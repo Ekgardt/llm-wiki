@@ -1,0 +1,31 @@
+# Default: normalize all text files to LF on commit, restore to native on checkout.
+# On Windows this means LF in repo, CRLF in working tree — diffs stay clean across machines.
+* text=auto
+
+# Explicit text (LF in repo)
+*.md       text eol=lf
+*.txt      text eol=lf
+*.json     text eol=lf
+*.yaml     text eol=lf
+*.yml      text eol=lf
+*.toml     text eol=lf
+*.py       text eol=lf
+*.sh       text eol=lf
+
+# Windows-only scripts — keep CRLF so PowerShell ISE and cmd don't choke
+*.ps1      text eol=crlf
+*.bat      text eol=crlf
+*.cmd      text eol=crlf
+
+# Lock files — never touch
+*.lock     -text
+uv.lock    -text
+
+# Binary — never convert
+*.png      binary
+*.jpg      binary
+*.jpeg     binary
+*.gif      binary
+*.webp     binary
+*.pdf      binary
+*.zip      binary

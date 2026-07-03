@@ -1,0 +1,7 @@
+{
+  "alwaysUpdateLinks": true,
+  "showUnsupportedFiles": true,
+  "newFileLocation": "folder",
+  "newFileFolderPath": "inbox/articles",
+  "attachmentFolderPath": "inbox/articles/assets"
+}
