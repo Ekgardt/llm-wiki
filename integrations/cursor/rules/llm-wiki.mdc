@@ -1,0 +1,52 @@
+---
+description: LLM-Wiki memory integration — search vault, record decisions, read project state
+globs: ["**/*"]
+alwaysApply: true
+---
+
+# LLM-Wiki Memory Integration
+
+You have access to a persistent memory vault at `$LLM_WIKI_ROOT` (default: `~/LLM-wiki`).
+This vault stores decisions, lessons, patterns, and debugging notes from all your coding sessions across Cursor, OpenCode, Codex, and Claude Code.
+
+## At session start
+
+Read the current project's handoff state:
+```bash
+cat "$LLM_WIKI_ROOT/wiki/projects/<project-slug>/state.md"
+```
+
+The `<project-slug>` is derived from the current working directory's parent folder name (lowercase, hyphens).
+
+## When you need to recall past knowledge
+
+Search the vault:
+```bash
+uv run python "$LLM_WIKI_ROOT/scripts/search_memory.py" "<query>" --limit 5
+```
+
+For semantic search (finds related concepts even without exact keywords):
+```bash
+uv run python "$LLM_WIKM_ROOT/scripts/search_memory.py" "<query>" --semantic --limit 5
+```
+
+## When a decision is made or a lesson is learned
+
+Record it to the daily log:
+```bash
+echo '{"slug":"<project-slug>","sessionId":"cursor-session","block":"## [TIMESTAMP] cursor-session | decision\n- Decision: <what was decided>\n- Reason: <why>"}' | uv run python "$LLM_WIKI_ROOT/scripts/daily_log_append.py"
+```
+
+## When you need project-specific context
+
+Get auto-generated context (decisions, patterns, gotchas for THIS project):
+```bash
+uv run python "$LLM_WIKI_ROOT/scripts/build_context.py" "<project-slug>"
+```
+
+## Important rules
+
+1. **ALWAYS search the vault before making architecture decisions** — a past session may have already solved this
+2. **Record every non-trivial decision** — future you (or another agent) will thank you
+3. **Never edit wiki/ or memory/knowledge/ files directly** — use the scripts. The compile pipeline will handle it.
+4. **Read guard rails at start** — `uv run python "$LLM_WIKI_ROOT/scripts/build_guardrails.py"` shows learned rules from past corrections

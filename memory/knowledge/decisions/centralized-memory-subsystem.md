@@ -1,0 +1,25 @@
+---
+type: decision
+title: "Centralized Memory Subsystem Independent Of Worktree Mode"
+description: "The memory subsystem (`memory/state/`, `memory/daily/`, `memory/knowledge/`) resolves to a single canonical location regardless of whether Claude Code runs from the main checkout or a git worktree."
+timestamp: 2026-07-03T05:41:37
+---
+# Centralized Memory Subsystem Independent Of Worktree Mode
+
+One-sentence summary: The memory subsystem (`memory/state/`, `memory/daily/`, `memory/knowledge/`) resolves to a single canonical location regardless of whether Claude Code runs from the main checkout or a git worktree.
+
+## Decision
+Date: 2026-04-18.
+
+Chose: `scripts/memory_state.py` resolves memory paths from a stable root (the main repo / `$LLM_WIKI_STATE_ROOT`), so hooks writing daily captures, state hashes, and knowledge pages land in the same place no matter which worktree the session was launched from. Added `scripts/cleanup_worktrees.py` for periodic hygiene — stale worktrees no longer leave behind divergent memory directories.
+
+Rejected: per-worktree memory directories (the default if paths are resolved relative to `cwd`). That caused hooks to silently write into `worktree/memory/daily/...` that never got compiled back, splitting the knowledge trail across throwaway trees.
+
+Why: memory is a long-lived knowledge layer shared across all sessions; worktrees are ephemeral branches for parallel work. Binding memory to the worktree's working copy ties durable knowledge to disposable context. Centralization keeps the compile pipeline coherent — one `daily/`, one `state.json`, one `index.md`.
+
+How to apply: any new script, hook, or skill that reads/writes under `memory/` must go through `memory_state.py` path resolution, never raw `Path("memory/...")` relative to `cwd`. When auditing worktree-related issues, check whether the failing component respects this indirection.
+
+Follow-up: if a new hook appears to "lose" captures, check first whether it was launched from a worktree and whether it imports the path resolver rather than hardcoding a relative path.
+
+## Related
+- [[memory/operating-model]] — compile cadence and the `memory/` ↔ `wiki/` boundary this centralization protects.

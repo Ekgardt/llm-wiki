@@ -1,0 +1,16 @@
+[project]
+name = "llm-wiki"
+version = "3.2.0"
+requires-python = ">=3.10"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.5.1",
+    "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# `conftest.py` injects scripts/ into sys.path; no package install needed.
+pythonpath = ["scripts"]
