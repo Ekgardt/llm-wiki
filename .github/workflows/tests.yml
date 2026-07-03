@@ -1,0 +1,47 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  pytest-and-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        # Matches pyproject.toml `requires-python = ">=3.10"` — pick the
+        # lowest supported to catch accidental 3.11+-only syntax.
+        run: uv python install 3.10
+
+      - name: Sync dev dependencies
+        run: uv sync --dev
+
+      - name: Structural lint (memory + wiki, blocking)
+        # Structural lint has no env dependencies beyond the vault tree;
+        # runs against the checked-out files directly.
+        # --fail-on-findings enforces structural integrity (broken wikilinks,
+        # missing frontmatter, invalid supersede chains, orphan gaps).
+        # Pre-existing debt categories (missing_backlinks, missing_sources_section)
+        # are exempted — they're tracked for visibility but don't block CI.
+        run: uv run python scripts/lint_memory.py --scope all --fail-on-findings --allowed-categories orphan_daily_logs missing_backlinks missing_sources_section temporal_validity
+
+      - name: Regression test suite (hermetic)
+        # CI runner has no pre-set LLM_WIKI_* env vars.
+        # conftest.py bootstraps LLM_WIKI_ROOT / LLM_WIKI_STATE_ROOT
+        # and creates a skeleton state.json automatically — if these
+        # fail to bootstrap, tests that use subprocess-invoked hooks
+        # (test_session_end_skip, test_context_noise) will surface it.
+        run: uv run pytest tests/ -v

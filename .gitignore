@@ -1,0 +1,64 @@
+# === Python (QMD runtime + memory subsystem scripts) ===
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# === Obsidian ===
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+.obsidian/cache
+.trash/
+
+# === Claude Code ===
+.claude/settings.local.json
+.claude/.credentials.json
+.claude/projects/
+.claude/todos/
+.claude/shell-snapshots/
+
+# === Gitleaks / артефакты аудита ===
+gitleaks-report.json
+gitleaks-report.sarif
+
+# === Секреты ===
+.env
+.env.*
+!.env.example
+secrets/
+credentials/
+private/
+
+# === OS / IDE ===
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+
+# Git worktrees созданные Claude Desktop
+.claude/worktrees/
+
+
+# === PERSONAL DATA — never commit user-specific session content ===
+# Daily logs contain raw breadcrumbs of what the user edited (real file
+# paths, project names, debug output). Keep them local to the user machine.
+memory/daily/*.md
+# Per-project state.md files contain real project paths and architecture
+# decisions specific to the user projects. Only the template and the
+# llm-wiki project own state are safe to share.
+wiki/projects/*
+!wiki/projects/_template/
+!wiki/projects/llm-wiki/
+!wiki/projects/README.md
+
+# Runtime lock files
+*.pid

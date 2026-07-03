@@ -1,0 +1,14 @@
+# Gitleaks false-positive allowlist.
+#
+# Format: one fingerprint per line. Comments start with `#`.
+# Generate a fingerprint by running `gitleaks detect --source . --no-git -v`
+# and copying the `Fingerprint:` line from the finding you want to allow.
+#
+# These are intentionally-public strings gitleaks flags as high-entropy
+# "API keys" but are actually documented public signatures, research
+# notes, or example data.
+
+# YourProject Q2 printer — public firmware signature key documented in YourProject's
+# own public JavaScript bundle. Captured as a research note in
+# wiki/projects/your-project/state.md. Not a private secret.
+wiki/projects/your-project/state.md:generic-api-key:238
