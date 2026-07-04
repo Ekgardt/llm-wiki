@@ -65,9 +65,21 @@ See `docs/AGENT-CONFIGURATION.md` for the complete guide on where to store plugi
 - **wiki/** — third-person citeable knowledge (concepts, entities, syntheses, comparisons, connections, qa, gaps, raw-sources, project state)
 - **memory/knowledge/** — first-person project lore (concepts, decisions, patterns, debugging, qa, workflows, facts)
 - **memory/daily/** — append-only raw session capture (no frontmatter; exempt from OKF)
-- **.claude/skills/** — agent workflows (type: skill)
+- **.claude/skills/** — **ONLY public memory-system skills** (the 9 allowlisted in `.gitignore`: knowledge-compile, knowledge-lookup, bridge-promote-insight, contradict-check, crystallize-playbook, knowledge-qa-file-back, knowledge-review, session-memory-compile, session-memory-review). **Personal/workflow skills (your TDD flavor, UX checklists, deploy rituals, design-system rules) go in `~/.claude/skills/` (dotfiles Zone 2) — NEVER here.** The `.gitignore` allowlist will reject them even if an agent drops them in.
 - **.claude/rules/** — file-handling policies (type: rule)
 - **wiki/projects/&lt;slug&gt;/state.md** — per-project handoff page (type: project-state)
+
+## Hard rule: what does NOT belong in this repo
+
+This is a PUBLIC repo. Anything personal must NOT be committed here:
+
+- **Personal skills** → `~/.claude/skills/` (dotfiles Zone 2). See `docs/AGENT-CONFIGURATION.md`.
+- **Personal scripts** (deploy.ps1, db-seed.py, backup-vault.ps1) → `D:\dev\_tools\scripts\` (dotfiles Zone 2). Never in `scripts/` here.
+- **Active plugin installations with local paths** → `~/.config/opencode/plugins/` (dotfiles Zone 2). Only the portable template stays in `scripts/llm-wiki-memory-opencode.js`.
+- **Secrets/keys/tokens** → age-encrypted in dotfiles `secrets/*.age`. Never here, never plaintext anywhere.
+- **User-level configs** (settings.json with env vars, hooks, CLAUDE.md) → dotfiles Zone 2.
+
+If you are working in this vault and create any of the above, put it in the dotfiles (`D:\dev\dotfiles\`), not here. The `.gitignore` allowlist enforces this for skills; for everything else, check before `git add`.
 
 ## LLM backend (Phase 5+ — multi-tool support)
 

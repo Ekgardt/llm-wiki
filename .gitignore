@@ -25,6 +25,22 @@ dist/
 .claude/todos/
 .claude/shell-snapshots/
 
+# === Skills allowlist ===
+# ONLY public memory-system skills ship in this repo. Personal/workflow skills
+# (your TDD flavor, UX checklists, deploy rituals) belong in ~/.claude/skills/
+# (dotfiles Zone 2) — NEVER here. This allowlist blocks accidental commits of
+# personal skills dropped here by agents working in the vault.
+.claude/skills/*
+!.claude/skills/bridge-promote-insight/
+!.claude/skills/contradict-check/
+!.claude/skills/crystallize-playbook/
+!.claude/skills/knowledge-compile/
+!.claude/skills/knowledge-lookup/
+!.claude/skills/knowledge-qa-file-back/
+!.claude/skills/knowledge-review/
+!.claude/skills/session-memory-compile/
+!.claude/skills/session-memory-review/
+
 # === Gitleaks / артефакты аудита ===
 gitleaks-report.json
 gitleaks-report.sarif
