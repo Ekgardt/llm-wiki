@@ -25,11 +25,10 @@ dist/
 .claude/todos/
 .claude/shell-snapshots/
 
-# === Skills allowlist ===
-# ONLY public memory-system skills ship in this repo. Personal/workflow skills
-# (your TDD flavor, UX checklists, deploy rituals) belong in ~/.claude/skills/
-# (dotfiles Zone 2) — NEVER here. This allowlist blocks accidental commits of
-# personal skills dropped here by agents working in the vault.
+# === Skills scope guard ===
+# Only the memory-system core skills ship in this repo. Prevents accidental
+# commits of non-core skills dropped into .claude/skills/ during development.
+# To add a new core skill, append it here.
 .claude/skills/*
 !.claude/skills/bridge-promote-insight/
 !.claude/skills/contradict-check/
