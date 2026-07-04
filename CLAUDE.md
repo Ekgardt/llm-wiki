@@ -44,6 +44,9 @@ When asked to compile or ingest new material:
 4. append a concise entry to `wiki/log.md`
 5. summarize what changed
 
+## Where things go
+See `docs/AGENT-CONFIGURATION.md` for the complete guide on where to store plugins, skills, scripts, methodologies, frameworks, and configurations across the vault, user home, and project directories.
+
 ## Extended rules (OKF + lifecycle — Phase 2+)
 
 11. **Every durable page MUST have YAML frontmatter with at least `type:`.** OKF v0.1 conformance. Use `scripts/migrate_to_okf.py --apply` to backfill missing frontmatter; `lint_memory.py` flags violations as `missing_frontmatter` / `missing_required_type`.
