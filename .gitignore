@@ -79,5 +79,45 @@ wiki/projects/llm-wiki/state.md
 wiki/projects/llm-wiki/re-setup.md
 wiki/projects/llm-wiki/.blackboard/
 
+# Knowledge allowlist — only existing public system-self-knowledge is tracked.
+# New personal/user knowledge (compiled by the system from daily work) is blocked.
+# To add a new PUBLIC concept/decision, append it here after explicit review.
+wiki/concepts/*
+!wiki/concepts/Editorial Notes Pattern.md
+!wiki/concepts/LLM Knowledge Base.md
+!wiki/concepts/Pipeline Mirroring.md
+!wiki/concepts/Preliminary Flagging.md
+
+memory/knowledge/*
+!memory/knowledge/concepts/
+!memory/knowledge/debugging/
+!memory/knowledge/decisions/
+!memory/knowledge/patterns/
+!memory/knowledge/qa/
+memory/knowledge/concepts/*
+memory/knowledge/debugging/*
+memory/knowledge/decisions/*
+memory/knowledge/patterns/*
+memory/knowledge/qa/*
+!memory/knowledge/concepts/editorial-notes-pattern.md
+!memory/knowledge/concepts/pipeline-mirroring.md
+!memory/knowledge/concepts/provenance-rule-6.md
+!memory/knowledge/debugging/case-sensitive-grep-injected-context.md
+!memory/knowledge/debugging/edit-multiple-matches.md
+!memory/knowledge/debugging/hook-errors-silent-without-state-root.md
+!memory/knowledge/debugging/prospective-memory-page-drift.md
+!memory/knowledge/decisions/centralized-memory-subsystem.md
+!memory/knowledge/decisions/flag-inferred-content-as-preliminary.md
+!memory/knowledge/decisions/hook-scripts-defense-in-depth.md
+!memory/knowledge/decisions/no-gitkeep-in-inbox-articles.md
+!memory/knowledge/decisions/state-md-exempt-from-lint.md
+!memory/knowledge/patterns/add-reciprocal-backlinks-at-creation.md
+!memory/knowledge/patterns/audit-current-vs-intended.md
+!memory/knowledge/patterns/b-sim-hook-testing.md
+!memory/knowledge/patterns/docs-portability-absolute-paths.md
+!memory/knowledge/patterns/editorial-disclaimer-over-history-rewrite.md
+!memory/knowledge/patterns/mirror-existing-pipelines.md
+!memory/knowledge/qa/inbox-vs-raw-after-compile.md
+
 # Runtime lock files
 *.pid

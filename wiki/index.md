@@ -24,6 +24,7 @@ This wiki is the compiled knowledge layer built from files in `raw/` and `inbox/
 - [[Karpathy LLM Wiki Workflow]]
 - [[Memory Subsystem Action Plan]]
 - [[Global Multi-Project Migration Plan]]
+- [[Product Requirements in the AI Era]] — 2026 shift to short prompt-native specs (PRO), AI-augmented discovery, and where AI loses to classical
 
 ### Raw sources
 - [[Karpathy X Thread - April 2026]]
