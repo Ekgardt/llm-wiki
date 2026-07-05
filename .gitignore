@@ -69,11 +69,15 @@ desktop.ini
 memory/daily/*.md
 # Per-project state.md files contain real project paths and architecture
 # decisions specific to the user projects. Only the template and the
-# llm-wiki project own state are safe to share.
+# llm-wiki project's clean concept docs (codex-integration.md) are shared.
+# state.md, re-setup.md, and .blackboard/ have machine-specific paths/runtime data.
 wiki/projects/*
 !wiki/projects/_template/
 !wiki/projects/llm-wiki/
 !wiki/projects/README.md
+wiki/projects/llm-wiki/state.md
+wiki/projects/llm-wiki/re-setup.md
+wiki/projects/llm-wiki/.blackboard/
 
 # Runtime lock files
 *.pid
