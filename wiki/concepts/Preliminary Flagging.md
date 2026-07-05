@@ -45,3 +45,4 @@ This page is a **promotion from session memory** rather than a compilation of ex
 - [[2026-04-13 Three Conventions One Root|Three Conventions, One Root]] — connection page placing this convention against the two siblings.
 - [[Memory Subsystem Action Plan]] — audit that first applied this flag to memory-compiler content.
 - [[Global Multi-Project Migration Plan]] — applies this flag to any inferred claim in per-project `state.md`.
+- [[Product Requirements in the AI Era]] — applies the preliminary flag to unverified 2026 source claims (PRO dating, ~95% ROI stat, expert quotes) until primary sources are captured into `raw/`.

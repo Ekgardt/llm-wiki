@@ -40,3 +40,4 @@ One-sentence summary: A personal, LLM-maintained markdown wiki compiled from raw
 - [[Retrieval Workflow]]
 - [[Review Workflow]]
 - [[Wiki vs Memory Compiler vs Fusion]] — comparison that evaluates this concept against alternative persistence strategies.
+- [[Product Requirements in the AI Era]] — a 2026 research synthesis compiled into the wiki and rendered as an `outputs/` artifact; demonstrates the ingest→wiki→output flow.
