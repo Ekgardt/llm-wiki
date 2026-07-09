@@ -27,7 +27,8 @@ Agent picks up where you stopped — no re-explaining, no repeated mistakes
 
 ## Benchmark (July 2026)
 
-> **Methodology disclosure**: 52 queries (known-item retrieval) over 34 pages.
+> **Methodology disclosure**: known-item retrieval over shipped sample notes
+> (run `benchmark/run_benchmark.py` for live query count).
 > This is NOT LoCoMo or LongMemEval (multi-session conversation recall).
 > It measures "can the system find page X when given a paraphrased query?" —
 > the most relevant metric for personal knowledge retrieval. 100% Recall@5
@@ -35,7 +36,7 @@ Agent picks up where you stopped — no re-explaining, no repeated mistakes
 > Competitor numbers (95.2%, 94.7%) are from different datasets and are
 > not directly comparable. Run `benchmark/run_benchmark.py` to reproduce.
 
-| Metric | **LLM Wiki v3.3** | agentmemory (24.5k★) | Zep | Mem0 |
+| Metric | **LLM Wiki v3.3.1** | agentmemory (24.5k★) | Zep | Mem0 |
 |---|---|---|---|---|
 | **Recall@2** | **100%** | n/a | n/a | n/a |
 | **Recall@5** | **100%** 🥇 | 95.2% | 94.7% | 91.6% |

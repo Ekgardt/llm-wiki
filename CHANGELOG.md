@@ -1,36 +1,55 @@
 # Changelog
 
-## [v3.3.0] — 2026-07-04 — "Cross-platform + i18n + Vector warm-start"
+All notable changes to this project are documented here.
+Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+Versioning follows [Semantic Versioning](https://semver.org/).
+
+## [3.3.1] — 2026-07-09
 
 ### Added
-- **Vector warm-start** — plugin preloads sentence-transformers model + builds vector cache at session start (fire-and-forget). First --semantic search now takes 30ms instead of 15s.
-- **Russian README** (`README.ru.md`) — full translation
-- **Chinese README** (`README.zh-CN.md`) — full translation
-- **Language selector** in all three READMEs (interlinked)
-- **GitHub badges** in README (CI status, license, tests count, benchmark)
+- Claude Code user-settings merge (`scripts/merge_claude_settings.py`) — safe install-time hook wiring with backup
+- Secret redaction for daily capture (`scripts/secret_redact.py`)
+- Public Evidence daily fixtures + curated sample notes under `knowledge/`
+- Regression suite for path-safety, fake-LLM compile e2e, Claude merge
 
 ### Changed
-- Cross-platform install (install.sh for macOS/Linux, install.ps1 for Windows)
-- Portable OpenCode plugin (`scripts/llm-wiki-memory-opencode.js`) uses `$LLM_WIKI_ROOT` env var
-- Methodology disclosure in benchmark section (honest about dataset size limitations)
-- "Why only 1 commit?" section explaining git-filter-repo history collapse
+- **Three-zone layout** complete: CODE / `knowledge/*` / runtime only under `$LLM_WIKI_STATE_ROOT/{run,logs,cache}`
+- Installers (`install.ps1` / `install.sh`): correct `Ekgardt/llm-wiki` URLs, `run|logs|cache` dirs, OpenCode force-copy, Codex paths
+- Compile: category whitelist + path containment, dry-run no side effects, AGENTS from `docs/AGENTS.md`
+- Queue drain works without `output_path`; atomic `maybe_compile` lock
+- Capture hooks use `update_state` + redaction; projects path under `knowledge/projects`
+- Docs, skills, Cursor rules aligned to `knowledge/` (no live root `memory/` / `wiki/`)
+- Search: FTS quote escape, vector `as_of`, JSON vector cache (no pickle)
+- Archive under `knowledge/notes/archive/`; export forbids `.obsidian/`
+- Benchmark scans flat notes (reproducible on public tree)
 
-### Test Coverage
-- 155 tests at release tag (was 106)
-- New test files: `test_search_ranking.py` (11), `test_graph_neighbors.py` (9), `test_feedback_capture.py` (11), `test_archive_stale.py` (10), `test_guardrails.py` (8)
+### Fixed
+- Path traversal via LLM `category`; Codex wrapper `exit` killing shell; flush `--event` mapping
+- OpenCode timestamp format (`[HH:MM:SS]`); broken QA dir; lint double-scan / wrong index path
+- Doc falsehoods (test counts, install URLs); tracked wikilinks (0 missing)
 
----
+### Security
+- Capture redaction for common secret patterns
+- Compile/feedback/blackboard path containment
+- Gitleaks in CI; `uv sync --locked`
 
-## [v3.3.1] — 2026-07-09 — "Three-zone + audit remediation"
+### Tests
+- **171** pytest tests (hermetic state under `.pytest_cache/`)
+
+## [3.3.0] — 2026-07-04
+
+### Added
+- **Vector warm-start** — plugin preloads sentence-transformers model + builds vector cache at session start
+- **Russian / Chinese READMEs** + language selector
+- **GitHub badges** (CI, license, tests, benchmark)
 
 ### Changed
-- **Three-zone layout** complete: `knowledge/` only; runtime `$LLM_WIKI_STATE_ROOT/{run,logs,cache}`
-- Installers: correct GitHub URLs, Claude settings merge, OpenCode force-copy, Codex paths
-- Path-safety: compile category whitelist, dry-run no-write, secret redaction, atomic compile lock
-- Docs/skills aligned to knowledge paths; public Evidence fixtures + sample notes shipped
+- Cross-platform install (`install.sh` / `install.ps1`)
+- Portable OpenCode plugin via `$LLM_WIKI_ROOT`
+- Benchmark methodology disclosure
 
-### Test Coverage
-- **171 tests** (pytest green)
+### Tests
+- 155 tests at this release tag
 
 ---
 
