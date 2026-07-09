@@ -97,7 +97,8 @@ export const LlmWikiMemoryPlugin = async ({ client, $, directory }) => {
         }
       } catch {}
       if (tier === "ok") { await heartbeat(slug, String(directory||""), "flush-ok", String(sid)); return; }
-      const ts = new Date().toISOString().replace("T"," ").slice(0,19);
+      // Match Python split_session_blocks / Evidence format: ## [HH:MM:SS] ...
+      const ts = new Date().toTimeString().slice(0, 8);
       await appendDaily(slug, String(sid), `## [${ts}] opencode-idle | ${sid}\n- Tier: \`${tier}\`\n\n${body||"(no body)"}\n`);
       if ((tier === "major" || tier === "minor") && body) {
         try {
@@ -110,7 +111,16 @@ export const LlmWikiMemoryPlugin = async ({ client, $, directory }) => {
     "experimental.session.compacting": async (input, output) => {
       if (isVault()) return;
       try {
-        if (output?.context) output.context.push(`Memory: session flushed to vault. Run compile after session.`);
+        const sid = String(input?.sessionID || input?.sessionId || "unknown");
+        // Best-effort flush before context loss (parity with Claude PreCompact).
+        try {
+          await $`uv run python ${SCRIPTS}/precompact_capture.py`.stdin(JSON.stringify({
+            session_id: sid,
+            transcript_path: "",
+            reason: "opencode-compacting",
+          })).quiet().nothrow();
+        } catch {}
+        if (output?.context) output.context.push(`Memory: precompact capture attempted. Run compile after session if needed.`);
       } catch {}
     },
   };

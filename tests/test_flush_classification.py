@@ -139,11 +139,11 @@ def test_maybe_trigger_compile_skips_minor(monkeypatch):
 
     spawned: list = []
 
-    def fake_spawn(*args, **kwargs):
-        spawned.append((args, kwargs))
-        return 99999
+    def fake_spawn(force=False):
+        spawned.append(force)
+        return True, "spawned"
 
-    monkeypatch.setattr(flush_memory, "spawn_detached", fake_spawn)
+    monkeypatch.setattr(flush_memory, "spawn_compile_if_idle", fake_spawn)
     monkeypatch.setattr(flush_memory, "file_hash", lambda p: "fake-hash-changed")
     # Force cutoff to 0 so the test runs regardless of wall-clock.
     monkeypatch.setenv("MEMORY_COMPILE_AFTER_HOUR", "0")
@@ -159,7 +159,11 @@ def test_maybe_trigger_compile_skips_ok(monkeypatch):
     import flush_memory  # noqa: WPS433
 
     spawned: list = []
-    monkeypatch.setattr(flush_memory, "spawn_detached", lambda *a, **k: spawned.append(1))
+    monkeypatch.setattr(
+        flush_memory,
+        "spawn_compile_if_idle",
+        lambda force=False: spawned.append(1) or (True, "spawned"),
+    )
     monkeypatch.setattr(flush_memory, "file_hash", lambda p: "changed")
     monkeypatch.setenv("MEMORY_COMPILE_AFTER_HOUR", "0")
 
@@ -173,7 +177,11 @@ def test_maybe_trigger_compile_spawns_for_major_after_cutoff(monkeypatch):
     import flush_memory  # noqa: WPS433
 
     spawned: list = []
-    monkeypatch.setattr(flush_memory, "spawn_detached", lambda *a, **k: spawned.append(1) or 12345)
+    monkeypatch.setattr(
+        flush_memory,
+        "spawn_compile_if_idle",
+        lambda force=False: spawned.append(1) or (True, "spawned compile pid=12345"),
+    )
     monkeypatch.setattr(flush_memory, "file_hash", lambda p: "new-hash")
     # Force hour cutoff to 0 so the test runs regardless of wall-clock.
     monkeypatch.setenv("MEMORY_COMPILE_AFTER_HOUR", "0")
@@ -192,7 +200,11 @@ def test_maybe_trigger_compile_respects_cooldown(monkeypatch):
     from datetime import datetime as real_datetime, timedelta
 
     spawned: list = []
-    monkeypatch.setattr(flush_memory, "spawn_detached", lambda *a, **k: spawned.append(1) or 12345)
+    monkeypatch.setattr(
+        flush_memory,
+        "spawn_compile_if_idle",
+        lambda force=False: spawned.append(1) or (True, "spawned"),
+    )
     monkeypatch.setattr(flush_memory, "file_hash", lambda p: "new-hash")
     monkeypatch.setenv("MEMORY_COMPILE_AFTER_HOUR", "0")
     # Default cooldown 900s applies (do NOT override).

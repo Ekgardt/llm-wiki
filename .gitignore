@@ -1,123 +1,85 @@
-# === Python (QMD runtime + memory subsystem scripts) ===
-.venv/
-venv/
+# === Python ===
 __pycache__/
 *.pyc
 *.pyo
-*.pyd
+.venv/
 .pytest_cache/
-.mypy_cache/
-.ruff_cache/
-*.egg-info/
-build/
-dist/
 
-# === Obsidian ===
-.obsidian/workspace.json
-.obsidian/workspace-mobile.json
-.obsidian/cache
+# === Obsidian (local UI only; not part of three-zone layout) ===
 .trash/
+.obsidian/
 
-# === Claude Code ===
-.claude/settings.local.json
-.claude/.credentials.json
-.claude/projects/
-.claude/todos/
-.claude/shell-snapshots/
+# === Runtime MUST live outside the vault ===
+# Canonical: $LLM_WIKI_STATE_ROOT/{run,logs,cache}  (default: <parent>/LLM-wiki-state/)
+# These patterns only block accidental creation inside the checkout.
+cache/
+logs/
+run/
+state/
+LLM-wiki-state/
 
-# === Skills scope guard ===
-# Only the memory-system core skills ship in this repo. Prevents accidental
-# commits of non-core skills dropped into .claude/skills/ during development.
-# To add a new core skill, append it here.
-.claude/skills/*
-!.claude/skills/bridge-promote-insight/
-!.claude/skills/contradict-check/
-!.claude/skills/crystallize-playbook/
-!.claude/skills/knowledge-compile/
-!.claude/skills/knowledge-lookup/
-!.claude/skills/knowledge-qa-file-back/
-!.claude/skills/knowledge-review/
-!.claude/skills/session-memory-compile/
-!.claude/skills/session-memory-review/
+# === Personal session data (private, NOT in git) ===
+knowledge/daily/*.md
+# Public Evidence fixtures (synthetic; no personal content)
+!knowledge/daily/2026-04-13.md
+!knowledge/daily/2026-04-19.md
+!knowledge/daily/README.md
+# Empty local scratch dailies stay ignored (no un-ignore for 2026-07-*)
 
-# === Gitleaks / артефакты аудита ===
+# === Knowledge allowlist ===
+# Personal/user notes are blocked; public system-self-knowledge samples are un-ignored.
+knowledge/notes/*
+!knowledge/notes/README.md
+!knowledge/notes/*.md
+# Nested personal categories stay ignored unless explicitly published:
+knowledge/notes/*/**
+
+# === Per-project state ===
+knowledge/projects/*
+!knowledge/projects/_template/
+!knowledge/projects/README.md
+
+# === Personal feedback / staging ===
+knowledge/feedback/
+knowledge/inbox/**
+!knowledge/inbox/README.md
+knowledge/raw/**
+!knowledge/raw/README.md
+
+# === Skills allowlist ===
+# Only the 9 public memory-system skills ship in this repo.
+skills/*
+!skills/bridge-promote-insight/
+!skills/contradict-check/
+!skills/crystallize-playbook/
+!skills/knowledge-compile/
+!skills/knowledge-lookup/
+!skills/knowledge-qa-file-back/
+!skills/knowledge-review/
+!skills/session-memory-compile/
+!skills/session-memory-review/
+
+# === Gitleaks / audit artifacts ===
 gitleaks-report.json
 gitleaks-report.sarif
 
-# === Секреты ===
-.env
-.env.*
-!.env.example
+# === Secrets ===
+*.env
+*.env.local
 secrets/
-credentials/
-private/
 
-# === OS / IDE ===
+# === OS / IDE junk ===
 .DS_Store
 Thumbs.db
-desktop.ini
+Desktop.ini
 .vscode/
 .idea/
+*.swp
+*.swo
 
-# Git worktrees созданные Claude Desktop
-.claude/worktrees/
-
-
-# === PERSONAL DATA — never commit user-specific session content ===
-# Daily logs contain raw breadcrumbs of what the user edited (real file
-# paths, project names, debug output). Keep them local to the user machine.
-memory/daily/*.md
-# Per-project state.md files contain real project paths and architecture
-# decisions specific to the user projects. Only the template and the
-# llm-wiki project's clean concept docs (codex-integration.md) are shared.
-# state.md, re-setup.md, and .blackboard/ have machine-specific paths/runtime data.
-wiki/projects/*
-!wiki/projects/_template/
-!wiki/projects/llm-wiki/
-!wiki/projects/README.md
-wiki/projects/llm-wiki/state.md
-wiki/projects/llm-wiki/re-setup.md
-wiki/projects/llm-wiki/.blackboard/
-
-# Knowledge allowlist — only existing public system-self-knowledge is tracked.
-# New personal/user knowledge (compiled by the system from daily work) is blocked.
-# To add a new PUBLIC concept/decision, append it here after explicit review.
-wiki/concepts/*
-!wiki/concepts/Editorial Notes Pattern.md
-!wiki/concepts/LLM Knowledge Base.md
-!wiki/concepts/Pipeline Mirroring.md
-!wiki/concepts/Preliminary Flagging.md
-
-memory/knowledge/*
-!memory/knowledge/concepts/
-!memory/knowledge/debugging/
-!memory/knowledge/decisions/
-!memory/knowledge/patterns/
-!memory/knowledge/qa/
-memory/knowledge/concepts/*
-memory/knowledge/debugging/*
-memory/knowledge/decisions/*
-memory/knowledge/patterns/*
-memory/knowledge/qa/*
-!memory/knowledge/concepts/editorial-notes-pattern.md
-!memory/knowledge/concepts/pipeline-mirroring.md
-!memory/knowledge/concepts/provenance-rule-6.md
-!memory/knowledge/debugging/case-sensitive-grep-injected-context.md
-!memory/knowledge/debugging/edit-multiple-matches.md
-!memory/knowledge/debugging/hook-errors-silent-without-state-root.md
-!memory/knowledge/debugging/prospective-memory-page-drift.md
-!memory/knowledge/decisions/centralized-memory-subsystem.md
-!memory/knowledge/decisions/flag-inferred-content-as-preliminary.md
-!memory/knowledge/decisions/hook-scripts-defense-in-depth.md
-!memory/knowledge/decisions/no-gitkeep-in-inbox-articles.md
-!memory/knowledge/decisions/state-md-exempt-from-lint.md
-!memory/knowledge/patterns/add-reciprocal-backlinks-at-creation.md
-!memory/knowledge/patterns/audit-current-vs-intended.md
-!memory/knowledge/patterns/b-sim-hook-testing.md
-!memory/knowledge/patterns/docs-portability-absolute-paths.md
-!memory/knowledge/patterns/editorial-disclaimer-over-history-rewrite.md
-!memory/knowledge/patterns/mirror-existing-pipelines.md
-!memory/knowledge/qa/inbox-vs-raw-after-compile.md
-
-# Runtime lock files
+# === Runtime lock files ===
 *.pid
+*.lock
+
+# === Backups ===
+*.bak-*

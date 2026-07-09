@@ -19,8 +19,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import ROOT  # noqa: E402
 
-WIKI_DIR = ROOT / "wiki"
-KNOWLEDGE_DIR = ROOT / "memory" / "knowledge"
+WIKI_DIR = ROOT / "knowledge" / "notes"
+KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
 
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+?)(?:\|[^\]]+)?\]\]")
 

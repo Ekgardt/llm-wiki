@@ -1,4 +1,4 @@
-"""Echo wiki/memory knowledge pages into a Cognee graph for semantic search.
+"""Echo knowledge/notes/memory knowledge pages into a Cognee graph for semantic search.
 
 Phase 4 — OPTIONAL semantic layer. This script is the bridge between
 the markdown vault and a Cognee graph database. It runs AFTER a
@@ -13,7 +13,7 @@ Design:
   by content hash internally).
 - Local-only: configured to use Ollama embeddings + LLM by default, to
   preserve the LLM-agnostic axiom. Override via env vars for cloud.
-- Storage: $LLM_WIKI_STATE_ROOT/cognee/ (sibling to qmd/ and memory-state/)
+- Storage: $LLM_WIKI_STATE_ROOT/cognee/ (sibling to run/, logs/, cache/)
 
 Usage:
     uv run python scripts/cognee_sync.py                    # sync all wiki + memory/knowledge
@@ -36,12 +36,12 @@ from pathlib import Path
 
 ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(Path(__file__).resolve().parent.parent))).resolve()
 STATE_ROOT = Path(
-    os.environ.get("LLM_WIKI_STATE_ROOT", str(Path(__file__).resolve().parent.parent.parent / "LLM-wiki-state"))
+    os.environ.get("LLM_WIKI_STATE_ROOT", str(ROOT.parent / "LLM-wiki-state"))
 ).resolve()
 COGNEE_DATA_DIR = STATE_ROOT / "cognee"
 
-WIKI_DIR = ROOT / "wiki"
-KNOWLEDGE_DIR = ROOT / "memory" / "knowledge"
+WIKI_DIR = ROOT / "knowledge" / "notes"
+KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
 
 # Skip these subtrees — they are operational / editorial, not knowledge.
 SKIP_SUBTREES = (
@@ -72,7 +72,7 @@ def _ollama_running() -> bool:
 
 
 def _collect_pages() -> list[Path]:
-    """All .md pages under wiki/ (except projects/gaps) + memory/knowledge/."""
+    """All .md pages under knowledge/notes/ (except projects/gaps) + knowledge/notes/."""
     out: list[Path] = []
     seen: set[Path] = set()
 
@@ -135,7 +135,7 @@ def _sync_one(cognee_module, page: Path) -> str:
         # replace rather than duplicate.
         rel = page.relative_to(ROOT).as_posix()
         asyncio_run = __import__("asyncio").run
-        asyncio_run(cognee.add(content, dataset_name=rel))
+        asyncio_run(cognee_module.add(content, dataset_name=rel))
         return "ok"
     except Exception as e:  # noqa: BLE001
         return f"cognee_add_failed: {type(e).__name__}: {e}"
@@ -145,7 +145,7 @@ def _cognify(cognee_module) -> str:
     """Run Cognee's cognify() to build the graph. Returns status."""
     try:
         asyncio_run = __import__("asyncio").run
-        asyncio_run(cognee.cognify())
+        asyncio_run(cognee_module.cognify())
         return "ok"
     except Exception as e:  # noqa: BLE001
         return f"cognify_failed: {type(e).__name__}: {e}"

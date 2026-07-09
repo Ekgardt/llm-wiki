@@ -1,10 +1,7 @@
-"""Regenerate `memory/index.md` from `memory/knowledge/*/*.md`.
+"""Regenerate `knowledge/index.md` from `knowledge/notes/**/*.md`.
 
-Reads the vault root from `memory_state.ROOT` (honouring `$LLM_WIKI_ROOT`
-or the sibling fallback) — previously this was hardcoded to
-`$LLM_WIKI_ROOT`, breaking portability and breaking `compile_memory.py`
-and `query_memory.py --file-back` on any machine where the vault lives
-elsewhere.
+Supports both flat notes (current public layout) and typed subdirs
+(concepts/decisions/patterns/debugging/qa) when present.
 """
 from __future__ import annotations
 
@@ -15,11 +12,25 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import ROOT  # noqa: E402
 
-memory = ROOT / "memory"
-knowledge = memory / "knowledge"
+memory = ROOT / "knowledge"
+knowledge = memory / "notes"
 out = memory / "index.md"
 
-sections = {
+TYPE_SECTIONS = {
+    "concept": "Concepts",
+    "decision": "Decisions",
+    "pattern": "Patterns",
+    "debugging": "Debugging",
+    "qa": "Q&A",
+    "entity": "Entities",
+    "synthesis": "Syntheses",
+    "comparison": "Comparisons",
+    "connection": "Connections",
+    "workflow": "Workflows",
+    "raw-source": "Raw sources",
+}
+
+SUBDIR_SECTIONS = {
     "Concepts": knowledge / "concepts",
     "Decisions": knowledge / "decisions",
     "Patterns": knowledge / "patterns",
@@ -28,14 +39,11 @@ sections = {
 }
 
 SUMMARY_RE = re.compile(r"^One-sentence summary:\s*(.+?)\s*$", re.MULTILINE)
+TYPE_RE = re.compile(r"^type:\s*(.+?)\s*$", re.MULTILINE)
+SKIP_NAMES = {"README.md", "index.md", "log.md"}
 
 
 def extract_hook(md_path: Path) -> str:
-    """Pull a one-line hook from a memory page.
-
-    Prefers the `One-sentence summary:` convention; falls back to the first
-    non-empty paragraph after the H1 title. Returns '' if nothing suitable.
-    """
     text = md_path.read_text(encoding="utf-8")
     m = SUMMARY_RE.search(text)
     if m:
@@ -44,15 +52,57 @@ def extract_hook(md_path: Path) -> str:
     for i, ln in enumerate(lines):
         if ln.startswith("# "):
             for follow in lines[i + 1 :]:
-                if follow and not follow.startswith("#"):
+                if follow and not follow.startswith("#") and not follow.startswith("---"):
                     return follow
             break
     return ""
 
 
+def extract_type(md_path: Path) -> str:
+    try:
+        text = md_path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    m = TYPE_RE.search(text)
+    return m.group(1).strip().strip("\"'") if m else ""
+
+
 def rel_link(md_path: Path) -> str:
     rel = md_path.relative_to(ROOT).with_suffix("")
     return rel.as_posix()
+
+
+def collect_pages() -> dict[str, list[Path]]:
+    buckets: dict[str, list[Path]] = {name: [] for name in TYPE_SECTIONS.values()}
+    buckets["Other"] = []
+
+    # Prefer typed subdirs when they exist and have content.
+    used_subdir = False
+    for name, path in SUBDIR_SECTIONS.items():
+        if path.exists():
+            pages = sorted(p for p in path.glob("*.md") if p.name not in SKIP_NAMES)
+            if pages:
+                buckets[name].extend(pages)
+                used_subdir = True
+
+    # Flat notes + any remaining nested files.
+    if knowledge.exists():
+        for p in sorted(knowledge.rglob("*.md")):
+            if p.name in SKIP_NAMES:
+                continue
+            if "archive" in p.parts:
+                continue
+            if used_subdir and p.parent != knowledge and p.parent.name in {
+                "concepts", "decisions", "patterns", "debugging", "qa"
+            }:
+                continue  # already listed via subdir
+            if p in {x for xs in buckets.values() for x in xs}:
+                continue
+            t = extract_type(p)
+            section = TYPE_SECTIONS.get(t, "Other")
+            buckets.setdefault(section, []).append(p)
+
+    return buckets
 
 
 lines = [
@@ -61,27 +111,27 @@ lines = [
     "This index catalogs durable memory distilled from Claude Code sessions.",
     "",
     "## Entry points",
-    "- [[memory/operating-model]] — compile cadence, promotion rules, and the `memory/` ↔ `wiki/` boundary.",
-    "- Recent daily logs live under `memory/daily/` — raw, timestamped session captures awaiting compile.",
+    "- [[docs/operating-model]] — compile cadence, promotion rules, and the daily ↔ notes boundary.",
+    "- Recent daily logs live under `knowledge/daily/` — raw, timestamped session captures awaiting compile.",
     "",
 ]
 
-for name, path in sections.items():
+buckets = collect_pages()
+for name in list(TYPE_SECTIONS.values()) + ["Other"]:
+    pages = sorted(set(buckets.get(name, [])), key=lambda p: p.name.lower())
+    if not pages:
+        continue
     lines.append(f"## {name}")
-    pages = sorted(path.glob("*.md")) if path.exists() else []
-    if pages:
-        for p in pages:
-            hook = extract_hook(p)
-            link = f"[[{rel_link(p)}]]"
-            lines.append(f"- {link} — {hook}" if hook else f"- {link}")
-    else:
-        lines.append("-")
+    for p in pages:
+        hook = extract_hook(p)
+        link = f"[[{rel_link(p)}]]"
+        lines.append(f"- {link} — {hook}" if hook else f"- {link}")
     lines.append("")
 
 lines.extend(
     [
         "## Editorial note",
-        "This index is vault metadata — a navigation map over `memory/knowledge/`, not a page derived from `raw/` or `inbox/`. It is regenerated by `scripts/rebuild_memory_index.py`; edits to page titles or one-sentence summaries will be picked up on the next rebuild.",
+        "This index is vault metadata — a navigation map over `knowledge/notes/`, not a page derived from `raw/` or `inbox/`. It is regenerated by `scripts/rebuild_memory_index.py`; edits to page titles or one-sentence summaries will be picked up on the next rebuild.",
     ]
 )
 

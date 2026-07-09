@@ -21,6 +21,7 @@ Override backend via MEMORY_LLM_PROVIDER env var:
     MEMORY_LLM_PROVIDER=claude    (uses claude CLI)
     MEMORY_LLM_PROVIDER=openai    (uses OPENAI_API_KEY)
     MEMORY_LLM_PROVIDER=ollama    (uses local Ollama server)
+    MEMORY_LLM_PROVIDER=fake      (tests/e2e — returns MEMORY_LLM_FAKE_RESPONSE)
 
 Design:
 - NEVER crash the caller: on any LLM failure, return "" (empty string).
@@ -60,6 +61,13 @@ def call_llm(prompt: str, system_prompt: str = "", max_tokens: int = 2000) -> st
         return ""
 
     forced = os.environ.get("MEMORY_LLM_PROVIDER", "").lower().strip()
+    # Test/e2e backend: return canned response without network or CLI.
+    if forced == "fake":
+        return os.environ.get(
+            "MEMORY_LLM_FAKE_RESPONSE",
+            '{"operations": [], "audit": {"verified": 0, "dedup": 0, "stubs": 0, "contradictions": 0, "rejected": 0}}\nCOMPILE_AUDIT: verified 0 evidence citations; 0 dedup checks performed; 0 stubs skipped; 0 contradictions handled; 0 pages rejected as below-threshold',
+        ).strip()
+
     candidates = _candidate_order(forced)
 
     for name in candidates:

@@ -27,9 +27,10 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import ROOT  # noqa: E402
 
-KNOWLEDGE = ROOT / "memory" / "knowledge"
-WIKI = ROOT / "wiki"
-ARCHIVE_ROOT = ROOT / "archive"
+KNOWLEDGE = ROOT / "knowledge" / "notes"
+WIKI = ROOT / "knowledge" / "notes"
+# Stay inside knowledge zone (three-zone layout forbids root archive/).
+ARCHIVE_ROOT = ROOT / "knowledge" / "notes" / "archive"
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 STATUS_RE = re.compile(r"^status:\s*(.+?)\s*$", re.MULTILINE)
@@ -137,11 +138,13 @@ def main() -> int:
     cutoff = datetime.now().timestamp() - (args.days * 86400)
     stale: list[Path] = []
 
-    # Scan knowledge pages
-    for tree in (KNOWLEDGE, WIKI / "syntheses", WIKI / "comparisons", WIKI / "connections"):
-        if not tree.exists():
-            continue
-        for md in tree.rglob("*.md"):
+    # Scan knowledge notes once (flat + optional typed subdirs).
+    if KNOWLEDGE.exists():
+        for md in KNOWLEDGE.rglob("*.md"):
+            if "archive" in md.parts:
+                continue
+            if md.name.lower() in {"readme.md", "index.md", "log.md"}:
+                continue
             if _is_stale(md, cutoff, args.days):
                 stale.append(md)
 

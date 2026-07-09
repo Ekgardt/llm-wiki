@@ -75,7 +75,7 @@ Ok "Dependencies installed"
 
 # ─── 4. Run tests ──────────────────────────────────────────────────
 
-Info "Running test suite (106 tests)..."
+Info "Running test suite..."
 $testResult = uv run pytest -q 2>&1 | Select-Object -Last 1
 if ($testResult -match "passed") {
     Ok $testResult
@@ -92,10 +92,11 @@ $stateRoot = Split-Path $VAULT_ROOT -Parent | Join-Path -ChildPath "LLM-wiki-sta
 $env:LLM_WIKI_ROOT = $VAULT_ROOT
 $env:LLM_WIKI_STATE_ROOT = $stateRoot
 
-New-Item -ItemType Directory -Path "$stateRoot\memory-state" -Force | Out-Null
-New-Item -ItemType Directory -Path "$stateRoot\memory-reports" -Force | Out-Null
-New-Item -ItemType Directory -Path "$stateRoot\search" -Force | Out-Null
-Ok "LLM_WIKI_ROOT set (User scope)"
+New-Item -ItemType Directory -Path "$stateRoot\run" -Force | Out-Null
+New-Item -ItemType Directory -Path "$stateRoot\run\queue" -Force | Out-Null
+New-Item -ItemType Directory -Path "$stateRoot\logs" -Force | Out-Null
+New-Item -ItemType Directory -Path "$stateRoot\cache" -Force | Out-Null
+Ok "LLM_WIKI_ROOT set (User scope); state at $stateRoot\{run,logs,cache}"
 
 # ─── 6. Build search index ─────────────────────────────────────────
 
@@ -116,12 +117,20 @@ else { Warn "Task Scheduler registration failed — run scripts\install-schedule
 Info "Detecting agents..."
 $agents = @()
 
-# OpenCode
-if (Get-Process "OpenCode*" -ErrorAction SilentlyContinue) {
+# OpenCode — detect by process OR config dir (process may not be running at install time)
+$openCodeConfig = "$env:USERPROFILE\.config\opencode"
+$openCodePluginSrc = Join-Path $VAULT_ROOT "scripts\llm-wiki-memory-opencode.js"
+if ((Get-Process "OpenCode*" -ErrorAction SilentlyContinue) -or (Test-Path $openCodeConfig) -or (Get-Command opencode -ErrorAction SilentlyContinue)) {
     $agents += "OpenCode"
-    $pluginDir = "$env:USERPROFILE\.config\opencode\plugins"
+    $pluginDir = Join-Path $openCodeConfig "plugins"
     New-Item -ItemType Directory -Path $pluginDir -Force | Out-Null
-    Ok "OpenCode detected — plugin at $pluginDir"
+    $pluginDst = Join-Path $pluginDir "llm-wiki-memory.js"
+    if (Test-Path $openCodePluginSrc) {
+        Copy-Item -LiteralPath $openCodePluginSrc -Destination $pluginDst -Force
+        Ok "OpenCode plugin installed → $pluginDst"
+    } else {
+        Warn "OpenCode detected but plugin source missing: $openCodePluginSrc"
+    }
 }
 
 # Codex
@@ -132,17 +141,28 @@ if (Get-Command codex -ErrorAction SilentlyContinue) {
     if (Test-Path $profilePath) {
         $content = Get-Content $profilePath -Raw
         if ($content -notmatch "codex-memory-wrapper") {
-            Add-Content $profilePath '. "LLM-wiki\scripts\codex-memory-wrapper.ps1"'
+            Add-Content $profilePath ". `"$VAULT_ROOT\scripts\codex-memory-wrapper.ps1`""
             Ok "Codex wrapper added to $profilePath"
         }
     }
     Ok "Codex detected"
 }
 
-# Claude Code
-if (Get-Command claude -ErrorAction SilentlyContinue) {
+# Claude Code — merge hooks into user settings if CLI or config dir present
+$claudeConfig = Join-Path $env:USERPROFILE ".claude"
+if ((Get-Command claude -ErrorAction SilentlyContinue) -or (Test-Path $claudeConfig)) {
     $agents += "Claude Code"
-    Ok "Claude Code detected"
+    Ok "Claude Code detected (or ~/.claude present)"
+    Info "Merging LLM-wiki hooks into Claude user settings (backup first)..."
+    uv run python (Join-Path $VAULT_ROOT "scripts\merge_claude_settings.py") `
+        --vault-root $VAULT_ROOT `
+        --state-root $stateRoot 2>&1 | ForEach-Object { Info "$_" }
+    if ($LASTEXITCODE -eq 0) {
+        Ok "Claude settings merged → $claudeConfig\settings.json"
+    } else {
+        Warn "Claude settings merge failed — run manually:"
+        Warn "  uv run python scripts\merge_claude_settings.py"
+    }
 }
 
 # Cursor

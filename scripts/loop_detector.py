@@ -33,8 +33,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import ROOT  # noqa: E402
 
-DAILY_DIR = ROOT / "memory" / "daily"
-FEEDBACK_DIR = ROOT / "memory" / "feedback"
+DAILY_DIR = ROOT / "knowledge" / "daily"
+FEEDBACK_DIR = ROOT / "knowledge" / "feedback"
 
 
 def detect_file_edit_loops(project: str | None, days: int = 7, threshold: int = 3) -> list[dict]:
@@ -62,15 +62,20 @@ def detect_file_edit_loops(project: str | None, days: int = 7, threshold: int = 
         if project and project.lower() not in content.lower():
             continue
 
-        # Find tool breadcrumbs with Edit/Write
+        # Find tool breadcrumbs with Edit/Write.
+        # Writer format (tool_breadcrumb_append.py / post_tool_capture.py):
+        #   - `[HH:MM:SS] tool | <session8> | <slug> | <tool>` <target>
+        # tool is lowercased (edit/write/multiedit/notebookedit).
         for match in re.finditer(
-            r"\[(\d{2}:\d{2}:\d{2})\]\s+tool\s+\|\s+(\w+)\s+\|\s+(\w+)\s+\|\s+(?:Edit|Write)\s+(.+)",
+            r"\[(\d{2}:\d{2}:\d{2})\]\s+tool\s+\|\s+(\S+)\s+\|\s+(\S+)\s+\|\s+"
+            r"(edit|write|multi_?edit|notebook_?edit)`?\s*(.*)",
             content,
+            re.IGNORECASE,
         ):
-            ts, session, slug, target = match.groups()
+            ts, session, slug, _tool, target = match.groups()
             if project and slug.lower() != project.lower():
                 continue
-            target = target.strip()
+            target = (target or "").strip() or "(unknown)"
             file_edits.setdefault(target, []).append({
                 "date": date_str,
                 "time": ts,

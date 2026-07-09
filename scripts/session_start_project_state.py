@@ -2,7 +2,7 @@
 
 This hook fires on every Claude Code session start, regardless of cwd. It
 resolves the current project's slug, reads (or creates) the corresponding
-`wiki/projects/<slug>/state.md`, and emits its content as additionalContext
+`knowledge/projects/<slug>/state.md`, and emits its content as additionalContext
 so Claude starts the session knowing where we left off in this project.
 
 Companion to the project-level `session_start_context.py` hook (which
@@ -14,7 +14,7 @@ Contract (hard requirements):
     * Must exit 0 on ANY error. Breaking a session is worse than missing
       context. All exceptions are swallowed and logged to
       $LLM_WIKI_STATE_ROOT/hook-errors.log (best-effort).
-    * Must no-op if LLM_WIKI_ROOT is unset or its wiki/projects/ is missing.
+    * Must no-op if LLM_WIKI_ROOT is unset or its knowledge/projects/ is missing.
     * Output: a single JSON object on stdout with the shape Claude Code
       expects (see schema: hookSpecificOutput.additionalContext).
 
@@ -119,7 +119,7 @@ def _safe_write_error(err: str) -> None:
         state_root = _resolve_state_root()
         if state_root is None:
             return
-        log_path = state_root / "hook-errors.log"
+        log_path = state_root / "logs" / "hook-errors.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().isoformat(timespec="seconds")
         with log_path.open("a", encoding="utf-8") as f:
@@ -261,7 +261,7 @@ def _slug_owns_dir(slug: str, project_dir: Path, projects_dir: Path) -> bool:
 def _compute_slug(project_dir: Path, projects_dir: Path) -> str:
     """Compute the slug for a project, resolving collisions.
 
-    Strategy (documented in `wiki/syntheses/Global Multi-Project Migration
+    Strategy (documented in `knowledge/notes/Global Multi-Project Migration
     Plan.md`):
       1. Parent folder name, sanitized.
       2. On collision: parent + parent-of-parent (e.g. `backend-your-app`).
@@ -380,7 +380,7 @@ def _build_context(state_path: Path, slug: str, is_new: bool) -> str:
     header = (
         f"# Per-project state — `{slug}`\n"
         f"\n"
-        f"(Auto-injected from `wiki/projects/{slug}/state.md`"
+        f"(Auto-injected from `knowledge/projects/{slug}/state.md`"
         + (" — freshly created for this project." if is_new else ".")
         + ")\n\n"
     )
@@ -395,7 +395,7 @@ def main() -> int:
         if not vault_root:
             return _emit_empty()
         vault = Path(vault_root)
-        projects_dir = vault / "wiki" / "projects"
+        projects_dir = vault / "knowledge" / "projects"
         if not projects_dir.is_dir():
             _safe_write_error(
                 f"projects dir missing: {projects_dir}"
@@ -441,10 +441,10 @@ def main() -> int:
                     if not bootstrap_path.exists():
                         import subprocess as _sp
                         _sp.run(
-                            [sys.executable, str(ROOT / "scripts" / "bootstrap_project.py"),
+                            [sys.executable, str(vault / "scripts" / "bootstrap_project.py"),
                              "--cwd", str(project_dir), "--apply"],
                             capture_output=True, timeout=30, check=False,
-                            cwd=str(ROOT),
+                            cwd=str(vault),
                         )
                 except Exception:
                     pass  # never block session start on bootstrap failure

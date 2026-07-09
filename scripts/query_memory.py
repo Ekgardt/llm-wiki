@@ -4,14 +4,15 @@ Usage:
     uv run python scripts/query_memory.py "how do we handle preliminary flagging?"
     uv run python scripts/query_memory.py "..." --file-back
 
-With --file-back, also writes the Q&A as `memory/knowledge/qa/<slug>.md`,
-regenerates the memory index, and appends to memory/log.md.
+With --file-back, also writes the Q&A as `knowledge/notes/qa/<slug>.md`,
+regenerates the memory index, and appends to knowledge/log.md.
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
 import re
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -19,10 +20,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import ROOT  # noqa: E402
 
-MEMORY = ROOT / "memory"
+MEMORY = ROOT / "knowledge"
 INDEX = MEMORY / "index.md"
 LOG = MEMORY / "log.md"
-QA_DIR = MEMORY / "knowledge" / "qa"
+QA_DIR = MEMORY / "notes" / "qa"
 
 
 def parse_args() -> argparse.Namespace:
@@ -92,12 +93,12 @@ Respond in this shape:
 **Answer:** ...
 
 **Sources:**
-- `memory/knowledge/.../...md`
+- `knowledge/notes/.../...md`
 - ...
 
 **Confidence:** high | medium | low — why.
 
---- memory/index.md ---
+--- knowledge/index.md ---
 {index_txt}
 
 --- question ---
@@ -141,7 +142,7 @@ def rebuild_index() -> bool:
     """Run the memory index rebuild. Returns True on success.
 
     Callers should surface a warning if False — the page was written
-    correctly, but `memory/index.md` is now stale until the next
+    correctly, but `knowledge/index.md` is now stale until the next
     successful rebuild.
     """
     result = subprocess.run(
@@ -173,7 +174,7 @@ def main() -> int:
     if args.file_back:
         out = file_back(args.question, answer_text)
         index_ok = rebuild_index()
-        suffix = "" if index_ok else " (WARN: memory/index.md rebuild failed — page written, index stale)"
+        suffix = "" if index_ok else " (WARN: knowledge/index.md rebuild failed — page written, index stale)"
         append_log(
             f"- {datetime.now().strftime('%Y-%m-%d')} — Filed Q&A `{out.relative_to(ROOT).as_posix()}` via `query_memory.py --file-back`.{suffix}"
         )

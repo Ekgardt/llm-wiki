@@ -1,12 +1,23 @@
 """Shared helpers for memory automation state.
 
-State lives in `$LLM_WIKI_STATE_ROOT/memory-state/state.json` (default:
-`D:/LLM-wiki-state/memory-state/state.json`), OUTSIDE the vault so Obsidian
-and git don't track ephemeral churn. Written by multiple concurrent
-processes (flush_memory and compile_memory may run at the same time).
-All writers MUST go through `update_state(mutator)` so the mutation is
-applied on top of the latest on-disk version under a cross-platform file
-lock — otherwise a slow writer will clobber fields written by a faster one.
+Three-zone layout: vault holds code + knowledge only. Runtime state lives
+OUTSIDE the vault so Obsidian/git don't track ephemeral churn:
+
+    $LLM_WIKI_STATE_ROOT/
+      run/state.json     # compile hashes, dedupe, heartbeats
+      run/compile.pid    # maybe_compile lock
+      run/queue/         # deferred LLM tasks
+      logs/              # lint / nightly reports
+      cache/             # search / QMD indexes
+
+Default STATE_ROOT: `$LLM_WIKI_ROOT/../LLM-wiki-state` (sibling of vault).
+Never write runtime into the vault root (`cache/`, `logs/`, `run/`, `state/`).
+
+Written by multiple concurrent processes (flush_memory and compile_memory
+may run at the same time). All writers MUST go through `update_state(mutator)`
+so the mutation is applied on top of the latest on-disk version under a
+cross-platform file lock — otherwise a slow writer will clobber fields
+written by a faster one.
 """
 from __future__ import annotations
 
@@ -44,9 +55,16 @@ def _resolve_vault_root(start: Path) -> Path:
     return start
 
 
-# Canonical vault root — resolves to the main repo even when running from
-# a git worktree (Claude Code Desktop creates a worktree per session).
-ROOT = _resolve_vault_root(Path(__file__).resolve().parent.parent)
+# Canonical vault root: prefer LLM_WIKI_ROOT when set (installed instance),
+# else resolve from this file's location (worktree-aware).
+def _vault_root() -> Path:
+    env = os.environ.get("LLM_WIKI_ROOT")
+    if env:
+        return Path(env).resolve()
+    return _resolve_vault_root(Path(__file__).resolve().parent.parent)
+
+
+ROOT = _vault_root()
 
 # Runtime state lives OUTSIDE the vault so git/Obsidian don't track ephemeral
 # churn (compile hashes, dedupe timestamps, lint reports, debug dumps).
@@ -54,9 +72,9 @@ ROOT = _resolve_vault_root(Path(__file__).resolve().parent.parent)
 # LLM_WIKI_STATE_ROOT for explicit portability.
 STATE_ROOT = Path(
     os.environ.get("LLM_WIKI_STATE_ROOT", str(ROOT.parent / "LLM-wiki-state"))
-)
-STATE_DIR = STATE_ROOT / "memory-state"
-REPORTS_DIR = STATE_ROOT / "memory-reports"
+).resolve()
+STATE_DIR = STATE_ROOT / "run"
+REPORTS_DIR = STATE_ROOT / "logs"
 STATE_FILE = STATE_DIR / "state.json"
 LOCK_FILE = STATE_DIR / "state.json.lock"
 
@@ -71,6 +89,16 @@ def load_state() -> dict[str, Any]:
     try:
         return json.loads(STATE_FILE.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
+        # Preserve corrupt file for forensics; do not silently clobber.
+        try:
+            bak = STATE_FILE.with_suffix(".json.corrupt")
+            bak.write_bytes(STATE_FILE.read_bytes())
+            err_log = REPORTS_DIR / "hook-errors.log"
+            REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+            with err_log.open("a", encoding="utf-8") as f:
+                f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] state.json corrupt; backed up to {bak.name}\n")
+        except OSError:
+            pass
         return {}
 
 

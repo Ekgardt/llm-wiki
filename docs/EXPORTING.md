@@ -71,17 +71,17 @@ Don't export-then-unzip; just clone:
 git clone git@github.com:Ekgardt/llm-wiki.git $LLM_WIKI_ROOT
 ```
 
-Then run the install steps in [[wiki/projects/llm-wiki/re-setup|re-setup guide]] to set up the machine-local pieces (`$LLM_WIKI_ROOT` env var, `~/.claude/CLAUDE.md`, hook wrappers, user-level skills).
+Then run the install steps in [[knowledge/projects/llm-knowledge/notes/re-setup|re-setup guide]] to set up the machine-local pieces (`$LLM_WIKI_ROOT` env var, `~/.claude/CLAUDE.md`, hook wrappers, user-level skills).
 
 ## Sharing a subset for discussion
 
-If you want to share only a subset (e.g. only `wiki/concepts/`), use sparse checkout or extract a selected path:
+If you want to share only a subset (e.g. only `knowledge/notes/`), use sparse checkout or extract a selected path:
 
 ```bash
-# Extract only wiki/concepts from HEAD into a separate tarball
-git archive HEAD --format=tar wiki/concepts | tar -xf - -C /tmp/export
+# Extract only knowledge/notes/concepts from HEAD into a separate tarball
+git archive HEAD --format=tar knowledge/notes/concepts | tar -xf - -C /tmp/export
 ```
 
 ## Related
-- [[wiki/projects/llm-wiki/re-setup|Re-setup guide]] for rebuilding the global harness on a new machine.
+- [[knowledge/projects/llm-knowledge/notes/re-setup|Re-setup guide]] for rebuilding the global harness on a new machine.
 - `.gitignore` in the repo root — authoritative list of excluded patterns.

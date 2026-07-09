@@ -1,6 +1,18 @@
-# Architecture — LLM-Wiki Memory System v3.2
+# Architecture — LLM-Wiki Memory System v3.3
 
 This document explains **why** the system is shaped the way it is. For **how to use it**, see [USER-GUIDE.md](USER-GUIDE.md).
+
+## Three-zone layout (canonical)
+
+```
+CODE          scripts/  tests/  docs/  skills/  rules/  integrations/  benchmark/
+KNOWLEDGE     knowledge/{daily,notes,projects,raw,inbox,feedback}
+RUNTIME       $LLM_WIKI_STATE_ROOT/{run,logs,cache}   # OUTSIDE vault
+              default: <vault-parent>/LLM-wiki-state/
+```
+
+- **Never** put live runtime under the vault root (`cache/`, `logs/`, `run/`, `state/`).
+- Public source develops code; installed vault (`$LLM_WIKI_ROOT`) holds user knowledge.
 
 ## Design principles (the 7 axioms)
 
@@ -29,7 +41,7 @@ The slug system (5-step collision resolution) lets a single vault track unlimite
 
 ---
 
-## System Architecture (v3.2)
+## System Architecture (v3.3)
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -111,16 +123,16 @@ The slug system (5-step collision resolution) lets a single vault track unlimite
 
 | Type | Location | Purpose | Archive threshold |
 |---|---|---|---|
-| `concept` | `wiki/concepts/`, `memory/knowledge/concepts/` | Mental models | **Never** |
-| `decision` | `memory/knowledge/decisions/` | Dated choices with rationale | **Never** |
-| `pattern` | `memory/knowledge/patterns/` | Recurring approaches | 180 days |
-| `debugging` | `memory/knowledge/debugging/` | Symptom → cause → fix | 60 days |
-| `qa` | `wiki/qa/`, `memory/knowledge/qa/` | Settled answers | 365 days |
-| `gap` | `wiki/gaps/` | Not-yet-written knowledge | 90 days |
-| `workflow` | `memory/knowledge/workflows/` | Auto-promoted playbooks | 365 days |
-| `fact` | `memory/knowledge/facts/` | Atomic facts | 120 days |
-| `skill` | `.claude/skills/` | Agent workflows | **Never** |
-| `project-state` | `wiki/projects/<slug>/state.md` | Per-project handoff | **Never** |
+| `concept` | `knowledge/notes/`, `knowledge/notes/concepts/` | Mental models | **Never** |
+| `decision` | `knowledge/notes/decisions/` | Dated choices with rationale | **Never** |
+| `pattern` | `knowledge/notes/patterns/` | Recurring approaches | 180 days |
+| `debugging` | `knowledge/notes/debugging/` | Symptom → cause → fix | 60 days |
+| `qa` | `knowledge/notes/`, `knowledge/notes/qa/` | Settled answers | 365 days |
+| `gap` | `knowledge/notes/` | Not-yet-written knowledge | 90 days |
+| `workflow` | `knowledge/notes/workflows/` | Auto-promoted playbooks | 365 days |
+| `fact` | `knowledge/notes/facts/` | Atomic facts | 120 days |
+| `skill` | `skills/` | Agent workflows | **Never** |
+| `project-state` | `knowledge/projects/<slug>/state.md` | Per-project handoff | **Never** |
 
 ---
 
@@ -128,7 +140,7 @@ The slug system (5-step collision resolution) lets a single vault track unlimite
 
 Three retrieval signals fused via Weighted RRF:
 
-1. **BM25 (weight=2.0)**: FTS5 full-text search, per-word tokenized. Most reliable for known-item retrieval. Title boost (5x exact, 3x subset), filename boost (10x exact match short-circuit), path preference (1.3x for memory/knowledge/).
+1. **BM25 (weight=2.0)**: FTS5 full-text search, per-word tokenized. Most reliable for known-item retrieval. Title boost (5x exact, 3x subset), filename boost (10x exact match short-circuit), path preference (1.3x for knowledge/notes/).
 
 2. **Vector (weight=1.0)**: sentence-transformers all-MiniLM-L6-v2 (384 dims, ~90MB). Optional dependency — degrades gracefully to BM25-only. Finds semantic relationships ("database performance" → "N+1 query fix").
 

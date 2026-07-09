@@ -4,7 +4,7 @@
 
 ![CI](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml/badge.svg)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests](https://img.shields.io/badge/tests-155%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://img.shields.io/badge/tests-160%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
 [![Benchmark](https://img.shields.io/badge/Recall%405-100%25-blue.svg)](benchmark/run_benchmark.py)
 
 **The proactive memory system for solo developers managing multiple AI agents. Markdown-first. Zero cloud cost. Recall@5 = 100%. $0/month.**
@@ -35,13 +35,13 @@ Agent picks up where you stopped — no re-explaining, no repeated mistakes
 > Competitor numbers (95.2%, 94.7%) are from different datasets and are
 > not directly comparable. Run `benchmark/run_benchmark.py` to reproduce.
 
-| Metric | **LLM Wiki v3.2** | agentmemory (24.5k★) | Zep | Mem0 |
+| Metric | **LLM Wiki v3.3** | agentmemory (24.5k★) | Zep | Mem0 |
 |---|---|---|---|---|
 | **Recall@2** | **100%** | n/a | n/a | n/a |
 | **Recall@5** | **100%** 🥇 | 95.2% | 94.7% | 91.6% |
 | **Recall@10** | **100%** | 98.6% | n/a | n/a |
-| **MRR** | **0.952** | 0.882 | n/a | n/a |
-| **Latency p50** | **28ms** | 14ms | 155ms | 880ms |
+| **MRR** | **0.942** | 0.882 | n/a | n/a |
+| **Latency p50** | **41ms** | 14ms | 155ms | 880ms |
 | **Token cost/search** | **0** 🥇 | ~1900 | $$ | $$ |
 | **Monthly cost** | **$0** | ~$10 | $200+ | $50-150 |
 
@@ -62,7 +62,8 @@ Reproduce: `uv run python benchmark/run_benchmark.py --semantic`
 - **Weighted RRF**: BM25 weight=2, Vector weight=1, Graph weight=0.5 (prevents regression)
 - **Title + filename boost**: exact match → 10x score, prevents duplicate-page confusion
 - **Project-scoped search** (`--project your-app`) — boost current project's pages
-- **Temporal queries** (`--since 2026-03`) — filter by date
+- **Temporal queries** (`--since 2026-03`, `--as-of 2026-04-01`) — date range + validity windows
+- **Typed provenance ranking** — `source_authority: user` outranks ai-derived/inferred
 - **Recall@2 = 100%** — correct page always in top 2 results
 
 ### Proactive Intelligence
@@ -93,18 +94,18 @@ Reproduce: `uv run python benchmark/run_benchmark.py --semantic`
 - **13 lint checks** — broken wikilinks, orphans, missing frontmatter, supersede chains, temporal validity, gaps
 - **Temporal validity** — `valid_from`/`valid_to` frontmatter, stale-fact detection
 - **Smart auto-archive** — type-aware thresholds (decisions never archive, debugging at 60 days)
-- **106 pytest tests**, CI green on Ubuntu
+- **160 pytest tests**, CI green on Ubuntu
 
 ---
 
-## Why only 1 commit?
+## Public history note
 
-Git history was collapsed via `git-filter-repo` to scrub personal project
+Git history was scrubbed via `git-filter-repo` to remove personal project
 data (daily logs, project state files) before making the repo public.
-The system was developed over multiple sessions with full history, but
-that history contained sensitive client/work information. The single
-commit represents the clean public release. All 106 tests verify the
-code works — the commit count doesn't reflect development effort.
+The system was developed over multiple sessions; the public commit count
+does not reflect total development effort. All 160 tests verify the
+code works. Sample `knowledge/daily/` fixtures restore Evidence links
+without publishing private session content.
 
 ---
 
@@ -132,13 +133,13 @@ curl -fsSL https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.sh | 
 irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 ```
 
-The installer checks prerequisites, installs dependencies, runs 155 tests, sets up scheduled maintenance, and detects your agents automatically.
+The installer checks prerequisites, installs dependencies, runs 160 tests, sets up scheduled maintenance, and detects your agents automatically.
 
 That's it. The installer:
 1. Checks prerequisites (Python 3.10+, git)
 2. Installs `uv` if missing (fast Python package manager)
 3. Installs dependencies (`uv sync`)
-4. Runs 106 tests to verify everything works
+4. Runs 160 tests to verify everything works
 5. Sets `LLM_WIKI_ROOT` environment variable
 6. Sets up scheduled maintenance (cron on Unix, Task Scheduler on Windows)
 7. Detects your agents (OpenCode, Codex, Claude Code, Cursor) and wires them up
@@ -149,7 +150,7 @@ That's it. The installer:
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync
-uv run pytest -q          # 106 tests should pass
+uv run pytest -q          # 160 tests should pass
 ```
 
 ### Wire up your tools
@@ -163,7 +164,7 @@ uv run pytest -q          # 106 tests should pass
 
 **Windows Task Scheduler** (auto-maintenance):
 ```powershell
-LLM-wiki/scripts/install-scheduled-tasks.ps1
+$env:LLM_WIKI_ROOT\scripts\install-scheduled-tasks.ps1
 ```
 
 **Optional: semantic search** (for hybrid BM25+Vector):
@@ -191,7 +192,7 @@ AGENT SEES: rules + decisions + open threads + project state
 
 ## Comparison
 
-| | **LLM Wiki v3.2** | agentmemory | ReMe | akitaonrails |
+| | **LLM Wiki v3.3** | agentmemory | ReMe | akitaonrails |
 |---|---|---|---|---|
 | Markdown-first | ✅ | ❌ | ✅ | ✅ |
 | Multi-tool (3+) | ✅ OpenCode+Codex+Claude | 32+ (MCP) | Claude only | 12+ |

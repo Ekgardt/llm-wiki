@@ -41,7 +41,7 @@ def main() -> int:
         return 0
 
     root = Path(os.environ.get("LLM_WIKI_ROOT", str(Path(__file__).resolve().parent.parent))).resolve()
-    daily_dir = root / "memory" / "daily"
+    daily_dir = root / "knowledge" / "daily"
     try:
         daily_dir.mkdir(parents=True, exist_ok=True)
         day = datetime.now().strftime("%Y-%m-%d")
@@ -49,7 +49,12 @@ def main() -> int:
         if not path.exists():
             path.write_text(f"# Daily Session Memory — {day}\n", encoding="utf-8")
         ts = datetime.now().strftime("%H:%M:%S")
-        line = f"- `[{ts}] tool | {session_id} | {slug} | {tool}` {target}\n".rstrip() + "\n"
+        try:
+            from secret_redact import redact_secrets
+            safe_target = redact_secrets(str(target or ""))
+        except Exception:  # noqa: BLE001
+            safe_target = str(target or "")
+        line = f"- `[{ts}] tool | {session_id} | {slug} | {tool}` {safe_target}\n".rstrip() + "\n"
         with path.open("a", encoding="utf-8") as f:
             f.write(line)
     except OSError as e:

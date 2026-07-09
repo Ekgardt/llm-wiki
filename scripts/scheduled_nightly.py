@@ -6,7 +6,7 @@ What it does:
 3. Run lint and append to a rolling log file.
 
 Designed to be invoked by Task Scheduler; never requires user interaction.
-All output goes to $LLM_WIKI_STATE_ROOT\\memory-reports\\nightly-YYYY-MM-DD.log.
+All output goes to $LLM_WIKI_STATE_ROOT\\logs\\nightly-YYYY-MM-DD.log.
 """
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ def main() -> int:
             f.write(line + "\n")
 
     log(f"=== Nightly consolidation pass — {today} ===")
+    failures = 0
 
     # Step 1: drain deferred queue.
     log("Step 1: draining deferred memory queue...")
@@ -39,6 +40,8 @@ def main() -> int:
         cwd=str(ROOT), capture_output=True, text=True, timeout=600,
     )
     log(f"  drain result: {r.stdout.strip() or r.stderr.strip() or '(empty)'}")
+    if r.returncode != 0:
+        failures += 1
 
     # Step 2: maybe_compile (will spawn compile if there's pending work).
     log("Step 2: triggering compile (if needed)...")
@@ -47,6 +50,8 @@ def main() -> int:
         cwd=str(ROOT), capture_output=True, text=True, timeout=60,
     )
     log(f"  maybe_compile: {r.stdout.strip()}")
+    if r.returncode != 0:
+        failures += 1
 
     # Step 3: structural lint (cheap, no LLM).
     log("Step 3: structural lint...")
@@ -56,6 +61,8 @@ def main() -> int:
     )
     for line in r.stdout.splitlines()[-5:]:
         log(f"  lint: {line}")
+    if r.returncode != 0:
+        failures += 1
 
     # Step 3b: rebuild FTS5 search index (cheap, no LLM, <1s for 100 pages).
     log("Step 3b: rebuilding FTS5 search index...")
@@ -64,6 +71,8 @@ def main() -> int:
         cwd=str(ROOT), capture_output=True, text=True, timeout=60,
     )
     log(f"  search: {r.stdout.strip()}")
+    if r.returncode != 0:
+        failures += 1
 
     # Step 3c: rebuild graph-neighbor link cache (for 3rd retrieval signal).
     log("Step 3c: rebuilding wikilink graph cache...")
@@ -74,6 +83,7 @@ def main() -> int:
         log(f"  graph: {edges} edges cached")
     except Exception as e:
         log(f"  graph: failed ({e})")
+        failures += 1
 
     # Step 4: prune old nightly logs (>30 days).
     log("Step 4: pruning old nightly reports...")
@@ -88,8 +98,8 @@ def main() -> int:
             pass
     log(f"  pruned {pruned} old report(s)")
 
-    log("=== Nightly pass complete ===")
-    return 0
+    log(f"=== Nightly pass complete (failures={failures}) ===")
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Flush one session event into memory/daily/YYYY-MM-DD.md.
+"""Flush one session event into knowledge/daily/YYYY-MM-DD.md.
 
 Run as a detached background process by PreCompact / SessionEnd hooks.
 
@@ -15,9 +15,9 @@ Responsibilities:
 4. Dedupe: skip if the same (session_id, event) was flushed in the last 60s.
 5. If local time >= MEMORY_COMPILE_AFTER_HOUR (default 18) AND tier is
    MAJOR AND today's daily log changed since last compile: spawn
-   `compile_memory.py` detached. (MINOR no longer triggers compile —
-   this prevents the compile pipeline from churning on sessions that
-   contain only minor gotchas.)
+   compile via `maybe_compile` (PID-locked). (MINOR no longer triggers
+   compile — this prevents the compile pipeline from churning on
+   sessions that contain only minor gotchas.)
 
 The 3-tier scale replaces the previous binary FLUSH_OK/no-FLUSH_OK.
 Empirically the old threshold was too aggressive (12 consecutive
@@ -25,8 +25,8 @@ empty flushes recorded in state.json as of 2026-04-23): the LLM
 returned FLUSH_OK for any session that lacked a clean "decisions"
 section, even when useful gotchas or commands were present.
 
-State lives in $LLM_WIKI_STATE_ROOT/memory-state/state.json (default:
-D:/LLM-wiki-state/memory-state/state.json) — OUTSIDE the vault so
+State lives in $LLM_WIKI_STATE_ROOT/run/state.json (default:
+$LLM_WIKI_ROOT/../LLM-wiki-state/run/state.json) — OUTSIDE the vault so
 Obsidian and git don't track runtime churn.
 """
 from __future__ import annotations
@@ -45,14 +45,12 @@ from memory_state import (  # noqa: E402
     ROOT,
     file_hash,
     load_state,
-    spawn_detached,
     update_state,
 )
+from maybe_compile import spawn_compile_if_idle  # noqa: E402
 
-DAILY_DIR = ROOT / "memory" / "daily"
+DAILY_DIR = ROOT / "knowledge" / "daily"
 COMPILE_LOG_DIR = REPORTS_DIR
-COMPILE_LOG_OUT = COMPILE_LOG_DIR / "compile-last.log"
-COMPILE_LOG_ERR = COMPILE_LOG_DIR / "compile-last.err.log"
 DEDUPE_WINDOW_SECONDS = 60
 MAX_TRANSCRIPT_CHARS = 60_000
 
@@ -255,12 +253,9 @@ def record_flush(state: dict, session_id: str, event: str) -> None:
 def maybe_trigger_compile(state: dict, daily_path: Path, tier: str) -> None:
     """Spawn compile only for FLUSH_MAJOR content, after the hour cutoff.
 
-    Phase 0.5 change: previously any non-empty flush could trigger
-    compile, which meant MINOR-tier gotchas repeatedly kicked off a
-    compile pass that mostly produced "0 pages touched". Now only
-    MAJOR (decisions/lessons) justifies the LLM cost of a compile.
-    MINOR content still gets persisted to the daily log; the next
-    MAJOR flush (or a manual run) will pick it up.
+    Always goes through `maybe_compile.spawn_compile_if_idle` so the PID
+    lock is the single concurrency gate (hooks / wrappers / schedulers
+    must not spawn `compile_memory.py` directly).
     """
     if tier != "major":
         return
@@ -285,31 +280,25 @@ def maybe_trigger_compile(state: dict, daily_path: Path, tier: str) -> None:
                 last_spawned = datetime.fromisoformat(last_spawned_raw)
                 elapsed = (datetime.now() - last_spawned).total_seconds()
                 if elapsed < cooldown_s:
-                    # Still within cooldown; skip this spawn. The daily
-                    # content isn't lost — the next compile (on natural
-                    # trigger or manual run) will pick it up.
                     return
             except (ValueError, TypeError):
-                pass  # malformed timestamp — proceed to spawn
+                pass
 
     spawned_at = datetime.now().isoformat(timespec="seconds")
-    pid = spawn_detached(
-        [sys.executable, str(ROOT / "scripts" / "compile_memory.py"), "--trigger", "auto"],
-        stdout_path=COMPILE_LOG_OUT,
-        stderr_path=COMPILE_LOG_ERR,
-    )
+    spawned, reason = spawn_compile_if_idle(force=False)
     state["last_compile_spawned_at"] = spawned_at
     state["last_compile_spawned_trigger"] = "auto"
     state["last_compile_spawned_daily"] = daily_path.name
-    state["last_compile_spawned_pid"] = pid
     state["last_compile_spawned_tier"] = tier
+    state["last_compile_spawned_reason"] = reason
     state.setdefault("compile_triggers", []).append(
         {
             "at": spawned_at,
             "daily": daily_path.name,
             "trigger": "auto",
             "tier": tier,
-            "pid": pid,
+            "spawned": spawned,
+            "reason": reason,
         }
     )
     state["compile_triggers"] = state["compile_triggers"][-20:]

@@ -25,9 +25,9 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import ROOT, load_state  # noqa: E402
 
-KNOWLEDGE = ROOT / "memory" / "knowledge"
-DAILY_DIR = ROOT / "memory" / "daily"
-PROJECTS_DIR = ROOT / "wiki" / "projects"
+KNOWLEDGE = ROOT / "knowledge" / "notes"
+DAILY_DIR = ROOT / "knowledge" / "daily"
+PROJECTS_DIR = ROOT / "knowledge" / "projects"
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 PROJECT_FIELD_RE = re.compile(r"^project:\s*[\"']?([^\"'\n]+)[\"']?\s*$", re.MULTILINE)
@@ -150,7 +150,7 @@ def _detect_agent_strengths(agent: str) -> list[str] | None:
                     type_counts[t] = type_counts.get(t, 0) + 1
 
     # Also check feedback: types where agent gets corrections = weakness
-    feedback_dir = ROOT / "memory" / "feedback"
+    feedback_dir = ROOT / "knowledge" / "feedback"
     if feedback_dir.exists():
         for f in feedback_dir.glob("*.json"):
             try:
@@ -248,7 +248,7 @@ def main() -> int:
     p = argparse.ArgumentParser(description="Build per-project context for SessionStart.")
     p.add_argument("slug", help="Project slug (e.g. 'your-project')")
     p.add_argument("--max-chars", type=int, default=2000)
-    p.add_argument("--write", action="store_true", help="Write to wiki/projects/<slug>/context.md")
+    p.add_argument("--write", action="store_true", help="Write to knowledge/projects/<slug>/context.md")
     args = p.parse_args()
 
     context = build_context(args.slug, args.max_chars)

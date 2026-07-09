@@ -27,7 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import ROOT  # noqa: E402
 
-PROJECTS_DIR = ROOT / "wiki" / "projects"
+PROJECTS_DIR = ROOT / "knowledge" / "projects"
 TEMPLATE = PROJECTS_DIR / "_template" / "state.md"
 
 

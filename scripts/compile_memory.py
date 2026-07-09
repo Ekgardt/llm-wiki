@@ -1,4 +1,4 @@
-"""Compile memory/daily/*.md into memory/knowledge/* durable pages.
+"""Compile knowledge/daily/*.md into knowledge/notes/* durable pages.
 
 CLI:
     uv run python scripts/compile_memory.py              # compile changed daily logs
@@ -14,19 +14,20 @@ CLI:
                                                          # `manual`. Surfaces as
                                                          # "Automated compile pass" vs
                                                          # "Manual compile pass" in
-                                                         # memory/log.md.
+                                                         # knowledge/log.md.
 
 Incrementality:
-    SHA-256 hashes of each daily log are tracked in $LLM_WIKI_STATE_ROOT/memory-state/state.json under
+    SHA-256 hashes of each daily log are tracked in $LLM_WIKI_STATE_ROOT/run/state.json under
     `compiled_daily_hashes`. Runs without --all/--file skip logs whose hash matches
     the last compile.
 
-After writing, runs `scripts/rebuild_memory_index.py` and appends to memory/log.md.
+After writing, runs `scripts/rebuild_memory_index.py` and appends to knowledge/log.md.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from datetime import datetime
@@ -35,12 +36,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import ROOT, STATE_ROOT, file_hash, load_state, update_state  # noqa: E402
 
-MEMORY = ROOT / "memory"
+MEMORY = ROOT / "knowledge"
 DAILY_DIR = MEMORY / "daily"
-KNOWLEDGE = MEMORY / "knowledge"
-AGENTS = MEMORY / "AGENTS.md"
+KNOWLEDGE = MEMORY / "notes"
+# Prefer docs/AGENTS.md (post three-zone); fall back to root AGENTS.md.
+_AGENTS_CANDIDATES = (ROOT / "docs" / "AGENTS.md", ROOT / "AGENTS.md")
+AGENTS = next((p for p in _AGENTS_CANDIDATES if p.exists()), _AGENTS_CANDIDATES[0])
 INDEX = MEMORY / "index.md"
 LOG = MEMORY / "log.md"
+
+ALLOWED_CATEGORIES = frozenset(
+    {"concepts", "decisions", "patterns", "debugging", "qa", "entities", "syntheses", "comparisons", "connections", "workflows"}
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -60,7 +67,17 @@ def parse_args() -> argparse.Namespace:
 
 def select_dailies(args: argparse.Namespace, state: dict) -> list[Path]:
     if args.file:
-        return [Path(args.file).resolve()]
+        path = Path(args.file).resolve()
+        daily_root = DAILY_DIR.resolve()
+        try:
+            path.relative_to(daily_root)
+        except ValueError as exc:
+            raise SystemExit(
+                f"compile_memory: --file must be under {daily_root}, got {path}"
+            ) from exc
+        if not path.is_file() or path.suffix.lower() != ".md":
+            raise SystemExit(f"compile_memory: --file must be an existing .md daily log: {path}")
+        return [path]
     all_dailies = sorted(DAILY_DIR.glob("*.md"))
     if args.all:
         return all_dailies
@@ -198,10 +215,10 @@ would help a future session in this project. Skip status chatter.
 === EXISTING PAGES (title + summary — for DEDUP) ===
 {knowledge_list}
 
-=== memory/AGENTS.md (full contract) ===
+=== docs/AGENTS.md (full contract) ===
 {agents_md}
 
-=== memory/log.md (tail) ===
+=== knowledge/log.md (tail) ===
 {log_tail}
 
 === DAILY LOGS TO COMPILE ===
@@ -448,7 +465,16 @@ def _execute_plan(
 
     for op in operations:
         action = op.get("action", "create")
-        category = op.get("category", "patterns")
+        category = str(op.get("category", "patterns") or "patterns").strip().lower()
+        # Flat notes are allowed via empty/default; nested only via whitelist.
+        if category in ("", ".", "notes"):
+            category = "patterns"
+        if category not in ALLOWED_CATEGORIES:
+            dropped.append({"slug": op.get("slug", ""), "reason": f"invalid category {category!r}"})
+            continue
+        if "/" in category or "\\" in category or ".." in category:
+            dropped.append({"slug": op.get("slug", ""), "reason": f"path-unsafe category {category!r}"})
+            continue
         slug = op.get("slug", "")
         if not slug:
             continue
@@ -457,7 +483,13 @@ def _execute_plan(
         if not slug:
             continue
 
-        target_dir = KNOWLEDGE / category
+        target_dir = (KNOWLEDGE / category).resolve()
+        knowledge_root = KNOWLEDGE.resolve()
+        try:
+            target_dir.relative_to(knowledge_root)
+        except ValueError:
+            dropped.append({"slug": slug, "reason": f"category escapes knowledge root: {category!r}"})
+            continue
         target_path = target_dir / f"{slug}.md"
 
         # VERIFY evidence for this operation.
@@ -485,17 +517,21 @@ def _execute_plan(
         contradictions = _check_contradictions_pre_write(
             category, slug, title, body_md
         )
+
+        if dry_run:
+            touched.append(str(target_path.relative_to(ROOT).as_posix()))
+            continue
+
         if contradictions:
-            # Auto-supersede: mark existing page as superseded by the new one
+            # Auto-supersede only on real writes (never during --dry-run).
             for old_path in contradictions:
                 try:
                     old_content = old_path.read_text(encoding="utf-8")
-                    # Add supersede marker if not already present
                     if "superseded_by" not in old_content:
                         supersede_note = (
                             f"\n\n## Superseded ({datetime.now().strftime('%Y-%m-%d')})\n"
                             f"This page has been superseded by "
-                            f"[[memory/knowledge/{category}/{slug}]].\n"
+                            f"[[knowledge/notes/{category}/{slug}]].\n"
                         )
                         old_path.write_text(
                             old_content.rstrip() + supersede_note,
@@ -503,10 +539,6 @@ def _execute_plan(
                         )
                 except OSError:
                     pass
-
-        if dry_run:
-            touched.append(str(target_path.relative_to(ROOT).as_posix()))
-            continue
 
         target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -524,7 +556,7 @@ def _execute_plan(
             ts = ev.get("timestamp", "")
             claim = ev.get("claim", "")
             evidence_lines.append(
-                f"- `memory/daily/{daily_date}.md [{ts}]` — {claim}"
+                f"- `knowledge/daily/{daily_date}.md [{ts}]` — {claim}"
             )
         evidence_section = (
             "\n\n## Evidence\n" + "\n".join(evidence_lines)
@@ -540,8 +572,8 @@ def _execute_plan(
         frontmatter = (
             "---\n"
             f"type: {category.rstrip('s') if category.endswith('s') else category}\n"
-            f'title: "{title}"\n'
-            f'description: "{summary}"\n'
+            f'title: "{str(title).replace(chr(92), chr(92)+chr(92)).replace(chr(34), chr(92)+chr(34)).replace(chr(10), " ").replace(chr(13), " ")}"\n'
+            f'description: "{str(summary).replace(chr(92), chr(92)+chr(92)).replace(chr(34), chr(92)+chr(34)).replace(chr(10), " ").replace(chr(13), " ")}"\n'
             f"timestamp: {datetime.now().isoformat(timespec='seconds')}\n"
             "---\n\n"
         )
@@ -651,7 +683,7 @@ def rebuild_index() -> bool:
 
     Previously called with `check=False` and the return value was
     ignored, so a failing rebuild (e.g. hardcoded-path regression)
-    would silently leave `memory/index.md` stale while the compile
+    would silently leave `knowledge/index.md` stale while the compile
     flow claimed success.
     """
     result = subprocess.run(
@@ -741,7 +773,7 @@ def _mark_finished(trigger: str, status: str, error: str | None = None) -> None:
 def _clear_compile_lock() -> None:
     """Best-effort clear of the maybe_compile PID lock."""
     try:
-        lock_file = STATE_ROOT / "memory-state" / "compile.pid"
+        lock_file = STATE_ROOT / "run" / "compile.pid"
         if lock_file.exists():
             lock_file.unlink()
     except OSError:
@@ -846,7 +878,7 @@ def _run(args: argparse.Namespace) -> int:
 
     update_state(_mutate)
 
-    # Only append to memory/log.md when the compile actually produced durable
+    # Only append to knowledge/log.md when the compile actually produced durable
     # output. A "no-op compile" (hash changed but nothing worth lifting, or
     # COMPILE_DONE: 0 pages touched) is a runtime event — record it in
     # state.json but do not pollute the knowledge changelog with heartbeat
@@ -864,7 +896,7 @@ def _run(args: argparse.Namespace) -> int:
             f"- {datetime.now().strftime('%Y-%m-%d')} — Manual compile pass over {sources}. No durable content to lift (runtime heartbeat)."
         )
     # Status: "ok" if compile + index both succeeded, "warning" if index
-    # rebuild failed (pages are written but memory/index.md is stale;
+    # rebuild failed (pages are written but knowledge/index.md is stale;
     # next run will re-attempt rebuild).
     finished_status = "ok" if index_ok else "warning"
     finished_error = None if index_ok else "index_rebuild_failed"

@@ -1,0 +1,37 @@
+{
+  "name": "Article to Inbox",
+  "behavior": "create",
+  "noteNameFormat": "{{title|replace:\"/\",\"-\"|replace:\"\\\\\",\"-\"|replace:\":\",\" -\"}}",
+  "path": "knowledge/inbox/articles",
+  "properties": [
+    {
+      "name": "title",
+      "value": "{{title}}"
+    },
+    {
+      "name": "url",
+      "value": "{{url}}"
+    },
+    {
+      "name": "author",
+      "value": "{{author}}"
+    },
+    {
+      "name": "site",
+      "value": "{{site}}"
+    },
+    {
+      "name": "published",
+      "value": "{{published|date:(\"YYYY-MM-DD\")}}"
+    },
+    {
+      "name": "captured",
+      "value": "{{date|date:\"YYYY-MM-DD\"}}"
+    },
+    {
+      "name": "type",
+      "value": "article"
+    }
+  ],
+  "template": "# {{title}}\n\nSource URL: {{url}}\n\nAuthor: {{author}}\nSite: {{site}}\nPublished: {{published|date:(\"YYYY-MM-DD\")}}\nCaptured: {{date|date:\"YYYY-MM-DD\"}}\n\n## Summary\n{{description}}\n\n## Highlights\n{% for item in highlights %}- {{item.text}}\n{% endfor %}\n\n## Content\n{{content}}\n"
+}

@@ -38,11 +38,38 @@ if hasattr(sys.stdout, "reconfigure"):
     except (AttributeError, io.UnsupportedOperation):
         pass
 
-ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(Path(__file__).resolve().parent.parent))).resolve()
-STATE_ROOT = Path(
-    os.environ.get("LLM_WIKI_STATE_ROOT", str(Path(__file__).resolve().parent.parent.parent / "LLM-wiki-state"))
-).resolve()
-DAILY_DIR = ROOT / "memory" / "daily"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from memory_state import ROOT as _MS_ROOT, STATE_ROOT as _MS_STATE, update_state  # noqa: E402
+    ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(_MS_ROOT))).resolve()
+    STATE_ROOT = Path(os.environ.get("LLM_WIKI_STATE_ROOT", str(_MS_STATE))).resolve()
+except Exception:  # noqa: BLE001
+    ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(Path(__file__).resolve().parent.parent))).resolve()
+    STATE_ROOT = Path(
+        os.environ.get("LLM_WIKI_STATE_ROOT", str(ROOT.parent / "LLM-wiki-state"))
+    ).resolve()
+
+    def update_state(mutator):  # type: ignore[misc]
+        state_file = STATE_ROOT / "run" / "state.json"
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        state = {}
+        if state_file.exists():
+            try:
+                state = json.loads(state_file.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                state = {}
+        mutator(state)
+        tmp = state_file.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(state_file)
+
+try:
+    from secret_redact import redact_secrets  # noqa: E402
+except Exception:  # noqa: BLE001
+    def redact_secrets(text: str) -> str:  # type: ignore[misc]
+        return text
+
+DAILY_DIR = ROOT / "knowledge" / "daily"
 
 # Rate-limit window per (slug, prompt-hash). Prevents log explosion
 # during rapid re-prompts or autocomplete-style submissions.
@@ -77,7 +104,7 @@ def _compute_slug_from_cwd(cwd: str) -> str:
     Reuses session_start_project_state._compute_slug so prompts are
     tagged with the SAME slug that state.md uses — no drift.
     """
-    projects_dir = ROOT / "wiki" / "projects"
+    projects_dir = ROOT / "knowledge" / "projects"
     try:
         sys.path.insert(0, str(ROOT / "scripts"))
         from session_start_project_state import _compute_slug  # type: ignore
@@ -95,7 +122,7 @@ def _compute_slug_from_cwd(cwd: str) -> str:
 def _rate_limited(slug: str, prompt_hash: str) -> bool:
     """True if this (slug, prompt) was logged in the last RATE_LIMIT_SECONDS."""
     try:
-        state_file = STATE_ROOT / "memory-state" / "state.json"
+        state_file = STATE_ROOT / "run" / "state.json"
         if not state_file.exists():
             return False
         state = json.loads(state_file.read_text(encoding="utf-8"))
@@ -115,30 +142,20 @@ def _rate_limited(slug: str, prompt_hash: str) -> bool:
 def _record_dedupe(slug: str, prompt_hash: str) -> None:
     """Record this (slug, prompt) in the dedupe map. Best-effort."""
     try:
-        state_file = STATE_ROOT / "memory-state" / "state.json"
-        state_file.parent.mkdir(parents=True, exist_ok=True)
-        if state_file.exists():
-            state = json.loads(state_file.read_text(encoding="utf-8"))
-        else:
-            state = {}
         key = f"{slug}::{prompt_hash}"
-        state.setdefault("prompt_capture_dedupe", {})[key] = datetime.now().isoformat(
-            timespec="seconds"
-        )
-        # Keep dedupe map bounded — keep only last 100 entries.
-        if len(state["prompt_capture_dedupe"]) > 100:
-            items = sorted(
-                state["prompt_capture_dedupe"].items(),
-                key=lambda kv: kv[1],
-                reverse=True,
-            )[:100]
-            state["prompt_capture_dedupe"] = dict(items)
-        # Atomic write via tmp+replace.
-        tmp = state_file.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-        tmp.replace(state_file)
+        now = datetime.now().isoformat(timespec="seconds")
+
+        def _mutate(state: dict) -> None:
+            state.setdefault("prompt_capture_dedupe", {})[key] = now
+            if len(state["prompt_capture_dedupe"]) > 100:
+                items = sorted(
+                    state["prompt_capture_dedupe"].items(),
+                    key=lambda kv: kv[1],
+                    reverse=True,
+                )[:100]
+                state["prompt_capture_dedupe"] = dict(items)
+
+        update_state(_mutate)
     except Exception:  # noqa: BLE001
         pass  # never fail the hook on dedupe-bookkeeping
 
@@ -152,9 +169,10 @@ def _append_prompt_tag(slug: str, session_id: str, preview: str) -> None:
         if not path.exists():
             path.write_text(f"# Daily Session Memory — {day}\n", encoding="utf-8")
         ts = datetime.now().strftime("%H:%M:%S")
+        safe = redact_secrets(preview)[:MAX_PROMPT_PREVIEW]
         line = (
             f"- `[{ts}] prompt | {session_id[:8]} | {slug}` "
-            f"{preview[:MAX_PROMPT_PREVIEW]}\n"
+            f"{safe}\n"
         )
         with path.open("a", encoding="utf-8") as f:
             f.write(line)

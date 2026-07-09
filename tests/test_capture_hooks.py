@@ -77,7 +77,7 @@ def test_prompt_capture_skips_vault_internal_sessions(monkeypatch, tmp_path):
     fake_root = tmp_path / "vault"
     fake_root.mkdir()
     monkeypatch.setattr(user_prompt_capture, "ROOT", fake_root)
-    monkeypatch.setattr(user_prompt_capture, "DAILY_DIR", fake_root / "memory" / "daily")
+    monkeypatch.setattr(user_prompt_capture, "DAILY_DIR", fake_root / "knowledge" / "daily")
 
     rc = _run_capture_with_stdin(
         "user_prompt_capture",
@@ -85,7 +85,7 @@ def test_prompt_capture_skips_vault_internal_sessions(monkeypatch, tmp_path):
     )
     assert rc == 0
     # No daily log written because cwd == ROOT.
-    daily_dir = fake_root / "memory" / "daily"
+    daily_dir = fake_root / "knowledge" / "daily"
     assert not daily_dir.exists() or list(daily_dir.glob("*.md")) == []
 
 
@@ -95,7 +95,7 @@ def test_prompt_capture_writes_line_for_real_prompt(monkeypatch, tmp_path):
 
     fake_root = tmp_path / "vault"
     fake_root.mkdir()
-    daily_dir = fake_root / "memory" / "daily"
+    daily_dir = fake_root / "knowledge" / "daily"
     monkeypatch.setattr(user_prompt_capture, "ROOT", fake_root)
     monkeypatch.setattr(user_prompt_capture, "DAILY_DIR", daily_dir)
     monkeypatch.setattr(
@@ -161,7 +161,7 @@ def test_tool_capture_logs_significant_tools(monkeypatch, tmp_path):
 
     fake_root = tmp_path / "vault"
     fake_root.mkdir()
-    daily_dir = fake_root / "memory" / "daily"
+    daily_dir = fake_root / "knowledge" / "daily"
     monkeypatch.setattr(post_tool_capture, "ROOT", fake_root)
     monkeypatch.setattr(post_tool_capture, "DAILY_DIR", daily_dir)
     monkeypatch.setattr(
@@ -222,7 +222,7 @@ def test_tool_capture_skips_vault_internal_sessions(monkeypatch, tmp_path):
     fake_root = tmp_path / "vault"
     fake_root.mkdir()
     monkeypatch.setattr(post_tool_capture, "ROOT", fake_root)
-    monkeypatch.setattr(post_tool_capture, "DAILY_DIR", fake_root / "memory" / "daily")
+    monkeypatch.setattr(post_tool_capture, "DAILY_DIR", fake_root / "knowledge" / "daily")
 
     rc = _run_capture_with_stdin(
         "post_tool_capture",
@@ -234,7 +234,7 @@ def test_tool_capture_skips_vault_internal_sessions(monkeypatch, tmp_path):
         },
     )
     assert rc == 0
-    daily_dir = fake_root / "memory" / "daily"
+    daily_dir = fake_root / "knowledge" / "daily"
     assert not daily_dir.exists() or list(daily_dir.glob("*.md")) == []
 
 
@@ -269,10 +269,7 @@ def tmp_path_state(tmp_path: Path, monkeypatch, module):
     of a sibling directory under tests/ — that older variant left a
     `_tmp_state_dir/` artifact in the repo after the suite ran.
     """
-    state_dir = tmp_path / "memory-state"
+    state_dir = tmp_path / "run"
     state_dir.mkdir()
     monkeypatch.setattr(module, "STATE_ROOT", tmp_path)
     return state_dir / "state.json"
-    state_file = tmp / "memory-state" / "state.json"
-    state_file.parent.mkdir(parents=True, exist_ok=True)
-    return state_file

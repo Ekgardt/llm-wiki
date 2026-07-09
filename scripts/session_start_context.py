@@ -2,17 +2,17 @@
 
 Emits a JSON object on stdout with `hookSpecificOutput.additionalContext`
 containing a trimmed view of project memory:
-  - `memory/index.md` — H1, Entry points, first 3 non-empty knowledge sections,
+  - `knowledge/index.md` — H1, Entry points, first 3 non-empty knowledge sections,
     with each bullet line clipped to keep the section visually scannable.
   - Latest daily log — a short excerpt of the most recent meaningful session
     block. Empty hook-trigger blocks, XML `<analysis>`/`<summary>` wrappers,
     and mojibake lines are stripped. If nothing clean remains, falls back to
     a one-line note.
-  - `memory/log.md` — last 3 dated entries, each clipped.
+  - `knowledge/log.md` — last 3 dated entries, each clipped.
 
 Total additionalContext is capped around 2.2 KB. A debug dump of the payload
-is written to `$LLM_WIKI_STATE_ROOT/memory-reports/session-start-last.txt`
-(default: ``D:/LLM-wiki-state/memory-reports/``) on every run.
+is written to `$LLM_WIKI_STATE_ROOT/logs/session-start-last.txt`
+(default: ``$LLM_WIKI_ROOT/../LLM-wiki-state/logs/``) on every run.
 """
 from __future__ import annotations
 
@@ -32,12 +32,12 @@ if hasattr(sys.stdout, "reconfigure"):
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import REPORTS_DIR, ROOT, load_state  # noqa: E402
 
-MEMORY_INDEX = ROOT / "memory" / "index.md"
-MEMORY_LOG = ROOT / "memory" / "log.md"
-DAILY_DIR = ROOT / "memory" / "daily"
-WIKI_DIR = ROOT / "wiki"
-KNOWLEDGE_DIR = ROOT / "memory" / "knowledge"
-SKILLS_DIR = ROOT / ".claude" / "skills"
+MEMORY_INDEX = ROOT / "knowledge" / "index.md"
+MEMORY_LOG = ROOT / "knowledge" / "log.md"
+DAILY_DIR = ROOT / "knowledge" / "daily"
+WIKI_DIR = ROOT / "knowledge" / "notes"
+KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
+SKILLS_DIR = ROOT / "skills"
 GAPS_DIR = WIKI_DIR / "gaps"
 DEBUG_DIR = REPORTS_DIR
 DEBUG_FILE = DEBUG_DIR / "session-start-last.txt"
@@ -268,7 +268,7 @@ def _count_md(tree: Path) -> int:
 
 def _count_active_projects() -> int:
     """Project folders with a state.md file (active = has handoff)."""
-    projects_root = WIKI_DIR / "projects"
+    projects_root = ROOT / "knowledge" / "projects"
     if not projects_root.exists():
         return 0
     return sum(
@@ -449,7 +449,7 @@ def build_context() -> str:
         MEMORY_INDEX.read_text(encoding="utf-8", errors="replace")
         if MEMORY_INDEX.exists() else ""
     )
-    index_trimmed = trim_index(index_txt).strip() or "(memory/index.md missing or empty)"
+    index_trimmed = trim_index(index_txt).strip() or "(knowledge/index.md missing or empty)"
 
     daily = latest_daily()
     daily_name = daily.name if daily else "(none)"
@@ -463,13 +463,13 @@ def build_context() -> str:
         guardrails_block(),
         metacognitive_block(),
         advisory_block(),
-        "## memory/index.md (trimmed)",
+        "## knowledge/index.md (trimmed)",
         index_trimmed,
         "",
         f"## Latest daily log: {daily_name}",
         daily_block,
         "",
-        "## Recent memory/log.md",
+        "## Recent knowledge/log.md",
         log_tail,
     ]
     text = "\n".join(parts).rstrip() + "\n"

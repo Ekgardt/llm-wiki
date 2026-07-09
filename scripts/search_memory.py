@@ -21,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sqlite3
@@ -31,12 +32,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import ROOT, STATE_ROOT  # noqa: E402
 
-INDEX_DIR = STATE_ROOT / "search"
+INDEX_DIR = STATE_ROOT / "cache"
 INDEX_FILE = INDEX_DIR / "index.sqlite"
-VECTOR_CACHE = INDEX_DIR / "vectors.npz"  # numpy cache for embeddings
+VECTOR_CACHE = INDEX_DIR / "vectors.json"  # JSON embedding cache (no pickle)
 
-WIKI_DIR = ROOT / "wiki"
-KNOWLEDGE_DIR = ROOT / "memory" / "knowledge"
+WIKI_DIR = ROOT / "knowledge" / "notes"
+KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
 
 # Files to skip (editorial / operational, not knowledge)
 SKIP_NAMES = {"index.md", "log.md", "README.md", "state.md", "context.md"}
@@ -180,6 +181,21 @@ def _extract_frontmatter_field(content: str, pattern: re.Pattern) -> str | None:
 # Patterns for metadata extraction
 PROJECT_FIELD_RE = re.compile(r"^project:\s*[\"']?([^\"'\n]+)[\"']?\s*$", re.MULTILINE)
 TIMESTAMP_FIELD_RE = re.compile(r"^timestamp:\s*(.+?)\s*$", re.MULTILINE)
+AUTHORITY_FIELD_RE = re.compile(
+    r"^source_authority:\s*[\"']?([^\"'\n]+)[\"']?\s*$", re.MULTILINE
+)
+VALID_TO_FIELD_RE = re.compile(r"^valid_to:\s*(.+?)\s*$", re.MULTILINE)
+
+# Higher weight = preferred in ranking (typed provenance).
+AUTHORITY_WEIGHTS = {
+    "user": 1.35,
+    "human": 1.35,
+    "ai-derived": 1.0,
+    "ai": 1.0,
+    "web": 0.9,
+    "inferred": 0.8,
+    "unknown": 1.0,
+}
 
 
 def _extract_title_and_summary(content: str, fallback_stem: str) -> tuple[str, str]:
@@ -258,6 +274,35 @@ def _build_index(pages: list[Path]) -> None:
     conn.close()
 
 
+def _authority_weight(path: str) -> float:
+    """Read source_authority from page frontmatter; default 1.0."""
+    try:
+        p = ROOT / path if not Path(path).is_absolute() else Path(path)
+        content = p.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return 1.0
+    auth = _extract_frontmatter_field(content, AUTHORITY_FIELD_RE)
+    if not auth:
+        return 1.0
+    return AUTHORITY_WEIGHTS.get(auth.strip().lower(), 1.0)
+
+
+def _valid_as_of(path: str, as_of: str) -> bool:
+    """True if page is valid at as_of (valid_to empty/null or >= as_of)."""
+    try:
+        p = ROOT / path if not Path(path).is_absolute() else Path(path)
+        content = p.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return True
+    valid_to = _extract_frontmatter_field(content, VALID_TO_FIELD_RE)
+    if not valid_to:
+        return True
+    vt = valid_to.strip().strip("\"'").lower()
+    if vt in ("null", "none", "~", ""):
+        return True
+    return vt[:10] >= as_of[:10]
+
+
 def search(
     query: str,
     scope: str = "all",
@@ -265,6 +310,7 @@ def search(
     force_rebuild: bool = False,
     project: str | None = None,
     since: str | None = None,
+    as_of: str | None = None,
     semantic: bool = False,
 ) -> list[dict]:
     """Run a hybrid BM25 + optional vector search.
@@ -272,6 +318,8 @@ def search(
     Optional filters:
     - project: boost results tagged with `project: <slug>` (x2 score boost)
     - since: only results with timestamp >= YYYY-MM-DD
+    - as_of: only results valid on YYYY-MM-DD (timestamp <= as_of and
+      valid_to empty or >= as_of); also applies source_authority weights
     - semantic: if sentence-transformers is installed, also run vector
       search and fuse results via RRF. Finds semantically related pages
       even when keywords don't match.
@@ -292,7 +340,14 @@ def search(
     # between terms while avoiding syntax errors.
     # "hook errors" → '"hook" "errors"' → AND of two terms
     # (NOT '"hook errors"' which would be exact phrase match)
-    fts_query = " ".join(f'"{w}"' for w in query.split() if w)
+    # Escape embedded double-quotes so FTS5 does not choke on user input.
+    fts_terms = []
+    for w in query.split():
+        if not w:
+            continue
+        safe = w.replace('"', '""')
+        fts_terms.append(f'"{safe}"')
+    fts_query = " ".join(fts_terms)
     bm25_raw = conn.execute(
         """
         SELECT path, title, summary, project, timestamp, bm25(pages) as rank
@@ -320,6 +375,14 @@ def search(
                     continue
             except (IndexError, TypeError):
                 pass
+        if as_of and ts:
+            try:
+                if ts[:10] > as_of[:10]:
+                    continue
+            except (IndexError, TypeError):
+                pass
+        if as_of and not _valid_as_of(path, as_of):
+            continue
         score = -rank
         if project and proj and proj.lower() == project.lower():
             score *= 2.0
@@ -347,9 +410,12 @@ def search(
             score *= 4.0
 
         # Path preference: if two pages have similar titles, prefer
-        # memory/knowledge/ (primary source) over wiki/concepts/ (copy)
-        if "memory/knowledge/" in path:
+        # knowledge/notes/ (primary source) over knowledge/notes/ (copy)
+        if "knowledge/notes/" in path:
             score *= 1.3  # increased from 1.2 to break ties more decisively
+
+        # Typed provenance: user-said outranks inferred/ai-derived.
+        score *= _authority_weight(path)
 
         bm25_results.append({
             "path": path,
@@ -370,18 +436,18 @@ def search(
     # return it at rank 1 immediately. This prevents graph-neighbor RRF
     # from pushing a filename-matched page down by promoting a linked
     # but incorrect page (e.g. wiki copy beating the knowledge original).
-    # When multiple pages match (duplicates), prefer memory/knowledge/.
+    # When multiple pages match (duplicates), prefer knowledge/notes/.
     query_normalized = query.lower().strip().replace(" ", "-")
     filename_matches = [
         r for r in bm25_results[:10]
         if Path(r["path"]).stem.lower() == query_normalized
     ]
     if filename_matches:
-        # Sort matches: memory/knowledge/ first (primary source),
+        # Sort matches: knowledge/notes/ first (primary source),
         # then by score (highest first)
         filename_matches.sort(
             key=lambda r: (
-                0 if "memory/knowledge/" in r["path"] else 1,
+                0 if "knowledge/notes/" in r["path"] else 1,
                 -r["score"],
             )
         )
@@ -393,10 +459,13 @@ def search(
     vector_results = None
     if semantic and _have_sentence_transformers():
         try:
+            _vector_as_of_holder.as_of = as_of
             vector_results = _vector_search(query, pages, limit * 3, project, since)
         except Exception as e:
             print(f"  (vector search failed: {e})", file=sys.stderr)
             vector_results = None
+        finally:
+            _vector_as_of_holder.as_of = None
 
     # Optional: graph-neighbor boost (3rd retrieval signal)
     graph_boosts = None
@@ -525,6 +594,16 @@ def _vector_search(
                     continue
             except (IndexError, TypeError):
                 pass
+        # Temporal filter for vector hits (parity with BM25 as_of).
+        as_of = getattr(_vector_as_of_holder, "as_of", None)
+        if as_of and ts:
+            try:
+                if ts[:10] > as_of[:10]:
+                    continue
+            except (IndexError, TypeError):
+                pass
+        if as_of and not _valid_as_of(paths[i], as_of):
+            continue
         score = round(sim, 4)
         if project and proj and proj.lower() == project.lower():
             score = round(score * 1.5, 4)
@@ -541,28 +620,34 @@ def _vector_search(
     return results[:limit]
 
 
+# Thread-local-ish holder so _vector_search can read as_of without signature churn
+# for all call sites; set by search() before vector path.
+class _vector_as_of_holder:
+    as_of: str | None = None
+
+
 def _load_or_build_vectors(pages: list[Path]) -> dict | None:
     """Load cached embeddings or build them fresh.
 
     Cache is invalidated when any source file changes (mtime check).
     """
-    import pickle
-
-    # Check cache validity
+    # Check cache validity via mtime + path set (JSON cache; no pickle).
     needs_rebuild = True
+    current_paths = sorted(
+        p.relative_to(ROOT).as_posix() for p in pages if p.exists()
+    )
     if VECTOR_CACHE.exists():
         try:
             cache_mtime = VECTOR_CACHE.stat().st_mtime
             needs_rebuild = any(
                 p.stat().st_mtime > cache_mtime for p in pages if p.exists()
             )
-        except OSError:
-            needs_rebuild = True
-
-    if not needs_rebuild:
-        try:
-            with VECTOR_CACHE.open("rb") as f:
-                return pickle.load(f)
+            if not needs_rebuild:
+                data = json.loads(VECTOR_CACHE.read_text(encoding="utf-8"))
+                if sorted(data.get("paths") or []) != current_paths:
+                    needs_rebuild = True
+                else:
+                    return data
         except Exception:
             needs_rebuild = True
 
@@ -623,11 +708,9 @@ def _build_vectors(pages: list[Path]) -> dict | None:
         "vectors": vectors.tolist(),
     }
 
-    # Cache to disk
-    import pickle
+    # Cache to disk as JSON (no pickle — safer if state root is compromised).
     try:
-        with VECTOR_CACHE.open("wb") as f:
-            pickle.dump(data, f)
+        VECTOR_CACHE.write_text(json.dumps(data), encoding="utf-8")
     except Exception:
         pass  # best-effort cache
 
@@ -641,6 +724,7 @@ def main() -> int:
     p.add_argument("--limit", type=int, default=10)
     p.add_argument("--project", default=None, help="Boost results from this project slug")
     p.add_argument("--since", default=None, help="Only results since YYYY-MM-DD")
+    p.add_argument("--as-of", dest="as_of", default=None, help="Only results valid on YYYY-MM-DD")
     p.add_argument("--semantic", action="store_true", help="Enable vector search (needs sentence-transformers)")
     p.add_argument("--rebuild", action="store_true", help="Force index rebuild")
     p.add_argument("--status", action="store_true", help="Show index stats")
@@ -679,6 +763,7 @@ def main() -> int:
         force_rebuild=args.rebuild,
         project=args.project,
         since=args.since,
+        as_of=args.as_of,
         semantic=args.semantic,
     )
     elapsed = time.time() - t0

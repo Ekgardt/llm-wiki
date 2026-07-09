@@ -6,7 +6,7 @@ What it does:
 3. LLM-judged contradiction check (optional, opt-in via env var).
 4. Prune permanently-failed queue tasks.
 
-Designed to run unattended. Logs to $LLM_WIKI_STATE_ROOT\\memory-reports\\weekly-YYYY-MM-DD.md.
+Designed to run unattended. Logs to $LLM_WIKI_STATE_ROOT\\logs\\weekly-YYYY-MM-DD.md.
 """
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ def main() -> int:
             f.write(line + "\n")
 
     log(f"=== Weekly deep maintenance — {today} ===")
+    failures = 0
 
     import subprocess
 
@@ -42,6 +43,8 @@ def main() -> int:
     )
     for line in r.stdout.splitlines():
         log(f"  nightly: {line}")
+    if r.returncode != 0:
+        failures += 1
 
     # Step 2: OKF conformance sweep — backfill missing frontmatter.
     log("Step 2: OKF conformance sweep (migrate_to_okf --apply)...")
@@ -49,9 +52,10 @@ def main() -> int:
         [sys.executable, str(ROOT / "scripts" / "migrate_to_okf.py"), "--apply"],
         cwd=str(ROOT), capture_output=True, text=True, timeout=120,
     )
-    # Show just the summary line.
     for line in r.stdout.splitlines()[-6:]:
         log(f"  okf: {line}")
+    if r.returncode != 0:
+        failures += 1
 
     # Step 3: prune permanently-failed queue tasks (attempts >= 5).
     log("Step 3: pruning permanently-failed queue tasks...")
@@ -60,6 +64,8 @@ def main() -> int:
         cwd=str(ROOT), capture_output=True, text=True, timeout=60,
     )
     log(f"  prune: {r.stdout.strip()}")
+    if r.returncode != 0:
+        failures += 1
 
     # Step 3b: auto-archive stale pages (>180 days).
     log("Step 3b: auto-archiving stale pages (>180 days)...")
@@ -69,9 +75,10 @@ def main() -> int:
     )
     for line in r.stdout.splitlines()[-5:]:
         log(f"  archive: {line}")
+    if r.returncode != 0:
+        failures += 1
 
     # Step 4: optional LLM-judged contradiction check.
-    # Off by default — costs LLM calls. Enable via env var.
     if os.environ.get("MEMORY_WEEKLY_CONTRADICTIONS", "").lower() in ("1", "true", "yes"):
         log("Step 4: LLM contradiction check (opt-in)...")
         r = subprocess.run(
@@ -80,11 +87,13 @@ def main() -> int:
         )
         for line in r.stdout.splitlines()[-5:]:
             log(f"  contradictions: {line}")
+        if r.returncode != 0:
+            failures += 1
     else:
         log("Step 4: contradiction check SKIPPED (set MEMORY_WEEKLY_CONTRADICTIONS=1 to enable)")
 
-    log("=== Weekly deep maintenance complete ===")
-    return 0
+    log(f"=== Weekly deep maintenance complete (failures={failures}) ===")
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

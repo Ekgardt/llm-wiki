@@ -9,7 +9,7 @@ Each agent reads/writes to a shared space in the vault. No direct
 agent-to-agent communication needed — coordination happens through
 the shared state.
 
-Files live at: wiki/projects/<slug>/.blackboard/
+Files live at: knowledge/projects/<slug>/.blackboard/
   - tasks.jsonl     — task queue with claim/complete status
   - signals.jsonl   — inter-agent signals ("I'm working on X")
   - conflicts.jsonl — conflict detection ("agent A and B edited same file")
@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 import time
 from datetime import datetime
@@ -43,11 +44,25 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import ROOT  # noqa: E402
 
-PROJECTS_DIR = ROOT / "wiki" / "projects"
+PROJECTS_DIR = ROOT / "knowledge" / "projects"
+
+
+def _sanitize_project(project: str) -> str:
+    """Allow only safe project slug segments (no path traversal)."""
+    raw = (project or "").strip().replace("\\", "/").split("/")[-1]
+    slug = re.sub(r"[^a-zA-Z0-9._-]", "-", raw).strip(".-")
+    if not slug or slug in {".", ".."}:
+        raise ValueError(f"invalid project slug: {project!r}")
+    return slug
 
 
 def _bb_dir(project: str) -> Path:
-    d = PROJECTS_DIR / project / ".blackboard"
+    slug = _sanitize_project(project)
+    d = (PROJECTS_DIR / slug / ".blackboard").resolve()
+    try:
+        d.relative_to(PROJECTS_DIR.resolve())
+    except ValueError as exc:
+        raise ValueError(f"project path escapes projects dir: {project!r}") from exc
     d.mkdir(parents=True, exist_ok=True)
     return d
 

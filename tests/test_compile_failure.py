@@ -3,7 +3,7 @@
 Verifies that a failed LLM compile run does NOT:
   - mark the daily log as compiled (compiled_daily_hashes unchanged)
   - produce a zero exit code
-  - append a fake success entry to memory/log.md
+  - append a fake success entry to knowledge/log.md
 And DOES:
   - record last_compile_status = "error" in state.json
 
@@ -22,7 +22,7 @@ import pytest
 
 @pytest.fixture
 def state_snapshot():
-    """Save / restore state.json and memory/log.md around the test.
+    """Save / restore state.json and knowledge/log.md around the test.
 
     Bootstraps state.json if it doesn't exist yet — a fresh clone has
     no runtime state. conftest.py creates an empty `{}` state.json
@@ -108,8 +108,8 @@ def test_failed_compile_does_not_mark_hash(state_snapshot, monkeypatch):
         f"{state_after.get('last_compile_status')!r}"
     )
 
-    # memory/log.md must not have gained a fake success entry
+    # knowledge/log.md must not have gained a fake success entry
     log_after = state_snapshot["log_md"].read_text(encoding="utf-8") if state_snapshot["log_md"].exists() else ""
     assert log_after == state_snapshot["log_before"], (
-        "memory/log.md changed on failed compile (expected no append)"
+        "knowledge/log.md changed on failed compile (expected no append)"
     )

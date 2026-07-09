@@ -90,7 +90,7 @@ ok "Dependencies installed"
 
 # ─── 4. Run tests ──────────────────────────────────────────────────
 
-info "Running test suite (106 tests)..."
+info "Running test suite..."
 if uv run pytest -q 2>&1 | tail -1 | grep -q "passed"; then
   ok "All tests passed"
 else
@@ -124,9 +124,7 @@ fi
 
 # Create state directory
 STATE_ROOT="${LLM_WIKI_STATE_ROOT:-$VAULT_ROOT/../LLM-wiki-state}"
-mkdir -p "$STATE_ROOT/memory-state"
-mkdir -p "$STATE_ROOT/memory-reports"
-mkdir -p "$STATE_ROOT/search"
+mkdir -p "$STATE_ROOT/run" "$STATE_ROOT/run/queue" "$STATE_ROOT/logs" "$STATE_ROOT/cache"
 ok "State directory: $STATE_ROOT"
 
 # ─── 6. Build search index ─────────────────────────────────────────
@@ -139,8 +137,8 @@ ok "Search index built"
 
 info "Setting up scheduled maintenance..."
 
-CRON_NIGHTLY="0 3 * * * cd $VAULT_ROOT && $(which uv) run python scripts/scheduled_nightly.py >> $STATE_ROOT/memory-reports/cron-nightly.log 2>&1"
-CRON_WEEKLY="0 4 * * 0 cd $VAULT_ROOT && $(which uv) run python scripts/scheduled_weekly.py >> $STATE_ROOT/memory-reports/cron-weekly.log 2>&1"
+CRON_NIGHTLY="0 3 * * * cd $VAULT_ROOT && $(which uv) run python scripts/scheduled_nightly.py >> $STATE_ROOT/logs/cron-nightly.log 2>&1"
+CRON_WEEKLY="0 4 * * 0 cd $VAULT_ROOT && $(which uv) run python scripts/scheduled_weekly.py >> $STATE_ROOT/logs/cron-weekly.log 2>&1"
 
 # Remove old entries if re-running
 if crontab -l 2>/dev/null | grep -q "LLM-Wiki"; then
@@ -163,32 +161,11 @@ if [ -d "$HOME/.config/opencode" ] || command -v opencode &>/dev/null; then
   AGENTS_FOUND="$AGENTS_FOUND OpenCode"
   PLUGIN_DIR="$HOME/.config/opencode/plugins"
   mkdir -p "$PLUGIN_DIR"
-  if [ ! -f "$PLUGIN_DIR/llm-wiki-memory.js" ]; then
-    cp "$VAULT_ROOT/scripts/llm-wiki-memory-opencode.js" "$PLUGIN_DIR/llm-wiki-memory.js" 2>/dev/null || true
-    # If no pre-built plugin, create a minimal one
-    if [ ! -f "$PLUGIN_DIR/llm-wiki-memory.js" ]; then
-      cat > "$PLUGIN_DIR/llm-wiki-memory.js" << 'PLUGIN'
-export const LlmWikiMemoryPlugin = async ({ client, $, directory }) => {
-  const VAULT = process.env.LLM_WIKI_ROOT || "LLM-wiki";
-  return {
-    "session.created": async () => {
-      try { await $`uv run python ${VAULT}/scripts/session_start_context.py`.quiet().nothrow(); } catch {}
-    },
-    "tool.execute.after": async (input) => {
-      const tool = String(input?.tool || "");
-      if (!["edit","write","multi_edit","bash"].includes(tool)) return;
-      try {
-        const payload = JSON.stringify({tool, target: String(input?.input?.filePath||input?.input?.command||"").slice(0,100)});
-        await $`uv run python ${VAULT}/scripts/daily_log_append.py`.stdin(payload).quiet().nothrow();
-      } catch {}
-    },
-  };
-};
-PLUGIN
-    fi
-    ok "OpenCode plugin installed"
+  if [ -f "$VAULT_ROOT/scripts/llm-wiki-memory-opencode.js" ]; then
+    cp -f "$VAULT_ROOT/scripts/llm-wiki-memory-opencode.js" "$PLUGIN_DIR/llm-wiki-memory.js"
+    ok "OpenCode plugin installed/updated"
   else
-    ok "OpenCode plugin already exists"
+    warn "OpenCode detected but plugin source missing at $VAULT_ROOT/scripts/llm-wiki-memory-opencode.js"
   fi
 fi
 
@@ -223,6 +200,19 @@ if [ -z "$AGENTS_FOUND" ]; then
   warn "No supported agents detected. Install OpenCode, Codex CLI, Claude Code, Cursor, or Antigravity."
 else
   ok "Agents detected:$AGENTS_FOUND"
+fi
+
+# Claude Code — merge hooks if CLI or config dir present (safe: backup + non-destructive)
+if command -v claude &>/dev/null || [ -d "$HOME/.claude" ]; then
+  AGENTS_FOUND="$AGENTS_FOUND Claude"
+  info "Merging LLM-wiki hooks into Claude user settings (backup first)..."
+  if uv run python "$VAULT_ROOT/scripts/merge_claude_settings.py" \
+      --vault-root "$VAULT_ROOT" \
+      --state-root "$STATE_ROOT"; then
+    ok "Claude settings merged → ~/.claude/settings.json"
+  else
+    warn "Claude settings merge failed — run: uv run python scripts/merge_claude_settings.py"
+  fi
 fi
 
 # ─── 9. Optional: sentence-transformers ─────────────────────────────

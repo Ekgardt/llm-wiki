@@ -58,7 +58,7 @@ def test_daily_log_append_writes_block(tmp_path, monkeypatch):
     assert rc == 0
 
     today = date.today().isoformat()
-    daily = tmp_path / "memory" / "daily" / f"{today}.md"
+    daily = tmp_path / "knowledge" / "daily" / f"{today}.md"
     assert daily.exists()
     content = daily.read_text(encoding="utf-8")
     assert "Tier: `major`" in content
@@ -138,7 +138,7 @@ def test_tool_breadcrumb_writes_line(tmp_path, monkeypatch):
     assert rc == 0
 
     today = date.today().isoformat()
-    daily = tmp_path / "memory" / "daily" / f"{today}.md"
+    daily = tmp_path / "knowledge" / "daily" / f"{today}.md"
     assert daily.exists()
     content = daily.read_text(encoding="utf-8")
     assert "tool" in content

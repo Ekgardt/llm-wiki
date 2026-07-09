@@ -37,8 +37,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 INDEX_DIR = ROOT / "benchmark"
-KNOWLEDGE = ROOT / "memory" / "knowledge"
-WIKI = ROOT / "wiki"
+KNOWLEDGE = ROOT / "knowledge" / "notes"
+WIKI = ROOT / "knowledge" / "notes"
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 H1_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
@@ -54,7 +54,9 @@ def _generate_qa_pairs() -> list[dict]:
     Also generates a 'paraphrased' query using key words from the summary.
     """
     pairs = []
+    # Flat notes (current layout) + optional typed subdirs (legacy/aspirational).
     search_dirs = [
+        KNOWLEDGE,  # flat knowledge/notes/*.md
         KNOWLEDGE / "decisions",
         KNOWLEDGE / "patterns",
         KNOWLEDGE / "debugging",
@@ -63,11 +65,18 @@ def _generate_qa_pairs() -> list[dict]:
         WIKI / "concepts",
         WIKI / "syntheses",
     ]
+    seen: set[Path] = set()
 
     for d in search_dirs:
         if not d.exists():
             continue
+        # Only direct children for flat root; subdirs use their own glob.
         for md in sorted(d.glob("*.md")):
+            if md in seen:
+                continue
+            if md.name.lower() in {"readme.md", "index.md", "log.md"}:
+                continue
+            seen.add(md)
             try:
                 content = md.read_text(encoding="utf-8", errors="ignore")
             except OSError:

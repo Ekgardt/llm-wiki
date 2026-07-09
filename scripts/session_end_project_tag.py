@@ -1,7 +1,7 @@
 """User-level SessionEnd hook — tag the day's daily log with the project slug.
 
 Fires at session end from any cwd. Appends a minimal marker entry to
-`memory/daily/YYYY-MM-DD.md` identifying the project slug and session
+`knowledge/daily/YYYY-MM-DD.md` identifying the project slug and session
 metadata. This lets cross-project sessions leave breadcrumbs in the
 shared daily log.
 
@@ -78,7 +78,7 @@ def _safe_write_error(err: str) -> None:
         state_root = _resolve_state_root()
         if state_root is None:
             return
-        log_path = state_root / "hook-errors.log"
+        log_path = state_root / "logs" / "hook-errors.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().isoformat(timespec="seconds")
         with log_path.open("a", encoding="utf-8") as f:
@@ -211,9 +211,9 @@ def main() -> int:
         if not vault_root:
             return 0
         vault = Path(vault_root).resolve()
-        daily_dir = vault / "memory" / "daily"
+        daily_dir = vault / "knowledge" / "daily"
         if not daily_dir.parent.is_dir():
-            _safe_write_error(f"memory/ dir missing under {vault}")
+            _safe_write_error(f"knowledge/ dir missing under {vault}")
             return 0
 
         project_dir = _resolve_project_dir()
@@ -230,7 +230,7 @@ def main() -> int:
         if _is_user_home(project_dir):
             return 0
 
-        projects_dir = vault / "wiki" / "projects"
+        projects_dir = vault / "knowledge" / "projects"
         slug = _compute_slug(project_dir, projects_dir)
         payload = _read_payload()
         now = datetime.now()

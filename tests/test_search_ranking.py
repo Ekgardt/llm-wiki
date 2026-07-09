@@ -3,7 +3,7 @@
 Locks in:
 1. Title boost: exact title match → higher rank than BM25-only
 2. Filename short-circuit: exact filename match → rank 1 always
-3. Path preference: memory/knowledge/ pages boosted over wiki/concepts/
+3. Path preference: knowledge/notes/ pages boosted over knowledge/notes/
 4. RRF fusion: weighted (BM25=2, Vector=1, Graph=0.5)
 5. Project-scoped boost: project-tagged pages x2
 """

@@ -7,7 +7,7 @@ Small pytest-based suite covering the critical scenarios surfaced by four rounds
 | Test file | Guards against |
 |---|---|
 | `test_slug.py` | Round 2 / Round 5: slug collision resolution + strict `_slug_owns_dir` ownership (state.md without `- Project root:` must NOT be claimed). Base slug sanitization, Cyrillic preservation, git owner-repo fallback, hash-suffix last resort, idempotency. |
-| `test_compile_failure.py` | Round 1 #C2: the `silent data loss` class bug where a failed LLM compile would still write `compiled_daily_hashes`. Monkey-patches `run_compile` to simulate failure, asserts hashes unchanged, exit=1, `last_compile_status=error`, `memory/log.md` untouched. |
+| `test_compile_failure.py` | Round 1 #C2: the `silent data loss` class bug where a failed LLM compile would still write `compiled_daily_hashes`. Monkey-patches `run_compile` to simulate failure, asserts hashes unchanged, exit=1, `last_compile_status=error`, `knowledge/log.md` untouched. |
 | `test_context_noise.py` | Round 3 #I4: technical noise (`Trigger:`, `Transcript:`, `Project root:`, session-id UUIDs) stripped from SessionStart-injected context; useful signal (index header, wikilinks) preserved. |
 | `test_slugify.py` | Round 3 #I5 + Round 5 #5: Unicode-safe slugify for Cyrillic questions; punct-only / emoji-only inputs get deterministic hash suffix instead of colliding on `"question"`. |
 | `test_session_end_skip.py` | Round 2 + 3.5: SessionEnd hook skips vault cwd (delegates to project-level hook) and skips $HOME (not a project); writes tagged entry for normal non-vault cwd. |

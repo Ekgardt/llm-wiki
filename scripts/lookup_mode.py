@@ -4,7 +4,7 @@ Thresholds are deliberately conservative — Karpathy's thread claims direct-rea
 works to ~100 articles / ~400K words, and coleam00 places the RAG-necessary
 breakpoint at ~2000 articles. We pick three tiers inside that range:
 
-  DIRECT  (< 50 wiki pages)    — read wiki/index.md + target pages; skip QMD.
+  DIRECT  (< 50 wiki pages)    — read knowledge/index.md + target pages; skip QMD.
   HYBRID  (50–300 wiki pages)  — wiki-first, fall back to `qmd search`
                                   (BM25) and `qmd query` (hybrid lex+vec)
                                   only when the direct read is unconvincing.
@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import ROOT  # noqa: E402
 from vault_editorial import EDITORIAL_NAMES, editorial_parents_to_skip  # noqa: E402
 
-WIKI = ROOT / "wiki"
+WIKI = ROOT / "knowledge" / "notes"
 
 TIERS = [
     (50, "DIRECT"),
@@ -47,11 +47,11 @@ TIERS = [
 
 
 def count_wiki_pages() -> int:
-    """Count curated content pages under `wiki/`.
+    """Count curated content pages under `knowledge/notes/`.
 
     Exempts editorial metadata (index/log/state/etc. — see
     `vault_editorial.EDITORIAL_NAMES`) and skeleton directories like
-    `wiki/projects/_template/`. The resulting count drives the retrieval
+    `knowledge/projects/_template/`. The resulting count drives the retrieval
     tier recommendation.
     """
     if not WIKI.exists():
@@ -78,8 +78,9 @@ def qmd_status() -> dict:
     Strategy:
       1. Look for the index file. Locations, in priority order:
          - `$QMD_INDEX` env var (explicit override)
-         - `$LLM_WIKI_STATE_ROOT/qmd/index.sqlite` (canonical runtime home)
-         - `<vault>/../LLM-wiki-state/qmd/index.sqlite` (default sibling)
+         - `$LLM_WIKI_STATE_ROOT/cache/index.sqlite` (canonical runtime home)
+         - `<vault>/../LLM-wiki-state/cache/index.sqlite` (default sibling)
+         - legacy `$LLM_WIKI_STATE_ROOT/qmd/index.sqlite` (pre-restructure)
          The file's mtime tells us when QMD last wrote.
       2. Try `qmd status` for richer detail. On Windows the `qmd` binary
          is often a shim only visible to bash/Git-Bash, not cmd.exe — so
@@ -98,9 +99,11 @@ def qmd_status() -> dict:
     if qmd_index_env:
         candidates.append(Path(qmd_index_env))
     if state_root_env:
-        candidates.append(Path(state_root_env) / "qmd" / "index.sqlite")
+        candidates.append(Path(state_root_env) / "cache" / "index.sqlite")
+        candidates.append(Path(state_root_env) / "qmd" / "index.sqlite")  # legacy
     # Sibling-of-vault default (matches memory_state.py convention).
-    candidates.append(ROOT.parent / "LLM-wiki-state" / "qmd" / "index.sqlite")
+    candidates.append(ROOT.parent / "LLM-wiki-state" / "cache" / "index.sqlite")
+    candidates.append(ROOT.parent / "LLM-wiki-state" / "qmd" / "index.sqlite")  # legacy
     for c in candidates:
         try:
             if c and c.exists() and c.is_file():
@@ -127,7 +130,7 @@ def qmd_status() -> dict:
             )
             if out.returncode == 0 and out.stdout:
                 for i, ln in enumerate(out.stdout.splitlines()):
-                    if "wiki (qmd://wiki/" in ln:
+                    if "wiki (qmd://knowledge/notes/" in ln:
                         for look in out.stdout.splitlines()[i : i + 4]:
                             if "Files:" in look:
                                 info["wiki_files_indexed"] = look.split("Files:")[-1].strip()

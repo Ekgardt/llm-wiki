@@ -14,9 +14,11 @@ Detection patterns:
 - User rejecting an agent's suggestion → implicit correction
 
 Usage (called from flush_memory.py or plugin on session.idle):
-    uv run python scripts/feedback_capture.py --transcript <path>
-    uv run python scripts/feedback_capture.py --list
-    uv run python scripts/feedback_capture.py --promote <id>
+    # OpenCode plugin: JSON on stdin (no args)
+    echo '{"text":"...","session_id":"...","slug":"..."}' | uv run python scripts/feedback_capture.py
+    uv run python scripts/feedback_capture.py capture --transcript <path>
+    uv run python scripts/feedback_capture.py list
+    uv run python scripts/feedback_capture.py promote <id>
 """
 from __future__ import annotations
 
@@ -31,7 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import ROOT  # noqa: E402
 
-FEEDBACK_DIR = ROOT / "memory" / "feedback"
+FEEDBACK_DIR = ROOT / "knowledge" / "feedback"
 
 # Patterns that indicate a user correction or preference
 CORRECTION_PATTERNS = [
@@ -133,12 +135,21 @@ def list_candidates(status: str = "candidate") -> list[dict]:
     return candidates
 
 
+ALLOWED_FEEDBACK_CATEGORIES = frozenset(
+    {"patterns", "decisions", "debugging", "concepts", "qa", "workflows"}
+)
+
+
 def promote_candidate(candidate_id: str, category: str = "patterns") -> str | None:
     """Promote a feedback candidate to a knowledge page.
 
-    Creates memory/knowledge/<category>/feedback-<id>.md with the
+    Creates knowledge/notes/<category>/feedback-<id>.md with the
     feedback text as the page body.
     """
+    category = (category or "patterns").strip().lower()
+    if category not in ALLOWED_FEEDBACK_CATEGORIES or "/" in category or ".." in category:
+        return None
+
     candidate_file = FEEDBACK_DIR / f"{candidate_id}.json"
     if not candidate_file.exists():
         return None
@@ -148,8 +159,13 @@ def promote_candidate(candidate_id: str, category: str = "patterns") -> str | No
     except (json.JSONDecodeError, OSError):
         return None
 
-    # Create knowledge page
-    knowledge_dir = ROOT / "memory" / "knowledge" / category
+    # Create knowledge page (containment-checked)
+    notes_root = (ROOT / "knowledge" / "notes").resolve()
+    knowledge_dir = (notes_root / category).resolve()
+    try:
+        knowledge_dir.relative_to(notes_root)
+    except ValueError:
+        return None
     knowledge_dir.mkdir(parents=True, exist_ok=True)
     page_name = f"feedback-{candidate_id[:8]}.md"
     page_path = knowledge_dir / page_name
@@ -174,7 +190,7 @@ def promote_candidate(candidate_id: str, category: str = "patterns") -> str | No
         f"({candidate['trigger']})\n"
         f"- Confidence: {candidate['confidence']}\n\n"
         f"## Related\n"
-        f"- [[memory/feedback/{candidate_id}.json]]\n"
+        f"- [[knowledge/feedback/{candidate_id}.json]]\n"
     )
     page_path.write_text(page_content, encoding="utf-8")
 
@@ -189,7 +205,42 @@ def promote_candidate(candidate_id: str, category: str = "patterns") -> str | No
     return page_path.relative_to(ROOT).as_posix()
 
 
+def _capture_from_stdin() -> int:
+    """OpenCode plugin contract: JSON on stdin, no CLI args.
+
+    Payload: {"text": "...", "session_id": "...", "slug": "...", "trigger": "..."}
+    """
+    try:
+        raw = sys.stdin.read()
+    except OSError:
+        return 0
+    if not raw.strip():
+        return 0
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+    text = str(payload.get("text") or "")
+    if not text.strip():
+        return 0
+    cid = capture_from_text(
+        text,
+        session_id=str(payload.get("session_id") or "unknown"),
+        slug=str(payload.get("slug") or "unknown"),
+        trigger=str(payload.get("trigger") or "stdin"),
+    )
+    if cid:
+        print(cid)
+    return 0
+
+
 def main() -> int:
+    # No args + non-TTY stdin → capture path (OpenCode plugin).
+    if len(sys.argv) == 1 and not sys.stdin.isatty():
+        return _capture_from_stdin()
+
     p = argparse.ArgumentParser(description="Feedback capture and management.")
     sub = p.add_subparsers(dest="command")
 
@@ -199,6 +250,13 @@ def main() -> int:
     promote = sub.add_parser("promote", help="Promote a candidate to knowledge page")
     promote.add_argument("id", help="Candidate ID")
     promote.add_argument("--category", default="patterns", help="Knowledge category")
+
+    capture = sub.add_parser("capture", help="Capture feedback from text or transcript")
+    capture.add_argument("--text", default="", help="Raw feedback text")
+    capture.add_argument("--transcript", default="", help="Path to transcript file")
+    capture.add_argument("--session-id", default="unknown")
+    capture.add_argument("--slug", default="unknown")
+    capture.add_argument("--trigger", default="cli")
 
     args = p.parse_args()
 
@@ -225,6 +283,27 @@ def main() -> int:
         else:
             print(f"Candidate {args.id} not found")
             return 1
+    elif args.command == "capture":
+        text = args.text or ""
+        if args.transcript:
+            try:
+                text = Path(args.transcript).read_text(encoding="utf-8", errors="ignore")
+            except OSError as e:
+                print(f"feedback_capture: cannot read transcript: {e}", file=sys.stderr)
+                return 1
+        if not text.strip():
+            print("feedback_capture: no text provided", file=sys.stderr)
+            return 1
+        cid = capture_from_text(
+            text,
+            session_id=args.session_id,
+            slug=args.slug,
+            trigger=args.trigger,
+        )
+        if cid:
+            print(cid)
+        else:
+            print("(no feedback detected)")
     else:
         p.print_help()
     return 0

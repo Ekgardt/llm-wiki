@@ -68,20 +68,20 @@ SUNDAY 04:00 (Task Scheduler)
 
 ### Life of one decision (example: you decide "use JWT for auth")
 
-1. **Monday 10:00** — you work in OpenCode. Plugin records every Edit/Write as breadcrumbs in `memory/daily/2026-07-06.md`.
+1. **Monday 10:00** — you work in OpenCode. Plugin records every Edit/Write as breadcrumbs in `knowledge/daily/2026-07-06.md`.
 2. **Monday 12:00** — session.idle fires. OpenCode LLM classifies: **FLUSH_MAJOR**. Structured summary appended to daily log.
 3. **Monday 12:01** — plugin triggers detached compile. Background process:
    - Reads daily log
    - Asks LLM to extract lessons → returns JSON
    - Python verifies cited evidence exists in source (no hallucinations)
-   - Writes `memory/knowledge/decisions/auth-jwt-migration.md` with full frontmatter
+   - Writes `knowledge/notes/decisions/auth-jwt-migration.md` with full frontmatter
 4. **Monday 12:05** — knowledge page exists. **Permanent memory.**
 
 ### Next session finds it automatically
 
 Tuesday 09:00 — open <your-project> again. Plugin's `session.created`:
-1. Loads `wiki/projects/<your-project>/state.md` (handoff: "JWT auth done, refresh tokens next")
-2. Loads `memory/index.md` (catalog including new `auth-jwt-migration` page)
+1. Loads `knowledge/projects/<your-project>/state.md` (handoff: "JWT auth done, refresh tokens next")
+2. Loads `knowledge/index.md` (catalog including new `auth-jwt-migration` page)
 3. Loads today's heartbeat (proves session is fresh)
 4. Injects all this into the agent's context
 
@@ -92,8 +92,8 @@ Agent reads: "Yesterday decided JWT. Stopped at: refresh tokens." Picks up witho
 You ask: **"why did we choose JWT over OAuth?"**
 
 1. Agent doesn't have it in current context (memory window reset).
-2. But agent sees `memory/index.md` in SessionStart context.
-3. Uses Read/Grep to find `memory/knowledge/decisions/auth-jwt-migration.md` from July.
+2. But agent sees `knowledge/index.md` in SessionStart context.
+3. Uses Read/Grep to find `knowledge/notes/decisions/auth-jwt-migration.md` from July.
 4. Reads it, sees Decision + Evidence pointing back to the July daily log.
 5. Answers with original reasoning.
 
@@ -122,10 +122,10 @@ Only way to lose data: delete `$LLM_WIKI_ROOT` AND `$LLM_WIKI_STATE_ROOT` simult
 
 ```powershell
 codex-memory-status                                                    # current state
-Get-Content $LLM_WIKI_STATE_ROOT/memory-reports\nightly-*.md | Select -Last 30   # last night's run
+Get-Content $LLM_WIKI_STATE_ROOT/logs\nightly-*.md | Select -Last 30   # last night's run
 uv run python $LLM_WIKI_ROOT/scripts\memory_queue.py status               # deferred tasks
 uv run python $LLM_WIKI_ROOT/scripts\maybe_compile.py --status            # compile lock state
-Get-Content $LLM_WIKI_ROOT/memory\daily\$(Get-Date -Format 'yyyy-MM-dd').md   # today's raw capture
+Get-Content $LLM_WIKI_ROOT/knowledge\daily\$(Get-Date -Format 'yyyy-MM-dd').md   # today's raw capture
 ```
 
 **None of these are required.** They're for curiosity.

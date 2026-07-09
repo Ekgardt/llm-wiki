@@ -13,7 +13,7 @@ This vault stores decisions, lessons, patterns, and debugging notes from all you
 
 Read the current project's handoff state:
 ```bash
-cat "$LLM_WIKI_ROOT/wiki/projects/<project-slug>/state.md"
+cat "$LLM_WIKI_ROOT/knowledge/projects/<project-slug>/state.md"
 ```
 
 The `<project-slug>` is derived from the current working directory's parent folder name (lowercase, hyphens).
@@ -27,7 +27,7 @@ uv run python "$LLM_WIKI_ROOT/scripts/search_memory.py" "<query>" --limit 5
 
 For semantic search (finds related concepts even without exact keywords):
 ```bash
-uv run python "$LLM_WIKM_ROOT/scripts/search_memory.py" "<query>" --semantic --limit 5
+uv run python "$LLM_WIKI_ROOT/scripts/search_memory.py" "<query>" --semantic --limit 5
 ```
 
 ## When a decision is made or a lesson is learned
@@ -48,5 +48,5 @@ uv run python "$LLM_WIKI_ROOT/scripts/build_context.py" "<project-slug>"
 
 1. **ALWAYS search the vault before making architecture decisions** — a past session may have already solved this
 2. **Record every non-trivial decision** — future you (or another agent) will thank you
-3. **Never edit wiki/ or memory/knowledge/ files directly** — use the scripts. The compile pipeline will handle it.
+3. **Never edit `knowledge/notes/` pages directly for compile output** — use the scripts. The compile pipeline will handle it.
 4. **Read guard rails at start** — `uv run python "$LLM_WIKI_ROOT/scripts/build_guardrails.py"` shows learned rules from past corrections

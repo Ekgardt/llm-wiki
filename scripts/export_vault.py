@@ -58,6 +58,7 @@ FORBIDDEN_PATH_PATTERNS = (
     ".git/",
     ".pytest_cache/",
     "__pycache__/",
+    ".obsidian/",
     ".obsidian/workspace.json",
     ".claude/settings.local.json",
     "gitleaks-report.json",

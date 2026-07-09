@@ -8,7 +8,7 @@ Injected additionalContext MUST NOT include:
 
 Useful signal must survive:
   - `# Session Memory Index` header
-  - Wikilinks into memory/knowledge/
+  - Wikilinks into knowledge/notes/
   - `Project slug: ...` (project identity, useful)
 """
 from __future__ import annotations
@@ -72,7 +72,7 @@ def test_useful_signal_preserved(injected_context: str):
     # index-derived content
     assert "Session Memory Index" in injected_context
     # at least one wikilink into the knowledge tree
-    assert "[[memory/knowledge/" in injected_context
+    assert "[[knowledge/notes/" in injected_context
 
 
 def test_context_size_reasonable(injected_context: str):

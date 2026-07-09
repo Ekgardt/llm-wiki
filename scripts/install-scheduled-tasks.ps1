@@ -5,7 +5,7 @@
 #   - LLMWiki-Weekly:  runs every Sunday 04:00 — deep maintenance + OKF sweep
 #
 # Both run as the current user (no admin elevation needed) and only when
-# the user is logged on. Output goes to $env:LLM_WIKI_ROOT-state\memory-reports\.
+# the user is logged on. Output goes to $env:LLM_WIKI_STATE_ROOT\logs\.
 #
 # Usage:
 #   . $env:LLM_WIKI_ROOT\scripts\install-scheduled-tasks.ps1                # install
@@ -56,11 +56,12 @@ if ($Uninstall) {
 }
 
 # Resolve paths.
-$pythonExe = (Get-Command python).Source
-if (-not $pythonExe) {
-    # Fall back to the uv-managed python inside the vault.
-    $pythonExe = "$env:LLM_WIKI_ROOT\.venv\Scripts\python.exe"
+# Prefer vault venv so scheduled tasks see project deps.
+$pythonExe = "$env:LLM_WIKI_ROOT\.venv\Scripts\python.exe"
+if (-not (Test-Path -LiteralPath $pythonExe)) {
+    $pythonExe = (Get-Command python -ErrorAction SilentlyContinue).Source
 }
+if (-not $pythonExe) { throw "No Python found (install uv sync first)" }
 $nightlyScript = "$env:LLM_WIKI_ROOT\scripts\scheduled_nightly.py"
 $weeklyScript = "$env:LLM_WIKI_ROOT\scripts\scheduled_weekly.py"
 
@@ -150,4 +151,4 @@ Write-Host ""
 Write-Host "Check status:  .\install-scheduled-tasks.ps1 -Status"
 Write-Host "Uninstall:     .\install-scheduled-tasks.ps1 -Uninstall"
 Write-Host ""
-Write-Host "Reports land at: $env:LLM_WIKI_ROOT-state\memory-reports\nightly-*.md"
+Write-Host "Reports land at: $env:LLM_WIKI_STATE_ROOT\logs\nightly-*.md"

@@ -43,7 +43,7 @@ def fake_env(tmp_path, monkeypatch):
 
     monkeypatch.setattr(maybe_compile, "ROOT", fake_root)
     monkeypatch.setattr(maybe_compile, "STATE_ROOT", fake_state)
-    monkeypatch.setattr(maybe_compile, "LOCK_FILE", fake_state / "memory-state" / "compile.pid")
+    monkeypatch.setattr(maybe_compile, "LOCK_FILE", fake_state / "run" / "compile.pid")
     monkeypatch.setattr(maybe_compile, "COMPILE_SCRIPT", fake_root / "scripts" / "compile_memory.py")
     return maybe_compile
 
@@ -187,13 +187,13 @@ def test_force_override_running_lock(fake_env, monkeypatch):
 
 def test_has_pending_work_false_when_all_compiled(fake_env, monkeypatch):
     """All daily hashes match state.json → no pending work."""
-    daily_dir = fake_env.ROOT / "memory" / "daily"
+    daily_dir = fake_env.ROOT / "knowledge" / "daily"
     daily_dir.mkdir(parents=True)
     p = daily_dir / "2026-07-01.md"
     p.write_text("test content", encoding="utf-8")
 
     # State.json says the hash matches.
-    state_file = fake_env.STATE_ROOT / "memory-state" / "state.json"
+    state_file = fake_env.STATE_ROOT / "run" / "state.json"
     state_file.parent.mkdir(parents=True, exist_ok=True)
     import hashlib
 
@@ -208,12 +208,12 @@ def test_has_pending_work_false_when_all_compiled(fake_env, monkeypatch):
 
 def test_has_pending_work_true_when_hash_differs(fake_env):
     """Daily log changed since last compile → pending work."""
-    daily_dir = fake_env.ROOT / "memory" / "daily"
+    daily_dir = fake_env.ROOT / "knowledge" / "daily"
     daily_dir.mkdir(parents=True)
     p = daily_dir / "2026-07-01.md"
     p.write_text("new content", encoding="utf-8")
 
-    state_file = fake_env.STATE_ROOT / "memory-state" / "state.json"
+    state_file = fake_env.STATE_ROOT / "run" / "state.json"
     state_file.parent.mkdir(parents=True, exist_ok=True)
     state_file.write_text(
         json.dumps({"compiled_daily_hashes": {"2026-07-01.md": "old-hash"}}),
@@ -225,10 +225,10 @@ def test_has_pending_work_true_when_hash_differs(fake_env):
 
 def test_has_pending_work_true_when_daily_not_in_state(fake_env):
     """New daily log never compiled → pending."""
-    daily_dir = fake_env.ROOT / "memory" / "daily"
+    daily_dir = fake_env.ROOT / "knowledge" / "daily"
     daily_dir.mkdir(parents=True)
     (daily_dir / "2026-07-01.md").write_text("x", encoding="utf-8")
-    state_file = fake_env.STATE_ROOT / "memory-state" / "state.json"
+    state_file = fake_env.STATE_ROOT / "run" / "state.json"
     state_file.parent.mkdir(parents=True, exist_ok=True)
     state_file.write_text("{}", encoding="utf-8")
 

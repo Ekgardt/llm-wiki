@@ -32,7 +32,7 @@ def test_parse_compile_audit_extracts_all_counts():
 
     raw = """Some preamble text.
 
-COMPILE_DONE: 3 page(s) touched: memory/knowledge/patterns/foo.md, memory/knowledge/decisions/bar.md
+COMPILE_DONE: 3 page(s) touched: knowledge/notes/patterns/foo.md, knowledge/notes/decisions/bar.md
 COMPILE_AUDIT: verified 7 evidence citations; 12 dedup checks performed; 2 stubs skipped; 1 contradictions handled; 0 pages rejected as below-threshold
 """
     audit = compile_memory.parse_compile_audit(raw)
@@ -52,7 +52,7 @@ def test_parse_compile_audit_tolerates_missing_line():
     """
     import compile_memory  # noqa: WPS433
 
-    legacy = "COMPILE_DONE: 1 page(s) touched: memory/knowledge/patterns/foo.md\n"
+    legacy = "COMPILE_DONE: 1 page(s) touched: knowledge/notes/patterns/foo.md\n"
     assert compile_memory.parse_compile_audit(legacy) == {}
 
 
@@ -110,8 +110,8 @@ COMPILE_AUDIT: verified 5 evidence citations; 3 dedup checks performed; 1 stubs 
 
 @pytest.fixture
 def temp_knowledge_tree(tmp_path: Path):
-    """Build a minimal memory/knowledge/ tree with realistic pages."""
-    knowledge = tmp_path / "memory" / "knowledge"
+    """Build a minimal knowledge/notes/ tree with realistic pages."""
+    knowledge = tmp_path / "knowledge" / "notes"
     for cat in ("patterns", "decisions", "debugging"):
         (knowledge / cat).mkdir(parents=True)
 
@@ -155,7 +155,7 @@ def test_knowledge_snapshot_includes_titles_and_summaries(temp_knowledge_tree: P
     """
     import compile_memory  # noqa: WPS433
 
-    with patch.object(compile_memory, "KNOWLEDGE", temp_knowledge_tree / "memory" / "knowledge"):
+    with patch.object(compile_memory, "KNOWLEDGE", temp_knowledge_tree / "knowledge" / "notes"):
         snapshot = compile_memory.existing_knowledge_snapshot()
 
     # Title + summary present for well-formed pages (new format:
@@ -178,7 +178,7 @@ def test_knowledge_snapshot_handles_missing_convention(temp_knowledge_tree: Path
     """
     import compile_memory  # noqa: WPS433
 
-    with patch.object(compile_memory, "KNOWLEDGE", temp_knowledge_tree / "memory" / "knowledge"):
+    with patch.object(compile_memory, "KNOWLEDGE", temp_knowledge_tree / "knowledge" / "notes"):
         snapshot = compile_memory.existing_knowledge_snapshot()
 
     # The stub file still appears (filename used as fallback)
@@ -188,7 +188,7 @@ def test_knowledge_snapshot_handles_missing_convention(temp_knowledge_tree: Path
 def test_knowledge_snapshot_empty_when_no_pages(tmp_path: Path):
     import compile_memory  # noqa: WPS433
 
-    empty_knowledge = tmp_path / "memory" / "knowledge"
+    empty_knowledge = tmp_path / "knowledge" / "notes"
     empty_knowledge.mkdir(parents=True)
     with patch.object(compile_memory, "KNOWLEDGE", empty_knowledge):
         snapshot = compile_memory.existing_knowledge_snapshot()

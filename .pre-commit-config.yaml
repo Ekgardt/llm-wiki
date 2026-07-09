@@ -14,7 +14,7 @@ repos:
   - repo: local
     hooks:
       - id: lint-memory-structural
-        name: structural lint (memory + wiki, blocking)
+        name: structural lint (knowledge, blocking)
         # allowed-categories lists finding types that are pre-existing
         # vault debt and should NOT block new feature commits. They
         # still appear in the lint report for visibility, but the
@@ -23,7 +23,7 @@ repos:
         entry: uv run python scripts/lint_memory.py --fail-on-findings --allowed-categories orphan_daily_logs missing_backlinks missing_sources_section temporal_validity
         language: system
         pass_filenames: false
-        files: ^(memory|wiki)/.*\.md$
+        files: ^knowledge/.*\.md$
         description: >-
           Structural lint (12 checks). Blocking on broken_wikilinks,
           orphan_pages, missing_frontmatter, missing_required_type,
@@ -39,7 +39,7 @@ repos:
         language: system
         pass_filenames: false
         stages: [pre-push]
-        files: ^(memory/knowledge|wiki/(concepts|syntheses|comparisons|connections|qa))/.*\.md$
+        files: ^knowledge/notes/.*\.md$
         description: LLM-judged contradictions across knowledge pages — costs API calls, runs on push only.
 
   # Gitleaks — secret scanning, runs on commit

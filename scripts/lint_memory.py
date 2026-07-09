@@ -1,6 +1,6 @@
 """Structural + semantic lint across the vault.
 
-Despite the filename, this now covers BOTH `memory/` and `wiki/` trees.
+Despite the filename, this now covers BOTH `memory/` and `knowledge/notes/` trees.
 The name is preserved for backward compatibility with hooks and docs.
 
 Twelve checks (Phase 2 expanded the original seven + Phase 6 temporal):
@@ -15,18 +15,18 @@ Twelve checks (Phase 2 expanded the original seven + Phase 6 temporal):
  9. missing_required_type — frontmatter exists but `type:` is absent/empty.
 10. missing_sources_section — claim-bearing page lacks `## Source` / `sources:`.
 11. invalid_supersede_chain — `superseded_by:` points to a non-existent page.
-12. orphan_gaps — page in `wiki/gaps/` has no inbound link from outside gaps/.
+12. orphan_gaps — page in `knowledge/notes/` has no inbound link from outside gaps/.
 13. temporal_validity — `valid_to:` is in the past but `status:` is still active.
 
 Usage:
     uv run python scripts/lint_memory.py                  # all scopes, structural only
     uv run python scripts/lint_memory.py --scope memory   # memory/ only
-    uv run python scripts/lint_memory.py --scope wiki     # wiki/ only
+    uv run python scripts/lint_memory.py --scope wiki     # knowledge/notes/ only
     uv run python scripts/lint_memory.py --contradictions # also run the LLM check
     uv run python scripts/lint_memory.py --sparse-words 300
 
-Writes a report to `$LLM_WIKI_STATE_ROOT/memory-reports/lint-YYYY-MM-DD.md`
-(default: ``D:/LLM-wiki-state/memory-reports/``) and prints a summary.
+Writes a report to `$LLM_WIKI_STATE_ROOT/logs/lint-YYYY-MM-DD.md`
+(default: ``$LLM_WIKI_ROOT/../LLM-wiki-state/logs/``) and prints a summary.
 """
 from __future__ import annotations
 
@@ -44,13 +44,14 @@ from vault_editorial import (  # noqa: E402
     EDITORIAL_NAMES,
 )
 
-MEMORY = ROOT / "memory"
-KNOWLEDGE = MEMORY / "knowledge"
+MEMORY = ROOT / "knowledge"
+KNOWLEDGE = MEMORY / "notes"
 DAILY_DIR = MEMORY / "daily"
 MEMORY_INDEX = MEMORY / "index.md"
 
-WIKI = ROOT / "wiki"
-WIKI_INDEX = WIKI / "index.md"
+# Post three-zone: notes live under knowledge/notes; vault index is knowledge/index.md.
+WIKI = ROOT / "knowledge" / "notes"
+WIKI_INDEX = MEMORY / "index.md"
 
 REPORTS = REPORTS_DIR
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+?)(?:\|[^\]]+)?\]\]")
@@ -127,7 +128,7 @@ def _resolve_link(target: str, search_roots: list[Path]) -> Path | None:
     t = target.strip()
     if not t:
         return None
-    # Path-style targets (e.g. "memory/knowledge/concepts/foo") — anchor at ROOT.
+    # Path-style targets (e.g. "knowledge/notes/concepts/foo") — anchor at ROOT.
     if "/" in t:
         cands = [(ROOT / (t + ".md")).resolve(), (ROOT / t).resolve()]
         for c in cands:
@@ -251,7 +252,7 @@ def check_sparse_pages(pages: list[Path], min_words: int) -> list[str]:
 #   9. missing_required_type     — frontmatter exists but `type:` is absent/empty
 #  10. missing_sources_section   — claim-bearing page lacks `## Source` or `sources:` frontmatter
 #  11. invalid_supersede_chain   — `superseded_by:` points to a non-existent target
-#  12. orphan_gaps               — page in wiki/gaps/ has no inbound link from a concept
+#  12. orphan_gaps               — page in knowledge/notes/ has no inbound link from a concept
 
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
@@ -441,7 +442,7 @@ def check_temporal_validity(pages: list[Path]) -> list[str]:
 
 
 def check_orphan_gaps(pages: list[Path]) -> list[str]:
-    """Pages in wiki/gaps/ should be linked from at least one concept.
+    """Pages in knowledge/notes/ should be linked from at least one concept.
 
     A gap page exists to mark a "mentioned but not-yet-written" concept.
     If no concept references it, the gap itself is orphaned signal.
@@ -557,19 +558,15 @@ def run_checks(args: argparse.Namespace) -> dict[str, list[str]]:
 
     search_roots = [MEMORY, WIKI]
 
+    # Three-zone: notes are a single tree. Keep legacy --scope labels as aliases
+    # but never double-scan the same pages under "all".
     scopes: list[tuple[str, list[Path], Path]] = []
-    if args.scope in ("memory", "all"):
-        scopes.append((
-            "memory",
-            [p for p in _iter_tree_md(KNOWLEDGE)],
-            MEMORY_INDEX,
-        ))
-    if args.scope in ("wiki", "all"):
-        # For wiki we lint everything under wiki/ except the editorial trio.
-        wiki_pages = [p for p in _iter_tree_md(WIKI) if p.name not in EDITORIAL_NAMES]
-        scopes.append(("wiki", wiki_pages, WIKI_INDEX))
+    notes_pages = [p for p in _iter_tree_md(KNOWLEDGE) if p.name not in EDITORIAL_NAMES]
+    if args.scope in ("memory", "wiki", "all"):
+        label = "notes" if args.scope == "all" else args.scope
+        scopes.append((label, notes_pages, WIKI_INDEX if WIKI_INDEX.exists() else MEMORY_INDEX))
 
-    # State-dependent checks (memory-only).
+    # State-dependent checks (daily / compile hashes).
     if args.scope in ("memory", "all"):
         state = load_state()
         findings["orphan_daily_logs"] = check_orphan_daily_logs(state)
@@ -578,13 +575,19 @@ def run_checks(args: argparse.Namespace) -> dict[str, list[str]]:
     all_pages_for_contradictions: list[Path] = []
 
     for label, pages, index in scopes:
-        # All *.md under the tree for broken-link scanning; pages-only for the rest.
-        tree_all = _iter_tree_md(MEMORY if label == "memory" else WIKI)
-        findings["broken_wikilinks"] += [f"[{label}] {x}" for x in check_broken_links(tree_all, search_roots)]
+        tree_all = list(_iter_tree_md(KNOWLEDGE)) + list(_iter_tree_md(MEMORY))
+        # Deduplicate by resolved path
+        seen: set[Path] = set()
+        unique_tree: list[Path] = []
+        for p in tree_all:
+            rp = p.resolve()
+            if rp not in seen:
+                seen.add(rp)
+                unique_tree.append(p)
+        findings["broken_wikilinks"] += [f"[{label}] {x}" for x in check_broken_links(unique_tree, search_roots)]
         findings["orphan_pages"] += [f"[{label}] {x}" for x in check_orphans_against_index(pages, index)]
         findings["missing_backlinks"] += [f"[{label}] {x}" for x in check_missing_backlinks(pages, search_roots)]
         findings["sparse_pages"] += [f"[{label}] {x}" for x in check_sparse_pages(pages, args.sparse_words)]
-        # Phase 2 OKF checks — apply to all pages in scope.
         findings["missing_frontmatter"] += [f"[{label}] {x}" for x in check_missing_frontmatter(pages)]
         findings["missing_required_type"] += [f"[{label}] {x}" for x in check_missing_required_type(pages)]
         findings["missing_sources_section"] += [f"[{label}] {x}" for x in check_missing_sources_section(pages)]

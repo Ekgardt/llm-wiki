@@ -85,7 +85,7 @@
 ## [v1.0] — 2026-04 — "Karpathy-style vault with session memory"
 
 ### Added
-- 3-layer architecture: raw/ (immutable) / wiki/ (compiled) / memory/ (session lore)
+- 3-layer architecture: raw/ (immutable) / knowledge/notes/ (compiled) / memory/ (session lore)
 - 7-check structural lint with LLM contradiction detection
 - Multi-project slug system with 5-step collision resolution
 - QMD hybrid search (BM25 + vector + reranker)

@@ -38,9 +38,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import ROOT  # noqa: E402
 
-KNOWLEDGE = ROOT / "memory" / "knowledge"
-FEEDBACK_DIR = ROOT / "memory" / "feedback"
-GUARDRAILS_FILE = ROOT / "memory" / "guardrails.md"
+KNOWLEDGE = ROOT / "knowledge" / "notes"
+FEEDBACK_DIR = ROOT / "knowledge" / "feedback"
+GUARDRAILS_FILE = ROOT / "knowledge" / "guardrails.md"
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 TYPE_RE = re.compile(r"^type:\s*(.+?)\s*$", re.MULTILINE)
@@ -57,7 +57,7 @@ def _collect_corrections(project: str | None = None) -> list[dict]:
 
     Sources:
     1. Knowledge pages with type: correction/preference/requirement
-    2. Promoted feedback candidates (from memory/feedback/)
+    2. Promoted feedback candidates (from knowledge/feedback/)
     3. Patterns with 'do not' / 'always' / 'never' in summary
     """
     corrections = []
@@ -175,7 +175,7 @@ def main() -> int:
     p = argparse.ArgumentParser(description="Build guard rails from learned corrections.")
     p.add_argument("--project", default=None, help="Filter by project")
     p.add_argument("--max-rules", type=int, default=15)
-    p.add_argument("--apply", action="store_true", help="Write to memory/guardrails.md")
+    p.add_argument("--apply", action="store_true", help="Write to knowledge/guardrails.md")
     args = p.parse_args()
 
     guardrails = build_guardrails(args.project, args.max_rules)

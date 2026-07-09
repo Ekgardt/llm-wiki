@@ -19,7 +19,7 @@ uv run python "$LLM_WIKI_ROOT/scripts/search_memory.py" "database performance" -
 
 ### Read project state
 ```bash
-cat "$LLM_WIKI_ROOT/wiki/projects/<project-slug>/state.md"
+cat "$LLM_WIKI_ROOT/knowledge/projects/<project-slug>/state.md"
 ```
 
 ### Record a decision
@@ -43,5 +43,5 @@ uv run python "$LLM_WIKI_ROOT/scripts/build_advisory.py" "<project-slug>"
 
 1. **Search vault before architecture decisions** — past sessions may have solved this
 2. **Record non-trivial decisions** — use daily_log_append.py
-3. **Never edit wiki/ or memory/knowledge/ files directly** — use scripts
+3. **Never edit knowledge/notes/ or knowledge/notes/ files directly** — use scripts
 4. **Read guard rails at start** — prevents repeating past mistakes

@@ -38,11 +38,38 @@ if hasattr(sys.stdout, "reconfigure"):
     except (AttributeError, io.UnsupportedOperation):
         pass
 
-ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(Path(__file__).resolve().parent.parent))).resolve()
-STATE_ROOT = Path(
-    os.environ.get("LLM_WIKI_STATE_ROOT", str(Path(__file__).resolve().parent.parent.parent / "LLM-wiki-state"))
-).resolve()
-DAILY_DIR = ROOT / "memory" / "daily"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from memory_state import ROOT as _MS_ROOT, STATE_ROOT as _MS_STATE, update_state  # noqa: E402
+    ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(_MS_ROOT))).resolve()
+    STATE_ROOT = Path(os.environ.get("LLM_WIKI_STATE_ROOT", str(_MS_STATE))).resolve()
+except Exception:  # noqa: BLE001
+    ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(Path(__file__).resolve().parent.parent))).resolve()
+    STATE_ROOT = Path(
+        os.environ.get("LLM_WIKI_STATE_ROOT", str(ROOT.parent / "LLM-wiki-state"))
+    ).resolve()
+
+    def update_state(mutator):  # type: ignore[misc]
+        state_file = STATE_ROOT / "run" / "state.json"
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        state = {}
+        if state_file.exists():
+            try:
+                state = json.loads(state_file.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                state = {}
+        mutator(state)
+        tmp = state_file.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(state_file)
+
+try:
+    from secret_redact import redact_secrets  # noqa: E402
+except Exception:  # noqa: BLE001
+    def redact_secrets(text: str) -> str:  # type: ignore[misc]
+        return text
+
+DAILY_DIR = ROOT / "knowledge" / "daily"
 
 # Tools we care about for memory purposes. Read/Glob/Grep/LS are too
 # noisy (every agent loop reads dozens of files) and add no durable
@@ -81,7 +108,7 @@ def _read_hook_input() -> dict:
 
 
 def _compute_slug_from_cwd(cwd: str) -> str:
-    projects_dir = ROOT / "wiki" / "projects"
+    projects_dir = ROOT / "knowledge" / "projects"
     try:
         sys.path.insert(0, str(ROOT / "scripts"))
         from session_start_project_state import _compute_slug  # type: ignore
@@ -112,7 +139,7 @@ def _extract_target(tool_name: str, tool_input: dict) -> str:
 
 def _rate_limited(slug: str, tool: str, target: str) -> bool:
     try:
-        state_file = STATE_ROOT / "memory-state" / "state.json"
+        state_file = STATE_ROOT / "run" / "state.json"
         if not state_file.exists():
             return False
         state = json.loads(state_file.read_text(encoding="utf-8"))
@@ -131,29 +158,20 @@ def _rate_limited(slug: str, tool: str, target: str) -> bool:
 
 def _record_dedupe(slug: str, tool: str, target: str) -> None:
     try:
-        state_file = STATE_ROOT / "memory-state" / "state.json"
-        state_file.parent.mkdir(parents=True, exist_ok=True)
-        if state_file.exists():
-            state = json.loads(state_file.read_text(encoding="utf-8"))
-        else:
-            state = {}
         key = f"{slug}::{tool}::{target[:80]}"
-        state.setdefault("tool_capture_dedupe", {})[key] = datetime.now().isoformat(
-            timespec="seconds"
-        )
-        # Bounded map.
-        if len(state["tool_capture_dedupe"]) > 200:
-            items = sorted(
-                state["tool_capture_dedupe"].items(),
-                key=lambda kv: kv[1],
-                reverse=True,
-            )[:200]
-            state["tool_capture_dedupe"] = dict(items)
-        tmp = state_file.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-        tmp.replace(state_file)
+        now = datetime.now().isoformat(timespec="seconds")
+
+        def _mutate(state: dict) -> None:
+            state.setdefault("tool_capture_dedupe", {})[key] = now
+            if len(state["tool_capture_dedupe"]) > 200:
+                items = sorted(
+                    state["tool_capture_dedupe"].items(),
+                    key=lambda kv: kv[1],
+                    reverse=True,
+                )[:200]
+                state["tool_capture_dedupe"] = dict(items)
+
+        update_state(_mutate)
     except Exception:  # noqa: BLE001
         pass
 
@@ -166,7 +184,7 @@ def _append_tool_tag(slug: str, session_id: str, tool: str, target: str) -> None
         if not path.exists():
             path.write_text(f"# Daily Session Memory — {day}\n", encoding="utf-8")
         ts = datetime.now().strftime("%H:%M:%S")
-        preview = target[:MAX_TARGET_PREVIEW] if target else ""
+        preview = redact_secrets(target)[:MAX_TARGET_PREVIEW] if target else ""
         line = f"- `[{ts}] tool | {session_id[:8]} | {slug} | {tool}` {preview}\n"
         with path.open("a", encoding="utf-8") as f:
             f.write(line)

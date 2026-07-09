@@ -25,7 +25,7 @@ backlinks from their callers (workflows and high-level entry points).
 append-only changelogs with historical references to renamed pages).
 
 `editorial_parents_to_skip()` — directories to skip wholesale when
-enumerating content (e.g. `wiki/projects/_template/` is a skeleton).
+enumerating content (e.g. `knowledge/projects/_template/` is a skeleton).
 
 ## What NOT to put here
 
@@ -48,7 +48,7 @@ EDITORIAL_NAMES: frozenset[str] = frozenset({
     "operating-model.md",
     # Directory-level readmes are metadata, not curated content.
     "README.md",
-    # Per-project state pages under `wiki/projects/<slug>/state.md` are
+    # Per-project state pages under `knowledge/projects/<slug>/state.md` are
     # auto-updated by the SessionStart hook. Same rationale as index/log.
     "state.md",
 })

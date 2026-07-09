@@ -43,7 +43,7 @@ IDE agents (Cursor, Antigravity, VS Code Copilot) work differently from CLI agen
 | **Context injection** | SessionStart hook injects 2KB | Rules file tells agent to read files |
 | **LLM backend** | llm_client.py (5 backends) | IDE's own LLM (Cursor Pro, Gemini) |
 
-**Key insight**: the vault is **shared infrastructure**. All agents write to the same `memory/daily/` and read from the same `memory/knowledge/`. A decision recorded by Cursor is visible to OpenCode in its next session.
+**Key insight**: the vault is **shared infrastructure**. All agents write to the same `knowledge/daily/` and read from the same `knowledge/notes/`. A decision recorded by Cursor is visible to OpenCode in its next session.
 
 ## MCP Server (optional)
 

@@ -23,9 +23,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import ROOT, load_state  # noqa: E402
 
-DAILY_DIR = ROOT / "memory" / "daily"
-KNOWLEDGE = ROOT / "memory" / "knowledge"
-PROJECTS_DIR = ROOT / "wiki" / "projects"
+DAILY_DIR = ROOT / "knowledge" / "daily"
+KNOWLEDGE = ROOT / "knowledge" / "notes"
+PROJECTS_DIR = ROOT / "knowledge" / "projects"
 
 # Patterns to extract agent identity from daily log entries
 AGENT_PATTERNS = [

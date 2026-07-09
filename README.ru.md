@@ -33,8 +33,8 @@ irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 |---|---|
 | Recall@2 | **100%** |
 | Recall@5 | **100%** |
-| MRR | **0.952** |
-| Latency p50 | **28ms** |
+| MRR | **0.942** |
+| Latency p50 | **41ms** |
 | Стоимость/мес | **$0** |
 
 ## Ключевые возможности
@@ -78,8 +78,8 @@ irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 
 3 слоя (по Karpathy):
 - `raw/` — неизменяемые исходные материалы
-- `wiki/` — курируемые знания (третье лицо, цитируемые)
-- `memory/` — лор проекта (первое лицо, сессионный)
+- `knowledge/notes/` — курируемые знания (третье лицо, цитируемые)
+- `knowledge/daily/` — эпизодические сессионные логи; `knowledge/notes/` — скомпилированное знание
 
 13 проверок lint, автоматический nightly compile (03:00), еженедельная очистка (воскресенье 04:00).
 

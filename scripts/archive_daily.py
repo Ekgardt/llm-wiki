@@ -1,17 +1,17 @@
-"""Archive old compiled daily logs under `memory/daily/archive/YYYY-MM/`.
+"""Archive old compiled daily logs under `knowledge/daily/archive/YYYY-MM/`.
 
 Policy (from [[Memory Subsystem Action Plan]]):
 
 - Daily logs are append-only; never delete.
-- Keep `memory/daily/` flat while file count is comfortable.
+- Keep `knowledge/daily/` flat while file count is comfortable.
 - When the flat directory grows past a threshold (default 30 files),
   move **compiled** daily logs older than `MAX_AGE_DAYS` (default 90)
-  into `memory/daily/archive/YYYY-MM/` based on the log's date.
+  into `knowledge/daily/archive/YYYY-MM/` based on the log's date.
 - **Un-compiled** logs stay in the flat directory regardless of age,
   so the next compile pass still finds them.
 
 "Compiled" means the log's file hash is present in
-`$LLM_WIKI_STATE_ROOT/memory-state/state.json::compiled_daily_hashes`
+`$LLM_WIKI_STATE_ROOT/run/state.json::compiled_daily_hashes`
 (managed by `compile_memory.py`; runtime state lives outside the vault
 so git and Obsidian don't track ephemeral churn).
 
@@ -25,7 +25,7 @@ The script exits 0 and prints nothing if the threshold isn't crossed —
 safe to run from cron / hooks without generating noise.
 
 Not wired into any hook yet. Will become a scheduled task or a
-compile-time side-effect when `memory/daily/` actually approaches the
+compile-time side-effect when `knowledge/daily/` actually approaches the
 threshold. Until then, this file is dormant infrastructure (commit
 it ready, don't trigger it until needed).
 """
@@ -41,7 +41,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import ROOT, load_state  # noqa: E402
 
-DAILY_DIR = ROOT / "memory" / "daily"
+DAILY_DIR = ROOT / "knowledge" / "daily"
 ARCHIVE_DIR = DAILY_DIR / "archive"
 
 # Filename pattern: YYYY-MM-DD.md
@@ -62,7 +62,7 @@ def parse_args() -> argparse.Namespace:
         "--threshold",
         type=int,
         default=DEFAULT_THRESHOLD,
-        help=f"Archive only when `memory/daily/` has >= this many flat files (default {DEFAULT_THRESHOLD}).",
+        help=f"Archive only when `knowledge/daily/` has >= this many flat files (default {DEFAULT_THRESHOLD}).",
     )
     p.add_argument(
         "--max-age",
@@ -79,7 +79,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def flat_dailies() -> list[Path]:
-    """Dailies sitting directly in memory/daily/ (not already in archive/)."""
+    """Dailies sitting directly in knowledge/daily/ (not already in archive/)."""
     if not DAILY_DIR.exists():
         return []
     return sorted(p for p in DAILY_DIR.glob("*.md") if p.is_file())

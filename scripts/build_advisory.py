@@ -21,13 +21,12 @@ from pathlib import Path
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT, load_state  # noqa: E402
+from memory_state import ROOT, STATE_FILE, REPORTS_DIR, load_state  # noqa: E402
 
-PROJECTS_DIR = ROOT / "wiki" / "projects"
-KNOWLEDGE = ROOT / "memory" / "knowledge"
-WIKI_DIR = ROOT / "wiki"
-DAILY_DIR = ROOT / "memory" / "daily"
-STATE_FILE = ROOT.parent / "LLM-wiki-state" / "memory-state" / "state.json"
+PROJECTS_DIR = ROOT / "knowledge" / "projects"
+KNOWLEDGE = ROOT / "knowledge" / "notes"
+WIKI_DIR = ROOT / "knowledge" / "notes"
+DAILY_DIR = ROOT / "knowledge" / "daily"
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 TIMESTAMP_RE = re.compile(r"^timestamp:\s*(.+?)\s*$", re.MULTILINE)
@@ -116,7 +115,7 @@ def _find_contradictions() -> list[str]:
     except Exception:
         return []
     # Check if the last lint report exists and has findings
-    reports_dir = ROOT.parent / "LLM-wiki-state" / "memory-reports"
+    reports_dir = REPORTS_DIR
     if not reports_dir.exists():
         return []
     reports = sorted(reports_dir.glob("lint-*.md"), reverse=True)

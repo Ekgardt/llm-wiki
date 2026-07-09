@@ -11,7 +11,7 @@ The queue is drained by:
   - Claude Code SessionStart hook (uses claude-agent-sdk)
   - Manual `uv run python scripts/memory_queue.py drain`
 
-Storage: `$LLM_WIKI_STATE_ROOT/memory-pipeline/queue/*.json`
+Storage: `$LLM_WIKI_STATE_ROOT/run/queue/*.json`
 Each file is one task, atomic via tmp+rename. Queue is crash-safe.
 
 Task schema:
@@ -37,10 +37,17 @@ from typing import Any, Callable
 
 
 def _queue_dir() -> Path:
-    state_root = Path(
-        os.environ.get("LLM_WIKI_STATE_ROOT", str(Path(__file__).resolve().parent.parent.parent / "LLM-wiki-state"))
-    )
-    q = state_root / "memory-pipeline" / "queue"
+    try:
+        from memory_state import STATE_ROOT
+        state_root = STATE_ROOT
+    except Exception:  # noqa: BLE001
+        env = os.environ.get("LLM_WIKI_STATE_ROOT")
+        if env:
+            state_root = Path(env)
+        else:
+            vault = Path(os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent))
+            state_root = vault.resolve().parent / "LLM-wiki-state"
+    q = Path(state_root) / "run" / "queue"
     q.mkdir(parents=True, exist_ok=True)
     return q
 
@@ -213,22 +220,37 @@ def _cli() -> int:
             task_type = task.get("type")
             payload = task.get("payload", {})
             if task_type == "query":
-                # Free-form LLM call, store result back to payload path.
+                # Free-form LLM call. Prefer writing to output_path when set;
+                # otherwise store under run/queue-results/<id>.txt so llm_client
+                # enqueues (no output_path) are still drainable.
                 prompt = payload.get("prompt", "")
                 sys_prompt = payload.get("system_prompt", "")
                 out_path = payload.get("output_path")
-                if not (prompt and out_path):
+                max_tokens = int(payload.get("max_tokens") or 4000)
+                if not prompt:
                     return False
-                result = call_llm(prompt, sys_prompt, max_tokens=4000)
+                result = call_llm(prompt, sys_prompt, max_tokens=max_tokens)
                 if not result:
                     return False
+                if not out_path:
+                    results_dir = _queue_dir().parent / "queue-results"
+                    results_dir.mkdir(parents=True, exist_ok=True)
+                    out_path = str(results_dir / f"{task.get('id', 'query')}.txt")
                 try:
                     Path(out_path).write_text(result, encoding="utf-8")
                     return True
                 except OSError:
                     return False
-            # Other task types (compile/classify) have richer Python-side
-            # logic — caller should drain via the specific script, not here.
+            if task_type == "compile":
+                # Re-dispatch compile via maybe_compile (idle-safe).
+                try:
+                    from maybe_compile import spawn_compile_if_idle
+                    spawned, reason = spawn_compile_if_idle(force=bool(payload.get("force")))
+                    return spawned or "no pending" in reason or "skipped" in reason
+                except Exception as exc:  # noqa: BLE001
+                    print(f"  compile drain failed: {exc}", file=sys.stderr)
+                    return False
+            # Other task types (classify) have richer Python-side logic.
             print(
                 f"  skipping {task['id']}: type={task_type} not supported in manual drain",
                 file=sys.stderr,

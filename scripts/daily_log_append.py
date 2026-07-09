@@ -1,7 +1,7 @@
 """Helper for OpenCode plugin: append a pre-built block to today's daily log.
 
 Reads JSON from stdin: {"slug": "...", "sessionId": "...", "block": "..."}
-Appends `block` to $LLM_WIKI_ROOT/memory/daily\\<date>.md.
+Appends `block` to $LLM_WIKI_ROOT/knowledge/daily/<date>.md.
 
 Why this exists: the OpenCode plugin does LLM work in JS (via OpenCode SDK),
 then needs to write the result to a markdown file. Calling Python for the
@@ -38,7 +38,7 @@ def main() -> int:
         return 0
 
     root = Path(os.environ.get("LLM_WIKI_ROOT", str(Path(__file__).resolve().parent.parent))).resolve()
-    daily_dir = root / "memory" / "daily"
+    daily_dir = root / "knowledge" / "daily"
     try:
         daily_dir.mkdir(parents=True, exist_ok=True)
         day = datetime.now().strftime("%Y-%m-%d")

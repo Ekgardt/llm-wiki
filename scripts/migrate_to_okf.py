@@ -52,45 +52,38 @@ ROOT_LEVEL_SKIP = frozenset(
 # Type inference rules. Order matters: more specific paths first.
 # Each entry: (path-template-substring, inferred type).
 TYPE_INFERENCE = [
-    # wiki/ tree
-    ("wiki/concepts/", "concept"),
-    ("wiki/entities/", "entity"),
-    ("wiki/syntheses/", "synthesis"),
-    ("wiki/comparisons/", "comparison"),
-    ("wiki/connections/", "connection"),
-    ("wiki/qa/", "qa"),
-    ("wiki/gaps/", "gap"),
-    ("wiki/raw-sources/", "raw-source"),
-    ("wiki/projects/", "project-state"),
-    # Top-level wiki workflows (special case — recognized by filename).
-    ("wiki/Ingestion Workflow.md", "workflow"),
-    ("wiki/Retrieval Workflow.md", "workflow"),
-    ("wiki/Review Workflow.md", "workflow"),
-    # memory/knowledge/ tree (Mirrors AGENTS.md categories)
-    ("memory/knowledge/concepts/", "concept"),
-    ("memory/knowledge/decisions/", "decision"),
-    ("memory/knowledge/patterns/", "pattern"),
-    ("memory/knowledge/debugging/", "debugging"),
-    ("memory/knowledge/qa/", "qa"),
-    ("memory/knowledge/workflows/", "workflow"),
-    ("memory/knowledge/facts/", "fact"),
-    # Agent config / skills / rules
-    (".claude/skills/", "skill"),
-    (".claude/rules/", "rule"),
+    # Most-specific path prefixes first.
+    ("knowledge/notes/decisions/", "decision"),
+    ("knowledge/notes/patterns/", "pattern"),
+    ("knowledge/notes/debugging/", "debugging"),
+    ("knowledge/notes/concepts/", "concept"),
+    ("knowledge/notes/qa/", "qa"),
+    ("knowledge/notes/workflows/", "workflow"),
+    ("knowledge/notes/facts/", "fact"),
+    ("knowledge/notes/entities/", "entity"),
+    ("knowledge/notes/syntheses/", "synthesis"),
+    ("knowledge/notes/comparisons/", "comparison"),
+    ("knowledge/notes/connections/", "connection"),
+    ("knowledge/projects/", "project-state"),
+    ("skills/", "skill"),
+    ("rules/", "rule"),
+    # Broad fallback last (flat notes without category subdir).
+    ("knowledge/notes/", "concept"),
 ]
 
 # Per-scope glob roots (used by --scope filter).
 SCOPE_ROOTS = {
-    "wiki": [ROOT / "wiki"],
-    "memory": [ROOT / "memory" / "knowledge"],
-    "skills": [ROOT / ".claude" / "skills"],
-    "rules": [ROOT / ".claude" / "rules"],
-    "projects": [ROOT / "wiki" / "projects"],
+    "wiki": [ROOT / "knowledge" / "notes"],
+    "memory": [ROOT / "knowledge" / "notes"],
+    "notes": [ROOT / "knowledge" / "notes"],
+    "skills": [ROOT / "skills"],
+    "rules": [ROOT / "rules"],
+    "projects": [ROOT / "knowledge" / "projects"],
     "all": [
-        ROOT / "wiki",
-        ROOT / "memory" / "knowledge",
-        ROOT / ".claude" / "skills",
-        ROOT / ".claude" / "rules",
+        ROOT / "knowledge" / "notes",
+        ROOT / "knowledge" / "projects",
+        ROOT / "skills",
+        ROOT / "rules",
     ],
 }
 
@@ -119,7 +112,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--report",
         action="store_true",
-        help="Write a markdown report to $LLM_WIKI_STATE_ROOT/memory-reports/.",
+        help="Write a markdown report to $LLM_WIKI_STATE_ROOT/logs/.",
     )
     return p.parse_args()
 
@@ -130,7 +123,7 @@ def infer_type(rel_path: str) -> str | None:
     for needle, type_name in TYPE_INFERENCE:
         if needle in forward:
             # Special case: state.md under projects gets its own type.
-            if needle == "wiki/projects/" and not forward.endswith("state.md"):
+            if needle == "knowledge/projects/" and not forward.endswith("state.md"):
                 # Other files under projects/ — leave them as concept by default.
                 return "concept"
             return type_name
@@ -310,7 +303,7 @@ def _write_report(
     state_root = Path(
         os.environ.get("LLM_WIKI_STATE_ROOT", str(ROOT.parent / "LLM-wiki-state"))
     )
-    reports = state_root / "memory-reports"
+    reports = state_root / "logs"
     reports.mkdir(parents=True, exist_ok=True)
     today = datetime.now().strftime("%Y-%m-%d")
     report = reports / f"okf-migration-{today}.md"

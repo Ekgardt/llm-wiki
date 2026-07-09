@@ -1,6 +1,6 @@
 """Bootstrap the QMD hybrid lex+vec index over the vault's content trees.
 
-Registers collections for `wiki/`, `raw/`, and `inbox/`, runs an index
+Registers collections for `knowledge/notes/`, `raw/`, and `inbox/`, runs an index
 update, and generates embeddings. Idempotent — re-running is safe;
 `qmd` de-duplicates collections and incrementally updates.
 
@@ -22,7 +22,7 @@ When to run:
 Prerequisites:
 - `qmd` CLI on PATH. On Windows-only environments, prefer Git Bash so
   `qmd` (a POSIX-style shim) resolves correctly.
-- `$LLM_WIKI_STATE_ROOT/qmd/` directory is writable (QMD stores
+- `$LLM_WIKI_STATE_ROOT/cache/` directory is writable (QMD stores
   `index.sqlite` there).
 
 Safe to no-op: every step uses `qmd`'s own idempotent commands. If
@@ -106,7 +106,7 @@ _ALREADY_EXISTS_MARKERS = (
 
 
 def add_collections() -> int:
-    """Register collections for wiki/, raw/, inbox/.
+    """Register collections for knowledge/notes/, raw/, inbox/.
 
     Idempotent in the narrow sense: a pre-existing collection with the
     same name is treated as benign (stdout/stderr must explicitly say
@@ -116,8 +116,8 @@ def add_collections() -> int:
     avoids the earlier "every failure looks like success" footgun the
     audit flagged.
     """
-    for name in ("wiki", "raw", "inbox"):
-        target = ROOT / name
+    for name in ("notes", "raw", "inbox"):
+        target = ROOT / "knowledge" / name
         if not target.is_dir():
             print(f"  skip `{name}` — directory missing at {target}")
             continue

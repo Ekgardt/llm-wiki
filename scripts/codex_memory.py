@@ -30,10 +30,10 @@ if hasattr(sys.stdout, "reconfigure"):
 
 ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(Path(__file__).resolve().parent.parent))).resolve()
 STATE_ROOT = Path(
-    os.environ.get("LLM_WIKI_STATE_ROOT", str(Path(__file__).resolve().parent.parent.parent / "LLM-wiki-state"))
+    os.environ.get("LLM_WIKI_STATE_ROOT", str(ROOT.parent / "LLM-wiki-state"))
 ).resolve()
 SCRIPTS_DIR = ROOT / "scripts"
-PROJECTS_DIR = ROOT / "wiki" / "projects"
+PROJECTS_DIR = ROOT / "knowledge" / "projects"
 
 sys.path.insert(0, str(SCRIPTS_DIR))
 
@@ -56,7 +56,7 @@ def parse_args() -> argparse.Namespace:
     daily.add_argument(
         "--reason",
         default="codex-turn-end",
-        help="Reason label stored in memory/daily",
+        help="Reason label stored in knowledge/daily",
     )
     daily.add_argument(
         "--session-id",
@@ -227,7 +227,7 @@ def command_daily_log(args: argparse.Namespace) -> int:
 
     if not transcript_path and not force_stub:
         # No transcript available — record heartbeat in state.json only,
-        # do NOT pollute memory/daily/ with stub blocks.
+        # do NOT pollute knowledge/daily/ with stub blocks.
         slug, _ = _state_path(project_dir)
         _record_heartbeat(slug, project_dir, args.reason, session_id)
         if args.json:
@@ -263,7 +263,14 @@ def command_daily_log(args: argparse.Namespace) -> int:
     # extract durable content (decisions/lessons/gotchas). This is
     # the same path Claude Code takes on SessionEnd.
     if transcript_path and Path(transcript_path).exists():
-        _spawn_flush_memory(session_id, args.reason, transcript_path, args.trigger)
+        # flush_memory --event only accepts session-end|pre-compact.
+        # Map Codex reasons into that enum; keep original reason in --trigger.
+        flush_event = "session-end"
+        reason = (args.reason or "").lower()
+        if "compact" in reason:
+            flush_event = "pre-compact"
+        trigger = args.trigger or args.reason or "codex"
+        _spawn_flush_memory(session_id, flush_event, transcript_path, trigger)
 
     if args.json:
         slug, state_path = _state_path(project_dir)
@@ -305,7 +312,7 @@ def _record_heartbeat(
     """Record a no-content heartbeat in state.json.
 
     Used when Codex turn-end fires without a transcript. Replaces the
-    old behavior of writing empty stub blocks into memory/daily/. The
+    old behavior of writing empty stub blocks into knowledge/daily/. The
     heartbeat is visible in state.json under `codex_heartbeats` so the
     SessionStart context injector can still surface "this project was
     active N hours ago" — without polluting the daily log corpus.

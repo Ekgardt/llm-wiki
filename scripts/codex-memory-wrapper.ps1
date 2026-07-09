@@ -116,8 +116,11 @@ function codex {
         Remove-Item Env:\CODEX_MEMORY_INVOKED -ErrorAction SilentlyContinue
     }
 
-    # Propagate codex's exit code.
-    exit $exitCode
+    # Propagate codex's exit code without killing the interactive shell.
+    if ($null -ne $exitCode) {
+        $global:LASTEXITCODE = $exitCode
+    }
+    return
 }
 
 <#
@@ -128,7 +131,13 @@ function codex-memory-status {
     Push-Location $env:LLM_WIKI_ROOT
     try {
         Write-Host "=== Codex heartbeats (recent activity) ===" -ForegroundColor Cyan
-        $state = Get-Content "$env:LLM_WIKI_ROOT-state\memory-state\state.json" -Raw | ConvertFrom-Json
+        $statePath = Join-Path $env:LLM_WIKI_STATE_ROOT "run\state.json"
+        if (-not (Test-Path -LiteralPath $statePath)) {
+            # Legacy fallback (pre three-zone runtime layout)
+            $legacy = Join-Path $env:LLM_WIKI_STATE_ROOT "memory-state\state.json"
+            if (Test-Path -LiteralPath $legacy) { $statePath = $legacy }
+        }
+        $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
         if ($state.codex_heartbeats) {
             $state.codex_heartbeats.PSObject.Properties | ForEach-Object {
                 $h = $_.Value
@@ -156,7 +165,7 @@ function codex-memory-status {
 
         Write-Host ""
         Write-Host "=== Daily log count ===" -ForegroundColor Cyan
-        $dailies = Get-ChildItem $env:LLM_WIKI_ROOT\memory\daily\*.md -ErrorAction SilentlyContinue
+        $dailies = Get-ChildItem $env:LLM_WIKI_ROOT\knowledge\daily\*.md -ErrorAction SilentlyContinue
         Write-Host "  total daily logs: $($dailies.Count)"
 
         Write-Host ""

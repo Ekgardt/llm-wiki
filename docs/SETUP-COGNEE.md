@@ -101,7 +101,7 @@ uv run python scripts/cognee_sync.py
 ```
 
 This will:
-1. Read all 75+ markdown pages from `wiki/` and `memory/knowledge/`.
+1. Read all 75+ markdown pages from `knowledge/notes/` and `knowledge/notes/`.
 2. Add them to Cognee's data store at `$LLM_WIKI_STATE_ROOT/cognee\`.
 3. Run `cognify()` — entity extraction + relationship graph build.
 
@@ -138,7 +138,7 @@ uv run python scripts/cognee_sync.py
 To sync just the touched files (faster):
 
 ```powershell
-uv run python scripts/cognee_sync.py --file memory/knowledge/patterns/new-pattern.md
+uv run python scripts/cognee_sync.py --file knowledge/notes/patterns/new-pattern.md
 ```
 
 ### Skipping the graph build (faster)

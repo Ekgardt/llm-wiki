@@ -5,7 +5,7 @@ compile_memory.py in a detached background process. The caller never
 blocks — this script returns immediately (under 100ms).
 
 Lock mechanism:
-- Writes a PID file at $LLM_WIKI_STATE_ROOT/memory-state/compile.pid
+- Writes a PID file at $LLM_WIKI_STATE_ROOT/run/compile.pid
 - On startup, checks if the PID is still alive (psutil-free, uses os.kill
   with signal 0 on POSIX or OpenProcess on Windows).
 - Stale lock (process dead OR older than MAX_COMPILE_DURATION_S) is
@@ -42,9 +42,9 @@ from memory_state import (  # noqa: E402
 
 
 COMPILE_SCRIPT = ROOT / "scripts" / "compile_memory.py"
-LOCK_FILE = STATE_ROOT / "memory-state" / "compile.pid"
-LOG_OUT = STATE_ROOT / "memory-reports" / "maybe-compile-last.log"
-LOG_ERR = STATE_ROOT / "memory-reports" / "maybe-compile-last.err.log"
+LOCK_FILE = STATE_ROOT / "run" / "compile.pid"
+LOG_OUT = STATE_ROOT / "logs" / "maybe-compile-last.log"
+LOG_ERR = STATE_ROOT / "logs" / "maybe-compile-last.err.log"
 
 # If a compile runs longer than this, assume it died and steal the lock.
 # 30 minutes is generous — typical compile is 5-15 minutes for 25 daily logs.
@@ -110,6 +110,24 @@ def _write_lock(pid: int) -> None:
     )
 
 
+def _try_claim_lock() -> bool:
+    """Atomically create lock file (O_EXCL). Returns True if we own it."""
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    try:
+        fd = os.open(str(LOCK_FILE), flags)
+    except FileExistsError:
+        return False
+    except OSError:
+        return False
+    try:
+        payload = f"0\n{datetime.now().isoformat(timespec='seconds')}\n"
+        os.write(fd, payload.encode("utf-8"))
+    finally:
+        os.close(fd)
+    return True
+
+
 def _clear_lock() -> None:
     try:
         LOCK_FILE.unlink()
@@ -145,7 +163,7 @@ def _has_pending_work() -> bool:
     """
     state = load_state()
     compiled_hashes = state.get("compiled_daily_hashes", {}) or {}
-    daily_dir = ROOT / "memory" / "daily"
+    daily_dir = ROOT / "knowledge" / "daily"
     if not daily_dir.exists():
         return False
     for p in daily_dir.glob("*.md"):
@@ -166,8 +184,21 @@ def spawn_compile_if_idle(force: bool = False) -> tuple[bool, str]:
     if not force and not _has_pending_work():
         return (False, "skipped: no pending work (all daily logs compiled)")
 
-    # Steal stale lock if present.
-    _clear_lock()
+    # If lock exists but process is dead/stale, clear before exclusive claim.
+    if not is_running and LOCK_FILE.exists():
+        _clear_lock()
+
+    # Atomic claim: only one concurrent caller can create the lock file.
+    if not _try_claim_lock():
+        # Another process claimed between our check and create.
+        is_running2, reason2 = _is_compile_running()
+        if is_running2 and not force:
+            return (False, f"skipped: {reason2}")
+        if not force:
+            return (False, "skipped: lock race lost")
+        _clear_lock()
+        if not _try_claim_lock():
+            return (False, "skipped: could not claim lock")
 
     pid = spawn_detached(
         [sys.executable, str(COMPILE_SCRIPT), "--trigger", "auto"],
@@ -175,11 +206,10 @@ def spawn_compile_if_idle(force: bool = False) -> tuple[bool, str]:
         stderr_path=LOG_ERR,
     )
     if pid is None:
+        _clear_lock()
         return (False, "spawn failed")
 
-    # Write lock with the spawned PID. The compile process will clear
-    # this on graceful exit; if it crashes, the next maybe_compile call
-    # will detect the stale lock.
+    # Update placeholder PID (0) with real spawned PID.
     _write_lock(pid)
     return (True, f"spawned compile pid={pid}")
 

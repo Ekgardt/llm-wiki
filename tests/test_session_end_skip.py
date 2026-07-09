@@ -37,10 +37,10 @@ def _invoke(cwd_path: str, payload: dict) -> int:
     """
     env = dict(os.environ)
     env["CLAUDE_PROJECT_DIR"] = cwd_path
-    # Required for the hook to know the vault; conftest sets it, but an
-    # explicit assert makes the contract clear if conftest is skipped.
-    if "LLM_WIKI_ROOT" not in env:
-        env["LLM_WIKI_ROOT"] = str(VAULT_ROOT)
+    # Always pin to this checkout — user/process env may point at an
+    # installed clone (e.g. tools-agent/llm-wiki); the fixture asserts
+    # against VAULT_ROOT/knowledge/daily/, so the hook must write there.
+    env["LLM_WIKI_ROOT"] = str(VAULT_ROOT)
     result = subprocess.run(
         [sys.executable, str(SCRIPT)],
         input=json.dumps(payload),
@@ -55,7 +55,7 @@ def _invoke(cwd_path: str, payload: dict) -> int:
 def daily_log_snapshot():
     """Snapshot today's daily log before/after to count appends."""
     from datetime import datetime
-    daily = VAULT_ROOT / "memory" / "daily" / f"{datetime.now().strftime('%Y-%m-%d')}.md"
+    daily = VAULT_ROOT / "knowledge" / "daily" / f"{datetime.now().strftime('%Y-%m-%d')}.md"
     before = daily.read_text(encoding="utf-8") if daily.exists() else ""
     yield {"path": daily, "before": before}
     # Restore (remove anything the test appended)

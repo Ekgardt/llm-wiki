@@ -33,8 +33,8 @@ irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 |---|---|
 | Recall@2 | **100%** |
 | Recall@5 | **100%** |
-| MRR | **0.952** |
-| 延迟 p50 | **28ms** |
+| MRR | **0.942** |
+| 延迟 p50 | **41ms** |
 | 月费用 | **$0** |
 
 ## 核心功能
