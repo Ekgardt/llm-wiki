@@ -4,7 +4,7 @@
 
 ![CI](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml/badge.svg)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests](https://img.shields.io/badge/tests-176%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://img.shields.io/badge/tests-178%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
 [![Benchmark](https://img.shields.io/badge/Recall%405-100%25-blue.svg)](benchmark/run_benchmark.py)
 
 **面向管理多个 AI 智能体的独立开发者的主动式记忆系统。Markdown 优先。零云成本。Recall@5 = 100%。$0/月。**
@@ -72,7 +72,7 @@
 - 夜间/每周维护（cron / Task Scheduler）
 - OpenCode 插件、Codex wrapper、Claude hooks（含 settings 合并）
 - Cursor + Antigravity
-- **176 个 pytest**，CI + gitleaks
+- **178 个 pytest**，CI + gitleaks
 
 ---
 
@@ -88,14 +88,14 @@ curl -fsSL https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.sh | 
 irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 ```
 
-安装器会：装依赖、跑 **176** 测试、设置 `LLM_WIKI_ROOT` / `LLM_WIKI_STATE_ROOT`、定时任务、检测代理、Claude merge、构建搜索索引。
+安装器会：装依赖、跑 **178** 测试、设置 `LLM_WIKI_ROOT` / `LLM_WIKI_STATE_ROOT`、定时任务、检测代理、Claude merge、构建搜索索引。
 
 **手动：**
 ```bash
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync
-uv run pytest -q          # 176 tests
+uv run pytest -q          # 178 tests
 ```
 
 ### 智能体接入
@@ -136,7 +136,7 @@ knowledge/notes/  （持久知识页）
 ## 公开历史说明
 
 开源前用 `git-filter-repo` 清理了个人数据。公开 commit 数 ≠ 实际开发量。  
-**176 个测试**验证代码。`knowledge/daily/` 样例为合成 Evidence，不含私人会话。
+**178 个测试**验证代码。`knowledge/daily/` 样例为合成 Evidence，不含私人会话。
 
 ---
 

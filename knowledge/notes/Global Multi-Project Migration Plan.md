@@ -156,4 +156,4 @@ This harness is **best-effort glue**, not a guaranteed semantic layer. When docu
 - [[Wiki vs Memory Compiler vs Fusion]]
 - [[knowledge/notes/pipeline-mirroring|Pipeline Mirroring]] — the convention that frames `knowledge/projects/` as a new mirrored axis.
 - [[Preliminary Flagging]] — applies to any inferred claims in per-project `state.md`.
-- [[knowledge/projects/llm-wiki/re-setup|LLM-wiki re-setup guide]] — operational checklist for restoring the Phase 2+3 harness on a new machine (Phases 2+3 live in `~/.claude/` which is machine-local, not git-tracked).
+- [[docs/USER-GUIDE|User guide]] / `install.ps1` · `install.sh` — machine harness setup (env, hooks, agents). Per-project `re-setup.md` is local-only (gitignored under `knowledge/projects/`).

@@ -4,7 +4,7 @@
 
 ![CI](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml/badge.svg)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests](https://img.shields.io/badge/tests-176%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://img.shields.io/badge/tests-178%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
 [![Benchmark](https://img.shields.io/badge/Recall%405-100%25-blue.svg)](benchmark/run_benchmark.py)
 
 **Проактивная система памяти для соло-разработчиков с несколькими ИИ-агентами. Markdown-first. Ноль облака. Recall@5 = 100%. $0/мес.**
@@ -72,7 +72,7 @@
 - Nightly/weekly (cron / Task Scheduler)
 - OpenCode plugin, Codex wrapper, Claude hooks (+ merge settings)
 - Cursor + Antigravity
-- **176 pytest**, CI + gitleaks
+- ** 178 pytest**, CI + gitleaks
 
 ---
 
@@ -88,14 +88,14 @@ curl -fsSL https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.sh | 
 irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 ```
 
-Установщик: зависимости, **176 тестов**, `LLM_WIKI_ROOT` / `LLM_WIKI_STATE_ROOT`, расписание, детекция агентов, Claude merge, индекс поиска.
+Установщик: зависимости, **178 тестов**, `LLM_WIKI_ROOT` / `LLM_WIKI_STATE_ROOT`, расписание, детекция агентов, Claude merge, индекс поиска.
 
 **Вручную:**
 ```bash
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync
-uv run pytest -q          # 176 tests
+uv run pytest -q          # 178 tests
 ```
 
 ### Агенты
@@ -136,7 +136,7 @@ knowledge/notes/  (durable pages)
 ## Публичная история
 
 Перед open-source история git очищена от личных данных. Число коммитов ≠ объём работы.  
-**176 тестов** проверяют код. Sample `knowledge/daily/` — синтетические Evidence, без личных сессий.
+**178 тестов** проверяют код. Sample `knowledge/daily/` — синтетические Evidence, без личных сессий.
 
 ---
 

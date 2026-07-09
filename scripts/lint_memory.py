@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -144,8 +145,33 @@ def _resolve_link(target: str, search_roots: list[Path]) -> Path | None:
 
 # ---------- individual checks ----------
 
+def _git_tracked_paths() -> set[str] | None:
+    """Return repo-relative posix paths of git-tracked files, or None if unavailable.
+
+    Used so CI (clean checkout) and local worktrees agree: a wikilink that only
+    resolves to a gitignored personal file must count as broken.
+    """
+    try:
+        out = subprocess.check_output(
+            ["git", "ls-files", "-z"],
+            cwd=str(ROOT),
+            stderr=subprocess.DEVNULL,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return None
+    if not out:
+        return set()
+    paths: set[str] = set()
+    for raw in out.split(b"\0"):
+        if not raw:
+            continue
+        paths.add(Path(raw.decode("utf-8", errors="replace")).as_posix())
+    return paths
+
+
 def check_broken_links(pages: list[Path], search_roots: list[Path]) -> list[str]:
     out: list[str] = []
+    tracked = _git_tracked_paths()
     for md in pages:
         # Daily logs contain transcribed prose that often cites `[[wikilinks]]`
         # or `[[...]]` as literal examples. They are append-only raw capture,
@@ -154,14 +180,38 @@ def check_broken_links(pages: list[Path], search_roots: list[Path]) -> list[str]
             continue
         if md.name in BROKEN_LINK_SKIP_NAMES:
             continue
+        # When git is available, only scan tracked pages (public vault surface).
+        # Personal gitignored notes under knowledge/projects/* must not fail CI
+        # simulation or local lint — but links *from* tracked pages *to* those
+        # files still fail below (untracked target).
+        if tracked is not None:
+            try:
+                src_rel = md.resolve().relative_to(ROOT.resolve()).as_posix()
+            except ValueError:
+                continue
+            if src_rel not in tracked:
+                continue
         for t in _extract_links(md):
             # Skip placeholder-looking targets: ellipses, generic "wikilinks",
             # or angle-bracket templates like <category>/<slug>.
             tt = t.strip()
             if tt in ("...", "wikilinks") or "<" in tt or ">" in tt:
                 continue
-            if _resolve_link(t, search_roots) is None:
+            resolved = _resolve_link(t, search_roots)
+            if resolved is None:
                 out.append(f"{_rel(md)} -> [[{t}]]")
+                continue
+            # If git metadata is available, require the target to be tracked.
+            # Prevents "works on my machine" where a personal gitignored page
+            # satisfies the link but CI clean checkout fails.
+            if tracked is not None:
+                try:
+                    rel = resolved.resolve().relative_to(ROOT.resolve()).as_posix()
+                except ValueError:
+                    out.append(f"{_rel(md)} -> [[{t}]] (outside vault)")
+                    continue
+                if rel not in tracked:
+                    out.append(f"{_rel(md)} -> [[{t}]] (untracked/gitignored target)")
     return out
 
 

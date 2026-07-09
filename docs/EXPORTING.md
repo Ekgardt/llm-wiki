@@ -71,7 +71,7 @@ Don't export-then-unzip; just clone:
 git clone git@github.com:Ekgardt/llm-wiki.git $LLM_WIKI_ROOT
 ```
 
-Then run the install steps in [[knowledge/projects/llm-knowledge/notes/re-setup|re-setup guide]] to set up the machine-local pieces (`$LLM_WIKI_ROOT` env var, `~/.claude/CLAUDE.md`, hook wrappers, user-level skills).
+Then run `install.ps1` / `install.sh` (or follow [[docs/USER-GUIDE|User guide]]) to set up the machine-local pieces (`$LLM_WIKI_ROOT` env var, hooks, agent wiring).
 
 ## Sharing a subset for discussion
 
@@ -83,5 +83,5 @@ git archive HEAD --format=tar knowledge/notes/concepts | tar -xf - -C /tmp/expor
 ```
 
 ## Related
-- [[knowledge/projects/llm-knowledge/notes/re-setup|Re-setup guide]] for rebuilding the global harness on a new machine.
+- [[docs/USER-GUIDE|User guide]] and root installers for rebuilding the harness on a new machine.
 - `.gitignore` in the repo root — authoritative list of excluded patterns.
