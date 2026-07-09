@@ -58,7 +58,7 @@ contradiction check on every push.
 - Concurrency-sensitive code (`maybe_compile.py`, `memory_queue.py`) needs explicit race-condition tests
 - Tests must be hermetic — no dependency on a real LLM, real network, or pre-existing state beyond what conftest.py bootstraps
 - **Minimum coverage**: all scripts with ranking/scoring/archival logic MUST have dedicated tests. This includes: `search_memory.py`, `graph_neighbors.py`, `feedback_capture.py`, `archive_stale.py`, `build_guardrails.py`
-- **171 tests** as of v3.3.0 — see `tests/` for patterns
+- **176 tests** as of v3.3.1 — see `tests/` for patterns
 
 ## Test commands
 
@@ -75,6 +75,24 @@ uv run pytest tests/test_search_ranking.py -v
 # With coverage
 uv run pytest --cov=scripts --cov-report=term-missing
 ```
+
+## Release checklist (mandatory — do not skip)
+
+Before tagging a release or updating public marketing numbers:
+
+1. **English README first** — `README.md` is the source of truth.
+2. **Sync i18n the same day** — update `README.ru.md` and `README.zh-CN.md` so they match:
+   - version string (e.g. v3.3.1)
+   - test count (must equal `pytest --collect-only` / live suite)
+   - install URLs (`Ekgardt/llm-wiki`)
+   - architecture (three-zone / `knowledge/`)
+   - benchmark headline numbers (MRR, latency) if changed
+3. **Run the i18n guard test** — `uv run pytest tests/test_readme_i18n.py -q` must pass.
+4. **CHANGELOG** — newest version at top (Keep a Changelog).
+5. **pyproject.toml version** + `uv.lock` package version must match the tag.
+6. Only then: tag, push, GitHub Release.
+
+**Never ship a release with EN updated and RU/ZH left stale.** That is a release blocker.
 
 ## Commit message style
 

@@ -1,23 +1,84 @@
 # LLM Wiki — Память для ИИ-агентов
 
+**Языки:** [English](README.md) | [Русский](README.ru.md) | [简体中文](README.zh-CN.md)
+
 ![CI](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml/badge.svg)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Tests](https://img.shields.io/badge/tests-176%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Benchmark](https://img.shields.io/badge/Recall%405-100%25-blue.svg)](benchmark/run_benchmark.py)
 
-**Проактивная система памяти для соло-разработчиков, управляющих несколькими ИИ-агентами. Markdown-first. Ноль облачных затрат. Recall@5 = 100%. $0/мес.**
+**Проактивная система памяти для соло-разработчиков с несколькими ИИ-агентами. Markdown-first. Ноль облака. Recall@5 = 100%. $0/мес.**
 
-Языки: [English](README.md) | [Русский](README.ru.md) | [简体中文](README.zh-CN.md)
+Большинство систем памяти (Mem0, Zep, Letta) тянут данные в своё облако и берут подписку. Эта держит всё **на вашем диске** как обычный markdown — Obsidian, `git diff`, только ваши файлы — и использует LLM, которые у вас **уже есть** (OpenCode, Codex CLI, Claude Code).
+
+```
+Работаете в OpenCode / Codex / Claude Code
+            ↓
+Система тихо пишет breadcrumbs и классифицирует сессии
+            ↓
+Фоновый compile превращает логи в страницы знаний
+            ↓
+Следующая сессия: guard rails + advisory + контекст
+            ↓
+Агент продолжает с места остановки — без повторных объяснений
+```
 
 ---
 
-## Что это
+## Бенчмарк (июль 2026)
 
-Ваша память — это **markdown-файлы на вашем диске**. Не облако, не векторная БД, не подписка. Обычные `.md` файлы, читаемые в Obsidian, отслеживаемые через `git diff`, принадлежащие только вам.
+> **Честно про методику:** known-item retrieval по публичным sample-заметкам
+> (живой счётчик: `benchmark/run_benchmark.py`). Это **не** LoCoMo / LongMemEval.
+> 100% Recall@5 на маленьком curated-наборе; на 500+ страницах ждите 85–95%.
+> Цифры конкурентов — с других датасетов, прямое сравнение некорректно.
 
-Система использует подписки на LLM, которые у вас **уже есть** (OpenCode, Codex CLI, Claude Code), для классификации сессий, компиляции знаний и проактивного контекста.
+| Метрика | **LLM Wiki v3.3.1** | agentmemory | Zep | Mem0 |
+|---|---|---|---|---|
+| **Recall@2** | **100%** | n/a | n/a | n/a |
+| **Recall@5** | **100%** | 95.2% | 94.7% | 91.6% |
+| **Recall@10** | **100%** | 98.6% | n/a | n/a |
+| **MRR** | **0.942** | 0.882 | n/a | n/a |
+| **Latency p50** | **41ms** | 14ms | 155ms | 880ms |
+| **Токены/поиск** | **0** | ~1900 | $$ | $$ |
+| **$/мес** | **$0** | ~$10 | $200+ | $50–150 |
+
+Воспроизведение: `uv run python benchmark/run_benchmark.py --semantic`
+
+---
+
+## Главное
+
+### Пайплайн
+- **SKEPTICAL compiler** + VERIFY-BEFORE-WRITE (проверка цитат в Python)
+- **3-tier FLUSH** (MAJOR / MINOR / OK)
+- **JSON-compile** — любой LLM backend
+- **COMPILE_AUDIT** — verified / dedup / stubs / contradictions
+
+### Поиск
+- **BM25 + Vector + Graph** (взвешенный RRF)
+- Title/filename boost, `--project`, `--since` / `--as-of`
+- `source_authority` в ранжировании
+
+### Проактивность
+- Guard rails, advisory, metacognitive context
+- Feedback capture → promotion в знания
+
+### Мульти-агент
+- Blackboard, loop detector, agent timeline
+
+### Инфра
+- 5 backend’ов: OpenCode → Codex → Claude → OpenAI → Ollama
+- Очередь offline-задач, PID-lock compile
+- Nightly/weekly (cron / Task Scheduler)
+- OpenCode plugin, Codex wrapper, Claude hooks (+ merge settings)
+- Cursor + Antigravity
+- **176 pytest**, CI + gitleaks
+
+---
 
 ## Установка (одна команда)
 
-**macOS / Linux:**
+**macOS / Linux / WSL2:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.sh | bash
 ```
@@ -27,62 +88,87 @@ curl -fsSL https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.sh | 
 irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 ```
 
-## Бенчмарк
+Установщик: зависимости, **176 тестов**, `LLM_WIKI_ROOT` / `LLM_WIKI_STATE_ROOT`, расписание, детекция агентов, Claude merge, индекс поиска.
 
-| Метрика | Результат |
-|---|---|
-| Recall@2 | **100%** |
-| Recall@5 | **100%** |
-| MRR | **0.942** |
-| Latency p50 | **41ms** |
-| Стоимость/мес | **$0** |
-
-## Ключевые возможности
-
-- **Тройной гибридный поиск**: BM25 + Vector + Graph-neighbor (взвешенный RRF)
-- **Guard rails**: автоматическая инъекция выученных правил в начале сессии
-- **Blackboard**: координация параллельных агентов через общий чёрный ящик
-- **Loop detector**: предотвращение бесконечных циклов «исправь → проверь → переделай»
-- **Agent timeline**: «кто какое решение принял и когда»
-- **Feedback learning**: система учится на ваших поправках
-- **5 LLM backends**: OpenCode → Codex → Claude → OpenAI → Ollama (автоопределение)
-- **Persistent queue**: задачи выживают офлайн, обрабатываются при следующей сессии
-- **OKF v0.1**: 100% соответствие открытому формату знаний
-- **155 тестов**, CI green на Ubuntu
-
-## Как это работает
-
-```
-Работаете в OpenCode / Codex / Claude Code
-            ↓
-Система записывает действия + классифицирует сессии
-            ↓
-Фоновый compile превращает сырые логи в страницы знаний
-            ↓
-Следующая сессия: guard rails + advisory + контекст — автоматически
-            ↓
-Агент продолжает где остановились — без повторных объяснений
+**Вручную:**
+```bash
+git clone https://github.com/Ekgardt/llm-wiki.git
+cd llm-wiki
+uv sync
+uv run pytest -q          # 176 tests
 ```
 
-## Поддерживаемые агенты
-
-| Агент | Интеграция |
+### Агенты
+| Агент | Как |
 |---|---|
-| OpenCode | Plugin (JS, autoload) |
-| Codex CLI | PowerShell wrapper |
-| Claude Code | Hooks (settings.json) |
-| Cursor | Rules file |
-| Antigravity | AGENTS.md |
+| OpenCode | plugin → `~/.config/opencode/plugins/` |
+| Codex | wrapper / `codex_memory.py` |
+| Claude Code | hooks + `merge_claude_settings.py` |
+| Cursor | `integrations/cursor/rules/` |
+| Antigravity | `integrations/antigravity/AGENTS.md` |
 
-## Архитектура
+Опционально semantic search: `uv pip install sentence-transformers`
 
-3 слоя (по Karpathy):
-- `raw/` — неизменяемые исходные материалы
-- `knowledge/notes/` — курируемые знания (третье лицо, цитируемые)
-- `knowledge/daily/` — эпизодические сессионные логи; `knowledge/notes/` — скомпилированное знание
+---
 
-13 проверок lint, автоматический nightly compile (03:00), еженедельная очистка (воскресенье 04:00).
+## Архитектура (three-zone)
+
+```
+CODE         scripts/  tests/  docs/  skills/  rules/  integrations/
+KNOWLEDGE    knowledge/{daily,notes,projects,raw,inbox,feedback}
+RUNTIME      $LLM_WIKI_STATE_ROOT/{run,logs,cache}   # вне vault
+```
+
+```
+Сырые источники / сессии
+    ↓ capture
+knowledge/daily/  (append-only)
+    ↓ compile
+knowledge/notes/  (durable pages)
+    ↓ search (BM25 + Vector + Graph)
+контекст сессии (guard rails + advisory)
+    ↓ SessionStart
+агент видит правила, решения, open threads
+```
+
+---
+
+## Публичная история
+
+Перед open-source история git очищена от личных данных. Число коммитов ≠ объём работы.  
+**176 тестов** проверяют код. Sample `knowledge/daily/` — синтетические Evidence, без личных сессий.
+
+---
+
+## Платформы
+
+- **Windows** — полный support (Task Scheduler, PowerShell)
+- **macOS/Linux** — Python-скрипты + cron/systemd
+- **OpenCode** — везде (JS)
+- **Codex wrapper** — PowerShell; на Unix — alias на `codex_memory.py`
+
+---
+
+## Сравнение
+
+| | **LLM Wiki v3.3.1** | agentmemory | ReMe |
+|---|---|---|---|
+| Markdown-first | ✅ | ❌ | ✅ |
+| Multi-tool | ✅ OpenCode+Codex+Claude | MCP | Claude |
+| IDE | ✅ Cursor+Antigravity | ❌ | ❌ |
+| Guard rails / blackboard / loop | ✅ | ❌ | ❌ |
+| $0/мес, zero cloud | ✅ | ✅ | ✅ |
+| Recall@5 | **100%** | 95.2% | n/a |
+
+---
+
+## Credits
+
+- [Karpathy LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)
+- [Harrison Chase — Wiki Memory](https://blog.langchain.dev/wiki-memory/)
+- [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md)
+- [Anthropic context engineering](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents)
 
 ## Лицензия
 
-[MIT](LICENSE) — делайте что хотите.
+[MIT](LICENSE)

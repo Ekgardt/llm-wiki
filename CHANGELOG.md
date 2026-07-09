@@ -34,7 +34,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - Gitleaks in CI; `uv sync --locked`
 
 ### Tests
-- **171** pytest tests (hermetic state under `.pytest_cache/`)
+- **176** pytest tests (hermetic state under `.pytest_cache/`)
 
 ## [3.3.0] — 2026-07-04
 
