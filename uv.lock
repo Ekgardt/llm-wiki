@@ -70,7 +70,7 @@ wheels = [
 
 [[package]]
 name = "llm-wiki"
-version = "3.3.0"
+version = "3.3.1"
 source = { virtual = "." }
 
 [package.dev-dependencies]
