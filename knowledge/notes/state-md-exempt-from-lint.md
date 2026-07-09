@@ -19,7 +19,7 @@ One-sentence summary: `state.md` files under `knowledge/projects/<slug>/` are ad
 - Sparse-floor check (template-seeded pages are intentionally minimal at first)
 - Any future editorial-metadata checks
 
-**Rationale:** Per-project state pages are vault metadata — auto-maintained operational records, not content derived from `raw/` or `inbox/`. They belong in the same exempt category as `index.md` (navigation map), `log.md` (changelog), and `Vault Home.md` (front door). Applying structural content rules to them would generate constant false-positive noise.
+**Rationale:** Per-project state pages are vault metadata — auto-maintained operational records, not content derived from `raw/` or `inbox/`. They belong in the same exempt category as `index.md` (navigation map), `log.md` (changelog), and `knowledge/index.md` (front door). Applying structural content rules to them would generate constant false-positive noise.
 
 **Alternatives rejected:**
 - Per-slug exemption: too granular, requires updating lint whenever a new project is added.

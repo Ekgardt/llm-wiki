@@ -18,7 +18,7 @@ One-sentence summary: The wiki should be pruned, linked, and quality-checked reg
 ## Monitoring & Metrics
 Track a small set of numbers over time to catch drift before it gets expensive:
 - **Page count** — total markdown files under `knowledge/notes/`.
-- **Orphan ratio** — share of pages with 0 inbound wikilinks (excluding entry points like `index.md`, `log.md`, `Vault Home.md`). Target: < 10%.
+- **Orphan ratio** — share of pages with 0 inbound wikilinks (excluding entry points like `index.md`, `log.md`, `knowledge/index.md`). Target: < 10%.
 - **Average inbound links per page** — healthy wikis trend upward as the graph densifies. Target: ≥ 3.
 - **Sourced-page ratio** — share of concept/entity/synthesis pages with a `Source:` line. Target: 100%.
 - **Stale pages** — pages not touched in > 90 days that still describe fast-moving topics.

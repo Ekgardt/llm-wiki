@@ -58,7 +58,7 @@ contradiction check on every push.
 - Concurrency-sensitive code (`maybe_compile.py`, `memory_queue.py`) needs explicit race-condition tests
 - Tests must be hermetic — no dependency on a real LLM, real network, or pre-existing state beyond what conftest.py bootstraps
 - **Minimum coverage**: all scripts with ranking/scoring/archival logic MUST have dedicated tests. This includes: `search_memory.py`, `graph_neighbors.py`, `feedback_capture.py`, `archive_stale.py`, `build_guardrails.py`
-- **160 tests** as of v3.3.0 — see `tests/` for patterns
+- **171 tests** as of v3.3.0 — see `tests/` for patterns
 
 ## Test commands
 

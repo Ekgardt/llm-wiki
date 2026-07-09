@@ -39,7 +39,7 @@ Turn `$LLM_WIKI_ROOT` (on this machine: `$LLM_WIKI_ROOT/`) into the default know
 Entirely inside `$LLM_WIKI_ROOT/`. No external surface touched.
 
 1. Create `knowledge/projects/` with `_template/state.md` skeleton (Where we left off / Recent decisions / Open threads / Links + `Source:`).
-2. Migrate LLM-wiki itself as first project: `knowledge/projects/llm-knowledge/notes/state.md` from recent `knowledge/log.md` entries.
+2. Migrate LLM-wiki itself as first project: `knowledge/projects/llm-wiki/state.md` from recent `knowledge/log.md` entries.
 3. Register `## Projects` section in [[index]]; append row to [[log]].
 4. Update `scripts/lint_memory.py` to treat `knowledge/projects/` as a valid section.
 5. Update `scripts/lookup_mode.py` to exclude `projects/*/state.md` from the curated-page count (editorial metadata).
@@ -126,12 +126,12 @@ This harness is **best-effort glue**, not a guaranteed semantic layer. When docu
   - `~/.claude/hooks/session_end.sh` (machine-local shim) — same wrapper pattern as session_start.
   - Registered in user `settings.json::hooks::SessionEnd` with matcher `""`.
   - Tech-debt sweep: removed 14 lines of unreachable code in `scripts/lookup_mode.py` (dead fallback after a `return info`).
-  - Re-setup guide `knowledge/projects/llm-knowledge/notes/re-setup.md` — checklist for restoring the global harness on a new machine (env vars, `~/.claude/CLAUDE.md`, skills, hook wrappers).
+  - Re-setup guide `knowledge/projects/llm-wiki/re-setup.md` — checklist for restoring the global harness on a new machine (env vars, `~/.claude/CLAUDE.md`, skills, hook wrappers).
 - **Phase 4** — **done 2026-04-19** (accelerated). 51 automated scenarios + 5 manual e2e checks in fresh Claude Code windows (persistence across 3 re-openings, `/compact` re-injection, cross-project isolation, real-project slug `your-app`, markerless no-op). 3 bugs surfaced and fixed: `LLM_WIKI_STATE_ROOT` missing in user env, `_compute_slug` `.`/`..` edge cases, `$HOME` false-positive on `.claude/` marker.
 - **Phase 5** — **done 2026-04-19.** Tractable polish items executed:
   - **Shared editorial module** — `scripts/vault_editorial.py` centralizes `EDITORIAL_NAMES`, `BACKLINK_EXEMPT_NAMES`, `BROKEN_LINK_SKIP_NAMES`, and `editorial_parents_to_skip()`. `lint_memory.py` and `lookup_mode.py` import from it, removing the prior duplicate literals.
   - **`scripts/archive_daily.py`** — dormant infrastructure, ready when `knowledge/daily/` grows past 30 files. Silent no-op below threshold; `--force`, `--commit`, `--threshold`, `--max-age` flags. Archive target: `knowledge/daily/archive/YYYY-MM/`. Respects the "never delete un-compiled logs" rule.
-  - **Plugin packaging (researched, skipped)** — Claude Code plugin architecture in April 2026 cannot host a CLAUDE.md-equivalent, cannot modify user-level `settings.json::env`, and enforces a cache directory that breaks relative-path hooks to outside scripts. Plugins are designed for optional, versioned, distributable extensions — not mandatory per-machine harness. Current manual-install path via `knowledge/projects/llm-knowledge/notes/re-setup.md` is the correct architecture. If Anthropic ships user-level plugin support for CLAUDE.md + env vars in a future release, revisit.
+  - **Plugin packaging (researched, skipped)** — Claude Code plugin architecture in April 2026 cannot host a CLAUDE.md-equivalent, cannot modify user-level `settings.json::env`, and enforces a cache directory that breaks relative-path hooks to outside scripts. Plugins are designed for optional, versioned, distributable extensions — not mandatory per-machine harness. Current manual-install path via `knowledge/projects/llm-wiki/re-setup.md` is the correct architecture. If Anthropic ships user-level plugin support for CLAUDE.md + env vars in a future release, revisit.
   - **Symlink migration for skills (attempted, skipped)** — Windows refuses symlink creation without Developer Mode / admin elevation. Also architecturally unsuitable: user-level `knowledge-lookup/SKILL.md` has different content (absolute `$LLM_WIKI_ROOT` paths) than the project-level variant. Copying with the documented divergence is the right pattern.
 
   **Kept dormant:** per-project QMD collections — triggered when wiki crosses 50 curated pages (currently 16); no point implementing a split that isn't yet useful.

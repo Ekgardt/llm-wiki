@@ -23,7 +23,7 @@ The env var is the portable reference; the parenthetical is the concrete sanity 
 
 ### Where to apply
 - READMEs and architecture docs that describe directory layouts.
-- Setup and re-setup guides (e.g., `knowledge/projects/llm-knowledge/notes/re-setup.md`).
+- Setup and re-setup guides (e.g., `knowledge/projects/llm-wiki/re-setup.md`).
 - Any canonical explanatory text that refers to paths that differ across machines.
 
 ### Where NOT to apply

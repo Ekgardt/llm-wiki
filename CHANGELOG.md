@@ -16,8 +16,21 @@
 - "Why only 1 commit?" section explaining git-filter-repo history collapse
 
 ### Test Coverage
-- 155 tests total (was 106)
+- 155 tests at release tag (was 106)
 - New test files: `test_search_ranking.py` (11), `test_graph_neighbors.py` (9), `test_feedback_capture.py` (11), `test_archive_stale.py` (10), `test_guardrails.py` (8)
+
+---
+
+## [v3.3.1] — 2026-07-09 — "Three-zone + audit remediation"
+
+### Changed
+- **Three-zone layout** complete: `knowledge/` only; runtime `$LLM_WIKI_STATE_ROOT/{run,logs,cache}`
+- Installers: correct GitHub URLs, Claude settings merge, OpenCode force-copy, Codex paths
+- Path-safety: compile category whitelist, dry-run no-write, secret redaction, atomic compile lock
+- Docs/skills aligned to knowledge paths; public Evidence fixtures + sample notes shipped
+
+### Test Coverage
+- **171 tests** (pytest green)
 
 ---
 

@@ -17,7 +17,7 @@ Pages currently carrying the note: [[index]] (wiki navigation map), [[log]] (wik
 Without the marker, a reader applying CLAUDE.md rule 5 ("preserve provenance") would expect every claim on the page to trace to a `raw/` file. Indexes and logs can't satisfy that — they *are* the vault's editorial layer. The note short-circuits the confusion: readers know not to look for `Source:` lines, and authors know these pages get updated alongside structure changes rather than during ingestion.
 
 ## How to recognize it
-- Page sits at the top of a directory (`index.md`, `log.md`, `Vault Home.md`) or serves as a changelog.
+- Page sits at the top of a directory (`index.md`, `log.md`, `knowledge/index.md`) or serves as a changelog.
 - Contains a `## Editorial note` section (usually the last section) stating the page is vault metadata.
 - Typically has no `Source:` line, because no raw source exists.
 

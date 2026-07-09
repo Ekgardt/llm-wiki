@@ -4,7 +4,7 @@
 
 ![CI](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml/badge.svg)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests](https://img.shields.io/badge/tests-160%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://img.shields.io/badge/tests-171%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
 [![Benchmark](https://img.shields.io/badge/Recall%405-100%25-blue.svg)](benchmark/run_benchmark.py)
 
 **The proactive memory system for solo developers managing multiple AI agents. Markdown-first. Zero cloud cost. Recall@5 = 100%. $0/month.**
@@ -94,7 +94,7 @@ Reproduce: `uv run python benchmark/run_benchmark.py --semantic`
 - **13 lint checks** — broken wikilinks, orphans, missing frontmatter, supersede chains, temporal validity, gaps
 - **Temporal validity** — `valid_from`/`valid_to` frontmatter, stale-fact detection
 - **Smart auto-archive** — type-aware thresholds (decisions never archive, debugging at 60 days)
-- **160 pytest tests**, CI green on Ubuntu
+- **171 pytest tests**, CI green on Ubuntu
 
 ---
 
@@ -103,7 +103,7 @@ Reproduce: `uv run python benchmark/run_benchmark.py --semantic`
 Git history was scrubbed via `git-filter-repo` to remove personal project
 data (daily logs, project state files) before making the repo public.
 The system was developed over multiple sessions; the public commit count
-does not reflect total development effort. All 160 tests verify the
+does not reflect total development effort. All 171 tests verify the
 code works. Sample `knowledge/daily/` fixtures restore Evidence links
 without publishing private session content.
 
@@ -133,13 +133,13 @@ curl -fsSL https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.sh | 
 irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 ```
 
-The installer checks prerequisites, installs dependencies, runs 160 tests, sets up scheduled maintenance, and detects your agents automatically.
+The installer checks prerequisites, installs dependencies, runs 171 tests, sets up scheduled maintenance, and detects your agents automatically.
 
 That's it. The installer:
 1. Checks prerequisites (Python 3.10+, git)
 2. Installs `uv` if missing (fast Python package manager)
 3. Installs dependencies (`uv sync`)
-4. Runs 160 tests to verify everything works
+4. Runs 171 tests to verify everything works
 5. Sets `LLM_WIKI_ROOT` environment variable
 6. Sets up scheduled maintenance (cron on Unix, Task Scheduler on Windows)
 7. Detects your agents (OpenCode, Codex, Claude Code, Cursor) and wires them up
@@ -150,7 +150,7 @@ That's it. The installer:
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync
-uv run pytest -q          # 160 tests should pass
+uv run pytest -q          # 171 tests should pass
 ```
 
 ### Wire up your tools
