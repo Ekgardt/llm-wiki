@@ -58,6 +58,7 @@ def test_ci_uses_current_gitleaks_action():
     """Gitleaks must use the Node 24 action with an available scanner release."""
     workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
     assert "gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e" in workflow
+    assert "GITLEAKS_VERSION: 8.30.1" in workflow
 
 
 # ─── 2. install.ps1 — no undefined PowerShell variables ─────────────
