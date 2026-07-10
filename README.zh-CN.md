@@ -1,6 +1,6 @@
 # LLM Wiki
 
-[![Tests](https://img.shields.io/badge/tests-226 tests collected in 0.26s%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://img.shields.io/badge/tests-226%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-3.3.3-blue.svg)](CHANGELOG.md)
