@@ -1,6 +1,6 @@
 # LLM Wiki
 
-[![Tests](https://img.shields.io/badge/tests-218%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://img.shields.io/badge/tests-226 tests collected in 0.26s%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-3.3.3-blue.svg)](CHANGELOG.md)
@@ -129,7 +129,7 @@ The installer:
 1. Checks prerequisites (Python 3.10+, git)
 2. Installs `uv` (fast Python package manager) if missing
 3. Syncs dependencies (`uv sync`)
-4. Runs the test suite (218 tests)
+4. Runs the test suite (226 tests collected in 0.26s tests)
 5. Sets `LLM_WIKI_ROOT` environment variable (user scope)
 6. Creates runtime dirs (`cache/`, `logs/`, `run/`, `cognee/` — gitignored)
 7. Registers scheduled maintenance (cron on Unix, Task Scheduler on Windows)
@@ -142,7 +142,7 @@ The installer:
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync
-uv run pytest -q          # 218 tests should pass
+uv run pytest -q          # 226 tests collected in 0.26s tests should pass
 ```
 
 ### Verify it works

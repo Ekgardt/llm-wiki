@@ -4,9 +4,12 @@
  * This version uses $LLM_WIKI_ROOT env var instead of hardcoded paths.
  * Copy this file to ~/.config/opencode/plugins/llm-wiki-memory.js
  *
- * Events handled:
- *   session.created, tool.execute.after, session.idle,
- *   experimental.session.compacting
+ * Features:
+ *   - Event handlers: session.created, tool.execute.after, session.idle,
+ *     experimental.session.compacting
+ *   - Custom tools: memory.context (session-start knowledge),
+ *     memory.recall (real-time search)
+ *   - Context file generation at session.created (for fallback / non-tool agents)
  */
 
 const _LLM_WIKI_ROOT = process.env.LLM_WIKI_ROOT;
@@ -54,7 +57,21 @@ export const LlmWikiMemoryPlugin = async ({ client, $, directory }) => {
     } catch { return "unknown"; }
   }
 
+  /**
+   * Generate session-start context and write to cache/session-context.md.
+   * This file is the fallback for agents that don't support custom tools
+   * (Cursor, Antigravity) and the source for opencode.json instructions.
+   */
+  async function generateContextFile() {
+    try {
+      const ctxFile = `${_LLM_WIKI_ROOT}/cache/session-context.md`;
+      await $`uv run python ${SCRIPTS}/session_start_context.py --output-file ${ctxFile}`.quiet().nothrow();
+    } catch {}
+  }
+
   return {
+    // ─── Event Handlers ─────────────────────────────────────────────
+
     "session.created": async (input) => {
       if (isVault()) return;
       const sid = input?.sessionInfo?.id || input?.sessionId || "opencode";
@@ -62,8 +79,10 @@ export const LlmWikiMemoryPlugin = async ({ client, $, directory }) => {
       await heartbeat(slug, String(directory||""), "opencode-start", String(sid));
       await drainQueue();
       await triggerCompile();
+      await generateContextFile();
       warmStartVectorSearch(); // fire-and-forget: preload model in background
     },
+
     "tool.execute.after": async (input) => {
       if (isVault()) return;
       const tool = String(input?.tool||"").toLowerCase();
@@ -73,6 +92,7 @@ export const LlmWikiMemoryPlugin = async ({ client, $, directory }) => {
       const target = String(input?.input?.filePath||input?.input?.command||"");
       await appendTool(slug, sid, tool, target);
     },
+
     "session.idle": async (input) => {
       if (isVault()) return;
       const sid = input?.sessionInfo?.id || input?.sessionId || "opencode";
@@ -112,6 +132,7 @@ export const LlmWikiMemoryPlugin = async ({ client, $, directory }) => {
       }
       if (tier === "major") { await triggerCompile(); }
     },
+
     "experimental.session.compacting": async (input, output) => {
       if (isVault()) return;
       try {
@@ -124,8 +145,72 @@ export const LlmWikiMemoryPlugin = async ({ client, $, directory }) => {
             reason: "opencode-compacting",
           })).quiet().nothrow();
         } catch {}
-        if (output?.context) output.context.push(`Memory: precompact capture attempted. Run compile after session if needed.`);
+        // Inject knowledge context into the compacted session so it survives.
+        if (output?.context) {
+          output.context.push(`Memory: precompact capture attempted. Knowledge context is available via the memory.context and memory.recall tools.`);
+        }
       } catch {}
+    },
+
+    // ─── Custom Tools (agent-native, real-time, zero infrastructure) ─
+    //
+    // These tools appear in the agent's tool-list. The agent calls them
+    // when it needs knowledge context or search results. No file I/O on
+    // the agent side — the tools call Python scripts via shell.
+    //
+    // Security: all calls are local (shell → Python script → local files).
+    // No network, no server process, no external dependencies.
+
+    tool: {
+      "memory.context": {
+        description:
+          "Get session-start knowledge context: vault inventory, knowledge " +
+          "index, guardrails (learned corrections), advisory (open threads, " +
+          "last decision), and the latest daily-log excerpt. Call this at " +
+          "the start of every session to understand the project knowledge state.",
+        args: {},
+        async execute() {
+          try {
+            const r = await $`uv run python ${SCRIPTS}/session_start_context.py`.quiet().nothrow();
+            const stdout = r.stdout?.toString()?.trim();
+            if (stdout && stdout.startsWith("{")) {
+              // Claude Code hook JSON format — extract additionalContext
+              try {
+                const parsed = JSON.parse(stdout);
+                const ctx = parsed?.hookSpecificOutput?.additionalContext;
+                if (ctx) return ctx;
+              } catch {}
+            }
+            return stdout || "(no context available — run compile first)";
+          } catch {
+            return "(memory.context: error generating context)";
+          }
+        },
+      },
+
+      "memory.recall": {
+        description:
+          "Search the knowledge base for relevant pages. Returns ranked " +
+          "results with titles, paths, and summaries. Use this when you " +
+          "need to find decisions, patterns, debugging notes, or Q&A pages " +
+          "related to the current task.",
+        args: {
+          query: {
+            type: "string",
+            description: "Natural-language search query (e.g. 'auth middleware decision')",
+          },
+        },
+        async execute(args) {
+          const query = String(args?.query || "").trim();
+          if (!query) return "Usage: memory.recall(query='your search query')";
+          try {
+            const r = await $`uv run python ${SCRIPTS}/search_memory.py ${query}`.quiet().nothrow();
+            return r.stdout?.toString()?.trim() || "(no results found)";
+          } catch {
+            return "(memory.recall: search error)";
+          }
+        },
+      },
     },
   };
 };

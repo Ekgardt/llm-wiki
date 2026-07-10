@@ -9,6 +9,17 @@ Set the vault root (add to your shell profile):
 export LLM_WIKI_ROOT="/path/to/LLM-wiki"
 ```
 
+## At session start (MANDATORY — do this first)
+
+Read the session context file for your current knowledge state:
+```bash
+cat "$LLM_WIKI_ROOT/cache/session-context.md" 2>/dev/null
+```
+If it doesn't exist, generate it:
+```bash
+mkdir -p "$LLM_WIKI_ROOT/cache" && uv run python "$LLM_WIKI_ROOT/scripts/session_start_context.py" --output-file "$LLM_WIKI_ROOT/cache/session-context.md" 2>/dev/null && cat "$LLM_WIKI_ROOT/cache/session-context.md"
+```
+
 ## Commands
 
 ### Recall past knowledge

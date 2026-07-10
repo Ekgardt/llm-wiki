@@ -174,6 +174,9 @@ if [ -d "$HOME/.config/opencode" ] || command -v opencode &>/dev/null; then
   if [ -f "$VAULT_ROOT/scripts/llm-wiki-memory-opencode.js" ]; then
     cp -f "$VAULT_ROOT/scripts/llm-wiki-memory-opencode.js" "$PLUGIN_DIR/llm-wiki-memory.js"
     ok "OpenCode plugin installed/updated"
+    # Generate initial context file so the first session has context
+    mkdir -p "$VAULT_ROOT/cache"
+    uv run python "$VAULT_ROOT/scripts/session_start_context.py" --output-file "$VAULT_ROOT/cache/session-context.md" 2>/dev/null || true
   else
     warn "OpenCode detected but plugin source missing at $VAULT_ROOT/scripts/llm-wiki-memory-opencode.js"
   fi

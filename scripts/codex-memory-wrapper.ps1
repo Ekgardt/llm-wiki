@@ -69,6 +69,14 @@ function codex {
     $cwdBefore = (Get-Location).Path
 
     try {
+        # Generate session context file for knowledge injection.
+        # Codex reads AGENTS.md at startup; the global AGENTS.md instructs
+        # it to read this file for project knowledge state.
+        try {
+            $contextFile = Join-Path $env:LLM_WIKI_ROOT "cache\session-context.md"
+            & uv run python scripts/session_start_context.py --output-file $contextFile 2>$null | Out-Null
+        } catch {}
+
         # Invoke the real codex binary with all forwarded args.
         & $REAL_CODEX @fwdArgs
         $exitCode = $LASTEXITCODE

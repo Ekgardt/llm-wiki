@@ -491,9 +491,28 @@ def write_debug(additional: str, daily_name: str) -> None:
 
 
 def main() -> int:
+    import argparse
+
+    p = argparse.ArgumentParser(description="SessionStart context builder.")
+    p.add_argument(
+        "--output-file",
+        default=None,
+        help="Write context as plain text to this file (for non-Claude agents). "
+        "Without this flag, outputs Claude Code hook JSON to stdout.",
+    )
+    args = p.parse_args()
+
     additional = build_context()
     daily = latest_daily()
     write_debug(additional, daily.name if daily else "(none)")
+
+    if args.output_file:
+        from pathlib import Path
+
+        out_path = Path(args.output_file)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(additional, encoding="utf-8")
+        return 0
 
     out = {
         "hookSpecificOutput": {

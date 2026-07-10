@@ -135,6 +135,9 @@ if ((Get-Process "OpenCode*" -ErrorAction SilentlyContinue) -or (Test-Path $open
     if (Test-Path $openCodePluginSrc) {
         Copy-Item -LiteralPath $openCodePluginSrc -Destination $pluginDst -Force
         Ok "OpenCode plugin installed → $pluginDst"
+        # Generate initial context file so the first session has context
+        $ctxFile = Join-Path $VAULT_ROOT "cache\session-context.md"
+        try { & uv run python (Join-Path $VAULT_ROOT "scripts\session_start_context.py") --output-file $ctxFile 2>$null | Out-Null } catch {}
     } else {
         Warn "OpenCode detected but plugin source missing: $openCodePluginSrc"
     }
