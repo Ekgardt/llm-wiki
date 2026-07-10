@@ -44,7 +44,8 @@ knowledge/projects/*
 !knowledge/projects/README.md
 
 # === Personal feedback / staging ===
-knowledge/feedback/
+knowledge/feedback/*
+!knowledge/feedback/README.md
 knowledge/inbox/**
 !knowledge/inbox/README.md
 knowledge/raw/**
