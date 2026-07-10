@@ -54,6 +54,12 @@ def test_no_qmd_refs_in_skills():
     assert not hits, "qmd references found in skills (qmd CLI does not exist):\n" + "\n".join(hits)
 
 
+def test_ci_uses_current_gitleaks_action():
+    """Gitleaks must use the Node 24 action with an available scanner release."""
+    workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+    assert "gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e" in workflow
+
+
 # ─── 2. install.ps1 — no undefined PowerShell variables ─────────────
 
 def test_install_ps1_no_undefined_vars():

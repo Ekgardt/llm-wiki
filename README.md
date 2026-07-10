@@ -1,9 +1,9 @@
 # LLM Wiki
 
-[![Tests](https://img.shields.io/badge/tests-217%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://img.shields.io/badge/tests-218%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-3.3.2-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-3.3.3-blue.svg)](CHANGELOG.md)
 
 **A local-first memory system for AI agents. Markdown files, git-tracked, zero cloud dependencies.**
 
@@ -123,13 +123,13 @@ curl -fsSL https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.sh | 
 irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 ```
 
-> **Production note:** The `main` branch URLs above are mutable. For production or audited deployments, pin to a specific release tag URL instead, e.g. `https://raw.githubusercontent.com/Ekgardt/llm-wiki/v3.3.2/install.sh`.
+> **Production note:** The `main` branch URLs above are mutable. For production or audited deployments, pin to a specific release tag URL instead, e.g. `https://raw.githubusercontent.com/Ekgardt/llm-wiki/v3.3.3/install.sh`.
 
 The installer:
 1. Checks prerequisites (Python 3.10+, git)
 2. Installs `uv` (fast Python package manager) if missing
 3. Syncs dependencies (`uv sync`)
-4. Runs the test suite (217 tests collected in 0.26s tests)
+4. Runs the test suite (218 tests)
 5. Sets `LLM_WIKI_ROOT` environment variable (user scope)
 6. Creates runtime dirs (`cache/`, `logs/`, `run/`, `cognee/` — gitignored)
 7. Registers scheduled maintenance (cron on Unix, Task Scheduler on Windows)
@@ -142,7 +142,7 @@ The installer:
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync
-uv run pytest -q          # 217 tests collected in 0.26s tests should pass
+uv run pytest -q          # 218 tests should pass
 ```
 
 ### Verify it works

@@ -66,7 +66,7 @@ The principles below summarize the non-negotiable invariants.
 - Concurrency-sensitive code (`maybe_compile.py`, `memory_queue.py`) needs explicit race-condition tests
 - Tests must be hermetic — no dependency on a real LLM, real network, or pre-existing state beyond what conftest.py bootstraps
 - **Minimum coverage**: all scripts with ranking/scoring/archival logic MUST have dedicated tests. This includes: `search_memory.py`, `graph_neighbors.py`, `feedback_capture.py`, `archive_stale.py`, `build_guardrails.py`
-- **217 tests collected in 0.26s tests** as of v3.3.2 — see `tests/` for patterns
+- **218 tests** as of v3.3.3 — see `tests/` for patterns
 
 ## Test commands
 
@@ -90,7 +90,7 @@ Before tagging a release or updating public marketing numbers:
 
 1. **English README first** — `README.md` is the source of truth.
 2. **Sync i18n the same day** — update `README.ru.md` and `README.zh-CN.md` so they match:
-   - version string (e.g. v3.3.2)
+    - version string (e.g. v3.3.3)
    - test count (must equal `pytest --collect-only` / live suite)
    - install URLs (`Ekgardt/llm-wiki`)
    - architecture (three-zone / `knowledge/`)

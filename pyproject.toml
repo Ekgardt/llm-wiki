@@ -1,6 +1,6 @@
 [project]
 name = "llm-wiki"
-version = "3.3.2"
+version = "3.3.3"
 requires-python = ">=3.10"
 dependencies = []
 
@@ -32,4 +32,3 @@ target-version = "py310"
 select = ["F", "E", "W", "I", "UP"]
 # Docstring-heavy scripts legitimately have long lines in inline examples.
 ignore = ["E501"]
-

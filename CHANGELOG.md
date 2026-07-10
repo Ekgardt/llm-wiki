@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [3.3.3] — 2026-07-10
+
+### Fixed
+- **GitHub Actions Gitleaks** — upgraded to the Node 24 `v3.0.0` action pinned by immutable commit SHA. The previous action attempted to download the removed Gitleaks 8.24.3 Windows archive and failed before tests ran.
+
+### Tests
+- **218 tests** — added a regression guard that prevents CI from reverting to the unavailable Gitleaks action.
+
 ## [3.3.2] — 2026-07-09
 
 ### Fixed

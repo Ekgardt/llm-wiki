@@ -1,9 +1,9 @@
 # LLM Wiki
 
-[![Tests](https://img.shields.io/badge/tests-217%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://img.shields.io/badge/tests-218%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-3.3.2-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-3.3.3-blue.svg)](CHANGELOG.md)
 
 **Локальная система памяти для AI-агентов. Markdown-файлы, версионирование в git, без облачных зависимостей.**
 
