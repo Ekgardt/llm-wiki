@@ -75,7 +75,6 @@ def _extract_activity(daily_path: Path, project_slug: str | None, days: int) -> 
         if not header_match:
             continue
         ts = header_match.group(1)
-        event_info = header_match.group(2)
 
         # Detect agent
         agent = _detect_agent(block)
@@ -101,8 +100,14 @@ def _extract_activity(daily_path: Path, project_slug: str | None, days: int) -> 
             elif in_section and BULLET_RE.match(line.strip()):
                 items.append({"type": in_section, "text": BULLET_RE.match(line.strip()).group(1)[:120]})
 
-        # Also capture tool breadcrumbs
-        tool_matches = re.findall(r"\[(\d{2}:\d{2}:\d{2})\]\s+tool\s+\|\s+(\w+)\s+\|\s+(\w+)\s+\|\s+(\w+)\s+(.*)", block)
+        # Also capture tool breadcrumbs.
+        # Writer format (tool_breadcrumb_append.py / post_tool_capture.py):
+        #   - `[HH:MM:SS] tool | <session8> | <slug> | <Tool>` <target>
+        tool_matches = re.findall(
+            r"\[(\d{2}:\d{2}:\d{2})\]\s+tool\s+\|\s+(\S+)\s+\|\s+(\S+)\s+\|\s+(\S+)`?\s*(.*)",
+            block,
+            re.IGNORECASE,
+        )
         for tool_ts, session, slug, tool_name, target in tool_matches:
             if project_slug and slug.lower() != project_slug.lower():
                 continue

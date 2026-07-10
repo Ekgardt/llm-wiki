@@ -46,8 +46,21 @@ INDEX = MEMORY / "index.md"
 LOG = MEMORY / "log.md"
 
 ALLOWED_CATEGORIES = frozenset(
-    {"concepts", "decisions", "patterns", "debugging", "qa", "entities", "syntheses", "comparisons", "connections", "workflows"}
+    {"concepts", "decisions", "patterns", "debugging", "qa"}
 )
+
+# YAML frontmatter delimiter (used for supersession marking).
+FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
+
+# Singular form per category — used for OKF `type:` frontmatter. Avoids the
+# `rstrip('s')` footgun (would mangle entities→entitie, syntheses→synthese).
+CATEGORY_SINGULAR = {
+    "concepts": "concept",
+    "decisions": "decision",
+    "patterns": "pattern",
+    "debugging": "debugging",
+    "qa": "qa",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -134,22 +147,26 @@ def existing_knowledge_snapshot() -> str:
         - neither                       → bare filename
     """
     lines: list[str] = []
-    for cat in ("concepts", "decisions", "patterns", "debugging", "qa"):
-        d = KNOWLEDGE / cat
-        if not d.exists():
+    if not KNOWLEDGE.exists():
+        return "(no pages yet)"
+    # Flat scan of the entire knowledge tree so pages living outside the
+    # legacy category dirs (flat-OKF layout) are still surfaced for dedup.
+    for md in sorted(KNOWLEDGE.rglob("*.md")):
+        # Skip the archive subtree (archived pages are not dedup candidates).
+        if "archive" in md.parts:
             continue
-        for md in sorted(d.glob("*.md")):
-            title, summary = _extract_title_and_summary(md)
-            head = f"- {cat}/{md.name}"
-            # Use «» around title to visually distinguish from summary
-            # and to give the LLM a clear "title goes here" anchor.
-            if title and title != md.stem and summary:
-                head += f" — «{title}»: {summary}"
-            elif title and title != md.stem:
-                head += f" — «{title}»"
-            elif summary:
-                head += f" — {summary}"
-            lines.append(head)
+        title, summary = _extract_title_and_summary(md)
+        rel = md.relative_to(KNOWLEDGE).as_posix()
+        head = f"- {rel}"
+        # Use «» around title to visually distinguish from summary
+        # and to give the LLM a clear "title goes here" anchor.
+        if title and title != md.stem and summary:
+            head += f" — «{title}»: {summary}"
+        elif title and title != md.stem:
+            head += f" — «{title}»"
+        elif summary:
+            head += f" — {summary}"
+        lines.append(head)
     return "\n".join(lines) or "(no pages yet)"
 
 
@@ -387,8 +404,7 @@ def _check_contradictions_pre_write(
     detection still runs in nightly lint. This catches the obvious cases
     without an LLM call.
     """
-    target_dir = KNOWLEDGE / category
-    if not target_dir.exists():
+    if not KNOWLEDGE.exists():
         return []
 
     contradictions = []
@@ -409,7 +425,11 @@ def _check_contradictions_pre_write(
         re.search(p, new_body, re.IGNORECASE) for p in negation_patterns
     )
 
-    for existing in target_dir.glob("*.md"):
+    # Flat scan of the entire knowledge tree so contradictions are caught
+    # across category boundaries (flat-OKF layout), not just within one dir.
+    for existing in KNOWLEDGE.rglob("*.md"):
+        if "archive" in existing.parts:
+            continue
         if existing.stem == new_slug:
             continue  # same page, skip
         try:
@@ -440,6 +460,33 @@ def _check_contradictions_pre_write(
     return contradictions
 
 
+def _mark_superseded(old_path: Path, new_slug: str) -> None:
+    """Mark an existing page as superseded via frontmatter, not content edits.
+
+    Inserts ``status: superseded`` and ``superseded_by: [[<new-slug>]]`` at
+    the top of the old page's YAML block. If the page has no frontmatter,
+    a new YAML block is prepended. The page body is left untouched so the
+    historical record is preserved verbatim.
+    """
+    try:
+        content = old_path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    if "status: superseded" in content:
+        return  # already marked
+    supersede_lines = f"status: superseded\nsuperseded_by: [[{new_slug}]]\n"
+    if FRONTMATTER_RE.match(content):
+        content = re.sub(
+            r"^(---\s*\n)",
+            r"\1" + supersede_lines,
+            content,
+            count=1,
+        )
+    else:
+        content = f"---\n{supersede_lines}---\n\n{content}"
+    old_path.write_text(content, encoding="utf-8")
+
+
 def _execute_plan(
     plan: dict,
     daily_paths: list[Path],
@@ -454,7 +501,6 @@ def _execute_plan(
     - For action="create": write if file doesn't exist.
     - For action="update": append a new section to existing file.
     """
-    import re as _re
 
     operations = plan.get("operations", []) or []
     audit_in = plan.get("audit", {}) or {}
@@ -479,7 +525,7 @@ def _execute_plan(
         if not slug:
             continue
         # Sanitize slug: lowercase, kebab-case, no extension.
-        slug = _re.sub(r"[^a-z0-9-]", "-", slug.lower()).strip("-")
+        slug = re.sub(r"[^a-z0-9-]", "-", slug.lower()).strip("-")
         if not slug:
             continue
 
@@ -513,7 +559,7 @@ def _execute_plan(
         # page. If the body_markdown contains claims that directly oppose
         # an existing knowledge page with the same category, flag it.
         body_md = op.get("body_markdown", "")
-        title = op.get("title", slug)
+        title = op.get("title") or slug.replace("-", " ").title()
         contradictions = _check_contradictions_pre_write(
             category, slug, title, body_md
         )
@@ -524,26 +570,14 @@ def _execute_plan(
 
         if contradictions:
             # Auto-supersede only on real writes (never during --dry-run).
+            # Mark via frontmatter (status: superseded + superseded_by),
+            # NOT by editing the page body — preserves the historical record.
             for old_path in contradictions:
-                try:
-                    old_content = old_path.read_text(encoding="utf-8")
-                    if "superseded_by" not in old_content:
-                        supersede_note = (
-                            f"\n\n## Superseded ({datetime.now().strftime('%Y-%m-%d')})\n"
-                            f"This page has been superseded by "
-                            f"[[knowledge/notes/{category}/{slug}]].\n"
-                        )
-                        old_path.write_text(
-                            old_content.rstrip() + supersede_note,
-                            encoding="utf-8",
-                        )
-                except OSError:
-                    pass
+                _mark_superseded(old_path, slug)
 
         target_dir.mkdir(parents=True, exist_ok=True)
 
         # Build the page markdown.
-        title = op.get("title", slug.replace("-", " ").title())
         summary = op.get("summary", "")
         body_section = op.get("body_section", "Lesson")
         body_md = op.get("body_markdown", "")
@@ -571,10 +605,12 @@ def _execute_plan(
 
         frontmatter = (
             "---\n"
-            f"type: {category.rstrip('s') if category.endswith('s') else category}\n"
+            f"type: {CATEGORY_SINGULAR.get(category, category)}\n"
             f'title: "{str(title).replace(chr(92), chr(92)+chr(92)).replace(chr(34), chr(92)+chr(34)).replace(chr(10), " ").replace(chr(13), " ")}"\n'
             f'description: "{str(summary).replace(chr(92), chr(92)+chr(92)).replace(chr(34), chr(92)+chr(34)).replace(chr(10), " ").replace(chr(13), " ")}"\n'
             f"timestamp: {datetime.now().isoformat(timespec='seconds')}\n"
+            f"confidence: medium\n"
+            f"source_authority: ai-derived\n"
             "---\n\n"
         )
 
@@ -609,6 +645,11 @@ def _execute_plan(
             )
             target_path.write_text(existing.rstrip() + update_block, encoding="utf-8")
             touched.append(str(target_path.relative_to(ROOT).as_posix()))
+        else:
+            dropped.append({
+                "slug": slug,
+                "reason": f"unhandled action={action!r} or target exists={target_path.exists()}",
+            })
 
     # Build the audit text in the legacy COMPILE_DONE / COMPILE_AUDIT
     # format so existing parsers continue to work.
@@ -669,7 +710,6 @@ def parse_compile_audit(raw: str) -> dict:
         ("contradictions", r"(\d+)\s+contradictions handled"),
         ("rejected", r"(\d+)\s+pages rejected"),
     ]
-    import re
 
     for key, pattern in mappings:
         m = re.search(pattern, body, re.IGNORECASE)
@@ -704,8 +744,10 @@ def _compile_succeeded(raw: str) -> bool:
     """Did the LLM compile run complete with a valid COMPILE_DONE marker?
 
     Distinguishes three cases:
-      - SDK missing: `raw == "(claude-agent-sdk not available)"` → False.
-      - Runtime exception: `raw` starts with `"(compile failed:"` → False.
+      - No backend / backend failure: `raw` starts with `(` (sentinels
+        emitted by run_compile such as `(llm_client not available)`,
+        `(no LLM response)`, `(no JSON found in response; …)`,
+        `(JSON parse failed: …)`) → False.
       - LLM produced output but never emitted the COMPILE_DONE marker
         (truncated / rate-limited / crashed mid-response) → False.
       - LLM produced output with a COMPILE_DONE marker → True.

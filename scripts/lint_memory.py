@@ -1,9 +1,9 @@
 """Structural + semantic lint across the vault.
 
-Despite the filename, this now covers BOTH `memory/` and `knowledge/notes/` trees.
-The name is preserved for backward compatibility with hooks and docs.
+Covers the `knowledge/notes/` tree (filename kept for backward compat with
+hooks and docs that still reference `lint_memory`).
 
-Twelve checks (Phase 2 expanded the original seven + Phase 6 temporal):
+Thirteen checks (Phase 2 expanded the original seven + Phase 6 temporal):
  1. broken_wikilinks — wikilinks whose target does not resolve to a file.
  2. orphan_pages — knowledge/wiki pages not referenced by the relevant index.md.
  3. orphan_daily_logs — daily logs with no compile recorded in state.json.
@@ -26,7 +26,7 @@ Usage:
     uv run python scripts/lint_memory.py --sparse-words 300
 
 Writes a report to `$LLM_WIKI_STATE_ROOT/logs/lint-YYYY-MM-DD.md`
-(default: ``$LLM_WIKI_ROOT/../LLM-wiki-state/logs/``) and prints a summary.
+(default: ``$LLM_WIKI_ROOT/logs/`` — inside the vault, gitignored) and prints a summary.
 """
 from __future__ import annotations
 
@@ -476,7 +476,6 @@ def check_temporal_validity(pages: list[Path]) -> list[str]:
             vt_date = valid_to[:10]  # take just the date part
             if vt_date < today:
                 # Check status — if still 'active', flag it
-                status_m = TYPE_FIELD_RE.search(fm_text)  # reuse for status check
                 status_val = ""
                 sm = re.search(r"^status:\s*(.+?)\s*$", fm_text, re.MULTILINE)
                 if sm:
@@ -625,7 +624,8 @@ def run_checks(args: argparse.Namespace) -> dict[str, list[str]]:
     all_pages_for_contradictions: list[Path] = []
 
     for label, pages, index in scopes:
-        tree_all = list(_iter_tree_md(KNOWLEDGE)) + list(_iter_tree_md(MEMORY))
+        # Single-tree scan (three-zone: notes is the only knowledge subtree).
+        tree_all = list(_iter_tree_md(KNOWLEDGE))
         # Deduplicate by resolved path
         seen: set[Path] = set()
         unique_tree: list[Path] = []
@@ -683,16 +683,12 @@ def main() -> int:
     findings = run_checks(args)
     report = write_report(findings, args)
     total = sum(len(v) for v in findings.values())
-    # Report lives outside ROOT now (runtime in $LLM_WIKI_STATE_ROOT/) — show the
-    # path relative to its own parent for a compact display, falling back to
-    # absolute if that also fails.
+    # Report lives inside the vault (runtime logs/ is gitignored) — show the
+    # path relative to ROOT for a compact display, absolute as fallback.
     try:
         display = report.relative_to(ROOT).as_posix()
     except ValueError:
-        try:
-            display = report.relative_to(ROOT.parent).as_posix()
-        except ValueError:
-            display = report.as_posix()
+        display = report.as_posix()
     print(f"lint_memory: {total} finding(s). Report: {display}")
     for section, items in findings.items():
         if items:

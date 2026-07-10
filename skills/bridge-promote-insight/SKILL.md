@@ -13,16 +13,16 @@ Use this when an insight discovered during coding/work sessions deserves to beco
 Procedure:
 1. Read the relevant page(s) from `knowledge/notes/`.
 2. Decide whether the insight belongs in:
-   - `knowledge/notes/`
-   - `knowledge/notes/`
-   - `knowledge/notes/`
-   - `knowledge/notes/` (cross-concept edge observations)
+   - `knowledge/notes/` as a concept page
+   - `knowledge/notes/` as a synthesis page
+   - `knowledge/notes/` as a comparison page
+   - `knowledge/notes/` as a connection (cross-concept edge observation)
    - or only as a cross-link from existing pages.
 3. Create or update the target wiki page. Required elements on the new wiki page:
    - standard wiki frontmatter + `One-sentence summary:` line
    - a `## Source` block that names the memory origin page explicitly, e.g.:
      > Origin: session memory — `knowledge/notes/<category>/<slug>` (distilled from `knowledge/daily/YYYY-MM-DD.md` [HH:MM:SS]).
-   - a closing paragraph stating *"This page is a **promotion from session memory**, not a compilation of external source material."* — tells future readers why there is no `raw/` citation.
+   - a closing paragraph stating *"This page is a **promotion from session memory**, not a compilation of external source material."* — tells future readers why there is no `knowledge/raw/` citation.
 4. Add a `## Promoted to wiki` section to the **memory origin page** (append, don't replace earlier content). Format:
    ```
    ## Promoted to wiki

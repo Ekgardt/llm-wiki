@@ -28,7 +28,7 @@ These live in the working copy but must not ship in any distributable bundle:
 | `.git/` | Internal git metadata. Bloats the archive and leaks branch/reflog history. | A fresh `git archive` omits it automatically. |
 | `.claude/settings.local.json` | **Machine-local Claude Code permissions and overrides.** Contains your personal `allow/deny` lists, may reference absolute paths outside the vault. | Gitignored. |
 | `gitleaks-report.json`, `gitleaks-report.sarif` | Local security-scan output. Often filled with noise from `.venv/` deps. | Gitignored. |
-| `$LLM_WIKI_STATE_ROOT/` (`$LLM_WIKI_STATE_ROOT/` by default) | Runtime state: hashes, dedupe markers, compile logs, QMD index, hook-error log. Lives OUTSIDE the vault — `git archive` can't reach it, but a naive `zip -r` of the vault's parent would. | Lives outside the vault by design. |
+| `cache/`, `logs/`, `run/` | **Runtime state: hashes, dedupe markers, compile logs, QMD index, hook-error log.** Live inside the vault but are gitignored — `git archive` omits them automatically, but a naive `zip -r` of the vault would include them. | Gitignored. The post-build `_verify_archive` step blocks them. |
 
 ## Wrong way: raw `zip -r`
 
@@ -78,8 +78,8 @@ Then run `install.ps1` / `install.sh` (or follow [[docs/USER-GUIDE|User guide]])
 If you want to share only a subset (e.g. only `knowledge/notes/`), use sparse checkout or extract a selected path:
 
 ```bash
-# Extract only knowledge/notes/concepts from HEAD into a separate tarball
-git archive HEAD --format=tar knowledge/notes/concepts | tar -xf - -C /tmp/export
+# Extract only knowledge/notes from HEAD into a separate tarball
+git archive HEAD --format=tar knowledge/notes | tar -xf - -C /tmp/export
 ```
 
 ## Related

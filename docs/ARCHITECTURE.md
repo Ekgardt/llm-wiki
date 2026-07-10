@@ -7,12 +7,14 @@ This document explains **why** the system is shaped the way it is. For **how to 
 ```
 CODE          scripts/  tests/  docs/  skills/  rules/  integrations/  benchmark/
 KNOWLEDGE     knowledge/{daily,notes,projects,raw,inbox,feedback}
-RUNTIME       $LLM_WIKI_STATE_ROOT/{run,logs,cache}   # OUTSIDE vault
-              default: <vault-parent>/LLM-wiki-state/
+RUNTIME       cache/  logs/  run/   # inside vault, gitignored
+              Override root via LLM_WIKI_STATE_ROOT (tests use a temp dir).
 ```
 
-- **Never** put live runtime under the vault root (`cache/`, `logs/`, `run/`, `state/`).
-- Public source develops code; installed vault (`$LLM_WIKI_ROOT`) holds user knowledge.
+- `cache/`, `logs/`, `run/` live inside the vault as gitignored
+  dirs — single-checkout portability, git never tracks their churn.
+- Public source develops code; installed vault (`$LLM_WIKI_ROOT`) holds
+  user knowledge + live runtime data.
 
 ## Design principles (the 7 axioms)
 
@@ -81,13 +83,13 @@ The slug system (5-step collision resolution) lets a single vault track unlimite
 └──────────────────────────┬───────────────────────────────────────────┘
                            ↓
 ┌──────────────────────────────────────────────────────────────────────┤
-│  SEARCH + RETRIEVAL LAYER (on-demand, <30ms)                        │
+│  SEARCH + RETRIEVAL LAYER (on-demand, ~41ms p50)                     │
 │                                                                       │
 │  search_memory.py ── Triple-fusion:                                  │
 │    BM25 (FTS5, weight=2) + Vector (MiniLM, weight=1)                │
 │    + Graph-neighbor (wikilinks, weight=0.5)                         │
 │  Weighted RRF fusion with title/filename boost + short-circuit       │
-│  Recall@2 = 100%, MRR = 0.952                                       │
+│  Recall@5 = 100%, MRR = 0.942, p50 = 41ms                               │
 └──────────────────────────┬───────────────────────────────────────────┘
                            ↓
 ┌──────────────────────────────────────────────────────────────────────┤
@@ -121,17 +123,22 @@ The slug system (5-step collision resolution) lets a single vault track unlimite
 
 ## Memory taxonomy
 
-| Type | Location | Purpose | Archive threshold |
+Pages live **flat** as `<slug>.md` under `knowledge/notes/` by default (the
+compile pipeline writes flat slugs). Typed subdirectories (`concepts/`,
+`decisions/`, etc.) are optional and currently unused — both layouts are
+valid and lint covers them equally.
+
+| Type | Location (flat or typed subdir) | Purpose | Archive threshold |
 |---|---|---|---|
-| `concept` | `knowledge/notes/`, `knowledge/notes/concepts/` | Mental models | **Never** |
-| `decision` | `knowledge/notes/decisions/` | Dated choices with rationale | **Never** |
-| `pattern` | `knowledge/notes/patterns/` | Recurring approaches | 180 days |
-| `debugging` | `knowledge/notes/debugging/` | Symptom → cause → fix | 60 days |
-| `qa` | `knowledge/notes/`, `knowledge/notes/qa/` | Settled answers | 365 days |
-| `gap` | `knowledge/notes/` | Not-yet-written knowledge | 90 days |
-| `workflow` | `knowledge/notes/workflows/` | Auto-promoted playbooks | 365 days |
-| `fact` | `knowledge/notes/facts/` | Atomic facts | 120 days |
-| `skill` | `skills/` | Agent workflows | **Never** |
+| `concept` | `knowledge/notes/<slug>.md` or `…/concepts/` | Mental models | **Never** |
+| `decision` | `knowledge/notes/<slug>.md` or `…/decisions/` | Dated choices with rationale | **Never** |
+| `pattern` | `knowledge/notes/<slug>.md` or `…/patterns/` | Recurring approaches | 180 days |
+| `debugging` | `knowledge/notes/<slug>.md` or `…/debugging/` | Symptom → cause → fix | 60 days |
+| `qa` | `knowledge/notes/<slug>.md` or `…/qa/` | Settled answers | 365 days |
+| `gap` | `knowledge/notes/<slug>.md` | Not-yet-written knowledge | 90 days |
+| `workflow` | `knowledge/notes/<slug>.md` or `…/workflows/` | Auto-promoted playbooks | 365 days |
+| `fact` | `knowledge/notes/<slug>.md` or `…/facts/` | Atomic facts | 120 days |
+| `skill` | `skills/<name>/SKILL.md` | Agent workflows | **Never** |
 | `project-state` | `knowledge/projects/<slug>/state.md` | Per-project handoff | **Never** |
 
 ---

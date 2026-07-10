@@ -11,9 +11,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
@@ -137,8 +135,9 @@ def test_needs_rebuild_no_index():
 
 def test_needs_rebuild_fresh_files():
     """Returns True when source files are newer than index."""
-    import search_memory
     import time
+
+    import search_memory
 
     fake_page = MagicMock()
     fake_page.stat.return_value.st_mtime = time.time()

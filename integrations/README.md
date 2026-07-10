@@ -39,28 +39,17 @@ IDE agents (Cursor, Antigravity, VS Code Copilot) work differently from CLI agen
 |---|---|---|
 | **Auto-capture** | Hooks/plugins fire automatically | Agent must call scripts via Bash |
 | **Session classification** | FLUSH MAJOR/MINOR/OK at idle | Manual: agent records when told |
-| **Nightly compile** | Task Scheduler runs automatically | Same — vault is shared |
+| **Nightly compile** | Scheduler (Task Scheduler on Windows, cron on Unix) runs automatically | Same — vault is shared |
 | **Context injection** | SessionStart hook injects 2KB | Rules file tells agent to read files |
 | **LLM backend** | llm_client.py (5 backends) | IDE's own LLM (Cursor Pro, Gemini) |
 
 **Key insight**: the vault is **shared infrastructure**. All agents write to the same `knowledge/daily/` and read from the same `knowledge/notes/`. A decision recorded by Cursor is visible to OpenCode in its next session.
 
-## MCP Server (optional)
+## MCP Server (planned — not yet implemented)
 
-For agents that prefer MCP over Bash:
-
-```json
-{
-  "mcpServers": {
-    "llm-wiki": {
-      "command": "uv",
-      "args": ["run", "python", "/path/to/LLM-wiki/scripts/search_memory.py", "--mcp"],
-      "env": {
-        "LLM_WIKI_ROOT": "/path/to/LLM-wiki"
-      }
-    }
-  }
-}
-```
+An MCP server surface for `search_memory.py` / `query_memory.py` is on the
+roadmap. Today, agents integrate via the hooks / plugin / rules mechanisms
+described above. When the MCP server lands, this section will show a
+canonical `mcpServers` config block.
 
 (MCP server mode is planned — currently use the Bash commands above.)

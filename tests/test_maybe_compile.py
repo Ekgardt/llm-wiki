@@ -14,7 +14,6 @@ import json
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -29,7 +28,7 @@ def fake_env(tmp_path, monkeypatch):
     fake_root = tmp_path / "vault"
     fake_state = tmp_path / "state"
     fake_state.mkdir(parents=True)
-    (fake_state / "memory-state").mkdir(parents=True)
+    (fake_state / "run").mkdir(parents=True)
 
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(fake_state))
     monkeypatch.setenv("LLM_WIKI_ROOT", str(fake_root))
@@ -38,7 +37,6 @@ def fake_env(tmp_path, monkeypatch):
     for mod in ("maybe_compile", "memory_state"):
         if mod in sys.modules:
             del sys.modules[mod]
-    import memory_state
     import maybe_compile
 
     monkeypatch.setattr(maybe_compile, "ROOT", fake_root)
@@ -171,16 +169,32 @@ def test_spawn_happens_when_idle_and_work_pending(fake_env, monkeypatch):
     assert lock["pid"] == 12345
 
 
-def test_force_override_running_lock(fake_env, monkeypatch):
-    """--force spawns even if another compile is supposedly running."""
+def test_force_refuses_live_lock(fake_env, monkeypatch):
+    """--force refuses to steal a LIVE lock (race risk); prints a warning."""
     fake_env._write_lock(99999)
     monkeypatch.setattr(fake_env, "_is_pid_alive", lambda pid: True)
     monkeypatch.setattr(fake_env, "_has_pending_work", lambda: False)
     monkeypatch.setattr(fake_env, "spawn_detached", lambda *a, **kw: 55555)
 
     spawned, reason = fake_env.spawn_compile_if_idle(force=True)
+    assert spawned is False
+    assert "skipped" in reason
+    # The live lock is left intact.
+    lock = fake_env._read_lock()
+    assert lock is not None
+    assert lock["pid"] == 99999
+
+
+def test_force_proceeds_on_stale_lock(fake_env, monkeypatch):
+    """--force proceeds when the lock is stale (dead PID), bypassing the
+    pending-work gate."""
+    fake_env._write_lock(99999)  # dead PID
+    monkeypatch.setattr(fake_env, "_is_pid_alive", lambda pid: False)
+    monkeypatch.setattr(fake_env, "_has_pending_work", lambda: False)
+    monkeypatch.setattr(fake_env, "spawn_detached", lambda *a, **kw: 55555)
+
+    spawned, reason = fake_env.spawn_compile_if_idle(force=True)
     assert spawned is True
-    # Lock should now hold the new PID.
     lock = fake_env._read_lock()
     assert lock["pid"] == 55555
 

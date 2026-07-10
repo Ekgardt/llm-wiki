@@ -13,7 +13,7 @@ Safety rules:
 - A worktree is eligible for deletion only if ALL hold:
     * working tree is clean (no modified, staged, or untracked files)
     * branch is fully merged into main
-- Anything that doesn''t meet those criteria is kept and flagged in the report.
+- Anything that doesn't meet those criteria is kept and flagged in the report.
 - With `--interactive`, unmerged/dirty worktrees trigger a per-item prompt
   (requires --apply too). Default flow is non-interactive, safe, and boring.
 
@@ -25,12 +25,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-MAIN_BRANCH = "main"
+MAIN_BRANCH = os.environ.get("LLM_WIKI_MAIN_BRANCH", "main")
 
 
 @dataclass

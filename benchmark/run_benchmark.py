@@ -27,13 +27,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import statistics
 import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 INDEX_DIR = ROOT / "benchmark"
@@ -121,9 +122,11 @@ def _generate_qa_pairs() -> list[dict]:
 def _run_benchmark(
     qa_pairs: list[dict],
     semantic: bool = False,
-    k_values: list[int] = [1, 3, 5, 10],
+    k_values: list[int] | None = None,
 ) -> dict:
     """Run search against all Q&A pairs and measure metrics."""
+    if k_values is None:
+        k_values = [1, 3, 5, 10]
     from search_memory import search
 
     results = {
@@ -218,7 +221,7 @@ def _format_report(results: dict) -> str:
     lines.append("")
     lines.append("| System | Recall@5 | MRR | Latency p50 |")
     lines.append("|---|---|---|---|")
-    lines.append(f"| **LLM-Wiki ({'hybrid' if results['semantic'] else 'BM15'})** | **{results['recall_at_k'].get(5, 0):.1%}** | **{results['mrr']:.4f}** | **{results['latency_p50_ms']}ms** |")
+    lines.append(f"| **LLM-Wiki ({'hybrid' if results['semantic'] else 'BM25'})** | **{results['recall_at_k'].get(5, 0):.1%}** | **{results['mrr']:.4f}** | **{results['latency_p50_ms']}ms** |")
     lines.append("| agentmemory (hybrid) | 95.2% | 88.2% | 14ms |")
     lines.append("| agentmemory (BM25 fallback) | 86.2% | 71.5% | <1ms |")
     lines.append("| Zep | 94.7% (LoCoMo) | n/a | 155ms |")

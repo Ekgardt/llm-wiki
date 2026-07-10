@@ -53,18 +53,53 @@ from memory_state import ROOT  # noqa: E402
 # Paths that MUST NOT appear in an export archive. All gitignored, so
 # `git archive` cannot include them — this list is the verification
 # post-check, catching archives built via other tools (e.g. `zip -r`).
-FORBIDDEN_PATH_PATTERNS = (
-    ".venv/",
-    ".git/",
-    ".pytest_cache/",
-    "__pycache__/",
-    ".obsidian/",
-    ".obsidian/workspace.json",
-    ".claude/settings.local.json",
-    "gitleaks-report.json",
-    "gitleaks-report.sarif",
-    "LLM-wiki-state/",  # runtime state — lives outside vault
+#
+# Each entry is (pattern, anchor):
+#   "root"     — matches only when the archive entry STARTS WITH pattern
+#                (e.g. "cache/" matches "cache/foo.md" but NOT
+#                "knowledge/raw/cache-effects.md").
+#   "anywhere" — substring match anywhere in the path (for specific files
+#                like ".claude/settings.local.json").
+#
+# [L-001] Previous versions used bare `pattern in name` which caused
+# false positives on legitimate nested paths (e.g. a knowledge page
+# named "cache-effects.md" was blocked by the "cache/" pattern).
+FORBIDDEN_PATH_PATTERNS: tuple[tuple[str, str], ...] = (
+    # Top-level dirs (root-anchored — nested occurrences are NOT blocked).
+    (".venv/", "root"),
+    (".git/", "root"),
+    (".pytest_cache/", "root"),
+    ("__pycache__/", "root"),
+    (".obsidian/", "root"),
+    ("cache/", "root"),
+    ("logs/", "root"),
+    ("run/", "root"),
+    ("state/", "root"),
+    ("wiki/", "root"),
+    ("memory/", "root"),
+    ("outputs/", "root"),
+    (".ci-lint-state/", "root"),
+        ("LLM-wiki-state/", "root"),
+    # Specific files (anywhere match — these are unique enough to be safe).
+    (".obsidian/workspace.json", "anywhere"),
+    (".claude/settings.local.json", "anywhere"),
+    ("gitleaks-report.json", "anywhere"),
+    ("gitleaks-report.sarif", "anywhere"),
 )
+
+
+def _is_forbidden(name: str, pattern: str, anchor: str) -> bool:
+    """Check whether *name* matches a forbidden *pattern*.
+
+    For ``"root"`` anchored patterns the entry must start with the pattern
+    (so ``cache/`` matches ``cache/foo.md`` but not
+    ``knowledge/raw/cache-effects.md``).  For ``"anywhere"`` patterns a
+    plain substring check is used.
+    """
+    if anchor == "root":
+        stripped = pattern.rstrip("/")
+        return name == stripped or name.startswith(pattern)
+    return pattern in name
 
 
 def parse_args() -> argparse.Namespace:
@@ -186,9 +221,9 @@ def _verify_archive(output: Path) -> int:
 
     # Find any forbidden matches
     hits: list[tuple[str, str]] = []  # (pattern, matched_file)
-    for pattern in FORBIDDEN_PATH_PATTERNS:
+    for pattern, anchor in FORBIDDEN_PATH_PATTERNS:
         for name in names:
-            if pattern in name:
+            if _is_forbidden(name, pattern, anchor):
                 hits.append((pattern, name))
                 break  # one example per pattern is enough
 

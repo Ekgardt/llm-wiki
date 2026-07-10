@@ -3,6 +3,8 @@ type: concept
 title: "Provenance Rule 6: Mark Uncertainty Explicitly"
 description: "CLAUDE.md rule 6 — 'mark uncertainty explicitly' — is the root constraint that justifies preliminary flagging, editorial notes, and every 'inferred from…' caveat in this vault."
 timestamp: 2026-07-03T05:41:37
+confidence: medium
+source_authority: user
 ---
 # Provenance Rule 6: Mark Uncertainty Explicitly
 
@@ -24,10 +26,12 @@ Rule 6 is cited in multiple session events as the justification for convention c
 ## Evidence
 - `CLAUDE.md` rule 6: "Mark uncertainty explicitly."
 - `knowledge/daily/2026-04-13.md` [00:57:04] — rule 6 invoked when deciding how to handle memory-compiler content that had no raw source.
-- `knowledge/notes/decisions/flag-inferred-content-as-preliminary.md` — decision page explicitly grounded in rule 6.
+- `knowledge/notes/flag-inferred-content-as-preliminary.md` — decision page explicitly grounded in rule 6.
 
 ## Related
 - [[Preliminary Flagging]] (wiki) — the public-facing convention derived from this rule.
 - [[knowledge/notes/flag-inferred-content-as-preliminary]] — dated decision applying the rule.
 - [[knowledge/notes/editorial-notes-pattern]] — a different operationalization of the same rule.
 - [[knowledge/notes/inbox-vs-raw-after-compile]] — settled Q that invokes this rule to justify its answer.
+- [[2026-04-13 Three Conventions One Root|Three Conventions, One Root]] — connection page showing three conventions that operationalize this rule.
+- [[knowledge/notes/add-reciprocal-backlinks-at-creation]] — pattern that makes relationships explicit, grounded in this rule.

@@ -17,8 +17,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import os
-import re
 import subprocess
 import sys
 from datetime import datetime
@@ -169,9 +167,27 @@ def bootstrap(cwd: str, apply: bool = False) -> str:
     # Collect information
     timeline = _extract_git_timeline(cwd)
     readme_summary = _extract_readme_summary(cwd)
+    # Redact secrets from README content before it lands in a vault file
+    # that may later be exported or shared (mirrors the secret_redact pass
+    # that all capture hooks run).
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from secret_redact import redact_secrets
+        readme_summary = redact_secrets(readme_summary)
+    except Exception:  # noqa: BLE001
+        pass
     tech_stack = _extract_tech_stack(cwd)
     docs_structure = _extract_docs_structure(cwd)
     git_remote = _run_git(cwd, "remote", "get-url", "origin")
+    # Redact embedded credentials (token:secret@host) before the URL lands
+    # in a vault file that may later be exported or shared. Mirrors the
+    # secret_redact pass that all capture hooks run.
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from secret_redact import redact_secrets
+        git_remote = redact_secrets(git_remote)
+    except Exception:  # noqa: BLE001
+        pass
     last_commit = _run_git(cwd, "log", "-1", "--format=%ci")
 
     # Build the bootstrap page
@@ -201,7 +217,7 @@ def bootstrap(cwd: str, apply: bool = False) -> str:
         parts.append("")
 
     if git_remote:
-        parts.append(f"## Git remote")
+        parts.append("## Git remote")
         parts.append(f"- `{git_remote}`")
         parts.append("")
 

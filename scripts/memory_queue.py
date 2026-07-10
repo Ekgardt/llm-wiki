@@ -29,11 +29,11 @@ from __future__ import annotations
 import json
 import os
 import sys
-import time
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 
 def _queue_dir() -> Path:
@@ -46,7 +46,7 @@ def _queue_dir() -> Path:
             state_root = Path(env)
         else:
             vault = Path(os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent))
-            state_root = vault.resolve().parent / "LLM-wiki-state"
+            state_root = vault.resolve()
     q = Path(state_root) / "run" / "queue"
     q.mkdir(parents=True, exist_ok=True)
     return q
@@ -134,6 +134,11 @@ def drain_with(processor: Callable[[dict], bool], max_tasks: int = 10) -> dict[s
 
     Stops after `max_tasks` (default 10) to bound work per drain session.
     Returns counts: {"ok": N, "failed": M, "skipped": K}.
+
+    Lease: each task file is renamed to ``.processing`` before the processor
+    runs, so two concurrent drainers cannot pick up the same task. On
+    success the ``.processing`` file is deleted; on failure it is renamed
+    back to ``.json`` and the attempt counter is bumped.
     """
     counts = {"ok": 0, "failed": 0, "skipped": 0}
     pending = list_pending()
@@ -152,15 +157,38 @@ def drain_with(processor: Callable[[dict], bool], max_tasks: int = 10) -> dict[s
                     continue
             except (ValueError, TypeError):
                 pass
+        # Acquire a lease: rename *.json → *.processing so concurrent
+        # drainers don't pick up the same task.
+        path_str = task.pop("_path", "")
+        path = Path(path_str) if path_str else None
+        lease_path = path.with_suffix(".processing") if path else None
+        if path is None or lease_path is None:
+            counts["skipped"] += 1
+            continue
+        try:
+            path.rename(lease_path)
+        except OSError:
+            # Another drainer already leased it, or the file vanished.
+            counts["skipped"] += 1
+            continue
         try:
             ok = bool(processor(task))
         except Exception as e:  # noqa: BLE001
             print(f"memory_queue: processor raised {type(e).__name__}: {e}", file=sys.stderr)
             ok = False
-        mark_attempt(task["id"], ok)
         if ok:
+            try:
+                lease_path.unlink()
+            except OSError:
+                pass
             counts["ok"] += 1
         else:
+            # Release the lease: rename back so mark_attempt can find it.
+            try:
+                lease_path.rename(path)
+            except OSError:
+                pass
+            mark_attempt(task["id"], False)
             counts["failed"] += 1
     return counts
 

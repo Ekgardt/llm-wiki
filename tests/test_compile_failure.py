@@ -14,8 +14,6 @@ loss". Keeping this test in the suite guards against re-regression.
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -59,7 +57,6 @@ def state_snapshot():
 
 def test_failed_compile_does_not_mark_hash(state_snapshot, monkeypatch):
     import compile_memory  # noqa: WPS433
-    from pathlib import Path
 
     # Patch run_compile to simulate a failure (no LLM response).
     # Phase 4+ refactor: run_compile is now sync (was async when it

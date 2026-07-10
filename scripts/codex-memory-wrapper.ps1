@@ -68,9 +68,6 @@ function codex {
     # Remember the cwd BEFORE codex runs (codex may cd internally).
     $cwdBefore = (Get-Location).Path
 
-    # Set CODEX_MEMORY_INVOKED so the wrapper can detect nesting.
-    $env:CODEX_MEMORY_INVOKED = "1"
-
     try {
         # Invoke the real codex binary with all forwarded args.
         & $REAL_CODEX @fwdArgs
@@ -86,34 +83,36 @@ function codex {
             try {
                 $reason = if ($fwdArgs -contains 'exec') { 'codex-exec' } else { 'codex-session-end' }
                 Push-Location $env:LLM_WIKI_ROOT
-                & uv run python scripts/codex_memory.py daily-log `
-                    --cwd $cwdBefore `
-                    --reason $reason `
-                    --json 2>$null | Out-Null
+                try {
+                    & uv run python scripts/codex_memory.py daily-log `
+                        --cwd $cwdBefore `
+                        --reason $reason `
+                        --json 2>$null | Out-Null
 
-                # Drain pending memory-pipeline queue: any tasks that were
-                # enqueued while no backend was available get serviced now
-                # by Codex LLM (via llm_client.py auto-detection).
-                $drainResult = & uv run python scripts/memory_queue.py drain 2>&1
-                if ($drainResult -match "drain complete") {
-                    Write-Host "[codex-memory] $drainResult" -ForegroundColor DarkGray
+                    # Drain pending memory-pipeline queue: any tasks that were
+                    # enqueued while no backend was available get serviced now
+                    # by Codex LLM (via llm_client.py auto-detection).
+                    $drainResult = & uv run python scripts/memory_queue.py drain 2>&1
+                    if ($drainResult -match "drain complete") {
+                        Write-Host "[codex-memory] $drainResult" -ForegroundColor DarkGray
+                    }
+
+                    # Fire-and-forget compile trigger. Checks concurrency lock
+                    # + pending work; spawns detached compile_memory.py if both
+                    # pass. Returns immediately — compile runs in background
+                    # and won't block the next codex invocation.
+                    & uv run python scripts/maybe_compile.py 2>&1 | ForEach-Object {
+                        Write-Host "[codex-memory] $_" -ForegroundColor DarkGray
+                    }
                 }
-
-                # Fire-and-forget compile trigger. Checks concurrency lock
-                # + pending work; spawns detached compile_memory.py if both
-                # pass. Returns immediately — compile runs in background
-                # and won't block the next codex invocation.
-                & uv run python scripts/maybe_compile.py 2>&1 | ForEach-Object {
-                    Write-Host "[codex-memory] $_" -ForegroundColor DarkGray
+                finally {
+                    Pop-Location
                 }
-
-                Pop-Location
             }
             catch {
                 # Never let memory capture failure block the user.
             }
         }
-        Remove-Item Env:\CODEX_MEMORY_INVOKED -ErrorAction SilentlyContinue
     }
 
     # Propagate codex's exit code without killing the interactive shell.
@@ -132,11 +131,6 @@ function codex-memory-status {
     try {
         Write-Host "=== Codex heartbeats (recent activity) ===" -ForegroundColor Cyan
         $statePath = Join-Path $env:LLM_WIKI_STATE_ROOT "run\state.json"
-        if (-not (Test-Path -LiteralPath $statePath)) {
-            # Legacy fallback (pre three-zone runtime layout)
-            $legacy = Join-Path $env:LLM_WIKI_STATE_ROOT "memory-state\state.json"
-            if (Test-Path -LiteralPath $legacy) { $statePath = $legacy }
-        }
         $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
         if ($state.codex_heartbeats) {
             $state.codex_heartbeats.PSObject.Properties | ForEach-Object {
@@ -165,7 +159,7 @@ function codex-memory-status {
 
         Write-Host ""
         Write-Host "=== Daily log count ===" -ForegroundColor Cyan
-        $dailies = Get-ChildItem $env:LLM_WIKI_ROOT\knowledge\daily\*.md -ErrorAction SilentlyContinue
+        $dailies = Get-ChildItem -LiteralPath (Join-Path $env:LLM_WIKI_ROOT 'knowledge\daily') -Filter *.md -ErrorAction SilentlyContinue
         Write-Host "  total daily logs: $($dailies.Count)"
 
         Write-Host ""
@@ -197,9 +191,9 @@ function codex-memory-compile {
     )
     Push-Location $env:LLM_WIKI_ROOT
     try {
-        $args = @("run", "python", "scripts/compile_memory.py")
-        if ($All) { $args += "--all" }
-        & uv @args
+        $pyArgs = @("run", "python", "scripts/compile_memory.py")
+        if ($All) { $pyArgs += "--all" }
+        & uv @pyArgs
     }
     finally {
         Pop-Location

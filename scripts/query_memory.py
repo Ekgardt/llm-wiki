@@ -47,7 +47,6 @@ def slugify(s: str, max_len: int = 60) -> str:
     deterministic so the same question maps to the same slug across
     runs.
     """
-    import hashlib
     s_norm = s.lower().strip()
     # \w = [A-Za-z0-9_] in ASCII mode, but with re.UNICODE (Python 3
     # default for str patterns) it matches any letter/digit in any
@@ -67,13 +66,13 @@ def slugify(s: str, max_len: int = 60) -> str:
 
 
 def answer(question: str) -> str:
-    """Answer a question using only content under `memory/`.
+    """Answer a question using only content under `knowledge/`.
 
-    Uses the unified llm_client (Codex CLI / OpenAI / Ollama). The
-    LLM does not get tool use — it sees the memory index inline and
-    reasons over what's described there. For deeper retrieval, the
-    user should pre-fetch relevant pages and include their content
-    in the question.
+    Uses the unified llm_client (Codex CLI / OpenCode / Claude CLI / OpenAI /
+    Ollama, auto-detected). The LLM does not get tool use — it sees the
+    knowledge index inline and reasons over what's described there. For
+    deeper retrieval, the user should pre-fetch relevant pages and include
+    their content in the question.
     """
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -118,22 +117,32 @@ def file_back(question: str, answer_text: str) -> Path:
     out = QA_DIR / f"{slug}.md"
     today = datetime.now().strftime("%Y-%m-%d")
     summary_line = question.strip().rstrip("?").strip()
-    page = f"""# {question.strip().rstrip('?')}?
-
-One-sentence summary: Settled answer to "{summary_line}" captured on {today}.
-
-## Question
-{question.strip()}
-
-## Answer
-{answer_text}
-
-## Evidence
-- Captured by `scripts/query_memory.py --file-back` on {today}.
-
-## Related
--
-"""
+    title = str(question.strip().rstrip("?")).replace(
+        chr(92), chr(92) + chr(92)
+    ).replace(chr(34), chr(92) + chr(34)).replace(chr(10), " ").replace(chr(13), " ")
+    summary_esc = str(summary_line).replace(
+        chr(92), chr(92) + chr(92)
+    ).replace(chr(34), chr(92) + chr(34)).replace(chr(10), " ").replace(chr(13), " ")
+    page = (
+        "---\n"
+        f"type: qa\n"
+        f'title: "{title}"\n'
+        f'description: "Settled answer captured on {today}"\n'
+        f"timestamp: {datetime.now().isoformat(timespec='seconds')}\n"
+        f"confidence: medium\n"
+        f"source_authority: ai-derived\n"
+        "---\n\n"
+        f"# {question.strip().rstrip('?')}?\n\n"
+        f"One-sentence summary: Settled answer to \"{summary_esc}\" captured on {today}.\n\n"
+        f"## Question\n"
+        f"{question.strip()}\n\n"
+        f"## Answer\n"
+        f"{answer_text}\n\n"
+        f"## Evidence\n"
+        f"- Captured by `scripts/query_memory.py --file-back` on {today}.\n\n"
+        f"## Related\n"
+        f"-\n"
+    )
     out.write_text(page, encoding="utf-8")
     return out
 

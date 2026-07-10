@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import sqlite3
 import sys
@@ -36,8 +35,10 @@ INDEX_DIR = STATE_ROOT / "cache"
 INDEX_FILE = INDEX_DIR / "index.sqlite"
 VECTOR_CACHE = INDEX_DIR / "vectors.json"  # JSON embedding cache (no pickle)
 
-WIKI_DIR = ROOT / "knowledge" / "notes"
 KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
+# Legacy alias retained for tests and external callers. Post-three-zone
+# consolidation both names resolve to the same single knowledge/notes tree.
+WIKI_DIR = KNOWLEDGE_DIR
 
 # Files to skip (editorial / operational, not knowledge)
 SKIP_NAMES = {"index.md", "log.md", "README.md", "state.md", "context.md"}
@@ -150,9 +151,9 @@ def _collect_pages(scope: str = "all") -> list[Path]:
     seen: set[Path] = set()
 
     roots: list[Path] = []
-    if scope in ("wiki", "all"):
-        roots.append(WIKI_DIR)
-    if scope in ("memory", "all"):
+    # All scope values resolve to the single knowledge/notes tree after the
+    # three-zone consolidation; "wiki" and "memory" are kept as legacy aliases.
+    if scope in ("wiki", "memory", "knowledge", "all"):
         roots.append(KNOWLEDGE_DIR)
 
     for root in roots:
@@ -163,7 +164,7 @@ def _collect_pages(scope: str = "all") -> list[Path]:
                 continue
             if md.name in SKIP_NAMES:
                 continue
-            if any(skip in md.parts for skip in SKIP_DIRS):
+            if any(skip in md.relative_to(root).parts for skip in SKIP_DIRS):
                 continue
             seen.add(md)
             pages.append(md)
@@ -324,6 +325,8 @@ def search(
       search and fuse results via RRF. Finds semantically related pages
       even when keywords don't match.
     """
+    if not query or not query.strip():
+        return []
     pages = _collect_pages(scope)
     if not pages:
         return []
@@ -409,8 +412,10 @@ def search(
         elif query_words and query_words.issubset(set(filename_slug.split())):
             score *= 4.0
 
-        # Path preference: if two pages have similar titles, prefer
-        # knowledge/notes/ (primary source) over knowledge/notes/ (copy)
+        # Path preference: knowledge/notes/ is the canonical durable-pages
+        # tree. (Pre-three-zone this distinguished wiki/ from memory/; both
+        # now resolve to the same knowledge/notes path, so the boost is a
+        # no-op kept for forward-compat if a second tree is reintroduced.)
         if "knowledge/notes/" in path:
             score *= 1.3  # increased from 1.2 to break ties more decisively
 
@@ -459,13 +464,10 @@ def search(
     vector_results = None
     if semantic and _have_sentence_transformers():
         try:
-            _vector_as_of_holder.as_of = as_of
-            vector_results = _vector_search(query, pages, limit * 3, project, since)
+            vector_results = _vector_search(query, pages, limit * 3, project, since, as_of)
         except Exception as e:
             print(f"  (vector search failed: {e})", file=sys.stderr)
             vector_results = None
-        finally:
-            _vector_as_of_holder.as_of = None
 
     # Optional: graph-neighbor boost (3rd retrieval signal)
     graph_boosts = None
@@ -556,6 +558,7 @@ def _vector_search(
     limit: int,
     project: str | None = None,
     since: str | None = None,
+    as_of: str | None = None,
 ) -> list[dict] | None:
     """Run vector similarity search using sentence-transformers.
 
@@ -595,7 +598,6 @@ def _vector_search(
             except (IndexError, TypeError):
                 pass
         # Temporal filter for vector hits (parity with BM25 as_of).
-        as_of = getattr(_vector_as_of_holder, "as_of", None)
         if as_of and ts:
             try:
                 if ts[:10] > as_of[:10]:
@@ -618,12 +620,6 @@ def _vector_search(
 
     results.sort(key=lambda x: x["score"], reverse=True)
     return results[:limit]
-
-
-# Thread-local-ish holder so _vector_search can read as_of without signature churn
-# for all call sites; set by search() before vector path.
-class _vector_as_of_holder:
-    as_of: str | None = None
 
 
 def _load_or_build_vectors(pages: list[Path]) -> dict | None:
@@ -720,7 +716,7 @@ def _build_vectors(pages: list[Path]) -> dict | None:
 def main() -> int:
     p = argparse.ArgumentParser(description="Built-in FTS5 search over the vault.")
     p.add_argument("query", nargs="?", default=None, help="Search query")
-    p.add_argument("--scope", choices=["all", "wiki", "memory"], default="all")
+    p.add_argument("--scope", choices=["all", "wiki", "memory", "knowledge"], default="all")
     p.add_argument("--limit", type=int, default=10)
     p.add_argument("--project", default=None, help="Boost results from this project slug")
     p.add_argument("--since", default=None, help="Only results since YYYY-MM-DD")

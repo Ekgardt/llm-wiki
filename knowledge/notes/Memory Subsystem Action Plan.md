@@ -1,21 +1,23 @@
 ---
-type: synthesis
+type: concept
 title: "Memory Subsystem Action Plan"
 description: "historical plan for turning `memory/` into a compiling knowledge subsystem — most items done, kept as a record of the build and a home for any remaining follow-ups."
 timestamp: 2026-07-03T05:41:37
+confidence: medium
+source_authority: user
 ---
 # Memory Subsystem Action Plan
 
 One-sentence summary: historical plan for turning `memory/` into a compiling knowledge subsystem — most items done, kept as a record of the build and a home for any remaining follow-ups.
 
 ## Current state (updated 2026-04-18)
-The subsystem is **operational**: daily captures flow from hooks → `daily/` → compiled knowledge pages → index → log. Automation (flush, compile, lint) runs via `scripts/` with state in `$LLM_WIKI_STATE_ROOT/` (default sibling of `$LLM_WIKI_ROOT`; on this machine: `$LLM_WIKI_STATE_ROOT/`). The `memory/` ↔ `knowledge/notes/` boundary is codified with a two-question checklist. Promotion via `bridge-promote-insight` has been exercised once (`decisions/flag-inferred-content-as-preliminary` → `[[Preliminary Flagging]]`). All original action items are done; the original open questions are resolved (see below).
+The subsystem is **operational**: daily captures flow from hooks → `daily/` → compiled knowledge pages → index → log. Automation (flush, compile, lint) runs via `scripts/` with state in `$LLM_WIKI_STATE_ROOT/run/` (inside the vault; default: `$LLM_WIKI_STATE_ROOT/run/`). The `memory/` ↔ `knowledge/notes/` boundary is codified with a two-question checklist. Promotion via `bridge-promote-insight` has been exercised once (`decisions/flag-inferred-content-as-preliminary` → `[[Preliminary Flagging]]`). All original action items are done; the original open questions are resolved (see below).
 
 ## Intended model (how it *should* work)
-Mirror the `raw/ → inbox/ → knowledge/notes/` pipeline from [[Karpathy LLM Wiki Workflow]], but scoped to *session artifacts* rather than external sources:
+Mirror the `knowledge/raw/ → knowledge/inbox/ → knowledge/notes/` pipeline from [[Karpathy LLM Wiki Workflow]], but scoped to *session artifacts* rather than external sources:
 
 - `knowledge/daily/YYYY-MM-DD.md` = raw layer (immutable session captures: compact summaries, session-end notes).
-- `knowledge/notes/<type>/<slug>.md` = compiled layer (durable, deduplicated pages by type).
+- `knowledge/notes/<slug>.md` = compiled layer (durable, deduplicated pages by type).
 - `knowledge/index.md` = navigation map (mirrors [[index]]''s role for the wiki).
 - `knowledge/log.md` = editorial changelog of compile passes.
 
@@ -36,7 +38,7 @@ Five knowledge types, each with a clear inclusion rule:
 ## Resolved questions (2026-04-18 review)
 
 - **Manual vs automatic compile passes?** **Hybrid.** Automatic compile spawns from `flush_memory.py` after `MEMORY_COMPILE_AFTER_HOUR` (default 18:00) when the day''s daily hash has changed; manual compile is still available via `/session-memory-compile` for mid-day or mid-initiative consolidation. Documented in `docs/AGENTS.md` under Automation contract.
-- **`qa` vs `decisions` overlap?** **Kept separate.** The type tie-breaker rule in `operating-model.md` resolves ambiguity — an item that fits both goes to the more actionable side (patterns > concepts; debugging > qa). First real Q&A entry exists (`qa/inbox-vs-raw-after-compile.md`), confirming the type earns its slot.
+- **`qa` vs `decisions` overlap?** **Kept separate.** The type tie-breaker rule in `operating-model.md` resolves ambiguity — an item that fits both goes to the more actionable side (patterns > concepts; debugging > qa). First real Q&A entry exists (`inbox-vs-raw-after-compile.md`), confirming the type earns its slot.
 - **Pruning of `knowledge/daily/` once entries are compiled?** **Never delete, archive later.** Policy: daily logs are append-only and kept indefinitely. When `knowledge/daily/` grows beyond comfortable Obsidian navigation (~30–50 files), compiled logs older than ~90 days get moved into `knowledge/daily/archive/YYYY-MM/`; un-compiled logs stay in the flat directory regardless of age so the next compile pass still finds them. No automation yet — current file count doesn''t warrant it. A future `scripts/archive_daily.py` will gate moves on `compiled_daily_hashes` (state.json) plus mtime when needed.
 
 ## Remaining follow-ups
@@ -45,7 +47,7 @@ None blocking. Two dormant items that will surface when volume demands it:
 - Periodic review of this plan itself — revisit if the subsystem grows a new layer or automation contract changes.
 
 ## Source
-- Live audit of `D:/LLM-knowledge/notes/memory/` on 2026-04-13, revisited 2026-04-18.
+- Live audit of `$LLM_WIKI_ROOT/knowledge/notes/` on 2026-04-13, revisited 2026-04-18.
 - `docs/operating-model.md`.
 - `docs/AGENTS.md`.
 - [[Karpathy LLM Wiki Workflow]] (pipeline analogy).

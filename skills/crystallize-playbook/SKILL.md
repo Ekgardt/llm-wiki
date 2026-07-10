@@ -5,6 +5,8 @@ argument-hint: "[optional: file or topic to crystallize from]"
 description: Extract a reusable workflow from a recent successful task and save it as a draft playbook under knowledge/notes/workflows/. The crystallization is conservative — it only extracts steps that would apply to future tasks of the same shape, never one-off project specifics.
 disable-model-invocation: true
 allowed-tools: Read Glob Grep LS Edit Write
+title: "SKILL"
+timestamp: 2026-07-03T05:41:37
 ---
 
 Crystallize a reusable workflow (a "playbook") from a recent successful task.

@@ -1,6 +1,8 @@
 ---
 title: Three Conventions, One Root (2026-04-13)
-type: connection
+type: concept
+confidence: medium
+source_authority: user
 ---
 
 # Three Conventions, One Root — 2026-04-13 Memory Review

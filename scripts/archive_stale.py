@@ -20,15 +20,14 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 
-import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import ROOT  # noqa: E402
 
 KNOWLEDGE = ROOT / "knowledge" / "notes"
-WIKI = ROOT / "knowledge" / "notes"
 # Stay inside knowledge zone (three-zone layout forbids root archive/).
 ARCHIVE_ROOT = ROOT / "knowledge" / "notes" / "archive"
 
@@ -101,8 +100,14 @@ def _archive_page(md: Path, apply: bool) -> str:
     """Move page to archive/YYYY/ and add status: archived to frontmatter."""
     year = datetime.now().strftime("%Y")
     rel = md.relative_to(ROOT)
-    # Determine archive path: archive/<original_subpath>
-    archive_path = ARCHIVE_ROOT / year / rel.parent / md.name
+    # Destination is relative to the KNOWLEDGE tree (drop the redundant
+    # knowledge/notes/ prefix so archived pages don't land at a doubled path).
+    try:
+        rel_under = md.relative_to(KNOWLEDGE)
+        dest_subdir = rel_under.parent
+    except ValueError:
+        dest_subdir = rel.parent
+    archive_path = ARCHIVE_ROOT / year / dest_subdir / md.name
 
     if apply:
         try:
@@ -121,9 +126,16 @@ def _archive_page(md: Path, apply: bool) -> str:
             content = f"---\nstatus: archived\n---\n\n{content}"
 
         archive_path.parent.mkdir(parents=True, exist_ok=True)
+        # Delete the source BEFORE writing to the archive path so there is
+        # no window where both the source and the (possibly overwriting)
+        # archive copy exist simultaneously. ``content`` is already in memory
+        # so the delete is safe.
+        try:
+            md.unlink()
+        except OSError:
+            return f"UNLINK_ERROR: {md}"
         archive_path.write_text(content, encoding="utf-8")
-        md.unlink()
-        return f"ARCHIVED: {rel} → archive/{year}/{rel}"
+        return f"ARCHIVED: {rel} → archive/{year}/{dest_subdir.as_posix()}/{md.name}"
     else:
         return f"WOULD ARCHIVE: {rel}"
 

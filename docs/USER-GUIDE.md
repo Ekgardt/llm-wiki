@@ -1,43 +1,100 @@
 # User Guide — LLM-Wiki Memory System
 
-How to actually work with this system in **your** tools. **Zero manual steps after setup** — the system maintains itself.
+How to actually work with this system in **your** tools. After one-time
+setup, the system maintains itself.
+
+For the canonical structure reference (paths, env vars, zones), see
+[STRUCTURE.md](STRUCTURE.md). For the design rationale, see
+[ARCHITECTURE.md](ARCHITECTURE.md). For the agent operating contract, see
+`AGENTS.md` (byte-identical to `CLAUDE.md`).
 
 ---
 
 ## The mental model in one paragraph
 
-This system **watches what you do** in your coding agent (OpenCode or Codex), **decides what's worth remembering** using an LLM, and **saves it as markdown pages** in `$LLM_WIKI_ROOT`. Next time you open a project, those pages are loaded back into the agent's context so it picks up where you stopped — no re-explaining, no lost decisions, no repeated mistakes. **All of this happens automatically** — capture on every action, classification on session end, compile in background, nightly deep maintenance via Windows Task Scheduler.
+This system **watches what you do** in your AI coding agent (OpenCode, Codex,
+Claude Code, Cursor, or Antigravity), **decides what's worth remembering**
+using an LLM, and **saves it as markdown pages** in your vault. Next time
+you open a project, those pages are loaded back into the agent's context so
+it picks up where you stopped — no re-explaining, no lost decisions, no
+repeated mistakes. **All of this happens automatically** — capture on every
+action, classification on session end, compile in background, nightly deep
+maintenance via scheduler.
 
-**The LLM part**: the system needs a "brain" to read transcripts and decide what to keep. That brain is **whichever tool you're already using** — OpenCode uses its own SDK, Codex uses `codex exec`. **No API keys, no Ollama, no extra subscriptions** beyond what you already pay for.
+**The LLM part**: the system needs a "brain" to read transcripts and decide
+what to keep. That brain is **whichever agent you're already using** — the
+`llm_client.py` abstraction auto-detects the first alive backend
+(OpenCode → Codex → Claude CLI → OpenAI → Ollama). **No extra API keys
+required** beyond what you already have; Ollama is optional (only needed for
+the Cognee graph layer at 300+ pages).
 
 ---
 
-## One-time setup (3 commands, then forget)
+## One-time setup
 
-### 1. OpenCode plugin — already installed and verified working
+### Option A: One-command installer (recommended)
 
-Heartbeat recorded at session start. Done.
+```bash
+# macOS / Linux / WSL2
+curl -fsSL https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.sh | bash
 
-### 2. Codex wrapper — add to PowerShell profile
-
-```powershell
-notepad $PROFILE
+# Windows
+irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 ```
-Add at the end:
+
+The installer detects your agents and wires them up automatically.
+
+### Option B: Manual setup
+
+1. **Clone + install dependencies:**
+   ```bash
+   git clone https://github.com/Ekgardt/llm-wiki.git
+   cd llm-wiki
+   uv sync
+   uv run pytest -q          # verify: 217 tests collected in 0.26s tests should pass
+   ```
+
+2. **Set environment variables** (add to your shell profile):
+   ```bash
+   export LLM_WIKI_ROOT="$(pwd)"
+   export LLM_WIKI_STATE_ROOT="$LLM_WIKI_ROOT"   # runtime inside vault
+   ```
+   ```powershell
+   [Environment]::SetEnvironmentVariable("LLM_WIKI_ROOT", "$(Get-Location)", "User")
+   [Environment]::SetEnvironmentVariable("LLM_WIKI_STATE_ROOT", "$(Get-Location)", "User")
+   ```
+
+3. **Create runtime dirs** (gitignored, regenerated on demand):
+   ```bash
+   mkdir -p cache logs run/queue cognee
+   ```
+
+4. **Wire up your agents** (see below).
+
+### Wire up your agents
+
+| Agent | How to wire |
+|-------|-------------|
+| **Claude Code** | `uv run python scripts/merge_claude_settings.py` — merges hooks into `~/.claude/settings.json` (5 hooks: SessionStart, PreCompact, SessionEnd, UserPromptSubmit, PostToolUse). Backup written automatically. |
+| **OpenCode** | Copy `scripts/llm-wiki-memory-opencode.js` to `~/.config/opencode/plugins/llm-wiki-memory.js`. Plugin autoloads. |
+| **Codex CLI** | Windows: add `. "$env:LLM_WIKI_ROOT\scripts\codex-memory-wrapper.ps1"` to `$PROFILE`. Unix: alias `codex-mem` to `uv run python scripts/codex_memory.py daily-log`. |
+| **Cursor** | Copy `integrations/cursor/rules/llm-wiki.mdc` to `.cursor/rules/`. |
+| **Antigravity** | Copy `integrations/antigravity/AGENTS.md` to your project root. |
+| **Obsidian** | Import `integrations/obsidian/Article-to-Inbox.json` as a Web Clipper template. |
+
+### Register scheduled maintenance
+
+**Windows (Task Scheduler):**
 ```powershell
-. "$LLM_WIKI_ROOT/scripts\codex-memory-wrapper.ps1"
+powershell -ExecutionPolicy Bypass -File scripts/install-scheduled-tasks.ps1
 ```
-If `$PROFILE` doesn't exist: `New-Item -Path $PROFILE -ItemType File -Force`. Restart terminal. Verify with `codex-memory-status`.
+Creates `LLMWiki-Nightly` (daily 03:00) and `LLMWiki-Weekly` (Sunday 04:00).
 
-### 3. Windows Task Scheduler — automatic nightly + weekly maintenance
-
-Already installed. Verify:
-```powershell
-$LLM_WIKI_ROOT/scripts\install-scheduled-tasks.ps1 -Status
+**Unix (cron):** add to `crontab -e`:
 ```
-Should show LLMWiki-Nightly (daily 03:00) and LLMWiki-Weekly (Sunday 04:00) both Ready.
-
-**That's it. You never touch the system again.**
+0 3 * * *   cd $LLM_WIKI_ROOT && uv run python scripts/scheduled_nightly.py
+0 4 * * 0   cd $LLM_WIKI_ROOT && uv run python scripts/scheduled_weekly.py
+```
 
 ---
 
@@ -49,115 +106,149 @@ REAL-TIME (while you work)
   SessionStart → load project handoff + drain queue + background compile
 
 END OF SESSION (agent idle or you close)
-  OpenCode/Codex LLM classifies transcript → FLUSH_MAJOR/MINOR/OK
+  LLM classifies transcript → FLUSH_MAJOR / FLUSH_MINOR / FLUSH_OK
   MAJOR/MINOR content → structured summary appended to daily log
   MAJOR triggers background compile (detached, doesn't block you)
 
-NIGHTLY 03:00 (Task Scheduler, even while you sleep)
+NIGHTLY 03:00 (scheduler, even while you sleep)
   Drain deferred queue → compile all pending → structural lint → prune old reports
 
-SUNDAY 04:00 (Task Scheduler)
-  Everything nightly does + OKF conformance sweep + prune failed queue tasks
+SUNDAY 04:00 (scheduler)
+  Everything nightly does + OKF conformance sweep + archive stale + prune failed queue tasks
 ```
 
-**You don't run any of these.** They fire on triggers.
+Nothing here requires your attention. If the LLM is offline, work is queued
+in `run/queue/` and drained at the next session.
 
 ---
 
-## How agents "remember" across sessions
+## Working with the system day-to-day
 
-### Life of one decision (example: you decide "use JWT for auth")
+### Asking questions about your knowledge
 
-1. **Monday 10:00** — you work in OpenCode. Plugin records every Edit/Write as breadcrumbs in `knowledge/daily/2026-07-06.md`.
-2. **Monday 12:00** — session.idle fires. OpenCode LLM classifies: **FLUSH_MAJOR**. Structured summary appended to daily log.
-3. **Monday 12:01** — plugin triggers detached compile. Background process:
-   - Reads daily log
-   - Asks LLM to extract lessons → returns JSON
-   - Python verifies cited evidence exists in source (no hallucinations)
-   - Writes `knowledge/notes/decisions/auth-jwt-migration.md` with full frontmatter
-4. **Monday 12:05** — knowledge page exists. **Permanent memory.**
-
-### Next session finds it automatically
-
-Tuesday 09:00 — open <your-project> again. Plugin's `session.created`:
-1. Loads `knowledge/projects/<your-project>/state.md` (handoff: "JWT auth done, refresh tokens next")
-2. Loads `knowledge/index.md` (catalog including new `auth-jwt-migration` page)
-3. Loads today's heartbeat (proves session is fresh)
-4. Injects all this into the agent's context
-
-Agent reads: "Yesterday decided JWT. Stopped at: refresh tokens." Picks up without re-explaining.
-
-### Long-term recall (3 months later)
-
-You ask: **"why did we choose JWT over OAuth?"**
-
-1. Agent doesn't have it in current context (memory window reset).
-2. But agent sees `knowledge/index.md` in SessionStart context.
-3. Uses Read/Grep to find `knowledge/notes/decisions/auth-jwt-migration.md` from July.
-4. Reads it, sees Decision + Evidence pointing back to the July daily log.
-5. Answers with original reasoning.
-
-**The page is permanent memory.** Doesn't expire, doesn't compact out, doesn't depend on any session's window.
-
----
-
-## What if something breaks?
-
-System **fails silently and self-heals**:
-
-| Failure | What happens |
-|---|---|
-| OpenCode LLM unavailable | Plugin skips classification, records heartbeat. Next session retries. |
-| Codex CLI not on PATH | `codex exec` returns empty. Queue picks up at next OpenCode session. |
-| Compile crashes | Lock remains; next `maybe_compile` detects stale lock after 30min, clears + retries. |
-| Task Scheduler disabled | Nightly/weekly don't run, but session-end triggers still fire. No data loss. |
-| Internet down | All LLM calls enqueue. Drains when internet returns. |
-| Disk full | File writes fail silently. Hooks exit 0 (never break user's session). |
-
-Only way to lose data: delete `$LLM_WIKI_ROOT` AND `$LLM_WIKI_STATE_ROOT` simultaneously.
-
----
-
-## Inspecting the system (optional)
-
-```powershell
-codex-memory-status                                                    # current state
-Get-Content $LLM_WIKI_STATE_ROOT/logs\nightly-*.md | Select -Last 30   # last night's run
-uv run python $LLM_WIKI_ROOT/scripts\memory_queue.py status               # deferred tasks
-uv run python $LLM_WIKI_ROOT/scripts\maybe_compile.py --status            # compile lock state
-Get-Content $LLM_WIKI_ROOT/knowledge\daily\$(Get-Date -Format 'yyyy-MM-dd').md   # today's raw capture
+```bash
+uv run python scripts/search_memory.py "how do we handle auth?"
+uv run python scripts/search_memory.py "database performance" --semantic
+uv run python scripts/search_memory.py --project my-app "decisions"
+uv run python scripts/query_memory.py "why did we choose Postgres?" --file-back
 ```
 
-**None of these are required.** They're for curiosity.
+`search_memory.py` runs hybrid BM25 + Vector + Graph fusion.
+`query_memory.py` asks the LLM to answer from the knowledge index and
+optionally files the answer as a Q&A page.
+
+### Compiling knowledge manually
+
+```bash
+uv run python scripts/compile_memory.py              # compile changed daily logs
+uv run python scripts/compile_memory.py --all        # recompile everything
+uv run python scripts/compile_memory.py --dry-run    # plan only, no writes
+```
+
+Compile runs automatically on MAJOR sessions after the hour cutoff, but you
+can trigger it manually anytime. The pipeline uses VERIFY-BEFORE-WRITE —
+the LLM cannot fabricate citations.
+
+### Linting and maintenance
+
+```bash
+uv run python scripts/lint_memory.py --scope all           # 13 structural checks
+uv run python scripts/lint_memory.py --contradictions      # + LLM-judged contradictions
+uv run python scripts/archive_stale.py --apply           # archive old pages by type
+uv run python scripts/lookup_mode.py                       # show retrieval tier + QMD status
+```
+
+### Skills (agent-side workflows)
+
+The 9 skills in `skills/` are invokable from your agent:
+
+- `/knowledge-compile` — run the compile pass
+- `/knowledge-lookup` — retrieval strategy advisor
+- `/knowledge-review` — audit existing pages
+- `/knowledge-qa-file-back` — file a Q&A page from a just-answered question
+- `/contradict-check` — LLM-judged contradiction scan
+- `/crystallize-playbook` — extract a reusable workflow
+- `/bridge-promote-insight` — promote an insight across categories
+- `/session-memory-compile` — compile wrapper (alias)
+- `/session-memory-review` — review wrapper (alias)
 
 ---
 
-## Common questions
+## Optional: semantic search (BM25 + Vector)
 
-**Do I need to do anything ever?** No. System is fully autonomous after setup.
+For hybrid search that finds semantically related pages even when keywords
+don't match:
 
-**Do I need Ollama?** No. All LLM work through existing subscriptions.
+```bash
+uv sync --extra semantic
+```
 
-**Disable auto-compile?** Comment out `triggerCompileIfIdle()` in plugin, or `install-scheduled-tasks.ps1 -Uninstall`.
+This installs `sentence-transformers` with a MiniLM model. Embeddings are
+cached in `cache/vectors.json` (gitignored) and rebuilt automatically when
+pages change.
 
-**Enable weekly contradiction check?** `setx MEMORY_WEEKLY_CONTRADICTIONS "1"`
+## Optional: Cognee graph (300+ pages)
+
+For entity extraction + relationship graph at scale:
+
+```bash
+uv sync --extra cognee
+```
+
+Requires Ollama running locally. See [SETUP-COGNEE.md](SETUP-COGNEE.md) for
+setup steps.
 
 ---
 
-## Daily mental model
+## Troubleshooting
 
-```
-YOU
-  Open OpenCode in any project, work normally, close when done. That's it.
+### "Nothing happens after install"
+- Verify env vars: `echo $LLM_WIKI_ROOT` / `echo $LLM_WIKI_STATE_ROOT`
+- Check runtime dirs exist: `cache/`, `logs/`, `run/`, `run/queue/`
+- Run `uv run python scripts/lookup_mode.py` — it shows vault state
 
-SYSTEM (autonomous, invisible)
-  Capture every action → breadcrumbs
-  Classify each session → daily log
-  Compile new content → knowledge pages (detached, background)
-  Nightly 03:00 → deep consolidation (Task Scheduler)
-  Sunday 04:00 → OKF + lint + cleanup (Task Scheduler)
-  Next session start → load accumulated memory automatically
+### "Compile never runs"
+- Compile triggers only on FLUSH_MAJOR sessions after
+  `MEMORY_COMPILE_AFTER_HOUR` (default 18:00). Override or run manually:
+  `uv run python scripts/compile_memory.py`
+- Check `run/state.json` for `compiled_daily_hashes` and `last_compile_status`
 
-Zero commands. Zero spreadsheets. Zero rituals.
-Just work — the system quietly remembers.
-```
+### "Search returns nothing"
+- Rebuild the index: `uv run python scripts/search_memory.py --rebuild`
+- Check `cache/index.sqlite` exists and is non-empty
+
+### "Hook errors"
+- Check `logs/hook-errors.log` for captured exceptions
+- All hooks exit 0 on any error (never break your session), so errors are
+  silent unless you check the log
+
+### "Tests fail on fresh clone"
+- `uv sync` first (deps must be installed)
+- `uv run pytest -q` — should report 217 tests collected in 0.26s passed
+- If `< 218`, your checkout is stale; `git pull`
+
+---
+
+## Where things live
+
+| Path | Zone | Purpose |
+|------|------|---------|
+| `scripts/` | CODE | Pipeline + hooks + helpers (43 .py + 3 helpers) |
+| `tests/` | CODE | 23 test files, 217 tests collected in 0.26s tests |
+| `docs/` | CODE | This file + ARCHITECTURE + STRUCTURE + SETUP-COGNEE + EXPORTING |
+| `skills/` | CODE | 9 agent skills |
+| `rules/` | CODE | 3 file-handling policies |
+| `integrations/` | CODE | claude-code, cursor, antigravity, obsidian |
+| `benchmark/` | CODE | Benchmark suite + report |
+| `knowledge/daily/` | KNOWLEDGE | Append-only session logs (private) |
+| `knowledge/notes/` | KNOWLEDGE | Durable OKF pages |
+| `knowledge/projects/<slug>/` | KNOWLEDGE | Per-project state.md |
+| `knowledge/raw/` | KNOWLEDGE | Immutable sources |
+| `knowledge/inbox/` | KNOWLEDGE | Unprocessed staging |
+| `knowledge/feedback/` | KNOWLEDGE | Correction candidates |
+| `cache/` | RUNTIME | Search / QMD / vector indexes (gitignored) |
+| `logs/` | RUNTIME | Lint reports, compile logs (gitignored) |
+| `run/` | RUNTIME | state.json, compile.pid, queue/ (gitignored) |
+| `cache/cognee/` | RUNTIME | Optional semantic graph (gitignored) |
+
+For the full canonical reference, see [STRUCTURE.md](STRUCTURE.md).

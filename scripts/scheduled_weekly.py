@@ -12,11 +12,27 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import maybe_compile  # noqa: E402
 from memory_state import REPORTS_DIR, ROOT  # noqa: E402
+
+
+def _wait_for_compile_idle(log_fn) -> None:
+    """If a compile is already running, wait (up to 3 retries × 10 s).
+
+    Scheduled passes run unattended and must not skip compile just because
+    a previous compile (triggered by a hook) is still running.
+    """
+    for attempt in range(3):
+        st = maybe_compile.status()
+        if not st["compile_running"]:
+            return
+        log_fn(f"  compile running ({st['reason']}), waiting 10s (attempt {attempt + 1}/3)...")
+        time.sleep(10)
 
 
 def main() -> int:
@@ -36,6 +52,7 @@ def main() -> int:
     import subprocess
 
     # Step 1: full nightly-style pass.
+    _wait_for_compile_idle(log)
     log("Step 1: drain queue + compile + structural lint...")
     r = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "scheduled_nightly.py")],

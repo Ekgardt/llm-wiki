@@ -74,9 +74,19 @@ def test_all_readmes_mention_knowledge_layout():
         assert "knowledge/" in text, f"{p.name}: must document knowledge/ layout"
 
 
-def test_all_readmes_mention_version_3_3_1():
+def test_all_readmes_mention_current_version():
+    """Every README must mention the version declared in pyproject.toml.
+    The version is read live so bumping pyproject + READMEs in the same
+    change keeps this test green without editing the test itself.
+    """
+    import re as _re
+
+    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    m = _re.search(r'^version\s*=\s*"([^"]+)"', pyproject.read_text(encoding="utf-8"), _re.MULTILINE)
+    assert m, "could not parse version from pyproject.toml"
+    current = m.group(1)
     for p in README_FILES:
         text = p.read_text(encoding="utf-8")
-        assert "3.3.1" in text or "v3.3.1" in text, (
-            f"{p.name}: must mention v3.3.1 (current release)"
+        assert current in text, (
+            f"{p.name}: must mention version {current} (current release per pyproject.toml)"
         )

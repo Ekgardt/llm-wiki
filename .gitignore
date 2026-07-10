@@ -4,19 +4,23 @@ __pycache__/
 *.pyo
 .venv/
 .pytest_cache/
+.ruff_cache/
 
 # === Obsidian (local UI only; not part of three-zone layout) ===
 .trash/
 .obsidian/
 
-# === Runtime MUST live outside the vault ===
-# Canonical: $LLM_WIKI_STATE_ROOT/{run,logs,cache}  (default: <parent>/LLM-wiki-state/)
-# These patterns only block accidental creation inside the checkout.
+# === Runtime dirs inside the vault (gitignored, regenerated on demand) ===
+# Three-zone layout: code + knowledge are tracked; runtime churn is local.
+# cache/    — search / QMD / vector indexes
+# logs/     — lint reports, compile logs, SessionStart debug dumps
+# run/      — state.json, compile.pid, queue/, locks
+# Override root via LLM_WIKI_STATE_ROOT (tests use a temp dir).
 cache/
 logs/
 run/
 state/
-LLM-wiki-state/
+.ci-lint-state/
 
 # === Personal session data (private, NOT in git) ===
 knowledge/daily/*.md
@@ -79,7 +83,7 @@ Desktop.ini
 
 # === Runtime lock files ===
 *.pid
-*.lock
+state.json.lock
 
 # === Backups ===
 *.bak-*

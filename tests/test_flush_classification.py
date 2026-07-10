@@ -13,10 +13,6 @@ Locks in:
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
-
-import pytest
-
 
 # ---------------------------------------------------------------------------
 # _classify_response
@@ -196,8 +192,10 @@ def test_maybe_trigger_compile_spawns_for_major_after_cutoff(monkeypatch):
 
 def test_maybe_trigger_compile_respects_cooldown(monkeypatch):
     """Even MAJOR after cutoff respects cooldown window."""
+    from datetime import datetime as real_datetime
+    from datetime import timedelta
+
     import flush_memory  # noqa: WPS433
-    from datetime import datetime as real_datetime, timedelta
 
     spawned: list = []
     monkeypatch.setattr(

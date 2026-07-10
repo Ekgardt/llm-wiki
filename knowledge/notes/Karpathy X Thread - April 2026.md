@@ -1,9 +1,11 @@
 ---
 title: Karpathy X Thread - April 2026
-type: raw-source
+type: fact
 author: Andrej Karpathy
 published: 2026-04-02
 captured: 2026-04-11
+confidence: medium
+source_authority: web
 ---
 
 # Karpathy X Thread — April 2026
@@ -15,11 +17,11 @@ One-sentence summary: Durable wiki-side pointer to the April 2026 X thread by [[
 - **Published:** 2026-04-02
 - **Captured into inbox:** 2026-04-11
 - **Original URL:** https://x.com/karpathy/status/2039805659525644595
-- **Local file (immutable):** `raw/articles/Thread by @karpathy.md`
+- **Local file (immutable):** `knowledge/raw/articles/Thread by @karpathy.md`
 
 ## What the thread covers
 Karpathy describes using an LLM to maintain a personal markdown knowledge base:
-- **Data ingest** — source documents go into `raw/`; an LLM incrementally compiles them into a `.md` wiki with summaries, backlinks, and concept articles. Obsidian Web Clipper is used to convert web pages; a hotkey fetches related images locally.
+- **Data ingest** — source documents go into `knowledge/raw/`; an LLM incrementally compiles them into a `.md` wiki with summaries, backlinks, and concept articles. Obsidian Web Clipper is used to convert web pages; a hotkey fetches related images locally.
 - **IDE** — [[Obsidian]] is the frontend for raw data, compiled wiki, and derived visualizations. The LLM writes the wiki; the human rarely edits directly.
 - **Q&A** — at ~100 articles / ~400K words, direct LLM reading over auto-maintained index and summary files replaces dedicated RAG.
 - **Output** — answers are rendered as markdown, Marp slides, or matplotlib images, and often filed back into the wiki so explorations compound.
@@ -40,7 +42,7 @@ Pages in this wiki that cite this thread as their source:
 - [[Review Workflow]]
 
 ## Source
-- `raw/articles/Thread by @karpathy.md` (local captured copy; immutable)
+- `knowledge/raw/articles/Thread by @karpathy.md` (local captured copy; immutable)
 - https://x.com/karpathy/status/2039805659525644595 (original)
 
 ## Related

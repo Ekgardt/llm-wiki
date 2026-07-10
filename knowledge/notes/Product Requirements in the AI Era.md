@@ -1,6 +1,6 @@
 ---
 title: Product Requirements in the AI Era
-type: synthesis
+type: concept
 confidence: medium
 source_authority: web
 status: preliminary
@@ -30,7 +30,7 @@ One-sentence summary: A 2026 synthesis of how product/business requirements shif
 - **No evals = release blind** — mandatory for any AI feature.
 
 ## Copy-paste artifacts
-The full, copy-pasteable reference — method cards, document templates (PRO, Lean PRD, PR-FAQ, Pitch, RFC, ADR), the prompt library **C1–C8**, five workflows, a worked Discovery→PRO example, checklists, and a risk/OWASP-LLM table — lives in the export artifact `outputs/product-requirements-ai-2026.md` (not a wiki page; referenced by path since `outputs/` is outside the wikilink graph).
+The full, copy-pasteable reference — method cards, document templates (PRO, Lean PRD, PR-FAQ, Pitch, RFC, ADR), the prompt library **C1–C8**, five workflows, a worked Discovery→PRO example, checklists, and a risk/OWASP-LLM table — lives in a separate research artifact (not shipped in public source).
 
 ## Open questions
 - Which 2026 source claims (PRO dating, exact quotes, the 95% ROI stat) survive primary-source verification — capture into `raw/` when confirmed.
@@ -38,7 +38,7 @@ The full, copy-pasteable reference — method cards, document templates (PRO, Le
 - Whether PRO generalizes to non-AI features or stays AI-specific.
 
 ## Source
-- Prior verified research session (July 2026) — specific 2026 facts flagged **⚠️ verify** in `outputs/product-requirements-ai-2026.md` §0 and §12.
+- Prior verified research session (July 2026) — specific 2026 facts flagged **⚠️ verify** in the originating research session §0 and §12.
 - Canonical methodologies: Ulwick (ODI/JTBD), Teresa Torres (OST), Amazon (Working Backwards/PR-FAQ), Basecamp (Shape Up), Jeff Patton (Story Mapping), Evans (DDD), North/BDD.
 - OWASP LLM Top-10 (*⚠️ verify current edition*).
 

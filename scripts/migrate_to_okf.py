@@ -31,10 +31,12 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from memory_state import ROOT  # noqa: E402
 
 # Reserved OKF filenames — no frontmatter allowed at bundle level.
 RESERVED_NAMES = frozenset({"index.md", "log.md"})
@@ -301,7 +303,7 @@ def _write_report(
     import os
 
     state_root = Path(
-        os.environ.get("LLM_WIKI_STATE_ROOT", str(ROOT.parent / "LLM-wiki-state"))
+        os.environ.get("LLM_WIKI_STATE_ROOT", str(ROOT))
     )
     reports = state_root / "logs"
     reports.mkdir(parents=True, exist_ok=True)

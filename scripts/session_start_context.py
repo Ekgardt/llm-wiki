@@ -12,7 +12,7 @@ containing a trimmed view of project memory:
 
 Total additionalContext is capped around 2.2 KB. A debug dump of the payload
 is written to `$LLM_WIKI_STATE_ROOT/logs/session-start-last.txt`
-(default: ``$LLM_WIKI_ROOT/../LLM-wiki-state/logs/``) on every run.
+(default: ``$LLM_WIKI_ROOT/logs/`` — inside the vault, gitignored) on every run.
 """
 from __future__ import annotations
 
@@ -35,10 +35,9 @@ from memory_state import REPORTS_DIR, ROOT, load_state  # noqa: E402
 MEMORY_INDEX = ROOT / "knowledge" / "index.md"
 MEMORY_LOG = ROOT / "knowledge" / "log.md"
 DAILY_DIR = ROOT / "knowledge" / "daily"
-WIKI_DIR = ROOT / "knowledge" / "notes"
 KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
 SKILLS_DIR = ROOT / "skills"
-GAPS_DIR = WIKI_DIR / "gaps"
+GAPS_DIR = KNOWLEDGE_DIR / "gaps"
 DEBUG_DIR = REPORTS_DIR
 DEBUG_FILE = DEBUG_DIR / "session-start-last.txt"
 
@@ -308,7 +307,6 @@ def metacognitive_block() -> str:
     except Exception:  # noqa: BLE001
         state = {}
 
-    wiki_total = _count_md(WIKI_DIR)
     knowledge_total = _count_md(KNOWLEDGE_DIR)
     daily_total = _count_md(DAILY_DIR)
     skills_total = _count_md(SKILLS_DIR)
@@ -323,7 +321,7 @@ def metacognitive_block() -> str:
 
     # Inventory line — quick mental model of vault size.
     lines.append(
-        f"- **Inventory**: {wiki_total} wiki pages, {knowledge_total} memory knowledge pages, "
+        f"- **Inventory**: {knowledge_total} knowledge pages, "
         f"{daily_total} daily logs, {skills_total} skills, {gaps_total} gaps, "
         f"{projects_active} active project(s)."
     )
@@ -352,8 +350,8 @@ def metacognitive_block() -> str:
         rejected = last_audit.get("rejected", 0)
         if verified == 0:
             lines.append(
-                f"- **Last compile audit**: 0 evidence citations verified — "
-                f"compiler may have skipped VERIFY-BEFORE-WRITE."
+                "- **Last compile audit**: 0 evidence citations verified — "
+                "compiler may have skipped VERIFY-BEFORE-WRITE."
             )
         else:
             lines.append(

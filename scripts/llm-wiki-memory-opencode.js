@@ -9,7 +9,11 @@
  *   experimental.session.compacting
  */
 
-const SCRIPTS = `${process.env.LLM_WIKI_ROOT || "LLM-wiki"}/scripts`;
+const _LLM_WIKI_ROOT = process.env.LLM_WIKI_ROOT;
+if (!_LLM_WIKI_ROOT) {
+  console.warn("[llm-wiki-memory] LLM_WIKI_ROOT is not set — memory capture will be disabled. Set it to your vault path.");
+}
+const SCRIPTS = `${_LLM_WIKI_ROOT || ""}/scripts`;
 const SIGNIFICANT_TOOLS = new Set(["edit", "write", "multi_edit", "notebook_edit", "bash"]);
 
 export const LlmWikiMemoryPlugin = async ({ client, $, directory }) => {

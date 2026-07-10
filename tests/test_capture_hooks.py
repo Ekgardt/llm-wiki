@@ -20,9 +20,6 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
-
 # ---------------------------------------------------------------------------
 # UserPromptSubmit capture — user_prompt_capture.py
 # ---------------------------------------------------------------------------
@@ -245,8 +242,9 @@ def test_tool_capture_skips_vault_internal_sessions(monkeypatch, tmp_path):
 
 def test_prompt_capture_rate_limit_window(tmp_path, monkeypatch):
     """Verify rate-limit check returns True within window, False outside."""
-    import user_prompt_capture  # noqa: WPS433
     from datetime import datetime, timedelta
+
+    import user_prompt_capture  # noqa: WPS433
 
     state_file = tmp_path_state(tmp_path, monkeypatch, user_prompt_capture)
     # Pre-populate dedupe with an entry 5 seconds ago (within 30s window).

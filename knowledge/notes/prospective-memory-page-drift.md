@@ -3,6 +3,8 @@ type: debugging
 title: "Prospective Memory Page Drift"
 description: "Memory and wiki pages written speculatively during planning go stale after implementation completes, producing false descriptions of vault behavior that no lint check will catch."
 timestamp: 2026-07-03T05:41:37
+confidence: medium
+source_authority: user
 ---
 # Prospective Memory Page Drift
 
@@ -27,7 +29,7 @@ One-sentence summary: Memory and wiki pages written speculatively during plannin
 5. When the wiki page is ahead of the memory page, note the discrepancy: "Memory page updated YYYY-MM-DD; see the corresponding wiki page for current authoritative description."
 
 ## Evidence
-- `knowledge/daily/2026-04-19.md` [22:41:34] — review session surfaced all three instances above; fixes applied in the same session.
+- `knowledge/daily/2026-04-19.md` [23:13:01] — review session surfaced all three instances above; fixes applied in the same session.
 
 ## Related
 - [[knowledge/notes/audit-current-vs-intended]] — the audit-page discipline that distinguishes present-state facts (dated) from future aspirations.

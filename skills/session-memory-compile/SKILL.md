@@ -8,7 +8,7 @@ allowed-tools: Read Glob Grep LS Bash(uv run python scripts/compile_memory.py *)
 title: "SKILL"
 timestamp: 2026-07-03T05:41:37
 ---
-Run the scripted compile pass. The script uses the Claude Agent SDK under the hood and follows `docs/AGENTS.md`.
+Run the scripted compile pass. The script uses the unified llm_client (`scripts/llm_client.py`) under the hood and follows `docs/AGENTS.md`.
 
 Procedure:
 1. Run `uv run python scripts/compile_memory.py $ARGUMENTS`.
@@ -21,7 +21,7 @@ Procedure:
     - writes/updates pages under `knowledge/notes/`
     - runs `scripts/rebuild_memory_index.py`
     - appends a dated entry to `knowledge/log.md`
-    - records compiled hashes in `$LLM_WIKI_STATE_ROOT/run/state.json` (outside the vault)
+    - records compiled hashes in `$LLM_WIKI_STATE_ROOT/run/state.json` (gitignored, inside the vault)
 3. Read the script's `COMPILE_DONE:` line to see which pages were touched.
 4. If the result is unsatisfying (e.g. a daily log held material the script did not lift), make targeted Edit/Write changes manually, then re-run `uv run python scripts/rebuild_memory_index.py` and append a corrective entry to `knowledge/log.md`.
 

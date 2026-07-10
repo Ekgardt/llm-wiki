@@ -2,7 +2,8 @@
 type: skill
 name: knowledge-qa-file-back
 argument-hint: "[optional slug hint]"
-description: Promote a just-answered question into a durable Q&A page — either in `knowledge/notes/` (external-domain questions about material in `raw/`) or `knowledge/notes/qa/` (internal "how we work here" questions).
+description: Promote a just-answered question into a durable Q&A page — either
+ in `knowledge/notes/` (external-domain questions about material in `knowledge/raw/`) or `knowledge/notes/qa/` (internal "how we work here" questions).
 disable-model-invocation: true
 allowed-tools: Read Glob Grep LS Edit Write Bash(python scripts/rebuild_memory_index.py)
 title: "SKILL"
@@ -28,7 +29,7 @@ Apply this two-question checklist:
    - *Yes* → it's external-domain knowledge. Candidate for `knowledge/notes/`.
    - *No* → it's project lore. Candidate for `knowledge/notes/qa/`.
 
-2. **Does the answer cite `raw/` material, public sources, or named authors?**
+2. **Does the answer cite `knowledge/raw/` material, public sources, or named authors?**
    - *Yes* → strengthens the `knowledge/notes/` case.
    - *No, only internal files / conventions / hooks / scripts* → strengthens the `knowledge/notes/qa/` case.
 
@@ -39,15 +40,15 @@ If a question straddles both, default to `knowledge/notes/qa/` and link out to t
 1. **Pick the target tree** using the checklist above.
 
 2. **Pick a slug** — kebab-case, phrased as the question's key phrase (not the answer).
-   - Good: `inbox-vs-raw-after-compile`, `when-to-rebuild-qmd-index`
+   - Good: `inbox-vs-raw-after-compile`, `when-to-rebuild-search-index`
    - Bad: `question-about-inbox`, `answer-1`
 
 3. **Write the page** at either:
-   - `knowledge/notes/<slug>.md` — follow wiki conventions (frontmatter with `type: qa`, `One-sentence summary:`, `Source:` citing `raw/` or prior wiki pages).
+   - `knowledge/notes/<slug>.md` — follow wiki conventions (frontmatter with `type: qa`, `One-sentence summary:`, `Source:` citing `knowledge/raw/` or prior wiki pages).
    - `knowledge/notes/qa/<slug>.md` — follow `docs/AGENTS.md` conventions (H1 title is the question verbatim, `One-sentence summary:`, `## Question`, `## Answer`, `## Evidence` pointing to the daily log + timestamp, `## Related`).
 
 4. **Register and log**:
-   - If target is `knowledge/notes/`: ensure a `### Q&A` section exists under `## Main areas` in `knowledge/index.md` (create it if missing), add the new page there, then append a dated entry to `knowledge/log.md`.
+   - If target is `knowledge/notes/`: add the new page under the existing top-level `## Q&A` section in `knowledge/index.md`, then append a dated entry to `knowledge/log.md`.
    - If target is `knowledge/notes/qa/`: run `python scripts/rebuild_memory_index.py` (the index is auto-generated), then append a dated entry to `knowledge/log.md`.
 
 5. **Cross-link**:

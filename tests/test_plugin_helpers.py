@@ -14,8 +14,6 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -82,7 +80,7 @@ def test_heartbeat_record_writes_state_entry(tmp_path, monkeypatch):
     # memory_state caches STATE_ROOT at module-load time, so we patch
     # the resolved attributes directly rather than relying on env vars.
     fake_state_root = tmp_path
-    fake_state_dir = fake_state_root / "memory-state"
+    fake_state_dir = fake_state_root / "run"
     fake_state_dir.mkdir(parents=True, exist_ok=True)
     fake_state_file = fake_state_dir / "state.json"
 

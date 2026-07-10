@@ -13,7 +13,7 @@ Design:
   by content hash internally).
 - Local-only: configured to use Ollama embeddings + LLM by default, to
   preserve the LLM-agnostic axiom. Override via env vars for cloud.
-- Storage: $LLM_WIKI_STATE_ROOT/cognee/ (sibling to run/, logs/, cache/)
+- Storage: $LLM_WIKI_STATE_ROOT/cache/cognee/ (under the search-index cache tree)
 
 Usage:
     uv run python scripts/cognee_sync.py                    # sync all wiki + memory/knowledge
@@ -32,21 +32,21 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 
 ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(Path(__file__).resolve().parent.parent))).resolve()
 STATE_ROOT = Path(
-    os.environ.get("LLM_WIKI_STATE_ROOT", str(ROOT.parent / "LLM-wiki-state"))
+    os.environ.get("LLM_WIKI_STATE_ROOT", str(ROOT))
 ).resolve()
-COGNEE_DATA_DIR = STATE_ROOT / "cognee"
+COGNEE_DATA_DIR = STATE_ROOT / "cache" / "cognee"
 
-WIKI_DIR = ROOT / "knowledge" / "notes"
 KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
 
 # Skip these subtrees — they are operational / editorial, not knowledge.
 SKIP_SUBTREES = (
-    WIKI_DIR / "projects",  # state.md is operational, not semantic knowledge
-    WIKI_DIR / "gaps",  # gaps are placeholders, not real content yet
+    ROOT / "knowledge" / "projects",  # state.md is operational, not semantic knowledge
+    KNOWLEDGE_DIR / "gaps",  # gaps are placeholders, not real content yet
 )
 
 
@@ -92,7 +92,6 @@ def _collect_pages() -> list[Path]:
             seen.add(p)
             out.append(p)
 
-    _add_tree(WIKI_DIR)
     _add_tree(KNOWLEDGE_DIR)
     return out
 
@@ -200,7 +199,15 @@ def main() -> int:
     import cognee
 
     if args.file:
-        pages = [Path(args.file).resolve()]
+        file_path = Path(args.file).resolve()
+        # Containment guard: --file must resolve inside ROOT (no .. escape).
+        if not file_path.is_relative_to(ROOT):
+            print(
+                f"cognee_sync: --file must be inside ROOT ({ROOT}), got {file_path}",
+                file=sys.stderr,
+            )
+            return 1
+        pages = [file_path]
     else:
         pages = _collect_pages()
 

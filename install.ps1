@@ -87,16 +87,19 @@ if ($testResult -match "passed") {
 
 Info "Setting environment variables..."
 [Environment]::SetEnvironmentVariable("LLM_WIKI_ROOT", $VAULT_ROOT, "User")
-$stateRoot = Split-Path $VAULT_ROOT -Parent | Join-Path -ChildPath "LLM-wiki-state"
-[Environment]::SetEnvironmentVariable("LLM_WIKI_STATE_ROOT", $stateRoot, "User")
+# Runtime lives inside the vault as gitignored cache/logs/run dirs.
+# LLM_WIKI_STATE_ROOT defaults to the vault itself; only set it explicitly
+# if you want runtime on a different disk.
+[Environment]::SetEnvironmentVariable("LLM_WIKI_STATE_ROOT", $VAULT_ROOT, "User")
 $env:LLM_WIKI_ROOT = $VAULT_ROOT
-$env:LLM_WIKI_STATE_ROOT = $stateRoot
+$env:LLM_WIKI_STATE_ROOT = $VAULT_ROOT
 
-New-Item -ItemType Directory -Path "$stateRoot\run" -Force | Out-Null
-New-Item -ItemType Directory -Path "$stateRoot\run\queue" -Force | Out-Null
-New-Item -ItemType Directory -Path "$stateRoot\logs" -Force | Out-Null
-New-Item -ItemType Directory -Path "$stateRoot\cache" -Force | Out-Null
-Ok "LLM_WIKI_ROOT set (User scope); state at $stateRoot\{run,logs,cache}"
+New-Item -ItemType Directory -Path "$VAULT_ROOT\run" -Force | Out-Null
+New-Item -ItemType Directory -Path "$VAULT_ROOT\run\queue" -Force | Out-Null
+New-Item -ItemType Directory -Path "$VAULT_ROOT\logs" -Force | Out-Null
+New-Item -ItemType Directory -Path "$VAULT_ROOT\cache" -Force | Out-Null
+New-Item -ItemType Directory -Path "$VAULT_ROOT\cognee" -Force | Out-Null
+Ok "LLM_WIKI_ROOT set (User scope); runtime at $VAULT_ROOT\{run,logs,cache} (gitignored)"
 
 # ─── 6. Build search index ─────────────────────────────────────────
 
@@ -108,9 +111,13 @@ Ok "Search index built"
 
 Info "Registering Windows Task Scheduler..."
 $pythonExe = (Get-Command python).Source
-& ".\scripts\install-scheduled-tasks.ps1" 2>$null
-if ($?) { Ok "Task Scheduler: nightly 03:00 + weekly Sun 04:00" }
-else { Warn "Task Scheduler registration failed — run scripts\install-scheduled-tasks.ps1 manually" }
+try {
+    & ".\scripts\install-scheduled-tasks.ps1" 2>$null
+    if ($LASTEXITCODE -eq 0) { Ok "Task Scheduler: nightly 03:00 + weekly Sun 04:00" }
+    else { Warn "Task Scheduler registration failed — run scripts\install-scheduled-tasks.ps1 manually" }
+} catch {
+    Warn "Task Scheduler registration failed — run scripts\install-scheduled-tasks.ps1 manually"
+}
 
 # ─── 8. Detect and wire up agents ──────────────────────────────────
 
@@ -138,12 +145,17 @@ if (Get-Command codex -ErrorAction SilentlyContinue) {
     $agents += "Codex"
     # Add wrapper to profile
     $profilePath = $PROFILE
-    if (Test-Path $profilePath) {
-        $content = Get-Content $profilePath -Raw
-        if ($content -notmatch "codex-memory-wrapper") {
-            Add-Content $profilePath ". `"$VAULT_ROOT\scripts\codex-memory-wrapper.ps1`""
-            Ok "Codex wrapper added to $profilePath"
-        }
+    $profileDir = Split-Path $profilePath -Parent
+    if (-not (Test-Path $profileDir)) {
+        New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
+    }
+    if (-not (Test-Path $profilePath)) {
+        New-Item -ItemType File -Path $profilePath -Force | Out-Null
+    }
+    $content = Get-Content $profilePath -Raw -ErrorAction SilentlyContinue
+    if ($content -notmatch "codex-memory-wrapper") {
+        Add-Content $profilePath '. "$env:LLM_WIKI_ROOT\scripts\codex-memory-wrapper.ps1"'
+        Ok "Codex wrapper added to $profilePath"
     }
     Ok "Codex detected"
 }
@@ -156,7 +168,7 @@ if ((Get-Command claude -ErrorAction SilentlyContinue) -or (Test-Path $claudeCon
     Info "Merging LLM-wiki hooks into Claude user settings (backup first)..."
     uv run python (Join-Path $VAULT_ROOT "scripts\merge_claude_settings.py") `
         --vault-root $VAULT_ROOT `
-        --state-root $stateRoot 2>&1 | ForEach-Object { Info "$_" }
+        --state-root $VAULT_ROOT 2>&1 | ForEach-Object { Info "$_" }
     if ($LASTEXITCODE -eq 0) {
         Ok "Claude settings merged → $claudeConfig\settings.json"
     } else {
@@ -171,8 +183,14 @@ if (Test-Path "$env:USERPROFILE\.cursor") {
     Ok "Cursor detected"
 }
 
+# Antigravity
+if (Test-Path "$env:USERPROFILE\.antigravity" -ErrorAction SilentlyContinue) {
+    $agents += "Antigravity"
+    Ok "Antigravity detected — copy integrations\antigravity\AGENTS.md to your project root"
+}
+
 if ($agents.Count -eq 0) {
-    Warn "No agents detected. Install OpenCode, Codex, Claude Code, or Cursor."
+    Warn "No agents detected. Install OpenCode, Codex, Claude Code, Cursor, or Antigravity."
 } else {
     Ok "Agents: $($agents -join ', ')"
 }
@@ -185,7 +203,7 @@ Write-Host "  LLM-Wiki installed successfully!" -ForegroundColor Green
 Write-Host "==============================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "Vault:       $VAULT_ROOT"
-Write-Host "State:       $stateRoot"
+Write-Host "State:       $VAULT_ROOT (cache/logs/run, gitignored)"
 Write-Host "Agents:      $($agents -join ', ')"
 Write-Host "Maintenance: Task Scheduler (nightly + weekly)"
 Write-Host ""

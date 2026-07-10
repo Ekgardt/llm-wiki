@@ -6,7 +6,7 @@ alwaysApply: true
 
 # LLM-Wiki Memory Integration
 
-You have access to a persistent memory vault at `$LLM_WIKI_ROOT` (default: `~/LLM-wiki`).
+You have access to a persistent memory vault at `$LLM_WIKI_ROOT` (default: set by installer; verify with `echo $LLM_WIKI_ROOT`).
 This vault stores decisions, lessons, patterns, and debugging notes from all your coding sessions across Cursor, OpenCode, Codex, and Claude Code.
 
 ## At session start

@@ -1,6 +1,8 @@
 ---
 title: LLM Knowledge Base
 type: concept
+confidence: medium
+source_authority: web
 ---
 
 # LLM Knowledge Base
@@ -8,7 +10,7 @@ type: concept
 One-sentence summary: A personal, LLM-maintained markdown wiki compiled from raw source documents, where the LLM (not the human) writes and curates the durable knowledge layer.
 
 ## Key facts
-- Raw source documents (articles, papers, repos, datasets, images) are indexed into a `raw/` directory and treated as immutable evidence.
+- Raw source documents (articles, papers, repos, datasets, images) are indexed into a `knowledge/raw/` directory and treated as immutable evidence.
 - An LLM incrementally "compiles" a wiki of `.md` files: summaries, concept articles, backlinks, and categorical structure.
 - The wiki itself is the LLM's domain; the human rarely writes or edits it directly.
 - At ~100 articles / ~400K words, plain LLM reading over auto-maintained index + summary files substitutes effectively for dedicated RAG.
@@ -17,7 +19,7 @@ One-sentence summary: A personal, LLM-maintained markdown wiki compiled from raw
 - A long-term extension is synthetic data generation + finetuning so the model internalizes the knowledge in weights rather than context.
 
 ## Workflow stages (per [[Andrej Karpathy]])
-1. **Data ingest** — drop sources into `raw/`; LLM compiles into wiki `.md` files.
+1. **Data ingest** — drop sources into `knowledge/raw/`; LLM compiles into wiki `.md` files.
 2. **IDE** — Obsidian as frontend to view raw, compiled wiki, and derived visualizations.
 3. **Q&A** — agent answers complex questions by reading the wiki directly.
 4. **Output** — responses rendered as markdown, slides, or images, viewable in Obsidian.
@@ -30,7 +32,7 @@ One-sentence summary: A personal, LLM-maintained markdown wiki compiled from raw
 
 ## Source
 - [[Karpathy X Thread - April 2026]] (durable wiki record)
-- `raw/articles/Thread by @karpathy.md` (captured original)
+- `knowledge/raw/articles/Thread by @karpathy.md` (captured original)
 
 ## Related
 - [[Andrej Karpathy]]
@@ -40,4 +42,4 @@ One-sentence summary: A personal, LLM-maintained markdown wiki compiled from raw
 - [[Retrieval Workflow]]
 - [[Review Workflow]]
 - [[Wiki vs Memory Compiler vs Fusion]] — comparison that evaluates this concept against alternative persistence strategies.
-- [[Product Requirements in the AI Era]] — a 2026 research synthesis compiled into the wiki and rendered as an `outputs/` artifact; demonstrates the ingest→wiki→output flow.
+- [[Product Requirements in the AI Era]] — a 2026 research synthesis compiled into the wiki; demonstrates the ingest→wiki flow.

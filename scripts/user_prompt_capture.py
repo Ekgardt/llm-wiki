@@ -40,13 +40,15 @@ if hasattr(sys.stdout, "reconfigure"):
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
-    from memory_state import ROOT as _MS_ROOT, STATE_ROOT as _MS_STATE, update_state  # noqa: E402
+    from memory_state import ROOT as _MS_ROOT  # noqa: E402
+    from memory_state import STATE_ROOT as _MS_STATE
+    from memory_state import update_state
     ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(_MS_ROOT))).resolve()
     STATE_ROOT = Path(os.environ.get("LLM_WIKI_STATE_ROOT", str(_MS_STATE))).resolve()
 except Exception:  # noqa: BLE001
     ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(Path(__file__).resolve().parent.parent))).resolve()
     STATE_ROOT = Path(
-        os.environ.get("LLM_WIKI_STATE_ROOT", str(ROOT.parent / "LLM-wiki-state"))
+        os.environ.get("LLM_WIKI_STATE_ROOT", str(ROOT))
     ).resolve()
 
     def update_state(mutator):  # type: ignore[misc]

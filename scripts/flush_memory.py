@@ -4,7 +4,8 @@ Run as a detached background process by PreCompact / SessionEnd hooks.
 
 Responsibilities:
 1. Read the transcript at `--transcript` (JSONL Claude Code transcript).
-2. Ask Claude (via claude-agent-sdk) to classify + summarize the session
+2. Ask the unified llm_client (auto-detected backend: OpenCode / Codex /
+   Claude CLI / OpenAI / Ollama) to classify + summarize the session
    into one of three tiers (Phase 0.5 upgrade):
      - FLUSH_MAJOR: decisions/lessons/non-obvious commands worth compiling
      - FLUSH_MINOR: only gotchas/debug-notes/open-questions — save but no auto-compile
@@ -26,20 +27,25 @@ returned FLUSH_OK for any session that lacked a clean "decisions"
 section, even when useful gotchas or commands were present.
 
 State lives in $LLM_WIKI_STATE_ROOT/run/state.json (default:
-$LLM_WIKI_ROOT/../LLM-wiki-state/run/state.json) — OUTSIDE the vault so
-Obsidian and git don't track runtime churn.
+$LLM_WIKI_ROOT/run/state.json — inside the vault, gitignored) so git
+doesn't track runtime churn.
 """
 from __future__ import annotations
 
 import argparse
 import os
-import re
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from secret_redact import redact_secrets  # noqa: E402
+except Exception:  # noqa: BLE001
+    def redact_secrets(text: str) -> str:  # type: ignore[misc]
+        return text
+from maybe_compile import spawn_compile_if_idle  # noqa: E402
 from memory_state import (  # noqa: E402
     REPORTS_DIR,
     ROOT,
@@ -47,7 +53,6 @@ from memory_state import (  # noqa: E402
     load_state,
     update_state,
 )
-from maybe_compile import spawn_compile_if_idle  # noqa: E402
 
 DAILY_DIR = ROOT / "knowledge" / "daily"
 COMPILE_LOG_DIR = REPORTS_DIR
@@ -107,16 +112,6 @@ def _classify_response(raw: str) -> tuple[str, str]:
     return "minor", stripped
 
 
-def _is_empty_summary(summary: str) -> bool:
-    """Legacy predicate kept for any callers that haven't been updated.
-
-    New code should use _classify_response directly. Returns True iff
-    the response classifies as FLUSH_OK (no durable content).
-    """
-    tier, _ = _classify_response(summary)
-    return tier == "ok"
-
-
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--event", required=True, choices=["session-end", "pre-compact"])
@@ -138,10 +133,10 @@ def read_transcript_tail(path: Path, max_chars: int = MAX_TRANSCRIPT_CHARS) -> s
     return data
 
 
-def summarize_with_sdk(transcript_excerpt: str, event: str) -> str:
+def summarize_with_llm(transcript_excerpt: str, event: str) -> str:
     """Ask the LLM to classify + distill the transcript into a tier + body.
 
-    Uses the unified llm_client (Codex CLI by default — no separate API
+    Uses the unified llm_client (auto-detected backend — no separate API
     key required on this machine). Falls back gracefully if the LLM is
     unavailable (returns "" → caller treats as FLUSH_OK).
     """
@@ -247,7 +242,13 @@ def should_skip(state: dict, session_id: str, event: str) -> bool:
 
 
 def record_flush(state: dict, session_id: str, event: str) -> None:
-    state.setdefault("flush_dedupe", {})[dedupe_key(session_id, event)] = time.time()
+    dedupe = state.setdefault("flush_dedupe", {})
+    dedupe[dedupe_key(session_id, event)] = time.time()
+    # Prune stale entries so the dict doesn't grow unbounded.
+    cutoff = time.time() - DEDUPE_WINDOW_SECONDS * 4
+    stale = [k for k, ts in dedupe.items() if float(ts) < cutoff]
+    for k in stale:
+        del dedupe[k]
 
 
 def maybe_trigger_compile(state: dict, daily_path: Path, tier: str) -> None:
@@ -259,7 +260,10 @@ def maybe_trigger_compile(state: dict, daily_path: Path, tier: str) -> None:
     """
     if tier != "major":
         return
-    hour_cutoff = int(os.environ.get("MEMORY_COMPILE_AFTER_HOUR", "18"))
+    try:
+        hour_cutoff = int(os.environ.get("MEMORY_COMPILE_AFTER_HOUR", "18"))
+    except ValueError:
+        hour_cutoff = 18
     if datetime.now().hour < hour_cutoff:
         return
     current_hash = file_hash(daily_path)
@@ -272,7 +276,10 @@ def maybe_trigger_compile(state: dict, daily_path: Path, tier: str) -> None:
     # process each time. Rate-limit to one spawn per cooldown window.
     # Tune via MEMORY_COMPILE_COOLDOWN_SECONDS (default 900 = 15 min).
     # Set to 0 to disable cooldown entirely.
-    cooldown_s = int(os.environ.get("MEMORY_COMPILE_COOLDOWN_SECONDS", "900"))
+    try:
+        cooldown_s = int(os.environ.get("MEMORY_COMPILE_COOLDOWN_SECONDS", "900"))
+    except ValueError:
+        cooldown_s = 900
     if cooldown_s > 0:
         last_spawned_raw = state.get("last_compile_spawned_at")
         if last_spawned_raw:
@@ -286,7 +293,8 @@ def maybe_trigger_compile(state: dict, daily_path: Path, tier: str) -> None:
 
     spawned_at = datetime.now().isoformat(timespec="seconds")
     spawned, reason = spawn_compile_if_idle(force=False)
-    state["last_compile_spawned_at"] = spawned_at
+    if spawned:
+        state["last_compile_spawned_at"] = spawned_at
     state["last_compile_spawned_trigger"] = "auto"
     state["last_compile_spawned_daily"] = daily_path.name
     state["last_compile_spawned_tier"] = tier
@@ -312,7 +320,7 @@ def main() -> int:
         return 0
 
     transcript = read_transcript_tail(Path(args.transcript)) if args.transcript else ""
-    raw_summary = summarize_with_sdk(transcript, args.event) if transcript else ""
+    raw_summary = summarize_with_llm(transcript, args.event) if transcript else ""
 
     # 3-tier classification (Phase 0.5). Replaces binary FLUSH_OK check.
     tier, body = _classify_response(raw_summary)
@@ -362,14 +370,21 @@ def main() -> int:
     )
     body_block = body + "\n" if body else "(tier flagged but no structured body — manual review needed)\n"
     block = header + meta + "\n" + body_block
-
-    daily_path = append_daily(day, block)
+    # Mandatory redaction boundary: strip secrets before the block lands
+    # in the durable daily log (mirrors post_tool_capture.py:66-72).
+    block = redact_secrets(block)
 
     def _mutate(state: dict) -> None:
-        # Re-check dedupe against the freshest state in case a sibling
-        # process recorded the same (session_id, event) while we were
-        # summarizing. If so, still record our timestamp (no harm) but
-        # keep the compile trigger path idempotent.
+        # Re-check dedupe INSIDE the lock: a sibling process may have
+        # already recorded + appended the same (session_id, event)
+        # while we were summarizing. If so, skip entirely (TOCTOU-safe:
+        # the file append and the dedupe record are now both gated by
+        # the same atomic state mutation).
+        if should_skip(state, args.session_id, args.event):
+            return
+        # Write the daily log NOW (inside the lock) so the append and
+        # the dedupe timestamp are atomic from the caller's perspective.
+        daily_path = append_daily(day, block)
         record_flush(state, args.session_id, args.event)
         # Track tier distribution for observability.
         state.setdefault("flush_tier_counts", {})

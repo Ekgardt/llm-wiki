@@ -1,8 +1,10 @@
 ---
-type: synthesis
+type: concept
 title: "Global Multi-Project Migration Plan"
 description: "plan for extending LLM-wiki from a single-project vault into a global 'second brain' that auto-captures context from every Claude Code session across all projects and restores it on return."
 timestamp: 2026-07-03T05:41:37
+confidence: medium
+source_authority: user
 ---
 # Global Multi-Project Migration Plan
 
@@ -16,7 +18,7 @@ Turn `$LLM_WIKI_ROOT` (on this machine: `$LLM_WIKI_ROOT/`) into the default know
 - Switch projects → independent state per slug, no cross-contamination.
 - Return to a project after a gap → full context restored automatically.
 - Cross-project lessons (patterns, conventions) promote into `knowledge/notes/` and become available everywhere.
-- GitHub (private `Ekgardt/llm-wiki`) serves as cloud backup and enables multi-machine sync of the vault; runtime state (`$LLM_WIKI_STATE_ROOT`) stays local per machine.
+- GitHub (public `Ekgardt/llm-wiki`) serves as cloud backup and enables multi-machine sync of the vault; runtime state (`$LLM_WIKI_STATE_ROOT`) stays local per machine.
 
 ## Design decisions (Phase 0)
 
@@ -53,7 +55,7 @@ Inject the vault into every Claude Code session regardless of cwd.
 
 1. Set Windows user env var `LLM_WIKI_ROOT=$LLM_WIKI_ROOT`. Scripts read it with cwd fallback.
 2. Create `~/.claude/CLAUDE.md` with: pointer to `$LLM_WIKI_ROOT`, slug rule, project/cross-cutting boundary, session-start/end contract.
-3. Copy skills (`/knowledge-lookup`, `/bridge-promote-insight`, `/session-memory-compile`, `/knowledge-qa-file-back`, `/contradict-check`) from `$LLM_WIKI_ROOT/.claude\skills\` to `~/skills/`. (Symlink migration deferred to Phase 5.)
+3. Copy skills (`/knowledge-lookup`, `/bridge-promote-insight`, `/session-memory-compile`, `/knowledge-qa-file-back`, `/contradict-check`) from `$LLM_WIKI_ROOT/skills/` to `~/skills/`. (Symlink migration deferred to Phase 5.)
 
 **Verify:** in an unrelated folder, `/knowledge-lookup` works; `echo $LLM_WIKI_ROOT` resolves.
 **Rollback:** remove `~/.claude/CLAUDE.md`, unset env var, delete user-level skills copy.
@@ -83,7 +85,7 @@ The fragile part. Every hook must fail silently on error — never break a sessi
 ### Phase 5 — Polish (opportunistic, not blocking)
 - `scripts/archive_daily.py` — already dormant in [[Memory Subsystem Action Plan]]; multi-project pressure makes it useful sooner.
 - Per-project QMD collections — when tier crosses into HYBRID/QMD.
-- Symlink migration for skills (Phase 2 copy → `~/skills/ → $LLM_WIKI_ROOT/.claude\skills\`).
+- Symlink migration for skills (Phase 2 copy → `~/skills/ → $LLM_WIKI_ROOT/skills/`).
 - `knowledge/projects/<slug>/index.md` when a project grows past ~5 pages.
 - Privacy profiles — split `LLM_WIKI_ROOT` only if NDA projects appear.
 - Multi-machine sync documentation once actually used on a second machine.
@@ -148,7 +150,7 @@ This harness is **best-effort glue**, not a guaranteed semantic layer. When docu
 - Conversation 2026-04-19 scoping the global multi-project model.
 - Current state of `$LLM_WIKI_ROOT/` and `$LLM_WIKI_STATE_ROOT/`.
 - [[Memory Subsystem Action Plan]] — pattern for an action-plan page and for the compile/lint infrastructure being extended.
-- [[Karpathy LLM Wiki Workflow]] — pipeline analogy (raw/inbox/wiki → now projects/ as a fourth axis).
+- [[Karpathy LLM Wiki Workflow]] — pipeline analogy (knowledge/raw/knowledge/inbox/knowledge/notes → now projects/ as a fourth axis).
 
 ## Related
 - [[Memory Subsystem Action Plan]] — prior multi-phase plan this one mirrors in structure.

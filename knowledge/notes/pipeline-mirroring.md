@@ -2,6 +2,7 @@
 type: concept
 title: "Pipeline Mirroring"
 description: "Noun-form counterpart of the pattern [[knowledge/notes/mirror-existing-pipelines]] — the rule that a new knowledge subsystem should reuse the shape of an existing pipeline."
+status: stub
 timestamp: 2026-07-03T05:41:37
 ---
 # Pipeline Mirroring
@@ -9,7 +10,7 @@ timestamp: 2026-07-03T05:41:37
 One-sentence summary: Noun-form counterpart of the pattern [[knowledge/notes/mirror-existing-pipelines]] — the rule that a new knowledge subsystem should reuse the shape of an existing pipeline.
 
 ## Status
-**Stub.** To avoid duplication with the imperative-form pattern, the full discussion lives in [[knowledge/notes/mirror-existing-pipelines]] (per the vault tiebreaker *patterns > concepts* when both would describe the same rule). The wiki-side promotion is [[knowledge/notes/pipeline-mirroring|Pipeline Mirroring]].
+**Stub.** To avoid duplication with the imperative-form pattern, the full discussion lives in [[knowledge/notes/mirror-existing-pipelines]] (per the vault tiebreaker *patterns > concepts* when both would describe the same rule).
 
 This page is kept only as a redirect so existing wikilinks continue to resolve.
 
@@ -18,8 +19,8 @@ When the first compile pass extracted the rule from `knowledge/daily/2026-04-13.
 
 The tiebreaker in `docs/AGENTS.md` resolves this: *patterns > concepts* when both would describe the same rule. The pattern form is strictly more actionable — it carries an "apply when" heuristic that the concept form lacks — so it wins canonical status. The concept remains as a stub rather than being deleted so that any existing wikilink anchored on the noun form still resolves, and so the historical trace of "we considered both framings and chose one" survives.
 
-Future compile passes should prefer creating new entries under `patterns/` when the rule is actionable, and only create a sibling `concepts/` entry if the concept carries meaning beyond the apply-when heuristic.
+Future compile passes should prefer creating new entries under `knowledge/notes/` when the rule is actionable, and only create a sibling concept entry if the concept carries meaning beyond the apply-when heuristic.
 
 ## Related
-- [[knowledge/notes/mirror-existing-pipelines]] — canonical memory-side page.
-- [[knowledge/notes/pipeline-mirroring|Pipeline Mirroring]] — public-facing wiki concept.
+- [[knowledge/notes/mirror-existing-pipelines]] — canonical page (verb-shaped pattern).
+- [[2026-04-13 Three Conventions One Root|Three Conventions, One Root]] — connection page placing this convention alongside its siblings.

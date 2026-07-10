@@ -11,11 +11,27 @@ All output goes to $LLM_WIKI_STATE_ROOT\\logs\\nightly-YYYY-MM-DD.log.
 from __future__ import annotations
 
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import maybe_compile  # noqa: E402
 from memory_state import REPORTS_DIR, ROOT  # noqa: E402
+
+
+def _wait_for_compile_idle(log_fn) -> None:
+    """If a compile is already running, wait (up to 3 retries × 10 s).
+
+    Scheduled passes run unattended and must not skip compile just because
+    a previous compile (triggered by a hook) is still running.
+    """
+    for attempt in range(3):
+        st = maybe_compile.status()
+        if not st["compile_running"]:
+            return
+        log_fn(f"  compile running ({st['reason']}), waiting 10s (attempt {attempt + 1}/3)...")
+        time.sleep(10)
 
 
 def main() -> int:
@@ -44,6 +60,7 @@ def main() -> int:
         failures += 1
 
     # Step 2: maybe_compile (will spawn compile if there's pending work).
+    _wait_for_compile_idle(log)
     log("Step 2: triggering compile (if needed)...")
     r = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "maybe_compile.py")],

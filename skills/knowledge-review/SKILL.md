@@ -6,7 +6,7 @@ description: Review the health of the wiki for gaps, contradictions, weak linkin
 disable-model-invocation: true
 context: fork
 agent: Explore
-allowed-tools: Read Glob Grep LS Bash(qmd *)
+allowed-tools: Read Glob Grep LS Bash(uv run python scripts/lint_memory.py *)
 title: "SKILL"
 timestamp: 2026-07-03T05:41:37
 ---

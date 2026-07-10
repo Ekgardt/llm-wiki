@@ -30,7 +30,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(Path(__file__).resolve().parent.parent))).resolve()
 STATE_ROOT = Path(
-    os.environ.get("LLM_WIKI_STATE_ROOT", str(ROOT.parent / "LLM-wiki-state"))
+    os.environ.get("LLM_WIKI_STATE_ROOT", str(ROOT))
 ).resolve()
 SCRIPTS_DIR = ROOT / "scripts"
 PROJECTS_DIR = ROOT / "knowledge" / "projects"

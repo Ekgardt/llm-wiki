@@ -1,6 +1,7 @@
 # Session Memory Index
 
-This index catalogs durable memory distilled from Claude Code sessions.
+This index catalogs durable memory distilled from AI agent sessions
+(OpenCode, Codex, Claude Code, Cursor, Antigravity).
 
 ## Entry points
 - [[docs/operating-model]] — compile cadence, promotion rules, and the daily ↔ notes boundary.
@@ -14,7 +15,7 @@ This index catalogs durable memory distilled from Claude Code sessions.
 - [[knowledge/notes/provenance-rule-6]] — CLAUDE.md rule 6 — "mark uncertainty explicitly" — is the root constraint that justifies preliminary flagging, editorial notes, and every "inferred from…" caveat in this vault.
 
 ## Decisions
-- [[knowledge/notes/centralized-memory-subsystem]] — The memory subsystem (`memory/state/`, `knowledge/daily/`, `knowledge/notes/`) resolves to a single canonical location regardless of whether Claude Code runs from the main checkout or a git worktree.
+- [[knowledge/notes/centralized-memory-subsystem]] — The memory subsystem (`run/state.json`, `knowledge/daily/`, `knowledge/notes/`) resolves to a single canonical location regardless of whether Claude Code runs from the main checkout or a git worktree.
 - [[knowledge/notes/flag-inferred-content-as-preliminary]] — When writing a wiki page about a topic that has no corresponding `raw/` or `inbox/` source, mark the inferred sections as **preliminary** rather than omitting them or presenting them as settled.
 - [[knowledge/notes/hook-scripts-defense-in-depth]] — Two hardening decisions made 2026-04-19 to prevent silent failures in session hook scripts: a `_resolve_state_root()` fallback when `LLM_WIKI_STATE_ROOT` is unset, and an explicit guard mapping `.`, `..`, or empty slugs to `"root"`.
 - [[knowledge/notes/no-gitkeep-in-inbox-articles]] — Do not add `.gitkeep` to `inbox/articles/` — the directory will be created on demand by scripts at first use.

@@ -19,7 +19,6 @@ import argparse
 import json
 import os
 import shutil
-import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -193,7 +192,7 @@ def main() -> int:
     vault = args.vault_root or str(Path(__file__).resolve().parent.parent)
     state = args.state_root
     if not state:
-        state = str(Path(vault).resolve().parent / "LLM-wiki-state")
+        state = str(Path(vault).resolve())
 
     apply_merge(
         user_settings=user_settings,

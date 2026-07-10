@@ -3,13 +3,15 @@ type: pattern
 title: "Mirror Existing Pipelines"
 description: "When introducing a new subsystem, mirror the structure of an already-working pipeline in the same repo rather than inventing new shape."
 timestamp: 2026-07-03T05:41:37
+confidence: medium
+source_authority: user
 ---
 # Mirror Existing Pipelines
 
 One-sentence summary: When introducing a new subsystem, mirror the structure of an already-working pipeline in the same repo rather than inventing new shape.
 
 ## Lesson
-This vault's core pipeline is `raw/ → inbox/ → knowledge/notes/` (three layers: immutable raw → staging → compiled). The session-memory subsystem mirrors the compile discipline and the index+log pair, but with **two layers only**: `knowledge/daily/` (immutable raw capture) → `knowledge/notes/` (compiled). There is no staging/inbox equivalent in `memory/`. Reusing shape keeps conventions transferable (provenance rules, editorial notes, registration in index+log) and reduces cognitive overhead.
+This vault's core pipeline is `knowledge/raw/ → knowledge/inbox/ → knowledge/notes/` (three layers: immutable raw → staging → compiled). The session-memory subsystem mirrors the compile discipline and the index+log pair, but with **two layers only**: `knowledge/daily/` (immutable raw capture) → `knowledge/notes/` (compiled). There is no staging equivalent. Reusing shape keeps conventions transferable (provenance rules, editorial notes, registration in index+log) and reduces cognitive overhead.
 
 **Correction note (2026-04-19):** Earlier versions of this page claimed memory had "the same immutable-raw / staged / compiled three-layer shape" as the core pipeline. That was inaccurate. Memory has two layers, not three. Both `knowledge/notes/Pipeline Mirroring.md` and `knowledge/notes/Memory Subsystem Action Plan.md` correctly describe only two layers.
 

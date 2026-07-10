@@ -1,12 +1,14 @@
 ---
 type: decision
 title: "Flag Inferred Content As Preliminary"
-description: "When writing a wiki page about a topic that has no corresponding `raw/` or `inbox/` source, mark the inferred sections as **preliminary** rather than omitting them or presenting them as settled."
+description: "When writing a wiki page about a topic that has no corresponding `knowledge/raw/` or `knowledge/inbox/` source, mark the inferred sections as **preliminary** rather than omitting them or presenting them as settled."
 timestamp: 2026-07-03T05:41:37
+confidence: medium
+source_authority: user
 ---
 # Flag Inferred Content As Preliminary
 
-One-sentence summary: When writing a wiki page about a topic that has no corresponding `raw/` or `inbox/` source, mark the inferred sections as **preliminary** rather than omitting them or presenting them as settled.
+One-sentence summary: When writing a wiki page about a topic that has no corresponding `knowledge/raw/` or `knowledge/inbox/` source, mark the inferred sections as **preliminary** rather than omitting them or presenting them as settled.
 
 ## Decision
 Date: 2026-04-13.
@@ -17,7 +19,7 @@ Rejected: (a) omit the section entirely — loses useful working knowledge; (b) 
 
 Why: CLAUDE.md rule 6 requires explicit uncertainty marking. This decision operationalizes it for the common case of "no raw source yet, but we still need the page."
 
-Follow-up: when a raw source later arrives in `inbox/`, the flag is removed and `Source:` updated.
+Follow-up: when a raw source later arrives in `knowledge/inbox/`, the flag is removed and `Source:` updated.
 
 ## Evidence
 - `knowledge/daily/2026-04-13.md` [00:57:04] — applied to [[Wiki vs Memory Compiler vs Fusion]]; memory-compiler and fusion sections flagged preliminary.

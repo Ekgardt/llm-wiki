@@ -1,6 +1,6 @@
 """Bootstrap the QMD hybrid lex+vec index over the vault's content trees.
 
-Registers collections for `knowledge/notes/`, `raw/`, and `inbox/`, runs an index
+Registers collections for `knowledge/notes/`, `knowledge/raw/`, and `knowledge/inbox/`, runs an index
 update, and generates embeddings. Idempotent — re-running is safe;
 `qmd` de-duplicates collections and incrementally updates.
 

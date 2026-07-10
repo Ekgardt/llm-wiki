@@ -16,16 +16,15 @@ Inspired by:
 from __future__ import annotations
 
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 
-import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT, STATE_FILE, REPORTS_DIR, load_state  # noqa: E402
+from memory_state import REPORTS_DIR, ROOT  # noqa: E402
 
 PROJECTS_DIR = ROOT / "knowledge" / "projects"
 KNOWLEDGE = ROOT / "knowledge" / "notes"
-WIKI_DIR = ROOT / "knowledge" / "notes"
 DAILY_DIR = ROOT / "knowledge" / "daily"
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
@@ -72,15 +71,22 @@ def _read_open_threads(slug: str) -> list[str]:
 
 
 def _find_last_decision(slug: str | None = None) -> dict | None:
-    """Find the most recent decision page (optionally filtered by project)."""
-    decisions_dir = KNOWLEDGE / "decisions"
-    if not decisions_dir.exists():
+    """Find the most recent decision page (optionally filtered by project).
+
+    The compiler writes decisions FLAT under knowledge/notes/ (not in a
+    decisions/ subdir), so we scan all .md files and filter by
+    frontmatter `type: decision`.
+    """
+    if not KNOWLEDGE.exists():
         return None
     candidates = []
-    for md in decisions_dir.glob("*.md"):
+    for md in KNOWLEDGE.rglob("*.md"):
         try:
             content = md.read_text(encoding="utf-8", errors="ignore")
         except OSError:
+            continue
+        page_type = _fm_field(content, TYPE_RE)
+        if not page_type or page_type.strip().strip("\"'").lower() != "decision":
             continue
         status = _fm_field(content, STATUS_RE) or "active"
         if status == "superseded":
@@ -109,11 +115,6 @@ def _find_last_decision(slug: str | None = None) -> dict | None:
 
 def _find_contradictions() -> list[str]:
     """Check lint report for contradiction findings."""
-    try:
-        import json
-        state = load_state()
-    except Exception:
-        return []
     # Check if the last lint report exists and has findings
     reports_dir = REPORTS_DIR
     if not reports_dir.exists():

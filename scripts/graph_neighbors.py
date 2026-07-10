@@ -13,14 +13,15 @@ Integrates into search_memory.py's _rrf_fuse() as a 3rd signal.
 from __future__ import annotations
 
 import re
-from pathlib import Path
 import sys
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import ROOT  # noqa: E402
 
-WIKI_DIR = ROOT / "knowledge" / "notes"
 KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
+# Legacy alias for tests / external callers (same tree post-three-zone).
+WIKI_DIR = KNOWLEDGE_DIR
 
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+?)(?:\|[^\]]+)?\]\]")
 
@@ -28,11 +29,12 @@ WIKILINK_RE = re.compile(r"\[\[([^\]|#]+?)(?:\|[^\]]+)?\]\]")
 def _build_link_graph() -> dict[str, list[str]]:
     """Build adjacency: page_path → [linked_page_paths].
 
-    Scans all wiki + knowledge markdown files for [[wikilinks]].
+    Scans all knowledge markdown files for [[wikilinks]].
     Resolves links to actual file paths.
     """
     graph: dict[str, list[str]] = {}
-    search_dirs = [WIKI_DIR, KNOWLEDGE_DIR]
+    seen_dirs: set[Path] = set()
+    search_dirs = [d for d in (KNOWLEDGE_DIR, WIKI_DIR) if d not in seen_dirs and not seen_dirs.add(d)]
 
     for d in search_dirs:
         if not d.exists():
@@ -44,7 +46,12 @@ def _build_link_graph() -> dict[str, list[str]]:
                 content = md.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 continue
-            rel = md.relative_to(ROOT).as_posix()
+            try:
+                rel = md.relative_to(ROOT).as_posix()
+            except ValueError:
+                # Page lives outside ROOT (e.g. symlinked archive) — skip it
+                # rather than crashing the whole graph build.
+                continue
             links = []
             for target in WIKILINK_RE.findall(content):
                 target = target.strip()

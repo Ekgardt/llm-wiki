@@ -3,6 +3,8 @@ type: debugging
 title: "Case-Sensitive Grep on Injected Context Gives False Failure"
 description: "Grepping the injected `additionalContext` payload with a lowercase pattern silently misses content that was written with an initial capital, producing a false 'notes lost' verdict even when the hook r"
 timestamp: 2026-07-03T05:41:37
+confidence: medium
+source_authority: user
 ---
 # Case-Sensitive Grep on Injected Context Gives False Failure
 

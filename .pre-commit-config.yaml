@@ -10,6 +10,15 @@
 default_install_hook_types: [pre-commit, pre-push]
 
 repos:
+  # Ruff — Python static analysis (undefined names, unused imports, style)
+  # TODO: pin to commit SHA for immutable supply chain
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+        files: ^(?:scripts|tests)/.*\.py$
+
   # Structural lint — fast, local, no API calls, runs on commit
   - repo: local
     hooks:
@@ -25,7 +34,7 @@ repos:
         pass_filenames: false
         files: ^knowledge/.*\.md$
         description: >-
-          Structural lint (12 checks). Blocking on broken_wikilinks,
+          Structural lint (13 checks). Blocking on broken_wikilinks,
           orphan_pages, missing_frontmatter, missing_required_type,
           invalid_supersede_chain, orphan_gaps (the categories that
           indicate real structural breakage). Pre-existing debt
@@ -43,6 +52,7 @@ repos:
         description: LLM-judged contradictions across knowledge pages — costs API calls, runs on push only.
 
   # Gitleaks — secret scanning, runs on commit
+  # TODO: pin to commit SHA for immutable supply chain
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.30.1
     hooks:

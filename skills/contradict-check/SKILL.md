@@ -1,17 +1,17 @@
 ---
 type: skill
 name: contradict-check
-argument-hint: "[--scope memory|wiki|all]  (default: all)"
+argument-hint: "[--scope all]  (default: all)"
 description: LLM-judged contradiction check across the vault. Run before committing changes that touch knowledge pages, or as a git pre-commit hook.
 disable-model-invocation: true
 allowed-tools: Read Glob Grep LS Bash(python scripts/lint_memory.py *) Bash(uv run python scripts/lint_memory.py *)
-title: "Only run the expensive check if knowledge pages changed."
+title: "SKILL"
 timestamp: 2026-07-03T05:41:37
 ---
-Wraps `scripts/lint_memory.py --contradictions`, which asks the Claude Agent SDK to flag concrete logical contradictions between pages.
+Wraps `scripts/lint_memory.py --contradictions`, which uses the unified llm_client (`scripts/llm_client.py`) to flag concrete logical contradictions between pages.
 
 ## When to use
-- Before committing a batch of edits to `knowledge/notes/` or `knowledge/notes/concepts|syntheses|comparisons|connections|qa/`.
+- Before committing a batch of edits to `knowledge/notes/`.
 - After promoting a page via `bridge-promote-insight` (to check the promoted page hasn't drifted from its memory origin).
 - Scheduled: part of a weekly review, alongside `knowledge-review` / `session-memory-review`.
 - As a git pre-commit hook (see *Installing as a pre-commit hook* below).
@@ -23,13 +23,12 @@ Only **concrete** contradictions — two pages giving different answers to the s
 
 1. Run: `python scripts/lint_memory.py --contradictions $ARGUMENTS`.
    - `--scope all` (default) — knowledge/notes.
-   - `--scope memory` / `--scope wiki` — one tree only.
-   - Note: this check costs API calls; the other 6 structural checks are free and always run.
+   - Note: this check costs API calls; the other 12 structural checks are free and always run.
 
 2. Open the generated report at `$LLM_WIKI_STATE_ROOT/logs/lint-YYYY-MM-DD.md` (default `$LLM_WIKI_STATE_ROOT/logs/`) and read the `## Contradictions` section.
 
 3. For each finding:
-   - If real: pick one page as canonical, update the other to defer to it, and add a `knowledge/log.md` or `knowledge/log.md` entry noting the resolution.
+   - If real: pick one page as canonical, update the other to defer to it, and add a `knowledge/log.md` entry noting the resolution.
    - If false positive: record in the relevant knowledge page's `Related` section that the apparent conflict is scope-difference, not contradiction — this teaches future lints (by making the distinction explicit in-page).
 
 4. Re-run the structural lint (`python scripts/lint_memory.py`) to confirm no new breakage from your fix.

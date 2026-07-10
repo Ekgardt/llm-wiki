@@ -12,8 +12,8 @@ Policy (from [[Memory Subsystem Action Plan]]):
 
 "Compiled" means the log's file hash is present in
 `$LLM_WIKI_STATE_ROOT/run/state.json::compiled_daily_hashes`
-(managed by `compile_memory.py`; runtime state lives outside the vault
-so git and Obsidian don't track ephemeral churn).
+(managed by `compile_memory.py`; runtime state lives inside the vault
+under gitignored cache/logs/run dirs).
 
 Usage:
     uv run python scripts/archive_daily.py                 # dry-run by default
@@ -39,7 +39,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT, load_state  # noqa: E402
+from memory_state import ROOT, file_hash, load_state  # noqa: E402
 
 DAILY_DIR = ROOT / "knowledge" / "daily"
 ARCHIVE_DIR = DAILY_DIR / "archive"
@@ -111,9 +111,10 @@ def find_candidates(
             continue
         if d >= cutoff:
             continue
-        if p.name not in compiled_hashes:
-            # Un-compiled logs stay put regardless of age — next compile
-            # pass needs to find them.
+        # Verify the actual file hash matches the recorded compiled hash,
+        # not just the filename — prevents archiving a log whose content
+        # changed after the last compile (still un-compiled).
+        if compiled_hashes.get(p.name) != file_hash(p):
             continue
         month_dir = ARCHIVE_DIR / f"{d.year:04d}-{d.month:02d}"
         out.append((p, month_dir / p.name))

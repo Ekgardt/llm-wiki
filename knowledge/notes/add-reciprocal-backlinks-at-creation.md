@@ -3,6 +3,8 @@ type: pattern
 title: "Add Reciprocal Backlinks at Creation"
 description: "When creating a new synthesis, concept, or decision page that references existing pages, add all reciprocal backlinks to the related pages in the same editing pass — never defer them to a future clean"
 timestamp: 2026-07-03T05:41:37
+confidence: medium
+source_authority: user
 ---
 # Add Reciprocal Backlinks at Creation
 

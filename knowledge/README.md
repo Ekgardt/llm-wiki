@@ -17,7 +17,9 @@ All durable and episodic content lives under this tree. Runtime state does **not
 Indexes, PID locks, queues, lint reports:
 
 ```
-$LLM_WIKI_STATE_ROOT/{run,logs,cache}
+$LLM_WIKI_STATE_ROOT/{run,logs,cache,cognee}
 ```
 
-Default: `<vault-parent>/LLM-wiki-state/`. Never create `cache/`, `logs/`, `run/`, or `state/` at the vault root.
+Default: the vault itself → `cache/`, `logs/`, `run/`, `cognee/` at vault
+root, all gitignored. Override via `LLM_WIKI_STATE_ROOT` (tests use a temp
+dir).

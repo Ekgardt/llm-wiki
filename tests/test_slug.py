@@ -8,11 +8,7 @@ Covers the Round 2 / Round 5 fixes to `session_start_project_state.py`:
 """
 from __future__ import annotations
 
-import shutil
-import tempfile
 from pathlib import Path
-
-import pytest
 
 from session_start_project_state import (
     _base_slug,
@@ -21,7 +17,6 @@ from session_start_project_state import (
     _path_hash_suffix,
     _slug_owns_dir,
 )
-
 
 # ---------- _base_slug ----------
 

@@ -1,17 +1,18 @@
 """Shared helpers for memory automation state.
 
-Three-zone layout: vault holds code + knowledge only. Runtime state lives
-OUTSIDE the vault so Obsidian/git don't track ephemeral churn:
+Three-zone layout: vault holds code + knowledge + gitignored runtime dirs.
 
-    $LLM_WIKI_STATE_ROOT/
+    <vault>/
       run/state.json     # compile hashes, dedupe, heartbeats
       run/compile.pid    # maybe_compile lock
       run/queue/         # deferred LLM tasks
       logs/              # lint / nightly reports
       cache/             # search / QMD indexes
+                       # cache/cognee/ — optional semantic graph
 
-Default STATE_ROOT: `$LLM_WIKI_ROOT/../LLM-wiki-state` (sibling of vault).
-Never write runtime into the vault root (`cache/`, `logs/`, `run/`, `state/`).
+`cache/` (incl. `cache/cognee/`), `logs/`, `run/` are gitignored — they live inside the
+vault for single-checkout portability but git never tracks their churn.
+Override the root via LLM_WIKI_STATE_ROOT (tests use a temp dir).
 
 Written by multiple concurrent processes (flush_memory and compile_memory
 may run at the same time). All writers MUST go through `update_state(mutator)`
@@ -27,9 +28,11 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any
+
 
 def _resolve_vault_root(start: Path) -> Path:
     """Resolve the canonical vault root even from inside a git worktree.
@@ -66,12 +69,12 @@ def _vault_root() -> Path:
 
 ROOT = _vault_root()
 
-# Runtime state lives OUTSIDE the vault so git/Obsidian don't track ephemeral
-# churn (compile hashes, dedupe timestamps, lint reports, debug dumps).
-# Default: sibling directory `$LLM_WIKI_STATE_ROOT/`. Overridable via
-# LLM_WIKI_STATE_ROOT for explicit portability.
+# Runtime state lives INSIDE the vault as gitignored dirs (cache/, logs/,
+# run/) — keeps everything in one checkout, git ignores the churn.
+# Overridable via LLM_WIKI_STATE_ROOT for explicit portability (tests use a
+# temp dir; multi-disk setups can point elsewhere).
 STATE_ROOT = Path(
-    os.environ.get("LLM_WIKI_STATE_ROOT", str(ROOT.parent / "LLM-wiki-state"))
+    os.environ.get("LLM_WIKI_STATE_ROOT", str(ROOT))
 ).resolve()
 STATE_DIR = STATE_ROOT / "run"
 REPORTS_DIR = STATE_ROOT / "logs"

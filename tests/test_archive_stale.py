@@ -6,7 +6,6 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch, MagicMock
 
 import pytest
 
@@ -141,3 +140,55 @@ def test_type_threshold_lookup():
     assert archive_stale._get_type_threshold("pattern") == 180
     assert archive_stale._get_type_threshold("qa") == 365
     assert archive_stale._get_type_threshold("unknown") == 180  # default
+
+
+def test_archive_page_actually_moves_file(fake_file, tmp_path, monkeypatch):
+    """When apply=True, the file is physically moved to archive/ with status: archived."""
+    import archive_stale
+
+    # Point archive_stale at tmp_path so we don't touch the real vault.
+    monkeypatch.setattr(archive_stale, "ROOT", tmp_path)
+    monkeypatch.setattr(archive_stale, "KNOWLEDGE", tmp_path / "knowledge" / "notes")
+    archive_dir = tmp_path / "knowledge" / "notes" / "archive"
+    monkeypatch.setattr(archive_stale, "ARCHIVE_ROOT", archive_dir)
+
+    # Create a stale debugging page (65 days old).
+    md = fake_file("stale-debug.md", "debugging", age_days=65)
+
+    result = archive_stale._archive_page(md, apply=True)
+
+    # Original file must be gone.
+    assert not md.exists(), f"original file still at {md}"
+
+    # Archive copy must exist and contain status: archived.
+    year = datetime.now().strftime("%Y")
+    archived = archive_dir / year / md.name
+    assert archived.exists(), f"archived file not at {archived}"
+    content = archived.read_text(encoding="utf-8")
+    assert "status: archived" in content
+
+    # Result string should indicate a real archive, not dry-run.
+    assert result.startswith("ARCHIVED:")
+
+
+def test_archive_page_dry_run_does_not_move(fake_file, tmp_path, monkeypatch):
+    """When apply=False (dry-run), the file stays put."""
+    import archive_stale
+
+    monkeypatch.setattr(archive_stale, "ROOT", tmp_path)
+    monkeypatch.setattr(archive_stale, "KNOWLEDGE", tmp_path / "knowledge" / "notes")
+    archive_dir = tmp_path / "knowledge" / "notes" / "archive"
+    monkeypatch.setattr(archive_stale, "ARCHIVE_ROOT", archive_dir)
+
+    md = fake_file("stale-debug.md", "debugging", age_days=65)
+
+    result = archive_stale._archive_page(md, apply=False)
+
+    # Original file must still exist.
+    assert md.exists(), "original file was moved during dry-run"
+    # No archive copy should exist.
+    year = datetime.now().strftime("%Y")
+    archived = archive_dir / year / md.name
+    assert not archived.exists()
+    # Result should indicate dry-run.
+    assert result.startswith("WOULD ARCHIVE:")

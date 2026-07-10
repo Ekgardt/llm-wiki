@@ -41,7 +41,7 @@ WIKI = ROOT / "knowledge" / "notes"
 
 TIERS = [
     (50, "DIRECT"),
-    (300, "HYBRID"),
+    (301, "HYBRID"),
     (float("inf"), "QMD"),
 ]
 
@@ -78,9 +78,9 @@ def qmd_status() -> dict:
     Strategy:
       1. Look for the index file. Locations, in priority order:
          - `$QMD_INDEX` env var (explicit override)
-         - `$LLM_WIKI_STATE_ROOT/cache/index.sqlite` (canonical runtime home)
-         - `<vault>/../LLM-wiki-state/cache/index.sqlite` (default sibling)
-         - legacy `$LLM_WIKI_STATE_ROOT/qmd/index.sqlite` (pre-restructure)
+         - `$LLM_WIKI_STATE_ROOT/cache/index.sqlite` (explicit state root)
+         - `<vault>/cache/index.sqlite` (default — runtime inside vault)
+         - legacy `<vault>/qmd/index.sqlite` (pre-restructure)
          The file's mtime tells us when QMD last wrote.
       2. Try `qmd status` for richer detail. On Windows the `qmd` binary
          is often a shim only visible to bash/Git-Bash, not cmd.exe — so
@@ -101,9 +101,10 @@ def qmd_status() -> dict:
     if state_root_env:
         candidates.append(Path(state_root_env) / "cache" / "index.sqlite")
         candidates.append(Path(state_root_env) / "qmd" / "index.sqlite")  # legacy
-    # Sibling-of-vault default (matches memory_state.py convention).
-    candidates.append(ROOT.parent / "LLM-wiki-state" / "cache" / "index.sqlite")
-    candidates.append(ROOT.parent / "LLM-wiki-state" / "qmd" / "index.sqlite")  # legacy
+    # Vault-root default (matches memory_state.py convention — runtime
+    # cache/ lives inside the vault, gitignored).
+    candidates.append(ROOT / "cache" / "index.sqlite")
+    candidates.append(ROOT / "qmd" / "index.sqlite")  # legacy
     for c in candidates:
         try:
             if c and c.exists() and c.is_file():
@@ -165,7 +166,7 @@ def main() -> int:
 
     print(f"Wiki pages (curated, excl. editorial): {count}")
     print(f"Recommended tier: {tier}")
-    print(f"Thresholds: DIRECT < 50  |  HYBRID 50–300  |  QMD > 300")
+    print("Thresholds: DIRECT < 50  |  HYBRID 50–300  |  QMD > 300")
     if qmd.get("available"):
         print(f"QMD index: {qmd.get('index_path')} ({qmd.get('index_size_mb')} MB)")
         age_h = qmd.get("index_age_hours")

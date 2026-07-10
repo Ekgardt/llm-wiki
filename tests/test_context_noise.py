@@ -21,7 +21,6 @@ from pathlib import Path
 
 import pytest
 
-
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "session_start_context.py"
 
 

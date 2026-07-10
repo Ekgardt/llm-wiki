@@ -3,6 +3,8 @@ type: pattern
 title: "Docs Portability: Absolute Paths"
 description: "Replace hardcoded absolute paths (`<absolute-path>...`) in canonical documentation with `$ENV_VAR (on this machine: <absolute-path>...)` to keep docs portable across machines while preserving a concrete sanity-check referenc"
 timestamp: 2026-07-03T05:41:37
+confidence: medium
+source_authority: user
 ---
 # Docs Portability: Absolute Paths
 

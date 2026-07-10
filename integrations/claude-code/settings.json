@@ -12,7 +12,8 @@
     "allow": [
       "Bash(git status)",
       "Bash(git diff *)",
-      "Bash(qmd *)",
+      "Bash(uv run python scripts/search_memory.py *)",
+      "Bash(uv run python scripts/lookup_mode.py *)",
       "Bash(ls *)",
       "Bash(find *)",
       "Bash(cat *)",

@@ -18,10 +18,10 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 
-import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import ROOT, load_state  # noqa: E402
 
@@ -99,6 +99,10 @@ def _find_recent_daily_activity(slug: str, days: int = 7) -> list[str]:
 def _read_state_handoff(slug: str) -> str:
     """Read the 'Where we left off' section from project state.md."""
     state_path = PROJECTS_DIR / slug / "state.md"
+    # Containment guard: slug must not escape PROJECTS_DIR (no .., no abs).
+    if not state_path.resolve().is_relative_to(PROJECTS_DIR.resolve()):
+        print(f"build_context: slug escapes PROJECTS_DIR: {slug!r}", file=sys.stderr)
+        return ""
     if not state_path.exists():
         return ""
     try:
@@ -223,7 +227,7 @@ def build_context(slug: str, max_chars: int = 2000, agent: str | None = None) ->
     # 3. Recent activity
     activity = _find_recent_daily_activity(slug)
     if activity:
-        parts.append(f"### Recent activity (last 7 days)")
+        parts.append("### Recent activity (last 7 days)")
         for line in activity[:5]:
             parts.append(f"- {line}")
         parts.append("")
@@ -233,7 +237,7 @@ def build_context(slug: str, max_chars: int = 2000, agent: str | None = None) ->
         state = load_state()
         hb = state.get("codex_heartbeats", {}).get(slug, {})
         if hb:
-            parts.append(f"### Last seen")
+            parts.append("### Last seen")
             parts.append(f"- {hb.get('reason', 'unknown')} at {hb.get('at', '?')}")
     except Exception:
         pass
@@ -254,6 +258,10 @@ def main() -> int:
     context = build_context(args.slug, args.max_chars)
     if args.write:
         out = PROJECTS_DIR / args.slug / "context.md"
+        # Containment guard: slug must not escape PROJECTS_DIR (no .., no abs).
+        if not out.resolve().is_relative_to(PROJECTS_DIR.resolve()):
+            print(f"build_context: slug escapes PROJECTS_DIR: {args.slug!r}", file=sys.stderr)
+            return 1
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(
             "---\n"

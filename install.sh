@@ -12,7 +12,7 @@
 #   2. Installs Python deps (uv sync)
 #   3. Runs tests to verify everything works
 #   4. Sets LLM_WIKI_ROOT in shell profile
-#   5. Sets up cron jobs (nightly + weekly) — macOS launchd or Linux cron
+#   5. Sets up cron jobs (nightly + weekly) — cron only (no launchd)
 #   6. Detects installed agents and wires them up
 #   7. Prints next steps
 #
@@ -110,22 +110,32 @@ else
   PROFILE="${HOME}/.profile"
 fi
 
-# Check if already set
+# Set LLM_WIKI_ROOT (idempotent per-var, so a re-install updates STATE_ROOT
+# even if LLM_WIKI_ROOT was already written by an older installer).
 if ! grep -q "LLM_WIKI_ROOT=" "$PROFILE" 2>/dev/null; then
   echo "" >> "$PROFILE"
   echo "# LLM-Wiki memory system" >> "$PROFILE"
   echo "export LLM_WIKI_ROOT=\"$VAULT_ROOT\"" >> "$PROFILE"
-  STATE_ROOT="$VAULT_ROOT/../LLM-wiki-state"
-  echo "export LLM_WIKI_STATE_ROOT=\"$STATE_ROOT\"" >> "$PROFILE"
   ok "Added LLM_WIKI_ROOT to $PROFILE"
 else
   ok "LLM_WIKI_ROOT already in $PROFILE"
 fi
 
-# Create state directory
-STATE_ROOT="${LLM_WIKI_STATE_ROOT:-$VAULT_ROOT/../LLM-wiki-state}"
+# Runtime lives inside the vault as gitignored cache/logs/run dirs.
+# LLM_WIKI_STATE_ROOT defaults to the vault itself; set it explicitly only
+# if you want runtime on a different disk.
+STATE_ROOT="$VAULT_ROOT"
+if ! grep -q "LLM_WIKI_STATE_ROOT=" "$PROFILE" 2>/dev/null; then
+  echo "export LLM_WIKI_STATE_ROOT=\"$STATE_ROOT\"" >> "$PROFILE"
+  ok "Added LLM_WIKI_STATE_ROOT to $PROFILE"
+else
+  ok "LLM_WIKI_STATE_ROOT already in $PROFILE"
+fi
+
+# Create runtime dirs inside the vault (gitignored)
+STATE_ROOT="${LLM_WIKI_STATE_ROOT:-$VAULT_ROOT}"
 mkdir -p "$STATE_ROOT/run" "$STATE_ROOT/run/queue" "$STATE_ROOT/logs" "$STATE_ROOT/cache"
-ok "State directory: $STATE_ROOT"
+ok "Runtime dirs: $STATE_ROOT/{run,logs,cache} (gitignored)"
 
 # ─── 6. Build search index ─────────────────────────────────────────
 
@@ -137,8 +147,8 @@ ok "Search index built"
 
 info "Setting up scheduled maintenance..."
 
-CRON_NIGHTLY="0 3 * * * cd $VAULT_ROOT && $(which uv) run python scripts/scheduled_nightly.py >> $STATE_ROOT/logs/cron-nightly.log 2>&1"
-CRON_WEEKLY="0 4 * * 0 cd $VAULT_ROOT && $(which uv) run python scripts/scheduled_weekly.py >> $STATE_ROOT/logs/cron-weekly.log 2>&1"
+CRON_NIGHTLY="0 3 * * * cd '$VAULT_ROOT' && $(which uv) run python scripts/scheduled_nightly.py >> '$STATE_ROOT/logs/cron-nightly.log' 2>&1"
+CRON_WEEKLY="0 4 * * 0 cd '$VAULT_ROOT' && $(which uv) run python scripts/scheduled_weekly.py >> '$STATE_ROOT/logs/cron-weekly.log' 2>&1"
 
 # Remove old entries if re-running
 if crontab -l 2>/dev/null | grep -q "LLM-Wiki"; then
@@ -173,7 +183,7 @@ fi
 if command -v codex &>/dev/null; then
   AGENTS_FOUND="$AGENTS_FOUND Codex"
   info "Codex CLI detected. Add this to your shell profile:"
-  info "  alias codex-mem='uv run python $VAULT/scripts/codex_memory.py daily-log --cwd \$(pwd) --reason codex-session-end --json'"
+  info "  alias codex-mem='uv run python $VAULT_ROOT/scripts/codex_memory.py daily-log --cwd \$(pwd) --reason codex-session-end --json'"
 fi
 
 # Claude Code

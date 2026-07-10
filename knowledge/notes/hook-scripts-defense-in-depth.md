@@ -3,6 +3,8 @@ type: decision
 title: "Hook Scripts Defense-in-Depth"
 description: "Two hardening decisions made 2026-04-19 to prevent silent failures in session hook scripts: a `_resolve_state_root()` fallback when `LLM_WIKI_STATE_ROOT` is unset, and an explicit guard mapping `.`, `"
 timestamp: 2026-07-03T05:41:37
+confidence: medium
+source_authority: user
 ---
 # Hook Scripts Defense-in-Depth
 
@@ -20,7 +22,7 @@ One-sentence summary: Two hardening decisions made 2026-04-19 to prevent silent 
 
 **Choices made:**
 
-- Added `_resolve_state_root()` to both scripts: if `LLM_WIKI_STATE_ROOT` is unset, fall back to `Path(LLM_WIKI_ROOT).parent / "LLM-wiki-state"`. This covers the common single-var setup and ensures error logging is always available.
+- Added `_resolve_state_root()` to both scripts: if `LLM_WIKI_STATE_ROOT` is unset, fall back to `$LLM_WIKI_STATE_ROOT/run/` (inside the vault). This covers the common single-var setup and ensures error logging is always available.
 
 - Added explicit guard in `_compute_slug()` in both scripts: `if not slug or slug in {".", ".."}:  return "root"`. The guard runs after `Path.resolve()`, so it only fires on pathological inputs; it is cheap insurance with no downside.
 

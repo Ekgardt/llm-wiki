@@ -1,16 +1,35 @@
 [project]
 name = "llm-wiki"
-version = "3.3.1"
+version = "3.3.2"
 requires-python = ">=3.10"
 dependencies = []
+
+# Optional heavy dependencies — install via `uv sync --extra semantic`
+# (or `--extra cognee`). Kept optional so the base install stays zero-dep.
+[project.optional-dependencies]
+semantic = ["sentence-transformers>=2.7,<6"]
+cognee = ["cognee>=0.1,<2"]
 
 [dependency-groups]
 dev = [
     "pre-commit>=4.5.1",
     "pytest>=8.0.0",
+    "ruff>=0.6.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # `conftest.py` injects scripts/ into sys.path; no package install needed.
 pythonpath = ["scripts"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# F = pyflakes (undefined names, unused imports), E/W = pycodestyle,
+# I = isort (import order), UP = pyupgrade (modern syntax).
+select = ["F", "E", "W", "I", "UP"]
+# Docstring-heavy scripts legitimately have long lines in inline examples.
+ignore = ["E501"]
+

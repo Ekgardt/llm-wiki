@@ -112,8 +112,9 @@ def detect_feedback_loops(threshold: int = 3) -> list[dict]:
         except (json.JSONDecodeError, OSError):
             continue
         text = candidate.get("text", "").lower()
-        # Extract key words as topic signature
-        words = [w for w in re.findall(r"\b[a-z]{5,}\b", text) if w not in
+        # Extract key words as topic signature (Unicode-aware: matches
+        # letters in any script, not just ASCII a-z).
+        words = [w for w in re.findall(r"\b[^\W\d_]{5,}\b", text, re.UNICODE) if w not in
                  {"should", "would", "could", "their", "there", "about", "after", "being"}]
         if words:
             topic = " ".join(sorted(words[:3]))  # top-3 words as signature

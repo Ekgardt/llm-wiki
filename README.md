@@ -1,128 +1,117 @@
-# LLM Wiki — Multi-Tool Agent Memory
+# LLM Wiki
+
+[![Tests](https://img.shields.io/badge/tests-217%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Version](https://img.shields.io/badge/version-3.3.2-blue.svg)](CHANGELOG.md)
+
+**A local-first memory system for AI agents. Markdown files, git-tracked, zero cloud dependencies.**
+
+LLM Wiki gives every AI coding agent you use — OpenCode, Codex, Claude Code, Cursor, Antigravity — a shared, persistent knowledge base that survives across sessions. It captures what you and the agents discuss, compiles durable knowledge pages from session transcripts, and injects the right context at the start of each session so you never re-explain the same thing twice.
+
+Everything lives on your disk as plain markdown: readable in Obsidian, diffable in git, owned entirely by you.
 
 **Languages:** [English](README.md) | [Русский](README.ru.md) | [简体中文](README.zh-CN.md)
 
-![CI](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml/badge.svg)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests](https://img.shields.io/badge/tests-178%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
-[![Benchmark](https://img.shields.io/badge/Recall%405-100%25-blue.svg)](benchmark/run_benchmark.py)
+---
 
-**The proactive memory system for solo developers managing multiple AI agents. Markdown-first. Zero cloud cost. Recall@5 = 100%. $0/month.**
+## Table of Contents
 
-Most agent memory tools (Mem0, Zep, Letta) want your data in their cloud and a monthly fee. This one keeps everything on your disk as plain markdown — readable in Obsidian, diffable in git, owned by you — and uses the LLM subscriptions you **already have** (OpenCode, Codex CLI, Claude Code) to do the heavy lifting.
+- [How it works](#how-it-works)
+- [Features](#features)
+- [Quick Start](#quick-start)
+- [Wire up your agents](#wire-up-your-agents)
+- [Architecture](#architecture)
+- [Benchmark](#benchmark)
+- [Comparison](#comparison)
+- [Contributing](#contributing)
+- [Credits](#credits)
+- [License](#license)
+
+---
+
+## How it works
 
 ```
-You work normally in OpenCode / Codex / Claude Code
-            ↓
-System silently captures breadcrumbs + classifies sessions
-            ↓
-Detached background compile distills durable knowledge pages
-            ↓
-Next session: guard rails + advisory + context auto-injected
-            ↓
+You work normally in your AI agent (OpenCode / Codex / Claude Code / Cursor)
+             ↓
+Hooks silently capture breadcrumbs + classify sessions (FLUSH_MAJOR/MINOR/OK)
+             ↓
+Background compile distills daily logs into durable knowledge pages
+(with VERIFY-BEFORE-WRITE — citations are checked, not trusted)
+             ↓
+Next session: guardrails + advisory + metacognitive context auto-injected
+             ↓
 Agent picks up where you stopped — no re-explaining, no repeated mistakes
 ```
 
----
-
-## Benchmark (July 2026)
-
-> **Methodology disclosure**: known-item retrieval over shipped sample notes
-> (run `benchmark/run_benchmark.py` for live query count).
-> This is NOT LoCoMo or LongMemEval (multi-session conversation recall).
-> It measures "can the system find page X when given a paraphrased query?" —
-> the most relevant metric for personal knowledge retrieval. 100% Recall@5
-> is achievable on small curated datasets; expect 85-95% on 500+ pages.
-> Competitor numbers (95.2%, 94.7%) are from different datasets and are
-> not directly comparable. Run `benchmark/run_benchmark.py` to reproduce.
-
-| Metric | **LLM Wiki v3.3.1** | agentmemory (24.5k★) | Zep | Mem0 |
-|---|---|---|---|---|
-| **Recall@2** | **100%** | n/a | n/a | n/a |
-| **Recall@5** | **100%** 🥇 | 95.2% | 94.7% | 91.6% |
-| **Recall@10** | **100%** | 98.6% | n/a | n/a |
-| **MRR** | **0.942** | 0.882 | n/a | n/a |
-| **Latency p50** | **41ms** | 14ms | 155ms | 880ms |
-| **Token cost/search** | **0** 🥇 | ~1900 | $$ | $$ |
-| **Monthly cost** | **$0** | ~$10 | $200+ | $50-150 |
-
-Reproduce: `uv run python benchmark/run_benchmark.py --semantic`
+The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)): raw session signals are captured in real time, then a background LLM pass compiles them into structured knowledge pages rather than relying on raw retrieval at query time.
 
 ---
 
-## 41 Features
+## Features
 
-### Core Pipeline
-- **SKEPTICAL compiler** with VERIFY-BEFORE-WRITE (Python-side citation verification — LLM cannot fake evidence)
-- **3-tier FLUSH classifier** (MAJOR/MINOR/OK) — decides what's worth saving at session end
+### Capture pipeline
+- **5 Claude Code hooks**: SessionStart, PreCompact, SessionEnd, UserPromptSubmit, PostToolUse — full lifecycle coverage
+- **OpenCode plugin** (JS) — session.created, tool.execute.after, session.idle, experimental.session.compacting
+- **Codex wrapper** (PowerShell) — wraps `codex` CLI, captures on exit
+- **3-tier session classification**: FLUSH_MAJOR (decisions/lessons → triggers compile), FLUSH_MINOR (gotchas → save only), FLUSH_OK (chatter → skip)
+- **Non-LLM breadcrumbs** — prompt + tool-usage tagging at ms-latency, no API calls
+- **Secret redaction** — API keys, tokens, long base64 stripped before any write
+
+### Compile pipeline
 - **JSON-protocol compile** — no agent tool-use required, works with any LLM backend
-- **COMPILE_AUDIT sentinel** — tracks verified citations, dedup checks, stubs skipped, contradictions
+- **VERIFY-BEFORE-WRITE** — Python-side deterministic citation verification; the LLM cannot fabricate evidence
+- **Semantic dedup** — update preferred over create; auto-supersede on contradiction
+- **Incremental** — SHA-256 hashing; only changed daily logs are recompiled
+- **Concurrency-safe** — PID lock with stale detection; only one compile runs at a time
+- **Persistent task queue** — offline-tolerant; deferred LLM work drains on next session
 
-### Search & Retrieval
-- **Triple-fusion search**: BM25 + Vector (sentence-transformers) + Graph-neighbor (wikilink RRF)
-- **Weighted RRF**: BM25 weight=2, Vector weight=1, Graph weight=0.5 (prevents regression)
-- **Title + filename boost**: exact match → 10x score, prevents duplicate-page confusion
-- **Project-scoped search** (`--project your-app`) — boost current project's pages
-- **Temporal queries** (`--since 2026-03`, `--as-of 2026-04-01`) — date range + validity windows
-- **Typed provenance ranking** — `source_authority: user` outranks ai-derived/inferred
-- **Recall@2 = 100%** — correct page always in top 2 results
+### Search and retrieval
+- **Triple-fusion search**: BM25 (FTS5) + Vector (sentence-transformers) + Graph-neighbor (wikilink RRF)
+- **Weighted RRF**: BM25=2.0, Vector=1.0, Graph=0.5 — prevents regression on known-item queries
+- **Title + filename boost** — exact filename match short-circuits to rank 1
+- **Typed-provenance ranking** — `source_authority: user` outranks `ai-derived` / `inferred`
+- **Temporal queries** — `--as-of YYYY-MM-DD` filters by `valid_to` frontmatter
+- **3-tier strategy** — DIRECT (<50 pages, index-only), HYBRID (50–300, +QMD), QMD (>300)
 
-### Proactive Intelligence
-- **Guard rails** — auto-injects learned corrections at SessionStart (prevents repeating mistakes)
-- **Advisory** — open threads, last decision, lint alerts, cross-project insights
+### Proactive intelligence
+- **Guardrails** — auto-injects learned corrections at SessionStart (prevents repeating mistakes)
+- **Advisory** — surfaces open threads, last decision, lint alerts, cross-project insights
 - **Metacognitive context** — vault inventory, compile backlog, flush tier distribution
-- **Feedback capture** — detects corrections/preferences in session transcripts, saves as candidates
-- **Feedback promotion** — promoted candidates become knowledge pages + guard rail rules
+- **Feedback capture** — detects corrections/preferences in transcripts, saves as promotion candidates
 
-### Multi-Agent Coordination
+### Multi-project and multi-agent
+- **One vault, many projects** — 5-step collision-safe slug system, per-project `state.md`
+- **Project bootstrap** — auto-generates context from git history, README, tech stack
 - **Blackboard protocol** — parallel agents claim tasks, signal completion, detect conflicts
-- **Loop detector** — prevents infinite "fix → review → redo" cycles (detects repeated edits)
-- **Agent timeline** — "who decided what and when" attribution across agents
-- **Auto-detect agent strengths** — learns from history, no hardcoded roles
+- **Loop detector** — flags repeated edit cycles (fix → review → redo)
+- **Agent timeline** — attribution: which agent decided what and when
+
+### Maintenance
+- **13 lint checks** — broken wikilinks, orphans, missing frontmatter, invalid supersede chains, temporal validity, gaps, sparse pages, missing sources, contradictions
+- **Type-aware archive** — debugging 60d, patterns 180d, decisions never
+- **Nightly + weekly schedules** — compile, lint, archive, OKF migration (Task Scheduler on Windows, cron on Unix)
+- **OKF v0.1 frontmatter** — `type`, `confidence`, `source_authority`, `supersede` fields; auto-migration from legacy pages
 
 ### Infrastructure
-- **5 LLM backends**: OpenCode SDK → Codex CLI → Claude CLI → OpenAI API → Ollama (auto-detect)
-- **Persistent task queue** — deferred LLM work survives offline, drains on next session
-- **Concurrency-safe compile** — PID lock with stale detection
-- **Windows Task Scheduler** — nightly (03:00) + weekly (Sunday 04:00), zero manual steps
-- **Cross-platform**: macOS, Linux, WSL2, Windows
-- **One-command install**: `curl ... | bash` (Unix) or `irm ... | iex` (Windows)
-- **3 CLI integrations**: OpenCode plugin, Codex wrapper, Claude Code hooks
-- **2 IDE integrations**: Cursor (rules file), Antigravity (AGENTS.md)
-
-### Quality & Standards
-- **OKF v0.1 conformant** — 100% of pages have `type:` frontmatter
-- **13 lint checks** — broken wikilinks, orphans, missing frontmatter, supersede chains, temporal validity, gaps
-- **Temporal validity** — `valid_from`/`valid_to` frontmatter, stale-fact detection
-- **Smart auto-archive** — type-aware thresholds (decisions never archive, debugging at 60 days)
-- ** 178 pytest tests**, CI green on Ubuntu
+- **5 LLM backends** (auto-detected): OpenCode → Codex → Claude CLI → OpenAI → Ollama
+- **Cross-platform**: Windows, macOS, Linux, WSL2
+- **Zero runtime dependencies** — base install is stdlib-only; sentence-transformers and Cognee are optional
+- **218 regression tests**, CI green on Ubuntu + Windows + macOS, Python 3.10 + 3.13
+- **Pre-commit hooks**: ruff (static analysis) + structural lint + gitleaks (secret scanning)
 
 ---
 
-## Public history note
+## Quick Start
 
-Git history was scrubbed via `git-filter-repo` to remove personal project
-data (daily logs, project state files) before making the repo public.
-The system was developed over multiple sessions; the public commit count
-does not reflect total development effort. All 178 tests verify the
-code works. Sample `knowledge/daily/` fixtures restore Evidence links
-without publishing private session content.
+### Prerequisites
 
----
+- Python 3.10+
+- git
+- An AI agent you already use (OpenCode, Codex, Claude Code, Cursor, or Antigravity)
 
-## Cross-platform notes
-
-- **Windows**: full support (Task Scheduler, PowerShell hooks, native paths)
-- **macOS/Linux**: core scripts work (Python cross-platform). Replace
-  Task Scheduler with cron or systemd timers. `scripts/scheduled_nightly.py`
-  and `scripts/scheduled_weekly.py` are plain Python — callable from any scheduler.
-- **OpenCode plugin**: works on all platforms (JS, no OS deps)
-- **Codex wrapper**: PowerShell-specific; macOS/Linux users can call
-  `codex_memory.py daily-log` from a shell alias
-
----
-
-## Quick Start (one command)
+### Install (one command)
 
 **macOS / Linux / WSL2:**
 ```bash
@@ -134,95 +123,147 @@ curl -fsSL https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.sh | 
 irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 ```
 
-The installer checks prerequisites, installs dependencies, runs 178 tests, sets up scheduled maintenance, and detects your agents automatically.
+> **Production note:** The `main` branch URLs above are mutable. For production or audited deployments, pin to a specific release tag URL instead, e.g. `https://raw.githubusercontent.com/Ekgardt/llm-wiki/v3.3.2/install.sh`.
 
-That's it. The installer:
+The installer:
 1. Checks prerequisites (Python 3.10+, git)
-2. Installs `uv` if missing (fast Python package manager)
-3. Installs dependencies (`uv sync`)
-4. Runs 178 tests to verify everything works
-5. Sets `LLM_WIKI_ROOT` environment variable
-6. Sets up scheduled maintenance (cron on Unix, Task Scheduler on Windows)
-7. Detects your agents (OpenCode, Codex, Claude Code, Cursor) and wires them up
-8. Builds the FTS5 search index
+2. Installs `uv` (fast Python package manager) if missing
+3. Syncs dependencies (`uv sync`)
+4. Runs the test suite (217 tests collected in 0.26s tests)
+5. Sets `LLM_WIKI_ROOT` environment variable (user scope)
+6. Creates runtime dirs (`cache/`, `logs/`, `run/`, `cognee/` — gitignored)
+7. Registers scheduled maintenance (cron on Unix, Task Scheduler on Windows)
+8. Detects your agents and wires them up
+9. Builds the FTS5 search index
 
-**Manual install** (if you prefer):
+### Manual install
+
 ```bash
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync
-uv run pytest -q          # 178 tests should pass
+uv run pytest -q          # 217 tests collected in 0.26s tests should pass
 ```
 
-### Wire up your tools
+### Verify it works
 
-**OpenCode** — plugin autoloads from `~/.config/opencode/plugins/`
-
-**Codex CLI** — add to `$PROFILE`:
-```powershell
-. "$env:LLM_WIKI_ROOT\scripts\codex-memory-wrapper.ps1"
-```
-
-**Claude Code** — installer merges hooks (backup first), or:
 ```bash
-uv run python scripts/merge_claude_settings.py
+uv run python scripts/search_memory.py "auth"
+uv run python scripts/lookup_mode.py
 ```
 
-**Windows Task Scheduler** (auto-maintenance):
-```powershell
-& "$env:LLM_WIKI_ROOT\scripts\install-scheduled-tasks.ps1"
-```
+---
 
-**Optional: semantic search** (for hybrid BM25+Vector):
+## Wire up your agents
+
+LLM Wiki auto-detects installed agents during install. Here's what gets wired:
+
+| Agent | Integration | How |
+|-------|-------------|-----|
+| **OpenCode** | JS plugin | Copied to `~/.config/opencode/plugins/llm-wiki-memory.js` |
+| **Codex CLI** | PowerShell wrapper | Sourced into `$PROFILE` (Windows) |
+| **Claude Code** | settings.json hooks | Merged into `~/.claude/settings.json` (5 hooks: SessionStart, PreCompact, SessionEnd, UserPromptSubmit, PostToolUse) |
+| **Cursor** | Rules file | Copy `integrations/cursor/rules/llm-wiki.mdc` manually |
+| **Antigravity** | AGENTS.md snippet | Copy `integrations/antigravity/AGENTS.md` manually |
+| **Obsidian** | Web Clipper template | Import `integrations/obsidian/Article-to-Inbox.json` |
+
+All agents share the same vault — a decision recorded by Cursor is visible to OpenCode in its next session.
+
+### Optional: semantic search
+
+For hybrid BM25 + Vector search (finds semantically related pages even when keywords don't match):
+
 ```bash
-uv pip install sentence-transformers
+uv sync --extra semantic
 ```
+
+### Optional: Cognee graph (300+ pages)
+
+For entity extraction + relationship graph at scale:
+
+```bash
+uv sync --extra cognee
+```
+
+See [docs/SETUP-COGNEE.md](docs/SETUP-COGNEE.md) for Ollama setup.
 
 ---
 
 ## Architecture
 
-Three-zone layout (v3.3+):
-
 ```
-CODE         scripts/  tests/  docs/  skills/  rules/  integrations/
-KNOWLEDGE    knowledge/{daily,notes,projects,raw,inbox,feedback}
-RUNTIME      $LLM_WIKI_STATE_ROOT/{run,logs,cache}   # outside vault only
+CODE          scripts/  tests/  docs/  skills/  rules/  integrations/  benchmark/
+KNOWLEDGE     knowledge/{daily,notes,projects,raw,inbox,feedback}
+RUNTIME       cache/  logs/  run/  cognee/   (gitignored, inside vault)
 ```
 
-```
-Session capture → knowledge/daily/ (append-only)
-    ↓ compile (FLUSH MAJOR/MINOR → pages)
-knowledge/notes/ (durable, OKF frontmatter)
-    ↓ search (BM25 + Vector + Graph RRF)
-SessionStart injects: guard rails + advisory + project state
-```
+- **CODE** — tracked in git. The pipeline, tests, docs, skills, rules, integrations.
+- **KNOWLEDGE** — tracked in git (public examples). Full user data lives in the installed vault. Daily logs and personal pages are gitignored.
+- **RUNTIME** — gitignored, regenerated on demand. Search indexes, compile logs, state.json, task queue.
+
+Full design rationale (7 axioms, system architecture diagram, memory taxonomy, search architecture) in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+For the canonical structure reference (what lives where, env contracts, forbidden layouts), see [docs/STRUCTURE.md](docs/STRUCTURE.md).
+
+---
+
+## Benchmark
+
+> **Methodology**: 52 known-item queries (paraphrased title + summary) over 34 curated pages. BM25 + Vector hybrid via RRF. This measures "can the system find page X when given a paraphrased query?" — the most relevant metric for personal knowledge retrieval. It is **not** LoCoMo or LongMemEval (multi-session conversation recall). Competitor numbers are from different datasets and are not directly comparable. Run `benchmark/run_benchmark.py` to reproduce.
+
+| Metric | LLM Wiki v3.3 | agentmemory | Zep | Mem0 |
+|--------|---------------|-------------|-----|------|
+| Recall@1 | **88.5%** | n/a | n/a | n/a |
+| Recall@3 | **100%** | n/a | n/a | n/a |
+| Recall@5 | **100%** | 95.2% | 94.7% | 91.6% |
+| Recall@10 | **100%** | n/a | n/a | n/a |
+| MRR | **0.942** | 0.882 | n/a | n/a |
+| Latency p50 | 41ms | **14ms** | 155ms | 880ms |
+| Token cost/search | **0** | ~1900 | $$ | $$ |
+
+100% Recall@5 is achievable on small curated datasets; expect 85–95% on 500+ pages. Latency is higher than agentmemory (in-process BM25-only) because LLM Wiki runs hybrid BM25 + Vector + Graph fusion.
+
+Reproduce: `uv run python benchmark/run_benchmark.py --semantic`
 
 ---
 
 ## Comparison
 
-| | **LLM Wiki v3.3.1** | agentmemory | ReMe | akitaonrails |
-|---|---|---|---|---|
-| Markdown-first | ✅ | ❌ | ✅ | ✅ |
-| Multi-tool (3+) | ✅ OpenCode+Codex+Claude | 32+ (MCP) | Claude only | 12+ |
-| IDE support | ✅ Cursor+Antigravity | ❌ | ❌ | ❌ |
-| Guard rails | ✅ | ❌ | ❌ | ❌ |
-| Blackboard coordination | ✅ | ❌ | ❌ | ❌ |
-| Loop detection | ✅ | ❌ | ❌ | ❌ |
-| Agent timeline | ✅ | ❌ | ❌ | ❌ |
-| Feedback learning | ✅ | ❌ | ❌ | ❌ |
-| Zero runtime deps | ✅ | ❌ Docker | ❌ pip | ❌ Rust |
-| $0/month | ✅ | ✅ | ✅ | ✅ |
-| Benchmark Recall@5 | **100%** | 95.2% | n/a | n/a |
+| Capability | LLM Wiki | agentmemory | ReMe | akitaonrails |
+|------------|----------|-------------|------|--------------|
+| Markdown-first | Yes | No | Yes | Yes |
+| Multi-agent (3+ tools) | Yes (5) | Yes (32+ via MCP) | Claude only | Yes (12+) |
+| IDE support | Cursor + Antigravity + Obsidian | No | No | No |
+| Compile-not-retrieve | Yes | No | No | No |
+| VERIFY-BEFORE-WRITE | Yes | No | No | No |
+| Guardrails (learned corrections) | Yes | No | No | No |
+| Blackboard coordination | Yes | No | No | No |
+| Loop detection | Yes | No | No | No |
+| Agent timeline | Yes | No | No | No |
+| Feedback learning | Yes | No | No | No |
+| Zero runtime dependencies | Yes | No (Docker) | No (pip) | No (Rust) |
+| Temporal validity (`valid_to`) | Yes | No | No | No |
+| Typed provenance ranking | Yes | No | No | No |
+
+---
+
+## Contributing
+
+Contributions are welcome. The bar is "does this survive contact with an actual multi-agent workflow?"
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for:
+- Development setup
+- Release checklist (README i18n sync, CHANGELOG, version bump)
+- Coding standards (ruff, pytest, pre-commit)
+- How to add a new agent integration
 
 ---
 
 ## Credits
 
-- [Karpathy's LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) — compile-not-retrieve pattern
+- [Karpathy's LLM Wiki gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) — the "compile, not retrieve" pattern
 - [Harrison Chase's "Wiki Memory"](https://blog.langchain.dev/wiki-memory/) — agent-maintained files
-- [Google's OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) — vendor-neutral markdown spec
+- [Google's OKF spec](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) — vendor-neutral markdown knowledge format
 - [Anthropic context engineering](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents) — capture/compact/subagent patterns
 - [VEP Semantic DNA](https://vep.live) — confidence/supersede/temporal lifecycle
 
@@ -230,4 +271,4 @@ SessionStart injects: guard rails + advisory + project state
 
 ## License
 
-[MIT](LICENSE) — do whatever you want.
+[MIT](LICENSE)

@@ -12,45 +12,60 @@ permissions:
 
 jobs:
   pytest-and-lint:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Cross-platform matrix: the project ships Windows-specific codepaths
+    # (PowerShell wrappers, win32 PID probes, encoding guards) that
+    # ubuntu-only CI would silently miss.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.10", "3.13"]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
-        # v4.2.2 — pin major.minor.patch for supply-chain stability
+        # TODO: pin to commit SHA for immutable supply chain
         uses: actions/checkout@v4.2.2
 
       - name: Install uv
+        # TODO: pin to commit SHA for immutable supply chain
         uses: astral-sh/setup-uv@v5.4.2
         with:
           enable-cache: true
 
-      - name: Install Python
-        # Matches pyproject.toml `requires-python = ">=3.10"` — pick the
-        # lowest supported to catch accidental 3.11+-only syntax.
-        run: uv python install 3.10
+      - name: Install Python ${{ matrix.python }}
+        run: uv python install ${{ matrix.python }}
+
+      - name: Pin Python ${{ matrix.python }}
+        run: uv python pin ${{ matrix.python }}
 
       - name: Sync dev dependencies
         run: uv sync --locked --dev
 
       - name: Gitleaks
+        # Secret scan on every push/PR. Cheap relative to the matrix, so
+        # run once per OS would be wasteful — but gitleaks-action caches
+        # fingerprints, and running on the matrix catches path-separator-
+        # dependent findings.
+        # TODO: pin to commit SHA for immutable supply chain
         uses: gitleaks/gitleaks-action@v2.3.9
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Structural lint (memory + wiki, blocking)
-        # Structural lint has no env dependencies beyond the vault tree;
-        # runs against the checked-out files directly.
+      - name: Ruff (Python static analysis)
+        # Catches undefined names, unused imports, syntax regressions that
+        # the test suite doesn't exercise. Zero config beyond pyproject.toml.
+        run: uv run ruff check scripts/ tests/
+
+      - name: Structural lint (knowledge tree, blocking)
         # --fail-on-findings enforces structural integrity (broken wikilinks,
         # missing frontmatter, invalid supersede chains, orphan gaps).
-        # Pre-existing debt categories (missing_backlinks, missing_sources_section)
-        # are exempted — they're tracked for visibility but don't block CI.
+        # Pre-existing debt categories are exempted — tracked for visibility
+        # but don't block CI.
         run: uv run python scripts/lint_memory.py --scope all --fail-on-findings --allowed-categories orphan_daily_logs missing_backlinks missing_sources_section temporal_validity
 
       - name: Regression test suite (hermetic)
-        # CI runner has no pre-set LLM_WIKI_* env vars.
         # conftest.py bootstraps LLM_WIKI_ROOT / LLM_WIKI_STATE_ROOT
-        # and creates a skeleton state.json automatically — if these
-        # fail to bootstrap, tests that use subprocess-invoked hooks
-        # (test_session_end_skip, test_context_noise) will surface it.
-        run: uv run pytest tests/ -v
+        # and defaults MEMORY_LLM_PROVIDER to "fake" — no live LLM calls.
+        run: uv run pytest tests/ -q

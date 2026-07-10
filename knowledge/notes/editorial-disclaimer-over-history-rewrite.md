@@ -3,6 +3,8 @@ type: pattern
 title: "Editorial Disclaimer Over History Rewrite"
 description: "When a changelog's historical entries contradict current code or decisions, add an explicit editorial disclaimer paragraph naming the superseded items and the precedence rule rather than rewriting or "
 timestamp: 2026-07-03T05:41:37
+confidence: medium
+source_authority: user
 ---
 # Editorial Disclaimer Over History Rewrite
 
@@ -28,7 +30,7 @@ Instead, add a prose paragraph or callout *after* the affected entries (or in th
 
 ## When NOT to apply
 - Non-changelog wiki pages (e.g., `knowledge/notes/`, `knowledge/notes/`) — those should be updated in-place with a dated correction note, since they are not append-only records.
-- `knowledge/notes/decisions/` pages — supersede by creating a new decision page that references the old one.
+- `knowledge/notes/` pages — supersede by creating a new decision page that references the old one.
 - A single isolated entry that is simply factually wrong with no historical significance — in that case a quiet correction in-place is acceptable.
 
 ## Evidence

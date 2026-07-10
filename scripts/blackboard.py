@@ -104,31 +104,38 @@ def claim_task(project: str, task: str, agent: str) -> str:
 
 
 def complete_task(project: str, task_id: str) -> bool:
-    """Mark a task as completed."""
-    tasks_file = _bb_dir(project) / "tasks.jsonl"
-    tasks = _read_jsonl(tasks_file)
-    found = False
-    for t in tasks:
-        if t["id"] == task_id:
-            t["status"] = "completed"
-            t["completed_at"] = datetime.now().isoformat(timespec="seconds")
-            found = True
-    if found:
-        tasks_file.write_text(
-            "\n".join(json.dumps(t, ensure_ascii=False) for t in tasks) + "\n",
-            encoding="utf-8",
-        )
-    return found
+    """Mark a task as completed.
+
+    Concurrency: appends a completion record to a separate `completed.jsonl`
+    rather than rewriting `tasks.jsonl` (which would race with concurrent
+    `claim_task` appends). The canonical task status is derived by folding
+    both files at read time (in `get_status`). This avoids the silent
+    data-loss race that a read-modify-rewrite of tasks.jsonl would create
+    when two agents complete different tasks in the same window.
+    """
+    completed_file = _bb_dir(project) / "completed.jsonl"
+    record = {
+        "id": task_id,
+        "completed_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    _append_jsonl(completed_file, record)
+    return True
 
 
 def get_status(project: str) -> dict:
     """Get blackboard status for a project."""
-    tasks_file = _bb_dir(project) / "tasks.jsonl"
-    signals_file = _bb_dir(project) / "signals.jsonl"
+    bb = _bb_dir(project)
+    tasks_file = bb / "tasks.jsonl"
+    completed_file = bb / "completed.jsonl"
+    signals_file = bb / "signals.jsonl"
     tasks = _read_jsonl(tasks_file)
     signals = _read_jsonl(signals_file)
-    active = [t for t in tasks if t["status"] == "claimed"]
-    completed = [t for t in tasks if t["status"] == "completed"]
+    # Build a set of completed task IDs from completed.jsonl. A task is
+    # "completed" if its ID appears there, regardless of its status field
+    # in tasks.jsonl (which stays "claimed" — see complete_task).
+    completed_ids = {t["id"] for t in _read_jsonl(completed_file) if "id" in t}
+    completed = [t for t in tasks if t["id"] in completed_ids]
+    active = [t for t in tasks if t["id"] not in completed_ids]
     # Active agents
     active_agents = list(set(t["agent"] for t in active))
     return {

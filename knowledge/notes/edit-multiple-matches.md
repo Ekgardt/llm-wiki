@@ -3,6 +3,8 @@ type: debugging
 title: "Edit Tool: 'Found N matches' Error"
 description: "When the Edit tool fails because `old_string` matches multiple locations, expand the string with unique preceding context rather than switching to `replace_all`."
 timestamp: 2026-07-03T05:41:37
+confidence: medium
+source_authority: user
 ---
 # Edit Tool: "Found N matches" Error
 
@@ -22,7 +24,7 @@ Expand `old_string` upward to include a distinctive preceding line that appears 
 Prefer this over `replace_all` whenever only one of the matches should change — `replace_all` will silently rewrite the others too.
 
 ## Variants seen
-- **Duplicated log entries.** Appending a dated entry to `knowledge/log.md` or `knowledge/log.md` when a previous day already contained the exact same leading phrase.
+- **Duplicated log entries.** Appending a dated entry to `knowledge/log.md`` when a previous day already contained the exact same leading phrase.
 - **Shared section headers.** Editing `## Source` or `## Related` on a multi-section page where the same header recurs — pick a unique preceding bullet as the anchor.
 - **Repeated wikilinks.** A page that references the same target multiple times — e.g. a "see-also" phrase with a wikilink appearing in two different sections, where the anchor text and bracketed target are identical.
 

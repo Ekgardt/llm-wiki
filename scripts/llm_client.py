@@ -26,7 +26,9 @@ Override backend via MEMORY_LLM_PROVIDER env var:
 Design:
 - NEVER crash the caller: on any LLM failure, return "" (empty string).
 - On no-backend-available: enqueue the call as a deferred task.
-- Bounded timeouts: 90s default.
+- Bounded timeouts: 90s per HTTP call. The OpenCode backend makes up to
+  three sequential calls (session create, system inject, prompt), so its
+  aggregate wall time may reach ~270s; all other backends are single-call.
 - Each backend does its own liveness probe — fall-through to next is
   automatic if a backend is installed but not currently running.
 """
@@ -42,7 +44,6 @@ import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
-
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -91,10 +92,16 @@ def call_llm(prompt: str, system_prompt: str = "", max_tokens: int = 2000) -> st
 
 
 def _candidate_order(forced: str) -> list[str]:
-    """Order in which to try backends. Forced wins first; otherwise defaults."""
+    """Order in which to try backends.
+
+    When ``forced`` is set to a known backend, ONLY that backend is tried —
+    a strict override. If it fails, the call is enqueued rather than
+    silently falling through to another provider. When ``forced`` is empty
+    or unknown, the full default order is used (auto-detection).
+    """
     defaults = ["opencode", "codex", "claude", "openai", "ollama"]
     if forced and forced in defaults:
-        return [forced] + [b for b in defaults if b != forced]
+        return [forced]
     return defaults
 
 

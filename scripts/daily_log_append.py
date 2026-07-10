@@ -25,6 +25,12 @@ if hasattr(sys.stdout, "reconfigure"):
     except (AttributeError, io.UnsupportedOperation):
         pass
 
+try:
+    from secret_redact import redact_secrets  # noqa: E402
+except Exception:  # noqa: BLE001
+    def redact_secrets(text: str) -> str:  # type: ignore[misc]
+        return text
+
 
 def main() -> int:
     try:
@@ -33,9 +39,13 @@ def main() -> int:
     except (json.JSONDecodeError, OSError):
         return 0
 
+    if not isinstance(payload, dict):
+        return 0
+
     block = payload.get("block") or ""
     if not block:
         return 0
+    block = redact_secrets(block)
 
     root = Path(os.environ.get("LLM_WIKI_ROOT", str(Path(__file__).resolve().parent.parent))).resolve()
     daily_dir = root / "knowledge" / "daily"

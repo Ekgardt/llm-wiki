@@ -28,7 +28,7 @@ Procedure:
    - Are there duplicate or near-duplicate decision/pattern pages that should be merged?
    - Are debugging pages turning into stale incident notes that should be archived?
    - Are there recurring themes across multiple daily logs that have not yet been lifted into knowledge?
-   - Are there weak links between `knowledge/notes/` and `knowledge/notes/` that would benefit from `bridge-promote-insight`?
+   - Are there weak links between `knowledge/daily/` (or `knowledge/projects/`) and `knowledge/notes/` that would benefit from `bridge-promote-insight`?
 
 Return:
 - concise health report summarizing the structural findings

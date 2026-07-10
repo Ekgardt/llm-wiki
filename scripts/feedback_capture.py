@@ -33,6 +33,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import ROOT  # noqa: E402
 
+try:
+    from secret_redact import redact_secrets  # noqa: E402
+except Exception:  # noqa: BLE001
+    def redact_secrets(text: str) -> str:  # type: ignore[misc]
+        return text
+
 FEEDBACK_DIR = ROOT / "knowledge" / "feedback"
 
 # Patterns that indicate a user correction or preference
@@ -91,6 +97,10 @@ def capture_from_text(
     ftype, confidence = _detect_feedback_type(text)
     if not ftype or confidence < 0.5:
         return None
+
+    # Redact secrets from the feedback text before persisting it (mirrors
+    # the secret_redact pass that all capture hooks run).
+    text = redact_secrets(text)
 
     FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -170,20 +180,36 @@ def promote_candidate(candidate_id: str, category: str = "patterns") -> str | No
     page_name = f"feedback-{candidate_id[:8]}.md"
     page_path = knowledge_dir / page_name
 
+    # Containment guard: the resolved page path must stay inside the
+    # knowledge root (defense-in-depth on top of the category whitelist).
+    if not page_path.resolve().is_relative_to(notes_root):
+        return None
+
+    # YAML-escape interpolated fields (backslashes, quotes, newlines) using
+    # the same pattern as compile_memory.py to prevent frontmatter injection.
+    def _esc(s: str) -> str:
+        return (
+            str(s)
+            .replace(chr(92), chr(92) + chr(92))
+            .replace(chr(34), chr(92) + chr(34))
+            .replace(chr(10), " ")
+            .replace(chr(13), " ")
+        )
+
     page_content = (
         "---\n"
         f"type: {candidate['type']}\n"
-        f'title: "User feedback: {candidate["text"][:60]}..."\n'
-        f'description: "Captured from {candidate["project"]} session"\n'
+        f'title: "{_esc("User feedback: " + candidate["text"][:60])}..."\n'
+        f'description: "{_esc("Captured from " + candidate["project"] + " session")}"\n'
         f"timestamp: {candidate['captured_at']}\n"
         f"project: {candidate['project']}\n"
         f"confidence: {candidate['confidence']}\n"
         f"source_authority: user\n"
         "---\n\n"
         f"# User feedback ({candidate['type']})\n\n"
-        f"One-sentence summary: {candidate['text'][:120]}\n\n"
+        f"One-sentence summary: {_esc(candidate['text'][:120])}\n\n"
         f"## {candidate['type'].title()}\n"
-        f"{candidate['text']}\n\n"
+        f"{_esc(candidate['text'])}\n\n"
         f"## Evidence\n"
         f"- Captured from session `{candidate['session_id']}` "
         f"in project `{candidate['project']}` "

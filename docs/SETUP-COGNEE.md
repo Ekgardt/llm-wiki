@@ -13,7 +13,7 @@ This guide walks you through enabling the **optional** Cognee semantic graph lay
 | Python 3.10+ | Cognee runtime | already installed |
 | Ollama | Local embeddings + LLM (preserves LLM-agnostic axiom) | install below |
 
-## Step 1: Set OLLAMA_MODELS to D: (CRITICAL — do this BEFORE installing Ollama)
+## Step 1: Set OLLAMA_MODELS to a non-C: drive (CRITICAL — do this BEFORE installing Ollama)
 
 By default Ollama stores models in `C:\Users\<user>\.ollama\models`. On a small C: drive this fills up fast. **Set this env var first**:
 
@@ -55,15 +55,15 @@ Models are ~600MB (mxbai) + ~1GB (qwen3) = ~1.6GB total. They land in `<ollama-m
 
 ```powershell
 cd $LLM_WIKI_ROOT
-uv pip install cognee
+uv sync --extra cognee
 ```
 
 This adds ~100 packages to `.venv` (FastAPI, SQLAlchemy, aiohttp, etc.). Cognee version pinned: 1.2.2 or newer.
 
-If the install reports conflicts with `anyio` or `claude-agent-sdk`, run:
+If the install reports conflicts with `anyio`, run:
 
 ```powershell
-uv pip install cognee --upgrade-package anyio
+uv sync --extra cognee --upgrade-package anyio
 ```
 
 ## Step 5: Verify the setup
@@ -101,8 +101,8 @@ uv run python scripts/cognee_sync.py
 ```
 
 This will:
-1. Read all 75+ markdown pages from `knowledge/notes/` and `knowledge/notes/`.
-2. Add them to Cognee's data store at `$LLM_WIKI_STATE_ROOT/cognee\`.
+1. Read all current pages from `knowledge/notes/` (~30 markdown pages, depending on what's been compiled).
+2. Add them to Cognee's data store at `$LLM_WIKI_STATE_ROOT/cache/cognee/`.
 3. Run `cognify()` — entity extraction + relationship graph build.
 
 **Expect 5-15 minutes** for the first build (depending on page count and LLM speed). Watch CPU/RAM — peak ~5GB. Don't run other heavy tasks during the first build.
@@ -154,7 +154,7 @@ Run a full sync (without `--skip-cognify`) weekly or after major knowledge addit
 ## Troubleshooting
 
 ### "cognee not installed"
-Run `uv pip install cognee` from `$LLM_WIKI_ROOT`.
+Run `uv sync --extra cognee` from `$LLM_WIKI_ROOT`.
 
 ### "Ollama not reachable"
 Start the service: `ollama serve`. Check it's listening on 11434.
@@ -162,7 +162,7 @@ Start the service: `ollama serve`. Check it's listening on 11434.
 ### RAM exhaustion during cognify
 Close browser + Obsidian + Claude Code during the build. If still OOM, switch to a smaller LLM (`qwen3:0.6b` is the smallest reasonable choice).
 
-### Models in C: instead of D:
+### Models in C: instead of a non-C: drive
 You forgot to set `OLLAMA_MODELS` before pulling. Move `C:\Users\<user>\.ollama\models\*` to `<ollama-models-path>/models\`, set the env var, restart Ollama.
 
 ### Want cloud fallback (OpenAI)?

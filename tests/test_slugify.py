@@ -5,8 +5,6 @@ Covers Round 3 #I5 (Cyrillic preservation) and Round 5 #5
 """
 from __future__ import annotations
 
-import pytest
-
 from query_memory import slugify
 
 
@@ -61,3 +59,18 @@ def test_length_respects_max():
     long_q = "what " * 40  # way over 60 chars
     s = slugify(long_q)
     assert len(s) <= 60, f"slug exceeds default max_len: {len(s)} chars"
+
+
+def test_max_len_smaller_than_hash_suffix():
+    """max_len=5 (< 7 = '-' + 6-hex hash) still produces a deterministic slug.
+
+    The hash suffix always survives; the slug head is clipped to zero.
+    The result is longer than max_len (unavoidable — the hash alone is
+    6 chars), but the function must not crash and must remain
+    deterministic.
+    """
+    s1 = slugify("hello world", max_len=5)
+    s2 = slugify("hello world", max_len=5)
+    assert s1 == s2, "slug must be deterministic even with tiny max_len"
+    # The 6-char hash is always present.
+    assert len(s1) >= 6, f"hash suffix missing: {s1!r}"

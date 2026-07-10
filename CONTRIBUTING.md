@@ -39,17 +39,25 @@ contradiction check on every push.
 
 ## Architectural principles (don't break these)
 
+The canonical structure reference is [`docs/STRUCTURE.md`](docs/STRUCTURE.md)
+and the full agent contract is in `AGENTS.md` (byte-identical to `CLAUDE.md`).
+The principles below summarize the non-negotiable invariants.
+
 1. **Markdown-first.** The vault is plain `.md` files. No databases, no proprietary formats. If a feature requires a database to read your memory, it doesn't belong here.
 
 2. **LLM-agnostic.** No hard dependency on any provider. The `llm_client.py` abstraction with 5 backends is the canonical way to call an LLM. New backends go there, not in feature code.
 
 3. **OKF v0.1 conformant.** Every knowledge page has `type:` frontmatter. New page types extend `migrate_to_okf.py`'s `TYPE_INFERENCE` table.
 
-4. **Fail silently, never break the user's session.** Every hook script must `exit 0` on any error. The worst case is "memory didn't get captured this round", never "the user's OpenCode crashed".
+4. **Fail silently, never break the user's session.** Every hook script must `exit 0` on any error. The worst case is "memory didn't get captured this round", never "the user's agent crashed".
 
 5. **Detached where possible.** Long-running work (compile, lint contradictions) runs in background processes via `spawn_detached`. Never block a session-start hook on LLM work.
 
 6. **Verify before write.** The compile pipeline's VERIFY-BEFORE-WRITE rule is non-negotiable. If the LLM claims a citation, Python verifies the literal substring exists in the source. Hallucinated evidence gets dropped.
+
+7. **Three-zone layout.** CODE + KNOWLEDGE tracked in git; RUNTIME
+   (`cache/logs/run/cognee/`) inside the vault but gitignored. Never put
+   runtime outside the vault. Enforced by `tests/test_structure.py`.
 
 ## Test discipline
 
@@ -58,7 +66,7 @@ contradiction check on every push.
 - Concurrency-sensitive code (`maybe_compile.py`, `memory_queue.py`) needs explicit race-condition tests
 - Tests must be hermetic — no dependency on a real LLM, real network, or pre-existing state beyond what conftest.py bootstraps
 - **Minimum coverage**: all scripts with ranking/scoring/archival logic MUST have dedicated tests. This includes: `search_memory.py`, `graph_neighbors.py`, `feedback_capture.py`, `archive_stale.py`, `build_guardrails.py`
-- **178 tests** as of v3.3.1 — see `tests/` for patterns
+- **217 tests collected in 0.26s tests** as of v3.3.2 — see `tests/` for patterns
 
 ## Test commands
 
@@ -82,7 +90,7 @@ Before tagging a release or updating public marketing numbers:
 
 1. **English README first** — `README.md` is the source of truth.
 2. **Sync i18n the same day** — update `README.ru.md` and `README.zh-CN.md` so they match:
-   - version string (e.g. v3.3.1)
+   - version string (e.g. v3.3.2)
    - test count (must equal `pytest --collect-only` / live suite)
    - install URLs (`Ekgardt/llm-wiki`)
    - architecture (three-zone / `knowledge/`)
@@ -119,7 +127,9 @@ The scope is usually the subsystem (`memory`, `compile`, `flush`, `lint`, `plugi
 
 ## Release model
 
-There are no versioned releases yet. The `main` branch is the release. When (if) this grows a real user base, semantic versioning + GitHub Releases will be added.
+Semantic versioning via `pyproject.toml` `version` + git tags. Releases are
+documented in `CHANGELOG.md` (Keep a Changelog format). The `main` branch
+is always releasable; tags mark public release points.
 
 ## Code of conduct
 

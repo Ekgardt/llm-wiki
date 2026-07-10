@@ -49,6 +49,12 @@ if hasattr(sys.stdout, "reconfigure"):
 
 SLUG_UNSAFE_RE = re.compile(r"[\s_/\\:*?\"<>|]+")
 
+try:
+    from secret_redact import redact_secrets  # noqa: E402
+except Exception:  # noqa: BLE001
+    def redact_secrets(text: str) -> str:  # type: ignore[misc]
+        return text
+
 # Match the Source line that session_start_project_state.py writes into
 # newly-created state.md pages. Used to find the slug that SessionStart
 # already assigned to this project, so SessionEnd tags with the same one.
@@ -58,17 +64,17 @@ STATE_SOURCE_LINE_RE = re.compile(
 
 
 def _resolve_state_root() -> Path | None:
-    """Return $LLM_WIKI_STATE_ROOT or a sibling-of-vault fallback.
+    """Return $LLM_WIKI_STATE_ROOT or the vault root as fallback.
 
     Mirrors `memory_state.py` convention: if the env var is unset, default
-    to `$LLM_WIKI_ROOT/../LLM-wiki-state`.
+    to the vault itself (runtime dirs cache/logs/run live inside the vault).
     """
     raw = os.environ.get("LLM_WIKI_STATE_ROOT")
     if raw:
         return Path(raw)
     vault = os.environ.get("LLM_WIKI_ROOT")
     if vault:
-        return Path(vault).resolve().parent / "LLM-wiki-state"
+        return Path(vault).resolve()
     return None
 
 
@@ -247,6 +253,9 @@ def main() -> int:
             + (f"- Transcript: `{transcript}`\n" if transcript else "")
             + "\n"
         )
+        # Mandatory redaction boundary: strip secrets before the entry lands
+        # in the durable daily log (mirrors post_tool_capture.py:66-72).
+        entry = redact_secrets(entry)
         _append_entry(today_file, entry)
         return 0
 

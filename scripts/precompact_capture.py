@@ -28,6 +28,9 @@ def main() -> int:
     except (json.JSONDecodeError, ValueError):
         payload = {}
 
+    if not isinstance(payload, dict):
+        return 0
+
     transcript_path = payload.get("transcript_path", "")
     session_id = payload.get("session_id", "unknown")
     trigger = payload.get("trigger", "")

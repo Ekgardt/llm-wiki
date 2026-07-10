@@ -1,10 +1,8 @@
 """Tests for build_guardrails.py — rule extraction and dedup."""
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
 
 import pytest
 

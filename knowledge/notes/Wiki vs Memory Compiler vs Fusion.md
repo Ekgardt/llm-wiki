@@ -1,6 +1,9 @@
 ---
-title: Wiki vs Memory Compiler vs Fusion
-type: comparison
+title: Wiki vs Memory compiler vs Fusion
+type: concept
+status: preliminary
+confidence: low
+source_authority: inferred
 ---
 
 # Karpathy LLM Wiki vs claude-memory-compiler vs Fusion

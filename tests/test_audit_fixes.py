@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -126,8 +125,9 @@ def test_memory_queue_drain_query_without_output_path(tmp_path, monkeypatch):
 
 
 def test_select_dailies_rejects_outside_daily(tmp_path, monkeypatch):
-    import compile_memory
     import argparse
+
+    import compile_memory
 
     monkeypatch.setattr(compile_memory, "DAILY_DIR", tmp_path / "knowledge" / "daily")
     (tmp_path / "knowledge" / "daily").mkdir(parents=True)
@@ -213,17 +213,80 @@ def test_e2e_compile_with_fake_provider(tmp_path, monkeypatch):
 
 
 def test_settings_hooks_use_llm_wiki_root():
+    """All Claude Code hook commands pin the vault via $LLM_WIKI_ROOT, the
+    referenced scripts exist on disk, every hook block has a numeric timeout,
+    and the matcher set is the expected one. A rename of any hooked script
+    would otherwise leave this green and break Claude Code at runtime.
+    """
+    import re as _re
+
     settings = Path(__file__).resolve().parent.parent / "integrations" / "claude-code" / "settings.json"
+    scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
     data = json.loads(settings.read_text(encoding="utf-8"))
     cmds = []
-    for _event, blocks in data.get("hooks", {}).items():
+    timeouts = []
+    for event, blocks in data.get("hooks", {}).items():
         for block in blocks:
+            assert "timeout" not in block, "timeout belongs on each hook, not the matcher block"
             for h in block.get("hooks", []):
-                if h.get("command"):
-                    cmds.append(h["command"])
-    assert cmds
+                cmd = h.get("command", "")
+                if cmd:
+                    cmds.append(cmd)
+                t = h.get("timeout")
+                if t is not None:
+                    timeouts.append(t)
+                # Script referenced in the command must exist.
+                m = _re.search(r"scripts/([A-Za-z_][A-Za-z0-9_-]*\.py)", cmd)
+                assert m, f"hook command has no scripts/*.py reference: {cmd!r}"
+                script_name = m.group(1)
+                assert (scripts_dir / script_name).is_file(), (
+                    f"hook references missing script: scripts/{script_name}"
+                )
+    assert cmds, "settings.json wires no hooks"
     assert all("$LLM_WIKI_ROOT" in c for c in cmds)
     assert all("uv run --directory" in c for c in cmds)
+    assert timeouts and all(isinstance(t, int) and t > 0 for t in timeouts), (
+        "every hook must declare a positive numeric timeout"
+    )
+
+
+def test_no_forbidden_legacy_paths_in_scripts():
+    """G-2: guard against silent regression of pre-three-zone hardcoded paths
+    inside scripts/. Catching them here is cheaper than waiting for a runtime
+    bug report from an operator whose env var layout differs from the author's.
+    """
+
+    scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+    # Forbidden literal substrings in LIVE code paths (docstrings/historical
+    # comments are skipped via a per-line filter).
+    forbidden = [
+        'ROOT / "memory"',
+        'ROOT / "wiki"',
+        'ROOT / "outputs"',
+        'MEMORY / "knowledge"',   # double-knowledge phantom
+        'vault / "wiki"',
+        'D:\\LLM-wiki',
+        'D:\\projects\\llm-wiki',
+        'D:\\tools-agent',
+    ]
+    offenders = []
+    for py in sorted(scripts_dir.glob("*.py")):
+        try:
+            lines = py.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            # Skip docstring lines (cheap heuristic: a """ block).
+            if '"""' in line or "'''" in line:
+                continue
+            for token in forbidden:
+                if token in line:
+                    offenders.append(f"{py.name}:{i}: {line.strip()}")
+                    break
+    assert not offenders, "forbidden legacy path tokens in scripts/:\n  " + "\n  ".join(offenders)
 
 
 def test_no_title_case_duplicate_notes():
