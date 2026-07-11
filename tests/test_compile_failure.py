@@ -19,44 +19,35 @@ import pytest
 
 
 @pytest.fixture
-def state_snapshot():
-    """Save / restore state.json and knowledge/log.md around the test.
+def state_snapshot(tmp_path):
+    """Save / restore state.json around the test.
 
-    Bootstraps state.json if it doesn't exist yet — a fresh clone has
-    no runtime state. conftest.py creates an empty `{}` state.json
-    session-wide; this fixture tolerates that case + any pre-existing
-    content. The restore step is a straight write-back, so whatever
-    was there (empty object or real hashes) is preserved.
+    Log is redirected to tmp_path via monkeypatch in the test itself
+    so the real knowledge/log.md is never touched.
     """
-    import compile_memory  # noqa: WPS433
     from memory_state import STATE_FILE
 
     state_file = STATE_FILE
-    log_md = compile_memory.LOG
 
-    # On clean clone conftest already ensured a skeleton `{}` — but defend.
     if not state_file.exists():
         state_file.parent.mkdir(parents=True, exist_ok=True)
         state_file.write_text("{}\n", encoding="utf-8")
 
     state_before = state_file.read_text(encoding="utf-8")
-    log_before = log_md.read_text(encoding="utf-8") if log_md.exists() else ""
 
     yield {
         "state_file": state_file,
-        "log_md": log_md,
         "state_before": state_before,
-        "log_before": log_before,
+        "log_md": tmp_path / "test-log.md",
     }
 
-    # Restore
     state_file.write_text(state_before, encoding="utf-8")
-    if log_before:
-        log_md.write_text(log_before, encoding="utf-8")
 
 
 def test_failed_compile_does_not_mark_hash(state_snapshot, monkeypatch):
     import compile_memory  # noqa: WPS433
+
+    monkeypatch.setattr(compile_memory, "LOG", state_snapshot["log_md"])
 
     # Patch run_compile to simulate a failure (no LLM response).
     # Phase 4+ refactor: run_compile is now sync (was async when it
@@ -105,8 +96,8 @@ def test_failed_compile_does_not_mark_hash(state_snapshot, monkeypatch):
         f"{state_after.get('last_compile_status')!r}"
     )
 
-    # knowledge/log.md must not have gained a fake success entry
+    # knowledge/log.md (redirected to tmp) must not have gained a fake success entry
     log_after = state_snapshot["log_md"].read_text(encoding="utf-8") if state_snapshot["log_md"].exists() else ""
-    assert log_after == state_snapshot["log_before"], (
+    assert log_after == "", (
         "knowledge/log.md changed on failed compile (expected no append)"
     )

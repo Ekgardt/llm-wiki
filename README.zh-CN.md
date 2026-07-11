@@ -1,9 +1,9 @@
 # LLM Wiki
 
-[![Tests](https://img.shields.io/badge/tests-226%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://img.shields.io/badge/tests-281%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-3.3.3-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-3.4.0-blue.svg)](CHANGELOG.md)
 
 **面向 AI 智能体的本地优先记忆系统。Markdown 文件，git 版本控制，零云依赖。**
 
@@ -89,7 +89,7 @@ LLM Wiki 为你使用的每一个 AI 编码智能体——OpenCode、Codex、Cla
 - **智能体时间线**——归因：哪个智能体何时做了什么决策
 
 ### 维护
-- **13 项 lint 检查**——损坏的 wikilinks、孤儿页面、缺失 frontmatter、无效 supersede 链、时间有效性、gap、稀疏页面、缺失来源、矛盾
+- **14 项 lint 检查（13 项结构性 + 1 项 LLM 判定矛盾）**——损坏的 wikilinks、孤儿页面、缺失 frontmatter、无效 supersede 链、时间有效性、gap、稀疏页面、缺失来源、矛盾
 - **类型感知归档**——debugging 60 天、patterns 180 天、decisions 永不
 - **Nightly + weekly 计划**——编译、lint、归档、OKF 迁移（Windows 上 Task Scheduler，Unix 上 cron）
 - **OKF v0.1 frontmatter**——`type`、`confidence`、`source_authority`、`supersede` 字段；从遗留页面自动迁移
@@ -98,7 +98,7 @@ LLM Wiki 为你使用的每一个 AI 编码智能体——OpenCode、Codex、Cla
 - **5 个 LLM 后端**（自动检测）：OpenCode → Codex → Claude CLI → OpenAI → Ollama
 - **跨平台**：Windows、macOS、Linux、WSL2
 - **零运行时依赖**——基础安装仅用标准库；sentence-transformers 和 Cognee 为可选
-- **218 个回归测试**，CI 在 Ubuntu + Windows + macOS 上通过，Python 3.10 + 3.13
+- **281 个回归测试**，CI 在 Ubuntu + Windows + macOS 上通过，Python 3.10 + 3.13
 - **Pre-commit 钩子**：ruff（静态分析）+ 结构 lint + gitleaks（密钥扫描）
 
 ---
@@ -123,13 +123,15 @@ curl -fsSL https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.sh | 
 irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 ```
 
+> **生产环境提示：** 上方的 `main` 分支 URL 可能会变化。对于生产或审计部署，请改用特定 release 标签的 URL，例如 `https://raw.githubusercontent.com/Ekgardt/llm-wiki/v3.4.0/install.sh`。
+
 安装程序会：
 1. 检查前置条件（Python 3.10+、git）
 2. 如缺失则安装 `uv`（快速 Python 包管理器）
 3. 同步依赖（`uv sync`）
-4. 运行测试套件（218 个测试）
+4. 运行测试套件（281 个测试）
 5. 设置 `LLM_WIKI_ROOT` 环境变量（用户级）
-6. 创建运行时目录（`cache/`、`logs/`、`run/`、`cognee/`——gitignored）
+6. 创建运行时目录（`cache/`、`logs/`、`run/`、`cache/cognee/`——gitignored）
 7. 注册计划维护（Unix 上 cron，Windows 上 Task Scheduler）
 8. 检测你的智能体并完成接入
 9. 构建 FTS5 搜索索引
@@ -140,7 +142,7 @@ irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync
-uv run pytest -q          # 218 个测试应通过
+uv run pytest -q          # 281 个测试应通过
 ```
 
 ### 验证可用
@@ -192,7 +194,7 @@ uv sync --extra cognee
 ```
 CODE          scripts/  tests/  docs/  skills/  rules/  integrations/  benchmark/
 KNOWLEDGE     knowledge/{daily,notes,projects,raw,inbox,feedback}
-RUNTIME       cache/  logs/  run/  cognee/   （gitignored，vault 内）
+RUNTIME       cache/  logs/  run/  cache/cognee/   （gitignored，vault 内）
 ```
 
 - **CODE**——git 跟踪。流水线、测试、文档、技能、规则、集成。
@@ -207,21 +209,21 @@ RUNTIME       cache/  logs/  run/  cognee/   （gitignored，vault 内）
 
 ## 基准测试
 
-> **方法论**：52 个已知项查询（改写后的 title + summary），覆盖 34 个精选页面。BM25 + Vector 混合 via RRF。测量"系统能否在给定改写查询时找到页面 X？"——对个人知识检索最相关的指标。这**不是** LoCoMo 或 LongMemEval（多会话对话召回）。竞争对手数据来自不同数据集，不可直接比较。运行 `benchmark/run_benchmark.py` 复现。
+> **方法论**：60 个已知项查询（精确标题匹配 + 摘要派生关键词，非 LLM 改写），覆盖 34 个精选页面。仅 BM25 模式（FTS5）。测量"系统能否在给定标题或摘要关键词时找到页面 X？"——对个人知识检索最相关的指标。这**不是** LoCoMo 或 LongMemEval（多会话对话召回）。竞争对手数据来自不同数据集，不可直接比较。运行 `benchmark/run_benchmark.py` 复现。
 
 | 指标 | LLM Wiki v3.3 | agentmemory | Zep | Mem0 |
 |------|---------------|-------------|-----|------|
-| Recall@1 | **88.5%** | n/a | n/a | n/a |
+| Recall@1 | **95.0%** | n/a | n/a | n/a |
 | Recall@3 | **100%** | n/a | n/a | n/a |
 | Recall@5 | **100%** | 95.2% | 94.7% | 91.6% |
 | Recall@10 | **100%** | n/a | n/a | n/a |
-| MRR | **0.942** | 0.882 | n/a | n/a |
-| 延迟 p50 | 41ms | **14ms** | 155ms | 880ms |
+| MRR | **0.9667** | 0.882 | n/a | n/a |
+| 延迟 p50 | **6ms** | 14ms | 155ms | 880ms |
 | Token 成本/搜索 | **0** | ~1900 | $$ | $$ |
 
-100% Recall@5 在小型精选数据集上可实现；500+ 页时预期 85–95%。延迟高于 agentmemory（进程内仅 BM25），因为 LLM Wiki 运行混合 BM25 + Vector + Graph fusion。
+100% Recall@5 在小型精选数据集上可实现；500+ 页时预期 85–95%。Triple-fusion（BM25 + Vector + Graph）在这些仅 BM25 的数字基础上增加了语义召回。
 
-复现：`uv run python benchmark/run_benchmark.py --semantic`
+复现：`uv run python benchmark/run_benchmark.py`
 
 ---
 

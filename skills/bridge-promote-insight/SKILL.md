@@ -5,7 +5,7 @@ argument-hint: "[page or topic]"
 description: Promote a durable insight from session memory into the external research wiki, or link the two layers together.
 disable-model-invocation: true
 allowed-tools: Read Glob Grep LS Edit Write
-title: "SKILL"
+title: "Bridge Promote Insight"
 timestamp: 2026-07-03T05:41:37
 ---
 Use this when an insight discovered during coding/work sessions deserves to become part of the broader research wiki.
@@ -14,23 +14,24 @@ Procedure:
 1. Read the relevant page(s) from `knowledge/notes/`.
 2. Decide whether the insight belongs in:
    - `knowledge/notes/` as a concept page
-   - `knowledge/notes/` as a synthesis page
-   - `knowledge/notes/` as a comparison page
-   - `knowledge/notes/` as a connection (cross-concept edge observation)
+   - `knowledge/notes/` as a decision page
+   - `knowledge/notes/` as a pattern page
+   - `knowledge/notes/` as a debugging page
+   - `knowledge/notes/` as a qa page
    - or only as a cross-link from existing pages.
 3. Create or update the target wiki page. Required elements on the new wiki page:
    - standard wiki frontmatter + `One-sentence summary:` line
    - a `## Source` block that names the memory origin page explicitly, e.g.:
-     > Origin: session memory — `knowledge/notes/<category>/<slug>` (distilled from `knowledge/daily/YYYY-MM-DD.md` [HH:MM:SS]).
+     > Origin: session memory — `knowledge/notes/<slug>` (distilled from `knowledge/daily/YYYY-MM-DD.md` [HH:MM:SS]).
    - a closing paragraph stating *"This page is a **promotion from session memory**, not a compilation of external source material."* — tells future readers why there is no `knowledge/raw/` citation.
 4. Add a `## Promoted to wiki` section to the **memory origin page** (append, don't replace earlier content). Format:
    ```
    ## Promoted to wiki
-   Promoted YYYY-MM-DD to [[Wiki Page Title]] (`knowledge/notes/<section>/`). This memory page remains as <reason — usually "the dated decision record" or "the fuller origin story">; the wiki page is the concise public-facing <concept/convention/definition>.
+   Promoted YYYY-MM-DD to [[Wiki Page Title]] (`knowledge/notes/`). This memory page remains as <reason — usually "the dated decision record" or "the fuller origin story">; the wiki page is the concise public-facing <concept/convention/definition>.
    ```
    Then add the wiki page as the first entry in the memory page's `## Related` section.
-5. Confirm the links are reciprocal — the wiki page's `## Related` should contain a `[[knowledge/notes/<category>/<slug>]]` wikilink back. Both pages must mention each other; a one-way promotion marker is a bug.
-6. Register the new wiki page in `knowledge/index.md` under the correct section (Concepts / Syntheses / Comparisons / Connections) and append a dated entry to `knowledge/log.md` describing the promotion and citing the memory origin.
+5. Confirm the links are reciprocal — the wiki page's `## Related` should contain a `[[knowledge/notes/<slug>]]` wikilink back. Both pages must mention each other; a one-way promotion marker is a bug.
+6. Register the new wiki page in `knowledge/index.md` under the correct section (Concepts / Decisions / Patterns / Debugging / Q&A) and append a dated entry to `knowledge/log.md` describing the promotion and citing the memory origin.
 
 Return:
 - path of the created or updated wiki page

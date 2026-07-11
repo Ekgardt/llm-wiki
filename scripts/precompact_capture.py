@@ -15,9 +15,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import spawn_detached  # noqa: E402
-
-ROOT = Path(__file__).resolve().parent.parent
+from memory_state import ROOT, spawn_detached  # noqa: E402
 
 
 def main() -> int:

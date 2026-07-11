@@ -52,24 +52,9 @@ except Exception:  # noqa: BLE001
     ).resolve()
 
     def update_state(mutator):  # type: ignore[misc]
-        state_file = STATE_ROOT / "run" / "state.json"
-        state_file.parent.mkdir(parents=True, exist_ok=True)
-        state = {}
-        if state_file.exists():
-            try:
-                state = json.loads(state_file.read_text(encoding="utf-8"))
-            except Exception:  # noqa: BLE001
-                state = {}
-        mutator(state)
-        tmp = state_file.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(state_file)
+        """No-op stub — safe skip when memory_state is unavailable."""
 
-try:
-    from secret_redact import redact_secrets  # noqa: E402
-except Exception:  # noqa: BLE001
-    def redact_secrets(text: str) -> str:  # type: ignore[misc]
-        return text
+from secret_redact import redact_secrets  # noqa: E402
 
 DAILY_DIR = ROOT / "knowledge" / "daily"
 
@@ -104,9 +89,10 @@ def _read_hook_input() -> dict:
     if not raw or not raw.strip():
         return {}
     try:
-        return json.loads(raw)
+        result = json.loads(raw)
     except json.JSONDecodeError:
         return {}
+    return result if isinstance(result, dict) else {}
 
 
 def _compute_slug_from_cwd(cwd: str) -> str:
@@ -133,9 +119,10 @@ def _extract_target(tool_name: str, tool_input: dict) -> str:
         return str(tool_input.get("filePath") or tool_input.get("file_path") or "")
     if tool_name == "Bash":
         cmd = str(tool_input.get("command") or "").strip()
-        # First line, truncated
+        # First line (full — redaction + truncation happens in _append_tool_tag
+        # so secrets are redacted BEFORE truncation, not after).
         first_line = cmd.splitlines()[0] if cmd else ""
-        return first_line[:MAX_TARGET_PREVIEW]
+        return first_line
     return ""
 
 
@@ -180,16 +167,12 @@ def _record_dedupe(slug: str, tool: str, target: str) -> None:
 
 def _append_tool_tag(slug: str, session_id: str, tool: str, target: str) -> None:
     try:
-        DAILY_DIR.mkdir(parents=True, exist_ok=True)
-        day = datetime.now().strftime("%Y-%m-%d")
-        path = DAILY_DIR / f"{day}.md"
-        if not path.exists():
-            path.write_text(f"# Daily Session Memory — {day}\n", encoding="utf-8")
+        from daily_log_append import append_daily
+
         ts = datetime.now().strftime("%H:%M:%S")
         preview = redact_secrets(target)[:MAX_TARGET_PREVIEW] if target else ""
-        line = f"- `[{ts}] tool | {session_id[:8]} | {slug} | {tool}` {preview}\n"
-        with path.open("a", encoding="utf-8") as f:
-            f.write(line)
+        block = f"- `[{ts}] tool | {session_id[:8]} | {slug} | {tool}` {preview}"
+        append_daily(slug, session_id, block)
     except Exception:  # noqa: BLE001
         pass
 
@@ -213,7 +196,7 @@ def main() -> int:
 
         # Skip sessions inside the vault itself.
         try:
-            if Path(cwd).resolve() == ROOT:
+            if Path(cwd).resolve().is_relative_to(ROOT):
                 return 0
         except Exception:  # noqa: BLE001
             pass

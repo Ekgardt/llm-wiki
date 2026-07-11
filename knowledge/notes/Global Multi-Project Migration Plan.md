@@ -1,5 +1,5 @@
 ---
-type: concept
+type: synthesis
 title: "Global Multi-Project Migration Plan"
 description: "plan for extending LLM-wiki from a single-project vault into a global 'second brain' that auto-captures context from every Claude Code session across all projects and restores it on return."
 timestamp: 2026-07-03T05:41:37
@@ -11,7 +11,7 @@ source_authority: user
 One-sentence summary: plan for extending LLM-wiki from a single-project vault into a global "second brain" that auto-captures context from every Claude Code session across all projects and restores it on return.
 
 ## Goal
-Turn `$LLM_WIKI_ROOT` (on this machine: `$LLM_WIKI_ROOT/`) into the default knowledge backend for every Claude Code session, regardless of working directory. Per-project state (`knowledge/projects/<slug>/state.md`) is auto-loaded at session start and auto-updated at session end; sessions and daily logs flow into the shared `memory/` pipeline with a project tag.
+Turn `$LLM_WIKI_ROOT` (on this machine: `$LLM_WIKI_ROOT/`) into the default knowledge backend for every Claude Code session, regardless of working directory. Per-project state (`knowledge/projects/<slug>/state.md`) is auto-loaded at session start; SessionEnd writes only a tagged daily-log entry — `state.md` itself is edited by the user or agent during sessions, not auto-written by hooks. Sessions and daily logs flow into the shared `knowledge/daily/` + `knowledge/notes/` pipeline with a project tag.
 
 ## Intended end state
 - Work in any folder → Claude reads `state.md` for that project → continues where you left off.
@@ -31,7 +31,7 @@ Turn `$LLM_WIKI_ROOT` (on this machine: `$LLM_WIKI_ROOT/`) into the default know
   Ownership is detected by parsing `- Project root:` from the existing `state.md`.
 - **Project vs cross-cutting boundary.**
   - Project-scoped (→ `knowledge/projects/<slug>/`): current state, architecture decisions specific to the project, API quirks, task context.
-  - Cross-cutting (→ `knowledge/notes/`, `knowledge/notes/`): work habits, universal patterns, tool conventions.
+  - Cross-cutting (→ `knowledge/notes/`): work habits, universal patterns, tool conventions.
 - **Secrets hygiene.** Even in a private repo, `state.md` never stores credentials, tokens, or NDA-bound specifics by name. Habit, enforced by convention in global `CLAUDE.md`.
 - **No auto-commit, no auto-push.** (Revised from the original Phase 0 plan of "auto-commit yes, auto-push no" — the auto-commit path was never actually implemented in any hook. `SessionEnd` hooks only *append* to `knowledge/daily/`; they do not run `git commit`. All commits are manual and deliberate. The revised decision is recorded here because it matches observed behavior and avoids the docs-vs-code drift that earlier rounds kept re-introducing.)
 
@@ -68,7 +68,7 @@ The fragile part. Every hook must fail silently on error — never break a sessi
 3. Register hooks in `~/.claude/settings.json` via the `/update-config` skill (not by hand).
 4. ~~Extend `scripts/compile_memory.py` with `--project <slug>` flag~~ — **dropped as superseded.** The per-project compile path was never built; in the shipped system, compile runs once per daily (not per-project), and per-project `state.md` updates are author-driven (Claude or the user edits it during sessions), not hook-driven. See the "Reliability notes" section below for the operative truth.
 
-**Verify:** open Claude Code in a new folder → `state.md` appears in start context (fresh if first time). After session → `state.md` updated, daily log appended.
+**Verify:** open Claude Code in a new folder → `state.md` appears in start context (fresh if first time). After session → daily log appended (state.md is edited by Claude or the user during sessions, not auto-written by hooks).
 **Rollback:** remove hook scripts and `settings.json` entries.
 
 ### Phase 4 — Real-world test (1 week)
@@ -107,7 +107,7 @@ The fragile part. Every hook must fail silently on error — never break a sessi
 
 This harness is **best-effort glue**, not a guaranteed semantic layer. When documentation (this plan, `~/.claude/CLAUDE.md`, re-setup guide) and implementation (scripts + hooks) disagree, **implementation is the source of truth**. Writing docs before the behavior lands creates promises this section exists to caveat.
 
-- **Hooks exit 0 on error.** Breaking a session is worse than a missed injection, so every hook swallows exceptions and logs to `$LLM_WIKI_STATE_ROOT/hook-errors.log`. Silent success after a catch does NOT mean the work landed — check the error log and `state.json::last_compile_status`.
+- **Hooks exit 0 on error.** Breaking a session is worse than a missed injection, so every hook swallows exceptions and logs to `$LLM_WIKI_STATE_ROOT/logs/hook-errors.log`. Silent success after a catch does NOT mean the work landed — check the error log and `state.json::last_compile_status`.
 - **Compile success is gated** (Round 1 fix, commit `1039aae`). A failed LLM compile no longer marks the daily as compiled — the daily stays eligible for the next run. Before the fix, a rate-limited compile would silently lose content.
 - **Index rebuild failure is recoverable but visible.** `compile_memory.py` writes knowledge pages first, then rebuilds `knowledge/index.md`. If rebuild fails (missing tool, hardcoded path, permission), pages ARE saved and `last_compile_status=warning` is recorded; the index is stale until the next successful rebuild.
 - **Slug collision resolution is active** (Round 2 fix, commit `ff0fbad`) — `_compute_slug` checks `- Project root:` in existing `state.md` and adds suffixes as needed. Pre-fix state.md pages are NOT retroactively migrated; a second project that would have collided gets the disambiguated slug, while the original keeps its base slug.
@@ -159,3 +159,4 @@ This harness is **best-effort glue**, not a guaranteed semantic layer. When docu
 - [[knowledge/notes/pipeline-mirroring|Pipeline Mirroring]] — the convention that frames `knowledge/projects/` as a new mirrored axis.
 - [[Preliminary Flagging]] — applies to any inferred claims in per-project `state.md`.
 - [[docs/USER-GUIDE|User guide]] / `install.ps1` · `install.sh` — machine harness setup (env, hooks, agents). Per-project `re-setup.md` is local-only (gitignored under `knowledge/projects/`).
+- [[add-reciprocal-backlinks-at-creation]] — migration plan execution applied the reciprocal-backlink pattern.

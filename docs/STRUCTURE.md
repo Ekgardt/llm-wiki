@@ -3,8 +3,8 @@
 > **Single source of truth for the llm-wiki repository layout.**
 > Any agent working in this repo MUST read this file before changing
 > structure, paths, or env contracts. Changes require explicit user sign-off
-> (see `AGENTS.md` §0). The `tests/test_structure.py` suite enforces the
-> invariants defined here.
+> (see `../AGENTS.md` §0 — the root agent contract). The
+> `tests/test_structure.py` suite enforces the invariants defined here.
 
 ## Three-zone layout
 
@@ -61,16 +61,17 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 ## What lives where
 
 ### CODE zone (tracked in git)
-- `scripts/` — 43 Python files + 3 helpers (`.ps1`, `.js`). Central hub:
+- `scripts/` — 45 Python files + 3 helpers (`.ps1`, `.js`). Central hub:
   `memory_state.py` (path/lock/state), `compile_memory.py` (LLM compile +
   VERIFY-BEFORE-WRITE), `flush_memory.py` (3-tier classification),
   `maybe_compile.py` (PID-locked spawn), `search_memory.py` (triple-RRF),
   `llm_client.py` (5 backends + fake).
-- `tests/` — 23 test files, 226 tests collected in 0.26s tests. Hermetic via `conftest.py` (pins
+- `tests/` — 25 test files, 281 tests collected in 0.26s. Hermetic via `conftest.py` (pins
   `LLM_WIKI_ROOT` to checkout, redirects `LLM_WIKI_STATE_ROOT` to a temp
   dir, defaults `MEMORY_LLM_PROVIDER=fake`).
 - `docs/` — `ARCHITECTURE.md`, `USER-GUIDE.md`, `AGENTS.md` (knowledge
-  subsystem brief), `EXPORTING.md`, `SETUP-COGNEE.md`, `operating-model.md`,
+  subsystem brief — subordinate to the root `../AGENTS.md` contract),
+  `EXPORTING.md`, `SETUP-COGNEE.md`, `operating-model.md`,
   `STRUCTURE.md` (this file).
 - `skills/` — 9 SKILL.md files (knowledge-compile, knowledge-lookup,
   knowledge-review, knowledge-qa-file-back, contradict-check,

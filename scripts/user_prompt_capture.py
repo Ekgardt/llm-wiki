@@ -46,30 +46,18 @@ try:
     ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(_MS_ROOT))).resolve()
     STATE_ROOT = Path(os.environ.get("LLM_WIKI_STATE_ROOT", str(_MS_STATE))).resolve()
 except Exception:  # noqa: BLE001
+    # memory_state unavailable — resolve paths but skip state writes (no
+    # unlocked fallback writer that could clobber concurrent locked writes).
     ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(Path(__file__).resolve().parent.parent))).resolve()
     STATE_ROOT = Path(
         os.environ.get("LLM_WIKI_STATE_ROOT", str(ROOT))
     ).resolve()
 
     def update_state(mutator):  # type: ignore[misc]
-        state_file = STATE_ROOT / "run" / "state.json"
-        state_file.parent.mkdir(parents=True, exist_ok=True)
-        state = {}
-        if state_file.exists():
-            try:
-                state = json.loads(state_file.read_text(encoding="utf-8"))
-            except Exception:  # noqa: BLE001
-                state = {}
-        mutator(state)
-        tmp = state_file.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(state_file)
+        """No-op stub — safe skip when memory_state is unavailable."""
+        pass
 
-try:
-    from secret_redact import redact_secrets  # noqa: E402
-except Exception:  # noqa: BLE001
-    def redact_secrets(text: str) -> str:  # type: ignore[misc]
-        return text
+from secret_redact import redact_secrets  # noqa: E402
 
 DAILY_DIR = ROOT / "knowledge" / "daily"
 
@@ -95,9 +83,10 @@ def _read_hook_input() -> dict:
     if not raw or not raw.strip():
         return {}
     try:
-        return json.loads(raw)
+        result = json.loads(raw)
     except json.JSONDecodeError:
         return {}
+    return result if isinstance(result, dict) else {}
 
 
 def _compute_slug_from_cwd(cwd: str) -> str:
@@ -165,19 +154,15 @@ def _record_dedupe(slug: str, prompt_hash: str) -> None:
 def _append_prompt_tag(slug: str, session_id: str, preview: str) -> None:
     """Append a one-line breadcrumb to today's daily log."""
     try:
-        DAILY_DIR.mkdir(parents=True, exist_ok=True)
-        day = datetime.now().strftime("%Y-%m-%d")
-        path = DAILY_DIR / f"{day}.md"
-        if not path.exists():
-            path.write_text(f"# Daily Session Memory — {day}\n", encoding="utf-8")
+        from daily_log_append import append_daily
+
         ts = datetime.now().strftime("%H:%M:%S")
         safe = redact_secrets(preview)[:MAX_PROMPT_PREVIEW]
-        line = (
+        block = (
             f"- `[{ts}] prompt | {session_id[:8]} | {slug}` "
-            f"{safe}\n"
+            f"{safe}"
         )
-        with path.open("a", encoding="utf-8") as f:
-            f.write(line)
+        append_daily(slug, session_id, block)
     except Exception:  # noqa: BLE001
         pass  # never fail the hook on disk-write
 
@@ -196,7 +181,7 @@ def main() -> int:
         # Skip sessions inside the vault itself (maintenance loops).
         try:
             cwd_resolved = Path(cwd).resolve()
-            if cwd_resolved == ROOT:
+            if cwd_resolved.is_relative_to(ROOT):
                 return 0
         except Exception:  # noqa: BLE001
             pass

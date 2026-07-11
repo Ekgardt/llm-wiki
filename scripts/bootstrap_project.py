@@ -24,6 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import ROOT  # noqa: E402
+from secret_redact import redact_secrets  # noqa: E402
 
 PROJECTS_DIR = ROOT / "knowledge" / "projects"
 TEMPLATE = PROJECTS_DIR / "_template" / "state.md"
@@ -164,31 +165,15 @@ def bootstrap(cwd: str, apply: bool = False) -> str:
     slug = _compute_slug(cwd)
     project_dir = PROJECTS_DIR / slug
 
-    # Collect information
-    timeline = _extract_git_timeline(cwd)
-    readme_summary = _extract_readme_summary(cwd)
-    # Redact secrets from README content before it lands in a vault file
-    # that may later be exported or shared (mirrors the secret_redact pass
-    # that all capture hooks run).
-    try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from secret_redact import redact_secrets
-        readme_summary = redact_secrets(readme_summary)
-    except Exception:  # noqa: BLE001
-        pass
-    tech_stack = _extract_tech_stack(cwd)
-    docs_structure = _extract_docs_structure(cwd)
-    git_remote = _run_git(cwd, "remote", "get-url", "origin")
-    # Redact embedded credentials (token:secret@host) before the URL lands
-    # in a vault file that may later be exported or shared. Mirrors the
-    # secret_redact pass that all capture hooks run.
-    try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from secret_redact import redact_secrets
-        git_remote = redact_secrets(git_remote)
-    except Exception:  # noqa: BLE001
-        pass
-    last_commit = _run_git(cwd, "log", "-1", "--format=%ci")
+    # Collect information — redact every field before it lands in a vault
+    # file that may later be exported or shared (mirrors the secret_redact
+    # pass that all capture hooks run).
+    timeline = [redact_secrets(t) for t in _extract_git_timeline(cwd)]
+    readme_summary = redact_secrets(_extract_readme_summary(cwd))
+    tech_stack = [redact_secrets(t) for t in _extract_tech_stack(cwd)]
+    docs_structure = [redact_secrets(d) for d in _extract_docs_structure(cwd)]
+    git_remote = redact_secrets(_run_git(cwd, "remote", "get-url", "origin"))
+    last_commit = redact_secrets(_run_git(cwd, "log", "-1", "--format=%ci"))
 
     # Build the bootstrap page
     parts = [

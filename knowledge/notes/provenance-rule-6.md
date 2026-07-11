@@ -35,3 +35,5 @@ Rule 6 is cited in multiple session events as the justification for convention c
 - [[knowledge/notes/inbox-vs-raw-after-compile]] — settled Q that invokes this rule to justify its answer.
 - [[2026-04-13 Three Conventions One Root|Three Conventions, One Root]] — connection page showing three conventions that operationalize this rule.
 - [[knowledge/notes/add-reciprocal-backlinks-at-creation]] — pattern that makes relationships explicit, grounded in this rule.
+- [[editorial-disclaimer-over-history-rewrite]] — the editorial disclaimer is a direct operationalization of rule 6.
+- [[prospective-memory-page-drift]] — flagging prospective drift is an application of rule 6's "mark uncertainty" principle.

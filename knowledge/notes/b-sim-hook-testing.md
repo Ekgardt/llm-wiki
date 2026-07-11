@@ -1,7 +1,7 @@
 ---
 type: pattern
 title: "B-Sim: Emulate Hook Lifecycle Without a Live Claude Code Window"
-description: "The full session-start → edit → session-end → reopen lifecycle for project-state hooks can be exercised entirely via direct script invocation with `CLAUDE_PROJECT_DIR=<path>`, covering all automated b"
+description: "The full session-start → edit → session-end → reopen lifecycle for project-state hooks can be exercised entirely via direct script invocation with `CLAUDE_PROJECT_DIR=<path>`, covering all automated behaviors without opening a new Claude Code window."
 timestamp: 2026-07-03T05:41:37
 confidence: medium
 source_authority: user

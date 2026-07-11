@@ -40,6 +40,7 @@ SUBDIR_SECTIONS = {
 
 SUMMARY_RE = re.compile(r"^One-sentence summary:\s*(.+?)\s*$", re.MULTILINE)
 TYPE_RE = re.compile(r"^type:\s*(.+?)\s*$", re.MULTILINE)
+STATUS_RE = re.compile(r"^status:\s*(.+?)\s*$", re.MULTILINE)
 SKIP_NAMES = {"README.md", "index.md", "log.md"}
 
 
@@ -81,22 +82,43 @@ def collect_pages() -> dict[str, list[Path]]:
     for name, path in SUBDIR_SECTIONS.items():
         if path.exists():
             pages = sorted(p for p in path.glob("*.md") if p.name not in SKIP_NAMES)
-            if pages:
-                buckets[name].extend(pages)
+            # Check status FIRST, before bucketing — superseded/archived
+            # pages must not appear in the index regardless of location.
+            filtered = []
+            for p in pages:
+                try:
+                    content = p.read_text(encoding="utf-8", errors="ignore")
+                    status_m = STATUS_RE.search(content)
+                    if status_m and status_m.group(1).strip() in ("superseded", "archived"):
+                        continue
+                except OSError:
+                    continue
+                filtered.append(p)
+            if filtered:
+                buckets[name].extend(filtered)
                 used_subdir = True
 
     # Flat notes + any remaining nested files.
+    already_bucketed: set[Path] = {x for xs in buckets.values() for x in xs}
     if knowledge.exists():
         for p in sorted(knowledge.rglob("*.md")):
             if p.name in SKIP_NAMES:
                 continue
             if "archive" in p.parts:
                 continue
+            # Skip superseded/archived pages from the index
+            try:
+                content = p.read_text(encoding="utf-8", errors="ignore")
+                status_m = STATUS_RE.search(content)
+                if status_m and status_m.group(1).strip() in ("superseded", "archived"):
+                    continue
+            except OSError:
+                continue
             if used_subdir and p.parent != knowledge and p.parent.name in {
                 "concepts", "decisions", "patterns", "debugging", "qa"
             }:
                 continue  # already listed via subdir
-            if p in {x for xs in buckets.values() for x in xs}:
+            if p in already_bucketed:
                 continue
             t = extract_type(p)
             section = TYPE_SECTIONS.get(t, "Other")
@@ -109,7 +131,8 @@ def main() -> int:
     lines = [
         "# Session Memory Index",
         "",
-        "This index catalogs durable memory distilled from Claude Code sessions.",
+        "This index catalogs durable memory distilled from AI agent sessions",
+        "(OpenCode, Codex, Claude Code, Cursor, Antigravity).",
         "",
         "## Entry points",
         "- [[docs/operating-model]] — compile cadence, promotion rules, and the daily ↔ notes boundary.",

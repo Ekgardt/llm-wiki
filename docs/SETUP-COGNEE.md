@@ -8,7 +8,7 @@ This guide walks you through enabling the **optional** Cognee semantic graph lay
 
 | Requirement | Why | Where |
 |---|---|---|
-| 16GB+ RAM (you have 16GB) | Cognee graph build peaks at 3-5GB; +Ollama ~1.5GB + Windows ~5GB | system |
+| 16GB+ RAM recommended | Cognee graph build peaks at 3-5GB; +Ollama ~1.5GB + Windows ~5GB | system |
 | ~3GB free disk space | Ollama models (~1.5GB) + Cognee data + venv deps | (any drive) |
 | Python 3.10+ | Cognee runtime | already installed |
 | Ollama | Local embeddings + LLM (preserves LLM-agnostic axiom) | install below |
@@ -58,7 +58,7 @@ cd $LLM_WIKI_ROOT
 uv sync --extra cognee
 ```
 
-This adds ~100 packages to `.venv` (FastAPI, SQLAlchemy, aiohttp, etc.). Cognee version pinned: 1.2.2 or newer.
+This adds ~100 packages to `.venv` (FastAPI, SQLAlchemy, aiohttp, etc.). Cognee version pinned: `cognee >= 0.1, < 2` (matches `pyproject.toml`).
 
 If the install reports conflicts with `anyio`, run:
 
@@ -77,7 +77,7 @@ Expected output:
 ```
 === Cognee setup status ===
   cognee installed:     YES
-  cognee data dir:      $LLM_WIKI_STATE_ROOT/cognee
+  cognee data dir:      $LLM_WIKI_STATE_ROOT/cache/cognee
   OLLAMA_MODELS env:    <ollama-models-path>/models
   Ollama reachable:     YES
   Pages eligible:       <N>
@@ -138,7 +138,7 @@ uv run python scripts/cognee_sync.py
 To sync just the touched files (faster):
 
 ```powershell
-uv run python scripts/cognee_sync.py --file knowledge/notes/patterns/new-pattern.md
+uv run python scripts/cognee_sync.py --file knowledge/notes/new-pattern.md
 ```
 
 ### Skipping the graph build (faster)
@@ -165,8 +165,8 @@ Close browser + Obsidian + Claude Code during the build. If still OOM, switch to
 ### Models in C: instead of a non-C: drive
 You forgot to set `OLLAMA_MODELS` before pulling. Move `C:\Users\<user>\.ollama\models\*` to `<ollama-models-path>/models\`, set the env var, restart Ollama.
 
-### Want cloud fallback (OpenAI)?
-Set `LLM_API_KEY` and unset `LLM_PROVIDER`. Cognee defaults to OpenAI when no provider is configured. **Not recommended** for this vault — violates the LLM-agnostic axiom.
+### Backend selection
+Start `ollama serve` (default backend). For cloud fallback, set `MEMORY_LLM_PROVIDER` and `LLM_API_KEY`. **Not recommended** for this vault — violates the LLM-agnostic axiom.
 
 ## When NOT to use Cognee
 
@@ -180,7 +180,7 @@ Set `LLM_API_KEY` and unset `LLM_PROVIDER`. Cognee defaults to OpenAI when no pr
 cd $LLM_WIKI_ROOT
 uv pip uninstall cognee
 # Optionally remove data:
-Remove-Item -Recurse -Force $LLM_WIKI_STATE_ROOT/cognee
+Remove-Item -Recurse -Force $LLM_WIKI_STATE_ROOT/cache/cognee
 ```
 
 The vault continues to work without Cognee — all retrieval falls back to QMD + index.md.

@@ -7,7 +7,7 @@ This document explains **why** the system is shaped the way it is. For **how to 
 ```
 CODE          scripts/  tests/  docs/  skills/  rules/  integrations/  benchmark/
 KNOWLEDGE     knowledge/{daily,notes,projects,raw,inbox,feedback}
-RUNTIME       cache/  logs/  run/   # inside vault, gitignored
+RUNTIME       cache/  cache/cognee/  logs/  run/   # inside vault, gitignored
               Override root via LLM_WIKI_STATE_ROOT (tests use a temp dir).
 ```
 
@@ -83,13 +83,15 @@ The slug system (5-step collision resolution) lets a single vault track unlimite
 └──────────────────────────┬───────────────────────────────────────────┘
                            ↓
 ┌──────────────────────────────────────────────────────────────────────┤
-│  SEARCH + RETRIEVAL LAYER (on-demand, ~41ms p50)                     │
+│  SEARCH + RETRIEVAL LAYER (on-demand, ~6ms p50)                      │
 │                                                                       │
 │  search_memory.py ── Triple-fusion:                                  │
 │    BM25 (FTS5, weight=2) + Vector (MiniLM, weight=1)                │
 │    + Graph-neighbor (wikilinks, weight=0.5)                         │
 │  Weighted RRF fusion with title/filename boost + short-circuit       │
-│  Recall@5 = 100%, MRR = 0.942, p50 = 41ms                               │
+│  Recall@5 = 100%, MRR = 0.9667, p50 = 6ms                             │
+│  (benchmark measured in BM25-only mode; triple-fusion adds           │
+│   Vector + Graph signals on top)                                      │
 └──────────────────────────┬───────────────────────────────────────────┘
                            ↓
 ┌──────────────────────────────────────────────────────────────────────┤
@@ -115,7 +117,7 @@ The slug system (5-step collision resolution) lets a single vault track unlimite
 │  scheduled_nightly.py (03:00) ── compile + lint + index + graph     │
 │  scheduled_weekly.py (Sun 04:00) ── OKF sweep + archive + prune     │
 │  archive_stale.py ── type-aware thresholds (decisions never expire)  │
-│  lint_memory.py ─── 13 checks (structural + semantic + temporal)    │
+│  lint_memory.py ─── 14 checks (13 structural + 1 LLM contradiction)    │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -137,7 +139,6 @@ valid and lint covers them equally.
 | `qa` | `knowledge/notes/<slug>.md` or `…/qa/` | Settled answers | 365 days |
 | `gap` | `knowledge/notes/<slug>.md` | Not-yet-written knowledge | 90 days |
 | `workflow` | `knowledge/notes/<slug>.md` or `…/workflows/` | Auto-promoted playbooks | 365 days |
-| `fact` | `knowledge/notes/<slug>.md` or `…/facts/` | Atomic facts | 120 days |
 | `skill` | `skills/<name>/SKILL.md` | Agent workflows | **Never** |
 | `project-state` | `knowledge/projects/<slug>/state.md` | Per-project handoff | **Never** |
 

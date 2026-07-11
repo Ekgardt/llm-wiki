@@ -32,5 +32,8 @@ Counter-examples where `.gitkeep` is still warranted:
 
 Under those conditions the empty-directory marker *is* operational, and the rule does not apply.
 
+## Source
+- Decision recorded 2026-04-18 — `knowledge/daily/2026-04-18.md` (private, installed vault only).
+
 ## Related
 - [[knowledge/notes/inbox-vs-raw-after-compile]] — governs the `knowledge/inbox/` → `knowledge/raw/` lifecycle this directory participates in.

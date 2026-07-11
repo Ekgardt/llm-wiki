@@ -16,6 +16,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -42,16 +44,23 @@ def _collect_test_count() -> int:
 # ─── 1. No qmd references in skills ─────────────────────────────────
 
 def test_no_qmd_refs_in_skills():
-    """The qmd CLI does not exist in this repo; skills must not reference it."""
+    """The qmd CLI does not exist in this repo; skills must not reference it
+    as a command. The conceptual tier name 'QMD' (matching lookup_mode.py)
+    is allowed."""
+    import re
+
     skills_dir = ROOT / "skills"
     hits: list[str] = []
+    # Match qmd as a CLI command (e.g. `qmd status`, `qmd embed`) — not as
+    # a standalone tier label like "| **QMD** |" or "## Tier: QMD".
+    cli_re = re.compile(r"\bqmd\s+(?:status|embed|index|query|collections|build|sync)\b", re.IGNORECASE)
     for skill_md in sorted(skills_dir.glob("*/SKILL.md")):
         for i, line in enumerate(
             skill_md.read_text(encoding="utf-8").splitlines(), 1
         ):
-            if "qmd" in line.lower():
+            if cli_re.search(line):
                 hits.append(f"{skill_md.relative_to(ROOT)}:{i}: {line.strip()}")
-    assert not hits, "qmd references found in skills (qmd CLI does not exist):\n" + "\n".join(hits)
+    assert not hits, "qmd CLI references found in skills (qmd CLI does not exist):\n" + "\n".join(hits)
 
 
 def test_ci_uses_current_gitleaks_action():
@@ -220,3 +229,183 @@ def test_readme_recall_at_10_agentmemory():
                 f"README Recall@10 competitor cell '{cell}' has a percentage "
                 f"not backed by benchmark/report.md — use 'n/a'"
             )
+
+
+# ─── 9. Lint check count in docs must match code ────────────────────
+
+def test_lint_check_count_matches_code():
+    """The lint check count in README/docs must match lint_memory.py source."""
+    lint_src = (ROOT / "scripts" / "lint_memory.py").read_text(encoding="utf-8")
+    # Count registered check categories in run_checks()
+    checks = re.findall(r'checks\.append\(', lint_src)
+    if not checks:
+        # Alternative: count check_ function definitions
+        checks = re.findall(r'^def check_', lint_src, re.MULTILINE)
+    actual = len(checks)
+    assert actual > 0, "Could not count lint checks in lint_memory.py"
+
+    for doc_name in ("README.md", "README.ru.md", "README.zh-CN.md",
+                      "docs/ARCHITECTURE.md"):
+        doc = (ROOT / doc_name).read_text(encoding="utf-8")
+        # Find "N lint checks" or "N checks" patterns
+        for m in re.finditer(r"(\d+)\s*(?:lint[- ]?checks?|structural\s+(?:lint\s+)?checks?)", doc, re.IGNORECASE):
+            claimed = int(m.group(1))
+            # The doc may say "13 structural" (correct if total is 14 with contradiction)
+            # or "14" total. Accept either if it matches actual or actual-1.
+            assert claimed in (actual, actual - 1), (
+                f"{doc_name}: claims {claimed} lint checks but code has {actual}. "
+                f"Update docs to match."
+            )
+
+
+# ─── 10. No standalone root cognee/ in docs ─────────────────────────
+
+def test_no_standalone_cognee_in_docs():
+    """Docs must use cache/cognee/ not standalone root cognee/."""
+    structure = (ROOT / "docs" / "STRUCTURE.md").read_text(encoding="utf-8")
+    # Extract canonical runtime dirs from STRUCTURE.md
+    assert "cache/cognee" in structure, "STRUCTURE.md must document cache/cognee/"
+
+    for doc_name in ("README.md", "README.ru.md", "README.zh-CN.md",
+                      "docs/USER-GUIDE.md", "CONTRIBUTING.md"):
+        doc = (ROOT / doc_name).read_text(encoding="utf-8")
+        # Find standalone cognee/ not preceded by cache/
+        for m in re.finditer(r"(?<!cache/)(?<!cache\\)\bcognee/", doc):
+            line = doc[:m.start()].count("\n") + 1
+            pytest.fail(
+                f"{doc_name}:{line}: standalone 'cognee/' found — "
+                f"should be 'cache/cognee/' per STRUCTURE.md"
+            )
+
+
+# ─── 11. Installer version comments match pyproject.toml ────────────
+
+def test_installer_version_matches_pyproject():
+    """Installer version-tag comments must match pyproject.toml version."""
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    version_match = re.search(r'version\s*=\s*"(\d+\.\d+\.\d+)"', pyproject)
+    assert version_match, "No version in pyproject.toml"
+    current_version = version_match.group(1)
+
+    for installer in ("install.sh", "install.ps1"):
+        src = (ROOT / installer).read_text(encoding="utf-8")
+        # Find version-tag references like v3.3.3
+        for m in re.finditer(r"v(\d+\.\d+\.\d+)", src):
+            tag_version = m.group(1)
+            if tag_version != current_version:
+                line = src[:m.start()].count("\n") + 1
+                pytest.fail(
+                    f"{installer}:{line}: references v{tag_version} but "
+                    f"pyproject.toml is {current_version}. Update installer comment."
+                )
+
+
+# ─── 12. All daily-log writers use shared lock ──────────────────────
+
+def test_all_daily_writers_use_lock():
+    """Scripts that write to daily logs must use _daily_lock or append_daily."""
+    daily_writers = []
+    for py in (ROOT / "scripts").glob("*.py"):
+        src = py.read_text(encoding="utf-8")
+        # Check if the script writes to a daily log file
+        if re.search(r'(daily.*\.open\s*\(|append.*daily|DAILY_DIR.*\.write)', src):
+            if py.name in ("daily_log_append.py", "memory_state.py"):
+                continue  # These define the lock/append infrastructure
+            daily_writers.append(py)
+
+    for py in daily_writers:
+        src = py.read_text(encoding="utf-8")
+        has_lock = "_daily_lock" in src or "append_daily" in src or "locked_append" in src
+        if not has_lock:
+            pytest.fail(
+                f"{py.name}: writes to daily log without using _daily_lock() "
+                f"or append_daily(). All daily-log writes must be lock-protected."
+            )
+
+
+# ─── 13. Clean-clone: all imports in tracked scripts resolve to tracked files ─
+
+def test_all_script_imports_resolve_in_git():
+    """Every local import in scripts/*.py must resolve to a file tracked by Git.
+
+    This catches the #1 recurring issue across audit rounds: new .py files
+    created during fixes but never `git add`ed. On a clean clone, these
+    cause ModuleNotFoundError before any test can run.
+    """
+    import subprocess
+
+    # Get list of tracked files
+    r = subprocess.run(
+        ["git", "ls-files", "scripts/", "tests/"],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    tracked = set()
+    for line in r.stdout.strip().splitlines():
+        tracked.add(line.split("/")[-1])  # filename only
+        tracked.add(line)  # full path
+
+    # Scan all tracked scripts for local imports
+    for py in sorted((ROOT / "scripts").glob("*.py")):
+        rel = f"scripts/{py.name}"
+        if rel not in tracked and py.name not in tracked:
+            continue  # untracked script — skip (will be caught by git status)
+        src = py.read_text(encoding="utf-8")
+        # Find local imports (not stdlib, not pip packages)
+        for m in re.finditer(r"^\s*(?:from|import)\s+(\w+)", src, re.MULTILINE):
+            mod_name = m.group(1)
+            # Skip stdlib and known external packages
+            if mod_name in ("os", "sys", "re", "json", "time", "datetime", "pathlib",
+                            "hashlib", "subprocess", "argparse", "contextlib",
+                            "io", "math", "secrets", "threading", "typing",
+                            "collections", "functools", "itertools", "enum",
+                            "dataclasses", "abc", "copy", "tempfile", "shutil",
+                            "importlib", "traceback", "textwrap", "string",
+                            "unittest", "pytest", "__future__",
+                            "datetime", "warnings"):
+                continue
+            # Check if this is a local module (a .py file in scripts/)
+            potential_file = ROOT / "scripts" / f"{mod_name}.py"
+            if potential_file.exists():
+                # It's a local import — must be tracked
+                if f"scripts/{mod_name}.py" not in tracked and mod_name + ".py" not in tracked:
+                    pytest.fail(
+                        f"scripts/{py.name}: imports '{mod_name}' which exists as "
+                        f"scripts/{mod_name}.py but is NOT tracked by Git. "
+                        f"Run: git add scripts/{mod_name}.py"
+                    )
+
+
+# ─── 14. No untracked .py files that are imported by tracked code ──────────
+
+def test_no_untracked_imported_modules():
+    """No untracked .py file in scripts/ should be importable by tracked code.
+
+    This is the clean-clone test: if a new helper module is created during
+    a fix but not committed, the next clean clone breaks. This test catches
+    that before it ships.
+    """
+    import subprocess
+
+    # Get untracked .py files
+    r = subprocess.run(
+        ["git", "status", "--short", "--porcelain", "scripts/"],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    untracked = []
+    for line in r.stdout.strip().splitlines():
+        if line.startswith("??") and line.endswith(".py"):
+            name = line.split("/")[-1].strip()
+            untracked.append(name.replace(".py", ""))
+
+    if not untracked:
+        return  # No untracked .py files — clean
+
+    # Check if any tracked script imports these untracked modules
+    for py in sorted((ROOT / "scripts").glob("*.py")):
+        src = py.read_text(encoding="utf-8")
+        for mod in untracked:
+            if re.search(rf"(?:from|import)\s+{mod}\b", src):
+                pytest.fail(
+                    f"scripts/{py.name}: imports '{mod}' which is UNTRACKED. "
+                    f"Run: git add scripts/{mod}.py — clean clone will break."
+                )

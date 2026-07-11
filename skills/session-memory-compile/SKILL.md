@@ -5,7 +5,7 @@ argument-hint: "[--all | --file path/to/daily.md | --dry-run]"
 description: Wrapper around scripts/compile_memory.py — distill knowledge/daily logs into durable knowledge/notes pages and refresh index + log.
 disable-model-invocation: true
 allowed-tools: Read Glob Grep LS Bash(uv run python scripts/compile_memory.py *) Bash(python scripts/compile_memory.py *) Bash(uv run python scripts/rebuild_memory_index.py)
-title: "SKILL"
+title: "Session Memory Compile"
 timestamp: 2026-07-03T05:41:37
 ---
 Run the scripted compile pass. The script uses the unified llm_client (`scripts/llm_client.py`) under the hood and follows `docs/AGENTS.md`.

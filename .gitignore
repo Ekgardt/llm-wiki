@@ -34,7 +34,39 @@ knowledge/daily/*.md
 # Personal/user notes are blocked; public system-self-knowledge samples are un-ignored.
 knowledge/notes/*
 !knowledge/notes/README.md
-!knowledge/notes/*.md
+# Explicit allowlist of public system-self-knowledge pages.
+# Do NOT use a broad !*.md — personal compiled notes must stay ignored so
+# they can never be accidentally `git add`ed and pushed to the public remote.
+!knowledge/notes/2026-04-13 Three Conventions One Root.md
+!knowledge/notes/Andrej Karpathy.md
+!knowledge/notes/Global Multi-Project Migration Plan.md
+!knowledge/notes/Karpathy LLM Wiki Workflow.md
+!knowledge/notes/Karpathy X Thread - April 2026.md
+!knowledge/notes/LLM Knowledge Base.md
+!knowledge/notes/Memory Subsystem Action Plan.md
+!knowledge/notes/Obsidian.md
+!knowledge/notes/Preliminary Flagging.md
+!knowledge/notes/Product Requirements in the AI Era.md
+!knowledge/notes/Wiki vs Memory Compiler vs Fusion.md
+!knowledge/notes/add-reciprocal-backlinks-at-creation.md
+!knowledge/notes/audit-current-vs-intended.md
+!knowledge/notes/b-sim-hook-testing.md
+!knowledge/notes/case-sensitive-grep-injected-context.md
+!knowledge/notes/centralized-memory-subsystem.md
+!knowledge/notes/docs-portability-absolute-paths.md
+!knowledge/notes/edit-multiple-matches.md
+!knowledge/notes/editorial-disclaimer-over-history-rewrite.md
+!knowledge/notes/editorial-notes-pattern.md
+!knowledge/notes/flag-inferred-content-as-preliminary.md
+!knowledge/notes/hook-errors-silent-without-state-root.md
+!knowledge/notes/hook-scripts-defense-in-depth.md
+!knowledge/notes/inbox-vs-raw-after-compile.md
+!knowledge/notes/mirror-existing-pipelines.md
+!knowledge/notes/no-gitkeep-in-inbox-articles.md
+!knowledge/notes/pipeline-mirroring.md
+!knowledge/notes/prospective-memory-page-drift.md
+!knowledge/notes/provenance-rule-6.md
+!knowledge/notes/state-md-exempt-from-lint.md
 # Nested personal categories stay ignored unless explicitly published:
 knowledge/notes/*/**
 

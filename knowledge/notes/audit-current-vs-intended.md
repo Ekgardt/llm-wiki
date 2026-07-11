@@ -34,3 +34,5 @@ An audit without a date is indistinguishable from a design document. A month lat
 - [[Memory Subsystem Action Plan]]
 - [[Review Workflow]]
 - [[knowledge/notes/add-reciprocal-backlinks-at-creation]] — complementary: reciprocal backlinks make cross-page relationships explicit, audits catch drift between intent and reality.
+- [[editorial-disclaimer-over-history-rewrite]] — the editorial disclaimer pattern is an application of the audit-current-vs-intended principle.
+- [[prospective-memory-page-drift]] — prospective drift is an instance where the audit pattern reveals fact-vs-aspiration gaps.

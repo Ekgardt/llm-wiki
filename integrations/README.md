@@ -33,7 +33,7 @@ cp integrations/antigravity/AGENTS.md /path/to/your/project/
 
 ## What works differently from CLI agents
 
-IDE agents (Cursor, Antigravity, VS Code Copilot) work differently from CLI agents (OpenCode, Codex, Claude Code):
+IDE agents (Cursor, Antigravity; VS Code Copilot — planned, not yet implemented) work differently from CLI agents (OpenCode, Codex, Claude Code):
 
 | Feature | CLI agents (OpenCode/Codex/Claude) | IDE agents (Cursor/Antigravity) |
 |---|---|---|

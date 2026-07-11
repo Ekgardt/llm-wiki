@@ -1,6 +1,8 @@
 ---
 type: workflow
 title: "Retrieval Workflow"
+confidence: high
+source_authority: user
 description: "Answers should come from the compiled wiki first, then from raw material only when needed, with the exact strategy picked by vault size."
 timestamp: 2026-07-03T05:48:32
 ---

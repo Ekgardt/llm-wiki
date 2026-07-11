@@ -49,11 +49,8 @@ if hasattr(sys.stdout, "reconfigure"):
 
 SLUG_UNSAFE_RE = re.compile(r"[\s_/\\:*?\"<>|]+")
 
-try:
-    from secret_redact import redact_secrets  # noqa: E402
-except Exception:  # noqa: BLE001
-    def redact_secrets(text: str) -> str:  # type: ignore[misc]
-        return text
+from daily_log_append import locked_append  # noqa: E402
+from secret_redact import redact_secrets  # noqa: E402
 
 # Match the Source line that session_start_project_state.py writes into
 # newly-created state.md pages. Used to find the slug that SessionStart
@@ -167,7 +164,8 @@ def _read_payload() -> dict:
         raw = sys.stdin.read()
         if not raw.strip():
             return {}
-        return json.loads(raw)
+        result = json.loads(raw)
+        return result if isinstance(result, dict) else {}
     except (json.JSONDecodeError, ValueError, OSError):
         return {}
 
@@ -196,19 +194,8 @@ def _is_user_home(project_dir: Path) -> bool:
 
 
 def _append_entry(daily_path: Path, entry: str) -> None:
-    """Append entry to daily log, creating the file if needed.
-
-    Not atomic-write because daily logs are append-only and a truncated
-    append recovers on the next write. A malformed entry at most loses
-    one marker — harmless.
-    """
-    daily_path.parent.mkdir(parents=True, exist_ok=True)
-    header_needed = not daily_path.exists()
-    with daily_path.open("a", encoding="utf-8") as f:
-        if header_needed:
-            today = datetime.now().strftime("%Y-%m-%d")
-            f.write(f"# Daily Session Memory — {today}\n\n")
-        f.write(entry)
+    """Append entry to daily log via canonical locked writer."""
+    locked_append(daily_path, entry)
 
 
 def main() -> int:

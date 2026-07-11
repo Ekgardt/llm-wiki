@@ -81,8 +81,8 @@ def _extract_activity(daily_path: Path, project_slug: str | None, days: int) -> 
         # Detect project from slug mention
         if project_slug and project_slug.lower() not in block.lower():
             # Check if this block mentions the target project
-            slug_in_block = re.search(r"slug:\s*[`']?(\w+)", block, re.IGNORECASE)
-            if slug_in_block and slug_in_block.group(1).lower() != project_slug.lower():
+            slug_in_block = re.search(r"slug:\s*[`']?([\w-]+)", block, re.IGNORECASE)
+            if not slug_in_block or slug_in_block.group(1).lower() != project_slug.lower():
                 continue
 
         # Extract decisions/lessons from the block
@@ -202,9 +202,10 @@ def build_timeline(project_slug: str | None = None, days: int = 30) -> list[dict
         for slug, hb in heartbeats.items():
             if project_slug and slug.lower() != project_slug.lower():
                 continue
+            hb_at = hb.get("at", "")
             activities.append({
-                "date": hb.get("at", "")[:10],
-                "time": hb.get("at", "")[11:19] if "T" in hb.get("at", "") else "",
+                "date": hb_at[:10],
+                "time": hb_at[11:19] if "T" in hb_at else "",
                 "agent": _detect_agent(hb.get("reason", "")),
                 "type": "heartbeat",
                 "text": f"active in {slug}",
@@ -237,7 +238,7 @@ def format_timeline(activities: list[dict]) -> str:
         text = a.get("text", a.get("target", ""))
 
         emoji = {"decision": "[DECISION]", "lesson": "[LESSON]", "gotcha": "[GOTCHA]",
-                 "tool": "[TOOL]", "heartbeat": "[ACTIVE]", "compile": "[COMPILED]"}.get(atype, "")
+                 "tool": "[TOOL]", "heartbeat": "[ACTIVE]"}.get(atype, "")
         if atype.startswith("knowledge:"):
             emoji = f"[{atype.split(':')[1].upper()}]"
 

@@ -62,15 +62,14 @@ def test_rrf_fuse_triple_empty_inputs():
 
 
 def test_rrf_fuse_basic_two_signals():
-    """Basic 2-signal RRF (BM25 + Vector)."""
+    """Basic 2-signal RRF (BM25 + Vector) via triple-fusion with no graph."""
     import search_memory
 
     bm25 = [{"path": "a.md", "title": "A", "summary": "", "score": 5, "project": "", "timestamp": ""}]
     vector = [{"path": "b.md", "title": "B", "summary": "", "score": 3, "project": "", "timestamp": ""}]
 
-    result = search_memory._rrf_fuse(bm25, vector)
+    result = search_memory._rrf_fuse_triple(bm25, vector, None)
     assert len(result) == 2
-    # a.md has BM25 rank=1 + no vector → higher fused score
     assert result[0]["path"] == "a.md"
 
 

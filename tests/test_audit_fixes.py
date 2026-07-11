@@ -38,7 +38,7 @@ def test_compile_rejects_path_escape_category(tmp_path, monkeypatch):
 def test_compile_dry_run_does_not_mutate_existing(tmp_path, monkeypatch):
     import compile_memory
 
-    knowledge = tmp_path / "knowledge" / "notes" / "patterns"
+    knowledge = tmp_path / "knowledge" / "notes"
     knowledge.mkdir(parents=True)
     old = knowledge / "old.md"
     old.write_text("# Old\n\nbody\n", encoding="utf-8")
@@ -72,10 +72,10 @@ def test_compile_dry_run_does_not_mutate_existing(tmp_path, monkeypatch):
     assert old.read_text(encoding="utf-8") == before
 
 
-def test_query_file_back_uses_qa_dir():
+def test_query_file_back_uses_notes_dir():
     import query_memory
 
-    assert query_memory.QA_DIR.as_posix().endswith("knowledge/notes/qa")
+    assert query_memory.QA_DIR.as_posix().endswith("knowledge/notes")
 
 
 def test_redact_secrets_strips_bearer():
@@ -121,7 +121,7 @@ def test_memory_queue_drain_query_without_output_path(tmp_path, monkeypatch):
         return True
 
     counts = memory_queue.drain_with(processor, max_tasks=5)
-    assert counts.get("ok", 0) >= 1 or counts.get("success", 0) >= 1 or sum(counts.values()) >= 1
+    assert counts.get("ok", 0) >= 1, f"expected at least 1 ok, got {counts}"
 
 
 def test_select_dailies_rejects_outside_daily(tmp_path, monkeypatch):

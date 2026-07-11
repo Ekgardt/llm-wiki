@@ -3,7 +3,7 @@
 Measures objective metrics that can be compared to competitors
 (agentmemory, Mem0, Zep, ReMe):
 
-1. Recall@K — can search find the right page when given a paraphrased query?
+1. Recall@K — can search find the right page when given a query derived from the page's title and summary?
 2. MRR (Mean Reciprocal Rank) — how high is the correct result ranked?
 3. Search latency — p50/p95 response time
 4. Token efficiency — tokens consumed per operation
@@ -11,7 +11,7 @@ Measures objective metrics that can be compared to competitors
 
 Methodology:
 - Generates synthetic Q&A pairs from existing knowledge pages
-- Each page's title + summary → paraphrased as a search query
+- Each page's title + summary → exact title query and summary-derived keyword query
 - Runs search_memory.py with BM25-only and optional BM25+Vector
 - Measures standard IR metrics (Recall@K, MRR)
 
@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import statistics
@@ -39,7 +40,6 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 INDEX_DIR = ROOT / "benchmark"
 KNOWLEDGE = ROOT / "knowledge" / "notes"
-WIKI = ROOT / "knowledge" / "notes"
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 H1_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
@@ -52,7 +52,7 @@ def _generate_qa_pairs() -> list[dict]:
     """Generate synthetic Q&A pairs from existing knowledge pages.
 
     For each page: title → query, page path → gold answer.
-    Also generates a 'paraphrased' query using key words from the summary.
+    Also generates a keyword query using key words from the summary.
     """
     pairs = []
     # Flat notes (current layout) + optional typed subdirs (legacy/aspirational).
@@ -63,8 +63,6 @@ def _generate_qa_pairs() -> list[dict]:
         KNOWLEDGE / "debugging",
         KNOWLEDGE / "concepts",
         KNOWLEDGE / "qa",
-        WIKI / "concepts",
-        WIKI / "syntheses",
     ]
     seen: set[Path] = set()
 
@@ -183,10 +181,11 @@ def _run_benchmark(
     }
     results["mrr"] = round(results["mrr_sum"] / n, 4) if n > 0 else 0
     results["latency_p50_ms"] = round(statistics.median(results["latencies_ms"]), 1)
+    sorted_lat = sorted(results["latencies_ms"])
+    n = len(sorted_lat)
     results["latency_p95_ms"] = round(
-        sorted(results["latencies_ms"])[int(len(results["latencies_ms"]) * 0.95)],
-        1,
-    ) if len(results["latencies_ms"]) > 1 else results["latency_p50_ms"]
+        sorted_lat[max(0, math.ceil(0.95 * n) - 1)], 1,
+    ) if n > 1 else results["latency_p50_ms"]
     results["latency_avg_ms"] = round(
         statistics.mean(results["latencies_ms"]), 1
     ) if results["latencies_ms"] else 0

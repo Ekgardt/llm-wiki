@@ -23,20 +23,17 @@ def fake_graph():
 
 def test_resolve_wikilink_exact_match(fake_graph):
     """Wikilink target resolves to an existing file."""
-    with patch.object(fake_graph, "WIKI_DIR") as wiki, \
-         patch.object(fake_graph, "KNOWLEDGE_DIR") as knowledge:
-        wiki.exists.return_value = True
-        knowledge.exists.return_value = False
-        # Create a fake file that the glob finds
+    with patch.object(fake_graph, "KNOWLEDGE_DIR") as knowledge:
+        knowledge.exists.return_value = True
         fake_file = MagicMock()
         fake_file.exists.return_value = True
         fake_file.is_file.return_value = True
+        fake_file.read_text.return_value = "# Some Page\n\nBody text."
         fake_file.relative_to.return_value.as_posix.return_value = "some-page.md"
-        wiki.rglob.return_value = [fake_file]
+        fake_file.resolve.return_value = fake_file
+        knowledge.rglob.return_value = [fake_file]
         result = fake_graph._resolve_wikilink("some-page")
-        # Resolution may return the path or None depending on glob behavior
-        # The key is it doesn't crash
-        assert result is None or "some-page" in result.lower()
+        assert result == "some-page.md"
 
 
 def test_resolve_wikilink_not_found(fake_graph):
@@ -82,8 +79,9 @@ def test_boost_graph_neighbors_prioritizes_close(fake_graph):
 
     # neighbor1 (rank 0) should have more boost than neighbor2 (rank 1)
     boost_map = {b["path"]: b["graph_boost"] for b in boosts}
-    if "neighbor1.md" in boost_map and "neighbor2.md" in boost_map:
-        assert boost_map["neighbor1.md"] >= boost_map["neighbor2.md"]
+    assert "neighbor1.md" in boost_map, "neighbor1 should be boosted"
+    assert "neighbor2.md" in boost_map, "neighbor2 should be boosted"
+    assert boost_map["neighbor1.md"] >= boost_map["neighbor2.md"]
 
 
 def test_boost_empty_results(fake_graph):
@@ -107,13 +105,11 @@ def test_build_link_graph_extracts_wikilinks(fake_graph):
     fake_md.read_text.return_value = "# Page A\n\nSee [[Page B]] and [[Page C]]."
     fake_md.relative_to.return_value.as_posix.return_value = "page_a.md"
 
-    with patch.object(fake_graph, "WIKI_DIR") as wiki, \
-         patch.object(fake_graph, "KNOWLEDGE_DIR") as knowledge, \
+    with patch.object(fake_graph, "KNOWLEDGE_DIR") as knowledge, \
          patch.object(fake_graph, "_resolve_wikilink", side_effect=lambda t: f"{t.lower().replace(' ', '-')}.md"), \
          patch.object(Path, "rglob", return_value=[fake_md]):
-        wiki.exists.return_value = True
-        wiki.rglob.return_value = [fake_md]
-        knowledge.exists.return_value = False
+        knowledge.exists.return_value = True
+        knowledge.rglob.return_value = [fake_md]
 
         graph = fake_graph._build_link_graph()
         assert "page_a.md" in graph

@@ -135,12 +135,14 @@ def test_type_threshold_lookup():
     import archive_stale
 
     assert archive_stale._get_type_threshold("debugging") == 60
-    assert archive_stale._get_type_threshold("decision") == 99999
-    assert archive_stale._get_type_threshold("concept") == 99999
+    assert archive_stale._get_type_threshold("gap") == 90
     assert archive_stale._get_type_threshold("pattern") == 180
     assert archive_stale._get_type_threshold("qa") == 365
     assert archive_stale._get_type_threshold("unknown") == 180  # default
+    # Decision and concept are EVERGREEN — never archived (no threshold needed).
+    assert "decision" in archive_stale.NEVER_ARCHIVE_TYPES
 
+    assert "concept" in archive_stale.NEVER_ARCHIVE_TYPES
 
 def test_archive_page_actually_moves_file(fake_file, tmp_path, monkeypatch):
     """When apply=True, the file is physically moved to archive/ with status: archived."""

@@ -1,6 +1,6 @@
 ---
 title: Obsidian
-type: concept
+type: entity
 confidence: medium
 source_authority: web
 ---

@@ -1,7 +1,7 @@
 ---
 type: decision
 title: "Hook Scripts Defense-in-Depth"
-description: "Two hardening decisions made 2026-04-19 to prevent silent failures in session hook scripts: a `_resolve_state_root()` fallback when `LLM_WIKI_STATE_ROOT` is unset, and an explicit guard mapping `.`, `"
+description: "Two hardening decisions made 2026-04-19 to prevent silent failures in session hook scripts: a `_resolve_state_root()` fallback when `LLM_WIKI_STATE_ROOT` is unset, and an explicit guard mapping `.`, `..`, or empty slugs to `\"root\"`."
 timestamp: 2026-07-03T05:41:37
 confidence: medium
 source_authority: user
@@ -16,7 +16,7 @@ One-sentence summary: Two hardening decisions made 2026-04-19 to prevent silent 
 
 **Context:** Phase 4 soak testing of the multi-project hook system surfaced two silent-failure classes:
 
-1. **Missing `LLM_WIKI_STATE_ROOT`** — if the user-level `settings.json::env` block omits this var, `_safe_write_error()` in both `session_start_project_state.py` and `session_end_project_tag.py` cannot locate `hook-errors.log`. Errors are swallowed silently; the hooks exit 0; the operator sees nothing.
+1. **Missing `LLM_WIKI_STATE_ROOT`** — if the user-level `settings.json::env` block omits this var, `_safe_write_error()` in both `session_start_project_state.py` and `session_end_project_tag.py` cannot locate `$LLM_WIKI_STATE_ROOT/logs/hook-errors.log`. Errors are swallowed silently; the hooks exit 0; the operator sees nothing.
 
 2. **Degenerate slug values** — `Path.resolve()` normally prevents `.`, `..`, or empty strings reaching `_compute_slug()`, but a future refactor (e.g., skipping resolve for performance) could break this. A slug of `"."` would write to `knowledge/projects/./state.md`, which is a path traversal into the projects directory root.
 
@@ -38,3 +38,4 @@ One-sentence summary: Two hardening decisions made 2026-04-19 to prevent silent 
 ## Related
 - [[knowledge/notes/hook-errors-silent-without-state-root]] — deeper debugging entry for the state-root symptom
 - [[knowledge/notes/b-sim-hook-testing]] — the testing technique that uncovered these gaps
+- [[docs-portability-absolute-paths]] — the defense-in-depth decisions and the portability pattern both address path-resolution robustness.

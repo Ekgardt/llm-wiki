@@ -6,33 +6,19 @@ What it does:
 3. LLM-judged contradiction check (optional, opt-in via env var).
 4. Prune permanently-failed queue tasks.
 
-Designed to run unattended. Logs to $LLM_WIKI_STATE_ROOT\\logs\\weekly-YYYY-MM-DD.md.
+Designed to run unattended. Logs to $LLM_WIKI_STATE_ROOT/logs/weekly-YYYY-MM-DD.md.
 """
 from __future__ import annotations
 
 import os
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import maybe_compile  # noqa: E402
+from maintenance_helpers import run_step as _run_step  # noqa: E402
+from maintenance_helpers import wait_for_compile_idle as _wait_for_compile_idle
 from memory_state import REPORTS_DIR, ROOT  # noqa: E402
-
-
-def _wait_for_compile_idle(log_fn) -> None:
-    """If a compile is already running, wait (up to 3 retries × 10 s).
-
-    Scheduled passes run unattended and must not skip compile just because
-    a previous compile (triggered by a hook) is still running.
-    """
-    for attempt in range(3):
-        st = maybe_compile.status()
-        if not st["compile_running"]:
-            return
-        log_fn(f"  compile running ({st['reason']}), waiting 10s (attempt {attempt + 1}/3)...")
-        time.sleep(10)
 
 
 def main() -> int:
@@ -49,62 +35,51 @@ def main() -> int:
     log(f"=== Weekly deep maintenance — {today} ===")
     failures = 0
 
-    import subprocess
-
     # Step 1: full nightly-style pass.
     _wait_for_compile_idle(log)
     log("Step 1: drain queue + compile + structural lint...")
-    r = subprocess.run(
+    rc = _run_step(
         [sys.executable, str(ROOT / "scripts" / "scheduled_nightly.py")],
-        cwd=str(ROOT), capture_output=True, text=True, timeout=1800,
+        log, "nightly", timeout=1800,
     )
-    for line in r.stdout.splitlines():
-        log(f"  nightly: {line}")
-    if r.returncode != 0:
+    if rc:
         failures += 1
 
     # Step 2: OKF conformance sweep — backfill missing frontmatter.
     log("Step 2: OKF conformance sweep (migrate_to_okf --apply)...")
-    r = subprocess.run(
+    rc = _run_step(
         [sys.executable, str(ROOT / "scripts" / "migrate_to_okf.py"), "--apply"],
-        cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+        log, "okf", timeout=120,
     )
-    for line in r.stdout.splitlines()[-6:]:
-        log(f"  okf: {line}")
-    if r.returncode != 0:
+    if rc:
         failures += 1
 
     # Step 3: prune permanently-failed queue tasks (attempts >= 5).
     log("Step 3: pruning permanently-failed queue tasks...")
-    r = subprocess.run(
+    rc = _run_step(
         [sys.executable, str(ROOT / "scripts" / "memory_queue.py"), "clear-failed"],
-        cwd=str(ROOT), capture_output=True, text=True, timeout=60,
+        log, "prune", timeout=60,
     )
-    log(f"  prune: {r.stdout.strip()}")
-    if r.returncode != 0:
+    if rc:
         failures += 1
 
     # Step 3b: auto-archive stale pages (>180 days).
     log("Step 3b: auto-archiving stale pages (>180 days)...")
-    r = subprocess.run(
+    rc = _run_step(
         [sys.executable, str(ROOT / "scripts" / "archive_stale.py"), "--days", "180", "--apply"],
-        cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+        log, "archive", timeout=120,
     )
-    for line in r.stdout.splitlines()[-5:]:
-        log(f"  archive: {line}")
-    if r.returncode != 0:
+    if rc:
         failures += 1
 
     # Step 4: optional LLM-judged contradiction check.
     if os.environ.get("MEMORY_WEEKLY_CONTRADICTIONS", "").lower() in ("1", "true", "yes"):
         log("Step 4: LLM contradiction check (opt-in)...")
-        r = subprocess.run(
+        rc = _run_step(
             [sys.executable, str(ROOT / "scripts" / "lint_memory.py"), "--contradictions"],
-            cwd=str(ROOT), capture_output=True, text=True, timeout=1800,
+            log, "contradictions", timeout=1800,
         )
-        for line in r.stdout.splitlines()[-5:]:
-            log(f"  contradictions: {line}")
-        if r.returncode != 0:
+        if rc:
             failures += 1
     else:
         log("Step 4: contradiction check SKIPPED (set MEMORY_WEEKLY_CONTRADICTIONS=1 to enable)")

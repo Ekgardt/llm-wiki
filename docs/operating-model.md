@@ -31,11 +31,12 @@ Lift an item into `knowledge/notes/` only if it is:
 - specific enough to act on next time (not "we should be careful with X").
 
 ### Knowledge categories
-- **concepts/** — project-specific mental models and vocabulary (e.g. "raw → inbox → wiki pipeline"). Noun-shaped.
-- **decisions/** — a choice made, with the alternatives rejected and the reason. Dated. Immutable once written; supersede rather than edit.
-- **patterns/** — a recurring approach that worked more than once ("when X, do Y because Z"). Verb-shaped.
-- **debugging/** — a concrete failure mode and its fix/diagnostic. Symptom → cause → resolution.
-- **qa/** — a question the human asked and its settled answer, when the answer is non-obvious and likely to be asked again.
+All pages live flat under `knowledge/notes/<slug>.md` with a `type:` frontmatter field. The categories below describe that field, not subdirectories.
+- **concepts** — project-specific mental models and vocabulary (e.g. "raw → inbox → wiki pipeline"). Noun-shaped.
+- **decisions** — a choice made, with the alternatives rejected and the reason. Dated. Immutable once written; supersede rather than edit.
+- **patterns** — a recurring approach that worked more than once ("when X, do Y because Z"). Verb-shaped.
+- **debugging** — a concrete failure mode and its fix/diagnostic. Symptom → cause → resolution.
+- **qa** — a question the human asked and its settled answer, when the answer is non-obvious and likely to be asked again.
 
 If an item could fit two categories, prefer the more actionable one (patterns > concepts; debugging > qa).
 
@@ -48,7 +49,7 @@ If an item could fit two categories, prefer the more actionable one (patterns > 
 
 ### Updating the indexes
 For every new knowledge page:
-1. Add a one-line bullet under the correct section in `knowledge/index.md` (format: `- [[knowledge/notes/<category>/<slug>]] — one-line hook`).
+1. Add a one-line bullet under the correct section in `knowledge/index.md` (format: `- [[knowledge/notes/<slug>]] — one-line hook`).
 2. Append a dated entry to `knowledge/log.md` describing what was compiled and from which daily source(s).
 3. Keep `knowledge/index.md` section bullets alphabetized within their section.
 

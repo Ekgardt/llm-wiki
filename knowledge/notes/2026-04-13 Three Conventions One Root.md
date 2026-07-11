@@ -1,6 +1,6 @@
 ---
 title: Three Conventions, One Root (2026-04-13)
-type: concept
+type: synthesis
 confidence: medium
 source_authority: user
 ---

@@ -35,7 +35,8 @@ uv run pre-commit install --hook-type pre-commit --hook-type pre-push
 ```
 
 This runs structural lint + gitleaks on every commit, and the LLM-judged
-contradiction check on every push.
+contradiction check on every push. The structural lint hook scopes to
+`knowledge/**/*.md` files only — scripts and tests are covered by ruff.
 
 ## Architectural principles (don't break these)
 
@@ -56,7 +57,7 @@ The principles below summarize the non-negotiable invariants.
 6. **Verify before write.** The compile pipeline's VERIFY-BEFORE-WRITE rule is non-negotiable. If the LLM claims a citation, Python verifies the literal substring exists in the source. Hallucinated evidence gets dropped.
 
 7. **Three-zone layout.** CODE + KNOWLEDGE tracked in git; RUNTIME
-   (`cache/logs/run/cognee/`) inside the vault but gitignored. Never put
+   (`cache/logs/run/`, incl. `cache/cognee/`) inside the vault but gitignored. Never put
    runtime outside the vault. Enforced by `tests/test_structure.py`.
 
 ## Test discipline
@@ -66,7 +67,7 @@ The principles below summarize the non-negotiable invariants.
 - Concurrency-sensitive code (`maybe_compile.py`, `memory_queue.py`) needs explicit race-condition tests
 - Tests must be hermetic — no dependency on a real LLM, real network, or pre-existing state beyond what conftest.py bootstraps
 - **Minimum coverage**: all scripts with ranking/scoring/archival logic MUST have dedicated tests. This includes: `search_memory.py`, `graph_neighbors.py`, `feedback_capture.py`, `archive_stale.py`, `build_guardrails.py`
-- **226 tests collected in 0.26s tests** as of v3.3.3 — see `tests/` for patterns
+- **281 tests collected in 0.26s** as of v3.4.0 — see `tests/` for patterns
 
 ## Test commands
 
@@ -90,7 +91,7 @@ Before tagging a release or updating public marketing numbers:
 
 1. **English README first** — `README.md` is the source of truth.
 2. **Sync i18n the same day** — update `README.ru.md` and `README.zh-CN.md` so they match:
-    - version string (e.g. v3.3.3)
+    - version string (e.g. v3.4.0)
    - test count (must equal `pytest --collect-only` / live suite)
    - install URLs (`Ekgardt/llm-wiki`)
    - architecture (three-zone / `knowledge/`)
@@ -98,7 +99,8 @@ Before tagging a release or updating public marketing numbers:
 3. **Run the i18n guard test** — `uv run pytest tests/test_readme_i18n.py -q` must pass.
 4. **CHANGELOG** — newest version at top (Keep a Changelog).
 5. **pyproject.toml version** + `uv.lock` package version must match the tag.
-6. Only then: tag, push, GitHub Release.
+6. If benchmark numbers changed, update `docs/ARCHITECTURE.md` search section + `benchmark/report.md` in the same change.
+7. Only then: tag, push, GitHub Release.
 
 **Never ship a release with EN updated and RU/ZH left stale.** That is a release blocker.
 

@@ -32,12 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import ROOT  # noqa: E402
-
-try:
-    from secret_redact import redact_secrets  # noqa: E402
-except Exception:  # noqa: BLE001
-    def redact_secrets(text: str) -> str:  # type: ignore[misc]
-        return text
+from secret_redact import redact_secrets  # noqa: E402
 
 FEEDBACK_DIR = ROOT / "knowledge" / "feedback"
 
@@ -146,8 +141,20 @@ def list_candidates(status: str = "candidate") -> list[dict]:
 
 
 ALLOWED_FEEDBACK_CATEGORIES = frozenset(
-    {"patterns", "decisions", "debugging", "concepts", "qa", "workflows"}
+    {"patterns", "decisions", "debugging", "concepts", "qa", "workflow"}
 )
+
+# Feedback classification types are NOT canonical OKF types. Map them to
+# the closest canonical type (see okf_types.CANONICAL_TYPES) so promoted
+# pages pass lint. The original classification is preserved in the
+# `feedback_type:` frontmatter field for traceability.
+_FEEDBACK_TYPE_MAP: dict[str, str] = {
+    "correction": "pattern",
+    "instruction": "pattern",
+    "preference": "decision",
+    "rejection": "decision",
+    "requirement": "qa",
+}
 
 
 def promote_candidate(candidate_id: str, category: str = "patterns") -> str | None:
@@ -156,6 +163,11 @@ def promote_candidate(candidate_id: str, category: str = "patterns") -> str | No
     Creates knowledge/notes/<category>/feedback-<id>.md with the
     feedback text as the page body.
     """
+    # candidate_id is a SHA-256 hash prefix (hex). Reject anything that
+    # could traverse outside FEEDBACK_DIR (path traversal, H-009).
+    if not re.match(r"^[a-f0-9]{6,64}$", candidate_id or ""):
+        return None
+
     category = (category or "patterns").strip().lower()
     if category not in ALLOWED_FEEDBACK_CATEGORIES or "/" in category or ".." in category:
         return None
@@ -169,13 +181,9 @@ def promote_candidate(candidate_id: str, category: str = "patterns") -> str | No
     except (json.JSONDecodeError, OSError):
         return None
 
-    # Create knowledge page (containment-checked)
+    # Create knowledge page (containment-checked, flat layout)
     notes_root = (ROOT / "knowledge" / "notes").resolve()
-    knowledge_dir = (notes_root / category).resolve()
-    try:
-        knowledge_dir.relative_to(notes_root)
-    except ValueError:
-        return None
+    knowledge_dir = notes_root  # flat layout
     knowledge_dir.mkdir(parents=True, exist_ok=True)
     page_name = f"feedback-{candidate_id[:8]}.md"
     page_path = knowledge_dir / page_name
@@ -198,12 +206,13 @@ def promote_candidate(candidate_id: str, category: str = "patterns") -> str | No
 
     page_content = (
         "---\n"
-        f"type: {candidate['type']}\n"
+        f"type: {_esc(_FEEDBACK_TYPE_MAP.get(candidate['type'], 'pattern'))}\n"
+        f"feedback_type: {_esc(candidate['type'])}\n"
         f'title: "{_esc("User feedback: " + candidate["text"][:60])}..."\n'
         f'description: "{_esc("Captured from " + candidate["project"] + " session")}"\n'
-        f"timestamp: {candidate['captured_at']}\n"
-        f"project: {candidate['project']}\n"
-        f"confidence: {candidate['confidence']}\n"
+        f"timestamp: {_esc(candidate['captured_at'])}\n"
+        f"project: {_esc(candidate['project'])}\n"
+        f"confidence: {_esc(candidate['confidence'])}\n"
         f"source_authority: user\n"
         "---\n\n"
         f"# User feedback ({candidate['type']})\n\n"
@@ -275,7 +284,7 @@ def main() -> int:
 
     promote = sub.add_parser("promote", help="Promote a candidate to knowledge page")
     promote.add_argument("id", help="Candidate ID")
-    promote.add_argument("--category", default="patterns", help="Knowledge category")
+    promote.add_argument("--category", default="patterns", help="Knowledge page type for frontmatter (e.g. patterns, debugging, qa). Does not affect the path — all pages are flat under knowledge/notes/.")
 
     capture = sub.add_parser("capture", help="Capture feedback from text or transcript")
     capture.add_argument("--text", default="", help="Raw feedback text")

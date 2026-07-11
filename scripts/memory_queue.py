@@ -126,6 +126,30 @@ def mark_attempt(task_id: str, success: bool) -> None:
     tmp.replace(path)
 
 
+def recover_stale_leases(max_age_seconds: int = 600) -> int:
+    """Recover .processing files older than max_age_seconds.
+
+    If a drainer crashes between renaming to .processing and completing,
+    the task is stuck forever. This function scans for stale leases and
+    renames them back to .json so they can be re-queued. Called at the
+    start of drain_with().
+    """
+    qdir = _queue_dir()
+    if not qdir.exists():
+        return 0
+    cutoff = datetime.now().timestamp() - max_age_seconds
+    recovered = 0
+    for p in qdir.glob("*.processing"):
+        try:
+            if p.stat().st_mtime < cutoff:
+                target = p.with_suffix(".json")
+                p.rename(target)
+                recovered += 1
+        except OSError:
+            pass
+    return recovered
+
+
 def drain_with(processor: Callable[[dict], bool], max_tasks: int = 10) -> dict[str, int]:
     """Drain the queue using a caller-provided processor.
 
@@ -141,6 +165,7 @@ def drain_with(processor: Callable[[dict], bool], max_tasks: int = 10) -> dict[s
     back to ``.json`` and the attempt counter is bumped.
     """
     counts = {"ok": 0, "failed": 0, "skipped": 0}
+    recover_stale_leases()
     pending = list_pending()
     for task in pending[:max_tasks]:
         # Skip tasks that have failed too many times — they need human attention.
@@ -260,21 +285,62 @@ def _cli() -> int:
                 result = call_llm(prompt, sys_prompt, max_tokens=max_tokens)
                 if not result:
                     return False
+                results_dir = _queue_dir().parent / "queue-results"
+                results_dir.mkdir(parents=True, exist_ok=True)
                 if not out_path:
-                    results_dir = _queue_dir().parent / "queue-results"
-                    results_dir.mkdir(parents=True, exist_ok=True)
                     out_path = str(results_dir / f"{task.get('id', 'query')}.txt")
+                else:
+                    out_resolved = Path(out_path).resolve()
+                    try:
+                        out_resolved.relative_to(results_dir.resolve())
+                    except ValueError:
+                        print(
+                            f"queue: output_path {out_path} escapes results dir, skipping",
+                            file=sys.stderr,
+                        )
+                        return False
                 try:
                     Path(out_path).write_text(result, encoding="utf-8")
                     return True
                 except OSError:
+                    return False
+            if task_type == "flush":
+                # Deferred flush from flush_memory: call the LLM, classify
+                # the response, and apply the result to the daily log so
+                # the session content is not silently lost.
+                prompt = payload.get("prompt", "")
+                sys_prompt = payload.get("system_prompt", "")
+                event = payload.get("event", "session-end")
+                max_tokens = int(payload.get("max_tokens") or 1500)
+                if not prompt:
+                    return False
+                result = call_llm(prompt, sys_prompt, max_tokens=max_tokens)
+                if not result:
+                    return False
+                try:
+                    sys.path.insert(0, str(Path(__file__).resolve().parent))
+                    from daily_log_append import locked_append
+                    from flush_memory import _classify_response
+                    from secret_redact import redact_secrets
+                    tier, body = _classify_response(result)
+                    if tier != "ok" and body:
+                        body = redact_secrets(body)
+                        now = datetime.now()
+                        day = now.strftime("%Y-%m-%d")
+                        root = Path(os.environ.get("LLM_WIKI_ROOT", "."))
+                        daily_path = root / "knowledge" / "daily" / f"{day}.md"
+                        block = f"\n## [{now.strftime('%H:%M:%S')}] deferred-{event}\n\n{body}\n"
+                        locked_append(daily_path, block)
+                    return True
+                except Exception as e:  # noqa: BLE001
+                    print(f"queue: flush apply failed: {type(e).__name__}: {e}", file=sys.stderr)
                     return False
             if task_type == "compile":
                 # Re-dispatch compile via maybe_compile (idle-safe).
                 try:
                     from maybe_compile import spawn_compile_if_idle
                     spawned, reason = spawn_compile_if_idle(force=bool(payload.get("force")))
-                    return spawned or "no pending" in reason or "skipped" in reason
+                    return spawned or "no pending" in reason
                 except Exception as exc:  # noqa: BLE001
                     print(f"  compile drain failed: {exc}", file=sys.stderr)
                     return False

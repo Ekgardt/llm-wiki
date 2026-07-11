@@ -44,6 +44,7 @@ GUARDRAILS_FILE = ROOT / "knowledge" / "guardrails.md"
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 TYPE_RE = re.compile(r"^type:\s*(.+?)\s*$", re.MULTILINE)
+STATUS_RE = re.compile(r"^status:\s*(.+?)\s*$", re.MULTILINE)
 PROJECT_RE = re.compile(r"^project:\s*[\"']?([^\"'\n]+)[\"']?\s*$", re.MULTILINE)
 TIMESTAMP_RE = re.compile(r"^timestamp:\s*(.+?)\s*$", re.MULTILINE)
 H1_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
@@ -73,13 +74,15 @@ def _collect_corrections(project: str | None = None) -> list[dict]:
             if not fm:
                 continue
             fm_text = fm.group(1)
+            status = _extract(fm_text, STATUS_RE)
+            if status and status.strip() in ("archived", "superseded"):
+                continue
             page_type = _extract(fm_text, TYPE_RE)
-            if page_type not in ("correction", "preference", "requirement", "instruction"):
-                # Also check patterns with imperative language
-                summary = _extract(content, SUMMARY_RE) or ""
-                if not re.search(r"\b(do not|don'?t|always|never|must|should)\b", summary, re.IGNORECASE):
-                    continue
-                page_type = "pattern_rule"
+            if page_type not in ("pattern", "decision", "qa", "debugging"):
+                continue
+            summary = _extract(content, SUMMARY_RE) or ""
+            if not re.search(r"\b(do not|don'?t|always|never|must|should)\b", summary, re.IGNORECASE):
+                continue
 
             # Filter by project
             proj = _extract(fm_text, PROJECT_RE)
@@ -155,7 +158,7 @@ def build_guardrails(project: str | None = None, max_rules: int = 15) -> str:
 
     for rtype in sorted(by_type.keys()):
         rules = by_type[rtype]
-        emoji = {
+        label = {
             "correction": "CORRECTION",
             "preference": "PREFERENCE",
             "requirement": "REQUIREMENT",
@@ -163,7 +166,7 @@ def build_guardrails(project: str | None = None, max_rules: int = 15) -> str:
             "pattern_rule": "RULE",
         }.get(rtype, rtype.upper())
 
-        lines.append(f"**{emoji}** ({len(rules)}):")
+        lines.append(f"**{label}** ({len(rules)}):")
         for r in rules[:5]:
             lines.append(f"- {r['summary']}")
         lines.append("")

@@ -4,7 +4,7 @@ name: knowledge-lookup
 argument-hint: "[question or topic]"
 description: Answer a question using the compiled wiki, with a three-tier retrieval strategy that scales with vault size (direct read → hybrid search → vector-primary).
 allowed-tools: Read Glob Grep LS Bash(uv run python scripts/lookup_mode.py *) Bash(uv run python scripts/search_memory.py *)
-title: "SKILL"
+title: "Knowledge Lookup"
 timestamp: 2026-07-03T05:41:37
 ---
 Answer `$ARGUMENTS` using a retrieval strategy chosen by vault size. Karpathy's direct-read pattern is strong at small scale; hybrid BM25+Vector search earns its keep at larger scale. Don't pick one globally — let the page count decide.
@@ -23,7 +23,7 @@ This prints the recommended tier based on the curated wiki page count:
 |---|---|---|
 | **DIRECT** | < 50 pages | Read `knowledge/index.md` + target pages. Skip search — the LLM's own navigation is faster and cheaper. |
 | **HYBRID** | 50–300 pages | Wiki-first, fall back to `search_memory.py` only when the direct read is unconvincing or index navigation is ambiguous. |
-| **SEMANTIC** | > 300 pages | `search_memory.py --semantic` primary. Read top-k results. Index becomes navigation, not retrieval surface. |
+| **QMD** | > 300 pages | `search_memory.py --semantic` primary. Read top-k results. Index becomes navigation, not retrieval surface. |
 
 The helper also warns if the search index is stale.
 
@@ -46,7 +46,7 @@ Do **not** invoke search in this tier. It adds latency without improving recall 
 5. **If the index is stale** (last-updated > 24h per `lookup_mode.py`), run `uv run python scripts/search_memory.py --rebuild` before step 4.
 6. Synthesize across all consulted pages. Cite paths.
 
-## Tier: SEMANTIC (>300 pages)
+## Tier: QMD (>300 pages)
 
 1. `uv run python scripts/search_memory.py "<natural-language question>" --semantic` — trust the hybrid ranker's top-8.
 2. Read those pages.

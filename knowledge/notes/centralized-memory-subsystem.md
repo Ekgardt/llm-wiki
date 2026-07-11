@@ -19,9 +19,12 @@ Rejected: per-worktree memory directories (the default if paths are resolved rel
 
 Why: memory is a long-lived knowledge layer shared across all sessions; worktrees are ephemeral branches for parallel work. Binding memory to the worktree's working copy ties durable knowledge to disposable context. Centralization keeps the compile pipeline coherent — one `daily/`, one `state.json`, one `index.md`.
 
-How to apply: any new script, hook, or skill that reads/writes runtime state must go through `memory_state.py` path resolution, never raw `Path("memory/...")` relative to `cwd`. When auditing worktree-related issues, check whether the failing component respects this indirection.
+How to apply: any new script, hook, or skill that reads/writes runtime state must go through `memory_state.py` path resolution, never raw `Path("knowledge/...")` relative to `cwd`. When auditing worktree-related issues, check whether the failing component respects this indirection.
 
 Follow-up: if a new hook appears to "lose" captures, check first whether it was launched from a worktree and whether it imports the path resolver rather than hardcoding a relative path.
 
+## Source
+- Decision recorded 2026-04-18 — `knowledge/daily/2026-04-18.md` (private, installed vault only).
+
 ## Related
-- [[docs/operating-model]] — compile cadence and the `memory/` ↔ `knowledge/notes/` boundary this centralization protects.
+- [[docs/operating-model]] — compile cadence and the `knowledge/daily/` ↔ `knowledge/notes/` boundary this centralization protects.

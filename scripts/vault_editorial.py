@@ -46,6 +46,7 @@ EDITORIAL_NAMES: frozenset[str] = frozenset({
     "Vault Home.md",
     "AGENTS.md",
     "operating-model.md",
+    "guardrails.md",
     # Directory-level readmes are metadata, not curated content.
     "README.md",
     # Per-project state pages under `knowledge/projects/<slug>/state.md` are

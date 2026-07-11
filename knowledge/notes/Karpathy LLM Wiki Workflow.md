@@ -1,6 +1,6 @@
 ---
 title: Karpathy LLM Wiki Workflow
-type: concept
+type: synthesis
 confidence: medium
 source_authority: web
 ---

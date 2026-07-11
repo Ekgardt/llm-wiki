@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 import time
@@ -90,7 +91,9 @@ def _read_jsonl(path: Path) -> list[dict]:
 def claim_task(project: str, task: str, agent: str) -> str:
     """Agent claims a task. Returns task ID."""
     tasks_file = _bb_dir(project) / "tasks.jsonl"
-    task_id = hashlib.sha256(f"{task}{time.time()}".encode()).hexdigest()[:12]
+    task_id = hashlib.sha256(
+        f"{task}{time.time()}{os.getpid()}".encode()
+    ).hexdigest()[:12]
     record = {
         "id": task_id,
         "task": task,
@@ -106,6 +109,9 @@ def claim_task(project: str, task: str, agent: str) -> str:
 def complete_task(project: str, task_id: str) -> bool:
     """Mark a task as completed.
 
+    Returns True if the task was found and marked, False if the task_id
+    does not exist in tasks.jsonl.
+
     Concurrency: appends a completion record to a separate `completed.jsonl`
     rather than rewriting `tasks.jsonl` (which would race with concurrent
     `claim_task` appends). The canonical task status is derived by folding
@@ -113,6 +119,11 @@ def complete_task(project: str, task_id: str) -> bool:
     data-loss race that a read-modify-rewrite of tasks.jsonl would create
     when two agents complete different tasks in the same window.
     """
+    # Verify the task exists before recording completion.
+    tasks_file = _bb_dir(project) / "tasks.jsonl"
+    known_ids = {t.get("id") for t in _read_jsonl(tasks_file)}
+    if task_id not in known_ids:
+        return False
     completed_file = _bb_dir(project) / "completed.jsonl"
     record = {
         "id": task_id,
@@ -162,8 +173,15 @@ def send_signal(project: str, from_agent: str, to_agent: str, message: str) -> N
 
 def detect_conflicts(project: str) -> list[dict]:
     """Detect if two agents claimed overlapping tasks."""
-    tasks_file = _bb_dir(project) / "tasks.jsonl"
-    tasks = [t for t in _read_jsonl(tasks_file) if t["status"] == "claimed"]
+    bb = _bb_dir(project)
+    tasks_file = bb / "tasks.jsonl"
+    completed_file = bb / "completed.jsonl"
+    # Skip completed tasks — they are no longer active conflicts.
+    completed_ids = {t["id"] for t in _read_jsonl(completed_file) if "id" in t}
+    tasks = [
+        t for t in _read_jsonl(tasks_file)
+        if t.get("status", "unknown") == "claimed" and t.get("id") not in completed_ids
+    ]
     conflicts = []
     for i, a in enumerate(tasks):
         for b in tasks[i + 1:]:

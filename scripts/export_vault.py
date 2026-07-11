@@ -79,7 +79,7 @@ FORBIDDEN_PATH_PATTERNS: tuple[tuple[str, str], ...] = (
     ("memory/", "root"),
     ("outputs/", "root"),
     (".ci-lint-state/", "root"),
-        ("LLM-wiki-state/", "root"),
+    ("LLM-wiki-state/", "root"),
     # Specific files (anywhere match — these are unique enough to be safe).
     (".obsidian/workspace.json", "anywhere"),
     (".claude/settings.local.json", "anywhere"),

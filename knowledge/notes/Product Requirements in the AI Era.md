@@ -1,7 +1,7 @@
 ---
 title: Product Requirements in the AI Era
-type: concept
-confidence: medium
+type: synthesis
+confidence: low
 source_authority: web
 status: preliminary
 ---

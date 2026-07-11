@@ -1,6 +1,6 @@
 ---
 title: Andrej Karpathy
-type: concept
+type: entity
 confidence: medium
 source_authority: web
 ---

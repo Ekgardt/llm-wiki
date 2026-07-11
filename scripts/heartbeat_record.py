@@ -8,7 +8,7 @@ Why this exists: the OpenCode plugin needs to record "this session was
 touched" without polluting the daily-log corpus. Heartbeats are visible
 in the SessionStart metacognitive block as project-activity signal.
 
-Never fails — always exits 0.
+Never fails on input parse — exits non-zero only on state write failure.
 """
 from __future__ import annotations
 
@@ -31,6 +31,9 @@ def main() -> int:
         raw = sys.stdin.read()
         payload = json.loads(raw) if raw.strip() else {}
     except (json.JSONDecodeError, OSError):
+        return 0
+
+    if not isinstance(payload, dict):
         return 0
 
     slug = payload.get("slug") or "unknown"
@@ -67,6 +70,7 @@ def main() -> int:
         update_state(_mutate)
     except Exception as e:  # noqa: BLE001
         print(f"heartbeat_record: state write failed: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
     return 0
 
 

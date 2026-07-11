@@ -4,7 +4,7 @@ Usage:
     uv run python scripts/query_memory.py "how do we handle preliminary flagging?"
     uv run python scripts/query_memory.py "..." --file-back
 
-With --file-back, also writes the Q&A as `knowledge/notes/qa/<slug>.md`,
+With --file-back, also writes the Q&A as `knowledge/notes/<slug>.md`,
 regenerates the memory index, and appends to knowledge/log.md.
 """
 from __future__ import annotations
@@ -19,11 +19,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import ROOT  # noqa: E402
+from secret_redact import redact_secrets  # noqa: E402
 
 MEMORY = ROOT / "knowledge"
 INDEX = MEMORY / "index.md"
 LOG = MEMORY / "log.md"
-QA_DIR = MEMORY / "notes" / "qa"
+QA_DIR = MEMORY / "notes"  # flat layout: all notes live directly under knowledge/notes/
 
 
 def parse_args() -> argparse.Namespace:
@@ -112,6 +113,8 @@ Respond in this shape:
 
 
 def file_back(question: str, answer_text: str) -> Path:
+    question = redact_secrets(question)
+    answer_text = redact_secrets(answer_text)
     QA_DIR.mkdir(parents=True, exist_ok=True)
     slug = slugify(question)
     out = QA_DIR / f"{slug}.md"
@@ -179,6 +182,9 @@ def main() -> int:
     args = parse_args()
     answer_text = answer(args.question)
     print(answer_text)
+
+    if answer_text.startswith("("):
+        return 1
 
     if args.file_back:
         out = file_back(args.question, answer_text)

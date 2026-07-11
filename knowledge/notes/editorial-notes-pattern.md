@@ -34,3 +34,6 @@ Canonical page for this convention (Title Case wiki copy removed in three-zone c
 - [[knowledge/notes/provenance-rule-6]] — counterpart for source-derived pages.
 - [[knowledge/notes/edit-multiple-matches]] — the incident that surfaced this pattern concretely.
 - [[2026-04-13 Three Conventions One Root|Three Conventions, One Root]] — connection page placing this convention alongside its siblings.
+- [[editorial-disclaimer-over-history-rewrite]] — the editorial disclaimer is a specialized application of the editorial-notes pattern.
+- [[Preliminary Flagging]] — preliminary flagging and editorial notes both operationalize provenance rule 6.
+- [[state-md-exempt-from-lint]] — the lint exemption for state.md is justified by the editorial-notes pattern.

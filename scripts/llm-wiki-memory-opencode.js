@@ -16,11 +16,16 @@ const _LLM_WIKI_ROOT = process.env.LLM_WIKI_ROOT;
 if (!_LLM_WIKI_ROOT) {
   console.warn("[llm-wiki-memory] LLM_WIKI_ROOT is not set — memory capture will be disabled. Set it to your vault path.");
 }
+const _LLM_WIKI_STATE_ROOT = process.env.LLM_WIKI_STATE_ROOT || _LLM_WIKI_ROOT || "";
 const SCRIPTS = `${_LLM_WIKI_ROOT || ""}/scripts`;
 const SIGNIFICANT_TOOLS = new Set(["edit", "write", "multi_edit", "notebook_edit", "bash"]);
 
 export const LlmWikiMemoryPlugin = async ({ client, $, directory }) => {
-  const isVault = () => directory?.replace(/\\/g, "/") === (process.env.LLM_WIKI_ROOT || "").replace(/\\/g, "/");
+  const isVault = () => {
+    const dir = (directory || "").replace(/\\/g, "/");
+    const root = (process.env.LLM_WIKI_ROOT || "").replace(/\\/g, "/");
+    return dir.startsWith(root);
+  };
 
   async function drainQueue() {
     try { await $`uv run python ${SCRIPTS}/memory_queue.py drain`.quiet().nothrow(); } catch {}
@@ -39,7 +44,7 @@ export const LlmWikiMemoryPlugin = async ({ client, $, directory }) => {
   }
   async function appendTool(slug, sid, tool, target) {
     try {
-      const p = JSON.stringify({ slug, sessionId: sid, tool, target: (target||"").slice(0,100) });
+      const p = JSON.stringify({ slug, sessionId: sid, tool, target: target||"" });
       await $`uv run python ${SCRIPTS}/tool_breadcrumb_append.py`.stdin(p).quiet().nothrow();
     } catch {}
   }
@@ -64,7 +69,7 @@ export const LlmWikiMemoryPlugin = async ({ client, $, directory }) => {
    */
   async function generateContextFile() {
     try {
-      const ctxFile = `${_LLM_WIKI_ROOT}/cache/session-context.md`;
+      const ctxFile = `${_LLM_WIKI_STATE_ROOT}/cache/session-context.md`;
       await $`uv run python ${SCRIPTS}/session_start_context.py --output-file ${ctxFile}`.quiet().nothrow();
     } catch {}
   }
@@ -204,7 +209,10 @@ export const LlmWikiMemoryPlugin = async ({ client, $, directory }) => {
           const query = String(args?.query || "").trim();
           if (!query) return "Usage: memory.recall(query='your search query')";
           try {
-            const r = await $`uv run python ${SCRIPTS}/search_memory.py ${query}`.quiet().nothrow();
+            // Pass query via stdin (not as a CLI arg) to eliminate any
+            // possibility of shell injection through user-supplied text.
+            const r = await $`uv run python ${SCRIPTS}/search_memory.py --stdin`
+              .stdin(query).quiet().nothrow();
             return r.stdout?.toString()?.trim() || "(no results found)";
           } catch {
             return "(memory.recall: search error)";

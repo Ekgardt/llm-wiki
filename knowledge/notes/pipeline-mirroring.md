@@ -2,7 +2,10 @@
 type: concept
 title: "Pipeline Mirroring"
 description: "Noun-form counterpart of the pattern [[knowledge/notes/mirror-existing-pipelines]] — the rule that a new knowledge subsystem should reuse the shape of an existing pipeline."
-status: stub
+status: superseded
+superseded_by: [[knowledge/notes/mirror-existing-pipelines]]
+confidence: low
+source_authority: inferred
 timestamp: 2026-07-03T05:41:37
 ---
 # Pipeline Mirroring
@@ -21,6 +24,12 @@ The tiebreaker in `docs/AGENTS.md` resolves this: *patterns > concepts* when bot
 
 Future compile passes should prefer creating new entries under `knowledge/notes/` when the rule is actionable, and only create a sibling concept entry if the concept carries meaning beyond the apply-when heuristic.
 
+## Source
+- Concept identified during the 2026-04-13 memory-review session. See [[knowledge/notes/mirror-existing-pipelines]] for the canonical pattern page (patterns > concepts tiebreaker).
+
 ## Related
 - [[knowledge/notes/mirror-existing-pipelines]] — canonical page (verb-shaped pattern).
 - [[2026-04-13 Three Conventions One Root|Three Conventions, One Root]] — connection page placing this convention alongside its siblings.
+- [[Global Multi-Project Migration Plan]] — the migration plan applied pipeline mirroring to extend the single-project vault.
+- [[Memory Subsystem Action Plan]] — the memory subsystem was built by mirroring existing pipeline shapes.
+- [[Preliminary Flagging]] — pipeline mirroring as a concept was itself flagged preliminary until grounded in practice.

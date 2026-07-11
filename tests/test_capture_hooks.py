@@ -95,6 +95,7 @@ def test_prompt_capture_writes_line_for_real_prompt(monkeypatch, tmp_path):
     daily_dir = fake_root / "knowledge" / "daily"
     monkeypatch.setattr(user_prompt_capture, "ROOT", fake_root)
     monkeypatch.setattr(user_prompt_capture, "DAILY_DIR", daily_dir)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(fake_root))
     monkeypatch.setattr(
         user_prompt_capture, "_compute_slug_from_cwd", lambda cwd: "test-slug"
     )
@@ -161,6 +162,7 @@ def test_tool_capture_logs_significant_tools(monkeypatch, tmp_path):
     daily_dir = fake_root / "knowledge" / "daily"
     monkeypatch.setattr(post_tool_capture, "ROOT", fake_root)
     monkeypatch.setattr(post_tool_capture, "DAILY_DIR", daily_dir)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(fake_root))
     monkeypatch.setattr(
         post_tool_capture, "_compute_slug_from_cwd", lambda cwd: "test-slug"
     )

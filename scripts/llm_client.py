@@ -10,10 +10,10 @@ Backend priority (auto-detected, first alive wins):
   4. OpenAI-compatible API (if OPENAI_API_KEY)
   5. Ollama HTTP API (if localhost:11434 alive)
 
-If NONE available: the call is **enqueued** to a persistent queue
-(`scripts/memory_queue.py`) and processed at the next active OpenCode
-or Codex session. Caller gets "" (treated as a skip — the work is not
-lost, just deferred).
+If NONE available: returns None. Callers handle this gracefully (compile
+skips, flush treats as FLUSH_OK, query returns error string). The queue
+(``scripts/memory_queue.py``) is available as an explicit API for callers
+that want deferred execution — ``memory_queue.enqueue()``.
 
 Override backend via MEMORY_LLM_PROVIDER env var:
     MEMORY_LLM_PROVIDER=opencode  (default — uses OpenCode HTTP API)
@@ -49,14 +49,14 @@ from pathlib import Path
 # Public API
 # ---------------------------------------------------------------------------
 
+def call_llm(prompt: str, system_prompt: str = "", max_tokens: int = 2000) -> str | None:
+    """Synchronous LLM call. Returns response text, "" on soft failure,
+    or None when no backend is available.
 
-def call_llm(prompt: str, system_prompt: str = "", max_tokens: int = 2000) -> str:
-    """Synchronous LLM call. Returns response text or "" on failure.
-
-    If no backend is currently available, the call is enqueued to the
-    persistent queue (see `scripts/memory_queue.py`). The caller gets
-    "" — which downstream code treats as "skip this round, will retry
-    later". Nothing is lost; the work happens at the next drain.
+    When no backend is available, None is returned. Callers treat this
+    gracefully (compile skips, flush treats as FLUSH_OK, query returns
+    error string). The queue (``scripts/memory_queue.py``) is available
+    as an explicit API for callers that want deferred execution.
     """
     if not prompt or not prompt.strip():
         return ""
@@ -86,16 +86,17 @@ def call_llm(prompt: str, system_prompt: str = "", max_tokens: int = 2000) -> st
             print(f"llm_client: {name} backend failed: {type(e).__name__}: {e}", file=sys.stderr)
             continue
 
-    # Nothing available — enqueue for the next drain.
-    _enqueue_forLater(prompt, system_prompt, max_tokens)
-    return ""
+    # No backend available — return None. Callers handle this gracefully
+    # (compile skips, flush treats as FLUSH_OK, query returns error string).
+    # The queue is available as an explicit API for deferred execution.
+    return None
 
 
 def _candidate_order(forced: str) -> list[str]:
     """Order in which to try backends.
 
     When ``forced`` is set to a known backend, ONLY that backend is tried —
-    a strict override. If it fails, the call is enqueued rather than
+    a strict override. If it fails, the call returns None rather than
     silently falling through to another provider. When ``forced`` is empty
     or unknown, the full default order is used (auto-detection).
     """
@@ -103,32 +104,6 @@ def _candidate_order(forced: str) -> list[str]:
     if forced and forced in defaults:
         return [forced]
     return defaults
-
-
-def _enqueue_forLater(prompt: str, system_prompt: str, max_tokens: int) -> None:
-    """Stash the call for the next drain. Best-effort, never raises."""
-    try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from memory_queue import enqueue
-
-        enqueue(
-            "query",
-            {
-                "prompt": prompt,
-                "system_prompt": system_prompt,
-                "max_tokens": max_tokens,
-                "enqueued_by": "llm_client",
-            },
-        )
-        print(
-            "llm_client: no backend available — task enqueued for next "
-            "OpenCode/Codex/Claude session.",
-            file=sys.stderr,
-        )
-    except Exception:  # noqa: BLE001
-        # Queue itself broken — nothing more we can do. Stay silent so
-        # the caller doesn't crash.
-        pass
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +326,8 @@ def _call_claude(prompt: str, system_prompt: str, max_tokens: int) -> str:
         return ""
 
     # Claude CLI accepts the prompt as a positional arg or via stdin.
-    # Combine system + user into one prompt to avoid arg-length issues.
+    # Combine system + user into one prompt and pass via stdin to avoid
+    # the Windows CreateProcess ~32K command-line ceiling on large compiles.
     combined = prompt
     if system_prompt:
         combined = f"<system>{system_prompt}</system>\n\n{prompt}"
@@ -362,8 +338,8 @@ def _call_claude(prompt: str, system_prompt: str, max_tokens: int) -> str:
                 claude_bin,
                 "-p",  # print mode (non-interactive)
                 "--output-format", "text",
-                combined,
             ],
+            input=combined,
             capture_output=True,
             timeout=_timeout_s(),
             check=False,

@@ -1,6 +1,6 @@
 ---
 title: Wiki vs Memory compiler vs Fusion
-type: concept
+type: synthesis
 status: preliminary
 confidence: low
 source_authority: inferred
@@ -60,7 +60,7 @@ One-sentence summary: Three approaches to giving an LLM durable, reusable knowle
 
 ## 3. Fusion system (this vault)
 
-**Description.** Combines both layers in one project: `knowledge/notes/` as the curated, provenance-bearing knowledge layer (Karpathy-style) *and* `memory/` as the session-distilled behavioral layer (compiler-style). Session memory index sits alongside the wiki index; CLAUDE.md enforces wiki-first retrieval while auto-memory runs in the background.
+**Description.** Combines both layers in one project: `knowledge/notes/` as the curated, provenance-bearing knowledge layer (Karpathy-style) *and* `knowledge/daily/` as the session-distilled behavioral layer (compiler-style). Session memory index sits alongside the wiki index; CLAUDE.md enforces wiki-first retrieval while auto-memory runs in the background.
 
 **Strengths**
 - Clean separation of concerns: *facts with sources* vs. *working-relationship state*.
@@ -96,7 +96,7 @@ One-sentence summary: Three approaches to giving an LLM durable, reusable knowle
 
 For this vault: **stay with the fusion approach** — the wiki is already established under Karpathy's conventions, and auto-memory adds behavioral continuity at negligible cost. The main risk is drift; mitigate by:
 
-1. **Hard routing rule.** Source-derived claims → `knowledge/notes/`. Session-derived observations → `memory/`. Never duplicate.
+1. **Hard routing rule.** Source-derived claims → `knowledge/notes/`. Session-derived observations → `knowledge/daily/`. Never duplicate.
 2. **Cross-reference, don't copy.** Memory entries that reference domain facts should link to the wiki page, not restate it.
 3. **Joint review cadence.** When running [[Review Workflow]], also audit `MEMORY.md` for stale entries.
 
@@ -120,3 +120,4 @@ If the memory layer stays empty in practice, collapse back to the pure Karpathy 
 - [[Preliminary Flagging]] — the convention this page's preliminary-caveat callout relies on.
 - [[Memory Subsystem Action Plan]] — follow-up audit that acted on the fusion approach recommended here.
 - [[Global Multi-Project Migration Plan]] — extends the fusion into a global multi-project model.
+- [[flag-inferred-content-as-preliminary]] — the comparison page's inferred sections were flagged preliminary per this decision.

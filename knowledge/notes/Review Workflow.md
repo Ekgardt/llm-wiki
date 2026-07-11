@@ -1,6 +1,8 @@
 ---
 type: workflow
 title: "Review Workflow"
+confidence: high
+source_authority: user
 description: "The wiki should be pruned, linked, and quality-checked regularly."
 timestamp: 2026-07-03T05:48:32
 ---

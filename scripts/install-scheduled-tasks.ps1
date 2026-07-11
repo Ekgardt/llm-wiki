@@ -24,6 +24,13 @@ param(
 $ErrorActionPreference = "Stop"
 $tasks = @("LLMWiki-Nightly", "LLMWiki-Weekly")
 
+# Detect dot-sourcing at TOP LEVEL (outside any function).
+# Inside a function, $MyInvocation.CommandOrigin is always 'Internal',
+# so we must capture the flag here, before defining _SafeExit.
+# When dot-sourced: CommandOrigin = 'Internal' (runs in caller's scope).
+# When run as child process: CommandOrigin = 'Runspace'.
+$script:IsDotSourced = $MyInvocation.CommandOrigin -eq 'Internal'
+
 if ($Status) {
     Write-Host "=== Scheduled task status ===" -ForegroundColor Cyan
     foreach ($name in $tasks) {
@@ -39,7 +46,7 @@ if ($Status) {
             Write-Host "  ${name}: NOT INSTALLED" -ForegroundColor Yellow
         }
     }
-    exit 0
+    if ($script:IsDotSourced) { return } else { exit 0 }
 }
 
 if ($Uninstall) {
@@ -52,7 +59,7 @@ if ($Uninstall) {
             Write-Host "  (not installed: $name)" -ForegroundColor DarkGray
         }
     }
-    exit 0
+    if ($script:IsDotSourced) { return } else { exit 0 }
 }
 
 # Resolve paths.
@@ -68,10 +75,14 @@ $weeklyScript = "$env:LLM_WIKI_ROOT\scripts\scheduled_weekly.py"
 if (-not (Test-Path $nightlyScript)) { throw "Missing: $nightlyScript" }
 if (-not (Test-Path $weeklyScript)) { throw "Missing: $weeklyScript" }
 
+# Quote script paths so Task Scheduler handles spaces in LLM_WIKI_ROOT correctly.
+$nightlyArgs = '"{0}"' -f $nightlyScript
+$weeklyArgs = '"{0}"' -f $weeklyScript
+
 # --- Nightly task: 03:00 every day ---
 $nightlyAction = New-ScheduledTaskAction `
     -Execute $pythonExe `
-    -Argument $nightlyScript `
+    -Argument $nightlyArgs `
     -WorkingDirectory "$env:LLM_WIKI_ROOT"
 
 $nightlyTrigger = New-ScheduledTaskTrigger -Daily -At 3am
@@ -106,7 +117,7 @@ Write-Host "  registered" -ForegroundColor Green
 # --- Weekly task: Sunday 04:00 ---
 $weeklyAction = New-ScheduledTaskAction `
     -Execute $pythonExe `
-    -Argument $weeklyScript `
+    -Argument $weeklyArgs `
     -WorkingDirectory "$env:LLM_WIKI_ROOT"
 
 $weeklyTrigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At 4am

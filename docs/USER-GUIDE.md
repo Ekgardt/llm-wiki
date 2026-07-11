@@ -51,7 +51,7 @@ The installer detects your agents and wires them up automatically.
    git clone https://github.com/Ekgardt/llm-wiki.git
    cd llm-wiki
    uv sync
-   uv run pytest -q          # verify: 226 tests collected in 0.26s tests should pass
+   uv run pytest -q          # verify: 281 tests collected in 0.26s should pass
    ```
 
 2. **Set environment variables** (add to your shell profile):
@@ -66,7 +66,7 @@ The installer detects your agents and wires them up automatically.
 
 3. **Create runtime dirs** (gitignored, regenerated on demand):
    ```bash
-   mkdir -p cache logs run/queue cognee
+   mkdir -p cache logs run/queue cache/cognee
    ```
 
 4. **Wire up your agents** (see below).
@@ -224,8 +224,8 @@ setup steps.
 
 ### "Tests fail on fresh clone"
 - `uv sync` first (deps must be installed)
-- `uv run pytest -q` — should report 226 tests collected in 0.26s passed
-- If `< 218`, your checkout is stale; `git pull`
+- `uv run pytest -q` — should report 281 tests collected in 0.26s passed
+- If `< 281`, your checkout is stale; `git pull`
 
 ---
 
@@ -233,8 +233,8 @@ setup steps.
 
 | Path | Zone | Purpose |
 |------|------|---------|
-| `scripts/` | CODE | Pipeline + hooks + helpers (43 .py + 3 helpers) |
-| `tests/` | CODE | 23 test files, 226 tests collected in 0.26s tests |
+| `scripts/` | CODE | Pipeline + hooks + helpers (45 .py + 3 helpers) |
+| `tests/` | CODE | 25 test files, 281 tests collected in 0.26s |
 | `docs/` | CODE | This file + ARCHITECTURE + STRUCTURE + SETUP-COGNEE + EXPORTING |
 | `skills/` | CODE | 9 agent skills |
 | `rules/` | CODE | 3 file-handling policies |

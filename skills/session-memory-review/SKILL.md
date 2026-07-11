@@ -6,7 +6,7 @@ description: Review the health of session memory — first runs scripts/lint_mem
 disable-model-invocation: true
 context: fork
 allowed-tools: Read Glob Grep LS Bash(uv run python scripts/lint_memory.py *) Bash(python scripts/lint_memory.py *)
-title: "SKILL"
+title: "Session Memory Review"
 timestamp: 2026-07-03T05:41:37
 ---
 Review `$ARGUMENTS` if provided, otherwise review the whole knowledge subsystem (`knowledge/daily/`, `knowledge/notes/`).

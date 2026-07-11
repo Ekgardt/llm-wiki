@@ -14,10 +14,8 @@ from __future__ import annotations
 
 import io
 import json
-import os
 import sys
 from datetime import datetime
-from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -33,30 +31,26 @@ def main() -> int:
     except (json.JSONDecodeError, OSError):
         return 0
 
+    if not isinstance(payload, dict):
+        return 0
+
     slug = payload.get("slug") or "unknown"
     session_id = str(payload.get("sessionId") or "opencode")[:8]
     tool = (payload.get("tool") or "").lower()
-    target = str(payload.get("target") or "").strip()[:100]
+    target = str(payload.get("target") or "").strip()
     if not tool:
         return 0
 
-    root = Path(os.environ.get("LLM_WIKI_ROOT", str(Path(__file__).resolve().parent.parent))).resolve()
-    daily_dir = root / "knowledge" / "daily"
     try:
-        daily_dir.mkdir(parents=True, exist_ok=True)
-        day = datetime.now().strftime("%Y-%m-%d")
-        path = daily_dir / f"{day}.md"
-        if not path.exists():
-            path.write_text(f"# Daily Session Memory — {day}\n", encoding="utf-8")
+        from daily_log_append import append_daily
+        from secret_redact import redact_secrets
+
         ts = datetime.now().strftime("%H:%M:%S")
-        try:
-            from secret_redact import redact_secrets
-            safe_target = redact_secrets(str(target or ""))
-        except Exception:  # noqa: BLE001
-            safe_target = str(target or "")
-        line = f"- `[{ts}] tool | {session_id} | {slug} | {tool}` {safe_target}\n".rstrip() + "\n"
-        with path.open("a", encoding="utf-8") as f:
-            f.write(line)
+        # Redact FIRST, then truncate — prevents secret fragments from
+        # escaping past the truncation boundary.
+        safe_target = redact_secrets(target)[:100]
+        line = f"- `[{ts}] tool | {session_id} | {slug} | {tool}` {safe_target}"
+        append_daily(slug, session_id, line)
     except OSError as e:
         print(f"tool_breadcrumb_append: write failed: {type(e).__name__}: {e}", file=sys.stderr)
     return 0

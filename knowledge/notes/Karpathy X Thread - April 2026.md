@@ -1,6 +1,6 @@
 ---
 title: Karpathy X Thread - April 2026
-type: fact
+type: raw-source
 author: Andrej Karpathy
 published: 2026-04-02
 captured: 2026-04-11

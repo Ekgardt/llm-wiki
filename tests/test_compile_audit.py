@@ -200,22 +200,17 @@ def test_knowledge_snapshot_empty_when_no_pages(tmp_path: Path):
 
 
 def test_failed_compile_does_not_mark_hash_still_holds():
-    """Sanity check that Phase 0 changes did not break the existing
-    invariant: a failed compile MUST NOT mutate compiled_daily_hashes.
+    """_compile_succeeded must reject sentinel-style failure strings.
 
-    This is a smoke test — the full version lives in
-    test_compile_failure.py. We re-assert the contract here because
-    Phase 0 touched `run_compile` callers.
+    This is a focused smoke test — the full end-to-end version lives in
+    test_compile_failure.py. Here we verify the gating function itself.
     """
     import compile_memory  # noqa: WPS433
 
-    # Phase 4+ refactor: run_compile is now sync (matches llm_client sync API).
-    def fake_failure(daily_paths, dry_run):
-        return ([], "(compile failed: RuntimeError: phase0-regression-check)")
-
-    # The function must still accept (daily_paths, dry_run) and return (list, str)
-    touched, raw = fake_failure([], False)
-    assert touched == []
-    assert "phase0-regression-check" in raw
-    # And _compile_succeeded must still reject this
-    assert compile_memory._compile_succeeded(raw) is False
+    # Simulate the kind of output run_compile produces on failure.
+    failure_output = "(compile failed: RuntimeError: phase0-regression-check)"
+    assert compile_memory._compile_succeeded(failure_output) is False
+    assert compile_memory._compile_succeeded("") is False
+    assert compile_memory._compile_succeeded(None) is False
+    # And a success marker must still be accepted.
+    assert compile_memory._compile_succeeded("COMPILE_DONE: 1 page(s) touched: x") is True

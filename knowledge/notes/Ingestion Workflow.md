@@ -1,6 +1,8 @@
 ---
 type: workflow
 title: "Ingestion Workflow"
+confidence: high
+source_authority: user
 description: "New source material is captured into knowledge/inbox or knowledge/raw, then compiled into durable wiki pages."
 timestamp: 2026-07-03T05:48:32
 ---

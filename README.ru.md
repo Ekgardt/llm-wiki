@@ -1,9 +1,9 @@
 # LLM Wiki
 
-[![Tests](https://img.shields.io/badge/tests-226%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://img.shields.io/badge/tests-281%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-3.3.3-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-3.4.0-blue.svg)](CHANGELOG.md)
 
 **Локальная система памяти для AI-агентов. Markdown-файлы, версионирование в git, без облачных зависимостей.**
 
@@ -89,7 +89,7 @@ LLM Wiki даёт каждому AI-агенту, которым вы польз
 - **Agent timeline** — атрибуция: какой агент какое решение принял и когда
 
 ### Обслуживание
-- **13 lint-проверок** — битые wikilinks, orphan'ы, missing frontmatter, невалидные supersede-цепочки, temporal validity, gap'ы, sparse pages, missing sources, противоречия
+- **14 lint-проверок (13 структурных + 1 LLM-оцениваемое противоречие)** — битые wikilinks, orphan'ы, missing frontmatter, невалидные supersede-цепочки, temporal validity, gap'ы, sparse pages, missing sources, противоречия
 - **Type-aware архивация** — debugging 60 дн, patterns 180 дн, decisions никогда
 - **Nightly + weekly расписания** — компиляция, lint, архивация, OKF-миграция (Task Scheduler на Windows, cron на Unix)
 - **OKF v0.1 frontmatter** — поля `type`, `confidence`, `source_authority`, `supersede`; авто-миграция с legacy-страниц
@@ -98,7 +98,7 @@ LLM Wiki даёт каждому AI-агенту, которым вы польз
 - **5 LLM-бэкендов** (авто-детекция): OpenCode → Codex → Claude CLI → OpenAI → Ollama
 - **Кросс-платформенность**: Windows, macOS, Linux, WSL2
 - **Ноль runtime-зависимостей** — базовая установка только stdlib; sentence-transformers и Cognee опциональны
-- **218 регрессионных тестов**, CI green на Ubuntu + Windows + macOS, Python 3.10 + 3.13
+- **281 регрессионных тестов**, CI green на Ubuntu + Windows + macOS, Python 3.10 + 3.13
 - **Pre-commit хуки**: ruff (статический анализ) + структурный lint + gitleaks (сканирование секретов)
 
 ---
@@ -123,13 +123,15 @@ curl -fsSL https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.sh | 
 irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 ```
 
+> **Примечание для production:** Указанные выше URL ветки `main` могут изменяться. Для production- или аудируемых развёртываний используйте URL конкретного release-тега, например `https://raw.githubusercontent.com/Ekgardt/llm-wiki/v3.4.0/install.sh`.
+
 Установщик:
 1. Проверяет требования (Python 3.10+, git)
 2. Устанавливает `uv` (быстрый Python-менеджер пакетов), если отсутствует
 3. Синхронизирует зависимости (`uv sync`)
-4. Запускает тестовый набор (218 тестов)
+4. Запускает тестовый набор (281 тестов)
 5. Устанавливает переменную окружения `LLM_WIKI_ROOT` (user scope)
-6. Создаёт runtime-директории (`cache/`, `logs/`, `run/`, `cognee/` — gitignored)
+6. Создаёт runtime-директории (`cache/`, `logs/`, `run/`, `cache/cognee/` — gitignored)
 7. Регистрирует плановое обслуживание (cron на Unix, Task Scheduler на Windows)
 8. Детектирует ваших агентов и подключает их
 9. Строит FTS5 search-индекс
@@ -140,7 +142,7 @@ irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync
-uv run pytest -q          # 218 тестов должны пройти
+uv run pytest -q          # 281 тестов должны пройти
 ```
 
 ### Проверка работы
@@ -192,7 +194,7 @@ uv sync --extra cognee
 ```
 CODE          scripts/  tests/  docs/  skills/  rules/  integrations/  benchmark/
 KNOWLEDGE     knowledge/{daily,notes,projects,raw,inbox,feedback}
-RUNTIME       cache/  logs/  run/  cognee/   (gitignored, внутри vault)
+RUNTIME       cache/  logs/  run/  cache/cognee/   (gitignored, внутри vault)
 ```
 
 - **CODE** — отслеживается в git. Пайплайн, тесты, документация, навыки, правила, интеграции.
@@ -207,21 +209,21 @@ RUNTIME       cache/  logs/  run/  cognee/   (gitignored, внутри vault)
 
 ## Бенчмарк
 
-> **Методология**: 52 known-item запроса (перефразированные title + summary) по 34 курируемым страницам. BM25 + Vector гибрид через RRF. Измеряет «может ли система найти страницу X по перефразированному запросу?» — наиболее релевантная метрика для персонального извлечения знаний. Это **не** LoCoMo или LongMemEval (multi-session conversation recall). Числа конкурентов — из других датасетов и не сопоставимы напрямую. Воспроизведите: `benchmark/run_benchmark.py`.
+> **Методология**: 60 known-item запроса (точное совпадение заголовка + ключевые слова из summary, не LLM-парафраз) по 34 курируемым страницам. BM25-only режим (FTS5). Измеряет «может ли система найти страницу X по её заголовку или ключевым словам из summary?» — наиболее релевантная метрика для персонального извлечения знаний. Это **не** LoCoMo или LongMemEval (multi-session conversation recall). Числа конкурентов — из других датасетов и не сопоставимы напрямую. Воспроизведите: `benchmark/run_benchmark.py`.
 
 | Метрика | LLM Wiki v3.3 | agentmemory | Zep | Mem0 |
 |---------|---------------|-------------|-----|------|
-| Recall@1 | **88.5%** | n/a | n/a | n/a |
+| Recall@1 | **95.0%** | n/a | n/a | n/a |
 | Recall@3 | **100%** | n/a | n/a | n/a |
 | Recall@5 | **100%** | 95.2% | 94.7% | 91.6% |
 | Recall@10 | **100%** | n/a | n/a | n/a |
-| MRR | **0.942** | 0.882 | n/a | n/a |
-| Латентность p50 | 41мс | **14мс** | 155мс | 880мс |
+| MRR | **0.9667** | 0.882 | n/a | n/a |
+| Латентность p50 | **6мс** | 14мс | 155мс | 880мс |
 | Стоимость токенов/запрос | **0** | ~1900 | $$ | $$ |
 
-100% Recall@5 достижимо на небольших курируемых датасетах; ожидайте 85–95% на 500+ страницах. Латентность выше, чем у agentmemory (in-process BM25-only), потому что LLM Wiki использует гибрид BM25 + Vector + Graph fusion.
+100% Recall@5 достижимо на небольших курируемых датасетах; ожидайте 85–95% на 500+ страницах. Triple-fusion (BM25 + Vector + Graph) добавляет семантический recall поверх этих BM25-only чисел.
 
-Воспроизведите: `uv run python benchmark/run_benchmark.py --semantic`
+Воспроизведите: `uv run python benchmark/run_benchmark.py`
 
 ---
 

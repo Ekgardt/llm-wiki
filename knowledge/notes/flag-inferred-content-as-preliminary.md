@@ -31,3 +31,4 @@ Promoted 2026-04-13 to [[Preliminary Flagging]] (`knowledge/notes/`) as a named 
 - [[Preliminary Flagging]]
 - [[Wiki vs Memory Compiler vs Fusion]]
 - [[knowledge/notes/provenance-rule-6]] — the underlying CLAUDE.md rule this decision operationalizes.
+- [[state-md-exempt-from-lint]] — the lint exemption decision applied the preliminary-flagging principle to operational metadata.

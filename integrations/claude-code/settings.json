@@ -25,8 +25,10 @@
       "Bash(basename *)",
       "Bash(xargs *)",
       "Bash(echo *)",
-      "Bash(python scripts/*.py)",
-      "Bash(uv run python scripts/*.py)",
+      "Bash(python scripts/search_memory.py *)",
+      "Bash(python scripts/lookup_mode.py *)",
+      "Bash(uv run python scripts/search_memory.py *)",
+      "Bash(uv run python scripts/lookup_mode.py *)",
       "Bash(uv run --directory *)"
     ]
   },
@@ -39,6 +41,11 @@
             "type": "command",
             "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/session_start_context.py",
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/session_start_project_state.py",
+            "timeout": 10
           }
         ]
       }
@@ -63,6 +70,11 @@
             "type": "command",
             "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/session_end_capture.py",
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/session_end_project_tag.py",
+            "timeout": 10
           }
         ]
       }

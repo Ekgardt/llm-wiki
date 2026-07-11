@@ -6,6 +6,10 @@
 # Or clone first:
 #   git clone https://github.com/Ekgardt/llm-wiki.git; cd llm-wiki; .\install.ps1
 #
+# NOTE: For reproducible installs, pin to a version tag:
+#   irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/v3.4.0/install.ps1 | iex
+# The main branch URL is for development convenience only.
+#
 # What this does:
 #   1. Checks prerequisites (Python 3.10+, uv, git)
 #   2. Installs Python deps
@@ -33,12 +37,16 @@ if (-not (Test-Path "$VAULT_ROOT\pyproject.toml")) {
     $VAULT_ROOT = "$env:USERPROFILE\LLM-wiki"
     if (-not (Test-Path "$VAULT_ROOT\pyproject.toml")) {
         Info "Cloning LLM-Wiki..."
-        git clone https://github.com/Ekgardt/llm-wiki.git $VAULT_ROOT
+        git clone --branch v3.4.0 --depth 1 https://github.com/Ekgardt/llm-wiki.git $VAULT_ROOT
     }
 }
 
 Set-Location $VAULT_ROOT
 Info "Vault root: $VAULT_ROOT"
+
+# Prevent accidental pushes from the installed vault
+git -C $VAULT_ROOT remote set-url --push origin no-push
+Ok "Push disabled (no-push) — installed vault cannot push to public remote"
 
 # ─── 2. Check prerequisites ────────────────────────────────────────
 
@@ -70,7 +78,7 @@ Ok "uv installed"
 # ─── 3. Install dependencies ───────────────────────────────────────
 
 Info "Installing Python dependencies..."
-uv sync --quiet
+uv sync --locked --quiet
 Ok "Dependencies installed"
 
 # ─── 4. Run tests ──────────────────────────────────────────────────
@@ -86,6 +94,17 @@ if ($testResult -match "passed") {
 # ─── 5. Set environment variables ──────────────────────────────────
 
 Info "Setting environment variables..."
+
+# Warn if env vars already point somewhere else (avoid silent clobber)
+$oldRoot = [Environment]::GetEnvironmentVariable("LLM_WIKI_ROOT", "User")
+if ($oldRoot -and $oldRoot -ne $VAULT_ROOT) {
+    Warn "LLM_WIKI_ROOT was '$oldRoot', overwriting to '$VAULT_ROOT'"
+}
+$oldState = [Environment]::GetEnvironmentVariable("LLM_WIKI_STATE_ROOT", "User")
+if ($oldState -and $oldState -ne $VAULT_ROOT) {
+    Warn "LLM_WIKI_STATE_ROOT was '$oldState', overwriting to '$VAULT_ROOT'"
+}
+
 [Environment]::SetEnvironmentVariable("LLM_WIKI_ROOT", $VAULT_ROOT, "User")
 # Runtime lives inside the vault as gitignored cache/logs/run dirs.
 # LLM_WIKI_STATE_ROOT defaults to the vault itself; only set it explicitly
@@ -94,12 +113,13 @@ Info "Setting environment variables..."
 $env:LLM_WIKI_ROOT = $VAULT_ROOT
 $env:LLM_WIKI_STATE_ROOT = $VAULT_ROOT
 
-New-Item -ItemType Directory -Path "$VAULT_ROOT\run" -Force | Out-Null
-New-Item -ItemType Directory -Path "$VAULT_ROOT\run\queue" -Force | Out-Null
-New-Item -ItemType Directory -Path "$VAULT_ROOT\logs" -Force | Out-Null
-New-Item -ItemType Directory -Path "$VAULT_ROOT\cache" -Force | Out-Null
-New-Item -ItemType Directory -Path "$VAULT_ROOT\cognee" -Force | Out-Null
-Ok "LLM_WIKI_ROOT set (User scope); runtime at $VAULT_ROOT\{run,logs,cache} (gitignored)"
+$STATE_ROOT = $VAULT_ROOT
+New-Item -ItemType Directory -Path "$STATE_ROOT\run" -Force | Out-Null
+New-Item -ItemType Directory -Path "$STATE_ROOT\run\queue" -Force | Out-Null
+New-Item -ItemType Directory -Path "$STATE_ROOT\logs" -Force | Out-Null
+New-Item -ItemType Directory -Path "$STATE_ROOT\cache" -Force | Out-Null
+New-Item -ItemType Directory -Path "$STATE_ROOT\cache\cognee" -Force | Out-Null
+Ok "LLM_WIKI_ROOT set (User scope); runtime at $STATE_ROOT\{run,logs,cache} (gitignored)"
 
 # ─── 6. Build search index ─────────────────────────────────────────
 
@@ -136,7 +156,7 @@ if ((Get-Process "OpenCode*" -ErrorAction SilentlyContinue) -or (Test-Path $open
         Copy-Item -LiteralPath $openCodePluginSrc -Destination $pluginDst -Force
         Ok "OpenCode plugin installed → $pluginDst"
         # Generate initial context file so the first session has context
-        $ctxFile = Join-Path $VAULT_ROOT "cache\session-context.md"
+        $ctxFile = Join-Path $STATE_ROOT "cache\session-context.md"
         try { & uv run python (Join-Path $VAULT_ROOT "scripts\session_start_context.py") --output-file $ctxFile 2>$null | Out-Null } catch {}
     } else {
         Warn "OpenCode detected but plugin source missing: $openCodePluginSrc"
@@ -171,7 +191,7 @@ if ((Get-Command claude -ErrorAction SilentlyContinue) -or (Test-Path $claudeCon
     Info "Merging LLM-wiki hooks into Claude user settings (backup first)..."
     uv run python (Join-Path $VAULT_ROOT "scripts\merge_claude_settings.py") `
         --vault-root $VAULT_ROOT `
-        --state-root $VAULT_ROOT 2>&1 | ForEach-Object { Info "$_" }
+        --state-root $STATE_ROOT 2>&1 | ForEach-Object { Info "$_" }
     if ($LASTEXITCODE -eq 0) {
         Ok "Claude settings merged → $claudeConfig\settings.json"
     } else {

@@ -201,6 +201,8 @@ def main() -> int:
     for w in worktrees:
         if w.is_main:
             continue
+        if not any(parent in str(w.path) for parent in (".claude", ".codex", ".opencode")):
+            continue
         w.is_clean = check_clean(w)
         w.is_merged = check_merged(w, repo_root)
         if not w.is_clean and not w.is_merged:

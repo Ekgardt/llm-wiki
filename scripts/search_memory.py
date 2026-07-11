@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -29,10 +30,11 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT, STATE_ROOT  # noqa: E402
+from memory_state import ROOT, STATE_ROOT, atomic_write  # noqa: E402
 
 INDEX_DIR = STATE_ROOT / "cache"
 INDEX_FILE = INDEX_DIR / "index.sqlite"
+INDEX_MANIFEST = INDEX_DIR / ".paths-manifest"
 VECTOR_CACHE = INDEX_DIR / "vectors.json"  # JSON embedding cache (no pickle)
 
 KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
@@ -107,44 +109,6 @@ def _cosine_similarity(query_vec: list[float], doc_vecs: list[list[float]]) -> l
     return (docs_norm @ q_norm).tolist()
 
 
-def _rrf_fuse(
-    bm25_results: list[dict],
-    vector_results: list[dict] | None,
-    k: int = 60,
-) -> list[dict]:
-    """Reciprocal Rank Fusion — combine BM25 and vector rankings.
-
-    RRF score = sum(1 / (k + rank_i)) for each result list.
-    Standard information-retrieval technique. k=60 is the literature default.
-    """
-    scores: dict[str, float] = {}
-    metadata: dict[str, dict] = {}
-
-    for rank, r in enumerate(bm25_results):
-        path = r["path"]
-        scores[path] = scores.get(path, 0) + 1.0 / (k + rank + 1)
-        metadata[path] = r
-
-    if vector_results:
-        for rank, r in enumerate(vector_results):
-            path = r["path"]
-            scores[path] = scores.get(path, 0) + 1.0 / (k + rank + 1)
-            if path not in metadata:
-                metadata[path] = r
-            else:
-                # Merge: prefer BM25 metadata but update score
-                pass
-
-    # Sort by fused score
-    sorted_paths = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    results = []
-    for path, score in sorted_paths:
-        r = metadata[path].copy()
-        r["fused_score"] = round(score, 4)
-        results.append(r)
-    return results
-
-
 def _collect_pages(scope: str = "all") -> list[Path]:
     """Collect all searchable markdown pages."""
     pages: list[Path] = []
@@ -165,6 +129,16 @@ def _collect_pages(scope: str = "all") -> list[Path]:
             if md.name in SKIP_NAMES:
                 continue
             if any(skip in md.relative_to(root).parts for skip in SKIP_DIRS):
+                continue
+            # Skip superseded/archived pages from active search results
+            try:
+                content = md.read_text(encoding="utf-8", errors="ignore")
+                fm = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
+                if fm:
+                    status_m = re.search(r"^status:\s*(.+?)\s*$", fm.group(1), re.MULTILINE)
+                    if status_m and status_m.group(1).strip() in ("superseded", "archived"):
+                        continue
+            except OSError:
                 continue
             seen.add(md)
             pages.append(md)
@@ -219,8 +193,23 @@ def _strip_frontmatter(content: str) -> str:
 
 
 def _needs_rebuild(pages: list[Path]) -> bool:
-    """Check if any page is newer than the index."""
+    """Check if any page is newer than the index, or if pages were added/removed."""
     if not INDEX_FILE.exists():
+        return True
+    # Manifest check: if the set of indexed paths differs from the
+    # current set (e.g. a page was deleted), trigger rebuild.
+    current_paths = sorted(p.relative_to(ROOT).as_posix() for p in pages)
+    if INDEX_MANIFEST.exists():
+        try:
+            manifest_paths = json.loads(
+                INDEX_MANIFEST.read_text(encoding="utf-8")
+            )
+            if manifest_paths != current_paths:
+                return True
+        except (OSError, json.JSONDecodeError):
+            return True
+    else:
+        # No manifest from a prior build — rebuild to create one.
         return True
     index_mtime = INDEX_FILE.stat().st_mtime
     for p in pages:
@@ -233,46 +222,82 @@ def _needs_rebuild(pages: list[Path]) -> bool:
 
 
 def _build_index(pages: list[Path]) -> None:
-    """Build the FTS5 index from scratch."""
+    """Build the FTS5 index from scratch (atomically).
+
+    Builds into a temporary database file, then atomically replaces the
+    live index via ``os.replace``. This ensures concurrent searches never
+    see a partially-built index or a missing-index window.
+    """
     INDEX_DIR.mkdir(parents=True, exist_ok=True)
-    # Remove old index
-    if INDEX_FILE.exists():
-        INDEX_FILE.unlink()
+    tmp_file = INDEX_FILE.with_suffix(".sqlite.tmp")
 
-    conn = sqlite3.connect(str(INDEX_FILE))
-    conn.execute(
-        """
-        CREATE VIRTUAL TABLE pages USING fts5(
-            path UNINDEXED,
-            title,
-            summary,
-            body,
-            project UNINDEXED,
-            timestamp UNINDEXED,
-            tokenize = 'porter unicode61'
-        )
-        """
-    )
+    # Clean up any stale temp file from a previous failed build.
+    if tmp_file.exists():
+        tmp_file.unlink()
 
-    for p in pages:
-        try:
-            content = p.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        title, summary = _extract_title_and_summary(content, p.stem)
-        body = _strip_frontmatter(content)
-        rel_path = p.relative_to(ROOT).as_posix()
-        project = _extract_frontmatter_field(content, PROJECT_FIELD_RE) or ""
-        timestamp = _extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or ""
-        # Truncate timestamp to date only for filtering
-        timestamp = timestamp[:10] if timestamp else ""
+    conn = sqlite3.connect(str(tmp_file))
+    try:
         conn.execute(
-            "INSERT INTO pages (path, title, summary, body, project, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
-            (rel_path, title, summary, body, project.lower(), timestamp),
+            """
+            CREATE VIRTUAL TABLE pages USING fts5(
+                path UNINDEXED,
+                title,
+                summary,
+                body,
+                project UNINDEXED,
+                timestamp UNINDEXED,
+                tokenize = 'porter unicode61'
+            )
+            """
         )
 
-    conn.commit()
-    conn.close()
+        for p in pages:
+            try:
+                content = p.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            title, summary = _extract_title_and_summary(content, p.stem)
+            body = _strip_frontmatter(content)
+            rel_path = p.relative_to(ROOT).as_posix()
+            project = _extract_frontmatter_field(content, PROJECT_FIELD_RE) or ""
+            timestamp = _extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or ""
+            # Truncate timestamp to date only for filtering
+            timestamp = timestamp[:10] if timestamp else ""
+            conn.execute(
+                "INSERT INTO pages (path, title, summary, body, project, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+                (rel_path, title, summary, body, project.lower(), timestamp),
+            )
+
+        conn.commit()
+    except Exception:
+        # Build failed — remove the temp file so the live index (if any)
+        # remains untouched and usable for searches.
+        conn.close()
+        try:
+            tmp_file.unlink()
+        except OSError:
+            pass
+        raise
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    # Atomic swap: rename temp → live. On the same filesystem this is
+    # atomic at the OS level, so concurrent readers never see a gap.
+    os.replace(str(tmp_file), str(INDEX_FILE))
+
+    # Write paths manifest so deletions are detected on the next check.
+    try:
+        atomic_write(
+            INDEX_MANIFEST,
+            json.dumps(
+                sorted(p.relative_to(ROOT).as_posix() for p in pages)
+            ),
+        )
+    except OSError:
+        pass  # best-effort
 
 
 def _authority_weight(path: str) -> float:
@@ -706,7 +731,7 @@ def _build_vectors(pages: list[Path]) -> dict | None:
 
     # Cache to disk as JSON (no pickle — safer if state root is compromised).
     try:
-        VECTOR_CACHE.write_text(json.dumps(data), encoding="utf-8")
+        atomic_write(VECTOR_CACHE, json.dumps(data))
     except Exception:
         pass  # best-effort cache
 
@@ -724,7 +749,11 @@ def main() -> int:
     p.add_argument("--semantic", action="store_true", help="Enable vector search (needs sentence-transformers)")
     p.add_argument("--rebuild", action="store_true", help="Force index rebuild")
     p.add_argument("--status", action="store_true", help="Show index stats")
+    p.add_argument("--stdin", action="store_true", help="Read query from stdin (injection-safe)")
     args = p.parse_args()
+
+    if args.stdin:
+        args.query = sys.stdin.read().strip()
 
     if args.status:
         pages = _collect_pages("all")

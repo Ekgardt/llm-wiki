@@ -5,7 +5,7 @@ argument-hint: "[--scope all]  (default: all)"
 description: LLM-judged contradiction check across the vault. Run before committing changes that touch knowledge pages, or as a git pre-commit hook.
 disable-model-invocation: true
 allowed-tools: Read Glob Grep LS Bash(python scripts/lint_memory.py *) Bash(uv run python scripts/lint_memory.py *)
-title: "SKILL"
+title: "Contradict Check"
 timestamp: 2026-07-03T05:41:37
 ---
 Wraps `scripts/lint_memory.py --contradictions`, which uses the unified llm_client (`scripts/llm_client.py`) to flag concrete logical contradictions between pages.
@@ -23,7 +23,7 @@ Only **concrete** contradictions — two pages giving different answers to the s
 
 1. Run: `python scripts/lint_memory.py --contradictions $ARGUMENTS`.
    - `--scope all` (default) — knowledge/notes.
-   - Note: this check costs API calls; the other 12 structural checks are free and always run.
+   - Note: this check costs API calls; the other 13 structural checks are free and always run.
 
 2. Open the generated report at `$LLM_WIKI_STATE_ROOT/logs/lint-YYYY-MM-DD.md` (default `$LLM_WIKI_STATE_ROOT/logs/`) and read the `## Contradictions` section.
 

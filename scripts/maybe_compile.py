@@ -36,9 +36,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import (  # noqa: E402
     ROOT,
     STATE_ROOT,
+    atomic_write,
     file_hash,
     load_state,
     spawn_detached,
+)
+from memory_state import (
+    _is_pid_alive as _os_pid_alive,
 )
 
 COMPILE_SCRIPT = ROOT / "scripts" / "compile_memory.py"
@@ -58,42 +62,18 @@ _current_owner: str | None = None
 def _is_pid_alive(pid: int) -> bool:
     """Cross-platform 'is this PID still running?' check.
 
-    PID 0 is a sentinel meaning "spawn in progress" (placeholder lock written
-    before the real child PID is known). Treated as alive so concurrent callers
-    see the lock as held and skip — prevents the spawn window race.
+    PID 0 is a pre-spawn placeholder. It gets a short TTL (10s): if the
+    lock still has PID 0 after that, the spawn failed and the lock is
+    treated as stale. This prevents eternal lockout if the process
+    crashes between _try_claim_lock() and _write_lock(real_pid).
     """
     if pid == 0:
+        # Caller must check age separately — PID 0 is "conditionally alive"
         return True
-    if pid < 0:
-        return False
-    if sys.platform == "win32":
-        # Windows: OpenProcess with PROCESS_QUERY_LIMITED_INFORMATION.
-        # This access right is granted for any process the user can see
-        # (no admin required), which is what we want for "is my own
-        # previously-spawned compile still running?".
-        import ctypes
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        STILL_ACTIVE = 259
-        kernel32 = ctypes.windll.kernel32
-        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-        if not handle:
-            return False
-        try:
-            exit_code = ctypes.c_ulong()
-            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
-                return False
-            return exit_code.value == STILL_ACTIVE
-        finally:
-            kernel32.CloseHandle(handle)
-    else:
-        # POSIX: signal 0 = "is this process alive?".
-        try:
-            os.kill(pid, 0)
-            return True
-        except (OSError, ProcessLookupError, OverflowError, ValueError):
-            # OverflowError: PID too large for the platform's pid_t.
-            # ValueError: negative or otherwise invalid PID.
-            return False
+    return _os_pid_alive(pid)
+
+
+_PID0_TTL_SECONDS = 10.0
 
 
 def _read_lock() -> dict | None:
@@ -119,9 +99,9 @@ def _read_lock() -> dict | None:
 
 def _write_lock(pid: int) -> None:
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    LOCK_FILE.write_text(
+    atomic_write(
+        LOCK_FILE,
         f"{pid}\n{datetime.now().isoformat(timespec='seconds')}\n{secrets.token_hex(8)}\n",
-        encoding="utf-8",
     )
 
 
@@ -172,17 +152,34 @@ def _clear_lock() -> bool:
         return True
     # Stale lock (dead PID) → safe to clear regardless of owner.
     pid = lock.get("pid", 0)
+    if pid == 0:
+        # PID-0 placeholder: check if it's expired
+        try:
+            started = datetime.fromisoformat(lock.get("started_at", ""))
+            age = (datetime.now() - started).total_seconds()
+            if age > _PID0_TTL_SECONDS:
+                try:
+                    LOCK_FILE.unlink()
+                except OSError:
+                    pass
+                return True
+        except (ValueError, TypeError):
+            pass
+        # PID-0 within TTL → treat as live
+        return False
     if not _is_pid_alive(pid):
         try:
             LOCK_FILE.unlink()
         except OSError:
             pass
         return True
-    # Stale lock (too old) → safe to clear regardless of owner.
+    # Stale lock (too old) → steal only if the PID is actually dead.
     try:
         started = datetime.fromisoformat(lock.get("started_at", ""))
         age = (datetime.now() - started).total_seconds()
         if age > MAX_COMPILE_DURATION_S:
+            if _is_pid_alive(pid):
+                return False
             try:
                 LOCK_FILE.unlink()
             except OSError:
@@ -205,7 +202,16 @@ def _is_compile_running() -> tuple[bool, str]:
     if not lock:
         return (False, "no lock file")
     pid = lock["pid"]
-    if not _is_pid_alive(pid):
+    if pid == 0:
+        # PID-0 placeholder: check TTL
+        try:
+            started = datetime.fromisoformat(lock["started_at"])
+            age = (datetime.now() - started).total_seconds()
+            if age > _PID0_TTL_SECONDS:
+                return (False, f"stale lock (pid-0 placeholder expired, age {int(age)}s)")
+        except (ValueError, TypeError):
+            return (False, "stale lock (pid-0, bad timestamp)")
+    elif not _is_pid_alive(pid):
         return (False, f"stale lock (pid {pid} dead)")
     # Check timeout.
     try:

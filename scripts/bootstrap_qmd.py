@@ -28,6 +28,11 @@ Prerequisites:
 Safe to no-op: every step uses `qmd`'s own idempotent commands. If
 `qmd` is not on PATH, the script prints a clear error and exits 1;
 it does not try to heuristically locate the binary.
+
+NOTE [UNVERIFIED]: The QMD CLI integration contract (collection add,
+update, embed, status subcommands and their output format) is version-
+dependent. Verify against the installed `qmd` version before relying on
+this script in production.
 """
 from __future__ import annotations
 

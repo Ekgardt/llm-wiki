@@ -4,7 +4,7 @@ Small pytest-based suite covering the critical scenarios surfaced by four rounds
 
 ## Coverage
 
-The suite currently has **178 tests across 21 files**. Highlights:
+The suite currently has **281 tests across 27 files**. Highlights:
 
 | Test file | Guards against |
 |---|---|
@@ -25,7 +25,7 @@ The suite currently has **178 tests across 21 files**. Highlights:
 | `test_memory_queue.py` | Enqueue/list/mark_attempt/drain/permanently-failed/backoff/max_tasks/status/corrupt-json/age-filter. |
 | `test_merge_claude_settings.py` | User hooks preserved + ours replaced, env set, permissions union, backup written. |
 | `test_plugin_helpers.py` | Empty/malformed stdin → exit 0; valid payload writes daily-log/state/breadcrumb. |
-| `test_readme_i18n.py` | All 3 READMEs exist, share live count (178), correct repo (`Ekgardt/llm-wiki`), mention `knowledge/`, mention `3.3.1`. |
+| `test_readme_i18n.py` | All 3 READMEs exist, share live count (281), correct repo (`Ekgardt/llm-wiki`), mention `knowledge/`, mention `3.4.0`. |
 | `test_search_ranking.py` | `_rrf_fuse_triple` weights verified; source_authority boost. |
 | `test_wikilinks_tracked.py` | `git ls-files knowledge` filtered, broken-link detector + untracked-target reporting. |
 | `test_archive_stale.py` | Type-aware archive thresholds (debugging=60d, decisions/concepts never). |
@@ -52,7 +52,7 @@ pytest tests/
   - `MEMORY_LLM_PROVIDER` → `fake` (no live LLM calls)
   - a skeleton `state.json` if it doesn't exist yet
 
-No pre-configuration required. Output: 178 passed in ~3s.
+No pre-configuration required. Output: 281 passed in ~3s.
 
 All tests are self-contained and use `tmp_path` + state snapshots, so running them does not mutate the vault permanently. The compile-failure test briefly flips `state.json::last_compile_status` and restores it via fixture.
 

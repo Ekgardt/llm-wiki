@@ -1,4 +1,4 @@
-"""Echo knowledge/notes/memory knowledge pages into a Cognee graph for semantic search.
+"""Echo knowledge/notes/ knowledge pages into a Cognee graph for semantic search.
 
 Phase 4 — OPTIONAL semantic layer. This script is the bridge between
 the markdown vault and a Cognee graph database. It runs AFTER a
@@ -16,7 +16,7 @@ Design:
 - Storage: $LLM_WIKI_STATE_ROOT/cache/cognee/ (under the search-index cache tree)
 
 Usage:
-    uv run python scripts/cognee_sync.py                    # sync all wiki + memory/knowledge
+    uv run python scripts/cognee_sync.py                    # sync all knowledge/notes/
     uv run python scripts/cognee_sync.py --file PATH        # sync one file
     uv run python scripts/cognee_sync.py --dry-run          # plan only
     uv run python scripts/cognee_sync.py --status           # check setup health
@@ -27,18 +27,22 @@ Prerequisites (see docs/setup-cognee.md):
     3. ollama pull mxbai-embed-large
     4. ollama pull qwen3:0.6b  (or llama3.2:1b for slightly better extraction)
     5. ollama serve running on localhost:11434
+
+NOTE [UNVERIFIED]: The Cognee integration contract (add, cognify, search
+APIs and their kwargs) is version-dependent. Verify against the installed
+`cognee` package version before relying on this script in production.
 """
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import sys
 from pathlib import Path
 
-ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(Path(__file__).resolve().parent.parent))).resolve()
-STATE_ROOT = Path(
-    os.environ.get("LLM_WIKI_STATE_ROOT", str(ROOT))
-).resolve()
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from memory_state import ROOT, STATE_ROOT  # noqa: E402
+
 COGNEE_DATA_DIR = STATE_ROOT / "cache" / "cognee"
 
 KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
@@ -51,13 +55,15 @@ SKIP_SUBTREES = (
 
 
 def _have_cognee() -> bool:
-    """True iff the `cognee` package is importable. Used for graceful skip."""
-    try:
-        import cognee  # noqa: F401
+    """True iff the `cognee` package is importable. Used for graceful skip.
 
-        return True
-    except ImportError:
-        return False
+    Uses ``importlib.util.find_spec`` instead of a bare ``import cognee``
+    to avoid executing the module body — Cognee reads env vars at import
+    time and caches them. A bare import here would poison the module
+    cache with default values before our ``os.environ.setdefault`` block
+    runs in ``main()``.
+    """
+    return importlib.util.find_spec("cognee") is not None
 
 
 def _ollama_running() -> bool:
@@ -72,7 +78,7 @@ def _ollama_running() -> bool:
 
 
 def _collect_pages() -> list[Path]:
-    """All .md pages under knowledge/notes/ (except projects/gaps) + knowledge/notes/."""
+    """All .md pages under knowledge/notes/ (except projects/gaps subtrees)."""
     out: list[Path] = []
     seen: set[Path] = set()
 
@@ -83,8 +89,7 @@ def _collect_pages() -> list[Path]:
             if not p.is_file() or p in seen:
                 continue
             # Skip excluded subtrees.
-            if any(p.is_relative_to(skip) if hasattr(p, "is_relative_to")
-                   else skip in p.parents for skip in SKIP_SUBTREES):
+            if any(skip in p.parents for skip in SKIP_SUBTREES):
                 continue
             # Skip editorial reserved filenames.
             if p.name in {"index.md", "log.md"}:
@@ -175,7 +180,7 @@ def main() -> int:
     if not _ollama_running():
         print(
             "cognee_sync: SKIP — Ollama not reachable on 127.0.0.1:11434. "
-            "Start `ollama serve` or set LLM_API_KEY for cloud fallback."
+            "Start `ollama serve`. For cloud fallback, set LLM_PROVIDER + LLM_API_KEY env vars."
         )
         return 0
 
@@ -196,7 +201,15 @@ def main() -> int:
     os.environ.setdefault("VECTOR_DB_PROVIDER", "lancedb")
 
     # NOW it's safe to import — env vars are in place.
-    import cognee
+    try:
+        import cognee
+    except Exception as e:
+        print(
+            f"cognee_sync: SKIP — `cognee` installed but import failed: "
+            f"{type(e).__name__}: {e}",
+            file=sys.stderr,
+        )
+        return 0
 
     if args.file:
         file_path = Path(args.file).resolve()

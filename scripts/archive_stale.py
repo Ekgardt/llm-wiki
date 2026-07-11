@@ -26,6 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import ROOT  # noqa: E402
+from okf_types import NEVER_ARCHIVE_TYPES  # noqa: E402
 
 KNOWLEDGE = ROOT / "knowledge" / "notes"
 # Stay inside knowledge zone (three-zone layout forbids root archive/).
@@ -35,21 +36,15 @@ FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 STATUS_RE = re.compile(r"^status:\s*(.+?)\s*$", re.MULTILINE)
 TIMESTAMP_RE = re.compile(r"^timestamp:\s*(.+?)\s*$", re.MULTILINE)
 
-# Pages with these types should NOT be archived (they're evergreen)
-EVERGREEN_TYPES = {"skill", "rule", "concept", "entity", "gap", "decision", "project-state", "project-context", "bootstrap-context"}
 TYPE_RE = re.compile(r"^type:\s*(.+?)\s*$", re.MULTILINE)
 
 # Type-specific age thresholds (Dorabotka D: smart archive by type)
 TYPE_AGE_DAYS = {
     "debugging": 60,       # old debugging notes go stale fast
-    "fact": 120,           # facts can be superseded
+    "gap": 90,             # gaps close when a real page is created (AGENTS.md §5)
     "pattern": 180,        # patterns live longer
-    "observation": 90,     # episodic, short-lived
-    "event": 90,           # episodic
     "workflow": 365,       # workflows are durable
     "qa": 365,            # Q&A stays relevant
-    "decision": 99999,     # NEVER archive decisions (immutable record)
-    "concept": 99999,      # NEVER archive concepts (evergreen)
 }
 
 # Default for untyped pages
@@ -81,7 +76,7 @@ def _is_stale(md: Path, default_cutoff_ts: float, default_days: int) -> bool:
         type_m = TYPE_RE.search(fm.group(1))
         page_type = type_m.group(1).strip() if type_m else ""
         # Evergreen types: never archive
-        if page_type in EVERGREEN_TYPES:
+        if page_type in NEVER_ARCHIVE_TYPES:
             return False
         # Type-specific threshold
         threshold_days = _get_type_threshold(page_type)
@@ -114,27 +109,50 @@ def _archive_page(md: Path, apply: bool) -> str:
             content = md.read_text(encoding="utf-8")
         except OSError:
             return f"READ_ERROR: {md}"
-        # Add status: archived to frontmatter if not present
+        # Set status: archived — replace existing status value or insert new.
         if FRONTMATTER_RE.match(content):
-            content = re.sub(
-                r"^(---\s*\n)",
-                r"\1status: archived\n",
-                content,
-                count=1,
-            )
-        else:
+            fm_text = FRONTMATTER_RE.match(content).group(1)
+            if STATUS_RE.search(fm_text):
+                # Replace existing status value with "archived".
+                content = re.sub(
+                    r"(^status:\s*).+$", r"\1archived", content,
+                    count=1, flags=re.MULTILINE,
+                )
+            else:
+                # No status field yet — insert after opening ---.
+                content = re.sub(
+                    r"^(---\s*\n)", r"\1status: archived\n", content, count=1,
+                )
+        elif "status:" not in content:
             content = f"---\nstatus: archived\n---\n\n{content}"
 
         archive_path.parent.mkdir(parents=True, exist_ok=True)
-        # Delete the source BEFORE writing to the archive path so there is
-        # no window where both the source and the (possibly overwriting)
-        # archive copy exist simultaneously. ``content`` is already in memory
-        # so the delete is safe.
+        if archive_path.exists():
+            # Collision: same-named page already archived. Append a suffix.
+            stem = archive_path.stem
+            suffix = archive_path.suffix
+            parent = archive_path.parent
+            counter = 1
+            while archive_path.exists():
+                archive_path = parent / f"{stem}-{counter}{suffix}"
+                counter += 1
+        # Write-to-temp → atomic rename → unlink source. This order
+        # ensures the archive copy is fully written BEFORE the original
+        # is removed — no data-loss window if the write fails mid-stream.
+        tmp_path = archive_path.with_suffix(".md.tmp")
+        try:
+            tmp_path.write_text(content, encoding="utf-8")
+            tmp_path.replace(archive_path)
+        except OSError:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+            return f"WRITE_ERROR: {archive_path}"
         try:
             md.unlink()
         except OSError:
-            return f"UNLINK_ERROR: {md}"
-        archive_path.write_text(content, encoding="utf-8")
+            return f"UNLINK_ERROR: {md} (archived copy at {archive_path})"
         return f"ARCHIVED: {rel} → archive/{year}/{dest_subdir.as_posix()}/{md.name}"
     else:
         return f"WOULD ARCHIVE: {rel}"
@@ -142,7 +160,7 @@ def _archive_page(md: Path, apply: bool) -> str:
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Archive stale knowledge pages.")
-    p.add_argument("--days", type=int, default=180, help="Default age threshold in days (overridden by type-specific rules)")
+    p.add_argument("--days", type=int, default=180, help="Sets the base threshold; type-specific thresholds (debugging=60d, pattern=180d, etc.) still apply.")
     p.add_argument("--apply", action="store_true", help="Actually move files (default: dry-run)")
     p.add_argument("--explain", action="store_true", help="Show why each page was flagged")
     args = p.parse_args()
@@ -165,16 +183,21 @@ def main() -> int:
         return 0
 
     print(f"Found {len(stale)} stale page(s) older than {args.days} days:\n")
+    failures = 0
     for md in stale:
         result = _archive_page(md, args.apply)
         print(f"  {result}")
+        if args.apply and "_ERROR:" in result:
+            failures += 1
 
     if not args.apply:
         print(f"\nDry-run. Re-run with --apply to move {len(stale)} page(s) to archive/.")
+    elif failures:
+        print(f"\nArchived {len(stale) - failures} page(s); {failures} FAILED.")
     else:
         print(f"\nArchived {len(stale)} page(s).")
 
-    return 0
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

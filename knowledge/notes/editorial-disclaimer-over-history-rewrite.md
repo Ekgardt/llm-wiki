@@ -1,7 +1,7 @@
 ---
 type: pattern
 title: "Editorial Disclaimer Over History Rewrite"
-description: "When a changelog's historical entries contradict current code or decisions, add an explicit editorial disclaimer paragraph naming the superseded items and the precedence rule rather than rewriting or "
+description: "When a changelog's historical entries contradict current code or decisions, add an explicit editorial disclaimer paragraph naming the superseded items and the precedence rule rather than rewriting or deleting the original entries."
 timestamp: 2026-07-03T05:41:37
 confidence: medium
 source_authority: user
@@ -12,7 +12,7 @@ One-sentence summary: When a changelog's historical entries contradict current c
 
 ## Lesson
 
-Changelogs (`knowledge/log.md`, `knowledge/log.md`) are append-only historical records. When implementation evolves and early entries become inaccurate, the temptation is to edit or delete them. Do not: readers rely on the log to understand how the vault arrived at its current state, and rewrites destroy that audit trail.
+Changelogs (`knowledge/log.md`, `CHANGELOG.md`) are append-only historical records. When implementation evolves and early entries become inaccurate, the temptation is to edit or delete them. Do not: readers rely on the log to understand how the vault arrived at its current state, and rewrites destroy that audit trail.
 
 Instead, add a prose paragraph or callout *after* the affected entries (or in the `## Editorial note` footer) that:
 1. Names the specific superseded patterns by entry date or feature.
@@ -25,11 +25,11 @@ Instead, add a prose paragraph or callout *after* the affected entries (or in th
 
 ## When to apply
 - Any append-only changelog where a later decision or implementation contradicts an earlier entry.
-- `knowledge/log.md`, `knowledge/log.md`, or any `## Changelog` section in a long-lived page.
+- `knowledge/log.md`, `CHANGELOG.md`, or any `## Changelog` section in a long-lived page.
 - When an audit pass flags docs–code drift across multiple historical entries.
 
 ## When NOT to apply
-- Non-changelog wiki pages (e.g., `knowledge/notes/`, `knowledge/notes/`) — those should be updated in-place with a dated correction note, since they are not append-only records.
+- Non-changelog wiki pages (e.g., `knowledge/notes/`) — those should be updated in-place with a dated correction note, since they are not append-only records.
 - `knowledge/notes/` pages — supersede by creating a new decision page that references the old one.
 - A single isolated entry that is simply factually wrong with no historical significance — in that case a quiet correction in-place is acceptable.
 

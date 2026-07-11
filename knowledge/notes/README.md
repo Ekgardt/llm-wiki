@@ -14,8 +14,7 @@ Typed subdirectories (`concepts/`, `decisions/`, `patterns/`, …) are allowed
 but currently unused — see `docs/ARCHITECTURE.md` for the taxonomy.
 
 ## What belongs here
-- concepts, decisions, patterns, debugging notes, qa, syntheses, entities,
-  facts, workflows, gaps
+- concepts, decisions, patterns, debugging notes, qa, workflows, gaps
 - each page links outward via Obsidian-style `[[wikilinks]]`
 
 ## What does NOT belong here

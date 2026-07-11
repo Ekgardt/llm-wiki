@@ -55,6 +55,11 @@ def _find_project_pages(slug: str) -> list[dict]:
             content = md.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
+        fm_match = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
+        if fm_match:
+            status_m = re.search(r"^status:\s*(.+?)\s*$", fm_match.group(1), re.MULTILINE)
+            if status_m and status_m.group(1).strip() in ("archived", "superseded"):
+                continue
         project = _extract_frontmatter_field(content, PROJECT_FIELD_RE)
         if project and project.lower().strip() == slug.lower().strip():
             page_type = _extract_frontmatter_field(content, TYPE_FIELD_RE) or "unknown"
@@ -142,8 +147,15 @@ def _detect_agent_strengths(agent: str) -> list[str] | None:
                 content = md.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 continue
-            # Check if this page was contributed by this agent
-            if agent.lower() not in content.lower():
+            fm_match = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
+            source_authority = ""
+            if fm_match:
+                sa_match = re.search(r"^source_authority:\s*(.+?)\s*$", fm_match.group(1), re.MULTILINE)
+                if sa_match:
+                    source_authority = sa_match.group(1).strip()
+            if agent.lower() not in source_authority.lower():
+                # Only check frontmatter source_authority (already done above)
+                # Do NOT fall back to substring scan of body text
                 continue
             # Extract type
             fm_match = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
@@ -257,6 +269,9 @@ def main() -> int:
 
     context = build_context(args.slug, args.max_chars)
     if args.write:
+        if not re.match(r"^[a-zA-Z0-9_-]+$", args.slug):
+            print("build_context: slug must be alphanumeric+hyphens only", file=sys.stderr)
+            return 1
         out = PROJECTS_DIR / args.slug / "context.md"
         # Containment guard: slug must not escape PROJECTS_DIR (no .., no abs).
         if not out.resolve().is_relative_to(PROJECTS_DIR.resolve()):

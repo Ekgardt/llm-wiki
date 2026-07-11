@@ -7,6 +7,10 @@
 # Or clone first:
 #   git clone git@github.com:Ekgardt/llm-wiki.git && cd llm-wiki && ./install.sh
 #
+# NOTE: For reproducible installs, pin to a version tag:
+#   curl ... https://raw.githubusercontent.com/Ekgardt/llm-wiki/v3.4.0/install.sh | bash
+# The main branch URL is for development convenience only.
+#
 # What this does:
 #   1. Checks prerequisites (Python 3.10+, uv, git)
 #   2. Installs Python deps (uv sync)
@@ -41,13 +45,17 @@ VAULT_ROOT="${LLM_WIKI_ROOT:-$SCRIPT_DIR}"
 if [[ ! -f "$VAULT_ROOT/pyproject.toml" ]]; then
   info "Cloning LLM-Wiki repository..."
   INSTALL_DIR="${HOME}/LLM-wiki"
-  git clone https://github.com/Ekgardt/llm-wiki.git "$INSTALL_DIR"
+  git clone --branch v3.4.0 --depth 1 https://github.com/Ekgardt/llm-wiki.git "$INSTALL_DIR"
   VAULT_ROOT="$INSTALL_DIR"
   cd "$VAULT_ROOT"
 fi
 
 cd "$VAULT_ROOT"
 info "Vault root: $VAULT_ROOT"
+
+# Prevent accidental pushes from the installed vault
+git -C "$VAULT_ROOT" remote set-url --push origin no-push
+ok "Push disabled (no-push) — installed vault cannot push to public remote"
 
 # ─── 2. Check prerequisites ────────────────────────────────────────
 
@@ -85,7 +93,7 @@ ok "uv $(uv --version 2>/dev/null || echo 'installed')"
 # ─── 3. Install dependencies ───────────────────────────────────────
 
 info "Installing Python dependencies..."
-uv sync --quiet
+uv sync --locked --quiet
 ok "Dependencies installed"
 
 # ─── 4. Run tests ──────────────────────────────────────────────────
@@ -100,6 +108,14 @@ fi
 # ─── 5. Set environment variables ──────────────────────────────────
 
 info "Setting environment variables..."
+
+# Warn if env vars already point somewhere else (avoid silent clobber)
+if [ -n "${LLM_WIKI_ROOT:-}" ] && [ "$LLM_WIKI_ROOT" != "$VAULT_ROOT" ]; then
+  warn "LLM_WIKI_ROOT was '$LLM_WIKI_ROOT', overwriting to '$VAULT_ROOT'"
+fi
+if [ -n "${LLM_WIKI_STATE_ROOT:-}" ] && [ "$LLM_WIKI_STATE_ROOT" != "$VAULT_ROOT" ]; then
+  warn "LLM_WIKI_STATE_ROOT was '$LLM_WIKI_STATE_ROOT', overwriting to '$VAULT_ROOT'"
+fi
 
 # Detect shell profile
 if [[ -n "${ZSH_VERSION:-}" ]] || [[ "$SHELL" == */zsh ]]; then
@@ -134,7 +150,7 @@ fi
 
 # Create runtime dirs inside the vault (gitignored)
 STATE_ROOT="${LLM_WIKI_STATE_ROOT:-$VAULT_ROOT}"
-mkdir -p "$STATE_ROOT/run" "$STATE_ROOT/run/queue" "$STATE_ROOT/logs" "$STATE_ROOT/cache"
+mkdir -p "$STATE_ROOT/run" "$STATE_ROOT/run/queue" "$STATE_ROOT/logs" "$STATE_ROOT/cache" "$STATE_ROOT/cache/cognee"
 ok "Runtime dirs: $STATE_ROOT/{run,logs,cache} (gitignored)"
 
 # ─── 6. Build search index ─────────────────────────────────────────
@@ -150,14 +166,14 @@ info "Setting up scheduled maintenance..."
 CRON_NIGHTLY="0 3 * * * cd '$VAULT_ROOT' && $(which uv) run python scripts/scheduled_nightly.py >> '$STATE_ROOT/logs/cron-nightly.log' 2>&1"
 CRON_WEEKLY="0 4 * * 0 cd '$VAULT_ROOT' && $(which uv) run python scripts/scheduled_weekly.py >> '$STATE_ROOT/logs/cron-weekly.log' 2>&1"
 
-# Remove old entries if re-running
-if crontab -l 2>/dev/null | grep -q "LLM-Wiki"; then
+# Remove old LLM-Wiki cron block (between markers only)
+if crontab -l 2>/dev/null | grep -q "LLM-Wiki-cron-start"; then
   info "Updating existing cron entries..."
-  crontab -l 2>/dev/null | grep -v "LLM-Wiki\|scheduled_nightly\|scheduled_weekly" | crontab -
+  crontab -l 2>/dev/null | sed '/# LLM-Wiki-cron-start/,/# LLM-Wiki-cron-end/d' | crontab -
 fi
 
-# Add new entries
-( crontab -l 2>/dev/null; echo "# LLM-Wiki nightly maintenance"; echo "$CRON_NIGHTLY"; echo "# LLM-Wiki weekly maintenance"; echo "$CRON_WEEKLY" ) | crontab -
+# Add new entries with markers
+( crontab -l 2>/dev/null; echo "# LLM-Wiki-cron-start"; echo "$CRON_NIGHTLY"; echo "$CRON_WEEKLY"; echo "# LLM-Wiki-cron-end" ) | crontab -
 ok "Cron scheduled: nightly 03:00, weekly Sunday 04:00"
 
 # ─── 8. Detect and wire up agents ──────────────────────────────────
@@ -175,8 +191,8 @@ if [ -d "$HOME/.config/opencode" ] || command -v opencode &>/dev/null; then
     cp -f "$VAULT_ROOT/scripts/llm-wiki-memory-opencode.js" "$PLUGIN_DIR/llm-wiki-memory.js"
     ok "OpenCode plugin installed/updated"
     # Generate initial context file so the first session has context
-    mkdir -p "$VAULT_ROOT/cache"
-    uv run python "$VAULT_ROOT/scripts/session_start_context.py" --output-file "$VAULT_ROOT/cache/session-context.md" 2>/dev/null || true
+    mkdir -p "$STATE_ROOT/cache"
+    uv run python "$VAULT_ROOT/scripts/session_start_context.py" --output-file "$STATE_ROOT/cache/session-context.md" 2>/dev/null || true
   else
     warn "OpenCode detected but plugin source missing at $VAULT_ROOT/scripts/llm-wiki-memory-opencode.js"
   fi
@@ -187,12 +203,6 @@ if command -v codex &>/dev/null; then
   AGENTS_FOUND="$AGENTS_FOUND Codex"
   info "Codex CLI detected. Add this to your shell profile:"
   info "  alias codex-mem='uv run python $VAULT_ROOT/scripts/codex_memory.py daily-log --cwd \$(pwd) --reason codex-session-end --json'"
-fi
-
-# Claude Code
-if [ -d "$HOME/.claude" ] || command -v claude &>/dev/null; then
-  AGENTS_FOUND="$AGENTS_FOUND Claude"
-  ok "Claude Code detected — hooks in settings.json (configure manually on macOS/Linux)"
 fi
 
 # Cursor

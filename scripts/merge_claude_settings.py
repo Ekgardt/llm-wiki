@@ -84,10 +84,11 @@ def merge_settings(user: dict, template: dict, vault_root: str, state_root: str)
     """Return a new merged settings dict."""
     result = json.loads(json.dumps(user))  # deep copy via JSON
 
-    # Schema / flag from template if missing
+    # Schema / flag from template ONLY if not already set by the user
+    # (non-destructive merge — do NOT clobber existing values).
     if "$schema" in template and "$schema" not in result:
         result["$schema"] = template["$schema"]
-    if template.get("autoMemoryEnabled") is not None:
+    if template.get("autoMemoryEnabled") is not None and "autoMemoryEnabled" not in result:
         result["autoMemoryEnabled"] = template["autoMemoryEnabled"]
 
     # Permissions: union lists

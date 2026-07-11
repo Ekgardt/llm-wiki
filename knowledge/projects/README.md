@@ -1,8 +1,3 @@
----
-type: concept
-title: "knowledge/projects/"
-timestamp: 2026-07-03T05:41:37
----
 # knowledge/projects/
 
 Per-project state for every folder you use Claude Code in. Structure:

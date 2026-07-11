@@ -1,7 +1,7 @@
 ---
 type: debugging
 title: "Hook Errors Silent Without LLM_WIKI_STATE_ROOT"
-description: "When `LLM_WIKI_STATE_ROOT` is absent from `~/.claude/settings.json::env`, hook scripts cannot locate the error log and silently swallow all failures — 'no errors in hook-errors.log' does not mean the "
+description: "When `LLM_WIKI_STATE_ROOT` is absent from `~/.claude/settings.json::env`, hook scripts cannot locate the error log and silently swallow all failures — 'no errors in hook-errors.log' does not mean the hooks ran cleanly."
 timestamp: 2026-07-03T05:41:37
 confidence: medium
 source_authority: user
@@ -16,7 +16,7 @@ One-sentence summary: When `LLM_WIKI_STATE_ROOT` is absent from `~/.claude/setti
 
 **Cause:** Both `session_start_project_state.py` and `session_end_project_tag.py` call `_safe_write_error()` to record failures. That function constructs the path to `hook-errors.log` using `LLM_WIKI_STATE_ROOT`. If the env var is absent from the user-level `settings.json::env` block (easy to forget because it is separate from the PATH), `_safe_write_error` cannot resolve the log path and discards the error silently. The hook exits 0 regardless (all hooks are fail-safe), so Claude Code sees no sign of trouble.
 
-**Resolution:** Both scripts now carry `_resolve_state_root()` — a private fallback that derives the state root from `$LLM_WIKI_STATE_ROOT/run/` (inside the vault) when `LLM_WIKI_STATE_ROOT` is unset. This covers the common case where only `LLM_WIKI_ROOT` is configured. However, the correct fix is to add both env vars explicitly to `~/.claude/settings.json::env`:
+**Resolution:** Both scripts now carry `_resolve_state_root()` — a private fallback that derives the state root from `$LLM_WIKI_STATE_ROOT/run/` (inside the vault) when `LLM_WIKI_STATE_ROOT` is unset. This covers the common case where only `LLM_WIKI_ROOT` is configured. The error log lives at `$LLM_WIKI_STATE_ROOT/logs/hook-errors.log` (inside the vault by default). However, the correct fix is to add both env vars explicitly to `~/.claude/settings.json::env`:
 
 ```json
 "env": {
@@ -38,3 +38,5 @@ CLAUDE_PROJECT_DIR=<your-project> python scripts/session_start_project_state.py
 ## Related
 - [[knowledge/notes/hook-scripts-defense-in-depth]] — broader defense-in-depth decision covering this fix + slug guard
 - [[knowledge/notes/b-sim-hook-testing]] — technique for exercising hook scripts manually
+- [[case-sensitive-grep-injected-context]] — the case-sensitivity gotcha was discovered while debugging this silent-failure mode.
+- [[docs-portability-absolute-paths]] — the docs-portability pattern emerged from the same class of path-resolution failures.

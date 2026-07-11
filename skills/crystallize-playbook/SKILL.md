@@ -2,10 +2,10 @@
 type: skill
 name: crystallize-playbook
 argument-hint: "[optional: file or topic to crystallize from]"
-description: Extract a reusable workflow from a recent successful task and save it as a draft playbook under knowledge/notes/workflows/. The crystallization is conservative — it only extracts steps that would apply to future tasks of the same shape, never one-off project specifics.
+description: Extract a reusable workflow from a recent successful task and save it as a draft playbook under knowledge/notes/. The crystallization is conservative — it only extracts steps that would apply to future tasks of the same shape, never one-off project specifics.
 disable-model-invocation: true
 allowed-tools: Read Glob Grep LS Edit Write
-title: "SKILL"
+title: "Crystallize Playbook"
 timestamp: 2026-07-03T05:41:37
 ---
 
@@ -32,11 +32,11 @@ Do NOT invoke after:
 2. **Extract the workflow shape, not the specifics**. Ask:
    - What *class* of problem does this solve? (e.g. "debug intermittent test failure", "add a new API endpoint with authz", "migrate a Django model")
    - What are the 3-7 steps that would apply to ANY instance of this class?
-   - What gotchas generalrise from this specific instance?
+   - What gotchas generalize from this specific instance?
 
-3. **Check for duplicates**. Read `knowledge/notes/workflows/` (and `knowledge/notes/patterns/`) — if a similar workflow already exists, the result should be an UPDATE to that page, not a new sibling. The DEDUP-BEFORE-CREATE rule from compile_memory.py applies here.
+3. **Check for duplicates**. Read `knowledge/notes/` (look for `type: workflow` or `type: pattern` pages) — if a similar workflow already exists, the result should be an UPDATE to that page, not a new sibling. The DEDUP-BEFORE-CREATE rule from compile_memory.py applies here.
 
-4. **Draft the playbook** under `knowledge/notes/workflows/<descriptive-slug>.md` using this format:
+4. **Draft the playbook** at `knowledge/notes/<descriptive-slug>.md` using this format:
 
    ```markdown
    ---
@@ -67,8 +67,8 @@ Do NOT invoke after:
    - Crystallized from `knowledge/daily/<date>.md` block at `[HH:MM:SS]` (verified to support the steps above).
 
    ## Related
-   - [[knowledge/notes/patterns/<related-pattern>]]
-   - [[knowledge/notes/decisions/<related-decision>]]
+   - [[knowledge/notes/<related-pattern>]]
+   - [[knowledge/notes/<related-decision>]]
    ```
 
 5. **Verify evidence**. Before writing, open the cited daily log block and confirm it actually contains the workflow you're describing. Same VERIFY-BEFORE-WRITE rule as compile_memory.py — fabrication is the highest-severity defect.
@@ -77,7 +77,7 @@ Do NOT invoke after:
 
 7. **Reciprocal backlinks**. Edit each `## Related` target to add a backlink to the new playbook (unless it already links back).
 
-8. **Do NOT auto-promote to a skill**. `skills/` is for human-curated, stable workflows. Playbooks under `knowledge/notes/workflows/` are agent-authored drafts; they earn promotion to a SKILL.md only after explicit user review.
+8. **Do NOT auto-promote to a skill**. `skills/` is for human-curated, stable workflows. Playbooks under `knowledge/notes/` are agent-authored drafts; they earn promotion to a SKILL.md only after explicit user review.
 
 ## Output
 

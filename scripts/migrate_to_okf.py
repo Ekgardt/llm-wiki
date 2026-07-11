@@ -61,11 +61,11 @@ TYPE_INFERENCE = [
     ("knowledge/notes/concepts/", "concept"),
     ("knowledge/notes/qa/", "qa"),
     ("knowledge/notes/workflows/", "workflow"),
-    ("knowledge/notes/facts/", "fact"),
+    ("knowledge/notes/facts/", "concept"),           # alias: fact → concept
     ("knowledge/notes/entities/", "entity"),
     ("knowledge/notes/syntheses/", "synthesis"),
-    ("knowledge/notes/comparisons/", "comparison"),
-    ("knowledge/notes/connections/", "connection"),
+    ("knowledge/notes/comparisons/", "synthesis"),    # alias: comparison → synthesis
+    ("knowledge/notes/connections/", "synthesis"),    # alias: connection → synthesis
     ("knowledge/projects/", "project-state"),
     ("skills/", "skill"),
     ("rules/", "rule"),
@@ -167,10 +167,12 @@ def build_frontmatter(
     lines = ["---", f"type: {type_name}"]
     # Title only if non-trivial (not just the filename stem)
     if title:
-        lines.append(f'title: "{title}"')
+        safe_title = title.replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'title: "{safe_title}"')
     if description:
         # Truncate overly long descriptions; lint will warn if too short.
-        desc = description[:200]
+        # Escape backslashes first, then double quotes for YAML double-quoted scalars.
+        desc = description[:200].replace("\\", "\\\\").replace('"', '\\"')
         lines.append(f'description: "{desc}"')
     lines.append(f"timestamp: {timestamp}")
     lines.append("---")
@@ -262,7 +264,8 @@ def main() -> int:
             print(f"  MIGRATE: {rel}")
         elif status.startswith("error"):
             print(f"  ERROR: {rel} — {status}")
-        elif status in ("skip_no_type_rule", "error_read"):
+            skipped_detail.append((status, path))
+        elif status in ("skip_no_type_rule",):
             # Track these for the summary so the operator can investigate.
             skipped_detail.append((status, path))
 
@@ -281,17 +284,19 @@ def main() -> int:
         return 0
 
     written = 0
+    write_errors = 0
     for path, new_content in plan:
         try:
             path.write_text(new_content, encoding="utf-8")
             written += 1
         except OSError as e:
             print(f"  WRITE ERROR: {path} — {type(e).__name__}: {e}")
+            write_errors += 1
     print(f"\nApplied: {written}/{len(plan)} file(s) migrated.")
 
     if args.report:
         _write_report(plan, counts, applied=True)
-    return 0
+    return 1 if write_errors else 0
 
 
 def _write_report(

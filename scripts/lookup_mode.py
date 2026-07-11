@@ -122,25 +122,23 @@ def qmd_status() -> dict:
             continue
 
     # 2. Best-effort CLI parse (ignored on Windows/cmd.exe where qmd is a bash shim).
-    for invoc in (["qmd", "status"], "qmd status"):
-        try:
-            out = subprocess.run(
-                invoc, capture_output=True, text=True, timeout=10,
-                shell=isinstance(invoc, str),
-                encoding="utf-8", errors="replace",
-            )
-            if out.returncode == 0 and out.stdout:
-                for i, ln in enumerate(out.stdout.splitlines()):
-                    if "wiki (qmd://knowledge/notes/" in ln:
-                        for look in out.stdout.splitlines()[i : i + 4]:
-                            if "Files:" in look:
-                                info["wiki_files_indexed"] = look.split("Files:")[-1].strip()
-                            if "updated" in look.lower():
-                                info["wiki_updated"] = look.strip()
-                        break
-                break
-        except (OSError, subprocess.TimeoutExpired):
-            continue
+    #    List-args only — never shell=True (security invariant).
+    try:
+        out = subprocess.run(
+            ["qmd", "status"], capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
+        )
+        if out.returncode == 0 and out.stdout:
+            for i, ln in enumerate(out.stdout.splitlines()):
+                if "wiki (qmd://knowledge/notes/" in ln:
+                    for look in out.stdout.splitlines()[i : i + 4]:
+                        if "Files:" in look:
+                            info["wiki_files_indexed"] = look.split("Files:")[-1].strip()
+                        if "updated" in look.lower():
+                            info["wiki_updated"] = look.strip()
+                    break
+    except (OSError, subprocess.TimeoutExpired):
+        pass
     return info
 
 

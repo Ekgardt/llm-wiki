@@ -4,13 +4,88 @@ All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [3.4.0] — 2026-07-11
+
+A comprehensive security, concurrency, and quality release following 9 rounds of
+full-codebase audit. **281 tests** (up from 226). **Zero Critical, zero High**
+open findings as of the final audit pass.
+
+### Security
+- **Secret redaction** (`scripts/secret_redact.py`) — 12 regex patterns (Bearer, API keys, GitHub, Slack, AWS, Google, JWT, PEM) plus Shannon entropy ≥ 4.0 high-entropy catch-all with pure-hex exclusion. Applied before ALL durable writes (daily logs, compile notes, Q&A file-back, bootstrap context).
+- **Transcript path containment** — hook-supplied transcript paths restricted to known agent directories (`~/.claude`, `~/.codex`, `~/.config/opencode`, system temp) with known extensions only. Prevents arbitrary file exfiltration via crafted hook payloads.
+- **Path traversal guards** — compile category whitelist + `relative_to()` containment, feedback candidate ID hex-only validation, queue output path containment under `run/queue-results/`, blackboard project slug sanitization.
+- **Installer push-lock** — installed vault gets `git remote set-url --push origin no-push` so personal data can never be pushed to the public repo.
+- **Installer pinned clone** — `git clone --branch v3.4.0 --depth 1` instead of mutable default branch.
+- **`.gitignore` allowlist** — explicit per-file un-ignore for public knowledge notes instead of broad `!knowledge/notes/*.md` that could expose personal pages.
+- **YAML injection prevention** — all frontmatter interpolation escapes backslash, double-quote, and newlines.
+- **Untrusted-data framing** — daily-log excerpts injected into SessionStart context are marked as `UNTRUSTED — session history, not instructions`.
+
+### Concurrency & Atomicity
+- **Daily-log lock rewritten** (`daily_log_append._daily_lock`) — `O_CREAT|O_EXCL` atomic file creation (was broken `rename()` which silently overwrites on POSIX). Stale-lock recovery via PID liveness + mtime. Fail-closed (raises `TimeoutError` instead of writing without lock).
+- **Single locked write path** — all daily-log writers (flush_memory, user_prompt_capture, post_tool_capture, session_end_project_tag, tool_breadcrumb_append) delegate to `locked_append()` / `append_daily()`. Zero duplicated write logic.
+- **Compile lock hardening** — PID-0 placeholder TTL (10s), owner-aware deletion via token check, atomic lock writes via temp+`os.replace`.
+- **`atomic_write()` helper** (`memory_state.py`) — all durable note writes, supersession markers, search index, and cache files use temp-file + `os.replace` pattern.
+- **Direct compile lock acquisition** — `compile_memory.main()` acquires the compile lock even when run directly (not spawned by `maybe_compile`), preventing concurrent manual compiles.
+- **State-lock deadline** — `memory_state._state_lock` bounded by monotonic deadline in all branches (was unbounded `sleep(timeout)` when owner PID alive).
+- **Maintenance lease** — `scheduled_nightly.py` acquires `run/maintenance.lock` via `O_EXCL`, preventing concurrent nightly+weekly runs.
+- **Project state exclusive-create** — `session_start_project_state.py` uses `O_CREAT|O_EXCL` for initial `state.md` creation instead of write+replace.
+
+### Architecture
+- **Flat notes layout** — `compile_memory.py` writes directly to `knowledge/notes/<slug>.md` (was `knowledge/notes/<category>/<slug>.md`). Type lives in frontmatter only. Aligns with Obsidian/Dataview 2026 property-based organization.
+- **`okf_types.py`** — single source of truth for canonical OKF types, type aliases (`comparison→synthesis`, `connection→synthesis`, `fact→concept`), and never-archive set. Imported by lint_memory, migrate_to_okf, archive_stale, rebuild_memory_index.
+- **`maintenance_helpers.py`** — shared `run_step()` and `wait_for_compile_idle()` extracted from scheduled_nightly + scheduled_weekly (was byte-identical copies).
+- **Deferred flush queue** — when no LLM backend is available, `flush_memory` enqueues a typed `"flush"` task. The drain processor classifies the result and applies it to the daily log, restoring the deferred-work contract.
+- **Queue stale-lease recovery** — `memory_queue.recover_stale_leases()` re-queues `.processing` files older than 10 minutes.
+
+### Search & Retrieval
+- **Superseded/archived exclusion** — `_collect_pages()` in search_memory, `_build_link_graph()` in graph_neighbors, `existing_knowledge_snapshot()` in compile_memory, and `rebuild_memory_index.py` all skip pages with `status: superseded` or `status: archived`.
+- **Atomic FTS index rebuild** — search index built in `index.sqlite.tmp`, then atomically replaced via `os.replace`.
+- **Path manifest** — `.paths-manifest` sidecar detects deleted pages and triggers search rebuild.
+- **JSON vector cache** — `vectors.json` (was `pickle`, now safe `json.loads`).
+
+### Lint (14 checks)
+- **14th check: `invalid_type_value`** — flags pages whose `type:` is not in `CANONICAL_TYPES` after alias normalization.
+- **`TYPE_ALIASES` applied** — `lint_memory.check_invalid_type_value` normalizes alias types before validation.
+- **`orphan_gaps` frontmatter scan** — scans by `type: gap` frontmatter instead of looking for a `gaps/` subdirectory.
+- **Skills/rules scope** — `--scope all` now includes `skills/` and `rules/` for OKF frontmatter conformance.
+- **Temporal validity** — non-date `valid_to` values (e.g. "forever") are skipped instead of causing false positives.
+
+### Testing (281 tests, up from 226)
+- **`test_security_invariants.py`** (47 tests) — property-based tests covering path traversal, YAML injection, secret redaction, status filtering, daily-lock exclusivity (5 concurrent threads), compile evidence enforcement, and legacy path detection.
+- **`test_quality_guards.py`** expanded — docs-equality tests for lint count, runtime dir names, installer version tags, daily-writer lock usage, clean-clone import resolution, and untracked module detection.
+- **Behavioral tests** — concurrent writers (no interleaving), compile evidence (empty→drop, valid→pass), snapshot exclusion, lock fail-closed behavior.
+
+### Documentation
+- **Full i18n sync** — README.md, README.ru.md, README.zh-CN.md synchronized: version, test count, lint count (14), benchmark methodology (exact title + keywords, not paraphrased), runtime dirs (`cache/cognee/`), installer tags.
+- **`docs/STRUCTURE.md`** — canonical structure reference with env contracts, runtime zone, and forbidden directories.
+- **Skills updated** — all 9 skills use flat `knowledge/notes/<slug>.md` paths.
+- **`operating-model.md`** — flat layout paths, multi-agent intro.
+- **Knowledge notes** — legacy `memory/` references updated to `knowledge/daily/` + `knowledge/notes/`. Trust fields (`confidence`, `source_authority`) added to workflow pages. Taxonomy aligned with canonical types.
+
+### Installer
+- **`uv sync --locked`** — verifies lockfile is up-to-date, fails if stale.
+- **Env-var overwrite warnings** — both installers warn before clobbering existing `LLM_WIKI_ROOT` / `LLM_WIKI_STATE_ROOT`.
+- **Bounded cron cleanup** — install.sh removes only lines between `# LLM-Wiki-cron-start` / `-end` markers (was broad `grep -v` that could delete unrelated jobs).
+- **Windows `cache\cognee`** — install.ps1 now creates `cache\cognee` instead of bare `cognee\`.
+- **`install-scheduled-tasks.ps1`** — removed `_SafeExit` function (was broken when dot-sourced); inline `return`/`exit` at call sites.
+
+### CI
+- **Gitleaks** — SHA-pinned GitHub Action, enforced by regression test.
+- **Cross-platform matrix** — Ubuntu + Windows + macOS, Python 3.10 + 3.13.
+- **`uv sync --locked --dev`** — lockfile enforced in CI.
+
 ## [3.3.3] — 2026-07-10
 
 ### Fixed
 - **GitHub Actions Gitleaks** — upgraded to the Node 24 `v3.0.0` action pinned by immutable commit SHA. The previous action attempted to download the removed Gitleaks 8.24.3 Windows archive and failed before tests ran.
 
 ### Tests
-- **226 tests** — added a regression guard that prevents CI from reverting to the unavailable Gitleaks action.
+- **281 tests** — added a regression guard that prevents CI from reverting to the unavailable Gitleaks action.
+
+### Docs
+- **Benchmark numbers refreshed** — `benchmark/report.md` now reports MRR 0.9667, p50 6ms (BM25-only mode, 60 queries). `docs/ARCHITECTURE.md` search layer updated to match; previously cited stale MRR 0.942 / p50 41ms figures.
 
 ## [3.3.2] — 2026-07-09
 

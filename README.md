@@ -1,9 +1,9 @@
 # LLM Wiki
 
-[![Tests](https://img.shields.io/badge/tests-226%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://img.shields.io/badge/tests-281%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-3.3.3-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-3.4.0-blue.svg)](CHANGELOG.md)
 
 **A local-first memory system for AI agents. Markdown files, git-tracked, zero cloud dependencies.**
 
@@ -89,7 +89,7 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 - **Agent timeline** — attribution: which agent decided what and when
 
 ### Maintenance
-- **13 lint checks** — broken wikilinks, orphans, missing frontmatter, invalid supersede chains, temporal validity, gaps, sparse pages, missing sources, contradictions
+- **14 lint checks (13 structural + 1 LLM-judged contradiction)** — broken wikilinks, orphans, missing frontmatter, invalid supersede chains, temporal validity, gaps, sparse pages, missing sources, contradictions
 - **Type-aware archive** — debugging 60d, patterns 180d, decisions never
 - **Nightly + weekly schedules** — compile, lint, archive, OKF migration (Task Scheduler on Windows, cron on Unix)
 - **OKF v0.1 frontmatter** — `type`, `confidence`, `source_authority`, `supersede` fields; auto-migration from legacy pages
@@ -98,7 +98,7 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 - **5 LLM backends** (auto-detected): OpenCode → Codex → Claude CLI → OpenAI → Ollama
 - **Cross-platform**: Windows, macOS, Linux, WSL2
 - **Zero runtime dependencies** — base install is stdlib-only; sentence-transformers and Cognee are optional
-- **218 regression tests**, CI green on Ubuntu + Windows + macOS, Python 3.10 + 3.13
+- **281 regression tests**, CI green on Ubuntu + Windows + macOS, Python 3.10 + 3.13
 - **Pre-commit hooks**: ruff (static analysis) + structural lint + gitleaks (secret scanning)
 
 ---
@@ -123,15 +123,15 @@ curl -fsSL https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.sh | 
 irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 ```
 
-> **Production note:** The `main` branch URLs above are mutable. For production or audited deployments, pin to a specific release tag URL instead, e.g. `https://raw.githubusercontent.com/Ekgardt/llm-wiki/v3.3.3/install.sh`.
+> **Production note:** The `main` branch URLs above are mutable. For production or audited deployments, pin to a specific release tag URL instead, e.g. `https://raw.githubusercontent.com/Ekgardt/llm-wiki/v3.4.0/install.sh`.
 
 The installer:
 1. Checks prerequisites (Python 3.10+, git)
 2. Installs `uv` (fast Python package manager) if missing
 3. Syncs dependencies (`uv sync`)
-4. Runs the test suite (226 tests collected in 0.26s tests)
+4. Runs the test suite (281 tests collected in 0.26s)
 5. Sets `LLM_WIKI_ROOT` environment variable (user scope)
-6. Creates runtime dirs (`cache/`, `logs/`, `run/`, `cognee/` — gitignored)
+6. Creates runtime dirs (`cache/`, `logs/`, `run/`, `cache/cognee/` — gitignored)
 7. Registers scheduled maintenance (cron on Unix, Task Scheduler on Windows)
 8. Detects your agents and wires them up
 9. Builds the FTS5 search index
@@ -142,7 +142,7 @@ The installer:
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync
-uv run pytest -q          # 226 tests collected in 0.26s tests should pass
+uv run pytest -q          # 281 tests collected in 0.26s should pass
 ```
 
 ### Verify it works
@@ -194,7 +194,7 @@ See [docs/SETUP-COGNEE.md](docs/SETUP-COGNEE.md) for Ollama setup.
 ```
 CODE          scripts/  tests/  docs/  skills/  rules/  integrations/  benchmark/
 KNOWLEDGE     knowledge/{daily,notes,projects,raw,inbox,feedback}
-RUNTIME       cache/  logs/  run/  cognee/   (gitignored, inside vault)
+RUNTIME       cache/  logs/  run/  cache/cognee/   (gitignored, inside vault)
 ```
 
 - **CODE** — tracked in git. The pipeline, tests, docs, skills, rules, integrations.
@@ -209,21 +209,21 @@ For the canonical structure reference (what lives where, env contracts, forbidde
 
 ## Benchmark
 
-> **Methodology**: 52 known-item queries (paraphrased title + summary) over 34 curated pages. BM25 + Vector hybrid via RRF. This measures "can the system find page X when given a paraphrased query?" — the most relevant metric for personal knowledge retrieval. It is **not** LoCoMo or LongMemEval (multi-session conversation recall). Competitor numbers are from different datasets and are not directly comparable. Run `benchmark/run_benchmark.py` to reproduce.
+> **Methodology**: 60 known-item queries (exact title match + summary-derived keywords, not LLM-paraphrased) over 34 curated pages. BM25-only mode (FTS5). This measures "can the system find page X when given its title or summary keywords?" — the most relevant metric for personal knowledge retrieval. It is **not** LoCoMo or LongMemEval (multi-session conversation recall). Competitor numbers are from different datasets and are not directly comparable. Run `benchmark/run_benchmark.py` to reproduce.
 
 | Metric | LLM Wiki v3.3 | agentmemory | Zep | Mem0 |
 |--------|---------------|-------------|-----|------|
-| Recall@1 | **88.5%** | n/a | n/a | n/a |
+| Recall@1 | **95.0%** | n/a | n/a | n/a |
 | Recall@3 | **100%** | n/a | n/a | n/a |
 | Recall@5 | **100%** | 95.2% | 94.7% | 91.6% |
 | Recall@10 | **100%** | n/a | n/a | n/a |
-| MRR | **0.942** | 0.882 | n/a | n/a |
-| Latency p50 | 41ms | **14ms** | 155ms | 880ms |
+| MRR | **0.9667** | 0.882 | n/a | n/a |
+| Latency p50 | **6ms** | 14ms | 155ms | 880ms |
 | Token cost/search | **0** | ~1900 | $$ | $$ |
 
-100% Recall@5 is achievable on small curated datasets; expect 85–95% on 500+ pages. Latency is higher than agentmemory (in-process BM25-only) because LLM Wiki runs hybrid BM25 + Vector + Graph fusion.
+100% Recall@5 is achievable on small curated datasets; expect 85–95% on 500+ pages. Triple-fusion (BM25 + Vector + Graph) adds semantic recall on top of these BM25-only numbers.
 
-Reproduce: `uv run python benchmark/run_benchmark.py --semantic`
+Reproduce: `uv run python benchmark/run_benchmark.py`
 
 ---
 

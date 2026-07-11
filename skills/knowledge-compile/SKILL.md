@@ -5,7 +5,7 @@ argument-hint: "[path or topic]"
 description: Compile inbox or raw material into durable wiki pages, update the wiki index, and append a log entry.
 disable-model-invocation: true
 allowed-tools: Read Glob Grep LS Edit Write Bash(uv run python scripts/search_memory.py *) Bash(uv run python scripts/rebuild_memory_index.py *)
-title: "SKILL"
+title: "Knowledge Compile"
 timestamp: 2026-07-03T05:41:37
 ---
 Compile `$ARGUMENTS` into the wiki.

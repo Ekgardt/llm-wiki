@@ -17,6 +17,9 @@ jobs:
 
     steps:
       - name: Checkout
+        # TODO: SHA-pin before next release. Look up the commit SHA for
+        # v4.2.2 at https://github.com/actions/checkout/releases and replace
+        # the tag with the immutable SHA: uses: actions/checkout@<sha>
         uses: actions/checkout@v4.2.2
 
       - name: Gitleaks
@@ -41,11 +44,15 @@ jobs:
 
     steps:
       - name: Checkout
-        # TODO: pin to commit SHA for immutable supply chain
+        # TODO: SHA-pin before next release. Look up the commit SHA for
+        # v4.2.2 at https://github.com/actions/checkout/releases and replace
+        # the tag with the immutable SHA: uses: actions/checkout@<sha>
         uses: actions/checkout@v4.2.2
 
       - name: Install uv
-        # TODO: pin to commit SHA for immutable supply chain
+        # TODO: SHA-pin before next release. Look up the commit SHA for
+        # v5.4.2 at https://github.com/astral-sh/setup-uv/releases and
+        # replace the tag with the immutable SHA.
         uses: astral-sh/setup-uv@v5.4.2
         with:
           enable-cache: true

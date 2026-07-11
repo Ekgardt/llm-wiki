@@ -1,7 +1,7 @@
 ---
 type: pattern
 title: "Add Reciprocal Backlinks at Creation"
-description: "When creating a new synthesis, concept, or decision page that references existing pages, add all reciprocal backlinks to the related pages in the same editing pass — never defer them to a future clean"
+description: "When creating a new synthesis, concept, or decision page that references existing pages, add all reciprocal backlinks to the related pages in the same editing pass — never defer them to a future cleanup round."
 timestamp: 2026-07-03T05:41:37
 confidence: medium
 source_authority: user
@@ -14,7 +14,7 @@ One-sentence summary: When creating a new synthesis, concept, or decision page t
 
 When you write `[[Memory Subsystem Action Plan]]` in a new page, the action plan page has no idea the new page exists. Lint will eventually surface the missing backlink, but by then the context is cold and the connection rationale is forgotten. Adding the reciprocal link *at creation time* is nearly free and closes the loop permanently.
 
-**Apply to:** any new page in `knowledge/notes/` or `knowledge/notes/` that uses a wikilink to an existing page.
+**Apply to:** any new page in `knowledge/notes/` that uses a wikilink to an existing page.
 
 **What to add on the target page:** a short `## Related` or inline link with a one-clause rationale for the connection (e.g., "— the plan that motivated this pattern"). A bare link with no rationale is acceptable but a brief phrase is better.
 

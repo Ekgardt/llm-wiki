@@ -1,7 +1,7 @@
 ---
 type: concept
 title: "Preliminary Flagging"
-description: "A convention for writing wiki pages whose content is inferred from operating instructions rather than grounded in a captured `knowledge/raw/` or `knowledge/inbox/` source — include the content, but mark it **preliminary*"
+description: "A convention for writing wiki pages whose content is inferred from operating instructions rather than grounded in a captured `knowledge/raw/` or `knowledge/inbox/` source — include the content, but mark it **preliminary** and retire the flag once a source arrives."
 timestamp: 2026-07-03T05:41:37
 confidence: medium
 source_authority: user

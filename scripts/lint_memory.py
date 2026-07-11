@@ -3,7 +3,7 @@
 Covers the `knowledge/notes/` tree (filename kept for backward compat with
 hooks and docs that still reference `lint_memory`).
 
-Thirteen checks (Phase 2 expanded the original seven + Phase 6 temporal):
+Fourteen checks (Phase 2 expanded the original seven + Phase 6 temporal + invalid-type-value):
  1. broken_wikilinks — wikilinks whose target does not resolve to a file.
  2. orphan_pages — knowledge/wiki pages not referenced by the relevant index.md.
  3. orphan_daily_logs — daily logs with no compile recorded in state.json.
@@ -13,14 +13,15 @@ Thirteen checks (Phase 2 expanded the original seven + Phase 6 temporal):
  7. contradictions — LLM-judged conflicts between pages (opt-in, --contradictions).
  8. missing_frontmatter — page has no YAML `---` block (OKF violation).
  9. missing_required_type — frontmatter exists but `type:` is absent/empty.
-10. missing_sources_section — claim-bearing page lacks `## Source` / `sources:`.
-11. invalid_supersede_chain — `superseded_by:` points to a non-existent page.
-12. orphan_gaps — page in `knowledge/notes/` has no inbound link from outside gaps/.
-13. temporal_validity — `valid_to:` is in the past but `status:` is still active.
+10. invalid_type_value — `type:` value is not in the canonical OKF type set.
+11. missing_sources_section — claim-bearing page lacks `## Source` / `sources:`.
+12. invalid_supersede_chain — `superseded_by:` points to a non-existent page.
+13. orphan_gaps — page in `knowledge/notes/` has no inbound link from outside gaps/.
+14. temporal_validity — `valid_to:` is in the past but `status:` is still active.
 
 Usage:
     uv run python scripts/lint_memory.py                  # all scopes, structural only
-    uv run python scripts/lint_memory.py --scope memory   # memory/ only
+    uv run python scripts/lint_memory.py --scope memory   # knowledge/notes/ only (legacy label)
     uv run python scripts/lint_memory.py --scope wiki     # knowledge/notes/ only
     uv run python scripts/lint_memory.py --contradictions # also run the LLM check
     uv run python scripts/lint_memory.py --sparse-words 300
@@ -39,6 +40,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import REPORTS_DIR, ROOT, file_hash, load_state  # noqa: E402
+from okf_types import CANONICAL_TYPES as VALID_TYPES  # noqa: E402
+from okf_types import TYPE_ALIASES  # noqa: E402
 from vault_editorial import (  # noqa: E402
     BACKLINK_EXEMPT_NAMES,
     BROKEN_LINK_SKIP_NAMES,
@@ -296,20 +299,21 @@ def check_sparse_pages(pages: list[Path], min_words: int) -> list[str]:
 
 # ---------- OKF conformance checks (Phase 2) ----------
 #
-# Five new structural checks added when the vault migrated to OKF
+# Six new structural checks added when the vault migrated to OKF
 # (Open Knowledge Format v0.1). These catch:
 #   8. missing_frontmatter       — page has no `---` YAML block at all
 #   9. missing_required_type     — frontmatter exists but `type:` is absent/empty
-#  10. missing_sources_section   — claim-bearing page lacks `## Source` or `sources:` frontmatter
-#  11. invalid_supersede_chain   — `superseded_by:` points to a non-existent target
-#  12. orphan_gaps               — page in knowledge/notes/ has no inbound link from a concept
+#  10. invalid_type_value        — `type:` value is not in the canonical OKF type set
+#  11. missing_sources_section   — claim-bearing page lacks `## Source` or `sources:` frontmatter
+#  12. invalid_supersede_chain   — `superseded_by:` points to a non-existent target
+#  13. orphan_gaps               — page in knowledge/notes/ has no inbound link from a concept
 
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 TYPE_FIELD_RE = re.compile(r"^type:\s*(.+?)\s*$", re.MULTILINE)
 SUPERSEDED_BY_RE = re.compile(r"^superseded_by:\s*\[?\[?([^\]\n]+?)\]?\]?\s*$", re.MULTILINE)
 SOURCES_FIELD_RE = re.compile(r"^sources:", re.MULTILINE)
-SOURCE_SECTION_RE = re.compile(r"^##\s*Source", re.MULTILINE)
+SOURCE_SECTION_RE = re.compile(r"^##\s*(?:Source|Evidence|Provenance)", re.MULTILINE)
 
 
 # Page types where claims need provenance. Skill / rule / project-state
@@ -319,14 +323,9 @@ CLAIM_BEARING_TYPES = frozenset(
     {
         "concept",
         "decision",
-        "synthesis",
-        "comparison",
-        "connection",
         "pattern",
         "debugging",
         "qa",
-        "fact",
-        "entity",
         "gap",
     }
 )
@@ -376,6 +375,29 @@ def check_missing_required_type(pages: list[Path]) -> list[str]:
         m = TYPE_FIELD_RE.search(fm.group(1))
         if not m or not m.group(1).strip():
             out.append(_rel(md))
+    return out
+
+
+def check_invalid_type_value(pages: list[Path]) -> list[str]:
+    """Pages whose `type:` value is not in the canonical OKF type set."""
+    out: list[str] = []
+    for md in pages:
+        if md.name in EDITORIAL_NAMES:
+            continue
+        try:
+            content = md.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        fm = FRONTMATTER_RE.match(content)
+        if not fm:
+            continue
+        m = TYPE_FIELD_RE.search(fm.group(1))
+        if not m:
+            continue
+        type_val = m.group(1).strip().strip("\"'")
+        type_val = TYPE_ALIASES.get(type_val, type_val)
+        if type_val and type_val not in VALID_TYPES:
+            out.append(f"{_rel(md)} (type: {type_val!r} — not in canonical set)")
     return out
 
 
@@ -470,6 +492,11 @@ def check_temporal_validity(pages: list[Path]) -> list[str]:
         valid_to = valid_to_m.group(1).strip().strip('"\'')
         if valid_to.lower() in ("null", "none", "~", ""):
             continue  # explicitly open-ended
+        # Validate ISO date format before comparing — non-date values
+        # like "forever" must not trigger false positives (string
+        # comparison would sort them before today).
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", valid_to[:10]):
+            continue  # Non-date value (e.g., "forever") — skip, not a violation
         # Check if valid_to is in the past
         try:
             # Try ISO date parsing (YYYY-MM-DD or full ISO)
@@ -491,19 +518,20 @@ def check_temporal_validity(pages: list[Path]) -> list[str]:
 
 
 def check_orphan_gaps(pages: list[Path]) -> list[str]:
-    """Pages in knowledge/notes/ should be linked from at least one concept.
+    """Pages with type: gap should be linked from at least one non-gap page.
 
     A gap page exists to mark a "mentioned but not-yet-written" concept.
-    If no concept references it, the gap itself is orphaned signal.
+    If no non-gap page references it, the gap itself is orphaned signal.
+    Scans by frontmatter type (flat-layout compatible).
     """
-    gaps_dir = WIKI / "gaps"
-    if not gaps_dir.exists():
+    gap_pages = [p for p in pages if _page_type(p) == "gap"]
+    if not gap_pages:
         return []
     out: list[str] = []
-    # Collect all wikilink targets across non-gap pages.
     referenced: set[str] = set()
+    gap_paths = {g.resolve() for g in gap_pages}
     for md in pages:
-        if gaps_dir in md.parents:
+        if md.resolve() in gap_paths:
             continue
         try:
             content = md.read_text(encoding="utf-8", errors="ignore")
@@ -511,14 +539,11 @@ def check_orphan_gaps(pages: list[Path]) -> list[str]:
             continue
         for link in WIKILINK_RE.findall(content):
             referenced.add(link.strip().split("|")[0].strip())
-    for gap_md in sorted(gaps_dir.glob("*.md")):
+    for gap_md in sorted(gap_pages):
         if gap_md.name in EDITORIAL_NAMES:
             continue
         stem = gap_md.stem
-        # Stem must appear as a wikilink target somewhere outside gaps/.
-        if stem not in referenced and _rel(gap_md) not in {
-            r for r in referenced
-        }:
+        if stem not in referenced and _rel(gap_md) not in referenced:
             out.append(_rel(gap_md))
     return out
 
@@ -597,6 +622,7 @@ def run_checks(args: argparse.Namespace) -> dict[str, list[str]]:
         # Phase 2 OKF conformance checks.
         "missing_frontmatter",
         "missing_required_type",
+        "invalid_type_value",
         "missing_sources_section",
         "invalid_supersede_chain",
         "orphan_gaps",
@@ -640,11 +666,30 @@ def run_checks(args: argparse.Namespace) -> dict[str, list[str]]:
         findings["sparse_pages"] += [f"[{label}] {x}" for x in check_sparse_pages(pages, args.sparse_words)]
         findings["missing_frontmatter"] += [f"[{label}] {x}" for x in check_missing_frontmatter(pages)]
         findings["missing_required_type"] += [f"[{label}] {x}" for x in check_missing_required_type(pages)]
+        findings["invalid_type_value"] += [f"[{label}] {x}" for x in check_invalid_type_value(pages)]
         findings["missing_sources_section"] += [f"[{label}] {x}" for x in check_missing_sources_section(pages)]
         findings["invalid_supersede_chain"] += [f"[{label}] {x}" for x in check_invalid_supersede_chain(pages)]
         findings["orphan_gaps"] += [f"[{label}] {x}" for x in check_orphan_gaps(pages)]
         findings["temporal_validity"] += [f"[{label}] {x}" for x in check_temporal_validity(pages)]
         all_pages_for_contradictions += pages
+
+    # OKF frontmatter conformance for skills/ and rules/ (AGENTS.md contract).
+    # Only missing_frontmatter + missing_required_type apply — wikilink /
+    # backlink / sparse checks are notes-specific and don't apply here.
+    if args.scope == "all":
+        for extra_label, extra_root in (
+            ("skills", ROOT / "skills"),
+            ("rules", ROOT / "rules"),
+        ):
+            extra_pages = _iter_tree_md(extra_root)
+            if not extra_pages:
+                continue
+            findings["missing_frontmatter"] += [
+                f"[{extra_label}] {x}" for x in check_missing_frontmatter(extra_pages)
+            ]
+            findings["missing_required_type"] += [
+                f"[{extra_label}] {x}" for x in check_missing_required_type(extra_pages)
+            ]
 
     if args.contradictions and not args.structural_only:
         findings["contradictions"] = check_contradictions(all_pages_for_contradictions)

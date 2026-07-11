@@ -85,6 +85,38 @@ LOCK_FILE = STATE_DIR / "state.json.lock"
 _STALE_LOCK_SECONDS = 30.0
 
 
+def _is_pid_alive(pid: int) -> bool:
+    """Cross-platform 'is this PID still running?' check.
+
+    Same pattern as maybe_compile.py — used to decide whether a stale
+    lock file belongs to a process that is genuinely dead (steal it)
+    or merely slow (wait longer).
+    """
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return False
+            return exit_code.value == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except (OSError, ProcessLookupError, OverflowError, ValueError):
+            return False
+
+
 def load_state() -> dict[str, Any]:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     if not STATE_FILE.exists():
@@ -118,13 +150,22 @@ def _state_lock(timeout: float = 10.0, poll: float = 0.05) -> Iterator[None]:
 
     Works on Windows and POSIX without extra deps. If the lock file is
     stale (older than _STALE_LOCK_SECONDS), we steal it.
+
+    Owner-aware: writes the owner's PID to the lock file on acquisition.
+    In the finally block, only deletes the lock if it still contains our
+    PID — prevents a slow holder from deleting a fresh lock that a
+    stale-lock thief's victim legitimately acquired. Before stealing a
+    stale lock, checks whether the owner PID is still alive; if it is,
+    waits rather than stealing (avoids killing a slow writer).
     """
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     deadline = time.time() + timeout
     fd: int | None = None
+    owner_pid = str(os.getpid())
     while True:
         try:
             fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+            os.write(fd, owner_pid.encode("utf-8"))
             break
         except FileExistsError:
             try:
@@ -132,6 +173,22 @@ def _state_lock(timeout: float = 10.0, poll: float = 0.05) -> Iterator[None]:
             except OSError:
                 age = 0.0
             if age > _STALE_LOCK_SECONDS:
+                # Before stealing, check if owner is actually dead
+                try:
+                    lock_content = LOCK_FILE.read_text(encoding="utf-8")
+                    prev_pid = int(lock_content.strip())
+                    if _is_pid_alive(prev_pid):
+                        # Owner is alive but slow — wait, but don't
+                        # sleep past the original deadline.
+                        remaining = deadline - time.time()
+                        if remaining <= 0:
+                            raise TimeoutError(
+                                f"Could not acquire state lock: {LOCK_FILE}"
+                            )
+                        time.sleep(min(poll * 10, remaining))
+                        continue
+                except (ValueError, OSError):
+                    pass  # Corrupt lock — steal it
                 try:
                     LOCK_FILE.unlink()
                 except OSError:
@@ -148,8 +205,13 @@ def _state_lock(timeout: float = 10.0, poll: float = 0.05) -> Iterator[None]:
                 os.close(fd)
             except OSError:
                 pass
+        # Owner-aware deletion: only unlink if the lock file still contains
+        # our PID. If a stale-lock thief deleted our lock and another
+        # process created a new one, we must NOT delete theirs.
         try:
-            LOCK_FILE.unlink()
+            current = LOCK_FILE.read_text(encoding="utf-8").strip()
+            if current == owner_pid:
+                LOCK_FILE.unlink()
         except OSError:
             pass
 
@@ -174,6 +236,19 @@ def file_hash(path: Path) -> str:
     h = hashlib.sha256()
     h.update(path.read_bytes())
     return h.hexdigest()
+
+
+def atomic_write(path: Path, content: str, encoding: str = "utf-8") -> None:
+    """Write content atomically via temp file + os.replace.
+
+    Guarantees that readers never see a partial/truncated file: either
+    the old version is intact or the new version is fully written.
+    Used for all durable writes (notes, locks, index, cache files).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(content, encoding=encoding)
+    os.replace(str(tmp), str(path))
 
 
 def spawn_detached(

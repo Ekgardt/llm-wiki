@@ -1,7 +1,7 @@
 ---
 type: decision
 title: "state.md Exempt from Lint"
-description: "`state.md` files under `knowledge/projects/<slug>/` are added to `EDITORIAL_NAMES` in `lint_memory.py` and exempted from backlink-obligation and sparse-floor checks, for the same reason that `index.md` and"
+description: "`state.md` files under `knowledge/projects/<slug>/` are added to `EDITORIAL_NAMES` in `lint_memory.py` and exempted from backlink-obligation and sparse-floor checks, for the same reason that `index.md` and `log.md` are exempt."
 timestamp: 2026-07-03T05:41:37
 confidence: medium
 source_authority: user

@@ -7,7 +7,9 @@ alwaysApply: true
 # LLM-Wiki Memory Integration
 
 You have access to a persistent memory vault at `$LLM_WIKI_ROOT` (default: set by installer; verify with `echo $LLM_WIKI_ROOT`).
-This vault stores decisions, lessons, patterns, and debugging notes from all your coding sessions across Cursor, OpenCode, Codex, and Claude Code.
+This vault stores decisions, lessons, patterns, and debugging notes from all your coding sessions across Cursor, OpenCode, Codex, Claude Code, and Antigravity.
+
+> **Platform note:** the shell commands below are POSIX (bash/zsh). On Windows, use PowerShell equivalents (e.g. `type` instead of `cat`, `$env:LLM_WIKI_ROOT` instead of `$LLM_WIKI_ROOT`, `` ` ``-delimited strings instead of single quotes).
 
 ## At session start (MANDATORY — do this first, before any other action)
 
@@ -42,7 +44,8 @@ uv run python "$LLM_WIKI_ROOT/scripts/search_memory.py" "<query>" --semantic --l
 
 Record it to the daily log:
 ```bash
-echo '{"slug":"<project-slug>","sessionId":"cursor-session","block":"## [TIMESTAMP] cursor-session | decision\n- Decision: <what was decided>\n- Reason: <why>"}' | uv run python "$LLM_WIKI_ROOT/scripts/daily_log_append.py"
+TS=$(date +%H:%M:%S)
+echo '{"slug":"<project-slug>","sessionId":"cursor-session","block":"## ['"$TS"'] cursor-session | decision\n- Decision: <what was decided>\n- Reason: <why>"}' | uv run python "$LLM_WIKI_ROOT/scripts/daily_log_append.py"
 ```
 
 ## When you need project-specific context

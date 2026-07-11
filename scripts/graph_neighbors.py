@@ -8,7 +8,7 @@ Example: query "JWT auth" → finds decisions/auth-jwt.md → that page
 links to patterns/token-refresh.md → refresh page gets boosted even
 though "JWT" doesn't appear in its text.
 
-Integrates into search_memory.py's _rrf_fuse() as a 3rd signal.
+Integrates into search_memory.py's _rrf_fuse_triple() as a 3rd signal.
 """
 from __future__ import annotations
 
@@ -20,10 +20,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import ROOT  # noqa: E402
 
 KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
-# Legacy alias for tests / external callers (same tree post-three-zone).
-WIKI_DIR = KNOWLEDGE_DIR
 
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+?)(?:\|[^\]]+)?\]\]")
+STATUS_RE = re.compile(r"^status:\s*(.+?)\s*$", re.MULTILINE)
+
+
+def _is_inactive(content: str) -> bool:
+    """Return True if the page has status: superseded or status: archived."""
+    m = STATUS_RE.search(content)
+    return bool(m and m.group(1).strip().lower() in ("superseded", "archived"))
 
 
 def _build_link_graph() -> dict[str, list[str]]:
@@ -33,36 +38,34 @@ def _build_link_graph() -> dict[str, list[str]]:
     Resolves links to actual file paths.
     """
     graph: dict[str, list[str]] = {}
-    seen_dirs: set[Path] = set()
-    search_dirs = [d for d in (KNOWLEDGE_DIR, WIKI_DIR) if d not in seen_dirs and not seen_dirs.add(d)]
 
-    for d in search_dirs:
-        if not d.exists():
+    if not KNOWLEDGE_DIR.exists():
+        return graph
+
+    for md in KNOWLEDGE_DIR.rglob("*.md"):
+        if not md.is_file():
             continue
-        for md in d.rglob("*.md"):
-            if not md.is_file():
+        try:
+            content = md.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        # Skip superseded/archived pages from the active graph
+        if _is_inactive(content):
+            continue
+        try:
+            rel = md.relative_to(ROOT).as_posix()
+        except ValueError:
+            continue
+        links = []
+        for target in WIKILINK_RE.findall(content):
+            target = target.strip()
+            if not target:
                 continue
-            try:
-                content = md.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                continue
-            try:
-                rel = md.relative_to(ROOT).as_posix()
-            except ValueError:
-                # Page lives outside ROOT (e.g. symlinked archive) — skip it
-                # rather than crashing the whole graph build.
-                continue
-            links = []
-            for target in WIKILINK_RE.findall(content):
-                target = target.strip()
-                if not target:
-                    continue
-                # Try to resolve the wikilink to a file path
-                resolved = _resolve_wikilink(target)
-                if resolved:
-                    links.append(resolved)
-            if links:
-                graph[rel] = list(set(links))  # dedupe
+            resolved = _resolve_wikilink(target)
+            if resolved:
+                links.append(resolved)
+        if links:
+            graph[rel] = list(set(links))  # dedupe
 
     return graph
 
@@ -80,15 +83,26 @@ def _resolve_wikilink(target: str) -> str | None:
     else:
         # Bare name: search for <name>.md in wiki + knowledge
         candidates = []
-        for d in (WIKI_DIR, KNOWLEDGE_DIR):
-            if d.exists():
-                for found in d.rglob(f"{t}.md"):
-                    candidates.append(found)
-                    break  # first match
+        if KNOWLEDGE_DIR.exists():
+            for found in KNOWLEDGE_DIR.rglob(f"{t}.md"):
+                candidates.append(found)
+                break
 
     for c in candidates:
-        if c.exists() and c.is_file():
-            return c.relative_to(ROOT).as_posix()
+        resolved = c.resolve()
+        if resolved.exists() and resolved.is_file():
+            try:
+                resolved.relative_to(ROOT)
+            except ValueError:
+                continue
+            # Skip superseded/archived targets from the active graph
+            try:
+                target_content = resolved.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if _is_inactive(target_content):
+                continue
+            return resolved.relative_to(ROOT).as_posix()
     return None
 
 

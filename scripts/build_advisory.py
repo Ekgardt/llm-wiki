@@ -48,7 +48,13 @@ def _fm_field(content: str, pattern: re.Pattern) -> str | None:
 
 def _read_open_threads(slug: str) -> list[str]:
     """Extract open threads from project state.md."""
-    state_path = PROJECTS_DIR / slug / "state.md"
+    # Validate by containment rather than ASCII slug format —
+    # session_start_project_state.py may generate Unicode slugs.
+    state_path = (PROJECTS_DIR / slug / "state.md").resolve()
+    try:
+        state_path.relative_to(PROJECTS_DIR.resolve())
+    except ValueError:
+        return []
     if not state_path.exists():
         return []
     try:
@@ -243,11 +249,14 @@ thread, call it out.
 
 Respond with only the insight paragraph (2-3 sentences). No preamble."""
 
-    llm_insight = call_llm(
-        prompt,
-        system_prompt="You are a concise technical advisor. 2-3 sentences max. No filler.",
-        max_tokens=200,
-    )
+    try:
+        llm_insight = call_llm(
+            prompt,
+            system_prompt="You are a concise technical advisor. 2-3 sentences max. No filler.",
+            max_tokens=200,
+        )
+    except Exception:  # noqa: BLE001
+        return rule_based
 
     if llm_insight and llm_insight.strip():
         # Prepend LLM insight, keep rule-based details below

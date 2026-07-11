@@ -40,22 +40,16 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-try:
-    from secret_redact import redact_secrets  # noqa: E402
-except Exception:  # noqa: BLE001
-    def redact_secrets(text: str) -> str:  # type: ignore[misc]
-        return text
 from maybe_compile import spawn_compile_if_idle  # noqa: E402
 from memory_state import (  # noqa: E402
-    REPORTS_DIR,
     ROOT,
     file_hash,
     load_state,
     update_state,
 )
+from secret_redact import redact_secrets  # noqa: E402
 
 DAILY_DIR = ROOT / "knowledge" / "daily"
-COMPILE_LOG_DIR = REPORTS_DIR
 DEDUPE_WINDOW_SECONDS = 60
 MAX_TRANSCRIPT_CHARS = 60_000
 
@@ -105,6 +99,9 @@ def _classify_response(raw: str) -> tuple[str, str]:
     # Failure sentinel from summarizer crash
     if stripped.startswith("(summary failed"):
         return "ok", ""
+    # Detect compile-plan JSON masquerading as flush response
+    if stripped.startswith('{"operations"') or stripped.startswith('{"audit"'):
+        return "ok", ""
     # No recognized sentinel: treat as MINOR (preserve content, don't
     # auto-compile — operator can manually trigger compile if needed).
     # This is a defensive default: better to save potentially-useful
@@ -121,8 +118,59 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _transcript_path_allowed(path: Path) -> bool:
+    """Only allow transcript paths from known agent session directories.
+
+    `transcript_path` arrives from hook JSON (untrusted input). A broad
+    allowlist (e.g. all of ``$HOME``) would let a crafted payload point
+    at ``~/.ssh/id_rsa`` and ship its contents to the LLM. Instead we
+    restrict to the specific directories where Claude Code, Codex, and
+    OpenCode store session transcripts, plus the system temp dir and the
+    vault-local cache for testing.
+    """
+    import tempfile
+
+    try:
+        p = path.resolve()
+    except OSError:
+        return False
+
+    allowed_prefixes: list[Path] = []
+    # Claude Code transcripts
+    home = Path.home()
+    allowed_prefixes.append(home / ".claude")
+    # Codex transcripts
+    allowed_prefixes.append(home / ".codex")
+    # OpenCode transcripts
+    allowed_prefixes.append(home / ".config" / "opencode")
+    # Vault-local temp (for testing)
+    if ROOT.exists():
+        allowed_prefixes.append(ROOT / "cache")
+    # System temp (for Claude Code compacted transcripts)
+    allowed_prefixes.append(Path(tempfile.gettempdir()))
+
+    # Must also have a known transcript extension.
+    if p.suffix not in (".jsonl", ".json", ".txt", ".log"):
+        return False
+
+    # Must be under one of the allowed directories.
+    for prefix in allowed_prefixes:
+        try:
+            prefix_resolved = prefix.resolve()
+        except OSError:
+            continue
+        try:
+            p.relative_to(prefix_resolved)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
 def read_transcript_tail(path: Path, max_chars: int = MAX_TRANSCRIPT_CHARS) -> str:
     if not path.exists():
+        return ""
+    if not _transcript_path_allowed(path):
         return ""
     try:
         data = path.read_text(encoding="utf-8", errors="ignore")
@@ -142,6 +190,7 @@ def summarize_with_llm(transcript_excerpt: str, event: str) -> str:
     """
     if not transcript_excerpt.strip():
         return ""
+    transcript_excerpt = redact_secrets(transcript_excerpt)
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from llm_client import call_llm
@@ -217,16 +266,35 @@ non-blank line MUST be the tier token.
         "log. You only emit FLUSH_MAJOR when you can point to a concrete "
         "decision or lesson in the transcript. No preamble, no apologies."
     )
-    return call_llm(prompt, system_prompt, max_tokens=1500)
+    try:
+        text = call_llm(prompt, system_prompt, max_tokens=1500)
+    except Exception:
+        return ""
+    if not text:
+        # No backend available (call_llm returned None) — enqueue for
+        # deferred processing so the content isn't silently lost as
+        # FLUSH_OK. Drained at the next active session via memory_queue.
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from memory_queue import enqueue
+            enqueue("flush", {
+                "prompt": prompt,
+                "system_prompt": system_prompt,
+                "max_tokens": 1500,
+                "enqueued_by": "flush_memory",
+                "event": event,
+            })
+        except Exception:
+            pass  # best-effort — never crash the hook
+        return ""
+    return text.strip()
 
 
 def append_daily(day: str, block: str) -> Path:
-    DAILY_DIR.mkdir(parents=True, exist_ok=True)
+    from daily_log_append import locked_append
+
     out = DAILY_DIR / f"{day}.md"
-    if not out.exists():
-        out.write_text(f"# Daily Session Memory — {day}\n", encoding="utf-8")
-    with out.open("a", encoding="utf-8") as f:
-        f.write(block)
+    locked_append(out, block)
     return out
 
 
@@ -374,25 +442,24 @@ def main() -> int:
     # in the durable daily log (mirrors post_tool_capture.py:66-72).
     block = redact_secrets(block)
 
+    deferred_compiles: list[tuple[Path, str]] = []
+
     def _mutate(state: dict) -> None:
-        # Re-check dedupe INSIDE the lock: a sibling process may have
-        # already recorded + appended the same (session_id, event)
-        # while we were summarizing. If so, skip entirely (TOCTOU-safe:
-        # the file append and the dedupe record are now both gated by
-        # the same atomic state mutation).
         if should_skip(state, args.session_id, args.event):
             return
-        # Write the daily log NOW (inside the lock) so the append and
-        # the dedupe timestamp are atomic from the caller's perspective.
         daily_path = append_daily(day, block)
         record_flush(state, args.session_id, args.event)
-        # Track tier distribution for observability.
         state.setdefault("flush_tier_counts", {})
         state["flush_tier_counts"][tier] = int(state["flush_tier_counts"].get(tier, 0)) + 1
-        # Only MAJOR triggers compile (see maybe_trigger_compile).
-        maybe_trigger_compile(state, daily_path, tier)
+        if tier == "major":
+            deferred_compiles.append((daily_path, tier))
 
     update_state(_mutate)
+
+    for daily_path, flush_tier in deferred_compiles:
+        def _trigger_and_persist(state: dict, _dp=daily_path, _ft=flush_tier) -> None:
+            maybe_trigger_compile(state, _dp, _ft)
+        update_state(_trigger_and_persist)
     return 0
 
 

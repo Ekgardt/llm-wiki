@@ -32,8 +32,13 @@ $REAL_CODEX = if ($IsWindows -or $PSVersionTable.Platform -eq $null) {
         (Get-Command codex.cmd -ErrorAction SilentlyContinue).Source
     }
 } else {
-    # Unix: codex is typically in /usr/local/bin or ~/.local/bin
-    (Get-Command codex -ErrorAction SilentlyContinue).Source
+    # Unix: codex is typically in /usr/local/bin or ~/.local/bin.
+    # Exclude Function/Script results to avoid resolving our own wrapper
+    # when the profile is reloaded (recursion guard).
+    $app = Get-Command codex -All -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandType -eq 'Application' } |
+        Select-Object -First 1
+    if ($app) { $app.Source }
 }
 
 if (-not $REAL_CODEX -or -not (Test-Path $REAL_CODEX)) {
@@ -73,8 +78,8 @@ function codex {
         # Codex reads AGENTS.md at startup; the global AGENTS.md instructs
         # it to read this file for project knowledge state.
         try {
-            $contextFile = Join-Path $env:LLM_WIKI_ROOT "cache\session-context.md"
-            & uv run python scripts/session_start_context.py --output-file $contextFile 2>$null | Out-Null
+            $contextFile = Join-Path $env:LLM_WIKI_STATE_ROOT "cache\session-context.md"
+            & uv run python "$env:LLM_WIKI_ROOT\scripts\session_start_context.py" --output-file $contextFile 2>$null | Out-Null
         } catch {}
 
         # Invoke the real codex binary with all forwarded args.
@@ -139,7 +144,16 @@ function codex-memory-status {
     try {
         Write-Host "=== Codex heartbeats (recent activity) ===" -ForegroundColor Cyan
         $statePath = Join-Path $env:LLM_WIKI_STATE_ROOT "run\state.json"
-        $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+        if (-not (Test-Path -LiteralPath $statePath)) {
+            Write-Host "  (state.json not found — no captures yet)"
+            return
+        }
+        try {
+            $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+        } catch {
+            Write-Host "  (state.json corrupt or unreadable: $($_.Exception.Message))" -ForegroundColor Yellow
+            return
+        }
         if ($state.codex_heartbeats) {
             $state.codex_heartbeats.PSObject.Properties | ForEach-Object {
                 $h = $_.Value

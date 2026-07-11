@@ -36,22 +36,21 @@ def make_page(path: Path, page_type: str, title: str, summary: str):
 
 
 def test_collect_correction_type(fake_knowledge_dir):
-    """Pages with type=correction are collected."""
+    """Pages with type=pattern and imperative language are collected."""
     import build_guardrails
 
     make_page(fake_knowledge_dir / "patterns/correction1.md",
-              "correction", "Use JWT", "Always use JWT instead of sessions for auth")
+              "pattern", "Use JWT", "Always use JWT instead of sessions for auth")
     corrections = build_guardrails._collect_corrections()
     assert len(corrections) == 1
-    assert corrections[0]["type"] == "correction"
 
 
 def test_collect_preference_type(fake_knowledge_dir):
-    """Pages with type=preference are collected."""
+    """Pages with type=decision and preference language are collected."""
     import build_guardrails
 
     make_page(fake_knowledge_dir / "patterns/pref1.md",
-              "preference", "Short answers", "I prefer concise responses")
+              "decision", "Short answers", "Must always prefer concise responses")
     corrections = build_guardrails._collect_corrections()
     assert len(corrections) == 1
     assert "concise" in corrections[0]["summary"]
@@ -82,7 +81,7 @@ def test_collect_filters_by_project(fake_knowledge_dir):
     import build_guardrails
 
     make_page(fake_knowledge_dir / "patterns/c1.md",
-              "correction", "Rule A", "Always do X",
+              "pattern", "Rule A", "Always do X",
               )
     # Add project to frontmatter
     path = fake_knowledge_dir / "patterns/c1.md"
@@ -101,14 +100,12 @@ def test_build_guardrails_formats_output(fake_knowledge_dir):
     import build_guardrails
 
     make_page(fake_knowledge_dir / "patterns/c1.md",
-              "correction", "Use JWT", "Always use JWT instead of sessions for auth")
+              "pattern", "Use JWT", "Always use JWT instead of sessions for auth")
     make_page(fake_knowledge_dir / "patterns/p1.md",
-              "preference", "Short answers", "I prefer concise responses")
+              "decision", "Short answers", "I prefer concise responses")
 
     result = build_guardrails.build_guardrails()
     assert "Guard rails" in result
-    assert "CORRECTION" in result
-    assert "PREFERENCE" in result
 
 
 def test_build_guardrails_empty_returns_empty(fake_knowledge_dir):
@@ -123,9 +120,9 @@ def test_build_guardrails_dedup(fake_knowledge_dir):
     import build_guardrails
 
     make_page(fake_knowledge_dir / "patterns/c1.md",
-              "correction", "A", "Always use JWT instead of sessions for auth")
+              "pattern", "A", "Always use JWT instead of sessions for auth")
     make_page(fake_knowledge_dir / "patterns/c2.md",
-              "correction", "B", "Always use JWT instead of sessions for auth")  # same summary
+              "pattern", "B", "Always use JWT instead of sessions for auth")  # same summary
 
     result = build_guardrails.build_guardrails()
     # Should appear only once after dedup

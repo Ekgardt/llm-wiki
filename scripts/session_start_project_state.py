@@ -420,18 +420,23 @@ def main() -> int:
                 return _emit_empty()
             try:
                 state_path.parent.mkdir(parents=True, exist_ok=True)
-                # Atomic write: two concurrent Claude Code instances in the
-                # same project on first visit would otherwise race and
-                # interleave content. Write to `.tmp` then rename — on
-                # POSIX and modern Windows (NTFS), rename over an existing
-                # file is atomic, and mkdir exist_ok races resolve fine.
-                tmp_path = state_path.with_suffix(".md.tmp")
-                tmp_path.write_text(
-                    _render_new_state(template, slug, project_dir),
-                    encoding="utf-8",
-                )
-                os.replace(tmp_path, state_path)
-                is_new = True
+                # Exclusive-create: O_CREAT|O_EXCL ensures only one
+                # session wins the race to create state.md. If another
+                # session already created it, FileExistsError is caught
+                # silently — their content is just as valid as ours.
+                content = _render_new_state(template, slug, project_dir)
+                try:
+                    fd = os.open(
+                        str(state_path),
+                        os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                    )
+                    try:
+                        os.write(fd, content.encode("utf-8"))
+                    finally:
+                        os.close(fd)
+                    is_new = True
+                except FileExistsError:
+                    pass  # Another session created it — that's fine
 
                 # Bootstrap: auto-generate context from git + README.
                 # Only on first discovery — gives the new project immediate

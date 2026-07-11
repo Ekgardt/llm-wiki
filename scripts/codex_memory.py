@@ -28,10 +28,9 @@ if hasattr(sys.stdout, "reconfigure"):
     except (AttributeError, io.UnsupportedOperation):
         pass
 
-ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(Path(__file__).resolve().parent.parent))).resolve()
-STATE_ROOT = Path(
-    os.environ.get("LLM_WIKI_STATE_ROOT", str(ROOT))
-).resolve()
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from memory_state import ROOT, STATE_ROOT  # noqa: E402
+
 SCRIPTS_DIR = ROOT / "scripts"
 PROJECTS_DIR = ROOT / "knowledge" / "projects"
 
@@ -130,7 +129,11 @@ def command_project_state(args: argparse.Namespace) -> int:
 
     payload = {}
     if result.stdout.strip():
-        payload = json.loads(result.stdout)
+        try:
+            data = json.loads(result.stdout)
+        except (json.JSONDecodeError, ValueError):
+            data = {}
+        payload = data
     ctx = payload.get("hookSpecificOutput", {}).get("additionalContext", "")
     slug, state_path = _state_path(project_dir)
     out = {
@@ -262,6 +265,7 @@ def command_daily_log(args: argparse.Namespace) -> int:
     # If we have a real transcript, also kick off flush_memory to
     # extract durable content (decisions/lessons/gotchas). This is
     # the same path Claude Code takes on SessionEnd.
+    flush_spawned = False
     if transcript_path and Path(transcript_path).exists():
         # flush_memory --event only accepts session-end|pre-compact.
         # Map Codex reasons into that enum; keep original reason in --trigger.
@@ -271,6 +275,7 @@ def command_daily_log(args: argparse.Namespace) -> int:
             flush_event = "pre-compact"
         trigger = args.trigger or args.reason or "codex"
         _spawn_flush_memory(session_id, flush_event, transcript_path, trigger)
+        flush_spawned = True
 
     if args.json:
         slug, state_path = _state_path(project_dir)
@@ -281,7 +286,7 @@ def command_daily_log(args: argparse.Namespace) -> int:
                     "slug": slug,
                     "state_path": str(state_path),
                     "daily_log_written": result.returncode == 0,
-                    "flush_spawned": bool(transcript_path),
+                    "flush_spawned": flush_spawned,
                     "reason": args.reason,
                     "session_id": session_id,
                 },
@@ -296,7 +301,7 @@ def command_daily_log(args: argparse.Namespace) -> int:
         print(f"Daily log tagged for slug: {slug}")
         print(f"Reason: {args.reason}")
         print(f"Session id: {session_id}")
-        if transcript_path:
+        if flush_spawned:
             print(f"Flush spawned for transcript: {transcript_path}")
     else:
         print(result.stderr.strip() or result.stdout.strip(), file=sys.stderr)
@@ -344,8 +349,8 @@ def _record_heartbeat(
 
     try:
         update_state(_mutate)
-    except Exception:  # noqa: BLE001
-        pass  # never crash the hook on state-write failure
+    except Exception as e:  # noqa: BLE001
+        print(f"codex_memory: {type(e).__name__}: {e}", file=sys.stderr)
 
 
 def _spawn_flush_memory(
@@ -379,8 +384,8 @@ def _spawn_flush_memory(
                 trigger,
             ],
         )
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        print(f"codex_memory: {type(e).__name__}: {e}", file=sys.stderr)
 
 
 def main() -> int:
