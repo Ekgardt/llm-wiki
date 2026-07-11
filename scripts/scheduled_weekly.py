@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -32,8 +33,27 @@ def main() -> int:
         os.write(fd, str(os.getpid()).encode())
         os.close(fd)
     except FileExistsError:
-        print("scheduled_weekly: maintenance already running, skipping.", file=sys.stderr)
-        return 0
+        try:
+            age = time.time() - maint_lock.stat().st_mtime
+            if age > 1800:
+                from memory_state import _is_pid_alive
+                try:
+                    old_pid = int(maint_lock.read_text(encoding="utf-8").strip())
+                    if not _is_pid_alive(old_pid):
+                        maint_lock.unlink()
+                        fd = os.open(str(maint_lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                        os.write(fd, str(os.getpid()).encode())
+                        os.close(fd)
+                    else:
+                        print("scheduled_weekly: maintenance running (stale but PID alive), skipping.", file=sys.stderr)
+                        return 0
+                except (ValueError, OSError):
+                    maint_lock.unlink()
+            else:
+                print("scheduled_weekly: maintenance already running, skipping.", file=sys.stderr)
+                return 0
+        except OSError:
+            return 0
 
     try:
         today = datetime.now().strftime("%Y-%m-%d")
@@ -116,8 +136,11 @@ def main() -> int:
         log(f"=== Weekly deep maintenance complete (failures={failures}) ===")
         return 1 if failures else 0
     finally:
+        # Owner-aware deletion: only unlink if lock still contains our PID
         try:
-            maint_lock.unlink()
+            current = maint_lock.read_text(encoding="utf-8").strip()
+            if current == str(os.getpid()):
+                maint_lock.unlink()
         except OSError:
             pass
 

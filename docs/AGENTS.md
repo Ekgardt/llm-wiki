@@ -52,7 +52,7 @@ Tiebreak: patterns > concepts; debugging > qa.
 - `scripts/compile_memory.py` — compiles changed daily logs into knowledge pages with VERIFY-BEFORE-WRITE.
 - `scripts/codex_memory.py daily-log` — Codex heartbeat or full flush path.
 - `scripts/user_prompt_capture.py` / `post_tool_capture.py` — non-LLM breadcrumbs (secrets redacted).
-- `scripts/lint_memory.py` — structural + OKF checks over `knowledge/notes/`. Use `--scope all` (default) or `--scope wiki`.
+- `scripts/lint_memory.py` — structural + OKF checks over `knowledge/notes/`, `skills/`, and `rules/`. Use `--scope all` (default) or `--scope wiki`.
 - Recursion guard: hook wrappers short-circuit when `CLAUDE_INVOKED_BY` is set.
 
 ## Multi-tool integration

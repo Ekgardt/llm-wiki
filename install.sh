@@ -99,10 +99,10 @@ ok "Dependencies installed"
 # ─── 4. Run tests ──────────────────────────────────────────────────
 
 info "Running test suite..."
-if uv run pytest -q 2>&1 | tail -1 | grep -q "passed"; then
-  ok "All tests passed"
-else
+if uv run pytest -q 2>&1 | tail -1 | grep -qE "failed|error"; then
   warn "Some tests failed — core features will still work, but please report issues"
+else
+  ok "All tests passed"
 fi
 
 # ─── 5. Set environment variables ──────────────────────────────────

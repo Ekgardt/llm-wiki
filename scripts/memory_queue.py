@@ -330,7 +330,8 @@ def _cli() -> int:
                         day = orig_day or now.strftime("%Y-%m-%d")
                         root = Path(os.environ.get("LLM_WIKI_ROOT", "."))
                         daily_path = root / "knowledge" / "daily" / f"{day}.md"
-                        block = f"\n## [{now.strftime('%H:%M:%S')}] deferred-{event}\n\n{body}\n"
+                        session_id = payload.get("session_id", "deferred")
+                        block = f"\n## [{now.strftime('%H:%M:%S')}] deferred-{event} | {session_id}\n- Tier: `{tier}`\n\n{body}\n"
                         locked_append(daily_path, block)
                     return True
                 except Exception as e:  # noqa: BLE001

@@ -123,7 +123,9 @@ curl -fsSL https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.sh | 
 irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 ```
 
-> **Production note:** The `main` branch URLs above are mutable. For production or audited deployments, pin to a specific release tag URL instead, e.g. `https://raw.githubusercontent.com/Ekgardt/llm-wiki/v3.4.0/install.sh`.
+> **Production note:** The `main` branch URLs above are mutable. For production or audited deployments, pin to a specific release tag URL instead:
+> - **macOS / Linux / WSL2:** `https://raw.githubusercontent.com/Ekgardt/llm-wiki/v3.4.0/install.sh`
+> - **Windows:** `https://raw.githubusercontent.com/Ekgardt/llm-wiki/v3.4.0/install.ps1`
 
 The installer:
 1. Checks prerequisites (Python 3.10+, git)

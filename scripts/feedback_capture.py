@@ -31,7 +31,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT  # noqa: E402
+from memory_state import ROOT, atomic_write  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
 FEEDBACK_DIR = ROOT / "knowledge" / "feedback"
@@ -154,6 +154,8 @@ _FEEDBACK_TYPE_MAP: dict[str, str] = {
     "preference": "decision",
     "rejection": "decision",
     "requirement": "qa",
+    "concepts": "concept",
+    "workflow": "workflow",
 }
 
 
@@ -232,14 +234,14 @@ def promote_candidate(candidate_id: str, category: str = "patterns") -> str | No
         f"## {candidate['type'].title()}\n"
         f"{_esc(candidate['text'])}\n\n"
         f"## Evidence\n"
-        f"- Captured from session `{candidate['session_id']}` "
-        f"in project `{candidate['project']}` "
-        f"({candidate['trigger']})\n"
+        f"- Captured from session `{_esc(candidate['session_id'])}` "
+        f"in project `{_esc(candidate['project'])}` "
+        f"({_esc(candidate['trigger'])})\n"
         f"- Confidence: {candidate['confidence']}\n\n"
         f"## Related\n"
         f"- [[knowledge/feedback/{candidate_id}.json]]\n"
     )
-    page_path.write_text(page_content, encoding="utf-8")
+    atomic_write(page_path, page_content)
 
     # Update candidate status
     candidate["status"] = "promoted"

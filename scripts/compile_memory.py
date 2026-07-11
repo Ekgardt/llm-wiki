@@ -792,7 +792,7 @@ def _compile_succeeded(raw: str) -> bool:
 
 def append_log(entry: str) -> None:
     if not LOG.exists():
-        LOG.write_text("# Session Memory Log\n\n", encoding="utf-8")
+        atomic_write(LOG, "# Session Memory Log\n\n")
 
     content = LOG.read_text(encoding="utf-8")
     line = entry if entry.endswith("\n") else entry + "\n"
@@ -803,10 +803,9 @@ def append_log(entry: str) -> None:
     if marker in content:
         head, sep, tail = content.partition(marker)
         head_trimmed = head.rstrip() + "\n"
-        LOG.write_text(head_trimmed + line + sep + tail, encoding="utf-8")
+        atomic_write(LOG, head_trimmed + line + sep + tail)
     else:
-        with LOG.open("a", encoding="utf-8") as f:
-            f.write(line)
+        atomic_write(LOG, content + line)
 
 
 def _mark_started(trigger: str) -> None:

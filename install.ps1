@@ -85,10 +85,10 @@ Ok "Dependencies installed"
 
 Info "Running test suite..."
 $testResult = uv run pytest -q 2>&1 | Select-Object -Last 1
-if ($testResult -match "passed") {
-    Ok $testResult
+if ($testResult -match "failed|error") {
+    Warn "Some tests may have issues"
 } else {
-    Warn "Tests may have issues — core features still work"
+    Ok $testResult
 }
 
 # ─── 5. Set environment variables ──────────────────────────────────
