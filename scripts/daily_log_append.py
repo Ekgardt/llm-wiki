@@ -77,6 +77,10 @@ def _daily_lock(timeout: float = 10.0, poll: float = 0.05):
                     lock_file.unlink()
                 except OSError:
                     pass
+                if time.time() > deadline:
+                    raise TimeoutError(
+                        f"Could not acquire daily-log lock: {lock_file}"
+                    )
                 continue
             if time.time() > deadline:
                 raise TimeoutError(f"Could not acquire daily-log lock: {lock_file}")

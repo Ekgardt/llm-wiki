@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT  # noqa: E402
+from memory_state import ROOT, atomic_write  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
 MEMORY = ROOT / "knowledge"
@@ -146,7 +146,7 @@ def file_back(question: str, answer_text: str) -> Path:
         f"## Related\n"
         f"-\n"
     )
-    out.write_text(page, encoding="utf-8")
+    atomic_write(out, page)
     return out
 
 

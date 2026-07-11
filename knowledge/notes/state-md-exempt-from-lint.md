@@ -14,7 +14,7 @@ One-sentence summary: `state.md` files under `knowledge/projects/<slug>/` are ad
 
 **Date:** 2026-04-19
 
-**Context:** Phase 1 of the Global Multi-Project Migration Plan introduced `knowledge/projects/<slug>/state.md` as a "where we left off" page auto-updated by the SessionStart/SessionEnd hook system. Lint immediately flagged these pages for missing backlinks (they reference many pages but receive few) and risked flagging them as sparse (a fresh state.md from the template is under 200 words).
+**Context:** Phase 1 of the Global Multi-Project Migration Plan introduced `knowledge/projects/<slug>/state.md` as a "where we left off" page read by SessionStart, updated by user/agent during sessions. Lint immediately flagged these pages for missing backlinks (they reference many pages but receive few) and risked flagging them as sparse (a fresh state.md from the template is under 200 words).
 
 **Choice:** Add `state.md` to `lint_memory.py::EDITORIAL_NAMES`. This exempts per-project state pages from:
 - Backlink obligation (no page needs to point back at a project's state.md)

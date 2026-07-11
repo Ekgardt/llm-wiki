@@ -214,15 +214,20 @@ When asked to compile or ingest new material:
 | Type | Location | Notes |
 |------|----------|-------|
 | `concept` | `knowledge/notes/<slug>.md` | Mental models. Never archives. |
+| `entity` | `knowledge/notes/<slug>.md` | Named things/people/orgs. Never archives. |
 | `decision` | `knowledge/notes/<slug>.md` | Dated choice + rationale. Immutable; supersede. |
 | `pattern` | `knowledge/notes/<slug>.md` | Recurring approach. 180-day archive. |
 | `debugging` | `knowledge/notes/<slug>.md` | Symptom → cause → fix. 60-day archive. |
 | `qa` | `knowledge/notes/<slug>.md` | Settled answer to a recurring question. 365-day. |
+| `synthesis` | `knowledge/notes/<slug>.md` | Cross-page comparison/connection. Never archives. |
+| `raw-source` | `knowledge/notes/<slug>.md` | Excerpted primary source. Archivable. |
 | `workflow` | `knowledge/notes/<slug>.md` | Auto-promoted playbook. 365-day. |
 | `gap` | `knowledge/notes/<slug>.md` | Not-yet-written knowledge. 90-day. |
 | `skill` | `skills/<name>/SKILL.md` | Agent workflow. Never archives. |
 | `rule` | `rules/<name>.md` | File-handling policy. Never archives. |
 | `project-state` | `knowledge/projects/<slug>/state.md` | Per-project handoff. Never archives. |
+| `project-context` | `knowledge/projects/<slug>/` | Per-project context. Never archives. |
+| `bootstrap-context` | `knowledge/notes/<slug>.md` | Seed context for new sessions. Never archives. |
 
 Pages live **flat** as `<slug>.md` under `knowledge/notes/` (the compile
 pipeline writes flat slugs). Typed subdirectories are optional.

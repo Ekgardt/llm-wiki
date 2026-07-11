@@ -1,5 +1,8 @@
 # Cognee Setup Guide (Phase 4 — Optional Semantic Layer)
 
+> **Platform:** This guide covers Windows setup. For macOS/Linux, use
+> `ollama serve` and adjust paths.
+
 This guide walks you through enabling the **optional** Cognee semantic graph layer over your LLM-wiki vault. Cognee adds entity extraction and relationship graph queries on top of your markdown — useful when the vault grows past ~300 pages and `[[wikilinks]]` alone no longer surface all relevant connections.
 
 **Skip this if**: your vault is under 300 pages (you're in DIRECT retrieval tier and don't need it yet). The vault is fully functional without Cognee.

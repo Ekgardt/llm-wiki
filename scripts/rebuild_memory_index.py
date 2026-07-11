@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT  # noqa: E402
+from memory_state import ROOT, atomic_write  # noqa: E402
 
 memory = ROOT / "knowledge"
 knowledge = memory / "notes"
@@ -159,7 +159,7 @@ def main() -> int:
         ]
     )
 
-    out.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    atomic_write(out, "\n".join(lines).rstrip() + "\n")
     return 0
 
 

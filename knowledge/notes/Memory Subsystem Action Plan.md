@@ -43,7 +43,7 @@ Five knowledge types, each with a clear inclusion rule:
 
 ## Remaining follow-ups
 None blocking. Two dormant items that will surface when volume demands it:
-- Archive automation (`scripts/archive_daily.py`) — write when `daily/` passes ~30 files.
+- Archive automation exists (`scripts/archive_daily.py`), dormant below ~30 daily files threshold.
 - Periodic review of this plan itself — revisit if the subsystem grows a new layer or automation contract changes.
 
 ## Source

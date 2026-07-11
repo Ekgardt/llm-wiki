@@ -19,9 +19,7 @@ Instead, add a prose paragraph or callout *after* the affected entries (or in th
 2. States the precedence rule explicitly: "code / current state is the source of truth; see the later entry or current file for authoritative behavior."
 3. Preserves every original entry verbatim.
 
-**Canonical example (2026-04-19):** `knowledge/log.md` contained multiple early entries describing "auto-commit yes / auto-push no" behavior that was never implemented. Rather than rewriting those entries, an editorial disclaimer was added to the `## Editorial note` footer:
-
-> "Historical entries may describe behavior that has since been superseded. Examples that remain in this log by design: early 'auto-commit yes / auto-push no' decisions (superseded — see latest entries, commits are manual), references to the pre-centralization `memory/state/state.json` path, and an earlier hardcoded `$LLM_WIKI_STATE_ROOT/qmd\index.sqlite` (superseded by env-derived resolution)."
+**Canonical example (2026-04-19):** `knowledge/log.md` contained multiple early entries describing "auto-commit yes / auto-push no" behavior that was never implemented. Rather than rewriting those entries, an editorial disclaimer was added to the `## Editorial note` footer. See `knowledge/log.md` for the current editorial practice.
 
 ## When to apply
 - Any append-only changelog where a later decision or implementation contradicts an earlier entry.

@@ -27,7 +27,7 @@ Operationally this means three things:
 - Any section that would otherwise need to be cut for lack of a source, but is genuinely useful working knowledge.
 
 ## When *not* to apply
-- Editorial metadata pages (`index`, `log`, `Vault Home`) — those use the `## Editorial note` convention instead, which signals vault metadata rather than uncertain content.
+- Editorial metadata pages (`index`, `log`, `knowledge/index`) — those use the `## Editorial note` convention instead, which signals vault metadata rather than uncertain content.
 - Pages where the "inferred" content is actually a design decision made in this repo — record it as a decision in `knowledge/notes/`, not as a preliminary wiki claim.
 
 ## Source

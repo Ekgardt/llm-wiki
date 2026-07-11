@@ -204,9 +204,21 @@ def promote_candidate(candidate_id: str, category: str = "patterns") -> str | No
             .replace(chr(13), " ")
         )
 
+    # Map category to canonical type if provided. The `--category` CLI
+    # arg otherwise only affected the (now-flat) path, so an explicit
+    # category was silently ignored in the frontmatter.
+    if category and category != "patterns":
+        type_from_category = {"debugging": "debugging", "qa": "qa", "decisions": "decision"}.get(category)
+        if type_from_category:
+            page_type = type_from_category
+        else:
+            page_type = _FEEDBACK_TYPE_MAP.get(candidate.get("type", ""), "pattern")
+    else:
+        page_type = _FEEDBACK_TYPE_MAP.get(candidate.get("type", ""), "pattern")
+
     page_content = (
         "---\n"
-        f"type: {_esc(_FEEDBACK_TYPE_MAP.get(candidate['type'], 'pattern'))}\n"
+        f"type: {_esc(page_type)}\n"
         f"feedback_type: {_esc(candidate['type'])}\n"
         f'title: "{_esc("User feedback: " + candidate["text"][:60])}..."\n'
         f'description: "{_esc("Captured from " + candidate["project"] + " session")}"\n'

@@ -24,7 +24,7 @@ Without the marker, a reader applying CLAUDE.md rule 5 ("preserve provenance") w
 - Typically has no `Source:` line, because no raw source exists.
 
 ## Evidence
-- `knowledge/daily/2026-04-13.md` [00:57:04] — convention applied while fixing a duplicate-match Edit error; the `## Editorial note` string repeated across index/log/Vault Home.
+- `knowledge/daily/2026-04-13.md` [00:57:04] — convention applied while fixing a duplicate-match Edit error; the `## Editorial note` string repeated across index/log/knowledge-index.
 - Codified in `knowledge/log.md` entry dated 2026-04-13 ("Added `## Editorial note` to [[index]], [[knowledge/index|Knowledge index]], and [[log]]").
 
 ## Promoted to wiki

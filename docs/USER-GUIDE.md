@@ -6,7 +6,7 @@ setup, the system maintains itself.
 For the canonical structure reference (paths, env vars, zones), see
 [STRUCTURE.md](STRUCTURE.md). For the design rationale, see
 [ARCHITECTURE.md](ARCHITECTURE.md). For the agent operating contract, see
-`AGENTS.md` (byte-identical to `CLAUDE.md`).
+`../AGENTS.md` (root agent contract, byte-identical to `CLAUDE.md`).
 
 ---
 

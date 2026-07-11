@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import maybe_compile  # noqa: E402
 from maintenance_helpers import run_step as _run_step  # noqa: E402
 from maintenance_helpers import wait_for_compile_idle as _wait_for_compile_idle
-from memory_state import REPORTS_DIR, ROOT, STATE_ROOT  # noqa: E402
+from memory_state import REPORTS_DIR, ROOT, STATE_ROOT, _is_pid_alive  # noqa: E402
 
 
 def main() -> int:
@@ -33,8 +33,31 @@ def main() -> int:
         os.write(fd, str(os.getpid()).encode())
         os.close(fd)
     except FileExistsError:
-        print("scheduled_nightly: maintenance already running, skipping.", file=sys.stderr)
-        return 0
+        # Check if the lock is stale (older than 30 minutes) and the
+        # holder PID is dead. If so, steal it; otherwise skip.
+        stolen = False
+        try:
+            age = time.time() - maint_lock.stat().st_mtime
+            if age > 1800:  # 30 minutes
+                try:
+                    old_pid = int(maint_lock.read_text(encoding="utf-8").strip())
+                    if not _is_pid_alive(old_pid):
+                        maint_lock.unlink()
+                        # Retry acquisition
+                        fd = os.open(str(maint_lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                        os.write(fd, str(os.getpid()).encode())
+                        os.close(fd)
+                        stolen = True
+                    else:
+                        print("scheduled_nightly: maintenance running (stale but PID alive), skipping.", file=sys.stderr)
+                        return 0
+                except (ValueError, OSError):
+                    maint_lock.unlink()
+        except OSError:
+            pass
+        if not stolen:
+            print("scheduled_nightly: maintenance already running, skipping.", file=sys.stderr)
+            return 0
 
     try:
         today = datetime.now().strftime("%Y-%m-%d")

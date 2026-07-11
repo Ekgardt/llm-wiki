@@ -22,7 +22,7 @@ One-sentence summary: Two hardening decisions made 2026-04-19 to prevent silent 
 
 **Choices made:**
 
-- Added `_resolve_state_root()` to both scripts: if `LLM_WIKI_STATE_ROOT` is unset, fall back to `$LLM_WIKI_STATE_ROOT/run/` (inside the vault). This covers the common single-var setup and ensures error logging is always available.
+- Added `_resolve_state_root()` to both scripts: if `LLM_WIKI_STATE_ROOT` is unset, fall back to `$LLM_WIKI_ROOT/run/` (inside the vault). This covers the common single-var setup and ensures error logging is always available.
 
 - Added explicit guard in `_compute_slug()` in both scripts: `if not slug or slug in {".", ".."}:  return "root"`. The guard runs after `Path.resolve()`, so it only fires on pathological inputs; it is cheap insurance with no downside.
 

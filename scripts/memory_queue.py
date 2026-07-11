@@ -312,6 +312,7 @@ def _cli() -> int:
                 sys_prompt = payload.get("system_prompt", "")
                 event = payload.get("event", "session-end")
                 max_tokens = int(payload.get("max_tokens") or 1500)
+                orig_day = payload.get("day")
                 if not prompt:
                     return False
                 result = call_llm(prompt, sys_prompt, max_tokens=max_tokens)
@@ -326,7 +327,7 @@ def _cli() -> int:
                     if tier != "ok" and body:
                         body = redact_secrets(body)
                         now = datetime.now()
-                        day = now.strftime("%Y-%m-%d")
+                        day = orig_day or now.strftime("%Y-%m-%d")
                         root = Path(os.environ.get("LLM_WIKI_ROOT", "."))
                         daily_path = root / "knowledge" / "daily" / f"{day}.md"
                         block = f"\n## [{now.strftime('%H:%M:%S')}] deferred-{event}\n\n{body}\n"

@@ -36,7 +36,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT  # noqa: E402
+from memory_state import ROOT, atomic_write  # noqa: E402
 
 # Reserved OKF filenames — no frontmatter allowed at bundle level.
 RESERVED_NAMES = frozenset({"index.md", "log.md"})
@@ -287,7 +287,7 @@ def main() -> int:
     write_errors = 0
     for path, new_content in plan:
         try:
-            path.write_text(new_content, encoding="utf-8")
+            atomic_write(path, new_content)
             written += 1
         except OSError as e:
             print(f"  WRITE ERROR: {path} — {type(e).__name__}: {e}")

@@ -17,8 +17,8 @@ One-sentence summary: Memory and wiki pages written speculatively during plannin
 **Cause:** Pages written during planning or mid-implementation are frequently not revisited after the described work finishes. The wiki or memory page and the actual implementation diverge silently; there is no compile-time check, lint rule, or diff that catches semantic drift between intended and actual state.
 
 **Three concrete instances surfaced 2026-04-19:**
-1. `knowledge/notes/concepts/editorial-notes-pattern.md` used future-ish language for `knowledge/index.md` and `knowledge/log.md` editorial notes — both had been added on 2026-04-18.
-2. `knowledge/notes/patterns/mirror-existing-pipelines.md` described the memory subsystem as having "the same immutable-raw / staged / compiled three-layer shape" as the core pipeline. Memory only has two layers (`daily/` + `knowledge/`); no staging equivalent exists. The wiki counterpart (`knowledge/notes/Pipeline Mirroring.md`) was already correct.
+1. `knowledge/notes/editorial-notes-pattern.md` used future-ish language for `knowledge/index.md` and `knowledge/log.md` editorial notes — both had been added on 2026-04-18.
+2. `knowledge/notes/mirror-existing-pipelines.md` described the memory subsystem as having "the same immutable-raw / staged / compiled three-layer shape" as the core pipeline. Memory only has two layers (`daily/` + `knowledge/`); no staging equivalent exists. The wiki counterpart (`knowledge/notes/pipeline-mirroring.md`) was already correct.
 3. `knowledge/notes/Global Multi-Project Migration Plan.md` Phase 2 Step 3 listed five skills to copy to user level. Only one (`knowledge-lookup`) was actually installed; the other four were intentionally kept project-level after scope reduction mid-execution. The step text was never updated after the decision.
 
 **Resolution:**

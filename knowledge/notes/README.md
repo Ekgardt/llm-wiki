@@ -5,7 +5,8 @@
 Durable, citeable knowledge pages with OKF v0.1 frontmatter. Every page
 carries at least `type:` and `title:`; durable claims also carry
 `confidence`, `source_authority`, and a `## Evidence` block pointing at a
-`knowledge/daily/<date>.md` block.
+`knowledge/daily/<date>.md` block. (Wiki-derived pages may use `## Source`
+instead of `## Evidence` — both are accepted.)
 
 ## Layout
 

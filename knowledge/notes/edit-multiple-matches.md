@@ -12,7 +12,7 @@ One-sentence summary: When the Edit tool fails because `old_string` matches mult
 
 ## Symptom
 `Edit` returns an error like "Found 2 matches for the given string". Common triggers in this vault:
-- Boilerplate phrases that legitimately repeat (`## Editorial note` appears in `index.md`, `log.md`, `Vault Home`).
+- Boilerplate phrases that legitimately repeat (`## Editorial note` appears in `index.md`, `log.md`, `[[index]]`).
 - Section headers shared across pages.
 
 ## Cause

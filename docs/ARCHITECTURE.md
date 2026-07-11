@@ -1,4 +1,4 @@
-# Architecture — LLM-Wiki Memory System v3.3
+# Architecture — LLM-Wiki Memory System v3.4
 
 This document explains **why** the system is shaped the way it is. For **how to use it**, see [USER-GUIDE.md](USER-GUIDE.md).
 
@@ -43,7 +43,7 @@ The slug system (5-step collision resolution) lets a single vault track unlimite
 
 ---
 
-## System Architecture (v3.3)
+## System Architecture (v3.4)
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐

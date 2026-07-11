@@ -181,7 +181,7 @@ def read_transcript_tail(path: Path, max_chars: int = MAX_TRANSCRIPT_CHARS) -> s
     return data
 
 
-def summarize_with_llm(transcript_excerpt: str, event: str) -> str:
+def summarize_with_llm(transcript_excerpt: str, event: str, session_id: str = "") -> str:
     """Ask the LLM to classify + distill the transcript into a tier + body.
 
     Uses the unified llm_client (auto-detected backend — no separate API
@@ -283,6 +283,8 @@ non-blank line MUST be the tier token.
                 "max_tokens": 1500,
                 "enqueued_by": "flush_memory",
                 "event": event,
+                "session_id": session_id,
+                "day": datetime.now().strftime("%Y-%m-%d"),
             })
         except Exception:
             pass  # best-effort — never crash the hook
@@ -388,7 +390,7 @@ def main() -> int:
         return 0
 
     transcript = read_transcript_tail(Path(args.transcript)) if args.transcript else ""
-    raw_summary = summarize_with_llm(transcript, args.event) if transcript else ""
+    raw_summary = summarize_with_llm(transcript, args.event, args.session_id) if transcript else ""
 
     # 3-tier classification (Phase 0.5). Replaces binary FLUSH_OK check.
     tier, body = _classify_response(raw_summary)
