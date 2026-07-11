@@ -2,7 +2,7 @@
 type: rule
 paths:
   - "knowledge/notes/**/*.md"
-title: "notes-artifacts"
+title: "output-files"
 timestamp: 2026-07-03T05:41:37
 ---
 When creating or compiling knowledge pages within `knowledge/notes/`:

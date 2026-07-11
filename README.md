@@ -131,7 +131,7 @@ The installer:
 1. Checks prerequisites (Python 3.10+, git)
 2. Installs `uv` (fast Python package manager) if missing
 3. Syncs dependencies (`uv sync`)
-4. Runs the test suite (281 tests collected in 0.26s)
+4. Runs the test suite (281 tests collected)
 5. Sets `LLM_WIKI_ROOT` environment variable (user scope)
 6. Creates runtime dirs (`cache/`, `logs/`, `run/`, `cache/cognee/` — gitignored)
 7. Registers scheduled maintenance (cron on Unix, Task Scheduler on Windows)
@@ -144,7 +144,7 @@ The installer:
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync
-uv run pytest -q          # 281 tests collected in 0.26s should pass
+uv run pytest -q          # 281 tests collected should pass
 ```
 
 ### Verify it works

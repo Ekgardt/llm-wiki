@@ -172,7 +172,9 @@ def main() -> int:
         return 1 if failures else 0
     finally:
         try:
-            maint_lock.unlink()
+            current = maint_lock.read_text(encoding="utf-8").strip()
+            if current == str(os.getpid()):
+                maint_lock.unlink()
         except OSError:
             pass
 

@@ -123,7 +123,9 @@ curl -fsSL https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.sh | 
 irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 ```
 
-> **生产环境提示：** 上方的 `main` 分支 URL 可能会变化。对于生产或审计部署，请改用特定 release 标签的 URL，例如 `https://raw.githubusercontent.com/Ekgardt/llm-wiki/v3.4.0/install.sh`。
+> **生产环境提示：** 上方的 `main` 分支 URL 可能会变化。对于生产或审计部署，请改用特定 release 标签的 URL，例如：
+> - **macOS / Linux / WSL2:** `https://raw.githubusercontent.com/Ekgardt/llm-wiki/v3.4.0/install.sh`
+> - **Windows:** `https://raw.githubusercontent.com/Ekgardt/llm-wiki/v3.4.0/install.ps1`
 
 安装程序会：
 1. 检查前置条件（Python 3.10+、git）

@@ -13,7 +13,7 @@ One-sentence summary: The `## Editorial note` footer marks a page as **vault met
 ## Definition
 An "editorial note" is a short footer section appended to pages whose purpose is to organize the vault itself — indexes, logs, and front doors — rather than to record external knowledge. The note explicitly tells a reader: *this page is not source-derived; it is maintained by hand or by compile scripts*.
 
-Pages currently carrying the note: [[index]] (wiki navigation map), [[log]] (wiki changelog), [[knowledge/index|Knowledge index]] (human front door). These were extended to carry editorial notes on 2026-04-18.
+Pages currently carrying the note: [[index]] (wiki navigation map and human front door), [[log]] (wiki changelog). These were extended to carry editorial notes on 2026-04-18.
 
 ## Why it exists
 Without the marker, a reader applying CLAUDE.md rule 5 ("preserve provenance") would expect every claim on the page to trace to a `knowledge/raw/` file. Indexes and logs can't satisfy that — they *are* the vault's editorial layer. The note short-circuits the confusion: readers know not to look for `Source:` lines, and authors know these pages get updated alongside structure changes rather than during ingestion.

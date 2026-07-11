@@ -51,7 +51,7 @@ The installer detects your agents and wires them up automatically.
    git clone https://github.com/Ekgardt/llm-wiki.git
    cd llm-wiki
    uv sync
-   uv run pytest -q          # verify: 281 tests collected in 0.26s should pass
+   uv run pytest -q          # verify: 281 tests collected should pass
    ```
 
 2. **Set environment variables** (add to your shell profile):
@@ -224,7 +224,7 @@ setup steps.
 
 ### "Tests fail on fresh clone"
 - `uv sync` first (deps must be installed)
-- `uv run pytest -q` — should report 281 tests collected in 0.26s passed
+- `uv run pytest -q` — should report 281 tests collected passed
 - If `< 281`, your checkout is stale; `git pull`
 
 ---
@@ -234,7 +234,7 @@ setup steps.
 | Path | Zone | Purpose |
 |------|------|---------|
 | `scripts/` | CODE | Pipeline + hooks + helpers (45 .py + 3 helpers) |
-| `tests/` | CODE | 25 test files, 281 tests collected in 0.26s |
+| `tests/` | CODE | 25 test files, 281 tests collected |
 | `docs/` | CODE | This file + ARCHITECTURE + STRUCTURE + SETUP-COGNEE + EXPORTING |
 | `skills/` | CODE | 9 agent skills |
 | `rules/` | CODE | 3 file-handling policies |

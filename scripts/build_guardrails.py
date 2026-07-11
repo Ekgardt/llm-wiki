@@ -36,7 +36,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT  # noqa: E402
+from memory_state import ROOT, atomic_write  # noqa: E402
 
 KNOWLEDGE = ROOT / "knowledge" / "notes"
 FEEDBACK_DIR = ROOT / "knowledge" / "feedback"
@@ -188,7 +188,8 @@ def main() -> int:
         return 0
 
     if args.apply:
-        GUARDRAILS_FILE.write_text(
+        atomic_write(
+            GUARDRAILS_FILE,
             f"---\n"
             f"type: guardrails\n"
             f'title: "Learned Guard Rails"\n'
@@ -196,7 +197,6 @@ def main() -> int:
             f"timestamp: {datetime.now().isoformat(timespec='seconds')}\n"
             f"---\n\n"
             f"{guardrails}\n",
-            encoding="utf-8",
         )
         print(f"Written: {GUARDRAILS_FILE.relative_to(ROOT)}")
     else:

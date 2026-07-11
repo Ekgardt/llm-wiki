@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT  # noqa: E402
+from memory_state import ROOT, atomic_write  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
 PROJECTS_DIR = ROOT / "knowledge" / "projects"
@@ -214,7 +214,8 @@ def bootstrap(cwd: str, apply: bool = False) -> str:
     if apply:
         project_dir.mkdir(parents=True, exist_ok=True)
         bootstrap_path = project_dir / "bootstrap.md"
-        bootstrap_path.write_text(
+        atomic_write(
+            bootstrap_path,
             "---\n"
             f"type: bootstrap-context\ntitle: \"{slug} bootstrap\"\n"
             f"description: \"Auto-generated from git history + README\"\n"
@@ -222,7 +223,6 @@ def bootstrap(cwd: str, apply: bool = False) -> str:
             f"project: {slug}\n"
             "---\n\n"
             f"{content}\n",
-            encoding="utf-8",
         )
         return f"Written: {bootstrap_path.relative_to(ROOT)}"
     else:

@@ -123,7 +123,9 @@ curl -fsSL https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.sh | 
 irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 ```
 
-> **Примечание для production:** Указанные выше URL ветки `main` могут изменяться. Для production- или аудируемых развёртываний используйте URL конкретного release-тега, например `https://raw.githubusercontent.com/Ekgardt/llm-wiki/v3.4.0/install.sh`.
+> **Примечание для production:** Указанные выше URL ветки `main` могут изменяться. Для production- или аудируемых развёртываний используйте URL конкретного release-тега, например:
+> - **macOS / Linux / WSL2:** `https://raw.githubusercontent.com/Ekgardt/llm-wiki/v3.4.0/install.sh`
+> - **Windows:** `https://raw.githubusercontent.com/Ekgardt/llm-wiki/v3.4.0/install.ps1`
 
 Установщик:
 1. Проверяет требования (Python 3.10+, git)

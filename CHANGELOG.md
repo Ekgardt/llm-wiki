@@ -9,7 +9,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ## [3.4.0] — 2026-07-11
 
 A comprehensive security, concurrency, and quality release following 9 rounds of
-full-codebase audit. **281 tests** (up from 226 at v3.2.0). **Zero Critical, zero High**
+full-codebase audit. **281 tests**. **Zero Critical, zero High**
 open findings as of the final audit pass.
 
 ### Security

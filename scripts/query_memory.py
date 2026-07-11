@@ -172,10 +172,11 @@ def rebuild_index() -> bool:
 
 
 def append_log(entry: str) -> None:
+    from daily_log_append import locked_append
+
     if not LOG.exists():
-        LOG.write_text("# Session Memory Log\n\n", encoding="utf-8")
-    with LOG.open("a", encoding="utf-8") as f:
-        f.write(entry if entry.endswith("\n") else entry + "\n")
+        atomic_write(LOG, "# Session Memory Log\n\n")
+    locked_append(LOG, entry)
 
 
 def main() -> int:

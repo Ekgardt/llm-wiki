@@ -66,7 +66,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
   VERIFY-BEFORE-WRITE), `flush_memory.py` (3-tier classification),
   `maybe_compile.py` (PID-locked spawn), `search_memory.py` (triple-RRF),
   `llm_client.py` (5 backends + fake).
-- `tests/` — 25 test files, 281 tests collected in 0.26s. Hermetic via `conftest.py` (pins
+- `tests/` — 25 test files, 281 tests collected. Hermetic via `conftest.py` (pins
   `LLM_WIKI_ROOT` to checkout, redirects `LLM_WIKI_STATE_ROOT` to a temp
   dir, defaults `MEMORY_LLM_PROVIDER=fake`).
 - `docs/` — `ARCHITECTURE.md`, `USER-GUIDE.md`, `AGENTS.md` (knowledge

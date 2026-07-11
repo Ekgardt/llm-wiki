@@ -118,9 +118,9 @@ def capture_from_text(
 
     # Write to feedback dir
     out = FEEDBACK_DIR / f"{candidate_id}.json"
-    out.write_text(
+    atomic_write(
+        out,
         json.dumps(candidate, indent=2, ensure_ascii=False),
-        encoding="utf-8",
     )
     return candidate_id
 
@@ -210,7 +210,13 @@ def promote_candidate(candidate_id: str, category: str = "patterns") -> str | No
     # arg otherwise only affected the (now-flat) path, so an explicit
     # category was silently ignored in the frontmatter.
     if category and category != "patterns":
-        type_from_category = {"debugging": "debugging", "qa": "qa", "decisions": "decision"}.get(category)
+        type_from_category = {
+            "debugging": "debugging",
+            "qa": "qa",
+            "decisions": "decision",
+            "concepts": "concept",
+            "workflow": "workflow",
+        }.get(category)
         if type_from_category:
             page_type = type_from_category
         else:
@@ -246,9 +252,9 @@ def promote_candidate(candidate_id: str, category: str = "patterns") -> str | No
     # Update candidate status
     candidate["status"] = "promoted"
     candidate["promoted_to"] = page_path.relative_to(ROOT).as_posix()
-    candidate_file.write_text(
+    atomic_write(
+        candidate_file,
         json.dumps(candidate, indent=2, ensure_ascii=False),
-        encoding="utf-8",
     )
 
     return page_path.relative_to(ROOT).as_posix()
