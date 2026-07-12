@@ -522,8 +522,24 @@ def _check_contradictions_pre_write(
         r"migrated?\s+from",
         r"switched?\s+(from|to)",
     ]
+
+    # Extension patterns indicating the new page refines (not replaces) an old one
+    extension_patterns = [
+        r"additionally",
+        r"more\s+specifically",
+        r"furthermore",
+        r"builds\s+on",
+        r"extends?\s+(this|the)",
+        r"in\s+addition\s+to",
+        r"updates?\s+(this|the)",
+        r"refines?",
+    ]
+
     has_negation = any(
         re.search(p, new_body, re.IGNORECASE) for p in negation_patterns
+    )
+    has_extension = any(
+        re.search(p, new_body, re.IGNORECASE) for p in extension_patterns
     )
 
     # Flat scan of the entire knowledge tree so contradictions are caught
@@ -555,8 +571,12 @@ def _check_contradictions_pre_write(
         # Need at least 2 meaningful words in common (skip stop words)
         stop = {"the", "a", "an", "for", "of", "to", "in", "and", "with", "mode", "hook"}
         meaningful = common - stop
-        if len(meaningful) >= 2 and has_negation:
-            contradictions.append(existing)
+        if len(meaningful) >= 2:
+            if has_negation:
+                contradictions.append(existing)
+            elif has_extension:
+                # Refinement: old page stays alive, gets refined_by link.
+                contradictions.append(existing)
 
     return contradictions
 
@@ -585,6 +605,32 @@ def _mark_superseded(old_path: Path, new_slug: str) -> None:
         )
     else:
         content = f"---\n{supersede_lines}---\n\n{content}"
+    atomic_write(old_path, content)
+
+
+def _mark_refined(old_path: Path, new_slug: str) -> None:
+    """Mark an existing page as refined (not replaced) by a new page.
+
+    Unlike supersede, the old page STAYS ACTIVE and searchable.
+    Adds ``refined_by: [[<new-slug>]]`` to the frontmatter.
+    This is the 'refines' typed edge from Graphiti/repowise model.
+    """
+    try:
+        content = old_path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    if "refined_by:" in content:
+        return  # already marked
+    refine_line = f"refined_by: [[{new_slug}]]\n"
+    if FRONTMATTER_RE.match(content):
+        content = re.sub(
+            r"^(---\s*\n)",
+            r"\1" + refine_line,
+            content,
+            count=1,
+        )
+    else:
+        content = f"---\n{refine_line}---\n\n{content}"
     atomic_write(old_path, content)
 
 
@@ -758,8 +804,20 @@ def _execute_plan(
         # page must remain authoritative — never orphan the knowledge base
         # by marking old as superseded when new doesn't exist yet.
         if written and contradictions:
+            # Determine action: negation → supersede, extension → refine.
+            _neg_patterns = [
+                r"instead\s+of", r"not\s+anymore", r"replaced\s+by",
+                r"superseded?\s+by", r"no\s+longer", r"changed\s+from",
+                r"migrated?\s+from", r"switched?\s+(from|to)",
+            ]
+            is_supersede = any(
+                re.search(p, body_md, re.IGNORECASE) for p in _neg_patterns
+            )
             for old_path in contradictions:
-                _mark_superseded(old_path, slug)
+                if is_supersede:
+                    _mark_superseded(old_path, slug)
+                else:
+                    _mark_refined(old_path, slug)
 
     # Build the audit text in the legacy COMPILE_DONE / COMPILE_AUDIT
     # format so existing parsers continue to work.
