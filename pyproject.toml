@@ -8,9 +8,8 @@ dependencies = []
 # Kept optional so the base install stays zero-dep (stdlib only).
 [project.optional-dependencies]
 semantic = ["sentence-transformers>=2.7,<6"]
+hybrid = ["lancedb>=0.20", "sentence-transformers>=2.7,<6"]
 cognee = ["cognee>=0.1,<2"]
-# v4.0: PostgreSQL hybrid search (BM25 + pgvector + graph in one query).
-postgres = ["psycopg[binary]>=3.2,<4"]
 # v4.0: tree-sitter code graph (call/imports/classes for Python/JS/TS).
 code-graph = [
     "tree-sitter>=0.23,<1",
@@ -24,7 +23,7 @@ mcp-server = ["mcp>=1.27,<2"]
 reranker = ["onnxruntime>=1.18,<2", "optimum>=1.20,<2", "tokenizers>=0.19,<1"]
 # Convenience: install everything.
 full = [
-    "llm-wiki[semantic,postgres,code-graph,mcp-server,reranker]",
+    "llm-wiki[semantic,hybrid,code-graph,mcp-server,reranker]",
 ]
 
 [dependency-groups]

@@ -35,7 +35,9 @@ from memory_state import ROOT, STATE_ROOT, atomic_write  # noqa: E402
 INDEX_DIR = STATE_ROOT / "cache"
 INDEX_FILE = INDEX_DIR / "index.sqlite"
 INDEX_MANIFEST = INDEX_DIR / ".paths-manifest"
-VECTOR_CACHE = INDEX_DIR / "vectors.json"  # JSON embedding cache (no pickle)
+VECTOR_CACHE = INDEX_DIR / "vectors.json"  # Legacy JSON cache (kept for backward compat)
+VECTOR_NPY = INDEX_DIR / "vectors.npy"  # Binary numpy cache (memory-mapped, fast load)
+VECTOR_META = INDEX_DIR / "vectors_meta.json"  # Metadata without vectors (small JSON)
 
 KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
 # Legacy alias retained for tests and external callers. Post-three-zone
@@ -414,27 +416,6 @@ def search(
     if not query or not query.strip():
         return []
 
-    # ── PostgreSQL backend (v4.0): try hybrid search in one SQL query ──
-    # If PostgreSQL + pgvector is available and has indexed pages, use it.
-    # Falls through to SQLite/FTS5 path if PG unavailable or empty.
-    try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from pg_store import pg_available
-        from pg_store import search as _pg_search
-        if pg_available():
-            embedding = None
-            if semantic:
-                qvecs = _embed_texts([query], is_query=True)
-                if qvecs:
-                    embedding = qvecs[0]
-            pg_results = _pg_search(
-                query, limit=limit, project=project, as_of=as_of,
-                semantic=semantic, embedding=embedding,
-            )
-            if pg_results:
-                return _maybe_rerank(query, pg_results, limit)
-    except Exception:
-        pass  # Fall through to SQLite path
     pages = _collect_pages(scope)
     if not pages:
         return []
@@ -572,11 +553,28 @@ def search(
     # Optional: vector search for semantic matching
     vector_results = None
     if semantic and _have_sentence_transformers():
+        # Try LanceDB (HNSW index) first, fall back to numpy brute-force.
         try:
-            vector_results = _vector_search(query, pages, limit * 3, project, since, as_of)
-        except Exception as e:
-            print(f"  (vector search failed: {e})", file=sys.stderr)
-            vector_results = None
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from lance_store import have_lancedb
+            from lance_store import vector_search as _lance_search
+
+            if have_lancedb():
+                qvecs = _embed_texts([query], is_query=True)
+                if qvecs:
+                    lance_results = _lance_search(qvecs[0], limit * 3, project)
+                    if lance_results:
+                        vector_results = lance_results
+        except Exception:
+            pass
+
+        # Fall back to numpy brute-force if LanceDB unavailable or empty.
+        if vector_results is None:
+            try:
+                vector_results = _vector_search(query, pages, limit * 3, project, since, as_of)
+            except Exception as e:
+                print(f"  (vector search failed: {e})", file=sys.stderr)
+                vector_results = None
 
     # Optional: graph-neighbor boost (3rd retrieval signal)
     graph_boosts = None
@@ -734,13 +732,32 @@ def _vector_search(
 def _load_or_build_vectors(pages: list[Path]) -> dict | None:
     """Load cached embeddings or build them fresh.
 
-    Cache is invalidated when any source file changes (mtime check).
+    v4.0: Uses memory-mapped .npy format for vectors (instant load) +
+    small .json for metadata. Falls back to legacy vectors.json if .npy
+    doesn't exist yet (backward compat during migration).
     """
-    # Check cache validity via mtime + path set (JSON cache; no pickle).
-    needs_rebuild = True
     current_paths = sorted(
         p.relative_to(ROOT).as_posix() for p in pages if p.exists()
     )
+
+    # Try .npy format first (fast, memory-mapped).
+    if VECTOR_NPY.exists() and VECTOR_META.exists():
+        try:
+            cache_meta = json.loads(VECTOR_META.read_text(encoding="utf-8"))
+            if sorted(cache_meta.get("paths") or []) == current_paths:
+                needs_rebuild = any(
+                    p.stat().st_mtime > VECTOR_NPY.stat().st_mtime
+                    for p in pages if p.exists()
+                )
+                if not needs_rebuild:
+                    import numpy as np
+                    vectors = np.load(str(VECTOR_NPY), mmap_mode="r")
+                    cache_meta["vectors"] = vectors.tolist()
+                    return cache_meta
+        except Exception:
+            pass
+
+    # Fall back to legacy JSON format (backward compat).
     if VECTOR_CACHE.exists():
         try:
             cache_mtime = VECTOR_CACHE.stat().st_mtime
@@ -749,16 +766,12 @@ def _load_or_build_vectors(pages: list[Path]) -> dict | None:
             )
             if not needs_rebuild:
                 data = json.loads(VECTOR_CACHE.read_text(encoding="utf-8"))
-                if sorted(data.get("paths") or []) != current_paths:
-                    needs_rebuild = True
-                else:
+                if sorted(data.get("paths") or []) == current_paths:
                     return data
         except Exception:
-            needs_rebuild = True
+            pass
 
-    if needs_rebuild:
-        return _build_vectors(pages)
-    return None
+    return _build_vectors(pages)
 
 
 def _build_vectors(pages: list[Path]) -> dict | None:
@@ -810,14 +823,25 @@ def _build_vectors(pages: list[Path]) -> dict | None:
         "summaries": summaries_list,
         "projects": projects_list,
         "timestamps": timestamps_list,
-        "vectors": vectors.tolist(),
+        "model": EMBEDDING_MODEL,
     }
 
-    # Cache to disk as JSON (no pickle — safer if state root is compromised).
+    # v4.0: Save vectors as binary .npy (memory-mapped, fast load).
+    # Save metadata as small JSON (no vectors → small file).
+    try:
+        import numpy as np
+        INDEX_DIR.mkdir(parents=True, exist_ok=True)
+        np.save(str(VECTOR_NPY), vectors)
+        atomic_write(VECTOR_META, json.dumps(data))
+    except Exception:
+        pass  # best-effort cache
+
+    # Also save legacy JSON for backward compat (one transition cycle).
+    data["vectors"] = vectors.tolist()
     try:
         atomic_write(VECTOR_CACHE, json.dumps(data))
     except Exception:
-        pass  # best-effort cache
+        pass
 
     return data
 

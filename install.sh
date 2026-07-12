@@ -238,27 +238,13 @@ if command -v claude &>/dev/null || [ -d "$HOME/.claude" ]; then
   fi
 fi
 
-# ─── 9. Optional: PostgreSQL backend ───────────────────────────────
+# ─── 9. Optional: semantic + hybrid search ─────────────────────────
 
-info "Optional: PostgreSQL backend for hybrid search?"
-if command -v psql &>/dev/null || command -v pg_ctl &>/dev/null; then
-  ok "PostgreSQL detected. Setting up local instance..."
-  uv run python "$VAULT_ROOT/scripts/pg_local.py" setup 2>/dev/null && \
-    ok "PostgreSQL backend ready (port 5433)" || \
-    warn "PostgreSQL setup failed — SQLite backend will be used"
-  uv run python "$VAULT_ROOT/scripts/rebuild_pg_index.py" --semantic 2>/dev/null || true
-else
-  info "  PostgreSQL not installed. SQLite backend will be used (works great for <500 pages)."
-  info "  To enable PostgreSQL: install it, then run: uv run python scripts/pg_local.py setup"
-fi
+info "Optional: install hybrid search (BM25 + vector + reranker)?"
+info "  uv sync --extra hybrid      # LanceDB HNSW + sentence-transformers"
+info "  uv sync --extra reranker     # cross-encoder reranker (ONNX)"
 
-# ─── 10. Optional: sentence-transformers ────────────────────────────
-
-info "Optional: install sentence-transformers for semantic search?"
-info "  uv pip install sentence-transformers"
-info "  (adds ~500MB, enables hybrid BM25+Vector search with Recall@5=100%)"
-
-# ─── 11. Print summary ─────────────────────────────────────────────
+# ─── 10. Print summary ─────────────────────────────────────────────
 
 echo ""
 echo "=============================================="
@@ -283,9 +269,9 @@ echo "  uv run python scripts/build_guardrails.py             # learned rules"
 echo "  uv run python benchmark/run_benchmark.py              # run benchmark"
 echo ""
 echo "v4.0 optional features:"
-echo "  uv sync --extra postgres     # PostgreSQL hybrid search"
-echo "  uv sync --extra code-graph   # tree-sitter code graph"
-echo "  uv sync --extra mcp-server   # MCP server (9 tools)"
-echo "  uv sync --extra reranker     # cross-encoder reranker"
-echo "  uv sync --extra full         # all of the above"
+echo "  uv sync --extra hybrid        # LanceDB HNSW + semantic search"
+echo "  uv sync --extra code-graph    # tree-sitter code graph"
+echo "  uv sync --extra mcp-server    # MCP server (9 tools)"
+echo "  uv sync --extra reranker      # cross-encoder reranker"
+echo "  uv sync --extra full          # all of the above"
 echo ""

@@ -218,26 +218,7 @@ if ($agents.Count -eq 0) {
     Ok "Agents: $($agents -join ', ')"
 }
 
-# ─── 9. Optional: PostgreSQL backend ───────────────────────────────
-
-Info "Optional: PostgreSQL backend for hybrid search?"
-$pgFound = $false
-if (Get-Command psql -ErrorAction SilentlyContinue) { $pgFound = $true }
-if (Get-Command pg_ctl -ErrorAction SilentlyContinue) { $pgFound = $true }
-if ($pgFound) {
-    Ok "PostgreSQL detected. Setting up local instance..."
-    try {
-        & uv run python (Join-Path $VAULT_ROOT "scripts\pg_local.py") setup 2>&1 | ForEach-Object { Info "$_" }
-        Ok "PostgreSQL backend ready (port 5433)"
-    } catch {
-        Warn "PostgreSQL setup failed — SQLite backend will be used"
-    }
-} else {
-    Info "  PostgreSQL not installed. SQLite backend will be used (works for <500 pages)."
-    Info "  To enable: install PostgreSQL, then run: uv run python scripts\pg_local.py setup"
-}
-
-# ─── 10. Summary ────────────────────────────────────────────────────
+# ─── 9. Summary ────────────────────────────────────────────────────
 
 Write-Host ""
 Write-Host "==============================================" -ForegroundColor Green
@@ -255,9 +236,9 @@ Write-Host "  2. Open a project in your agent"
 Write-Host "  3. Work normally — capture is automatic"
 Write-Host ""
 Write-Host "v4.0 optional features:"
-Write-Host "  uv sync --extra postgres     # PostgreSQL hybrid search"
-Write-Host "  uv sync --extra code-graph   # tree-sitter code graph"
-Write-Host "  uv sync --extra mcp-server   # MCP server (9 tools)"
-Write-Host "  uv sync --extra reranker     # cross-encoder reranker"
-Write-Host "  uv sync --extra full         # all of the above"
+Write-Host "  uv sync --extra hybrid        # LanceDB HNSW + semantic search"
+Write-Host "  uv sync --extra code-graph    # tree-sitter code graph"
+Write-Host "  uv sync --extra mcp-server    # MCP server (9 tools)"
+Write-Host "  uv sync --extra reranker      # cross-encoder reranker"
+Write-Host "  uv sync --extra full          # all of the above"
 Write-Host ""

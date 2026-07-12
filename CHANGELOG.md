@@ -15,7 +15,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   start/stop, schema init for a vault-local instance in `cache/postgres/`.
 - **Optional dependencies** — `postgres`, `code-graph`, `mcp-server`,
   `reranker` extras in `pyproject.toml`. Base install remains zero-dep.
-- **431 tests** (58 new PostgreSQL backend + rebuild tests).
+- **383 tests** (58 new PostgreSQL backend + rebuild tests).
 
 ## [3.4.0] — 2026-07-11
 
@@ -254,3 +254,4 @@ open findings as of the final audit pass.
 - Multi-project slug system with 5-step collision resolution
 - QMD hybrid search (BM25 + vector + reranker)
 - Promotion pipeline from project memory to cross-cutting wiki
+
