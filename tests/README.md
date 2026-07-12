@@ -4,7 +4,7 @@ Small pytest-based suite covering the critical scenarios surfaced by four rounds
 
 ## Coverage
 
-The suite currently has **419 tests across 30 files**. Highlights:
+The suite currently has **419 tests across 36 files**. Highlights:
 
 | Test file | Guards against |
 |---|---|
@@ -31,6 +31,12 @@ The suite currently has **419 tests across 30 files**. Highlights:
 | `test_archive_stale.py` | Type-aware archive thresholds (debugging=60d, decisions/concepts never). |
 | `test_pg_store.py` | PostgreSQL backend: graceful degradation, schema DDL correctness, hybrid SQL RRF weights, upsert functions, integration tests (skip without PG). |
 | `test_rebuild_pg_index.py` | Markdown → PostgreSQL rebuild: page collection, frontmatter parsing, wikilink extraction, graceful degradation, integration (skip without PG). |
+| `test_reranker.py` | Cross-encoder reranker: graceful degradation, rerank logic, sigmoid stability, search_memory integration. |
+| `test_access_tracking.py` | Access tracking: record, stats, Ebbinghaus decay score, frontmatter flush, batch threshold. |
+| `test_reflection.py` | A-MEM reflection: candidate finding (pages with >=2 updates), threshold, skip conditions, dry-run. |
+| `test_mcp_server.py` | MCP server: 9 tool definitions, helper functions, async tool call handling, graceful degradation. |
+| `test_code_graph.py` | Code graph: language detection, tree-sitter/regex parsing (Python/JS/TS), caller search, directory indexing. |
+| `test_impact_analysis.py` | LINK Layer: symbol extraction, stale wiki page finding, confidence levels, advisory formatting. |
 
 ## Running
 
