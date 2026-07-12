@@ -146,6 +146,40 @@ def find_stale_wiki_pages(changed_symbols: list[str]) -> list[dict]:
     return results
 
 
+def apply_significance_budget(pages: list[dict], threshold: float = 0.8) -> list[dict]:
+    """Pareto 80% cover — return only pages covering threshold% of total impact.
+
+    Sorts pages by number of matched symbols (descending), accumulates
+    until threshold is reached, returns only those. Prevents information
+    overload when many pages are affected.
+
+    (Memtrace pattern: "surface the minimum set covering ≥80% of significance".)
+    """
+    if not pages or len(pages) <= 5:
+        return pages
+
+    total = sum(len(p.get("matched_symbols", [])) for p in pages)
+    if total == 0:
+        return pages
+
+    sorted_pages = sorted(
+        pages,
+        key=lambda p: len(p.get("matched_symbols", [])),
+        reverse=True,
+    )
+
+    cumulative = 0
+    result = []
+    for p in sorted_pages:
+        count = len(p.get("matched_symbols", []))
+        cumulative += count
+        result.append(p)
+        if cumulative / total >= threshold:
+            break
+
+    return result
+
+
 def analyze_impact(git_range: str | None = None) -> dict:
     """Full impact analysis: git diff → changed symbols → stale wiki pages.
 
@@ -170,8 +204,9 @@ def analyze_impact(git_range: str | None = None) -> dict:
             symbols = extract_symbols_from_file(cf)
             all_symbols.update(symbols)
 
-    # Find stale wiki pages.
+    # Find stale wiki pages (with significance budgeting).
     stale_pages = find_stale_wiki_pages(list(all_symbols))
+    stale_pages = apply_significance_budget(stale_pages)
 
     summary = (
         f"{len(changed_files)} file(s) changed, "

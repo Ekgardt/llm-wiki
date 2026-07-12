@@ -215,6 +215,9 @@ def build_advisory(slug: str | None = None, max_chars: int = 800, use_llm: bool 
     This is the "navigator" layer — actionable intelligence, not just inventory.
     Non-LLM, <100ms for rule-based. Optional LLM enhancement adds ~5-10s.
 
+    v4.0: Uses L1 tier summaries (from build_tiers.py) when available for
+    more compact context injection (progressive disclosure).
+
     Args:
         slug: Project slug to scope the advisory.
         max_chars: Maximum output length.
@@ -285,7 +288,16 @@ def _build_rule_based_advisory(slug: str | None, max_chars: int) -> str:
     last = _find_last_decision(slug)
     if last:
         parts.append(f"**Last decision** ({last['timestamp']}):")
-        parts.append(f"- {last['title']}: {last['summary']}")
+        # v4.0: Use L1 overview if available (progressive disclosure).
+        try:
+            from build_tiers import get_l1
+            l1 = get_l1(last["slug"])
+            if l1:
+                parts.append(f"- {l1[:200]}")
+            else:
+                parts.append(f"- {last['title']}: {last['summary']}")
+        except Exception:
+            parts.append(f"- {last['title']}: {last['summary']}")
         parts.append("")
 
     # 3. Potential contradictions
