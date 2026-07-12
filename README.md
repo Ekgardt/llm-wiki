@@ -1,6 +1,6 @@
 # LLM Wiki
 
-[![Tests](https://img.shields.io/badge/tests-339%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://img.shields.io/badge/tests-353%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-3.4.0-blue.svg)](CHANGELOG.md)
@@ -98,7 +98,7 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 - **5 LLM backends** (auto-detected): OpenCode → Codex → Claude CLI → OpenAI → Ollama
 - **Cross-platform**: Windows, macOS, Linux, WSL2
 - **Zero runtime dependencies** — base install is stdlib-only; sentence-transformers and Cognee are optional
-- **339 regression tests**, CI green on Ubuntu + Windows + macOS, Python 3.10 + 3.13
+- **353 regression tests**, CI green on Ubuntu + Windows + macOS, Python 3.10 + 3.13
 - **Pre-commit hooks**: ruff (static analysis) + structural lint + gitleaks (secret scanning)
 
 ---
@@ -131,7 +131,7 @@ The installer:
 1. Checks prerequisites (Python 3.10+, git)
 2. Installs `uv` (fast Python package manager) if missing
 3. Syncs dependencies (`uv sync`)
-4. Runs the test suite (339 tests collected)
+4. Runs the test suite (353 tests collected)
 5. Sets `LLM_WIKI_ROOT` environment variable (user scope)
 6. Creates runtime dirs (`cache/`, `logs/`, `run/`, `cache/cognee/` — gitignored)
 7. Registers scheduled maintenance (cron on Unix, Task Scheduler on Windows)
@@ -144,7 +144,7 @@ The installer:
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync
-uv run pytest -q          # 339 tests collected should pass
+uv run pytest -q          # 353 tests collected should pass
 ```
 
 ### Verify it works

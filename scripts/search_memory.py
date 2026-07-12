@@ -52,9 +52,12 @@ SUMMARY_RE = re.compile(
     r"^One-sentence summary:\s*(.+?)\s*$", re.MULTILINE | re.IGNORECASE
 )
 
-# Embedding model — lightweight, CPU-friendly, ~90MB download on first use
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+# Embedding model — bge-small-en-v1.5 (MIT, MTEB 62.17, +25% over MiniLM).
+# Same 384d as all-MiniLM-L6-v2 — no dimension change needed.
+# Query instruction prefix improves retrieval accuracy (per BGE model card).
+EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 EMBEDDING_DIM = 384
+QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages:"
 
 
 def _have_sentence_transformers() -> bool:
@@ -86,12 +89,18 @@ def _get_embedder():
 _embedder_cache = None
 
 
-def _embed_texts(texts: list[str]) -> list[list[float]] | None:
-    """Embed a list of texts. Returns None if model unavailable."""
+def _embed_texts(texts: list[str], is_query: bool = False) -> list[list[float]] | None:
+    """Embed a list of texts. Returns None if model unavailable.
+
+    For bge-small-en-v1.5, queries are prefixed with a retrieval instruction
+    for better accuracy. Documents are embedded without prefix.
+    """
     embedder = _get_embedder()
     if not embedder:
         return None
     try:
+        if is_query and QUERY_INSTRUCTION:
+            texts = [f"{QUERY_INSTRUCTION} {t}" for t in texts]
         vectors = embedder.encode(texts, show_progress_bar=False, convert_to_numpy=True)
         return vectors.tolist()
     except Exception:
@@ -329,6 +338,25 @@ def _valid_as_of(path: str, as_of: str) -> bool:
     return vt[:10] >= as_of[:10]
 
 
+def _maybe_rerank(query: str, results: list[dict], limit: int) -> list[dict]:
+    """Apply cross-encoder reranker if available, else return results as-is.
+
+    The reranker re-scores top-20 candidates by jointly encoding (query, doc)
+    pairs — much more precise than bi-encoder similarity. Optional dependency.
+    """
+    if not results or len(results) <= 1:
+        return results[:limit]
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from reranker import rerank, reranker_available
+
+        if reranker_available():
+            return rerank(query, results, limit=limit)
+    except Exception:
+        pass
+    return results[:limit]
+
+
 def search(
     query: str,
     scope: str = "all",
@@ -363,7 +391,7 @@ def search(
         if pg_available():
             embedding = None
             if semantic:
-                qvecs = _embed_texts([query])
+                qvecs = _embed_texts([query], is_query=True)
                 if qvecs:
                     embedding = qvecs[0]
             pg_results = _pg_search(
@@ -371,7 +399,7 @@ def search(
                 semantic=semantic, embedding=embedding,
             )
             if pg_results:
-                return pg_results
+                return _maybe_rerank(query, pg_results, limit)
     except Exception:
         pass  # Fall through to SQLite path
     pages = _collect_pages(scope)
@@ -534,11 +562,11 @@ def search(
                 if r.get("project", "").lower() == project.lower():
                     r["fused_score"] = round(r["fused_score"] * 1.5, 4)
             fused.sort(key=lambda x: x.get("fused_score", 0), reverse=True)
-        return fused[:limit]
+        return _maybe_rerank(query, fused, limit)
 
     # BM25 only (fallback)
     bm25_results.sort(key=lambda x: x["score"], reverse=True)
-    return bm25_results[:limit]
+    return _maybe_rerank(query, bm25_results, limit)
 
 
 def _rrf_fuse_triple(
@@ -625,7 +653,7 @@ def _vector_search(
     vectors = vectors_data["vectors"]
 
     # Embed the query
-    query_vec = _embed_texts([query])
+    query_vec = _embed_texts([query], is_query=True)
     if not query_vec:
         return None
 
