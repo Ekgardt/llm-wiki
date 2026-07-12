@@ -255,12 +255,19 @@ for tests/e2e.
 ## 7. Quick command reference
 
 ```bash
-uv run pytest -q                              # run the test suite (281 tests collected)
+uv run pytest -q                              # run the test suite (419 tests collected)
 uv run ruff check scripts/ tests/             # Python static analysis
 uv run python scripts/lint_memory.py --scope all   # structural lint
 uv run python scripts/search_memory.py "query"     # hybrid search
 uv run python scripts/compile_memory.py            # compile daily logs → notes
 uv run python scripts/lookup_mode.py               # show retrieval tier
+# v4.0 optional features (require --extra flags):
+uv run python scripts/mcp_server.py                # MCP server (9 tools, stdio)
+uv run python scripts/code_graph.py .              # index code graph (tree-sitter)
+uv run python scripts/impact_analysis.py           # git diff → stale wiki pages
+uv run python scripts/reflection.py --apply        # A-MEM page consolidation
+uv run python scripts/access_tracking.py --flush   # flush access counts
+uv run python scripts/rebuild_pg_index.py --semantic  # rebuild PostgreSQL index
 ```
 
 Runtime state (under `cache/`, `logs/`, `run/`) is gitignored and

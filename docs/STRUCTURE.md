@@ -12,7 +12,18 @@
 llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │
 ├── scripts/                       CODE — pipeline + hooks + helpers
-├── tests/                         CODE — regression suite (pytest)
+│   ├── (45 v3.x scripts)            existing: compile, search, hooks, lint, etc.
+│   ├── pg_store.py                  v4.0: PostgreSQL hybrid search backend
+│   ├── pg_local.py                  v4.0: local PostgreSQL instance management
+│   ├── rebuild_pg_index.py          v4.0: Markdown → PostgreSQL pipeline
+│   ├── reranker.py                  v4.0: cross-encoder reranker (ONNX)
+│   ├── access_tracking.py           v4.0: access logs + Ebbinghaus decay
+│   ├── reflection.py                v4.0: A-MEM page consolidation
+│   ├── mcp_server.py                v4.0: MCP server (9 tools, stdio)
+│   ├── code_graph.py                v4.0: tree-sitter code intelligence
+│   ├── impact_analysis.py           v4.0: LINK layer (code→wiki impact)
+│   └── queries/                     v4.0: tree-sitter .scm query files (future)
+├── tests/                         CODE — regression suite (pytest, 419 tests)
 ├── docs/                          CODE — architecture + user guide
 ├── skills/                        CODE — 9 agent skills (SKILL.md)
 ├── rules/                         CODE — file-handling policies
@@ -27,9 +38,16 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── inbox/                       unprocessed staging
 │   └── feedback/                    correction candidates
 │
-├── cache/                        RUNTIME — gitignored (search/QMD/vector)
-├── logs/                         RUNTIME — gitignored (lint/compile logs)
+├── cache/                        RUNTIME — gitignored (search/QMD/vector/PG/models)
+│   ├── postgres/                    v4.0: PostgreSQL data directory (optional)
+│   ├── models/                      v4.0: ML model cache (reranker, embeddings)
+│   ├── access_log.jsonl             v4.0: access tracking log
+│   ├── index.sqlite                 FTS5 search index (SQLite fallback)
+│   └── vectors.json                 vector embedding cache
+├── logs/                         RUNTIME — gitignored (lint/compile/PG logs)
 ├── run/                          RUNTIME — gitignored (state.json/pid/queue)
+│   ├── pg_server.pid                v4.0: PostgreSQL process PID (optional)
+│   └── pg_connection.json           v4.0: PostgreSQL connection config
 │
 ├── AGENTS.md                     ROOT — agent contract (byte-identical to CLAUDE.md)
 ├── CLAUDE.md                     ROOT — agent contract (byte-identical to AGENTS.md)
@@ -96,10 +114,12 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 
 ### RUNTIME zone (always gitignored, inside vault)
 - `cache/` — `index.sqlite` (FTS5), `vectors.json` (embeddings), QMD index.
+  v4.0: `postgres/` (PostgreSQL data, optional), `models/` (ML model cache),
+  `access_log.jsonl` (retrieval analytics).
 - `logs/` — `lint-YYYY-MM-DD.md`, `compile-last.log`, `session-start-last.txt`.
 - `run/` — `state.json` (compile hashes, dedupe, heartbeats),
   `compile.pid` (maybe_compile lock), `queue/` (deferred LLM tasks),
-  `state.json.lock`.
+  `state.json.lock`. v4.0: `pg_server.pid`, `pg_connection.json` (PostgreSQL).
 - `cache/cognee/` — optional semantic graph data (only if Cognee installed).
 
 **Runtime is regenerated on demand.** Deleting `cache/`, `logs/`, `run/` is safe — the next pipeline run recreates them.

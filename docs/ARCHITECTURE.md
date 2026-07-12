@@ -43,81 +43,61 @@ The slug system (5-step collision resolution) lets a single vault track unlimite
 
 ---
 
-## System Architecture (v3.4)
+## System Architecture (v4.0)
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  AGENTS (5 supported)                                                 │
+│  AGENTS (5 supported + MCP)                                           │
 │                                                                       │
-│  OpenCode ──→ plugin (JS, autoload, OpenCode SDK for LLM)            │
-│  Codex CLI ──→ PowerShell wrapper (auto-capture on exit)             │
-│  Claude Code → settings.json hooks (SessionStart/End/Prompt/Tool)    │
-│  Cursor ────→ rules file (.cursor/rules/llm-wiki.mdc)               │
-│  Antigravity → AGENTS.md snippet                                      │
+│  OpenCode ──→ plugin (JS) + MCP tools (9 task-shaped, stdio)         │
+│  Codex CLI ──→ PowerShell wrapper + MCP                              │
+│  Claude Code → hooks (5 lifecycle) + MCP + skills                    │
+│  Cursor ────→ rules file + MCP                                       │
+│  Antigravity → AGENTS.md + MCP                                       │
 └──────────────────────────┬───────────────────────────────────────────┘
                            ↓
 ┌──────────────────────────────────────────────────────────────────────┐
-│  LLM BACKEND (llm_client.py — 5 auto-detected backends)              │
-│                                                                       │
-│  Priority: OpenCode SDK → Codex exec → Claude CLI → OpenAI → Ollama  │
-│  If none available → task enqueued to persistent queue                │
+│  LLM BACKEND (llm_client.py — 5 auto-detected + Ollama local)        │
+│  v4.0: constrained decoding (guided_json) for local LLM reliability  │
 └──────────────────────────┬───────────────────────────────────────────┘
                            ↓
 ┌──────────────────────────────────────────────────────────────────────┐
 │  CAPTURE LAYER (real-time, non-LLM)                                  │
-│                                                                       │
-│  user_prompt_capture.py ── breadcrumb per prompt (ms-fast)           │
-│  post_tool_capture.py ──── breadcrumb per Edit/Write/Bash            │
-│  daily_log_append.py ───── structured FLUSH block append             │
-│  heartbeat_record.py ───── project activity signal                    │
-│  feedback_capture.py ───── correction/preference detection           │
+│  v4.0: access_tracking.py logs every retrieval (Ebbinghaus decay)    │
 └──────────────────────────┬───────────────────────────────────────────┘
                            ↓
-┌──────────────────────────────────────────────────────────────────────┤
+┌──────────────────────────────────────────────────────────────────────┐
 │  CLASSIFY + COMPILE LAYER (session end, background)                  │
 │                                                                       │
-│  flush_memory.py ── 3-tier FLUSH classifier (MAJOR/MINOR/OK)        │
-│  compile_memory.py ─ JSON protocol → VERIFY-BEFORE-WRITE → pages    │
-│  maybe_compile.py ── PID lock + stale detection + detached spawn    │
-│  memory_queue.py ─── persistent deferred task queue (crash-safe)    │
+│  v4.0: compile_memory.py ── multi-pass: draft → critique → write    │
+│  v4.0: typed edges ── refines (not just supersedes)                  │
+│  v4.0: reflection.py ── A-MEM evolution (weekly page consolidation) │
 └──────────────────────────┬───────────────────────────────────────────┘
                            ↓
-┌──────────────────────────────────────────────────────────────────────┤
-│  SEARCH + RETRIEVAL LAYER (on-demand, ~6ms p50)                      │
+┌──────────────────────────────────────────────────────────────────────┐
+│  SEARCH + RETRIEVAL LAYER                                             │
 │                                                                       │
-│  search_memory.py ── Triple-fusion:                                  │
-│    BM25 (FTS5, weight=2) + Vector (MiniLM, weight=1)                │
-│    + Graph-neighbor (wikilinks, weight=0.5)                         │
-│  Weighted RRF fusion with title/filename boost + short-circuit       │
-│  Recall@5 = 100%, MRR = 0.9667, p50 = 6ms                             │
-│  (benchmark measured in BM25-only mode; triple-fusion adds           │
-│   Vector + Graph signals on top)                                      │
+│  v4.0: PostgreSQL backend (pg_store.py) ── hybrid in ONE SQL query: │
+│    BM25 (ts_rank_cd) + pgvector (HNSW) + graph (wikilink edges)     │
+│    Weighted RRF (2.0/1.0/0.5) in CTE — single round-trip            │
+│  Fallback: SQLite/FTS5 + numpy (when PG unavailable)                 │
+│  v4.0: bge-small-en-v1.5 (MTEB 62.17, +25% over MiniLM)             │
+│  v4.0: cross-encoder reranker (bge-reranker, ONNX, top-20 rerank)   │
+└──────────────────────────┬───────────────────────────────────────────┘
+                           ↓
+┌──────────────────────────────────────────────────────────────────────┐
+│  v4.0: CODE INTELLIGENCE LAYER                                       │
+│                                                                       │
+│  code_graph.py ── tree-sitter: functions, classes, calls, imports   │
+│  impact_analysis.py ── LINK: git diff → stale wiki pages            │
+│  (unique: no other system connects code graph to knowledge graph)    │
 └──────────────────────────┬───────────────────────────────────────────┘
                            ↓
 ┌──────────────────────────────────────────────────────────────────────┤
 │  PROACTIVE INTELLIGENCE (SessionStart injection)                     │
 │                                                                       │
-│  build_guardrails.py ── learned rules from corrections (0 tokens)    │
-│  build_advisory.py ──── open threads, last decision, lint alerts     │
-│  build_context.py ───── per-project knowledge + agent-aware ranking  │
-│  session_start_context.py ── metacognitive block + all of above     │
-└──────────────────────────┬───────────────────────────────────────────┘
-                           ↓
-┌──────────────────────────────────────────────────────────────────────┤
-│  MULTI-AGENT COORDINATION (when agents run in parallel)              │
-│                                                                       │
-│  blackboard.py ───── task claiming, signal passing, conflict detect  │
-│  loop_detector.py ─── prevents infinite fix-review-redo cycles       │
-│  agent_timeline.py ── attribution: who decided what and when        │
-└──────────────────────────┬───────────────────────────────────────────┘
-                           ↓
-┌──────────────────────────────────────────────────────────────────────┤
-│  MAINTENANCE (automatic, scheduled)                                   │
-│                                                                       │
-│  scheduled_nightly.py (03:00) ── compile + lint + index + graph     │
-│  scheduled_weekly.py (Sun 04:00) ── OKF sweep + archive + prune     │
-│  archive_stale.py ── type-aware thresholds (decisions never expire)  │
-│  lint_memory.py ─── 14 checks (13 structural + 1 LLM contradiction)    │
+│  v4.0: hybrid forgetting (archive_stale.py + access_tracking decay)  │
+│  v4.0: impact advisory (stale pages from code changes)               │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -144,19 +124,26 @@ valid and lint covers them equally.
 
 ---
 
-## Search Architecture
+## Search Architecture (v4.0)
 
-Three retrieval signals fused via Weighted RRF:
+Two backends, same weighted RRF fusion:
 
-1. **BM25 (weight=2.0)**: FTS5 full-text search, per-word tokenized. Most reliable for known-item retrieval. Title boost (5x exact, 3x subset), filename boost (10x exact match short-circuit), path preference (1.3x for knowledge/notes/).
+### PostgreSQL backend (recommended, `uv sync --extra postgres`)
+One SQL query with CTEs — BM25 + pgvector HNSW + graph in a single round-trip:
+1. **BM25 (weight=2.0)**: `ts_rank_cd` on generated tsvector (title=weight A, summary=B, body=D).
+2. **Vector (weight=1.0)**: pgvector HNSW cosine distance, bge-small-en-v1.5 (384 dims, MTEB 62.17).
+3. **Graph-neighbor (weight=0.5)**: wikilink edges in `edges` table, bi-temporal.
+4. **Cross-encoder reranker**: bge-reranker-base (ONNX INT8, optional), re-scores top-20.
 
-2. **Vector (weight=1.0)**: sentence-transformers all-MiniLM-L6-v2 (384 dims, ~90MB). Optional dependency — degrades gracefully to BM25-only. Finds semantic relationships ("database performance" → "N+1 query fix").
-
-3. **Graph-neighbor (weight=0.5)**: wikilink adjacency boost. When BM25 finds page A, pages linked FROM A get a soft boost. Finds connected knowledge through the link graph.
+### SQLite backend (fallback, zero-dep)
+Same triple-fusion, but BM25 via FTS5 + vectors via numpy cosine, fused in Python.
 
 **RRF formula**: `score = 2.0/(60+bm25_rank) + 1.0/(60+vector_rank) + 0.5*graph_boost/(120+graph_rank)`
 
-**Short-circuit**: if filename slug exactly matches query → return at rank 1 immediately (bypasses RRF).
+**Short-circuit**: if filename slug exactly matches query → return at rank 1 immediately.
+
+**v4.0 embedding**: BAAI/bge-small-en-v1.5 (MIT, MTEB 62.17, +25% over all-MiniLM-L6-v2).
+Query instruction prefix for retrieval optimization.
 
 ---
 
@@ -176,5 +163,12 @@ For most teams and most use cases, **you should**. Those tools are mature, suppo
 - **No cloud sync** — your memory stays on your disk. Use git for remote backup.
 - **No web UI** — Obsidian is the UI. Or `cat`.
 - **No multi-user** — solo developer only.
-- **No Neo4j / graph DB** — wikilinks + FTS5 suffice at personal scale.
-- **No per-prompt RAG** — session-start + session-end injection is sufficient for solo dev.
+- **No per-prompt RAG** — compile-not-retrieve pattern; session-start + session-end injection suffices.
+
+## What v4.0 adds (optional, all behind `--extra` flags)
+
+- **PostgreSQL + pgvector** (`--extra postgres`): hybrid search in one SQL query. SQLite remains the zero-dep fallback.
+- **Cross-encoder reranker** (`--extra reranker`): bge-reranker ONNX, re-ranks top-20 results.
+- **Code graph** (`--extra code-graph`): tree-sitter parsing of Python/JS/TS, call graph, impact analysis.
+- **MCP server** (`--extra mcp-server`): 9 task-shaped tools, stdio transport, 100% local.
+- **All v4.0 features degrade gracefully** — base install remains zero-dep, zero-daemon.
