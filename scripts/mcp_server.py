@@ -243,6 +243,21 @@ def _build_tool_definitions() -> list:
     ]
 
 
+def _meta() -> dict:
+    """Build _meta envelope for MCP responses (freshness, provenance)."""
+    from datetime import datetime
+
+    from lookup_mode import count_wiki_pages
+    from memory_state import load_state
+
+    state = load_state()
+    return {
+        "page_count": count_wiki_pages(),
+        "last_compile": state.get("last_compile_at", "never"),
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
 async def _handle_tool_call(name: str, arguments: dict) -> str:
     """Handle a tool call and return text result."""
     import json
@@ -253,7 +268,7 @@ async def _handle_tool_call(name: str, arguments: dict) -> str:
                 arguments.get("query", ""),
                 limit=arguments.get("limit", 8),
             )
-            return json.dumps(results, indent=2, ensure_ascii=False)
+            return json.dumps({"results": results, "_meta": _meta()}, indent=2, ensure_ascii=False)
 
         elif name == "read_page":
             result = _read_page(arguments.get("slug", ""))
@@ -261,6 +276,7 @@ async def _handle_tool_call(name: str, arguments: dict) -> str:
 
         elif name == "wiki_overview":
             result = _wiki_overview()
+            result["_meta"] = _meta()
             return json.dumps(result, indent=2, ensure_ascii=False)
 
         elif name == "vault_status":

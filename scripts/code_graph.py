@@ -280,9 +280,9 @@ def index_directory(directory: Path, verbose: bool = True) -> dict:
 
 
 def find_callers(function_name: str, directory: Path) -> list[dict]:
-    """Find all files that call a function by name.
+    """Find all files that call a function by name (CALLS edge, reverse direction).
 
-    Returns list of {file, line, context}.
+    Returns list of {file, line, function}.
     """
     callers = []
     extensions = set(LANGUAGE_MAP.keys())
@@ -303,6 +303,47 @@ def find_callers(function_name: str, directory: Path) -> list[dict]:
                 })
 
     return callers
+
+
+def find_callees(function_name: str, directory: Path) -> list[dict]:
+    """Find all functions called BY a function (CALLS edge, forward direction).
+
+    Returns list of {file, line, callee}.
+    """
+    callees = []
+    extensions = set(LANGUAGE_MAP.keys())
+
+    for path in sorted(directory.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in extensions:
+            continue
+        if any(skip in path.parts for skip in {".git", "node_modules", "__pycache__", ".venv"}):
+            continue
+
+        result = parse_file(path)
+        # Find the function definition.
+        in_function = False
+        for func in result["functions"]:
+            if func["name"] == function_name:
+                in_function = True
+                break
+
+        if not in_function:
+            continue
+
+        # Find calls within the function's line range.
+        func_def = next((f for f in result["functions"] if f["name"] == function_name), None)
+        if not func_def:
+            continue
+
+        for call in result["calls"]:
+            if func_def["line"] <= call["line"] <= func_def.get("end_line", call["line"]):
+                callees.append({
+                    "file": str(path),
+                    "line": call["line"],
+                    "callee": call["name"],
+                })
+
+    return callees
 
 
 def main() -> int:

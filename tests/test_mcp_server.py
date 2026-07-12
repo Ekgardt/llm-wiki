@@ -98,7 +98,9 @@ class TestHandleToolCall:
     def test_recall_returns_json(self):
         result = self._run("recall", {"query": "auth"})
         data = json.loads(result)
-        assert isinstance(data, list)
+        # v4.0: recall returns {"results": [...], "_meta": {...}}
+        assert isinstance(data, dict)
+        assert "results" in data or isinstance(data, list)
 
     def test_wiki_overview_returns_json(self):
         result = self._run("wiki_overview", {})
