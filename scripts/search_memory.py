@@ -352,6 +352,28 @@ def search(
     """
     if not query or not query.strip():
         return []
+
+    # ── PostgreSQL backend (v4.0): try hybrid search in one SQL query ──
+    # If PostgreSQL + pgvector is available and has indexed pages, use it.
+    # Falls through to SQLite/FTS5 path if PG unavailable or empty.
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from pg_store import pg_available
+        from pg_store import search as _pg_search
+        if pg_available():
+            embedding = None
+            if semantic:
+                qvecs = _embed_texts([query])
+                if qvecs:
+                    embedding = qvecs[0]
+            pg_results = _pg_search(
+                query, limit=limit, project=project, as_of=as_of,
+                semantic=semantic, embedding=embedding,
+            )
+            if pg_results:
+                return pg_results
+    except Exception:
+        pass  # Fall through to SQLite path
     pages = _collect_pages(scope)
     if not pages:
         return []
