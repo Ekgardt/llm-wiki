@@ -39,7 +39,10 @@ FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 
 def record_access(slug: str, source: str = "search", query: str | None = None,
                   rank: int | None = None) -> None:
-    """Record a page access. Appends to JSONL log and batches frontmatter update.
+    """Record a page access. In-memory batch only (instant, no I/O).
+
+    JSONL logging and frontmatter flush happen in scheduled_nightly.py.
+    This keeps search latency unaffected by access tracking.
 
     Args:
         slug: The page slug (filename without .md).
@@ -47,23 +50,8 @@ def record_access(slug: str, source: str = "search", query: str | None = None,
         query: The search query that surfaced this page (if applicable).
         rank: The position this page was shown at (if applicable).
     """
-    entry = {
-        "slug": slug,
-        "source": source,
-        "query": query,
-        "rank": rank,
-        "timestamp": datetime.now().isoformat(timespec="seconds"),
-    }
-
-    # Append to JSONL log (always).
-    ACCESS_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(ACCESS_LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry) + "\n")
-
-    # Batch frontmatter update.
+    # In-memory batch only — no disk I/O during search.
     _batch[slug] = _batch.get(slug, 0) + 1
-    if _batch[slug] >= BATCH_THRESHOLD:
-        flush_access_to_frontmatter(slug)
 
 
 def flush_access_to_frontmatter(slug: str | None = None) -> int:
@@ -137,7 +125,26 @@ def flush_access_to_frontmatter(slug: str | None = None) -> int:
 
 
 def flush_all() -> int:
-    """Flush all pending access counts. Called by scheduled jobs."""
+    """Flush all pending access counts to JSONL + frontmatter.
+
+    Called by scheduled_nightly.py. Writes JSONL entries for batched
+    accesses, then updates frontmatter for pages above threshold.
+    """
+    # Write JSONL entries for all batched accesses.
+    ACCESS_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.now().isoformat(timespec="seconds")
+    try:
+        with open(ACCESS_LOG_FILE, "a", encoding="utf-8") as f:
+            for slug, count in _batch.items():
+                for _ in range(count):
+                    f.write(json.dumps({
+                        "slug": slug, "source": "search",
+                        "timestamp": now,
+                    }) + "\n")
+    except Exception:
+        pass
+
+    # Flush to frontmatter.
     return flush_access_to_frontmatter(None)
 
 

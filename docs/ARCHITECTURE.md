@@ -173,7 +173,7 @@ For most teams and most use cases, **you should**. Those tools are mature, suppo
 
 ## What v4.0 adds (optional, all behind `--extra` flags)
 
-- **PostgreSQL + pgvector** (`--extra hybrid`): ~~PostgreSQL~~ → LanceDB HNSW embedded hybrid search. Zero-daemon.
+- **LanceDB hybrid vectors** (`--extra hybrid`): HNSW vector search, embedded, zero-daemon.
 - **Cross-encoder reranker** (`--extra reranker`): bge-reranker ONNX, re-ranks top-20 results.
 - **Code graph** (`--extra code-graph`): tree-sitter parsing of Python/JS/TS, call graph, impact analysis.
 - **MCP server** (`--extra mcp-server`): 9 task-shaped tools, stdio transport, 100% local.

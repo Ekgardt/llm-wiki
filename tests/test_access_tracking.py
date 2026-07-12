@@ -9,34 +9,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 
 class TestRecordAccess:
-    """Test record_access writes to JSONL log."""
+    """Test record_access accumulates in memory (no disk I/O)."""
 
-    def test_record_appends_to_log(self, tmp_path, monkeypatch):
-        """record_access should append a JSON line to the access log."""
+    def test_record_accumulates_in_batch(self, tmp_path, monkeypatch):
+        """record_access should accumulate in memory batch without disk I/O."""
         import access_tracking
 
-        log_file = tmp_path / "access_log.jsonl"
-        monkeypatch.setattr(access_tracking, "ACCESS_LOG_FILE", log_file)
+        monkeypatch.setattr(access_tracking, "ACCESS_LOG_FILE", tmp_path / "access_log.jsonl")
         monkeypatch.setattr(access_tracking, "KNOWLEDGE_DIR", tmp_path / "notes")
         access_tracking._batch.clear()
 
         access_tracking.record_access("test-page", source="search", query="auth")
+        access_tracking.record_access("test-page", source="search", query="auth")
 
-        assert log_file.exists()
-        lines = log_file.read_text(encoding="utf-8").strip().split("\n")
-        assert len(lines) == 1
-        entry = json.loads(lines[0])
-        assert entry["slug"] == "test-page"
-        assert entry["source"] == "search"
-        assert entry["query"] == "auth"
-        assert "timestamp" in entry
+        assert access_tracking._batch.get("test-page", 0) == 2
 
     def test_record_batch_accumulates(self, tmp_path, monkeypatch):
-        """Multiple accesses accumulate in the batch without flushing."""
+        """Multiple accesses accumulate in the batch."""
         import access_tracking
 
-        log_file = tmp_path / "access_log.jsonl"
-        monkeypatch.setattr(access_tracking, "ACCESS_LOG_FILE", log_file)
+        monkeypatch.setattr(access_tracking, "ACCESS_LOG_FILE", tmp_path / "access_log.jsonl")
         monkeypatch.setattr(access_tracking, "KNOWLEDGE_DIR", tmp_path / "notes")
         access_tracking._batch.clear()
 
@@ -49,16 +41,12 @@ class TestRecordAccess:
         """record_access works without optional query/rank params."""
         import access_tracking
 
-        log_file = tmp_path / "access_log.jsonl"
-        monkeypatch.setattr(access_tracking, "ACCESS_LOG_FILE", log_file)
+        monkeypatch.setattr(access_tracking, "ACCESS_LOG_FILE", tmp_path / "access_log.jsonl")
         monkeypatch.setattr(access_tracking, "KNOWLEDGE_DIR", tmp_path / "notes")
         access_tracking._batch.clear()
 
         access_tracking.record_access("simple", source="direct")
-        lines = log_file.read_text(encoding="utf-8").strip().split("\n")
-        entry = json.loads(lines[0])
-        assert entry["query"] is None
-        assert entry["rank"] is None
+        assert access_tracking._batch.get("simple", 0) == 1
 
 
 class TestGetAccessStats:

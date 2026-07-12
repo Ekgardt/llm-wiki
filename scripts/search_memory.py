@@ -120,15 +120,9 @@ def _cosine_similarity(query_vec: list[float], doc_vecs: list[list[float]]) -> l
 
 
 def _collect_pages(scope: str = "all") -> list[Path]:
-    """Collect all searchable markdown pages.
-
-    Deduplicates by filename stem: if the same slug exists both flat
-    (knowledge/notes/X.md) and under a subdirectory (knowledge/notes/qa/X.md),
-    only the flat version is kept.
-    """
+    """Collect all searchable markdown pages."""
     pages: list[Path] = []
     seen: set[Path] = set()
-    seen_stems: set[str] = set()
 
     roots: list[Path] = []
     # All scope values resolve to the single knowledge/notes tree after the
@@ -156,19 +150,6 @@ def _collect_pages(scope: str = "all") -> list[Path]:
                         continue
             except OSError:
                 continue
-            # Deduplicate by stem: prefer flat (knowledge/notes/X.md) over subdir.
-            if md.stem in seen_stems:
-                # Check if current md is flat (preferred) and existing is subdir.
-                existing_idx = next((i for i, p in enumerate(pages) if p.stem == md.stem), -1)
-                if existing_idx >= 0:
-                    existing = pages[existing_idx]
-                    is_md_flat = len(md.relative_to(root).parts) == 1
-                    is_existing_flat = len(existing.relative_to(root).parts) == 1
-                    if is_md_flat and not is_existing_flat:
-                        pages[existing_idx] = md  # Replace subdir with flat.
-                    continue  # Skip duplicate.
-                continue
-            seen_stems.add(md.stem)
             seen.add(md)
             pages.append(md)
     return pages
