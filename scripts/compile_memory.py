@@ -324,9 +324,90 @@ Output ONLY the JSON object. No markdown fences, no commentary, no
     except json.JSONDecodeError as e:
         return [], f"(JSON parse failed: {e}; first 200 chars: {json_text[:200]})"
 
+    # Multi-pass compile: critique pass (v4.0).
+    # A second LLM call reviews each operation against quality criteria.
+    # Operations that fail specificity/durability checks are dropped.
+    plan, critique_text = _critique_plan(plan, daily_paths)
+
     # Execute the plan deterministically — this is where Python writes
     # files and verifies citations. Returns (touched, audit_text).
-    return _execute_plan(plan, daily_paths, dry_run)
+    touched, audit_text = _execute_plan(plan, daily_paths, dry_run)
+    if critique_text:
+        audit_text = critique_text + "\n" + audit_text
+    return touched, audit_text
+
+
+def _critique_plan(plan: dict, daily_paths: list[Path]) -> tuple[dict, str]:
+    """Run a second LLM pass to critique the compile plan (multi-pass compile).
+
+    Reviews each operation against quality criteria (specificity, durability,
+    evidence, noise). Drops operations that fail.
+
+    Disabled when MEMORY_LLM_PROVIDER=fake (tests) or when LLM unavailable.
+    Returns (possibly_filtered_plan, critique_summary_text).
+    """
+    operations = plan.get("operations", [])
+    if not operations:
+        return plan, ""
+
+    # Skip critique for fake provider (tests use canned responses).
+    if os.environ.get("MEMORY_LLM_PROVIDER", "").lower() == "fake":
+        return plan, ""
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    try:
+        from llm_client import call_llm
+    except ImportError:
+        return plan, ""
+
+    ops_json = json.dumps(operations[:20], indent=2)
+
+    critique_prompt = f"""You are a STRICT CRITIC reviewing a memory editor's draft plan.
+For EACH operation below, evaluate:
+
+1. SPECIFICITY: Is it actionable? ("when X, do Y because Z" — not vague)
+2. DURABILITY: Will this be useful in future sessions? (not one-off status)
+3. EVIDENCE: Does it cite real source text? (not fabricated)
+4. COMPLETENESS: Does the body have enough detail? (not a stub)
+
+Operations to review:
+{ops_json}
+
+Return ONLY a JSON object with this shape:
+{{
+  "reviews": [
+    {{"slug": "<slug>", "verdict": "pass", "reason": "ok"}},
+    {{"slug": "<slug>", "verdict": "drop", "reason": "<why>"}}
+  ]
+}}
+
+Be strict: when in doubt, drop. Empty reviews list is valid (pass all).
+"""
+    system = "You are a quality critic for a knowledge base. Output JSON only."
+
+    raw = call_llm(critique_prompt, system, max_tokens=2000)
+    if not raw or not raw.strip():
+        return plan, ""
+
+    critique_json = _extract_json_block(raw)
+    if not critique_json:
+        return plan, ""
+
+    try:
+        critique = json.loads(critique_json)
+    except json.JSONDecodeError:
+        return plan, ""
+
+    reviews = {r.get("slug", ""): r for r in critique.get("reviews", [])}
+    original = len(operations)
+    filtered = [
+        op for op in operations
+        if reviews.get(op.get("slug", ""), {}).get("verdict") != "drop"
+    ]
+    dropped = original - len(filtered)
+    plan["operations"] = filtered
+
+    return plan, f"(critique: {original} reviewed, {dropped} dropped)"
 
 
 def _extract_json_block(text: str) -> str:
