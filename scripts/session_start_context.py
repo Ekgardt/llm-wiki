@@ -443,6 +443,20 @@ def guardrails_block() -> str:
     return f"{guardrails}\n\n"
 
 
+def _impact_block() -> str:
+    """Code-knowledge impact analysis (v4.0).
+
+    Detects wiki pages that might be stale due to recent code changes.
+    Non-blocking — failures are silently ignored.
+    """
+    try:
+        from impact_analysis import analyze_impact, format_for_advisory
+        impact = analyze_impact()
+        return format_for_advisory(impact, max_pages=3)
+    except Exception:
+        return ""
+
+
 def build_context() -> str:
     index_txt = (
         MEMORY_INDEX.read_text(encoding="utf-8", errors="replace")
@@ -462,6 +476,7 @@ def build_context() -> str:
         guardrails_block(),
         metacognitive_block(),
         advisory_block(),
+        _impact_block(),
         "## knowledge/index.md (trimmed)",
         index_trimmed,
         "",

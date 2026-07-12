@@ -133,6 +133,30 @@ def main() -> int:
         else:
             log("Step 4: contradiction check SKIPPED (set MEMORY_WEEKLY_CONTRADICTIONS=1 to enable)")
 
+        # Step 5: A-MEM reflection — consolidate pages with multiple updates (v4.0).
+        log("Step 5: A-MEM reflection (page consolidation)...")
+        try:
+            from reflection import find_reflection_candidates, reflect_page
+            candidates = find_reflection_candidates()
+            if candidates:
+                log(f"  Found {len(candidates)} reflection candidate(s)")
+                for c in candidates:
+                    result = reflect_page(c["path"], apply=True)
+                    log(f"  {result}")
+            else:
+                log("  No reflection candidates found")
+        except Exception as e:
+            log(f"  reflection: failed ({e}) — skipping")
+
+        # Step 6: generate L1 tier overviews (v4.0, best-effort).
+        log("Step 6: generating L1 tier overviews...")
+        try:
+            from build_tiers import build_all_tiers
+            stats = build_all_tiers(use_llm=False, verbose=False)
+            log(f"  tiers: {stats['generated']} generated, {stats['skipped']} skipped")
+        except Exception as e:
+            log(f"  tiers: failed ({e}) — skipping")
+
         log(f"=== Weekly deep maintenance complete (failures={failures}) ===")
         return 1 if failures else 0
     finally:

@@ -236,6 +236,31 @@ if command -v claude &>/dev/null || [ -d "$HOME/.claude" ]; then
   else
     warn "Claude settings merge failed — run: uv run python scripts/merge_claude_settings.py"
   fi
+  # v4.0: MCP server config for Claude Code
+  CLAUDE_MCP="$HOME/.claude/.mcp.json"
+  if [ ! -f "$CLAUDE_MCP" ] || ! grep -q "llm-wiki" "$CLAUDE_MCP" 2>/dev/null; then
+    info "Adding MCP server config for Claude Code..."
+    mkdir -p "$HOME/.claude"
+    if [ ! -f "$CLAUDE_MCP" ]; then
+      echo '{"mcpServers":{"llm-wiki":{"command":"uv","args":["run","--directory","'"$VAULT_ROOT"'","python","scripts/mcp_server.py"]}}}' > "$CLAUDE_MCP"
+    else
+      info "  Existing .mcp.json found — add manually: llm-wiki MCP server"
+    fi
+    ok "Claude MCP config: ~/.claude/.mcp.json"
+  fi
+fi
+
+# v4.0: OpenCode MCP config
+if [ -d "$HOME/.config/opencode" ] || command -v opencode &>/dev/null; then
+  OPENCODE_CONFIG="$HOME/.config/opencode/opencode.json"
+  if [ ! -f "$OPENCODE_CONFIG" ] || ! grep -q "llm-wiki" "$OPENCODE_CONFIG" 2>/dev/null; then
+    info "Adding MCP server config for OpenCode..."
+    mkdir -p "$HOME/.config/opencode"
+    if [ ! -f "$OPENCODE_CONFIG" ]; then
+      echo '{"mcpServers":{"llm-wiki":{"command":"uv","args":["run","--directory","'"$VAULT_ROOT"'","python","scripts/mcp_server.py"]}}}' > "$OPENCODE_CONFIG"
+    fi
+    ok "OpenCode MCP config"
+  fi
 fi
 
 # ─── 9. Optional: semantic + hybrid search ─────────────────────────

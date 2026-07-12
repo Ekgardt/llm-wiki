@@ -8,14 +8,28 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### v4.0: Unified Knowledge Intelligence
 
-- **PostgreSQL + pgvector backend** (`scripts/pg_store.py`) — hybrid search
-  engine: BM25 + pgvector HNSW + graph-neighbor in a single SQL query with
-  weighted RRF. Graceful fallback to SQLite/FTS5 when PostgreSQL unavailable.
-- **Local PostgreSQL management** (`scripts/pg_local.py`) — initdb, pg_ctl
-  start/stop, schema init for a vault-local instance in `cache/postgres/`.
-- **Optional dependencies** — `postgres`, `code-graph`, `mcp-server`,
-  `reranker` extras in `pyproject.toml`. Base install remains zero-dep.
-- **383 tests** (58 new PostgreSQL backend + rebuild tests).
+- **LanceDB embedded vector backend** (`scripts/lance_store.py`) — HNSW vector
+  search, embedded (no daemon). Replaces PostgreSQL. `--extra hybrid` to enable.
+- **Memory-mapped vector cache** — `vectors.npy` replaces `vectors.json`. Binary
+  numpy format loads instantly via mmap instead of JSON parsing.
+- **bge-small-en-v1.5 embedding** — MTEB 62.17 (+25% over all-MiniLM-L6-v2).
+- **Cross-encoder reranker** (`scripts/reranker.py`) — bge-reranker ONNX INT8,
+  re-ranks top-20 results. `--extra reranker`.
+- **Access tracking + Ebbinghaus forgetting** (`scripts/access_tracking.py`) —
+  retrieval analytics, decay scoring, hybrid archive (time + access).
+- **Multi-pass compile** — draft → critique pass, drops low-quality operations.
+- **Typed edges** — `refines` (page stays alive) alongside `superseded_by`.
+- **A-MEM reflection** (`scripts/reflection.py`) — weekly page consolidation.
+- **MCP server** (`scripts/mcp_server.py`) — 9 task-shaped tools, stdio transport.
+- **Code graph** (`scripts/code_graph.py`) — tree-sitter Python/JS/TS parsing.
+- **LINK Layer** (`scripts/impact_analysis.py`) — git diff → stale wiki pages.
+- **L0/L1/L2 tiered loading** (`scripts/build_tiers.py`) — progressive disclosure.
+- **Scheduled jobs integration** — nightly: access flush + code graph.
+  Weekly: A-MEM reflection + L1 tier generation.
+- **SessionStart impact advisory** — stale wiki pages from code changes.
+- **MCP config in install scripts** — Claude Code + OpenCode auto-config.
+- **Optional extras** — `hybrid`, `code-graph`, `mcp-server`, `reranker`, `full`.
+- **382 tests** (101 new v4.0 tests).
 
 ## [3.4.0] — 2026-07-11
 

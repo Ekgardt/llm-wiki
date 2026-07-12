@@ -130,8 +130,6 @@ def main() -> int:
                 failures += 1
 
             # Step 3c: rebuild graph-neighbor link cache (for 3rd retrieval signal).
-            # Run as subprocess with timeout — an in-process call could hang on a
-            # corrupt wikilink graph or filesystem stall, blocking the nightly run.
             log("Step 3c: rebuilding wikilink graph cache...")
             try:
                 env = dict(os.environ)
@@ -154,6 +152,24 @@ def main() -> int:
             except OSError as e:
                 log(f"  graph: OS error ({e}) — skipping, continuing")
                 failures += 1
+
+            # Step 3d: flush access tracking to frontmatter (v4.0).
+            log("Step 3d: flushing access tracking...")
+            try:
+                from access_tracking import flush_all
+                flushed = flush_all()
+                log(f"  access: flushed {flushed} page(s)")
+            except Exception as e:
+                log(f"  access: failed ({e}) — skipping")
+
+            # Step 3e: index code graph (v4.0, best-effort).
+            log("Step 3e: indexing code graph...")
+            try:
+                from code_graph import index_directory
+                stats = index_directory(ROOT, verbose=False)
+                log(f"  code graph: {stats['files']} files, {stats['functions']} functions")
+            except Exception as e:
+                log(f"  code graph: failed ({e}) — skipping")
 
         # Step 4: prune old nightly logs (>30 days).
         log("Step 4: pruning old nightly reports...")
