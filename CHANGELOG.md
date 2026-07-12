@@ -15,7 +15,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   start/stop, schema init for a vault-local instance in `cache/postgres/`.
 - **Optional dependencies** — `postgres`, `code-graph`, `mcp-server`,
   `reranker` extras in `pyproject.toml`. Base install remains zero-dep.
-- **390 tests** (58 new PostgreSQL backend + rebuild tests).
+- **407 tests** (58 new PostgreSQL backend + rebuild tests).
 
 ## [3.4.0] — 2026-07-11
 

@@ -1,6 +1,6 @@
 # LLM Wiki
 
-[![Tests](https://img.shields.io/badge/tests-390%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://img.shields.io/badge/tests-407%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-3.4.0-blue.svg)](CHANGELOG.md)
@@ -98,7 +98,7 @@ LLM Wiki 为你使用的每一个 AI 编码智能体——OpenCode、Codex、Cla
 - **5 个 LLM 后端**（自动检测）：OpenCode → Codex → Claude CLI → OpenAI → Ollama
 - **跨平台**：Windows、macOS、Linux、WSL2
 - **零运行时依赖**——基础安装仅用标准库；sentence-transformers 和 Cognee 为可选
-- **390 个回归测试**，CI 在 Ubuntu + Windows + macOS 上通过，Python 3.10 + 3.13
+- **407 个回归测试**，CI 在 Ubuntu + Windows + macOS 上通过，Python 3.10 + 3.13
 - **Pre-commit 钩子**：ruff（静态分析）+ 结构 lint + gitleaks（密钥扫描）
 
 ---
@@ -131,7 +131,7 @@ irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 1. 检查前置条件（Python 3.10+、git）
 2. 如缺失则安装 `uv`（快速 Python 包管理器）
 3. 同步依赖（`uv sync`）
-4. 运行测试套件（390 个测试）
+4. 运行测试套件（407 个测试）
 5. 设置 `LLM_WIKI_ROOT` 环境变量（用户级）
 6. 创建运行时目录（`cache/`、`logs/`、`run/`、`cache/cognee/`——gitignored）
 7. 注册计划维护（Unix 上 cron，Windows 上 Task Scheduler）
@@ -144,7 +144,7 @@ irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync
-uv run pytest -q          # 390 个测试应通过
+uv run pytest -q          # 407 个测试应通过
 ```
 
 ### 验证可用
