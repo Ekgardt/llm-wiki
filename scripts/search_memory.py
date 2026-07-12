@@ -351,9 +351,20 @@ def _maybe_rerank(query: str, results: list[dict], limit: int) -> list[dict]:
         from reranker import rerank, reranker_available
 
         if reranker_available():
-            return rerank(query, results, limit=limit)
+            results = rerank(query, results, limit=limit)
     except Exception:
         pass
+
+    # Log access for each result (powers forgetting curve + quality score).
+    try:
+        from access_tracking import record_access
+        for i, r in enumerate(results):
+            slug = Path(r.get("path", "")).stem
+            if slug:
+                record_access(slug, source="search", query=query, rank=i + 1)
+    except Exception:
+        pass
+
     return results[:limit]
 
 
