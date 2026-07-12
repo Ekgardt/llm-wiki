@@ -4,7 +4,7 @@ Small pytest-based suite covering the critical scenarios surfaced by four rounds
 
 ## Coverage
 
-The suite currently has **383 tests across 36 files**. Highlights:
+The suite currently has **383 tests across 33 files**. Highlights:
 
 | Test file | Guards against |
 |---|---|
@@ -29,8 +29,6 @@ The suite currently has **383 tests across 36 files**. Highlights:
 | `test_search_ranking.py` | `_rrf_fuse_triple` weights verified; source_authority boost. |
 | `test_wikilinks_tracked.py` | `git ls-files knowledge` filtered, broken-link detector + untracked-target reporting. |
 | `test_archive_stale.py` | Type-aware archive thresholds (debugging=60d, decisions/concepts never). |
-| `test_pg_store.py` | PostgreSQL backend: graceful degradation, schema DDL correctness, hybrid SQL RRF weights, upsert functions, integration tests (skip without PG). |
-| `test_rebuild_pg_index.py` | Markdown → PostgreSQL rebuild: page collection, frontmatter parsing, wikilink extraction, graceful degradation, integration (skip without PG). |
 | `test_reranker.py` | Cross-encoder reranker: graceful degradation, rerank logic, sigmoid stability, search_memory integration. |
 | `test_access_tracking.py` | Access tracking: record, stats, Ebbinghaus decay score, frontmatter flush, batch threshold. |
 | `test_reflection.py` | A-MEM reflection: candidate finding (pages with >=2 updates), threshold, skip conditions, dry-run. |

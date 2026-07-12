@@ -267,7 +267,7 @@ uv run python scripts/code_graph.py .              # index code graph (tree-sitt
 uv run python scripts/impact_analysis.py           # git diff → stale wiki pages
 uv run python scripts/reflection.py --apply        # A-MEM page consolidation
 uv run python scripts/access_tracking.py --flush   # flush access counts
-uv run python scripts/rebuild_pg_index.py --semantic  # rebuild PostgreSQL index
+uv run python scripts/build_tiers.py --all          # generate L1 overviews
 ```
 
 Runtime state (under `cache/`, `logs/`, `run/`) is gitignored and

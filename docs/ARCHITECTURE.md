@@ -77,12 +77,15 @@ The slug system (5-step collision resolution) lets a single vault track unlimite
 ┌──────────────────────────────────────────────────────────────────────┐
 │  SEARCH + RETRIEVAL LAYER                                             │
 │                                                                       │
-│  v4.0: PostgreSQL backend (pg_store.py) ── hybrid in ONE SQL query: │
-│    BM25 (ts_rank_cd) + pgvector (HNSW) + graph (wikilink edges)     │
-│    Weighted RRF (2.0/1.0/0.5) in CTE — single round-trip            │
-│  Fallback: SQLite/FTS5 + numpy (when PG unavailable)                 │
+│  SEARCH + RETRIEVAL LAYER                                             │
+│                                                                       │
+│  SQLite FTS5 (BM25, weight=2) — zero-dep, always works               │
+│  v4.0: LanceDB (HNSW vector, weight=1) — embedded, --extra hybrid    │
+│    fallback: numpy brute-force (.npy memory-mapped) when no LanceDB  │
+│  Graph-neighbor (wikilinks, weight=0.5)                              │
 │  v4.0: bge-small-en-v1.5 (MTEB 62.17, +25% over MiniLM)             │
 │  v4.0: cross-encoder reranker (bge-reranker, ONNX, top-20 rerank)   │
+│  Weighted RRF fusion: 2.0/(60+bm25) + 1.0/(60+vec) + 0.5*graph      │
 └──────────────────────────┬───────────────────────────────────────────┘
                            ↓
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -126,24 +129,27 @@ valid and lint covers them equally.
 
 ## Search Architecture (v4.0)
 
-Two backends, same weighted RRF fusion:
+Two tiers, same weighted RRF fusion:
 
-### PostgreSQL backend (recommended, `uv sync --extra postgres`)
-One SQL query with CTEs — BM25 + pgvector HNSW + graph in a single round-trip:
-1. **BM25 (weight=2.0)**: `ts_rank_cd` on generated tsvector (title=weight A, summary=B, body=D).
-2. **Vector (weight=1.0)**: pgvector HNSW cosine distance, bge-small-en-v1.5 (384 dims, MTEB 62.17).
-3. **Graph-neighbor (weight=0.5)**: wikilink edges in `edges` table, bi-temporal.
+### Base tier (zero-dep, always works)
+1. **BM25 (weight=2.0)**: SQLite FTS5 full-text search. Title boost (5x exact), filename boost (10x match short-circuit).
+2. **Vector (weight=1.0)**: numpy brute-force cosine similarity, bge-small-en-v1.5 (384 dims, MTEB 62.17). Vectors cached as `.npy` (memory-mapped binary — instant load).
+3. **Graph-neighbor (weight=0.5)**: wikilink adjacency boost.
+
+### Hybrid tier (`uv sync --extra hybrid`)
+1. **BM25 (weight=2.0)**: SQLite FTS5 (same as base — 25 years battle-tested).
+2. **Vector (weight=1.0)**: LanceDB HNSW (embedded, no daemon, Apache-2.0). Sub-ms at any scale.
+3. **Graph-neighbor (weight=0.5)**: wikilink adjacency boost.
 4. **Cross-encoder reranker**: bge-reranker-base (ONNX INT8, optional), re-scores top-20.
-
-### SQLite backend (fallback, zero-dep)
-Same triple-fusion, but BM25 via FTS5 + vectors via numpy cosine, fused in Python.
 
 **RRF formula**: `score = 2.0/(60+bm25_rank) + 1.0/(60+vector_rank) + 0.5*graph_boost/(120+graph_rank)`
 
-**Short-circuit**: if filename slug exactly matches query → return at rank 1 immediately.
-
 **v4.0 embedding**: BAAI/bge-small-en-v1.5 (MIT, MTEB 62.17, +25% over all-MiniLM-L6-v2).
 Query instruction prefix for retrieval optimization.
+
+**Why no PostgreSQL?** Every top local-first system (EverOS, repowise, codebase-memory-mcp,
+Memtrace) uses embedded storage. PostgreSQL requires a daemon — violates Axiom #1.
+SQLite + LanceDB gives the same hybrid quality without any server process.
 
 ---
 
@@ -167,7 +173,7 @@ For most teams and most use cases, **you should**. Those tools are mature, suppo
 
 ## What v4.0 adds (optional, all behind `--extra` flags)
 
-- **PostgreSQL + pgvector** (`--extra postgres`): hybrid search in one SQL query. SQLite remains the zero-dep fallback.
+- **PostgreSQL + pgvector** (`--extra hybrid`): ~~PostgreSQL~~ → LanceDB HNSW embedded hybrid search. Zero-daemon.
 - **Cross-encoder reranker** (`--extra reranker`): bge-reranker ONNX, re-ranks top-20 results.
 - **Code graph** (`--extra code-graph`): tree-sitter parsing of Python/JS/TS, call graph, impact analysis.
 - **MCP server** (`--extra mcp-server`): 9 task-shaped tools, stdio transport, 100% local.
