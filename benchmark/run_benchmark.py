@@ -114,6 +114,24 @@ def _generate_qa_pairs() -> list[dict]:
                         "query_type": "keywords_from_summary",
                     })
 
+            # Query 3: partial title (first 2-3 words) — tests truncation robustness
+            title_words = title.split()
+            if len(title_words) >= 3:
+                pairs.append({
+                    "query": " ".join(title_words[:2]).lower(),
+                    "gold_path": rel_path,
+                    "query_type": "partial_title",
+                })
+
+            # Query 4: slug-derived (filename as search) — tests filename boost
+            slug = md.stem.lower().replace("-", " ")
+            if slug != title.lower() and len(slug) > 5:
+                pairs.append({
+                    "query": slug,
+                    "gold_path": rel_path,
+                    "query_type": "slug_match",
+                })
+
     return pairs
 
 
