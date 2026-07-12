@@ -29,7 +29,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - **SessionStart impact advisory** — stale wiki pages from code changes.
 - **MCP config in install scripts** — Claude Code + OpenCode auto-config.
 - **Optional extras** — `hybrid`, `code-graph`, `mcp-server`, `reranker`, `full`.
-- **383 tests** (101 new v4.0 tests).
+- **399 tests** (101 new v4.0 tests).
 
 ## [3.4.0] — 2026-07-11
 
