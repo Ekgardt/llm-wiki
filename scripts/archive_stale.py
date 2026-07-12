@@ -35,6 +35,7 @@ ARCHIVE_ROOT = ROOT / "knowledge" / "notes" / "archive"
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 STATUS_RE = re.compile(r"^status:\s*(.+?)\s*$", re.MULTILINE)
 TIMESTAMP_RE = re.compile(r"^timestamp:\s*(.+?)\s*$", re.MULTILINE)
+CONFIDENCE_RE = re.compile(r"^confidence:\s*(.+?)\s*$", re.MULTILINE)
 
 TYPE_RE = re.compile(r"^type:\s*(.+?)\s*$", re.MULTILINE)
 
@@ -57,17 +58,20 @@ def _get_type_threshold(page_type: str) -> int:
 
 
 def _is_stale(md: Path, default_cutoff_ts: float, default_days: int) -> bool:
-    """Check if a page is stale using smart type-aware thresholds.
+    """Check if a page is stale using hybrid time + access-aware thresholds.
 
-    Instead of a flat 180-day cutoff for everything, uses per-type
-    thresholds: debugging logs archive at 60 days, decisions NEVER
-    archive, concepts NEVER archive, patterns at 180 days.
+    v4.0: Combines type-aware mtime thresholds with Ebbinghaus decay score
+    from access_tracking. A page that is mtime-stale but frequently accessed
+    STAYS ALIVE (access reinforces). A page that is mtime-stale AND never
+    accessed gets archived (both signals agree).
     """
     try:
         content = md.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return False
     # Skip if already superseded or archived
+    page_type = ""
+    confidence = "medium"
     fm = FRONTMATTER_RE.match(content)
     if fm:
         status_m = STATUS_RE.search(fm.group(1))
@@ -78,6 +82,8 @@ def _is_stale(md: Path, default_cutoff_ts: float, default_days: int) -> bool:
         # Evergreen types: never archive
         if page_type in NEVER_ARCHIVE_TYPES:
             return False
+        conf_m = CONFIDENCE_RE.search(fm.group(1))
+        confidence = conf_m.group(1).strip() if conf_m else "medium"
         # Type-specific threshold
         threshold_days = _get_type_threshold(page_type)
         threshold_ts = datetime.now().timestamp() - (threshold_days * 86400)
@@ -86,9 +92,27 @@ def _is_stale(md: Path, default_cutoff_ts: float, default_days: int) -> bool:
         threshold_ts = default_cutoff_ts
     # Check file age against the type-specific threshold
     try:
-        return md.stat().st_mtime < threshold_ts
+        mtime_stale = md.stat().st_mtime < threshold_ts
     except OSError:
         return False
+
+    if not mtime_stale:
+        return False  # Not old enough by time.
+
+    # v4.0: Hybrid forgetting — check access-based decay score.
+    # Only applies when we have actual access data for this page.
+    # A page that is mtime-stale but frequently accessed stays alive.
+    try:
+        from access_tracking import decay_score, get_access_stats
+        stats = get_access_stats(md.stem)
+        if stats["total_count"] > 0:
+            score = decay_score(md.stem, page_type or "concept", confidence)
+            if score > 0.3:
+                return False  # Access reinforces — keep alive.
+    except Exception:
+        pass  # access_tracking unavailable — use mtime only.
+
+    return True
 
 
 def _archive_page(md: Path, apply: bool) -> str:
