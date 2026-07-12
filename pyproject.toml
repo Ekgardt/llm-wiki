@@ -4,11 +4,28 @@ version = "3.4.0"
 requires-python = ">=3.10"
 dependencies = []
 
-# Optional heavy dependencies — install via `uv sync --extra semantic`
-# (or `--extra cognee`). Kept optional so the base install stays zero-dep.
+# Optional heavy dependencies — install via `uv sync --extra <name>`.
+# Kept optional so the base install stays zero-dep (stdlib only).
 [project.optional-dependencies]
 semantic = ["sentence-transformers>=2.7,<6"]
 cognee = ["cognee>=0.1,<2"]
+# v4.0: PostgreSQL hybrid search (BM25 + pgvector + graph in one query).
+postgres = ["psycopg[binary]>=3.2,<4"]
+# v4.0: tree-sitter code graph (call/imports/classes for Python/JS/TS).
+code-graph = [
+    "tree-sitter>=0.23,<1",
+    "tree-sitter-python>=0.23,<1",
+    "tree-sitter-javascript>=0.23,<1",
+    "tree-sitter-typescript>=0.23,<1",
+]
+# v4.0: MCP server (9 task-shaped tools, stdio transport, 100% local).
+mcp-server = ["mcp>=1.27,<2"]
+# v4.0: Cross-encoder reranker (mxbai-rerank via ONNX, local CPU).
+reranker = ["onnxruntime>=1.18,<2", "optimum>=1.20,<2", "tokenizers>=0.19,<1"]
+# Convenience: install everything.
+full = [
+    "llm-wiki[semantic,postgres,code-graph,mcp-server,reranker]",
+]
 
 [dependency-groups]
 dev = [

@@ -4,7 +4,18 @@ All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [Unreleased] — v4.0 Development
+
+### PostgreSQL Backend Foundation
+
+- **PostgreSQL + pgvector backend** (`scripts/pg_store.py`) — hybrid search
+  engine: BM25 + pgvector HNSW + graph-neighbor in a single SQL query with
+  weighted RRF. Graceful fallback to SQLite/FTS5 when PostgreSQL unavailable.
+- **Local PostgreSQL management** (`scripts/pg_local.py`) — initdb, pg_ctl
+  start/stop, schema init for a vault-local instance in `cache/postgres/`.
+- **Optional dependencies** — `postgres`, `code-graph`, `mcp-server`,
+  `reranker` extras in `pyproject.toml`. Base install remains zero-dep.
+- **326 tests** (45 new PostgreSQL backend tests).
 
 ## [3.4.0] — 2026-07-11
 

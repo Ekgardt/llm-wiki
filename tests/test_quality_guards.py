@@ -156,8 +156,35 @@ def test_changelog_latest_version_matches_pyproject():
 # ─── 5. CHANGELOG test count matches live suite ─────────────────────
 
 def test_changelog_test_count_matches_live():
-    """The latest CHANGELOG section's 'N tests' claim must match the live count."""
+    """The latest CHANGELOG section's 'N tests' claim must match the live count.
+
+    If an [Unreleased] section exists with a test count, that takes priority
+    (development in progress). Otherwise the latest version section is checked.
+    """
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    # Check for an [Unreleased] section first — dev work in progress.
+    unreleased_match = re.search(
+        r"^##\s*\[Unreleased[^\]]*\]", changelog, re.MULTILINE
+    )
+    if unreleased_match:
+        # Find the next section header to bound the Unreleased block.
+        after = changelog[unreleased_match.end():]
+        next_hdr = re.search(r"^##\s*\[", after, re.MULTILINE)
+        un_section = changelog[unreleased_match.start():
+            unreleased_match.end() + (next_hdr.start() if next_hdr else len(after))
+        ]
+        count_match = re.search(r"(\d+)\s+tests?\b", un_section)
+        if count_match:
+            claimed = int(count_match.group(1))
+            live = _collect_test_count()
+            assert claimed == live, (
+                f"CHANGELOG [Unreleased] claims {claimed} tests but live "
+                f"suite collects {live}; update CHANGELOG"
+            )
+            return
+
+    # Fall through to version-numbered sections.
     headers = list(
         re.finditer(r"^##\s*\[\d+(?:\.\d+)*\]", changelog, re.MULTILINE)
     )
