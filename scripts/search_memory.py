@@ -821,13 +821,7 @@ def _build_vectors(pages: list[Path]) -> dict | None:
     except Exception:
         pass  # best-effort cache
 
-    # Also save legacy JSON for one transition cycle.
     data["vectors"] = vectors.tolist()
-    try:
-        atomic_write(INDEX_DIR / "vectors.json", json.dumps(data))
-    except Exception:
-        pass
-
     return data
 
 
