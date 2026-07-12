@@ -338,6 +338,25 @@ def _valid_as_of(path: str, as_of: str) -> bool:
     return vt[:10] >= as_of[:10]
 
 
+def _deduplicate_by_slug(results: list[dict]) -> list[dict]:
+    """Remove results with duplicate filename stems, keeping the first (highest-ranked).
+
+    Some pages exist both flat (knowledge/notes/X.md) and under subdirectories
+    (knowledge/notes/qa/X.md). This deduplication keeps only the first
+    occurrence, preventing the same content from appearing twice.
+    """
+    seen_stems: set[str] = set()
+    deduped: list[dict] = []
+    for r in results:
+        # Use slug as identifier; fall back to filename stem from path.
+        stem = r.get("slug") or Path(r.get("path", "")).stem
+        if stem in seen_stems:
+            continue
+        seen_stems.add(stem)
+        deduped.append(r)
+    return deduped
+
+
 def _maybe_rerank(query: str, results: list[dict], limit: int) -> list[dict]:
     """Apply cross-encoder reranker if available, else return results as-is.
 
@@ -364,6 +383,9 @@ def _maybe_rerank(query: str, results: list[dict], limit: int) -> list[dict]:
                 record_access(slug, source="search", query=query, rank=i + 1)
     except Exception:
         pass
+
+    # Deduplicate by slug (same page in flat + subdir).
+    results = _deduplicate_by_slug(results)
 
     return results[:limit]
 
@@ -427,9 +449,6 @@ def search(
     # prevent FTS5 from interpreting common words (in, not, and, or,
     # near) as operators or column names. This preserves AND semantics
     # between terms while avoiding syntax errors.
-    # "hook errors" → '"hook" "errors"' → AND of two terms
-    # (NOT '"hook errors"' which would be exact phrase match)
-    # Escape embedded double-quotes so FTS5 does not choke on user input.
     fts_terms = []
     for w in query.split():
         if not w:
@@ -437,6 +456,10 @@ def search(
         safe = w.replace('"', '""')
         fts_terms.append(f'"{safe}"')
     fts_query = " ".join(fts_terms)
+    # Adaptive fetch limit: short queries (≤3 words) match more pages,
+    # so fetch more candidates to give filename/title boosts a chance.
+    query_word_count = len([w for w in query.split() if w])
+    fetch_multiplier = 5 if query_word_count <= 3 else 3
     bm25_raw = conn.execute(
         """
         SELECT path, title, summary, project, timestamp, bm25(pages) as rank
@@ -445,7 +468,7 @@ def search(
         ORDER BY rank
         LIMIT ?
         """,
-        (fts_query, limit * 3),
+        (fts_query, limit * fetch_multiplier),
     ).fetchall()
     conn.close()
 
