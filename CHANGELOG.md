@@ -4,9 +4,9 @@ All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased] — v4.0 Development
+## [4.0.0] — Unreleased
 
-### PostgreSQL Backend Foundation
+### v4.0: Unified Knowledge Intelligence
 
 - **PostgreSQL + pgvector backend** (`scripts/pg_store.py`) — hybrid search
   engine: BM25 + pgvector HNSW + graph-neighbor in a single SQL query with
@@ -15,7 +15,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   start/stop, schema init for a vault-local instance in `cache/postgres/`.
 - **Optional dependencies** — `postgres`, `code-graph`, `mcp-server`,
   `reranker` extras in `pyproject.toml`. Base install remains zero-dep.
-- **419 tests** (58 new PostgreSQL backend + rebuild tests).
+- **431 tests** (58 new PostgreSQL backend + rebuild tests).
 
 ## [3.4.0] — 2026-07-11
 

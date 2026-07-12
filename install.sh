@@ -8,7 +8,7 @@
 #   git clone git@github.com:Ekgardt/llm-wiki.git && cd llm-wiki && ./install.sh
 #
 # NOTE: For reproducible installs, pin to a version tag:
-#   curl ... https://raw.githubusercontent.com/Ekgardt/llm-wiki/v3.4.0/install.sh | bash
+#   curl ... https://raw.githubusercontent.com/Ekgardt/llm-wiki/v4.0.0/install.sh | bash
 # The main branch URL is for development convenience only.
 #
 # What this does:
@@ -45,7 +45,7 @@ VAULT_ROOT="${LLM_WIKI_ROOT:-$SCRIPT_DIR}"
 if [[ ! -f "$VAULT_ROOT/pyproject.toml" ]]; then
   info "Cloning LLM-Wiki repository..."
   INSTALL_DIR="${HOME}/LLM-wiki"
-  git clone --branch v3.4.0 --depth 1 https://github.com/Ekgardt/llm-wiki.git "$INSTALL_DIR"
+  git clone --branch v4.0.0 --depth 1 https://github.com/Ekgardt/llm-wiki.git "$INSTALL_DIR"
   VAULT_ROOT="$INSTALL_DIR"
   cd "$VAULT_ROOT"
 fi

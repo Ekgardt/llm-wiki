@@ -7,7 +7,7 @@
 #   git clone https://github.com/Ekgardt/llm-wiki.git; cd llm-wiki; .\install.ps1
 #
 # NOTE: For reproducible installs, pin to a version tag:
-#   irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/v3.4.0/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/v4.0.0/install.ps1 | iex
 # The main branch URL is for development convenience only.
 #
 # What this does:
@@ -37,7 +37,7 @@ if (-not (Test-Path "$VAULT_ROOT\pyproject.toml")) {
     $VAULT_ROOT = "$env:USERPROFILE\LLM-wiki"
     if (-not (Test-Path "$VAULT_ROOT\pyproject.toml")) {
         Info "Cloning LLM-Wiki..."
-        git clone --branch v3.4.0 --depth 1 https://github.com/Ekgardt/llm-wiki.git $VAULT_ROOT
+        git clone --branch v4.0.0 --depth 1 https://github.com/Ekgardt/llm-wiki.git $VAULT_ROOT
     }
 }
 
