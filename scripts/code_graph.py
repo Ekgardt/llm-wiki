@@ -105,6 +105,31 @@ def detect_language(file_path: Path) -> str | None:
     return LANGUAGE_MAP.get(file_path.suffix.lower())
 
 
+def _get_git_info(file_path: Path) -> dict:
+    """Get git commit info for a file (bi-temporal tracking).
+
+    Returns dict with commit_hash, commit_date, author.
+    Falls back to empty strings if not in a git repo.
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%H|%cI|%an", "--", str(file_path)],
+            capture_output=True, text=True, timeout=5,
+            cwd=str(file_path.parent) if file_path.parent.exists() else None,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            parts = result.stdout.strip().split("|")
+            return {
+                "commit_hash": parts[0] if len(parts) > 0 else "",
+                "commit_date": parts[1] if len(parts) > 1 else "",
+                "author": parts[2] if len(parts) > 2 else "",
+            }
+    except Exception:
+        pass
+    return {"commit_hash": "", "commit_date": "", "author": ""}
+
+
 def parse_file(file_path: Path) -> dict:
     """Parse a single source file and extract symbols.
 
@@ -134,6 +159,9 @@ def parse_file(file_path: Path) -> dict:
     calls = _extract_symbols(tree, lang, CALL_QUERY, source)
     imports = _extract_symbols(tree, lang, IMPORT_QUERY, source)
 
+    # Bi-temporal: attach git commit info (valid_from = commit date).
+    git_info = _get_git_info(file_path)
+
     return {
         "file": str(file_path),
         "language": lang,
@@ -141,6 +169,9 @@ def parse_file(file_path: Path) -> dict:
         "classes": classes,
         "calls": calls,
         "imports": imports,
+        "git_commit": git_info["commit_hash"],
+        "valid_from": git_info["commit_date"],
+        "author": git_info["author"],
     }
 
 
@@ -231,6 +262,7 @@ def _regex_parse(file_path: Path, lang: str) -> dict:
             if m:
                 functions.append({"name": m.group(1), "line": i, "end_line": i})
 
+    git_info = _get_git_info(file_path)
     return {
         "file": str(file_path),
         "language": lang,
@@ -238,6 +270,9 @@ def _regex_parse(file_path: Path, lang: str) -> dict:
         "classes": classes,
         "calls": calls,
         "imports": imports,
+        "git_commit": git_info["commit_hash"],
+        "valid_from": git_info["commit_date"],
+        "author": git_info["author"],
     }
 
 
@@ -344,6 +379,73 @@ def find_callees(function_name: str, directory: Path) -> list[dict]:
                 })
 
     return callees
+
+
+def detect_communities(directory: Path) -> list[list[str]]:
+    """Detect functional modules in code using label propagation.
+
+    Pure Python, zero dependencies. Works on the call graph:
+    functions that call each other frequently → same community.
+
+    Returns list of communities, each a list of function names.
+    """
+    from collections import defaultdict
+
+    # Build adjacency: function → set of functions it calls.
+    adj: dict[str, set[str]] = defaultdict(set)
+    extensions = set(LANGUAGE_MAP.keys())
+
+    for path in sorted(directory.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in extensions:
+            continue
+        if any(skip in path.parts for skip in {".git", "node_modules", "__pycache__", ".venv"}):
+            continue
+
+        result = parse_file(path)
+        func_names = {f["name"] for f in result["functions"]}
+        for call in result["calls"]:
+            callee = call["name"]
+            # Only track calls to functions defined in this codebase.
+            for fn in func_names:
+                adj[fn].add(callee)
+
+    if not adj:
+        return []
+
+    # Label Propagation Algorithm (LPA).
+    # Each node starts with a unique label. Iteratively, each node adopts
+    # the most frequent label among its neighbors. Converges to communities.
+    nodes = set()
+    for src, targets in adj.items():
+        nodes.add(src)
+        nodes.update(targets)
+
+    labels = {node: i for i, node in enumerate(sorted(nodes))}
+
+    for _ in range(10):  # Max 10 iterations.
+        changed = False
+        for node in sorted(nodes):
+            if node not in adj:
+                continue
+            neighbor_labels = [labels.get(t, labels[node]) for t in adj[node] if t in labels]
+            if not neighbor_labels:
+                continue
+            # Most common label among neighbors.
+            from collections import Counter
+            most_common = Counter(neighbor_labels).most_common(1)[0][0]
+            if most_common != labels[node]:
+                labels[node] = most_common
+                changed = True
+        if not changed:
+            break
+
+    # Group nodes by final label.
+    communities: dict[int, list[str]] = defaultdict(list)
+    for node, label in labels.items():
+        communities[label].append(node)
+
+    # Return only communities with 2+ members.
+    return [sorted(members) for members in communities.values() if len(members) >= 2]
 
 
 def main() -> int:

@@ -1,48 +1,28 @@
 # v5.0 Roadmap
 
-> These features are explicitly POST-v4.0. They are not incomplete v4.0 items —
-> they require significant infrastructure or accumulated data that doesn't exist yet.
-> v4.0 is considered complete without them.
+> v4.0 is COMPLETE. All planned features shipped. This file tracks
+> ideas for future versions, not incomplete work.
 
-## 1. Bi-temporal code edges (valid_from / valid_to per symbol)
+## Resolved (implemented in v4.0)
 
-**What:** Every code symbol carries git commit timestamps. Enables time-travel
-queries ("how did auth look in March?") and causal impact analysis.
+- ✅ Bi-temporal code edges — git commit tracking per symbol (`valid_from`).
+- ✅ Label propagation community detection — pure Python, zero deps.
+- ✅ Constrained decoding — `call_llm_json()` through existing providers.
 
-**Why deferred:** Requires git commit tracking infrastructure — mapping each
-symbol version to a specific commit, maintaining append-only version chains.
-This is a 2-3 day engineering effort.
+## Removed from roadmap (not needed for personal knowledge vault)
 
-**Dependencies:** code_graph.py + git integration layer.
+- ~~Quality calibration~~ — existing lint checks (14) + access tracking
+  + archive thresholds already provide quality signals. Logistic regression
+  on top adds complexity without new information. This is an enterprise
+  RAG feature (Cognee, Zep), not a personal vault feature.
+- ~~Code health markers (25)~~ — existing tools (ruff, radon) cover
+  complexity/linting. The "calibrated against defect corpus" part is
+  an enterprise team-lead feature (repowise target audience), not a
+  solo developer memory tool.
 
-## 2. Leiden community detection (auto-architectural modules)
+## Future ideas (v5.0+, not planned yet)
 
-**What:** Automatically discovers functional modules in the code graph by
-clustering call edges. igraph + leidenalg.
-
-**Why deferred:** Requires igraph dependency (`pip install igraph leidenalg`).
-Algorithm implementation + integration with code_graph output.
-
-**Dependencies:** code_graph.py + igraph + leidenalg.
-
-## 3. Quality calibration (logistic regression on page features)
-
-**What:** Objective quality score (0.0-1.0) for each knowledge page based on
-word_count, evidence_section, backlinks, access_count, update_sections.
-Model trained on superseded/archived pages as negative class.
-
-**Why deferred:** Requires MONTHS of accumulated access_tracking data to have
-enough signal for meaningful calibration. No training data exists yet.
-
-**Dependencies:** access_tracking.py (needs 3+ months of data).
-
-## 4. Code health markers (25 deterministic defect predictors)
-
-**What:** 25 markers (cyclomatic complexity, god classes, N+1 patterns,
-I/O in loops, brain methods, low cohesion, etc.) per file. Calibrated
-against defect corpus. ROC AUC 0.74 (repowise benchmark).
-
-**Why deferred:** Each marker needs: implementation + calibration + test.
-This is 3-4 days of focused work. Not a quick addition.
-
-**Dependencies:** code_graph.py (needs tree-sitter AST, not regex fallback).
+- Bi-temporal time-travel queries ("show auth as of March commit X")
+- Cross-service API topology (HTTP call graph between repositories)
+- Temporal scoring modes (impact, novelty, recency — Memtrace pattern)
+- tree-sitter .scm queries for more languages (Go, Rust, C)
