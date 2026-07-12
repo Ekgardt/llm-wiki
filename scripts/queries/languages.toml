@@ -1,0 +1,36 @@
+# Language tier configuration for code_graph.py
+# Each language: extension → {tier, grammar, query_file}
+
+[python]
+extension = ".py"
+tier = "full"
+query = "queries/python.scm"
+
+[javascript]
+extension = ".js"
+tier = "full"
+query = "queries/javascript.scm"
+
+[typescript]
+extension = ".ts"
+tier = "full"
+query = "queries/typescript.scm"
+
+[typescript_tsx]
+extension = ".tsx"
+tier = "full"
+query = "queries/typescript.scm"
+
+[javascript_jsx]
+extension = ".jsx"
+tier = "full"
+query = "queries/javascript.scm"
+
+# Future languages (Good tier):
+# [go]
+# extension = ".go"
+# tier = "good"
+#
+# [rust]
+# extension = ".rs"
+# tier = "good"
