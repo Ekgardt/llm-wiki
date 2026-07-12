@@ -35,7 +35,6 @@ from memory_state import ROOT, STATE_ROOT, atomic_write  # noqa: E402
 INDEX_DIR = STATE_ROOT / "cache"
 INDEX_FILE = INDEX_DIR / "index.sqlite"
 INDEX_MANIFEST = INDEX_DIR / ".paths-manifest"
-VECTOR_CACHE = INDEX_DIR / "vectors.json"  # Legacy JSON cache (kept for backward compat)
 VECTOR_NPY = INDEX_DIR / "vectors.npy"  # Binary numpy cache (memory-mapped, fast load)
 VECTOR_META = INDEX_DIR / "vectors_meta.json"  # Metadata without vectors (small JSON)
 
@@ -121,9 +120,15 @@ def _cosine_similarity(query_vec: list[float], doc_vecs: list[list[float]]) -> l
 
 
 def _collect_pages(scope: str = "all") -> list[Path]:
-    """Collect all searchable markdown pages."""
+    """Collect all searchable markdown pages.
+
+    Deduplicates by filename stem: if the same slug exists both flat
+    (knowledge/notes/X.md) and under a subdirectory (knowledge/notes/qa/X.md),
+    only the flat version is kept.
+    """
     pages: list[Path] = []
     seen: set[Path] = set()
+    seen_stems: set[str] = set()
 
     roots: list[Path] = []
     # All scope values resolve to the single knowledge/notes tree after the
@@ -151,6 +156,19 @@ def _collect_pages(scope: str = "all") -> list[Path]:
                         continue
             except OSError:
                 continue
+            # Deduplicate by stem: prefer flat (knowledge/notes/X.md) over subdir.
+            if md.stem in seen_stems:
+                # Check if current md is flat (preferred) and existing is subdir.
+                existing_idx = next((i for i, p in enumerate(pages) if p.stem == md.stem), -1)
+                if existing_idx >= 0:
+                    existing = pages[existing_idx]
+                    is_md_flat = len(md.relative_to(root).parts) == 1
+                    is_existing_flat = len(existing.relative_to(root).parts) == 1
+                    if is_md_flat and not is_existing_flat:
+                        pages[existing_idx] = md  # Replace subdir with flat.
+                    continue  # Skip duplicate.
+                continue
+            seen_stems.add(md.stem)
             seen.add(md)
             pages.append(md)
     return pages
@@ -740,7 +758,7 @@ def _load_or_build_vectors(pages: list[Path]) -> dict | None:
         p.relative_to(ROOT).as_posix() for p in pages if p.exists()
     )
 
-    # Try .npy format first (fast, memory-mapped).
+    # Try .npy format (fast, memory-mapped).
     if VECTOR_NPY.exists() and VECTOR_META.exists():
         try:
             cache_meta = json.loads(VECTOR_META.read_text(encoding="utf-8"))
@@ -754,20 +772,6 @@ def _load_or_build_vectors(pages: list[Path]) -> dict | None:
                     vectors = np.load(str(VECTOR_NPY), mmap_mode="r")
                     cache_meta["vectors"] = vectors.tolist()
                     return cache_meta
-        except Exception:
-            pass
-
-    # Fall back to legacy JSON format (backward compat).
-    if VECTOR_CACHE.exists():
-        try:
-            cache_mtime = VECTOR_CACHE.stat().st_mtime
-            needs_rebuild = any(
-                p.stat().st_mtime > cache_mtime for p in pages if p.exists()
-            )
-            if not needs_rebuild:
-                data = json.loads(VECTOR_CACHE.read_text(encoding="utf-8"))
-                if sorted(data.get("paths") or []) == current_paths:
-                    return data
         except Exception:
             pass
 
@@ -836,10 +840,10 @@ def _build_vectors(pages: list[Path]) -> dict | None:
     except Exception:
         pass  # best-effort cache
 
-    # Also save legacy JSON for backward compat (one transition cycle).
+    # Also save legacy JSON for one transition cycle.
     data["vectors"] = vectors.tolist()
     try:
-        atomic_write(VECTOR_CACHE, json.dumps(data))
+        atomic_write(INDEX_DIR / "vectors.json", json.dumps(data))
     except Exception:
         pass
 

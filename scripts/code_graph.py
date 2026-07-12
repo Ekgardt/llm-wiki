@@ -1,8 +1,7 @@
 """Code graph — tree-sitter based code intelligence for the vault.
 
 Parses source code files into a knowledge graph: functions, classes,
-imports, call edges. Stores in PostgreSQL (when available) for graph
-queries, or falls back to in-memory analysis.
+imports, call edges. Stores results for graph queries and impact analysis.
 
 The graph enables:
 - "Who calls this function?" — caller analysis

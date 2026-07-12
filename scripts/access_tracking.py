@@ -6,9 +6,8 @@ direct reads). This data powers:
 - Quality scoring: frequently-accessed pages are validated as useful.
 - Advisory ranking: recently-accessed pages get boost in SessionStart.
 
-The access log is stored in two places:
-1. PostgreSQL access_log table (when PG available) — queryable, scalable.
-2. cache/access_log.jsonl (always) — append-only JSONL, survives PG restarts.
+The access log is stored in:
+1. cache/access_log.jsonl (always) — append-only JSONL, survives restarts.
 
 Frontmatter fields updated on page files:
 - access_count: int (how many times accessed)
@@ -65,22 +64,6 @@ def record_access(slug: str, source: str = "search", query: str | None = None,
     _batch[slug] = _batch.get(slug, 0) + 1
     if _batch[slug] >= BATCH_THRESHOLD:
         flush_access_to_frontmatter(slug)
-
-    # Record in PostgreSQL if available.
-    try:
-        from pg_store import db, log_access, pg_available
-
-        if pg_available():
-            with db() as conn:
-                page_row = conn.execute(
-                    "SELECT id FROM pages WHERE slug = %s AND status = 'active'",
-                    (slug,),
-                ).fetchone()
-                if page_row:
-                    log_access(conn, page_row[0], source, query, rank)
-                    conn.commit()
-    except Exception:
-        pass
 
 
 def flush_access_to_frontmatter(slug: str | None = None) -> int:
