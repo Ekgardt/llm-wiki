@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import markdown_transaction
 import pytest
 from markdown_transaction import ABSENT, MarkdownChange, MarkdownCoordinator
 from reliable_memory import sha256_bytes
@@ -478,7 +479,7 @@ def test_recovery_does_not_discard_a_live_preparer(vault: Path, state_root: Path
     assert _row(state_root, "live")["state"] == "preparing"
 
 
-def test_corrupt_after_image_rolls_back_only_known_transaction_hashes(
+def test_corrupt_after_image_does_not_rollback_ambiguous_after_hash_without_receipt(
     vault: Path, state_root: Path
 ):
     target = vault / "knowledge/notes/page.md"
@@ -494,8 +495,98 @@ def test_corrupt_after_image_rolls_back_only_known_transaction_hashes(
 
     recovered = coordinator.recover()[0]
 
-    assert recovered.state == "discarded"
+    assert recovered.state == "quarantined"
     assert recovered.error_code == "after_image_corrupt"
+    assert target.read_bytes() == b"after"
+    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+        assert database.execute(
+            'SELECT applied FROM "operation" WHERE transaction_id = ?',
+            (transaction.id,),
+        ).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    ("kind", "before", "after"),
+    [
+        ("create", None, b"created externally"),
+        ("replace", b"before", b"replaced externally"),
+        ("delete", b"before", None),
+    ],
+)
+def test_corrupt_other_image_preserves_ambiguous_applied_zero_target(
+    vault: Path,
+    state_root: Path,
+    kind: str,
+    before: bytes | None,
+    after: bytes | None,
+):
+    target = vault / "knowledge/notes/page.md"
+    if before is not None:
+        target.write_bytes(before)
+    changes = {
+        "create": MarkdownChange.create(
+            "knowledge/notes/page.md", b"created externally"
+        ),
+        "replace": MarkdownChange.replace(
+            "knowledge/notes/page.md", b"replaced externally"
+        ),
+        "delete": MarkdownChange.delete("knowledge/notes/page.md"),
+    }
+    coordinator = MarkdownCoordinator(vault, state_root)
+    transaction = coordinator.prepare(
+        [
+            changes[kind],
+            MarkdownChange.create("knowledge/notes/corrupt-source.md", b"source"),
+        ],
+        operation_id=f"corrupt-ambiguous:{kind}",
+    )
+    if after is None:
+        target.unlink()
+    else:
+        target.write_bytes(after)
+    artifact = state_root / "run/transactions" / transaction.id / "after/000001.bin"
+    artifact.write_bytes(b"corrupt")
+
+    recovered = coordinator.recover()[0]
+
+    assert (recovered.state, recovered.error_code) == (
+        "quarantined",
+        "after_image_corrupt",
+    )
+    assert (target.read_bytes() if target.exists() else None) == after
+    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+        assert database.execute(
+            'SELECT applied FROM "operation" WHERE transaction_id = ? AND position = 0',
+            (transaction.id,),
+        ).fetchone()[0] == 0
+
+
+def test_corrupt_after_image_rolls_back_durably_applied_target(
+    vault: Path, state_root: Path
+):
+    target = vault / "knowledge/notes/page.md"
+    target.write_bytes(b"before")
+    coordinator = MarkdownCoordinator(vault, state_root)
+    transaction = coordinator.prepare(
+        [MarkdownChange.replace("knowledge/notes/page.md", b"after")],
+        operation_id="corrupt-applied",
+    )
+    target.write_bytes(b"after")
+    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+        database.execute(
+            'UPDATE "operation" SET applied = 1 WHERE transaction_id = ?',
+            (transaction.id,),
+        )
+        database.commit()
+    artifact = state_root / "run/transactions" / transaction.id / "after/000000.bin"
+    artifact.write_bytes(b"corrupt")
+
+    recovered = coordinator.recover()[0]
+
+    assert (recovered.state, recovered.error_code) == (
+        "discarded",
+        "after_image_corrupt",
+    )
     assert target.read_bytes() == b"before"
 
 
@@ -518,6 +609,74 @@ def test_corrupt_after_image_quarantines_unknown_target_bytes(
     assert recovered.state == "quarantined"
     assert recovered.error_code == "after_image_corrupt"
     assert target.read_bytes() == b"unknown"
+
+
+def test_apply_parent_identity_change_quarantines_and_releases_gate(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    target = vault / "knowledge/notes/page.md"
+    target.write_bytes(b"before")
+    coordinator = MarkdownCoordinator(vault, state_root)
+    transaction = coordinator.prepare(
+        [MarkdownChange.replace("knowledge/notes/page.md", b"after")],
+        operation_id="parent-change-apply",
+    )
+    parent_identity = coordinator._parent_identity
+    monkeypatch.setattr(
+        coordinator,
+        "_parent_identity",
+        lambda path: (
+            parent_identity(path)[0],
+            parent_identity(path)[1] + 1,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="parent identity"):
+        coordinator.apply(transaction.id)
+
+    record = coordinator._record(transaction.id)
+    assert (record.state, record.error_code) == (
+        "quarantined",
+        "parent_identity_changed",
+    )
+    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+        assert database.execute("SELECT * FROM writer_owners").fetchall() == []
+    monkeypatch.setattr(coordinator, "_parent_identity", parent_identity)
+    unrelated = coordinator.prepare(
+        [MarkdownChange.create("knowledge/notes/unrelated.md", b"unrelated")],
+        operation_id="after-parent-change",
+    )
+    assert unrelated.state == "prepared"
+
+
+def test_recover_reparse_change_quarantines_and_does_not_block_prepare(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    target = vault / "knowledge/notes/page.md"
+    target.write_bytes(b"before")
+    coordinator = MarkdownCoordinator(vault, state_root)
+    transaction = coordinator.prepare(
+        [MarkdownChange.replace("knowledge/notes/page.md", b"after")],
+        operation_id="reparse-recovery",
+    )
+    monkeypatch.setattr(
+        markdown_transaction,
+        "_is_reparse_point",
+        lambda path: path == vault / "knowledge/notes",
+    )
+
+    recovered = coordinator.recover()
+
+    assert [(record.id, record.state, record.error_code) for record in recovered] == [
+        (transaction.id, "quarantined", "parent_identity_changed")
+    ]
+    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+        assert database.execute("SELECT * FROM writer_owners").fetchall() == []
+    unrelated = coordinator.prepare(
+        [MarkdownChange.replace("knowledge/index.md", b"unrelated")],
+        operation_id="after-reparse-change",
+    )
+    assert unrelated.state == "prepared"
 
 
 def test_project_lease_precondition_is_persisted_and_rechecked_before_apply(

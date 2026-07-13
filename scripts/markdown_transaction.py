@@ -103,6 +103,29 @@ class TransactionFailure(RuntimeError):
         self.state = state
 
 
+class TargetBoundaryFailure(RuntimeError):
+    """A persisted target no longer has its prepared containment identity."""
+
+
+def _is_target_boundary_error(error: BaseException) -> bool:
+    if isinstance(error, (TargetBoundaryFailure, FileNotFoundError)):
+        return True
+    message = str(error).casefold()
+    return any(
+        marker in message
+        for marker in (
+            "parent identity",
+            "parent does not exist",
+            "reparse point",
+            "traverses a symlink",
+            "non-canonical parent",
+            "outside the vault",
+            "escapes the vault",
+            "stable directory",
+        )
+    )
+
+
 def _require_bytes(content: bytes) -> bytes:
     if not isinstance(content, bytes):
         raise TypeError("Markdown content must be bytes")
@@ -718,8 +741,19 @@ class MarkdownCoordinator:
                         transaction_id, exc.state, error_code=exc.code
                     )
                 raise
-            except RuntimeError as exc:
+            except (FileNotFoundError, RuntimeError, ValueError) as exc:
                 message = str(exc)
+                if _is_target_boundary_error(exc):
+                    self._set_transaction_state(
+                        transaction_id,
+                        "quarantined",
+                        error_code="parent_identity_changed",
+                    )
+                    raise TransactionFailure(
+                        "target parent identity changed",
+                        "parent_identity_changed",
+                        "quarantined",
+                    ) from exc
                 if "after-image is corrupt" in message or "plan hash mismatch" in message:
                     recovered = self._recover_corrupt_after_image(transaction_id)
                     raise TransactionFailure(
@@ -824,9 +858,16 @@ class MarkdownCoordinator:
                             transaction_id, exc.state, error_code=exc.code
                         )
                     recovered.append(self._record(transaction_id))
-                except RuntimeError as exc:
+                except (FileNotFoundError, RuntimeError, ValueError) as exc:
                     message = str(exc)
-                    if "after-image is corrupt" in message or "plan hash mismatch" in message:
+                    if _is_target_boundary_error(exc):
+                        self._set_transaction_state(
+                            transaction_id,
+                            "quarantined",
+                            error_code="parent_identity_changed",
+                        )
+                        recovered.append(self._record(transaction_id))
+                    elif "after-image is corrupt" in message or "plan hash mismatch" in message:
                         recovered.append(self._recover_corrupt_after_image(transaction_id))
                     elif "before state mismatch" in message:
                         rows = self._operation_rows(transaction_id)
@@ -927,7 +968,10 @@ class MarkdownCoordinator:
                 ):
                     return "invalid"
                 path = str(operation["path"])
-                self._target(path)
+                try:
+                    self._target(path)
+                except (FileNotFoundError, ValueError) as exc:
+                    raise TargetBoundaryFailure from exc
                 normalized = unicodedata.normalize("NFC", path).casefold()
                 if normalized in seen_paths:
                     return "invalid"
@@ -946,7 +990,10 @@ class MarkdownCoordinator:
                     and (before_hash == ABSENT or after_hash != ABSENT)
                 ):
                     return "invalid"
-                current_parent = self._parent_identity(self._target(path).parent)
+                try:
+                    current_parent = self._parent_identity(self._target(path).parent)
+                except (FileNotFoundError, RuntimeError, ValueError) as exc:
+                    raise TargetBoundaryFailure from exc
                 parent_identity = (
                     persisted["parent_device"],
                     persisted["parent_inode"],
@@ -978,6 +1025,11 @@ class MarkdownCoordinator:
             }
             if sha256_bytes(canonical_json_bytes(request)) != manifest["request_hash"]:
                 return "invalid"
+        except TargetBoundaryFailure:
+            self._set_transaction_state(
+                record.id, "quarantined", error_code="parent_identity_changed"
+            )
+            return "quarantined"
         except (AssertionError, KeyError, OSError, TypeError, ValueError):
             return "invalid"
 
@@ -997,7 +1049,7 @@ class MarkdownCoordinator:
             )
         if parent_mismatch:
             self._set_transaction_state(
-                record.id, "quarantined", error_code="precondition_failed"
+                record.id, "quarantined", error_code="parent_identity_changed"
             )
             return "quarantined"
         return "promoted"
@@ -1016,7 +1068,17 @@ class MarkdownCoordinator:
         for row in self._operation_rows(transaction_id):
             if not row["applied"]:
                 continue
-            current = self._operation_hash(row)
+            try:
+                current = self._operation_hash(row)
+            except (OSError, RuntimeError, ValueError) as exc:
+                if _is_target_boundary_error(exc):
+                    self._set_transaction_state(
+                        transaction_id,
+                        "quarantined",
+                        error_code="parent_identity_changed",
+                    )
+                    return
+                raise
             if current != row["after_hash"]:
                 continue
             before_state: object = ABSENT
@@ -1053,7 +1115,14 @@ class MarkdownCoordinator:
             }
             try:
                 self._apply_inverse_under_fence(inverse, before_state)
-            except (OSError, RuntimeError):
+            except (OSError, RuntimeError, ValueError) as exc:
+                if _is_target_boundary_error(exc):
+                    self._set_transaction_state(
+                        transaction_id,
+                        "quarantined",
+                        error_code="parent_identity_changed",
+                    )
+                    return
                 continue
             with self._connect() as database, begin_immediate(database):
                 database.execute(
@@ -1074,20 +1143,33 @@ class MarkdownCoordinator:
 
     def _recover_corrupt_after_image(self, transaction_id: str) -> TransactionRecord:
         rows = self._operation_rows(transaction_id)
-        before_states: list[object] = []
-        current_hashes: list[str] = []
+        before_states: dict[int, object] = {}
+        current_hashes: dict[int, str] = {}
+        ambiguous = False
         for row in rows:
-            current = self._operation_hash(row)
-            current_hashes.append(current)
+            try:
+                current = self._operation_hash(row)
+            except (OSError, RuntimeError, ValueError) as exc:
+                if _is_target_boundary_error(exc):
+                    self._set_transaction_state(
+                        transaction_id,
+                        "quarantined",
+                        error_code="parent_identity_changed",
+                    )
+                    return self._record(transaction_id)
+                raise
+            current_hashes[row["position"]] = current
             if current not in {row["before_hash"], row["after_hash"]}:
-                self._set_transaction_state(
-                    transaction_id,
-                    "quarantined",
-                    error_code="after_image_corrupt",
-                )
-                return self._record(transaction_id)
+                ambiguous = True
+                continue
+            if not row["applied"]:
+                if current == row["after_hash"]:
+                    ambiguous = True
+                continue
+            if current == row["before_hash"]:
+                continue
             if row["before_hash"] == ABSENT:
-                before_states.append(ABSENT)
+                before_states[row["position"]] = ABSENT
                 continue
             artifact = (
                 self.transaction_root
@@ -1100,23 +1182,20 @@ class MarkdownCoordinator:
             except OSError:
                 content = b""
             if sha256_bytes(content) != row["before_hash"]:
-                self._set_transaction_state(
-                    transaction_id,
-                    "quarantined",
-                    error_code="after_image_corrupt",
-                )
-                return self._record(transaction_id)
-            before_states.append(
-                {
-                    "sha256": row["before_hash"],
-                    "artifact": f"before/{row['position']:06d}.bin",
-                }
-            )
+                ambiguous = True
+                continue
+            before_states[row["position"]] = {
+                "sha256": row["before_hash"],
+                "artifact": f"before/{row['position']:06d}.bin",
+            }
 
-        for row, current, before_state in zip(
-            rows, current_hashes, before_states, strict=True
-        ):
-            if current == row["before_hash"]:
+        for row in rows:
+            position = row["position"]
+            if (
+                not row["applied"]
+                or current_hashes[position] != row["after_hash"]
+                or position not in before_states
+            ):
                 continue
             inverse = {
                 "transaction_id": transaction_id,
@@ -1133,16 +1212,20 @@ class MarkdownCoordinator:
                 "parent_inode": row["parent_inode"],
             }
             try:
-                self._apply_inverse_under_fence(inverse, before_state)
-            except RuntimeError:
-                self._set_transaction_state(
-                    transaction_id,
-                    "quarantined",
-                    error_code="after_image_corrupt",
-                )
-                return self._record(transaction_id)
+                self._apply_inverse_under_fence(inverse, before_states[position])
+            except (OSError, RuntimeError, ValueError) as exc:
+                if _is_target_boundary_error(exc):
+                    self._set_transaction_state(
+                        transaction_id,
+                        "quarantined",
+                        error_code="parent_identity_changed",
+                    )
+                    return self._record(transaction_id)
+                ambiguous = True
         self._set_transaction_state(
-            transaction_id, "discarded", error_code="after_image_corrupt"
+            transaction_id,
+            "quarantined" if ambiguous else "discarded",
+            error_code="after_image_corrupt",
         )
         return self._record(transaction_id)
 
