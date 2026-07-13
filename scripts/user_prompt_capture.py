@@ -22,7 +22,6 @@ Output: a JSON `{"continue": true}` on stdout (or empty — both work).
 """
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import os
@@ -40,9 +39,16 @@ if hasattr(sys.stdout, "reconfigure"):
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
-    from memory_state import ROOT as _MS_ROOT  # noqa: E402
-    from memory_state import STATE_ROOT as _MS_STATE
-    from memory_state import update_state
+    from memory_state import (  # noqa: E402
+        ROOT as _MS_ROOT,
+    )
+    from memory_state import (
+        STATE_ROOT as _MS_STATE,
+    )
+    from memory_state import (
+        spawn_detached,
+        update_state,
+    )
     ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(_MS_ROOT))).resolve()
     STATE_ROOT = Path(os.environ.get("LLM_WIKI_STATE_ROOT", str(_MS_STATE))).resolve()
 except Exception:  # noqa: BLE001
@@ -53,10 +59,14 @@ except Exception:  # noqa: BLE001
         os.environ.get("LLM_WIKI_STATE_ROOT", str(ROOT))
     ).resolve()
 
-    def update_state(mutator):  # type: ignore[misc]
+    def update_state(mutator, *, lock_timeout=10.0):  # type: ignore[misc]
         """No-op stub — safe skip when memory_state is unavailable."""
         pass
 
+    def spawn_detached(args):  # type: ignore[misc]
+        return None
+
+from event_envelope import build_event_envelope  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
 DAILY_DIR = ROOT / "knowledge" / "daily"
@@ -72,6 +82,8 @@ MIN_PROMPT_CHARS = 5
 # How many chars of the prompt to log. Long prompts (paste of files,
 # stack traces) shouldn't blow up the daily log.
 MAX_PROMPT_PREVIEW = 140
+FLUSH_MESSAGE_INTERVAL = 20
+HOOK_STATE_LOCK_TIMEOUT = 0.1
 
 
 def _read_hook_input() -> dict:
@@ -146,9 +158,94 @@ def _record_dedupe(slug: str, prompt_hash: str) -> None:
                 )[:100]
                 state["prompt_capture_dedupe"] = dict(items)
 
-        update_state(_mutate)
+        update_state(_mutate, lock_timeout=HOOK_STATE_LOCK_TIMEOUT)
     except Exception:  # noqa: BLE001
         pass  # never fail the hook on dedupe-bookkeeping
+
+
+def _claim_prompt_dedupe(slug: str, prompt_hash: str) -> bool:
+    """Atomically reserve a prompt key; return True only for the first caller."""
+    claimed = False
+    key = f"{slug}::{prompt_hash}"
+    now = datetime.now()
+
+    def _mutate(state: dict) -> None:
+        nonlocal claimed
+        dedupe = state.setdefault("prompt_capture_dedupe", {})
+        last = dedupe.get(key)
+        if last:
+            try:
+                if (now - datetime.fromisoformat(last)).total_seconds() < RATE_LIMIT_SECONDS:
+                    return
+            except (ValueError, TypeError):
+                pass
+        claimed = True
+        dedupe[key] = now.isoformat(timespec="seconds")
+        if len(dedupe) > 100:
+            state["prompt_capture_dedupe"] = dict(
+                sorted(dedupe.items(), key=lambda item: item[1], reverse=True)[:100]
+            )
+
+    try:
+        update_state(_mutate, lock_timeout=HOOK_STATE_LOCK_TIMEOUT)
+    except Exception:  # noqa: BLE001
+        return True
+    return claimed
+
+
+def _increment_prompt_count(session_id: str, slug: str) -> int:
+    """Increment this session's prompt count, falling back to the project."""
+    count = 0
+    normalized_session = str(session_id or "").strip()
+    key = (
+        normalized_session
+        if normalized_session and normalized_session != "unknown"
+        else f"project:{slug or 'unknown'}"
+    )
+
+    def _mutate(state: dict) -> None:
+        nonlocal count
+        counters = state.setdefault("user_prompt_counts", {})
+        count = int(counters.get(key, 0)) + 1
+        counters[key] = count
+
+    try:
+        update_state(_mutate, lock_timeout=HOOK_STATE_LOCK_TIMEOUT)
+        return count
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _spawn_periodic_flush(hook: dict, session_id: str) -> None:
+    args = [
+        sys.executable,
+        str(ROOT / "scripts" / "flush_memory.py"),
+        "--event", "pre-compact",
+        "--session-id", str(session_id),
+        "--transcript", str(hook.get("transcript_path", "")),
+        "--trigger", "prompt-count-20",
+    ]
+    spawn_detached(args)
+
+
+def _build_advisory_refresh() -> str:
+    try:
+        from build_advisory import build_advisory_refresh
+
+        return build_advisory_refresh()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _write_advisory_output(advisory: str) -> None:
+    if not advisory:
+        return
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": advisory,
+        }
+    }, ensure_ascii=False))
 
 
 def _append_prompt_tag(slug: str, session_id: str, preview: str) -> None:
@@ -171,8 +268,10 @@ def main() -> int:
     try:
         hook = _read_hook_input()
         prompt = (hook.get("prompt") or "").strip()
-        session_id = hook.get("session_id") or "unknown"
-        cwd = hook.get("cwd") or os.getcwd()
+        source_session = hook.get("session_id")
+        source_cwd = hook.get("cwd")
+        session_id = source_session or "unknown"
+        cwd = source_cwd or os.getcwd()
 
         # Skip prompts that are too short to be meaningful.
         if len(prompt) < MIN_PROMPT_CHARS:
@@ -187,15 +286,35 @@ def main() -> int:
             pass
 
         slug = _compute_slug_from_cwd(cwd)
+        safe_prompt = redact_secrets(prompt)
+        envelope = build_event_envelope(
+            event_type="user_prompt",
+            payload={"prompt": safe_prompt},
+            agent=hook.get("agent") if isinstance(hook.get("agent"), str) else None,
+            session=str(source_session) if source_session is not None else None,
+            project=slug if source_cwd else None,
+            worktree=str(source_cwd) if source_cwd else None,
+            severity=hook.get("severity") if isinstance(hook.get("severity"), str) else None,
+            parent_event_id=(
+                hook.get("parent_event_id")
+                if isinstance(hook.get("parent_event_id"), str)
+                else None
+            ),
+        )
 
-        # Rate-limit by prompt content hash (so the same question
-        # retried 5 times in a row only logs once per window).
-        prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
-        if _rate_limited(slug, prompt_hash):
+        prompt_count = _increment_prompt_count(str(session_id), slug)
+        if prompt_count and prompt_count % 10 == 0:
+            _write_advisory_output(_build_advisory_refresh())
+        if prompt_count and prompt_count % FLUSH_MESSAGE_INTERVAL == 0:
+            _spawn_periodic_flush(hook, session_id)
+
+        # Rate-limit by the redacted payload hash so capture state cannot
+        # become a side channel for source secrets.
+        prompt_hash = envelope.content_hash[:12]
+        if not _claim_prompt_dedupe(slug, prompt_hash):
             return 0
 
-        _append_prompt_tag(slug, session_id, prompt)
-        _record_dedupe(slug, prompt_hash)
+        _append_prompt_tag(slug, session_id, envelope.payload["prompt"])
     except Exception:  # noqa: BLE001
         # Last-resort: never break the user's session over a logging hook.
         pass

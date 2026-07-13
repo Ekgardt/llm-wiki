@@ -12,14 +12,11 @@ For the canonical structure reference (paths, env vars, zones), see
 
 ## The mental model in one paragraph
 
-This system **watches what you do** in your AI coding agent (OpenCode, Codex,
-Claude Code, Cursor, or Antigravity), **decides what's worth remembering**
-using an LLM, and **saves it as markdown pages** in your vault. Next time
-you open a project, those pages are loaded back into the agent's context so
-it picks up where you stopped — no re-explaining, no lost decisions, no
-repeated mistakes. **All of this happens automatically** — capture on every
-action, classification on session end, compile in background, nightly deep
-maintenance via scheduler.
+Agents read and act on the vault through the local MCP server. Thin native
+hooks/plugins forward lifecycle events that MCP cannot observe through
+`integration_adapter.py`. The system decides what's worth remembering, saves
+it as Markdown, and compiles in the background. SessionStart health is quiet
+when healthy and injects only degraded/error findings.
 
 **The LLM part**: the system needs a "brain" to read transcripts and decide
 what to keep. That brain is **whichever agent you're already using** — the
@@ -50,8 +47,8 @@ The installer detects your agents and wires them up automatically.
    ```bash
    git clone https://github.com/Ekgardt/llm-wiki.git
    cd llm-wiki
-   uv sync
-   uv run pytest -q          # verify: 281 tests collected should pass
+   uv sync --locked --extra mcp-server
+   uv run pytest -q          # verify: 812 tests collected should pass
    ```
 
 2. **Set environment variables** (add to your shell profile):
@@ -75,12 +72,15 @@ The installer detects your agents and wires them up automatically.
 
 | Agent | How to wire |
 |-------|-------------|
-| **Claude Code** | `uv run python scripts/merge_claude_settings.py` — merges hooks into `~/.claude/settings.json` (5 hooks: SessionStart, PreCompact, SessionEnd, UserPromptSubmit, PostToolUse). Backup written automatically. |
-| **OpenCode** | Copy `scripts/llm-wiki-memory-opencode.js` to `~/.config/opencode/plugins/llm-wiki-memory.js`. Plugin autoloads. |
-| **Codex CLI** | Windows: add `. "$env:LLM_WIKI_ROOT\scripts\codex-memory-wrapper.ps1"` to `$PROFILE`. Unix: alias `codex-mem` to `uv run python scripts/codex_memory.py daily-log`. |
-| **Cursor** | Copy `integrations/cursor/rules/llm-wiki.mdc` to `.cursor/rules/`. |
-| **Antigravity** | Copy `integrations/antigravity/AGENTS.md` to your project root. |
-| **Obsidian** | Import `integrations/obsidian/Article-to-Inbox.json` as a Web Clipper template. |
+| **Claude Code** | Configure MCP for reads/actions, then run `uv run python scripts/merge_claude_settings.py` for five thin lifecycle hooks. |
+| **OpenCode** | Configure MCP, then copy `scripts/llm-wiki-memory-opencode.js` for lifecycle events. |
+| **Codex CLI** | Configure MCP; on Windows add `. "$env:LLM_WIKI_ROOT\scripts\codex-memory-wrapper.ps1"` to `$PROFILE` for lifecycle capture. |
+| **Cursor** | Configure MCP and copy `integrations/cursor/rules/llm-wiki.mdc` to `.cursor/rules/`. |
+| **Antigravity** | Configure MCP and copy `integrations/antigravity/AGENTS.md` to your project root. |
+| **Obsidian** | Optional Markdown viewer only: open the vault directly. No Obsidian UI is required. |
+
+The MCP server exposes 12 task-shaped tools, including `doctor`. All tools use
+one response envelope, and health/context are also available as MCP resources.
 
 ### Register scheduled maintenance
 
@@ -155,7 +155,8 @@ the LLM cannot fabricate citations.
 uv run python scripts/lint_memory.py --scope all           # 13 structural checks
 uv run python scripts/lint_memory.py --contradictions      # + LLM-judged contradictions
 uv run python scripts/archive_stale.py --apply           # archive old pages by type
-uv run python scripts/lookup_mode.py                       # show retrieval tier + QMD status
+uv run python scripts/lookup_mode.py                       # show direct/base/hybrid mode
+uv run python scripts/doctor.py                            # local health; --repair is explicit
 ```
 
 ### Skills (agent-side workflows)
@@ -183,8 +184,9 @@ don't match:
 uv sync --extra semantic
 ```
 
-This installs `sentence-transformers` with a MiniLM model. Embeddings are
-cached in `cache/vectors.json` (gitignored) and rebuilt automatically when
+This installs `sentence-transformers` with `BAAI/bge-small-en-v1.5`.
+Embeddings are cached in `cache/vectors.npy` with metadata in
+`cache/vectors_meta.json` (both gitignored) and rebuilt automatically when
 pages change.
 
 ## Optional: Cognee graph (300+ pages)
@@ -223,9 +225,9 @@ setup steps.
   silent unless you check the log
 
 ### "Tests fail on fresh clone"
-- `uv sync` first (deps must be installed)
-- `uv run pytest -q` — should report 281 tests collected passed
-- If `< 281`, your checkout is stale; `git pull`
+- Run `uv sync --locked --extra mcp-server` first (the installed baseline includes MCP)
+- `uv run pytest -q` — should report 812 tests collected
+- If `< 812`, your checkout is stale; `git pull`
 
 ---
 
@@ -233,12 +235,12 @@ setup steps.
 
 | Path | Zone | Purpose |
 |------|------|---------|
-| `scripts/` | CODE | Pipeline + hooks + helpers (45 .py + 3 helpers) |
-| `tests/` | CODE | 25 test files, 281 tests collected |
+| `scripts/` | CODE | Pipeline + hooks + helpers (60 .py + 3 helpers) |
+| `tests/` | CODE | 42 test files, 812 tests collected |
 | `docs/` | CODE | This file + ARCHITECTURE + STRUCTURE + SETUP-COGNEE + EXPORTING |
 | `skills/` | CODE | 9 agent skills |
 | `rules/` | CODE | 3 file-handling policies |
-| `integrations/` | CODE | claude-code, cursor, antigravity, obsidian |
+| `integrations/` | CODE | Thin claude-code, cursor, and antigravity host wiring |
 | `benchmark/` | CODE | Benchmark suite + report |
 | `knowledge/daily/` | KNOWLEDGE | Append-only session logs (private) |
 | `knowledge/notes/` | KNOWLEDGE | Durable OKF pages |
@@ -246,7 +248,7 @@ setup steps.
 | `knowledge/raw/` | KNOWLEDGE | Immutable sources |
 | `knowledge/inbox/` | KNOWLEDGE | Unprocessed staging |
 | `knowledge/feedback/` | KNOWLEDGE | Correction candidates |
-| `cache/` | RUNTIME | Search / QMD / vector indexes (gitignored) |
+| `cache/` | RUNTIME | FTS5 / vector / graph indexes (gitignored) |
 | `logs/` | RUNTIME | Lint reports, compile logs (gitignored) |
 | `run/` | RUNTIME | state.json, compile.pid, queue/ (gitignored) |
 | `cache/cognee/` | RUNTIME | Optional semantic graph (gitignored) |

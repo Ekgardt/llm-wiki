@@ -36,10 +36,12 @@ def main() -> int:
     if not isinstance(payload, dict):
         return 0
 
-    slug = payload.get("slug") or "unknown"
+    slug = payload.get("slug")
+    if not isinstance(slug, str) or not slug:
+        return 0
     reason = payload.get("reason") or "opencode-heartbeat"
-    session_id = payload.get("sessionId") or "opencode"
-    project_root = payload.get("projectRoot") or ""
+    session_id = payload.get("sessionId")
+    project_root = payload.get("projectRoot")
 
     try:
         from memory_state import update_state  # type: ignore

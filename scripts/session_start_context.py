@@ -18,9 +18,10 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -30,7 +31,14 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import REPORTS_DIR, ROOT, load_state  # noqa: E402
+from memory_state import (  # noqa: E402
+    REPORTS_DIR,
+    ROOT,
+    STATE_ROOT,
+    load_state,
+    spawn_detached,
+    update_state,
+)
 
 MEMORY_INDEX = ROOT / "knowledge" / "index.md"
 MEMORY_LOG = ROOT / "knowledge" / "log.md"
@@ -47,6 +55,63 @@ INDEX_BULLET_MAX = 140
 LOG_ENTRY_MAX = 200
 DAILY_EXCERPT_LINES = 6
 DAILY_LINE_MAX = 160
+HOOK_STATE_LOCK_TIMEOUT = 0.1
+
+
+def _claim_nightly_catchup(today: str | None = None, now: str | None = None) -> bool:
+    """Atomically reserve today's catchup when no nightly completed today."""
+    today = today or datetime.now().date().isoformat()
+    claimed_at = datetime.fromisoformat(now) if now else datetime.now()
+    claimed = False
+
+    def _mutate(state: dict) -> None:
+        nonlocal claimed
+        if str(state.get("last_nightly_date", ""))[:10] == today:
+            return
+        existing = state.get("nightly_catchup_claim", {})
+        expires_at = _parse_iso_safe(existing.get("expires_at"))
+        if (
+            existing.get("date") == today
+            and existing.get("status") == "claimed"
+            and expires_at is not None
+            and expires_at > claimed_at
+        ):
+            return
+        state.pop("nightly_catchup_claimed_date", None)
+        state["nightly_catchup_claim"] = {
+            "date": today,
+            "status": "claimed",
+            "claimed_at": claimed_at.isoformat(timespec="seconds"),
+            "expires_at": (claimed_at + timedelta(minutes=30)).isoformat(timespec="seconds"),
+        }
+        claimed = True
+
+    try:
+        update_state(_mutate, lock_timeout=HOOK_STATE_LOCK_TIMEOUT)
+    except Exception:  # noqa: BLE001
+        return False
+    return claimed
+
+
+def _maybe_spawn_nightly_catchup(today: str | None = None) -> None:
+    if os.environ.get("MEMORY_LLM_PROVIDER") == "fake":
+        return
+    today = today or datetime.now().date().isoformat()
+    if not _claim_nightly_catchup(today):
+        return
+    pid = spawn_detached([
+        sys.executable,
+        str(ROOT / "scripts" / "scheduled_nightly.py"),
+    ])
+    if pid is None:
+        def _release(state: dict) -> None:
+            if state.get("nightly_catchup_claim", {}).get("date") == today:
+                state.pop("nightly_catchup_claim", None)
+
+        try:
+            update_state(_release, lock_timeout=HOOK_STATE_LOCK_TIMEOUT)
+        except Exception:  # noqa: BLE001
+            pass
 
 # Mojibake markers: fragments that almost only appear when UTF-8 Cyrillic
 # has been misdecoded as cp1252 and re-encoded.
@@ -172,7 +237,16 @@ def trim_index(index_txt: str) -> str:
 def latest_daily() -> Path | None:
     if not DAILY_DIR.exists():
         return None
-    dailies = sorted(DAILY_DIR.glob("*.md"))
+    dailies = []
+    for path in DAILY_DIR.glob("*.md"):
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}\.md", path.name) is None:
+            continue
+        try:
+            datetime.strptime(path.stem, "%Y-%m-%d")
+        except ValueError:
+            continue
+        dailies.append(path)
+    dailies.sort()
     return dailies[-1] if dailies else None
 
 
@@ -457,6 +531,23 @@ def _impact_block() -> str:
         return ""
 
 
+def health_block() -> str:
+    """Return doctor output only when local health is degraded."""
+    try:
+        from doctor import degraded_summary, run_doctor
+
+        summary = degraded_summary(
+            run_doctor(
+                root=ROOT,
+                state_root=STATE_ROOT,
+                time_budget_seconds=0.1,
+            )
+        )
+    except Exception:  # noqa: BLE001
+        return ""
+    return f"## Health\n\n{summary}\n\n" if summary else ""
+
+
 def build_context() -> str:
     index_txt = (
         MEMORY_INDEX.read_text(encoding="utf-8", errors="replace")
@@ -475,6 +566,7 @@ def build_context() -> str:
         "",
         guardrails_block(),
         metacognitive_block(),
+        health_block(),
         advisory_block(),
         _impact_block(),
         "## knowledge/index.md (trimmed)",
@@ -518,6 +610,7 @@ def main() -> int:
     )
     args = p.parse_args()
 
+    _maybe_spawn_nightly_catchup()
     additional = build_context()
     daily = latest_daily()
     write_debug(additional, daily.name if daily else "(none)")

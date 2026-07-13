@@ -12,17 +12,21 @@
 llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │
 ├── scripts/                       CODE — pipeline + hooks + helpers
-│   ├── (45 v3.x scripts)            existing: compile, search, hooks, lint, etc.
+│   ├── (60 Python scripts)           compile, search, hooks, lint, etc.
 │   ├── lance_store.py               v4.0: LanceDB embedded vector backend (HNSW)
 │   ├── reranker.py                  v4.0: cross-encoder reranker (ONNX)
 │   ├── access_tracking.py           v4.0: access logs + Ebbinghaus decay
 │   ├── reflection.py                v4.0: A-MEM page consolidation
-│   ├── mcp_server.py                v4.0: MCP server (9 tools, stdio)
+│   ├── mcp_server.py                v4.0: MCP server (12 task-shaped tools, stdio)
+│   ├── integration_adapter.py       v4.x: thin native lifecycle adapter
+│   ├── event_envelope.py            v4.x: shared lifecycle event contract
+│   ├── mcp_contract.py              v4.x: uniform MCP response envelope/resources
+│   ├── doctor.py                    v4.x: degraded-only health + safe repair
 │   ├── code_graph.py                v4.0: tree-sitter code intelligence
 │   ├── impact_analysis.py           v4.0: LINK layer (code→wiki impact)
 │   ├── build_tiers.py               v4.0: L0/L1/L2 progressive disclosure
-│   └── queries/                     v4.0: tree-sitter .scm query files (future)
-├── tests/                         CODE — regression suite (pytest, 419 tests)
+│   └── queries/                     v4.0: 12 tree-sitter .scm language queries
+├── tests/                         CODE — regression suite (pytest, 812 tests)
 ├── docs/                          CODE — architecture + user guide
 ├── skills/                        CODE — 9 agent skills (SKILL.md)
 ├── rules/                         CODE — file-handling policies
@@ -37,15 +41,15 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── inbox/                       unprocessed staging
 │   └── feedback/                    correction candidates
 │
-├── cache/                        RUNTIME — gitignored (search/QMD/vector/LanceDB)
+├── cache/                        RUNTIME — gitignored (FTS5/vector/graph/LanceDB)
 │   ├── lancedb/                     v4.0: LanceDB vector store (optional, --extra hybrid)
 │   ├── models/                      v4.0: ML model cache (reranker, embeddings)
 │   ├── access_log.jsonl             v4.0: access tracking log
+│   ├── code_tools.json               v4.0: atomic code-tool capability manifest
 │   ├── vectors.npy                  v4.0: numpy binary vector cache (memory-mapped)
 │   ├── vectors_meta.json            v4.0: vector metadata (paths, titles — no vectors)
-│   ├── index.sqlite                 FTS5 search index
-│   └── vectors.json                 Legacy JSON vector cache (backward compat)
-├── logs/                         RUNTIME — gitignored (lint/compile/PG logs)
+│   └── index.sqlite                 FTS5 search index
+├── logs/                         RUNTIME — gitignored (lint/compile/hook logs)
 ├── run/                          RUNTIME — gitignored (state.json/pid/queue)
 │   └── state.json.lock
 │
@@ -79,26 +83,32 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 ## What lives where
 
 ### CODE zone (tracked in git)
-- `scripts/` — 45 Python files + 3 helpers (`.ps1`, `.js`). Central hub:
+- `scripts/` — 60 Python files + 3 helpers (`.ps1`, `.js`). Central hub:
   `memory_state.py` (path/lock/state), `compile_memory.py` (LLM compile +
   VERIFY-BEFORE-WRITE), `flush_memory.py` (3-tier classification),
   `maybe_compile.py` (PID-locked spawn), `search_memory.py` (triple-RRF),
-  `llm_client.py` (5 backends + fake).
-- `tests/` — 25 test files, 281 tests collected. Hermetic via `conftest.py` (pins
+  `llm_client.py` (5 backends + fake), `integration_adapter.py` (thin host
+  lifecycle boundary), `mcp_server.py` (12 task-shaped tools), and `doctor.py`.
+- `tests/` — 42 test files, 812 tests collected. Hermetic via `conftest.py` (pins
   `LLM_WIKI_ROOT` to checkout, redirects `LLM_WIKI_STATE_ROOT` to a temp
   dir, defaults `MEMORY_LLM_PROVIDER=fake`).
 - `docs/` — `ARCHITECTURE.md`, `USER-GUIDE.md`, `AGENTS.md` (knowledge
   subsystem brief — subordinate to the root `../AGENTS.md` contract),
   `EXPORTING.md`, `SETUP-COGNEE.md`, `operating-model.md`,
   `STRUCTURE.md` (this file).
+- `scripts/queries/` — 12 language-specific Tree-sitter queries for function,
+  class/type, call, and import extraction. Grammar packages are optional and
+  loaded lazily by `code_graph.py`; `NOTICE.md` records grammar provenance and
+  MIT notices.
 - `skills/` — 9 SKILL.md files (knowledge-compile, knowledge-lookup,
   knowledge-review, knowledge-qa-file-back, contradict-check,
   crystallize-playbook, bridge-promote-insight, session-memory-compile,
   session-memory-review).
 - `rules/` — 3 rule files (wiki-files, raw-files, output-files).
-- `integrations/` — claude-code (settings.json), cursor (rules),
-  antigravity (AGENTS.md), obsidian (Web Clipper template).
-- `benchmark/` — `run_benchmark.py` + `report.md`.
+- `integrations/` — thin host wiring: claude-code (settings.json), cursor
+  (rules), and antigravity (AGENTS.md). MCP is the common read/action interface.
+  Obsidian is an optional Markdown viewer and requires no bundled integration.
+- `benchmark/` — `run_benchmark.py`, versioned `legacy-60-v1.json`, and `report.md`.
 
 ### KNOWLEDGE zone (tracked: public fixtures; gitignored: personal)
 - `knowledge/daily/` — append-only `YYYY-MM-DD.md`. Private (gitignored).
@@ -114,7 +124,8 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 
 ### RUNTIME zone (always gitignored, inside vault)
 - `cache/` — `index.sqlite` (FTS5), `vectors.npy` (binary numpy, mmap),
-  `vectors_meta.json` (metadata), `vectors.json` (legacy cache).
+  `vectors_meta.json` (metadata),
+  `code_tools.json` (fresh code-tool detection and active semantic capabilities).
   v4.0: `lancedb/` (LanceDB vector store, optional), `models/` (ML model cache),
   `access_log.jsonl` (retrieval analytics).
 - `logs/` — `lint-YYYY-MM-DD.md`, `compile-last.log`, `session-start-last.txt`.

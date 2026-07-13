@@ -82,3 +82,7 @@ jobs:
         # conftest.py bootstraps LLM_WIKI_ROOT / LLM_WIKI_STATE_ROOT
         # and defaults MEMORY_LLM_PROVIDER to "fake" — no live LLM calls.
         run: uv run pytest tests/ -q
+
+      - name: Fixed BM25 benchmark gate
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.13'
+        run: uv run python benchmark/run_benchmark.py --legacy-only

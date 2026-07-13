@@ -8,23 +8,62 @@ The graph enables:
 - "What will break if I change this?" — impact analysis (blast radius)
 - "Find dead code" — functions with zero callers
 
-Languages (3-tier model, like repowise):
-- Full: Python, TypeScript, JavaScript (tree-sitter grammars)
-- Good: (future — Go, Rust, C)
-- File-only: (future — syntax-only for other languages)
+Languages: Python, JavaScript, TypeScript, Go, Rust, Java, C, C++, Ruby,
+PHP, C#, and Bash. Each grammar is optional and loaded only when needed.
 
 Install: uv sync --extra code-graph
 """
 from __future__ import annotations
 
+import ast
+import importlib
+import json
+import math
+import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
+import threading
+import time
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from importlib import metadata
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from .import_resolver import (
+        EMPTY_REGISTRY,
+        SymbolRegistry,
+        build_python_symbol_registry,
+        resolve_python_imports_and_calls,
+    )
+except ImportError:
+    from import_resolver import (
+        EMPTY_REGISTRY,
+        SymbolRegistry,
+        build_python_symbol_registry,
+        resolve_python_imports_and_calls,
+    )
 
-# Lazy-loaded tree-sitter.
-_ts: dict = {}  # language_name → (Language, Parser)
+# Lazy-loaded tree-sitter parsers.
+_ts: dict = {}  # language_name -> Parser
+
+GRAMMAR_LOADERS = {
+    "python": ("tree_sitter_python", "language"),
+    "javascript": ("tree_sitter_javascript", "language"),
+    "typescript": ("tree_sitter_typescript", "language_typescript"),
+    "go": ("tree_sitter_go", "language"),
+    "rust": ("tree_sitter_rust", "language"),
+    "java": ("tree_sitter_java", "language"),
+    "c": ("tree_sitter_c", "language"),
+    "cpp": ("tree_sitter_cpp", "language"),
+    "ruby": ("tree_sitter_ruby", "language"),
+    "php": ("tree_sitter_php", "language_php"),
+    "c_sharp": ("tree_sitter_c_sharp", "language"),
+    "bash": ("tree_sitter_bash", "language"),
+}
 
 LANGUAGE_MAP = {
     ".py": "python",
@@ -32,33 +71,29 @@ LANGUAGE_MAP = {
     ".ts": "typescript",
     ".tsx": "typescript",
     ".jsx": "javascript",
+    ".go": "go",
+    ".rs": "rust",
+    ".java": "java",
+    ".c": "c",
+    ".h": "c",
+    ".cc": "cpp",
+    ".cpp": "cpp",
+    ".cxx": "cpp",
+    ".hh": "cpp",
+    ".hpp": "cpp",
+    ".hxx": "cpp",
+    ".rb": "ruby",
+    ".php": "php",
+    ".cs": "c_sharp",
+    ".sh": "bash",
+    ".bash": "bash",
 }
 
-# Query patterns for symbol extraction.
-# These are simplified — full .scm files would be loaded from scripts/queries/.
-FUNCTION_QUERY = {
-    "python": "(function_definition name: (identifier) @name) @func",
-    "javascript": "(function_declaration name: (identifier) @name) @func",
-    "typescript": "(function_declaration name: (identifier) @name) @func",
-}
+CO_CHANGE_EDGE = "CO_CHANGED_WITH"
+CODE_TOOLS_SCHEMA_VERSION = 1
+_MANIFEST_WRITE_LOCK = threading.Lock()
 
-CLASS_QUERY = {
-    "python": "(class_definition name: (identifier) @name) @cls",
-    "javascript": "(class_declaration name: (identifier) @name) @cls",
-    "typescript": "(class_declaration name: (identifier) @name) @cls",
-}
-
-CALL_QUERY = {
-    "python": "(call function: (identifier) @name) @call",
-    "javascript": "(call_expression function: (identifier) @name) @call",
-    "typescript": "(call_expression function: (identifier) @name) @call",
-}
-
-IMPORT_QUERY = {
-    "python": "(import_statement (dotted_name (identifier) @name)) @import",
-    "javascript": "(import_statement (identifier) @name) @import",
-    "typescript": "(import_statement (identifier) @name) @import",
-}
+QUERY_DIR = Path(__file__).with_name("queries")
 
 
 def _have_tree_sitter() -> bool:
@@ -77,21 +112,14 @@ def _get_parser(lang: str):
 
     try:
         import tree_sitter as ts
-        from tree_sitter import Parser
 
-        if lang == "python":
-            import tree_sitter_python
-            language = ts.Language(tree_sitter_python.language())
-        elif lang == "javascript":
-            import tree_sitter_javascript
-            language = ts.Language(tree_sitter_javascript.language())
-        elif lang == "typescript":
-            import tree_sitter_typescript
-            language = ts.Language(tree_sitter_typescript.language_typescript())
-        else:
+        loader = GRAMMAR_LOADERS.get(lang)
+        if loader is None:
             return None
-
-        parser = Parser(language)
+        module_name, factory_name = loader
+        grammar = importlib.import_module(module_name)
+        language = ts.Language(getattr(grammar, factory_name)())
+        parser = ts.Parser(language)
         _ts[lang] = parser
         return parser
     except ImportError:
@@ -103,6 +131,367 @@ def _get_parser(lang: str):
 def detect_language(file_path: Path) -> str | None:
     """Detect language from file extension."""
     return LANGUAGE_MAP.get(file_path.suffix.lower())
+
+
+def _probe_version(args: list[str], timeout: float = 2) -> tuple[str | None, str | None]:
+    """Return a tool's first version line without invoking a shell."""
+    try:
+        result = subprocess.run(
+            args, capture_output=True, text=True, timeout=timeout, check=False
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, str(exc)
+    output = (result.stdout or result.stderr).strip().splitlines()
+    if result.returncode != 0 or not output:
+        return None, f"version probe exited {result.returncode}"
+    return output[0], None
+
+
+def _command_tool(provider: str, path: str | None, args: list[str], semantic: bool) -> dict:
+    if not path:
+        return {
+            "provider": provider, "available": False, "version": None, "path": None,
+            "capabilities": {"semantic": semantic}, "failure": "executable not found",
+        }
+    version, failure = _probe_version([path, *args], timeout=2)
+    return {
+        "provider": provider,
+        "available": failure is None,
+        "version": version,
+        "path": str(Path(path).resolve()),
+        "capabilities": {"semantic": semantic},
+        "failure": failure,
+    }
+
+
+def detect_code_tools(directory: Path, cache_path: Path | None = None) -> dict:
+    """Detect optional semantic tools and atomically refresh their manifest."""
+    from datetime import datetime, timezone
+
+    try:
+        from . import memory_state
+    except ImportError:
+        import memory_state
+
+    directory = directory.resolve()
+    try:
+        jedi_version = metadata.version("jedi")
+        importlib.import_module("jedi")
+        python = {
+            "provider": "jedi", "available": True, "version": jedi_version,
+            "path": None, "capabilities": {"semantic": True}, "failure": None,
+        }
+    except (ImportError, metadata.PackageNotFoundError) as exc:
+        python = {
+            "provider": "jedi", "available": False, "version": None, "path": None,
+            "capabilities": {"semantic": False}, "failure": str(exc) or "package not found",
+        }
+
+    tsc_names = ("tsc.cmd", "tsc") if sys.platform == "win32" else ("tsc", "tsc.cmd")
+    local_tsc = next(
+        (
+            candidate
+            for name in tsc_names
+            for candidate in (directory / "node_modules" / ".bin" / name,)
+            if candidate.is_file()
+        ),
+        None,
+    )
+    tsc = str(local_tsc) if local_tsc else shutil.which("tsc")
+    specifications = {
+        "typescript": ("typescript", tsc, ["--version"], False),
+        "rust": ("rust-analyzer", shutil.which("rust-analyzer"), ["--version"], False),
+        "go": ("gopls", shutil.which("gopls"), ["version"], False),
+    }
+    with ThreadPoolExecutor(max_workers=len(specifications)) as pool:
+        futures = {
+            name: pool.submit(_command_tool, *specification)
+            for name, specification in specifications.items()
+        }
+        tools = {"python": python}
+        tools.update({name: futures[name].result() for name in specifications})
+    manifest = {
+        "schema_version": CODE_TOOLS_SCHEMA_VERSION,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "tools": tools,
+    }
+    destination = cache_path or memory_state.STATE_ROOT / "cache" / "code_tools.json"
+    _write_tool_manifest(destination, manifest)
+    return manifest
+
+
+def _write_tool_manifest(path: Path, manifest: dict) -> None:
+    """Atomically replace a manifest using a writer-unique sibling temp file."""
+    with _MANIFEST_WRITE_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=path.parent,
+                prefix=f"{path.name}.", suffix=".tmp", delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+                json.dump(manifest, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+            for attempt in range(20):
+                try:
+                    os.replace(temporary, path)
+                    return
+                except PermissionError:
+                    if attempt < 19:
+                        time.sleep(0.01)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+
+def enrich_python_semantics(file_path: Path, calls: list[dict], workspace_root: Path) -> list[dict]:
+    """Resolve unknown Python calls with Jedi when it yields one workspace target."""
+    try:
+        jedi = importlib.import_module("jedi")
+        project = jedi.Project(path=str(workspace_root.resolve()))
+        script = jedi.Script(path=str(file_path.resolve()), project=project)
+    except Exception:
+        return calls
+
+    enriched = []
+    workspace = workspace_root.resolve()
+    for call in calls:
+        if call.get("confidence") != "unknown" or not call.get("semantic_eligible", False):
+            enriched.append(call)
+            continue
+        try:
+            definitions = script.infer(line=call["line"], column=call.get("column", 0))
+            candidates = []
+            for definition in definitions:
+                module_path = getattr(definition, "module_path", None)
+                full_name = getattr(definition, "full_name", None)
+                if not module_path or not full_name:
+                    continue
+                resolved_path = Path(module_path).resolve()
+                resolved_path.relative_to(workspace)
+                candidates.append((full_name, resolved_path))
+            unique = set(candidates)
+        except Exception:
+            unique = set()
+        if len(unique) == 1:
+            updated = dict(call)
+            full_name, _ = unique.pop()
+            updated.update(qualified_name=full_name, confidence="confirmed", evidence="jedi")
+            enriched.append(updated)
+        else:
+            enriched.append(call)
+    return enriched
+
+
+def analyze_co_changes(
+    directory: Path,
+    *,
+    min_shared_commits: int = 3,
+    max_commit_files: int = 50,
+    min_ochiai: float = 0.5,
+    timeout: float = 10,
+) -> list[dict]:
+    """Find statistically meaningful file-level logical coupling in git history."""
+    repo_root = _git_repo_root(directory, timeout) or directory.resolve()
+    try:
+        pathspec = directory.resolve().relative_to(repo_root).as_posix()
+    except ValueError:
+        return []
+    pathspec = pathspec or "."
+    try:
+        result = subprocess.run(
+            [
+                "git", "log", "--reverse", "--max-count=2000", "--no-merges",
+                "--name-status", "-z",
+                "--find-renames=50%", "--find-copies=50%", "--format=COMMIT%x00%H",
+                "--", pathspec,
+            ],
+            cwd=str(repo_root),
+            capture_output=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0 or not result.stdout:
+        return []
+
+    commits, preferred = _parse_git_name_status(result.stdout)
+    normalized = [
+        identities
+        for identities in commits
+        if 1 <= len(identities) <= max_commit_files
+    ]
+    if not normalized:
+        return []
+
+    file_commits = Counter(identity for files in normalized for identity in files)
+    shared = Counter()
+    for files in normalized:
+        ordered = sorted(files)
+        for index, source in enumerate(ordered):
+            for target in ordered[index + 1:]:
+                shared[(source, target)] += 1
+
+    total = len(normalized)
+    edges = []
+    for (source, target), together in shared.items():
+        if together < min_shared_commits:
+            continue
+        source_count = file_commits[source]
+        target_count = file_commits[target]
+        ochiai = together / math.sqrt(source_count * target_count)
+        support = together / total
+        lift = together * total / (source_count * target_count)
+        denominator = -math.log(support)
+        npmi = math.log(lift) / denominator if denominator else 0.0
+        if ochiai < min_ochiai or lift <= 1 or npmi <= 0:
+            continue
+        edges.append({
+            "source": preferred.get(source, source),
+            "target": preferred.get(target, target),
+            "type": CO_CHANGE_EDGE,
+            "weight": round(ochiai, 6),
+            "ochiai": round(ochiai, 6),
+            "npmi": round(npmi, 6),
+            "lift": round(lift, 6),
+            "support": round(support, 6),
+            "shared_commits": together,
+        })
+    return sorted(edges, key=lambda edge: (-edge["weight"], edge["source"], edge["target"]))
+
+
+def _git_repo_root(directory: Path, timeout: float) -> Path | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=str(directory),
+            capture_output=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0 or not result.stdout or b"\0" in result.stdout:
+        return None
+    root = Path(result.stdout.decode("utf-8", errors="surrogateescape").strip())
+    return root.resolve() if root.is_absolute() else None
+
+
+def _parse_git_name_status(data: bytes) -> tuple[list[set[int]], dict[int, str]]:
+    fields = [field.decode("utf-8", errors="surrogateescape") for field in data.split(b"\0")]
+    records: list[list[tuple[str, ...]]] = []
+    current: list[tuple[str, ...]] | None = None
+    index = 0
+    while index < len(fields):
+        field = fields[index]
+        record = field.lstrip("\r\n")
+        if record == "COMMIT" and index + 1 < len(fields):
+            current = []
+            records.append(current)
+            index += 2
+            continue
+        if not field or current is None:
+            index += 1
+            continue
+        status = record
+        if status.startswith(("R", "C")) and index + 2 < len(fields):
+            old_path, new_path = fields[index + 1:index + 3]
+            current.append((status, _normalize_git_path(old_path), _normalize_git_path(new_path)))
+            index += 3
+            continue
+        if index + 1 < len(fields):
+            path = fields[index + 1]
+            current.append((status, _normalize_git_path(path)))
+            index += 2
+            continue
+        index += 1
+
+    commits: list[set[int]] = []
+    active: dict[str, int] = {}
+    preferred: dict[int, str] = {}
+    next_identity = 0
+
+    def new_identity(path: str) -> int:
+        nonlocal next_identity
+        identity = next_identity
+        next_identity += 1
+        active[path] = identity
+        preferred[identity] = path
+        return identity
+
+    for changes in records:
+        identities = set()
+        for change in changes:
+            status = change[0]
+            if status.startswith("R"):
+                old_path, new_path = change[1:]
+                identity = active.pop(old_path, None)
+                if identity is None:
+                    identity = new_identity(new_path)
+                else:
+                    active[new_path] = identity
+                    preferred[identity] = new_path
+                identities.add(identity)
+            elif status.startswith("C"):
+                new_path = change[2]
+                identities.add(new_identity(new_path))
+            else:
+                path = change[1]
+                identity = active.get(path)
+                if identity is None:
+                    identity = new_identity(path)
+                identities.add(identity)
+                if status.startswith("D"):
+                    active.pop(path, None)
+        commits.append(identities)
+    return commits, preferred
+
+
+def _normalize_git_path(path: str) -> str:
+    return path.replace("\\", "/")
+
+
+def refine_call_edges_with_co_changes(
+    call_edges: list[dict], co_change_edges: list[dict], directory: Path | None = None
+) -> list[dict]:
+    """Add co-change evidence to confirmed calls without changing edge semantics."""
+    root = (_git_repo_root(directory, 10) or directory.resolve()) if directory else None
+    coupling = {
+        frozenset((
+            _normalize_edge_path(edge["source"], root),
+            _normalize_edge_path(edge["target"], root),
+        )): edge
+        for edge in co_change_edges
+        if edge.get("type") == CO_CHANGE_EDGE
+    }
+    refined = []
+    for edge in call_edges:
+        updated = dict(edge)
+        match = coupling.get(frozenset((
+            _normalize_edge_path(edge.get("source", ""), root),
+            _normalize_edge_path(edge.get("target", ""), root),
+        )))
+        if (
+            edge.get("type") == "CALLS"
+            and edge.get("confidence") == "confirmed"
+            and match
+        ):
+            evidence = dict(edge.get("evidence", {}))
+            evidence["co_change_weight"] = match["weight"]
+            updated["evidence"] = evidence
+        refined.append(updated)
+    return refined
+
+
+def _normalize_edge_path(path: str, root: Path | None) -> str:
+    normalized = _normalize_git_path(path)
+    candidate = Path(normalized)
+    if root and candidate.is_absolute():
+        try:
+            normalized = candidate.resolve().relative_to(root).as_posix()
+        except ValueError:
+            pass
+    return _normalize_git_path(normalized)
 
 
 def _get_git_info(file_path: Path) -> dict:
@@ -141,6 +530,15 @@ def parse_file(file_path: Path) -> dict:
         calls: list[{name, line}]
         imports: list[{name, line}]
     """
+    registry = (
+        build_python_symbol_registry(file_path.parent)
+        if detect_language(file_path) == "python"
+        else EMPTY_REGISTRY
+    )
+    return _parse_file(file_path, registry, file_path.parent)
+
+
+def _parse_file(file_path: Path, registry: SymbolRegistry, workspace_root: Path) -> dict:
     lang = detect_language(file_path)
     if not lang:
         return {"file": str(file_path), "language": None, "functions": [],
@@ -149,15 +547,18 @@ def parse_file(file_path: Path) -> dict:
     parser = _get_parser(lang)
     if parser is None:
         # Fallback: regex-based extraction (less accurate but no deps).
-        return _regex_parse(file_path, lang)
+        return _regex_parse(file_path, lang, registry, workspace_root)
 
     source = file_path.read_bytes()
     tree = parser.parse(source)
 
-    functions = _extract_symbols(tree, lang, FUNCTION_QUERY, source)
-    classes = _extract_symbols(tree, lang, CLASS_QUERY, source)
-    calls = _extract_symbols(tree, lang, CALL_QUERY, source)
-    imports = _extract_symbols(tree, lang, IMPORT_QUERY, source)
+    extracted = _extract_symbols(tree, parser.language, lang, source)
+    if extracted is None:
+        return _regex_parse(file_path, lang, registry, workspace_root)
+    functions, classes, calls, imports = extracted
+    if lang == "python":
+        imports, calls = resolve_python_imports_and_calls(file_path, registry, workspace_root)
+        calls = enrich_python_semantics(file_path, calls, workspace_root)
 
     # Bi-temporal: attach git commit info (valid_from = commit date).
     git_info = _get_git_info(file_path)
@@ -175,60 +576,66 @@ def parse_file(file_path: Path) -> dict:
     }
 
 
-def _extract_symbols(tree, lang: str, query_map: dict, source: bytes) -> list[dict]:
-    """Extract symbols matching a tree-sitter query."""
-    query_str = query_map.get(lang)
-    if not query_str:
-        return []
-
+def _extract_symbols(tree, language, lang: str, source: bytes) -> tuple | None:
+    """Execute the language query and return functions, classes, calls, imports."""
     try:
-        # Walk the tree manually for symbol extraction.
-        # Full query support requires tree-sitter query API.
-        return _walk_tree_for_symbols(tree.root_node, query_str, source)
-    except Exception:
-        return []
+        import tree_sitter as ts
+
+        query_source = (QUERY_DIR / f"{lang}.scm").read_text(encoding="utf-8")
+        matches = ts.QueryCursor(ts.Query(language, query_source)).matches(tree.root_node)
+    except (OSError, UnicodeError, Exception):
+        return None
+
+    groups = {name: [] for name in ("function", "class", "call", "import")}
+    seen = {name: set() for name in groups}
+    for _, captures in matches:
+        for kind in groups:
+            nodes = captures.get(f"{kind}.name", [])
+            owners = captures.get(f"{kind}.node", nodes)
+            if not isinstance(nodes, list):
+                nodes = [nodes]
+            if not isinstance(owners, list):
+                owners = [owners]
+            for index, node in enumerate(nodes):
+                owner = owners[min(index, len(owners) - 1)] if owners else node
+                key = (node.start_byte, node.end_byte, kind)
+                if key in seen[kind]:
+                    continue
+                seen[kind].add(key)
+                text = source[node.start_byte:node.end_byte].decode(
+                    "utf-8", errors="ignore"
+                )
+                if kind == "import" and len(text) >= 2 and (
+                    text[0] == text[-1] and text[0] in {"'", '"'}
+                    or text[0] == "<" and text[-1] == ">"
+                ):
+                    text = text[1:-1]
+                groups[kind].append({
+                    "name": text,
+                    "line": owner.start_point[0] + 1,
+                    "end_line": owner.end_point[0] + 1,
+                    "column": owner.start_point[1],
+                    "end_column": owner.end_point[1],
+                    **(
+                        {"signature": signature}
+                        if kind == "function"
+                        and (
+                            signature := _declaration_signature(
+                                source[owner.start_byte:owner.end_byte].decode(
+                                    "utf-8", errors="ignore"
+                                ),
+                                text,
+                            )
+                        )
+                        else {}
+                    ),
+                })
+    return tuple(groups[name] for name in ("function", "class", "call", "import"))
 
 
-def _walk_tree_for_symbols(node, query_type: str, source: bytes) -> list[dict]:
-    """Walk the AST and extract symbols based on query type patterns."""
-    results = []
-
-    # Determine what node types to look for based on query.
-    if "function_definition" in query_type or "function_declaration" in query_type:
-        target_types = {"function_definition", "function_declaration"}
-        name_field = "name"
-    elif "class_definition" in query_type or "class_declaration" in query_type:
-        target_types = {"class_definition", "class_declaration"}
-        name_field = "name"
-    elif "call" in query_type.lower():
-        target_types = {"call", "call_expression"}
-        name_field = "function"
-    elif "import" in query_type:
-        target_types = {"import_statement"}
-        name_field = None
-    else:
-        return []
-
-    def _walk(n):
-        if n.type in target_types:
-            name = None
-            if name_field:
-                child = n.child_by_field_name(name_field)
-                if child:
-                    name = source[child.start_byte:child.end_byte].decode("utf-8", errors="ignore")
-            results.append({
-                "name": name or "<anonymous>",
-                "line": n.start_point[0] + 1,
-                "end_line": n.end_point[0] + 1,
-            })
-        for child in n.children:
-            _walk(child)
-
-    _walk(node)
-    return results
-
-
-def _regex_parse(file_path: Path, lang: str) -> dict:
+def _regex_parse(
+    file_path: Path, lang: str, registry: SymbolRegistry, workspace_root: Path
+) -> dict:
     """Fallback: regex-based symbol extraction (no tree-sitter required)."""
     content = file_path.read_text(encoding="utf-8", errors="ignore")
     functions = []
@@ -240,7 +647,7 @@ def _regex_parse(file_path: Path, lang: str) -> dict:
         for i, line in enumerate(content.splitlines(), 1):
             m = re.match(r"\s*def\s+(\w+)", line)
             if m:
-                functions.append({"name": m.group(1), "line": i, "end_line": i})
+                functions.append(_regex_function(m.group(1), line, i))
             m = re.match(r"\s*class\s+(\w+)", line)
             if m:
                 classes.append({"name": m.group(1), "line": i, "end_line": i})
@@ -250,17 +657,35 @@ def _regex_parse(file_path: Path, lang: str) -> dict:
             m = re.match(r"\s*(?:from\s+\S+\s+)?import\s+(\w+)", line)
             if m:
                 imports.append({"name": m.group(1), "line": i})
+        imports, calls = resolve_python_imports_and_calls(file_path, registry, workspace_root)
+        calls = enrich_python_semantics(file_path, calls, workspace_root)
     elif lang in ("javascript", "typescript"):
         for i, line in enumerate(content.splitlines(), 1):
             m = re.match(r"\s*(?:export\s+)?function\s+(\w+)", line)
             if m:
-                functions.append({"name": m.group(1), "line": i, "end_line": i})
+                functions.append(_regex_function(m.group(1), line, i))
             m = re.match(r"\s*(?:export\s+)?class\s+(\w+)", line)
             if m:
                 classes.append({"name": m.group(1), "line": i, "end_line": i})
             m = re.match(r"\s*(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?\(", line)
             if m:
-                functions.append({"name": m.group(1), "line": i, "end_line": i})
+                functions.append(_regex_function(m.group(1), line, i))
+            declared = {
+                match.group(1)
+                for match in [
+                    re.match(r"\s*(?:export\s+)?function\s+(\w+)", line),
+                    re.match(r"\s*(?:async\s+)?(\w+)\s*\([^)]*\)\s*(?::[^{}]+)?\{", line),
+                ]
+                if match
+            }
+            for call in re.finditer(r"\b(\w+)\s*\(", line):
+                name = call.group(1)
+                if name not in declared and name not in {"if", "for", "while", "switch", "catch"}:
+                    calls.append({"name": name, "line": i})
+    else:
+        _regex_parse_additional_languages(
+            content, lang, functions, classes, calls, imports
+        )
 
     git_info = _get_git_info(file_path)
     return {
@@ -276,16 +701,114 @@ def _regex_parse(file_path: Path, lang: str) -> dict:
     }
 
 
+def _regex_parse_additional_languages(
+    content: str,
+    lang: str,
+    functions: list[dict],
+    classes: list[dict],
+    calls: list[dict],
+    imports: list[dict],
+) -> None:
+    """Extract basic symbols for optional grammars when tree-sitter is absent."""
+    patterns = {
+        "go": (r"\bfunc\s+(?:\([^)]*\)\s*)?(\w+)\s*\(", r"\btype\s+(\w+)\s+(?:struct|interface)\b"),
+        "rust": (r"\bfn\s+(\w+)\s*\(", r"\b(?:struct|enum|union|trait)\s+(\w+)\b"),
+        "java": (r"\b(?:void|[A-Z]\w*|\w+(?:<[^>]+>)?)\s+(\w+)\s*\([^;]*\)\s*\{", r"\b(?:class|interface|enum)\s+(\w+)\b"),
+        "c": (r"\b(?:void|int|char|float|double|\w+\s*\*)\s+(\w+)\s*\([^;]*\)\s*\{", r"\b(?:struct|union)\s+(\w+)\b"),
+        "cpp": (r"\b(?:void|int|char|float|double|auto|\w+(?:::\w+)*\s*\*?)\s+(\w+)\s*\([^;]*\)\s*\{", r"\b(?:class|struct|union)\s+(\w+)\b"),
+        "ruby": (r"^\s*def\s+(?:self\.)?(\w+[!?=]?)", r"^\s*(?:class|module)\s+([A-Z]\w*)"),
+        "php": (r"\bfunction\s+(\w+)\s*\(", r"\b(?:class|interface|trait)\s+(\w+)\b"),
+        "c_sharp": (r"\b(?:void|[A-Z]\w*|\w+(?:<[^>]+>)?)\s+(\w+)\s*\([^;]*\)\s*\{", r"\b(?:class|interface|struct|enum)\s+(\w+)\b"),
+        "bash": (r"^\s*(?:function\s+)?([A-Za-z_]\w*)\s*\(\)\s*\{", None),
+    }
+    function_pattern, class_pattern = patterns[lang]
+    declared = set()
+    for line_number, line in enumerate(content.splitlines(), 1):
+        function_match = re.search(function_pattern, line)
+        if function_match:
+            name = function_match.group(1)
+            declared.add(name)
+            functions.append(_regex_function(name, line, line_number))
+        if class_pattern and (class_match := re.search(class_pattern, line)):
+            classes.append({
+                "name": class_match.group(1), "line": line_number, "end_line": line_number,
+            })
+        _regex_add_import(line, line_number, lang, imports)
+        for call in re.finditer(r"\b(?:\w+(?:::|\.|->))?(\w+[!?]?)\s*[!(]", line):
+            name = call.group(1)
+            if lang == "rust":
+                name = name.removesuffix("!")
+            if name not in declared and name not in {
+                "if", "for", "while", "switch", "catch", "class", "struct", "interface",
+            }:
+                calls.append({"name": name, "line": line_number})
+        if lang in {"ruby", "bash"}:
+            for command in re.finditer(r"(?:^|[;{])\s*([A-Za-z_]\w*[!?]?)\s+", line):
+                name = command.group(1)
+                if name not in declared and name not in {
+                    "class", "def", "do", "else", "elsif", "end", "fi", "function",
+                    "if", "load", "module", "require", "source", "then",
+                }:
+                    calls.append({"name": name, "line": line_number})
+
+
+def _regex_function(name: str, declaration: str, line: int) -> dict:
+    function = {"name": name, "line": line, "end_line": line}
+    signature = _declaration_signature(declaration, name)
+    if signature:
+        function["signature"] = signature
+    return function
+
+
+def _declaration_signature(declaration: str, name: str) -> str | None:
+    """Return a compact name-and-parameters signature when it is explicit."""
+    match = re.search(rf"\b{re.escape(name)}\s*\(", declaration)
+    if not match:
+        return None
+    start = declaration.find("(", match.start())
+    depth = 0
+    for index in range(start, len(declaration)):
+        char = declaration[index]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                parameters = re.sub(r"\s+", " ", declaration[start:index + 1]).strip()
+                parameters = re.sub(r"\s*,\s*", ", ", parameters)
+                return f"{name}{parameters}"
+    return None
+
+
+def _regex_add_import(line: str, line_number: int, lang: str, imports: list[dict]) -> None:
+    patterns = {
+        "go": r'^\s*import\s+(?:\w+\s+)?["`]([^"`]+)["`]',
+        "rust": r"^\s*use\s+([^;]+)",
+        "java": r"^\s*import\s+(?:static\s+)?([^;]+)",
+        "c": r"^\s*#\s*include\s*[<\"]([^>\"]+)[>\"]",
+        "cpp": r"^\s*#\s*include\s*[<\"]([^>\"]+)[>\"]",
+        "ruby": r"^\s*(?:require|load)\s*[('\"]+([^)'\"]+)",
+        "php": r"^\s*(?:use\s+([^;]+)|(?:include|include_once|require|require_once)\s*[('\"]+([^)'\"]+))",
+        "c_sharp": r"^\s*using\s+([^;=]+)",
+        "bash": r"^\s*(?:source|\.)\s+([^\s;]+)",
+    }
+    if match := re.search(patterns[lang], line):
+        name = next(group for group in match.groups() if group is not None)
+        imports.append({"name": name.strip(), "line": line_number})
+
+
 def index_directory(directory: Path, verbose: bool = True) -> dict:
     """Index all source files in a directory.
 
     Returns stats: {files, functions, classes, calls, imports}
     """
+    detect_code_tools(directory)
     if not directory.exists():
         return {"files": 0, "functions": 0, "classes": 0, "calls": 0, "imports": 0}
 
     stats = {"files": 0, "functions": 0, "classes": 0, "calls": 0, "imports": 0}
     extensions = set(LANGUAGE_MAP.keys())
+    registry = build_python_symbol_registry(directory)
 
     for path in sorted(directory.rglob("*")):
         if not path.is_file():
@@ -295,7 +818,7 @@ def index_directory(directory: Path, verbose: bool = True) -> dict:
         if any(skip in path.parts for skip in {".git", "node_modules", "__pycache__", ".venv", "venv"}):
             continue
 
-        result = parse_file(path)
+        result = _parse_file(path, registry, directory)
         if result["language"]:
             stats["files"] += 1
             stats["functions"] += len(result["functions"])
@@ -315,12 +838,13 @@ def index_directory(directory: Path, verbose: bool = True) -> dict:
 
 
 def find_callers(function_name: str, directory: Path) -> list[dict]:
-    """Find all files that call a function by name (CALLS edge, reverse direction).
+    """Find callers using strict Python evidence or non-Python name heuristics.
 
-    Returns list of {file, line, function}.
+    Unknown Python calls are excluded. Returns caller edge dictionaries.
     """
     callers = []
     extensions = set(LANGUAGE_MAP.keys())
+    registry = build_python_symbol_registry(directory)
 
     for path in sorted(directory.rglob("*")):
         if not path.is_file() or path.suffix.lower() not in extensions:
@@ -328,13 +852,19 @@ def find_callers(function_name: str, directory: Path) -> list[dict]:
         if any(skip in path.parts for skip in {".git", "node_modules", "__pycache__", ".venv"}):
             continue
 
-        result = parse_file(path)
+        result = _parse_file(path, registry, directory)
         for call in result["calls"]:
-            if call["name"] == function_name:
+            resolved_name = (call.get("qualified_name") or call["name"]).rsplit(".", 1)[-1]
+            is_python = result["language"] == "python"
+            if resolved_name == function_name and (
+                call.get("confidence") == "confirmed" or not is_python
+            ):
                 callers.append({
                     "file": str(path),
                     "line": call["line"],
                     "function": function_name,
+                    "qualified_name": call.get("qualified_name"),
+                    "confidence": call.get("confidence", "heuristic"),
                 })
 
     return callers
@@ -347,6 +877,7 @@ def find_callees(function_name: str, directory: Path) -> list[dict]:
     """
     callees = []
     extensions = set(LANGUAGE_MAP.keys())
+    registry = build_python_symbol_registry(directory)
 
     for path in sorted(directory.rglob("*")):
         if not path.is_file() or path.suffix.lower() not in extensions:
@@ -354,7 +885,7 @@ def find_callees(function_name: str, directory: Path) -> list[dict]:
         if any(skip in path.parts for skip in {".git", "node_modules", "__pycache__", ".venv"}):
             continue
 
-        result = parse_file(path)
+        result = _parse_file(path, registry, directory)
         # Find the function definition.
         in_function = False
         for func in result["functions"]:
@@ -381,71 +912,328 @@ def find_callees(function_name: str, directory: Path) -> list[dict]:
     return callees
 
 
+def find_dead_code(directory: Path) -> list[dict]:
+    """Return conservative dead-code candidates from the incomplete static graph."""
+    parsed, definitions, edges = _workspace_call_graph(directory)
+    incoming = {edge["target"] for edge in edges}
+
+    candidates = []
+    for path, result in parsed:
+        source = path.read_text(encoding="utf-8", errors="ignore")
+        exports = _declared_exports(path, source, result["language"])
+        lines = source.splitlines()
+        for function in result["functions"]:
+            name = function["name"]
+            if (
+                function["symbol_id"] in incoming
+                or name in {"main", "__init__"}
+                or name.startswith("test_")
+                or path.name.startswith("test_")
+                or name in exports
+                or _is_framework_route(lines, function["line"])
+            ):
+                continue
+            candidates.append({
+                "name": name,
+                "symbol_id": function["symbol_id"],
+                "owner": function["owner"],
+                "file": str(path),
+                "line": function["line"],
+                "status": "candidate",
+                "reason": "zero_confirmed_incoming_calls",
+                "graph_complete": False,
+            })
+    return sorted(candidates, key=lambda item: (item["name"], item["file"], item["line"]))
+
+
+def _declared_exports(path: Path, source: str, language: str) -> set[str]:
+    if language == "python":
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return set()
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == "__all__"
+                for target in node.targets
+            ):
+                try:
+                    value = ast.literal_eval(node.value)
+                except (ValueError, TypeError):
+                    return set()
+                return {item for item in value if isinstance(item, str)}
+        return set()
+    if language in {"javascript", "typescript"}:
+        return set(re.findall(r"\bexport\s+(?:default\s+)?(?:async\s+)?(?:function|class)\s+(\w+)", source))
+    return set()
+
+
+def _is_framework_route(lines: list[str], definition_line: int) -> bool:
+    prefix = "\n".join(lines[max(0, definition_line - 2):definition_line])
+    return bool(re.search(r"(?:@\w*\.route\s*\(|@(?:GetMapping|RequestMapping)\b)", prefix))
+
+
+def get_architecture(directory: Path) -> dict:
+    """Summarize statically visible entry points, routes, hotspots, and modules."""
+    parsed, definitions, edges = _workspace_call_graph(directory)
+    entry_points = []
+    routes = []
+    incoming: dict[str, set[str]] = {}
+    for edge in edges:
+        incoming.setdefault(edge["target"], set()).add(edge["source"])
+    for path, result in parsed:
+        source = path.read_text(encoding="utf-8", errors="ignore")
+        for function in result["functions"]:
+            if function["name"] == "main":
+                entry_points.append({
+                    "kind": "main", "name": "main", "file": str(path),
+                    "line": function["line"],
+                })
+        entry_points.extend(_listen_entry_points(path, source))
+        routes.extend(_framework_routes(path, source))
+
+    hotspots = [
+        {
+            "name": definitions[symbol_id]["name"],
+            "symbol_id": symbol_id,
+            "owner": definitions[symbol_id]["owner"],
+            "file": definitions[symbol_id]["file"],
+            "line": definitions[symbol_id]["line"],
+            "incoming_callers": len(callers),
+        }
+        for symbol_id, callers in incoming.items()
+        if symbol_id in definitions
+    ]
+    hotspots.sort(key=lambda item: (-item["incoming_callers"], item["name"], item["file"]))
+    return {
+        "entry_points": entry_points,
+        "routes": routes,
+        "hotspots": hotspots,
+        "communities": detect_communities(directory),
+        "graph_complete": False,
+    }
+
+
+def _listen_entry_points(path: Path, source: str) -> list[dict]:
+    return [
+        {
+            "kind": "listen", "name": match.group(1), "file": str(path),
+            "line": source.count("\n", 0, match.start()) + 1,
+        }
+        for match in re.finditer(r"\b((?:app|server)\.listen)\s*\(", source)
+    ]
+
+
+def _framework_routes(path: Path, source: str) -> list[dict]:
+    patterns = [
+        (r"@\w+\.route\s*\(\s*['\"]([^'\"]+)", "ROUTE"),
+        (r"\b(?:app|router)\.(get|post|put|patch|delete|all)\s*\(\s*['\"]([^'\"]+)", None),
+        (r"@(Get|Post|Put|Patch|Delete|Request)Mapping\s*\(\s*['\"]([^'\"]+)", None),
+    ]
+    routes = []
+    for pattern, fixed_method in patterns:
+        for match in re.finditer(pattern, source, re.IGNORECASE):
+            method = fixed_method or match.group(1).upper().removesuffix("MAPPING")
+            route_path = match.group(1 if fixed_method else 2)
+            routes.append({
+                "method": method, "path": route_path, "file": str(path),
+                "line": source.count("\n", 0, match.start()) + 1,
+            })
+    return routes
+
+
 def detect_communities(directory: Path) -> list[list[str]]:
-    """Detect functional modules in code using label propagation.
+    """Detect functional modules with deterministic weighted Louvain."""
+    _, _, edges = _workspace_call_graph(directory)
+    graph: dict[str, dict[str, float]] = {}
+    for edge in edges:
+        caller, callee = edge["source"], edge["target"]
+        if caller == callee:
+            continue
+        graph.setdefault(caller, {})[callee] = graph.setdefault(caller, {}).get(callee, 0) + 1
+        graph.setdefault(callee, {})[caller] = graph.setdefault(callee, {}).get(caller, 0) + 1
+    return _louvain_communities(graph)
 
-    Pure Python, zero dependencies. Works on the call graph:
-    functions that call each other frequently → same community.
 
-    Returns list of communities, each a list of function names.
-    """
-    from collections import defaultdict
-
-    # Build adjacency: function → set of functions it calls.
-    adj: dict[str, set[str]] = defaultdict(set)
-    extensions = set(LANGUAGE_MAP.keys())
-
+def _workspace_call_graph(
+    directory: Path,
+) -> tuple[list[tuple[Path, dict]], dict[str, dict], list[dict]]:
+    """Parse a workspace and resolve calls to canonical path/owner/name IDs."""
+    directory = directory.resolve()
+    registry = build_python_symbol_registry(directory)
+    parsed: list[tuple[Path, dict]] = []
+    definitions: dict[str, dict] = {}
+    by_name: dict[str, list[dict]] = {}
+    by_qualified: dict[str, dict] = {}
     for path in sorted(directory.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in extensions:
+        if (
+            not path.is_file()
+            or path.suffix.lower() not in LANGUAGE_MAP
+            or any(skip in path.parts for skip in {".git", "node_modules", "__pycache__", ".venv", "venv"})
+        ):
             continue
-        if any(skip in path.parts for skip in {".git", "node_modules", "__pycache__", ".venv"}):
-            continue
+        result = _parse_file(path, registry, directory)
+        _annotate_function_ids(path, result, directory)
+        parsed.append((path, result))
+        for function in result["functions"]:
+            definition = {**function, "file": str(path), "language": result["language"]}
+            definitions[function["symbol_id"]] = definition
+            by_name.setdefault(function["name"], []).append(definition)
+            if result["language"] == "python":
+                by_qualified[_python_qualified_name(path, function, directory)] = definition
 
-        result = parse_file(path)
-        func_names = {f["name"] for f in result["functions"]}
+    edges = []
+    for path, result in parsed:
         for call in result["calls"]:
-            callee = call["name"]
-            # Only track calls to functions defined in this codebase.
-            for fn in func_names:
-                adj[fn].add(callee)
-
-    if not adj:
-        return []
-
-    # Label Propagation Algorithm (LPA).
-    # Each node starts with a unique label. Iteratively, each node adopts
-    # the most frequent label among its neighbors. Converges to communities.
-    nodes = set()
-    for src, targets in adj.items():
-        nodes.add(src)
-        nodes.update(targets)
-
-    labels = {node: i for i, node in enumerate(sorted(nodes))}
-
-    for _ in range(10):  # Max 10 iterations.
-        changed = False
-        for node in sorted(nodes):
-            if node not in adj:
+            caller = _containing_function(result["functions"], call)
+            if caller is None:
                 continue
-            neighbor_labels = [labels.get(t, labels[node]) for t in adj[node] if t in labels]
-            if not neighbor_labels:
-                continue
-            # Most common label among neighbors.
-            from collections import Counter
-            most_common = Counter(neighbor_labels).most_common(1)[0][0]
-            if most_common != labels[node]:
-                labels[node] = most_common
-                changed = True
-        if not changed:
+            target = None
+            if result["language"] == "python":
+                if call.get("confidence") != "confirmed":
+                    continue
+                target = by_qualified.get(call.get("qualified_name"))
+            same_file = [
+                item for item in by_name.get(call["name"], []) if item["file"] == str(path)
+            ]
+            if target is None and len(same_file) == 1:
+                target = same_file[0]
+            if target is None and len(by_name.get(call["name"], [])) == 1:
+                target = by_name[call["name"]][0]
+            if target is not None:
+                edges.append({"source": caller["symbol_id"], "target": target["symbol_id"]})
+    return parsed, definitions, edges
+
+
+def _annotate_function_ids(path: Path, result: dict, root: Path) -> None:
+    containers = [*result["classes"], *result["functions"]]
+    relative = path.resolve().relative_to(root).as_posix()
+    annotated = []
+    for function in result["functions"]:
+        enclosing = [
+            item for item in containers
+            if item is not function and _symbol_contains(item, function)
+        ]
+        owner = min(enclosing, key=_symbol_span)["name"] if enclosing else "<module>"
+        function["owner"] = owner
+        identity = function.get("signature") or f"{function['name']}@L{function['line']}"
+        annotated.append((function, f"{relative}::{owner}::{identity}"))
+    counts: dict[str, int] = {}
+    for _, identity in annotated:
+        counts[identity] = counts.get(identity, 0) + 1
+    for function, identity in annotated:
+        function["symbol_id"] = (
+            f"{identity}@L{function['line']}" if counts[identity] > 1 else identity
+        )
+
+
+def _python_qualified_name(path: Path, function: dict, root: Path) -> str:
+    relative = path.resolve().relative_to(root).with_suffix("")
+    parts = list(relative.parts)
+    if parts[-1] == "__init__":
+        parts.pop()
+    module = ".".join(parts)
+    owner = "" if function["owner"] == "<module>" else f".{function['owner']}"
+    return f"{module}{owner}.{function['name']}"
+
+
+def _symbol_span(symbol: dict) -> tuple[int, int]:
+    return (
+        symbol.get("end_line", symbol["line"]) - symbol["line"],
+        symbol.get("end_column", 0) - symbol.get("column", 0),
+    )
+
+
+def _symbol_contains(container: dict, child: dict) -> bool:
+    start = (container["line"], container.get("column", 0))
+    end = (container.get("end_line", container["line"]), container.get("end_column", 10**9))
+    child_start = (child["line"], child.get("column", 0))
+    child_end = (child.get("end_line", child["line"]), child.get("end_column", 10**9))
+    return start <= child_start and child_end <= end and (start, end) != (child_start, child_end)
+
+
+def _containing_function(functions: list[dict], call: dict) -> dict | None:
+    matches = [function for function in functions if _symbol_contains(function, call)]
+    return min(matches, key=_symbol_span) if matches else None
+
+
+def _louvain_communities(graph: dict[str, dict[str, float]]) -> list[list[str]]:
+    """Optimize modularity on a weighted undirected graph without dependencies."""
+    current = {node: dict(neighbors) for node, neighbors in graph.items()}
+    members = {node: {node} for node in current}
+    while current:
+        nodes = sorted(current, key=str)
+        community = {node: node for node in nodes}
+        degree = {node: sum(current[node].values()) for node in nodes}
+        totals = dict(degree)
+        m2 = sum(degree.values())
+        if not m2:
             break
 
-    # Group nodes by final label.
-    communities: dict[int, list[str]] = defaultdict(list)
-    for node, label in labels.items():
-        communities[label].append(node)
+        moved = True
+        while moved:
+            moved = False
+            for node in nodes:
+                old = community[node]
+                totals[old] -= degree[node]
+                weights: dict[object, float] = {}
+                for neighbor, weight in current[node].items():
+                    target = community[neighbor]
+                    weights[target] = weights.get(target, 0.0) + weight
+                choices = sorted(weights, key=str)
+                best = old
+                best_gain = 0.0
+                for target in choices:
+                    gain = weights[target] - totals[target] * degree[node] / m2
+                    if gain > best_gain + 1e-12:
+                        best, best_gain = target, gain
+                community[node] = best
+                totals[best] += degree[node]
+                moved |= best != old
 
-    # Return only communities with 2+ members.
-    return [sorted(members) for members in communities.values() if len(members) >= 2]
+        groups: dict[object, list[object]] = {}
+        for node in nodes:
+            groups.setdefault(community[node], []).append(node)
+        ordered_groups = sorted(
+            (sorted(group, key=str) for group in groups.values()),
+            key=lambda group: str(group[0]),
+        )
+        if len(ordered_groups) == len(nodes):
+            break
+
+        group_of = {
+            node: index for index, group in enumerate(ordered_groups) for node in group
+        }
+        next_members = {
+            index: set().union(*(members[node] for node in group))
+            for index, group in enumerate(ordered_groups)
+        }
+        reduced = _aggregate_louvain_graph(current, group_of)
+        current, members = reduced, next_members
+
+    communities = [sorted(group) for group in members.values() if len(group) >= 2]
+    return sorted(communities, key=lambda group: group[0])
+
+
+def _aggregate_louvain_graph(
+    graph: dict[object, dict[object, float]], group_of: dict[object, int]
+) -> dict[int, dict[int, float]]:
+    """Aggregate an undirected weighted graph using adjacency degree weights."""
+    reduced: dict[int, dict[int, float]] = {
+        group: {} for group in sorted(set(group_of.values()))
+    }
+    for source in sorted(graph, key=str):
+        for target, weight in graph[source].items():
+            left, right = group_of[source], group_of[target]
+            if source == target:
+                reduced[left][left] = reduced[left].get(left, 0.0) + weight
+            elif str(source) <= str(target):
+                if left == right:
+                    reduced[left][left] = reduced[left].get(left, 0.0) + 2 * weight
+                else:
+                    reduced[left][right] = reduced[left].get(right, 0.0) + weight
+                    reduced[right][left] = reduced[right].get(left, 0.0) + weight
+    return reduced
 
 
 def main() -> int:

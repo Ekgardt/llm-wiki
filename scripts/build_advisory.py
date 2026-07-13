@@ -271,6 +271,24 @@ Respond with only the insight paragraph (2-3 sentences). No preamble."""
     return rule_based
 
 
+def build_advisory_refresh() -> str:
+    """Return a roughly 50-token mid-session vault health refresh."""
+    pages = 0
+    if KNOWLEDGE.exists():
+        for path in KNOWLEDGE.rglob("*.md"):
+            try:
+                content = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if _fm_field(content, STATUS_RE) != "superseded":
+                pages += 1
+    stale = _find_stale_pages()
+    return (
+        f"Memory refresh: {pages} pages indexed; {stale} stale. "
+        "Use durable pages first and verify stale claims before relying on them."
+    )
+
+
 def _build_rule_based_advisory(slug: str | None, max_chars: int) -> str:
     """Build the fast rule-based advisory (no LLM)."""
     parts: list[str] = []

@@ -186,4 +186,6 @@ uv pip uninstall cognee
 Remove-Item -Recurse -Force $LLM_WIKI_STATE_ROOT/cache/cognee
 ```
 
-The vault continues to work without Cognee — all retrieval falls back to QMD + index.md.
+The vault continues to work without Cognee: direct page reads and SQLite FTS5
+BM25 remain available, with optional local vectors/LanceDB, graph neighbors,
+and reranking when their extras are installed.

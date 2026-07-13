@@ -10,8 +10,10 @@ fix the reference first, then the code.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
+import memory_state as early_memory_state
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -42,6 +44,10 @@ def test_agent_contract_mentions_three_zone_process_rule():
     text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     assert "sign-off" in text.lower() or "explicit" in text.lower(), (
         "AGENTS.md must mention the architecture-change sign-off process"
+    )
+    template = ROOT / "integrations" / "obsidian" / "Article-to-Inbox.json"
+    assert not template.exists(), (
+        "Obsidian is an optional Markdown viewer; do not bundle ingestion wiring"
     )
 
 
@@ -140,6 +146,10 @@ def test_memory_state_default_is_vault_root():
     assert "ROOT.parent" not in src.split("STATE_ROOT")[1].split("\n")[0], (
         "STATE_ROOT line references ROOT.parent — sibling layout regression"
     )
+
+
+def test_imported_memory_state_uses_the_hermetic_test_root():
+    assert early_memory_state.STATE_ROOT == Path(os.environ["LLM_WIKI_STATE_ROOT"]).resolve()
 
 
 # ---------------------------------------------------------------------------

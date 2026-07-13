@@ -7,7 +7,7 @@ Three-zone layout: vault holds code + knowledge + gitignored runtime dirs.
       run/compile.pid    # maybe_compile lock
       run/queue/         # deferred LLM tasks
       logs/              # lint / nightly reports
-      cache/             # search / QMD indexes
+      cache/             # FTS5/vector/graph indexes
                        # cache/cognee/ — optional semantic graph
 
 `cache/` (incl. `cache/cognee/`), `logs/`, `run/` are gitignored — they live inside the
@@ -162,12 +162,26 @@ def _state_lock(timeout: float = 10.0, poll: float = 0.05) -> Iterator[None]:
     deadline = time.time() + timeout
     fd: int | None = None
     owner_pid = str(os.getpid())
+    observed_contention = False
     while True:
         try:
             fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_RDWR)
             os.write(fd, owner_pid.encode("utf-8"))
             break
         except FileExistsError:
+            observed_contention = True
+        except PermissionError as exc:
+            # Windows sharing/lock violations are contention. ACL denial is not.
+            sharing_violation = (
+                getattr(exc, "winerror", None) in {32, 33}
+                or sys.platform == "win32" and exc.errno == 13
+            )
+            existing_exclusive_lock = sys.platform == "win32" and LOCK_FILE.exists()
+            if not sharing_violation and not existing_exclusive_lock and not observed_contention:
+                raise
+        try:
+            # Windows may report sharing contention on an existing O_EXCL lock
+            # as ERROR_SHARING_VIOLATION instead of EEXIST.
             try:
                 age = time.time() - LOCK_FILE.stat().st_mtime
             except OSError:
@@ -197,6 +211,8 @@ def _state_lock(timeout: float = 10.0, poll: float = 0.05) -> Iterator[None]:
             if time.time() > deadline:
                 raise TimeoutError(f"Could not acquire state lock: {LOCK_FILE}")
             time.sleep(poll)
+        except BaseException:
+            raise
     try:
         yield
     finally:
@@ -216,14 +232,18 @@ def _state_lock(timeout: float = 10.0, poll: float = 0.05) -> Iterator[None]:
             pass
 
 
-def update_state(mutator: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+def update_state(
+    mutator: Callable[[dict[str, Any]], None], *, lock_timeout: float = 10.0
+) -> dict[str, Any]:
     """Atomically read-modify-write state under a file lock.
 
     `mutator` receives the freshly-loaded state dict and mutates it
     in place. The updated dict is written back atomically. Returns the
     state that was written, so callers can inspect the post-merge result.
+    `lock_timeout` bounds lock acquisition while preserving the default
+    timeout for scheduled and other non-hook writers.
     """
-    with _state_lock():
+    with _state_lock(timeout=lock_timeout):
         state = load_state()
         mutator(state)
         save_state(state)

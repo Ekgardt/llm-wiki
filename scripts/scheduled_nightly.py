@@ -21,10 +21,68 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import maybe_compile  # noqa: E402
 from maintenance_helpers import run_step as _run_step  # noqa: E402
 from maintenance_helpers import wait_for_compile_idle as _wait_for_compile_idle
-from memory_state import REPORTS_DIR, ROOT, STATE_ROOT, _is_pid_alive  # noqa: E402
+from memory_state import (  # noqa: E402
+    REPORTS_DIR,
+    ROOT,
+    STATE_ROOT,
+    _is_pid_alive,
+    update_state,
+)
+
+
+def _record_nightly_result(today: str, failures: int, error: str | None = None) -> None:
+    """Release today's catchup lease and persist the terminal result."""
+    timestamp = datetime.now().isoformat(timespec="seconds")
+
+    def _mutate(state: dict) -> None:
+        claim = state.get("nightly_catchup_claim", {})
+        if claim.get("date") == today:
+            state.pop("nightly_catchup_claim", None)
+        if failures:
+            state["last_nightly_status"] = "failed"
+            state["last_nightly_failure"] = {
+                "date": today,
+                "failed_at": timestamp,
+                "failures": failures,
+                **({"error": error} if error else {}),
+            }
+        else:
+            state["last_nightly_status"] = "success"
+            state["last_nightly_date"] = today
+            state.pop("last_nightly_failure", None)
+
+    update_state(_mutate)
+
+
+def _record_nightly_skip(today: str, reason: str) -> None:
+    """Release today's claim without replacing the last execution result."""
+    timestamp = datetime.now().isoformat(timespec="seconds")
+
+    def _mutate(state: dict) -> None:
+        claim = state.get("nightly_catchup_claim", {})
+        if claim.get("date") == today:
+            state.pop("nightly_catchup_claim", None)
+        state["last_nightly_skip"] = {
+            "date": today,
+            "skipped_at": timestamp,
+            "status": "deferred",
+            "reason": reason,
+        }
+
+    update_state(_mutate)
 
 
 def main() -> int:
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    def _skip_for_maintenance(message: str) -> int:
+        print(message, file=sys.stderr)
+        try:
+            _record_nightly_skip(today, "maintenance_lock_held")
+        except Exception as exc:
+            print(f"scheduled_nightly: could not record skip: {exc}", file=sys.stderr)
+        return 0
+
     # Maintenance lease: prevent concurrent nightly/weekly runs.
     maint_lock = STATE_ROOT / "run" / "maintenance.lock"
     maint_lock.parent.mkdir(parents=True, exist_ok=True)
@@ -49,18 +107,21 @@ def main() -> int:
                         os.close(fd)
                         stolen = True
                     else:
-                        print("scheduled_nightly: maintenance running (stale but PID alive), skipping.", file=sys.stderr)
-                        return 0
+                        return _skip_for_maintenance(
+                            "scheduled_nightly: maintenance running (stale but PID alive), skipping."
+                        )
                 except (ValueError, OSError):
                     maint_lock.unlink()
         except OSError:
             pass
         if not stolen:
-            print("scheduled_nightly: maintenance already running, skipping.", file=sys.stderr)
-            return 0
+            return _skip_for_maintenance(
+                "scheduled_nightly: maintenance already running, skipping."
+            )
 
+    failures = 1
+    terminal_error = None
     try:
-        today = datetime.now().strftime("%Y-%m-%d")
         log_file = REPORTS_DIR / f"nightly-{today}.md"
         REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -186,7 +247,14 @@ def main() -> int:
 
         log(f"=== Nightly pass complete (failures={failures}) ===")
         return 1 if failures else 0
+    except Exception as exc:
+        terminal_error = f"{type(exc).__name__}: {exc}"
+        raise
     finally:
+        try:
+            _record_nightly_result(today, failures, terminal_error)
+        except Exception as exc:
+            print(f"scheduled_nightly: could not record result: {exc}", file=sys.stderr)
         try:
             current = maint_lock.read_text(encoding="utf-8").strip()
             if current == str(os.getpid()):

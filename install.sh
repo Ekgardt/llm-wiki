@@ -13,7 +13,7 @@
 #
 # What this does:
 #   1. Checks prerequisites (Python 3.10+, uv, git)
-#   2. Installs Python deps (uv sync)
+#   2. Installs locked Python deps with the MCP server baseline
 #   3. Runs tests to verify everything works
 #   4. Sets LLM_WIKI_ROOT in shell profile
 #   5. Sets up cron jobs (nightly + weekly) — cron only (no launchd)
@@ -92,9 +92,9 @@ ok "uv $(uv --version 2>/dev/null || echo 'installed')"
 
 # ─── 3. Install dependencies ───────────────────────────────────────
 
-info "Installing Python dependencies..."
-uv sync --locked --quiet
-ok "Dependencies installed"
+info "Installing locked Python dependencies with MCP support..."
+uv sync --locked --extra mcp-server --quiet
+ok "Dependencies installed (MCP server baseline included)"
 
 # ─── 4. Run tests ──────────────────────────────────────────────────
 
@@ -181,6 +181,7 @@ ok "Cron scheduled: nightly 03:00, weekly Sunday 04:00"
 info "Detecting installed agents..."
 
 AGENTS_FOUND=""
+VAULT_JSON=$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$VAULT_ROOT")
 
 # OpenCode
 if [ -d "$HOME/.config/opencode" ] || command -v opencode &>/dev/null; then
@@ -201,6 +202,22 @@ fi
 # Codex CLI
 if command -v codex &>/dev/null; then
   AGENTS_FOUND="$AGENTS_FOUND Codex"
+  CODEX_CONFIG="$HOME/.codex/config.toml"
+  CODEX_BLOCK=$(printf '%s\n' \
+    '[mcp_servers.llm-wiki]' \
+    'command = "uv"' \
+    "args = [\"run\", \"--directory\", $VAULT_JSON, \"python\", \"scripts/mcp_server.py\"]")
+  mkdir -p "$HOME/.codex"
+  if ! grep -q '^\[mcp_servers\.llm-wiki\]$' "$CODEX_CONFIG" 2>/dev/null; then
+    if [ -f "$CODEX_CONFIG" ]; then
+      cp -p "$CODEX_CONFIG" "$CODEX_CONFIG.bak"
+      printf '\n%s\n' "$CODEX_BLOCK" >> "$CODEX_CONFIG"
+      ok "Codex MCP config appended; backup: $CODEX_CONFIG.bak"
+    else
+      printf '%s\n' "$CODEX_BLOCK" > "$CODEX_CONFIG"
+      ok "Codex MCP config created: $CODEX_CONFIG"
+    fi
+  fi
   info "Codex CLI detected. Add this to your shell profile:"
   info "  alias codex-mem='uv run python $VAULT_ROOT/scripts/codex_memory.py daily-log --cwd \$(pwd) --reason codex-session-end --json'"
 fi
@@ -226,7 +243,7 @@ else
 fi
 
 # Claude Code — merge hooks if CLI or config dir present (safe: backup + non-destructive)
-if command -v claude &>/dev/null || [ -d "$HOME/.claude" ]; then
+if command -v claude &>/dev/null || [ -d "$HOME/.claude" ] || [ -f "$HOME/.claude.json" ]; then
   AGENTS_FOUND="$AGENTS_FOUND Claude"
   info "Merging LLM-wiki hooks into Claude user settings (backup first)..."
   if uv run python "$VAULT_ROOT/scripts/merge_claude_settings.py" \
@@ -237,29 +254,28 @@ if command -v claude &>/dev/null || [ -d "$HOME/.claude" ]; then
     warn "Claude settings merge failed — run: uv run python scripts/merge_claude_settings.py"
   fi
   # v4.0: MCP server config for Claude Code
-  CLAUDE_MCP="$HOME/.claude/.mcp.json"
-  if [ ! -f "$CLAUDE_MCP" ] || ! grep -q "llm-wiki" "$CLAUDE_MCP" 2>/dev/null; then
+  CLAUDE_MCP="$HOME/.claude.json"
+  if [ ! -f "$CLAUDE_MCP" ]; then
     info "Adding MCP server config for Claude Code..."
-    mkdir -p "$HOME/.claude"
-    if [ ! -f "$CLAUDE_MCP" ]; then
-      echo '{"mcpServers":{"llm-wiki":{"command":"uv","args":["run","--directory","'"$VAULT_ROOT"'","python","scripts/mcp_server.py"]}}}' > "$CLAUDE_MCP"
-    else
-      info "  Existing .mcp.json found — add manually: llm-wiki MCP server"
-    fi
-    ok "Claude MCP config: ~/.claude/.mcp.json"
+    printf '%s\n' '{"mcpServers":{"llm-wiki":{"command":"uv","args":["run","--directory",'"$VAULT_JSON"',"python","scripts/mcp_server.py"]}}}' > "$CLAUDE_MCP"
+    ok "Claude MCP config: ~/.claude.json"
+  elif ! grep -q '"llm-wiki"' "$CLAUDE_MCP" 2>/dev/null; then
+    warn "Existing ~/.claude.json found without llm-wiki; merge this under top-level mcpServers:"
+    warn '  "llm-wiki":{"command":"uv","args":["run","--directory",'"$VAULT_JSON"',"python","scripts/mcp_server.py"]}'
   fi
 fi
 
 # v4.0: OpenCode MCP config
 if [ -d "$HOME/.config/opencode" ] || command -v opencode &>/dev/null; then
   OPENCODE_CONFIG="$HOME/.config/opencode/opencode.json"
-  if [ ! -f "$OPENCODE_CONFIG" ] || ! grep -q "llm-wiki" "$OPENCODE_CONFIG" 2>/dev/null; then
+  if [ ! -f "$OPENCODE_CONFIG" ]; then
     info "Adding MCP server config for OpenCode..."
     mkdir -p "$HOME/.config/opencode"
-    if [ ! -f "$OPENCODE_CONFIG" ]; then
-      echo '{"mcpServers":{"llm-wiki":{"command":"uv","args":["run","--directory","'"$VAULT_ROOT"'","python","scripts/mcp_server.py"]}}}' > "$OPENCODE_CONFIG"
-    fi
+    printf '%s\n' '{"mcp":{"llm-wiki":{"type":"local","command":["uv","run","--directory",'"$VAULT_JSON"',"python","scripts/mcp_server.py"],"enabled":true}}}' > "$OPENCODE_CONFIG"
     ok "OpenCode MCP config"
+  elif ! grep -q '"llm-wiki"' "$OPENCODE_CONFIG" 2>/dev/null; then
+    warn "Existing opencode.json found without llm-wiki; merge this under top-level mcp:"
+    warn '  "llm-wiki":{"type":"local","command":["uv","run","--directory",'"$VAULT_JSON"',"python","scripts/mcp_server.py"],"enabled":true}'
   fi
 fi
 
@@ -293,10 +309,10 @@ echo "  uv run python scripts/build_advisory.py              # proactive advisor
 echo "  uv run python scripts/build_guardrails.py             # learned rules"
 echo "  uv run python benchmark/run_benchmark.py              # run benchmark"
 echo ""
-echo "v4.0 optional features:"
+echo "MCP baseline: 12 local task-shaped tools (installed)"
+echo "Optional enhancements:"
 echo "  uv sync --extra hybrid        # LanceDB HNSW + semantic search"
 echo "  uv sync --extra code-graph    # tree-sitter code graph"
-echo "  uv sync --extra mcp-server    # MCP server (9 tools)"
 echo "  uv sync --extra reranker      # cross-encoder reranker"
 echo "  uv sync --extra full          # all of the above"
 echo ""

@@ -54,6 +54,7 @@ except Exception:  # noqa: BLE001
     def update_state(mutator):  # type: ignore[misc]
         """No-op stub — safe skip when memory_state is unavailable."""
 
+from event_envelope import build_event_envelope  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
 DAILY_DIR = ROOT / "knowledge" / "daily"
@@ -182,8 +183,10 @@ def main() -> int:
         hook = _read_hook_input()
         tool_name = hook.get("tool_name") or ""
         tool_input = hook.get("tool_input") or {}
-        session_id = hook.get("session_id") or "unknown"
-        cwd = hook.get("cwd") or os.getcwd()
+        source_session = hook.get("session_id")
+        source_cwd = hook.get("cwd")
+        session_id = source_session or "unknown"
+        cwd = source_cwd or os.getcwd()
 
         # Filter to significant tools only.
         if tool_name not in SIGNIFICANT_TOOLS:
@@ -202,12 +205,27 @@ def main() -> int:
             pass
 
         slug = _compute_slug_from_cwd(cwd)
+        safe_target = redact_secrets(target) if target else ""
+        envelope = build_event_envelope(
+            event_type="post_tool_use",
+            payload={"tool_name": tool_name, "target": safe_target},
+            agent=hook.get("agent") if isinstance(hook.get("agent"), str) else None,
+            session=str(source_session) if source_session is not None else None,
+            project=slug if source_cwd else None,
+            worktree=str(source_cwd) if source_cwd else None,
+            severity=hook.get("severity") if isinstance(hook.get("severity"), str) else None,
+            parent_event_id=(
+                hook.get("parent_event_id")
+                if isinstance(hook.get("parent_event_id"), str)
+                else None
+            ),
+        )
 
-        if _rate_limited(slug, tool_name, target):
+        if _rate_limited(slug, tool_name, envelope.payload["target"]):
             return 0
 
-        _append_tool_tag(slug, session_id, tool_name, target)
-        _record_dedupe(slug, tool_name, target)
+        _append_tool_tag(slug, session_id, tool_name, envelope.payload["target"])
+        _record_dedupe(slug, tool_name, envelope.payload["target"])
     except Exception:  # noqa: BLE001
         pass
     return 0

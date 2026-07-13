@@ -39,12 +39,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/session_start_context.py",
+            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event session_start --delegate session_start_context.py",
             "timeout": 15
           },
           {
             "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/session_start_project_state.py",
+            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event session_start --delegate session_start_project_state.py",
             "timeout": 10
           }
         ]
@@ -56,7 +56,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/precompact_capture.py",
+            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event pre_compact --delegate precompact_capture.py",
             "timeout": 15
           }
         ]
@@ -68,12 +68,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/session_end_capture.py",
+            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event session_end --delegate session_end_capture.py",
             "timeout": 15
           },
           {
             "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/session_end_project_tag.py",
+            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event session_end --delegate session_end_project_tag.py",
             "timeout": 10
           }
         ]
@@ -85,7 +85,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/user_prompt_capture.py",
+            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event user_prompt --delegate user_prompt_capture.py",
             "timeout": 5
           }
         ]
@@ -97,7 +97,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/post_tool_capture.py",
+            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event post_tool_use --delegate post_tool_capture.py",
             "timeout": 5
           }
         ]

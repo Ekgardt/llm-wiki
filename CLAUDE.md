@@ -61,7 +61,7 @@ knowledge/
 
 # RUNTIME (inside the vault, gitignored — regenerated on demand)
 # Override root via LLM_WIKI_STATE_ROOT (tests use a temp dir).
-cache/     # search / QMD / vector indexes (+ cache/cognee/ for optional graph)
+cache/     # FTS5 / vector / graph indexes (+ cache/cognee/ for optional graph)
 logs/      # lint reports, compile logs, SessionStart debug dumps
 run/       # state.json, compile.pid, queue/, locks
 ```
@@ -74,6 +74,12 @@ run/       # state.json, compile.pid, queue/, locks
   Override for multi-disk setups or hermetic tests.
 - `$MEMORY_LLM_PROVIDER` → `fake` (tests), or one of
   `opencode|codex|claude|openai|ollama` (runtime, auto-detected).
+
+**Agent integration boundary:** MCP is the common interface for reads and
+actions (12 task-shaped tools, uniform response envelope, health/context
+resources). Native hooks, plugins, and wrappers are thin lifecycle adapters
+for events MCP cannot observe. Automatic health context is injected only when
+`doctor` reports degraded/error findings.
 
 **Forbidden at vault root:** `wiki/`, `memory/`, `outputs/`, `state/`,
 `LLM-wiki-state/` (legacy sibling layout — removed). Runtime lives **inside**
@@ -255,14 +261,15 @@ for tests/e2e.
 ## 7. Quick command reference
 
 ```bash
-uv run pytest -q                              # run the test suite (419 tests collected)
+uv run pytest -q                              # run the test suite (812 tests collected)
 uv run ruff check scripts/ tests/             # Python static analysis
 uv run python scripts/lint_memory.py --scope all   # structural lint
 uv run python scripts/search_memory.py "query"     # hybrid search
 uv run python scripts/compile_memory.py            # compile daily logs → notes
 uv run python scripts/lookup_mode.py               # show retrieval tier
 # v4.0 optional features (require --extra flags):
-uv run python scripts/mcp_server.py                # MCP server (9 tools, stdio)
+uv run python scripts/mcp_server.py                # MCP server (12 tools, stdio)
+uv run python scripts/doctor.py                    # local health; --repair is explicit
 uv run python scripts/code_graph.py .              # index code graph (tree-sitter)
 uv run python scripts/impact_analysis.py           # git diff → stale wiki pages
 uv run python scripts/reflection.py --apply        # A-MEM page consolidation

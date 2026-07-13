@@ -16,6 +16,7 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(?i)(secret\s*[=:]\s*)(\S+)"), r"\1[REDACTED]"),
     (re.compile(r"(?i)(password\s*[=:]\s*)(\S+)"), r"\1[REDACTED]"),
     (re.compile(r"(?i)(token\s*[=:]\s*)(\S+)"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)(entropy\s*[=:]\s*)(\S+)"), r"\1[REDACTED]"),
     (re.compile(r"sk-[A-Za-z0-9]{20,}"), "[REDACTED_API_KEY]"),
     (re.compile(r"ghp_[A-Za-z0-9]{20,}"), "[REDACTED_GITHUB_TOKEN]"),
     (re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"), "[REDACTED_SLACK_TOKEN]"),

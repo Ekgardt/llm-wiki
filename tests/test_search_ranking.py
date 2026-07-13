@@ -10,6 +10,10 @@ Locks in:
 from __future__ import annotations
 
 import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -146,3 +150,71 @@ def test_needs_rebuild_fresh_files():
          patch.object(Path, "stat") as mock_stat:
         mock_stat.return_value.st_mtime = time.time() - 3600  # index 1h old
         assert search_memory._needs_rebuild([fake_page]) is True
+
+
+def test_slug_is_indexed_and_selects_the_matching_duplicate(tmp_path, monkeypatch):
+    import search_memory
+
+    notes = tmp_path / "knowledge" / "notes"
+    notes.mkdir(parents=True)
+    first = notes / "first-implementation.md"
+    second = notes / "second-implementation.md"
+    content = "---\ntype: concept\n---\n# Shared title\n\nUnrelated body.\n"
+    first.write_text(content, encoding="utf-8")
+    second.write_text(content, encoding="utf-8")
+    index_dir = tmp_path / "cache" / "search"
+    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
+    monkeypatch.setattr(search_memory, "WIKI_DIR", notes)
+    monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
+    monkeypatch.setattr(search_memory, "INDEX_DIR", index_dir)
+    monkeypatch.setattr(search_memory, "INDEX_FILE", index_dir / "index.sqlite")
+    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", index_dir / "manifest.json")
+
+    results = search_memory.search("second implementation", force_rebuild=True)
+
+    assert results[0]["path"] == "knowledge/notes/second-implementation.md"
+
+
+def test_concurrent_index_builds_use_unique_temps_and_leave_valid_index(
+    tmp_path, monkeypatch
+):
+    import doctor
+    import search_memory
+
+    notes = tmp_path / "knowledge" / "notes"
+    notes.mkdir(parents=True)
+    page = notes / "page.md"
+    page.write_text("# Page\nBody", encoding="utf-8")
+    index_dir = tmp_path / "cache"
+    index = index_dir / "index.sqlite"
+    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
+    monkeypatch.setattr(search_memory, "INDEX_DIR", index_dir)
+    monkeypatch.setattr(search_memory, "INDEX_FILE", index)
+    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", index_dir / ".paths-manifest")
+    real_connect = search_memory.sqlite3.connect
+    barrier = threading.Barrier(2)
+    opened = []
+    opened_lock = threading.Lock()
+
+    def overlapping_connect(database, *args, **kwargs):
+        connection = real_connect(database, *args, **kwargs)
+        with opened_lock:
+            opened.append(Path(database))
+        barrier.wait(timeout=2)
+        return connection
+
+    with monkeypatch.context() as context:
+        context.setattr(search_memory.sqlite3, "connect", overlapping_connect)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(lambda _: search_memory._build_index([page]), range(2)))
+
+    temp_paths = [path for path in opened if path != index]
+    assert len(temp_paths) == 2
+    assert len(set(temp_paths)) == 2
+    assert not any(path.exists() for path in temp_paths)
+    check = doctor._index_check(
+        tmp_path,
+        datetime.now(timezone.utc),
+        deadline=time.monotonic() + 1,
+    )
+    assert check["status"] == "ok"

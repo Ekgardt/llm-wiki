@@ -12,7 +12,7 @@
 #
 # What this does:
 #   1. Checks prerequisites (Python 3.10+, uv, git)
-#   2. Installs Python deps
+#   2. Installs locked Python deps with the MCP server baseline
 #   3. Runs tests
 #   4. Sets LLM_WIKI_ROOT environment variable (user-level)
 #   5. Registers Windows Task Scheduler (nightly + weekly)
@@ -29,6 +29,22 @@ function Info($msg) { Write-Host "[INFO] $msg" -ForegroundColor Blue }
 function Ok($msg)   { Write-Host "[OK] $msg"   -ForegroundColor Green }
 function Warn($msg) { Write-Host "[WARN] $msg"  -ForegroundColor Yellow }
 function Fail($msg) { Write-Host "[FAIL] $msg"  -ForegroundColor Red; exit 1 }
+function Write-Utf8NoBom([string]$path, [string]$content) {
+    [System.IO.File]::WriteAllText(
+        $path,
+        $content,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+}
+function Resolve-StateRoot(
+    [string]$ProcessState,
+    [string]$UserState,
+    [string]$VaultRoot
+) {
+    if (-not [string]::IsNullOrWhiteSpace($ProcessState)) { return $ProcessState }
+    if (-not [string]::IsNullOrWhiteSpace($UserState)) { return $UserState }
+    return $VaultRoot
+}
 
 # ─── 1. Resolve vault root ──────────────────────────────────────────
 
@@ -77,9 +93,9 @@ Ok "uv installed"
 
 # ─── 3. Install dependencies ───────────────────────────────────────
 
-Info "Installing Python dependencies..."
-uv sync --locked --quiet
-Ok "Dependencies installed"
+Info "Installing locked Python dependencies with MCP support..."
+uv sync --locked --extra mcp-server --quiet
+Ok "Dependencies installed (MCP server baseline included)"
 
 # ─── 4. Run tests ──────────────────────────────────────────────────
 
@@ -101,19 +117,22 @@ if ($oldRoot -and $oldRoot -ne $VAULT_ROOT) {
     Warn "LLM_WIKI_ROOT was '$oldRoot', overwriting to '$VAULT_ROOT'"
 }
 $oldState = [Environment]::GetEnvironmentVariable("LLM_WIKI_STATE_ROOT", "User")
-if ($oldState -and $oldState -ne $VAULT_ROOT) {
-    Warn "LLM_WIKI_STATE_ROOT was '$oldState', overwriting to '$VAULT_ROOT'"
-}
+$processState = $env:LLM_WIKI_STATE_ROOT
+$STATE_ROOT = Resolve-StateRoot `
+    -ProcessState $processState `
+    -UserState $oldState `
+    -VaultRoot $VAULT_ROOT
 
 [Environment]::SetEnvironmentVariable("LLM_WIKI_ROOT", $VAULT_ROOT, "User")
 # Runtime lives inside the vault as gitignored cache/logs/run dirs.
 # LLM_WIKI_STATE_ROOT defaults to the vault itself; only set it explicitly
 # if you want runtime on a different disk.
-[Environment]::SetEnvironmentVariable("LLM_WIKI_STATE_ROOT", $VAULT_ROOT, "User")
+if ([string]::IsNullOrWhiteSpace($processState) -and [string]::IsNullOrWhiteSpace($oldState)) {
+    [Environment]::SetEnvironmentVariable("LLM_WIKI_STATE_ROOT", $VAULT_ROOT, "User")
+}
 $env:LLM_WIKI_ROOT = $VAULT_ROOT
-$env:LLM_WIKI_STATE_ROOT = $VAULT_ROOT
+$env:LLM_WIKI_STATE_ROOT = $STATE_ROOT
 
-$STATE_ROOT = $VAULT_ROOT
 New-Item -ItemType Directory -Path "$STATE_ROOT\run" -Force | Out-Null
 New-Item -ItemType Directory -Path "$STATE_ROOT\run\queue" -Force | Out-Null
 New-Item -ItemType Directory -Path "$STATE_ROOT\logs" -Force | Out-Null
@@ -161,6 +180,27 @@ if ((Get-Process "OpenCode*" -ErrorAction SilentlyContinue) -or (Test-Path $open
     } else {
         Warn "OpenCode detected but plugin source missing: $openCodePluginSrc"
     }
+    $openCodeMcp = Join-Path $openCodeConfig "opencode.json"
+    $openCodeEntryObject = [ordered]@{
+        type = "local"
+        command = @("uv", "run", "--directory", $VAULT_ROOT, "python", "scripts/mcp_server.py")
+        enabled = $true
+    }
+    $openCodeConfigObject = [ordered]@{
+        mcp = [ordered]@{ "llm-wiki" = $openCodeEntryObject }
+    }
+    $openCodeJson = $openCodeConfigObject | ConvertTo-Json -Depth 6 -Compress
+    $openCodeMerge = ([ordered]@{ "llm-wiki" = $openCodeEntryObject } | ConvertTo-Json -Depth 5 -Compress)
+    if (-not (Test-Path $openCodeMcp)) {
+        Write-Utf8NoBom $openCodeMcp $openCodeJson
+        Ok "OpenCode MCP config created → $openCodeMcp"
+    } else {
+        $openCodeExisting = Get-Content -LiteralPath $openCodeMcp -Raw
+        if ($openCodeExisting -notmatch '"llm-wiki"\s*:') {
+            Warn 'Existing opencode.json found without llm-wiki; merge this under top-level "mcp":'
+            Warn "  $openCodeMerge"
+        }
+    }
 }
 
 # Codex
@@ -180,12 +220,40 @@ if (Get-Command codex -ErrorAction SilentlyContinue) {
         Add-Content $profilePath '. "$env:LLM_WIKI_ROOT\scripts\codex-memory-wrapper.ps1"'
         Ok "Codex wrapper added to $profilePath"
     }
+    $codexConfig = Join-Path $env:USERPROFILE ".codex\config.toml"
+    $codexDir = Split-Path $codexConfig -Parent
+    New-Item -ItemType Directory -Path $codexDir -Force | Out-Null
+    $tomlVault = $VAULT_ROOT.Replace("\", "\\").Replace('"', '\"')
+    $codexBlock = @"
+[mcp_servers.llm-wiki]
+command = "uv"
+args = ["run", "--directory", "$tomlVault", "python", "scripts/mcp_server.py"]
+"@
+    if (-not (Test-Path $codexConfig)) {
+        Write-Utf8NoBom $codexConfig ($codexBlock + "`n")
+        Ok "Codex MCP config created → $codexConfig"
+    } else {
+        $codexExisting = Get-Content -LiteralPath $codexConfig -Raw
+        if ($codexExisting -notmatch '(?m)^\s*\[mcp_servers\.llm-wiki\]\s*$') {
+            Copy-Item -LiteralPath $codexConfig -Destination "$codexConfig.bak" -Force
+            $codexSeparator = if ([string]::IsNullOrEmpty($codexExisting)) {
+                ""
+            } elseif ($codexExisting.EndsWith("`n")) {
+                "`n"
+            } else {
+                "`n`n"
+            }
+            Write-Utf8NoBom $codexConfig ($codexExisting + $codexSeparator + $codexBlock + "`n")
+            Ok "Codex MCP config appended; backup: $codexConfig.bak"
+        }
+    }
     Ok "Codex detected"
 }
 
 # Claude Code — merge hooks into user settings if CLI or config dir present
 $claudeConfig = Join-Path $env:USERPROFILE ".claude"
-if ((Get-Command claude -ErrorAction SilentlyContinue) -or (Test-Path $claudeConfig)) {
+$claudeUserConfig = Join-Path $env:USERPROFILE ".claude.json"
+if ((Get-Command claude -ErrorAction SilentlyContinue) -or (Test-Path $claudeConfig) -or (Test-Path $claudeUserConfig)) {
     $agents += "Claude Code"
     Ok "Claude Code detected (or ~/.claude present)"
     Info "Merging LLM-wiki hooks into Claude user settings (backup first)..."
@@ -197,6 +265,26 @@ if ((Get-Command claude -ErrorAction SilentlyContinue) -or (Test-Path $claudeCon
     } else {
         Warn "Claude settings merge failed — run manually:"
         Warn "  uv run python scripts\merge_claude_settings.py"
+    }
+    $claudeMcp = $claudeUserConfig
+    $claudeEntryObject = [ordered]@{
+        command = "uv"
+        args = @("run", "--directory", $VAULT_ROOT, "python", "scripts/mcp_server.py")
+    }
+    $claudeConfigObject = [ordered]@{
+        mcpServers = [ordered]@{ "llm-wiki" = $claudeEntryObject }
+    }
+    $claudeJson = $claudeConfigObject | ConvertTo-Json -Depth 6 -Compress
+    $claudeMerge = ([ordered]@{ "llm-wiki" = $claudeEntryObject } | ConvertTo-Json -Depth 5 -Compress)
+    if (-not (Test-Path $claudeMcp)) {
+        Write-Utf8NoBom $claudeMcp $claudeJson
+        Ok "Claude MCP config created → $claudeMcp"
+    } else {
+        $claudeExisting = Get-Content -LiteralPath $claudeMcp -Raw
+        if ($claudeExisting -notmatch '"llm-wiki"\s*:') {
+            Warn 'Existing ~/.claude.json found without llm-wiki; merge this under top-level "mcpServers":'
+            Warn "  $claudeMerge"
+        }
     }
 }
 
@@ -235,10 +323,10 @@ Write-Host "  1. Restart terminal"
 Write-Host "  2. Open a project in your agent"
 Write-Host "  3. Work normally — capture is automatic"
 Write-Host ""
-Write-Host "v4.0 optional features:"
+Write-Host "MCP baseline: 12 local task-shaped tools (installed)"
+Write-Host "Optional enhancements:"
 Write-Host "  uv sync --extra hybrid        # LanceDB HNSW + semantic search"
 Write-Host "  uv sync --extra code-graph    # tree-sitter code graph"
-Write-Host "  uv sync --extra mcp-server    # MCP server (9 tools)"
 Write-Host "  uv sync --extra reranker      # cross-encoder reranker"
 Write-Host "  uv sync --extra full          # all of the above"
 Write-Host ""

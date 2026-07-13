@@ -1,4 +1,4 @@
-# Architecture — LLM-Wiki Memory System v3.4
+# Architecture — LLM-Wiki Memory System v4.0
 
 This document explains **why** the system is shaped the way it is. For **how to use it**, see [USER-GUIDE.md](USER-GUIDE.md).
 
@@ -47,60 +47,32 @@ The slug system (5-step collision resolution) lets a single vault track unlimite
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  AGENTS (5 supported + MCP)                                           │
-│                                                                       │
-│  OpenCode ──→ plugin (JS) + MCP tools (9 task-shaped, stdio)         │
-│  Codex CLI ──→ PowerShell wrapper + MCP                              │
-│  Claude Code → hooks (5 lifecycle) + MCP + skills                    │
-│  Cursor ────→ rules file + MCP                                       │
-│  Antigravity → AGENTS.md + MCP                                       │
-└──────────────────────────┬───────────────────────────────────────────┘
-                           ↓
+│  AGENTS                                                              │
+│                                                                      │
+│  NATIVE LIFECYCLE EVENTS                                             │
+│  hooks/plugins/wrappers → integration_adapter.py → local capture     │
+│  Capture is deterministic and does not require an LLM.               │
+│                                                                      │
+│  MCP READS + ACTIONS                                                 │
+│  12 task-shaped MCP tools → local search/code/doctor/maintenance     │
+│  MCP responses and resources do not require an LLM.                  │
+└──────────────────────────────┬───────────────────────────────────────┘
+                               │ captured session signals
+                               ↓
 ┌──────────────────────────────────────────────────────────────────────┐
-│  LLM BACKEND (llm_client.py — 5 auto-detected + Ollama local)        │
-│  v4.0: constrained decoding (guided_json) for local LLM reliability  │
-└──────────────────────────┬───────────────────────────────────────────┘
-                           ↓
+│  CLASSIFY + COMPILE                                                  │
+│  flush_memory.py / compile_memory.py → durable Markdown pages        │
+│                               │                                      │
+│                               ↓                                      │
+│  LLM BACKEND (CLASSIFY + COMPILE ONLY)                               │
+│  llm_client.py: 5 backends including Ollama, selected locally        │
+└──────────────────────────────┬───────────────────────────────────────┘
+                               ↓
 ┌──────────────────────────────────────────────────────────────────────┐
-│  CAPTURE LAYER (real-time, non-LLM)                                  │
-│  v4.0: access_tracking.py logs every retrieval (Ebbinghaus decay)    │
-└──────────────────────────┬───────────────────────────────────────────┘
-                           ↓
-┌──────────────────────────────────────────────────────────────────────┐
-│  CLASSIFY + COMPILE LAYER (session end, background)                  │
-│                                                                       │
-│  v4.0: compile_memory.py ── multi-pass: draft → critique → write    │
-│  v4.0: typed edges ── refines (not just supersedes)                  │
-│  v4.0: reflection.py ── A-MEM evolution (weekly page consolidation) │
-└──────────────────────────┬───────────────────────────────────────────┘
-                           ↓
-┌──────────────────────────────────────────────────────────────────────┐
-│  SEARCH + RETRIEVAL LAYER                                             │
-│                                                                       │
-│  SEARCH + RETRIEVAL LAYER                                             │
-│                                                                       │
-│  SQLite FTS5 (BM25, weight=2) — zero-dep, always works               │
-│  v4.0: LanceDB (HNSW vector, weight=1) — embedded, --extra hybrid    │
-│    fallback: numpy brute-force (.npy memory-mapped) when no LanceDB  │
-│  Graph-neighbor (wikilinks, weight=0.5)                              │
-│  v4.0: bge-small-en-v1.5 (MTEB 62.17, +25% over MiniLM)             │
-│  v4.0: cross-encoder reranker (bge-reranker, ONNX, top-20 rerank)   │
-│  Weighted RRF fusion: 2.0/(60+bm25) + 1.0/(60+vec) + 0.5*graph      │
-└──────────────────────────┬───────────────────────────────────────────┘
-                           ↓
-┌──────────────────────────────────────────────────────────────────────┐
-│  v4.0: CODE INTELLIGENCE LAYER                                       │
-│                                                                       │
-│  code_graph.py ── tree-sitter: functions, classes, calls, imports   │
-│  impact_analysis.py ── LINK: git diff → stale wiki pages            │
-│  (unique: no other system connects code graph to knowledge graph)    │
-└──────────────────────────┬───────────────────────────────────────────┘
-                           ↓
-┌──────────────────────────────────────────────────────────────────────┤
-│  PROACTIVE INTELLIGENCE (SessionStart injection)                     │
-│                                                                       │
-│  v4.0: hybrid forgetting (archive_stale.py + access_tracking decay)  │
-│  v4.0: impact advisory (stale pages from code changes)               │
+│  LOCAL SEARCH + INTELLIGENCE                                        │
+│  SQLite FTS5 BM25 + wikilink graph (baseline local retrieval)        │
+│  optional vectors/LanceDB + reranker                                 │
+│  code_graph.py + impact_analysis.py + proactive SessionStart context │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -129,11 +101,17 @@ valid and lint covers them equally.
 
 ## Search Architecture (v4.0)
 
-Two tiers, same weighted RRF fusion:
+Three local tiers share the same Markdown corpus:
 
-### Base tier (zero-dep, always works)
+### Base retrieval tier (no optional search extras)
 1. **BM25 (weight=2.0)**: SQLite FTS5 full-text search. Title boost (5x exact), filename boost (10x match short-circuit).
-2. **Vector (weight=1.0)**: numpy brute-force cosine similarity, bge-small-en-v1.5 (384 dims, MTEB 62.17). Vectors cached as `.npy` (memory-mapped binary — instant load).
+2. **Graph-neighbor (weight=0.5)**: wikilink adjacency boost.
+
+No embedding model, vector cache, or optional package is required in this tier.
+
+### Optional semantic tier (`uv sync --extra semantic`)
+1. **BM25 (weight=2.0)**: SQLite FTS5.
+2. **Vector (weight=1.0)**: numpy brute-force cosine similarity using BAAI/bge-small-en-v1.5. Vectors are cached in `vectors.npy` with `vectors_meta.json` metadata.
 3. **Graph-neighbor (weight=0.5)**: wikilink adjacency boost.
 
 ### Hybrid tier (`uv sync --extra hybrid`)
@@ -147,8 +125,7 @@ Two tiers, same weighted RRF fusion:
 **v4.0 embedding**: BAAI/bge-small-en-v1.5 (MIT, MTEB 62.17, +25% over all-MiniLM-L6-v2).
 Query instruction prefix for retrieval optimization.
 
-**Why no PostgreSQL?** Every top local-first system (EverOS, repowise, codebase-memory-mcp,
-Memtrace) uses embedded storage. PostgreSQL requires a daemon — violates Axiom #1.
+**Why no PostgreSQL?** PostgreSQL requires a daemon, which violates Axiom #1.
 SQLite + LanceDB gives the same hybrid quality without any server process.
 
 ---
@@ -167,7 +144,7 @@ For most teams and most use cases, **you should**. Those tools are mature, suppo
 ## What's intentionally NOT here
 
 - **No cloud sync** — your memory stays on your disk. Use git for remote backup.
-- **No web UI** — Obsidian is the UI. Or `cat`.
+- **No canonical frontend** — Obsidian is an optional Markdown viewer; any editor or `cat` works.
 - **No multi-user** — solo developer only.
 - **No per-prompt RAG** — compile-not-retrieve pattern; session-start + session-end injection suffices.
 
@@ -175,6 +152,13 @@ For most teams and most use cases, **you should**. Those tools are mature, suppo
 
 - **LanceDB hybrid vectors** (`--extra hybrid`): HNSW vector search, embedded, zero-daemon.
 - **Cross-encoder reranker** (`--extra reranker`): bge-reranker ONNX, re-ranks top-20 results.
-- **Code graph** (`--extra code-graph`): tree-sitter parsing of Python/JS/TS, call graph, impact analysis.
-- **MCP server** (`--extra mcp-server`): 9 task-shaped tools, stdio transport, 100% local.
-- **All v4.0 features degrade gracefully** — base install remains zero-dep, zero-daemon.
+- **Code graph** (`--extra code-graph`): lazy tree-sitter parsing of Python,
+  JavaScript, TypeScript, Go, Rust, Java, C, C++, Ruby, PHP, C#, and Bash;
+  materialized `.scm` queries, call graph, and impact analysis.
+- **MCP server**: the installer baseline includes the MCP package and exposes
+  12 task-shaped tools including `doctor`, a uniform response envelope, and
+  health/context resources. For manual dependency selection from source, use
+  `uv sync --locked --extra mcp-server`; transport remains local stdio.
+- **Automatic health**: SessionStart injects only degraded/error findings; healthy
+  checks stay quiet. Repairs are explicit and limited to safe, idempotent actions.
+- **All v4.0 features degrade gracefully** — the installed product remains local and zero-daemon.

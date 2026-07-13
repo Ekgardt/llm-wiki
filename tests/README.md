@@ -4,7 +4,7 @@ Small pytest-based suite covering the critical scenarios surfaced by four rounds
 
 ## Coverage
 
-The suite currently has **407 tests across 33 files**. Highlights:
+The suite currently has **812 tests across 42 files**. Highlights:
 
 | Test file | Guards against |
 |---|---|
@@ -25,15 +25,21 @@ The suite currently has **407 tests across 33 files**. Highlights:
 | `test_memory_queue.py` | Enqueue/list/mark_attempt/drain/permanently-failed/backoff/max_tasks/status/corrupt-json/age-filter. |
 | `test_merge_claude_settings.py` | User hooks preserved + ours replaced, env set, permissions union, backup written. |
 | `test_plugin_helpers.py` | Empty/malformed stdin → exit 0; valid payload writes daily-log/state/breadcrumb. |
-| `test_readme_i18n.py` | All 3 READMEs exist, share live count (407), correct repo (`Ekgardt/llm-wiki`), mention `knowledge/`, mention `3.4.0`. |
+| `test_readme_i18n.py` | All 3 READMEs exist, share the live test count, correct repo (`Ekgardt/llm-wiki`), mention `knowledge/`, mention the current version. |
 | `test_search_ranking.py` | `_rrf_fuse_triple` weights verified; source_authority boost. |
+| `test_benchmark.py` | Versioned legacy-60 corpus, Recall@5 miss reporting, and current/legacy regression floors. |
 | `test_wikilinks_tracked.py` | `git ls-files knowledge` filtered, broken-link detector + untracked-target reporting. |
 | `test_archive_stale.py` | Type-aware archive thresholds (debugging=60d, decisions/concepts never). |
 | `test_reranker.py` | Cross-encoder reranker: graceful degradation, rerank logic, sigmoid stability, search_memory integration. |
 | `test_access_tracking.py` | Access tracking: record, stats, Ebbinghaus decay score, frontmatter flush, batch threshold. |
 | `test_reflection.py` | A-MEM reflection: candidate finding (pages with >=2 updates), threshold, skip conditions, dry-run. |
-| `test_mcp_server.py` | MCP server: 9 tool definitions, helper functions, async tool call handling, graceful degradation. |
-| `test_code_graph.py` | Code graph: language detection, tree-sitter/regex parsing (Python/JS/TS), caller search, directory indexing. |
+| `test_mcp_server.py` | MCP server: 12 task-shaped tools including doctor, resources, uniform response envelopes, async handling, and graceful degradation. |
+| `test_event_envelope.py` | Versioned lifecycle event envelope validation and redaction. |
+| `test_integration_injection.py` | Thin host adapters normalize events through `integration_adapter.py`. |
+| `test_doctor.py` | Local health checks, degraded-only summaries, time budgets, and safe idempotent repairs. |
+| `test_code_graph.py` | Code graph: lazy optional grammars and `.scm` extraction for 12 languages, scoped import captures, nine-language regex fallback, evidence-aware Python calls, rename-aware git co-change refinement, caller search, directory indexing. |
+| `test_memory_state_permissions.py` | Windows sharing violations retry while ACL permission failures fail fast. |
+| `test_scheduled_nightly.py` | Nightly catchup lease completion/failure state and retry release. |
 | `test_impact_analysis.py` | LINK Layer: symbol extraction, stale wiki page finding, confidence levels, advisory formatting. |
 
 ## Running
@@ -58,7 +64,7 @@ pytest tests/
   - `MEMORY_LLM_PROVIDER` → `fake` (no live LLM calls)
   - a skeleton `state.json` if it doesn't exist yet
 
-No pre-configuration required. Output: 407 passed in ~3s.
+No pre-configuration required. Current collection: 812 tests.
 
 All tests are self-contained and use `tmp_path` + state snapshots, so running them does not mutate the vault permanently. The compile-failure test briefly flips `state.json::last_compile_status` and restores it via fixture.
 
@@ -87,7 +93,7 @@ This switches conftest to `setdefault` semantics so a pre-set `LLM_WIKI_STATE_RO
 
 - End-to-end real-project flow (requires live Claude Code sessions; covered by manual soak tests).
 - `/compact` re-firing of hooks (Claude Code internal; tested manually in Phase 4).
-- QMD index behavior (dormant until tier crosses to HYBRID at 50+ pages).
+- Optional third-party vector model quality and external graph services.
 - Installer orchestration (`install.ps1` / `install.sh`) — the merge *primitive* is tested via `test_merge_claude_settings.py`, but the install entrypoint scripts themselves are not executed by CI.
 
 ## If you add a test

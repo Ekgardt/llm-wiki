@@ -28,7 +28,7 @@ These live in the working copy but must not ship in any distributable bundle:
 | `.git/` | Internal git metadata. Bloats the archive and leaks branch/reflog history. | A fresh `git archive` omits it automatically. |
 | `.claude/settings.local.json` | **Machine-local Claude Code permissions and overrides.** Contains your personal `allow/deny` lists, may reference absolute paths outside the vault. | Gitignored. |
 | `gitleaks-report.json`, `gitleaks-report.sarif` | Local security-scan output. Often filled with noise from `.venv/` deps. | Gitignored. |
-| `cache/`, `logs/`, `run/` | **Runtime state: hashes, dedupe markers, compile logs, QMD index, hook-error log.** Live inside the vault but are gitignored — `git archive` omits them automatically, but a naive `zip -r` of the vault would include them. | Gitignored. The post-build `_verify_archive` step blocks them. |
+| `cache/`, `logs/`, `run/` | **Runtime state: hashes, dedupe markers, compile logs, FTS5/vector/graph indexes, hook-error log.** Live inside the vault but are gitignored — `git archive` omits them automatically, but a naive `zip -r` of the vault would include them. | Gitignored. The post-build `_verify_archive` step blocks them. |
 
 ## Wrong way: raw `zip -r`
 

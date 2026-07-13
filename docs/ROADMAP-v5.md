@@ -25,4 +25,7 @@
 - Bi-temporal time-travel queries ("show auth as of March commit X")
 - Cross-service API topology (HTTP call graph between repositories)
 - Temporal scoring modes (impact, novelty, recency — Memtrace pattern)
-- tree-sitter .scm queries for more languages (Go, Rust, C)
+
+## Resolved by task7
+
+- tree-sitter `.scm` queries and lazy optional grammars for 12 languages.

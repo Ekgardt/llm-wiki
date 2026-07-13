@@ -12,7 +12,7 @@ __pycache__/
 
 # === Runtime dirs inside the vault (gitignored, regenerated on demand) ===
 # Three-zone layout: code + knowledge are tracked; runtime churn is local.
-# cache/    — search / QMD / vector indexes
+# cache/    — FTS5 / vector / graph indexes
 # logs/     — lint reports, compile logs, SessionStart debug dumps
 # run/      — state.json, compile.pid, queue/, locks
 # Override root via LLM_WIKI_STATE_ROOT (tests use a temp dir).
@@ -53,6 +53,7 @@ knowledge/notes/*
 !knowledge/notes/b-sim-hook-testing.md
 !knowledge/notes/case-sensitive-grep-injected-context.md
 !knowledge/notes/centralized-memory-subsystem.md
+!knowledge/notes/agent-native-mcp-foundation.md
 !knowledge/notes/docs-portability-absolute-paths.md
 !knowledge/notes/edit-multiple-matches.md
 !knowledge/notes/editorial-disclaimer-over-history-rewrite.md

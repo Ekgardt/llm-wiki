@@ -17,7 +17,7 @@ One-sentence summary: AI researcher and educator; source author of the April 202
 ## Why his framing matters for this vault
 The April 2026 thread is unusual in that it treats the knowledge base as software — a compiled artifact produced by a compiler (the LLM) from source inputs (`knowledge/raw/`). Most prior writing on "personal knowledge management" treats the note system as a second brain the human authors. Karpathy's inversion — the human curates sources, the LLM writes the wiki — is what this vault operationalizes.
 
-The thread is also the canonical justification for preferring markdown + wikilinks over a vector database at modest corpus size. That claim underpins the three-tier retrieval strategy in `/knowledge-lookup`: DIRECT below ~50 pages, HYBRID between 50–300, QMD only past ~300. All three thresholds are conservative interpretations of Karpathy's "~100 articles / ~400K words" direct-read claim.
+Historically, this thread motivated a direct-read-first strategy and an experimental QMD scale tier. That provenance is preserved here, but it is not current product guidance. Current retrieval uses local DIRECT/BASE/HYBRID tiers built from SQLite FTS5 BM25, optional local vectors, wikilink graph neighbors, and an optional reranker. The thresholds remain conservative interpretations of Karpathy's "~100 articles / ~400K words" direct-read claim.
 
 ## Role in this vault
 This page is the entity record; the thread it references is preserved at [[Karpathy X Thread - April 2026]] so the vault doesn't depend on the external URL staying alive.

@@ -14,20 +14,26 @@ class TestGracefulDegradation:
         from lance_store import have_lancedb
         assert isinstance(have_lancedb(), bool)
 
-    def test_vector_search_returns_empty_without_lancedb(self):
-        from lance_store import vector_search
-        results = vector_search([0.1] * 384)
+    def test_vector_search_returns_empty_without_lancedb(self, monkeypatch):
+        import lance_store
+
+        monkeypatch.setattr(lance_store, "_get_db", lambda: None)
+        results = lance_store.vector_search([0.1] * 384)
         assert isinstance(results, list)
         assert len(results) == 0
 
-    def test_vector_count_returns_zero_without_lancedb(self):
-        from lance_store import vector_count
-        assert isinstance(vector_count(), int)
-        assert vector_count() == 0
+    def test_vector_count_returns_zero_without_lancedb(self, monkeypatch):
+        import lance_store
 
-    def test_upsert_returns_zero_without_lancedb(self):
-        from lance_store import upsert_vectors
-        result = upsert_vectors(
+        monkeypatch.setattr(lance_store, "_get_db", lambda: None)
+        assert isinstance(lance_store.vector_count(), int)
+        assert lance_store.vector_count() == 0
+
+    def test_upsert_returns_zero_without_lancedb(self, monkeypatch):
+        import lance_store
+
+        monkeypatch.setattr(lance_store, "_get_db", lambda: None)
+        result = lance_store.upsert_vectors(
             paths=["test"], titles=["T"], summaries=["S"],
             projects=["p"], timestamps=["2026-01-01"],
             vectors=[[0.1] * 384],

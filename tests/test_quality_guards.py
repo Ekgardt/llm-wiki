@@ -41,26 +41,86 @@ def _collect_test_count() -> int:
     raise AssertionError(f"could not parse pytest collect count:\n{text[-500:]}")
 
 
-# ─── 1. No qmd references in skills ─────────────────────────────────
+# ─── 1. No QMD references on active product surfaces ────────────────
 
 def test_no_qmd_refs_in_skills():
-    """The qmd CLI does not exist in this repo; skills must not reference it
-    as a command. The conceptual tier name 'QMD' (matching lookup_mode.py)
-    is allowed."""
-    import re
+    skill = ROOT / "skills" / "knowledge-lookup" / "SKILL.md"
+    assert not re.search(r"\bqmd\b", skill.read_text(encoding="utf-8"), re.IGNORECASE)
+    assert not (ROOT / "scripts" / "bootstrap_qmd.py").exists()
+    lookup_mode = (ROOT / "scripts" / "lookup_mode.py").read_text(encoding="utf-8")
+    assert not re.search(r"\bqmd\b", lookup_mode, re.IGNORECASE)
+    active_docs = (
+        "docs/ARCHITECTURE.md",
+        "docs/STRUCTURE.md",
+        "docs/USER-GUIDE.md",
+        "docs/EXPORTING.md",
+        "docs/SETUP-COGNEE.md",
+        "integrations/README.md",
+        "tests/README.md",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "knowledge/notes/Retrieval Workflow.md",
+        "knowledge/notes/Ingestion Workflow.md",
+    )
+    for relative_path in active_docs:
+        text = (ROOT / relative_path).read_text(encoding="utf-8")
+        assert not re.search(r"\bqmd\b", text, re.IGNORECASE), (
+            f"{relative_path}: stale QMD claim"
+        )
 
-    skills_dir = ROOT / "skills"
-    hits: list[str] = []
-    # Match qmd as a CLI command (e.g. `qmd status`, `qmd embed`) — not as
-    # a standalone tier label like "| **QMD** |" or "## Tier: QMD".
-    cli_re = re.compile(r"\bqmd\s+(?:status|embed|index|query|collections|build|sync)\b", re.IGNORECASE)
-    for skill_md in sorted(skills_dir.glob("*/SKILL.md")):
-        for i, line in enumerate(
-            skill_md.read_text(encoding="utf-8").splitlines(), 1
-        ):
-            if cli_re.search(line):
-                hits.append(f"{skill_md.relative_to(ROOT)}:{i}: {line.strip()}")
-    assert not hits, "qmd CLI references found in skills (qmd CLI does not exist):\n" + "\n".join(hits)
+    integration_docs = (
+        "docs/ARCHITECTURE.md",
+        "docs/STRUCTURE.md",
+        "docs/USER-GUIDE.md",
+        "integrations/README.md",
+        "knowledge/notes/Ingestion Workflow.md",
+    )
+    for relative_path in integration_docs:
+        text = (ROOT / relative_path).read_text(encoding="utf-8")
+        assert "web clipper" not in text.casefold(), (
+            f"{relative_path}: stale Web Clipper claim"
+        )
+    obsidian_integration = ROOT / "integrations" / "obsidian"
+    bundled = [path for path in obsidian_integration.rglob("*") if path.is_file()]
+    assert not bundled, f"bundled Obsidian integration files found: {bundled}"
+    obsidian_note = (ROOT / "knowledge" / "notes" / "Obsidian.md").read_text(
+        encoding="utf-8"
+    )
+    assert "canonical viewer" not in obsidian_note.casefold()
+    assert "frontend here" not in obsidian_note.casefold()
+
+    karpathy = (ROOT / "knowledge" / "notes" / "Andrej Karpathy.md").read_text(
+        encoding="utf-8"
+    )
+    assert "historical" in karpathy.casefold()
+    assert "current retrieval" in karpathy.casefold()
+
+    from mcp_server import TOOL_INPUT_SCHEMAS
+
+    assert len(TOOL_INPUT_SCHEMAS) == 12
+    active_public_docs = (
+        "README.md",
+        "README.ru.md",
+        "README.zh-CN.md",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "docs/ARCHITECTURE.md",
+        "docs/STRUCTURE.md",
+        "docs/USER-GUIDE.md",
+        "integrations/README.md",
+        "tests/README.md",
+    )
+    for relative_path in active_public_docs:
+        text = (ROOT / relative_path).read_text(encoding="utf-8")
+        counts = re.findall(
+            r"\b(\d+)\s+(?:\S+\s+)?task-shaped\s+(?:MCP\s+)?(?:tools|инструмент\w*|工具)",
+            text,
+            re.IGNORECASE,
+        )
+        assert counts, f"{relative_path}: missing numeric task-shaped MCP tool count"
+        assert set(counts) == {str(len(TOOL_INPUT_SCHEMAS))}, (
+            f"{relative_path}: stale task-shaped MCP tool counts: {counts}"
+        )
 
 
 def test_ci_uses_current_gitleaks_action():
@@ -95,7 +155,7 @@ def test_install_ps1_no_undefined_vars():
         assigned.add(m.group(1))
 
     # Collect function parameters: function Name($a, $b)
-    for fm in re.finditer(r"function\s+\w+\s*\(([^)]*)\)", content):
+    for fm in re.finditer(r"function\s+[\w-]+\s*\(([^)]*)\)", content):
         for pm in re.finditer(r"\$([A-Za-z_]\w*)", fm.group(1)):
             assigned.add(pm.group(1))
 
@@ -213,6 +273,39 @@ def test_architecture_no_recall_at_2():
         "docs/ARCHITECTURE.md cites Recall@2, which is absent from "
         "benchmark/report.md — remove or replace with a reported metric"
     )
+    assert "NATIVE LIFECYCLE EVENTS" in arch
+    assert "MCP READS + ACTIONS" in arch
+    assert "LLM BACKEND (CLASSIFY + COMPILE ONLY)" in arch
+    assert "5 backends including Ollama" in arch
+    assert "unique: no other system" not in arch.casefold()
+
+    base = arch.split("### Base retrieval tier", 1)[1].split("### ", 1)[0]
+    assert "Vector" not in base
+    assert "### Optional semantic tier" in arch
+    assert "### Hybrid tier" in arch
+    assert "base, zero dependencies" not in arch.casefold()
+    assert "base install remains zero-dep" not in arch.casefold()
+    assert "installer baseline" in arch.casefold()
+    assert "manual dependency selection" in arch.casefold()
+
+    guide = (ROOT / "docs" / "USER-GUIDE.md").read_text(encoding="utf-8")
+    assert "BAAI/bge-small-en-v1.5" in guide
+    assert "cache/vectors.npy" in guide
+    assert "vectors_meta.json" in guide
+    assert "MiniLM" not in guide
+    assert "vectors.json" not in guide
+
+    structure = (ROOT / "docs" / "STRUCTURE.md").read_text(encoding="utf-8")
+    assert "vectors.json" not in structure
+    search_source = (ROOT / "scripts" / "search_memory.py").read_text(encoding="utf-8")
+    assert "legacy vectors.json" not in search_source
+
+    contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    assert "812 tests collected" in contributing
+
+    integrations = (ROOT / "integrations" / "README.md").read_text(encoding="utf-8")
+    assert "installer baseline" in integrations.casefold()
+    assert "manual dependency selection" in integrations.casefold()
 
 
 # ─── 7. Skills' allowed-tools reference existing scripts ────────────

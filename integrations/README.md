@@ -1,6 +1,8 @@
 # IDE Agent Integration
 
-Cursor and Antigravity (and other MCP-compatible IDEs) can access the LLM-Wiki memory vault through rules files and CLI tools.
+MCP is the common read/action interface for every compatible agent. Native
+hooks, plugins, wrappers, and rules remain thin lifecycle or guidance adapters;
+they do not implement a second memory API.
 
 ## Cursor
 
@@ -37,7 +39,8 @@ IDE agents (Cursor, Antigravity; VS Code Copilot — planned, not yet implemente
 
 | Feature | CLI agents (OpenCode/Codex/Claude) | IDE agents (Cursor/Antigravity) |
 |---|---|---|
-| **Auto-capture** | Hooks/plugins fire automatically | Agent must call scripts via Bash |
+| **Reads/actions** | 12 task-shaped MCP tools | The same 12 task-shaped MCP tools |
+| **Auto-capture** | Thin hooks/plugins forward lifecycle events | Depends on host lifecycle support |
 | **Session classification** | FLUSH MAJOR/MINOR/OK at idle | Manual: agent records when told |
 | **Nightly compile** | Scheduler (Task Scheduler on Windows, cron on Unix) runs automatically | Same — vault is shared |
 | **Context injection** | SessionStart hook injects 2KB | Rules file tells agent to read files |
@@ -45,11 +48,19 @@ IDE agents (Cursor, Antigravity; VS Code Copilot — planned, not yet implemente
 
 **Key insight**: the vault is **shared infrastructure**. All agents write to the same `knowledge/daily/` and read from the same `knowledge/notes/`. A decision recorded by Cursor is visible to OpenCode in its next session.
 
-## MCP Server (planned — not yet implemented)
+## MCP Server
 
-An MCP server surface for `search_memory.py` / `query_memory.py` is on the
-roadmap. Today, agents integrate via the hooks / plugin / rules mechanisms
-described above. When the MCP server lands, this section will show a
-canonical `mcpServers` config block.
+`scripts/mcp_server.py` exposes 12 task-shaped tools over local stdio. The
+installer baseline includes the MCP package. For manual dependency selection from
+source, run `uv sync --locked --extra mcp-server`, then configure the
+agent to run `uv run python scripts/mcp_server.py` from the vault root.
 
-(MCP server mode is planned — currently use the Bash commands above.)
+The tools include vault search, context, decisions, maintenance, conservative
+code analysis, and `doctor`. Every tool returns the same versioned response
+envelope; health and context are also MCP resources. Automatic SessionStart
+health output appears only for degraded/error checks.
+
+## Obsidian
+
+Obsidian is an optional Markdown viewer. Open the vault directly if desired.
+There is no bundled ingestion wiring, required UI, or canonical frontend.

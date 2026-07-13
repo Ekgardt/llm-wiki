@@ -17,6 +17,10 @@ README_FILES = [
 ]
 
 
+def _readmes() -> list[tuple[Path, str]]:
+    return [(path, path.read_text(encoding="utf-8")) for path in README_FILES]
+
+
 def _collect_test_count() -> int:
     r = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", "-q"],
@@ -49,6 +53,13 @@ def test_all_readmes_share_live_test_count():
         assert re.search(rf"\b{live}\b", text), (
             f"{p.name} must mention live test count {live} "
             f"(update i18n READMEs before release)"
+        )
+        assert f"tests-{live}%20collected-" in text, (
+            f"{p.name}: badge must describe collection, not passing tests"
+        )
+        assert f"tests-{live}%20passing-" not in text
+        assert "uv sync --locked --extra mcp-server" in text, (
+            f"{p.name}: manual install must include the MCP baseline"
         )
         # ban known stale counts when suite is larger
         for stale in (106, 155, 160):
@@ -85,8 +96,23 @@ def test_all_readmes_mention_current_version():
     m = _re.search(r'^version\s*=\s*"([^"]+)"', pyproject.read_text(encoding="utf-8"), _re.MULTILINE)
     assert m, "could not parse version from pyproject.toml"
     current = m.group(1)
-    for p in README_FILES:
-        text = p.read_text(encoding="utf-8")
+    required = ("MCP", "12", "doctor", "envelope", "resource", "integration_adapter.py")
+    critical_markers = {
+        "README.md": ("12 task-shaped", "812 tests collected", "Current 112", "optional Obsidian viewer"),
+        "README.ru.md": ("12 task-shaped", "812 тестов", "Текущие 112", "Obsidian как опциональный viewer"),
+        "README.zh-CN.md": ("12 个 task-shaped", "812 个测试", "当前 112", "Obsidian 为可选 viewer"),
+    }
+    for p, text in _readmes():
         assert current in text, (
             f"{p.name}: must mention version {current} (current release per pyproject.toml)"
         )
+        for claim in required:
+            assert claim.casefold() in text.casefold(), f"{p.name}: missing {claim!r} claim"
+        assert "degraded" in text.casefold(), f"{p.name}: missing degraded-only health claim"
+        assert "obsidian" in text.casefold(), f"{p.name}: missing optional Obsidian viewer"
+        assert "web clipper" not in text.casefold(), f"{p.name}: stale Web Clipper claim"
+        assert not re.search(r"\bqmd\b", text, re.IGNORECASE), f"{p.name}: stale QMD claim"
+        for marker in critical_markers[p.name]:
+            assert marker in text, f"{p.name}: missing critical parity marker {marker!r}"
+        assert "zero runtime dependencies" not in text.casefold()
+        assert "stdlib-only" not in text.casefold()

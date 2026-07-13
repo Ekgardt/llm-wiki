@@ -19,7 +19,6 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -33,9 +32,12 @@ from memory_state import ROOT, STATE_ROOT  # noqa: E402
 
 SCRIPTS_DIR = ROOT / "scripts"
 PROJECTS_DIR = ROOT / "knowledge" / "projects"
+SCRIPT_TIMEOUT_SECONDS = 10
 
 sys.path.insert(0, str(SCRIPTS_DIR))
 
+from integration_adapter import ingest_event, normalize_event  # noqa: E402
+from secret_redact import redact_secrets  # noqa: E402
 from session_start_project_state import _compute_slug  # type: ignore  # noqa: E402
 
 
@@ -102,17 +104,21 @@ def _hook_env(project_dir: Path) -> dict[str, str]:
 
 def _run_script(name: str, project_dir: Path, stdin_text: str = "") -> subprocess.CompletedProcess[str]:
     script = SCRIPTS_DIR / name
-    return subprocess.run(
-        [sys.executable, str(script)],
-        cwd=str(ROOT),
-        env=_hook_env(project_dir),
-        input=stdin_text,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+    try:
+        return subprocess.run(
+            [sys.executable, str(script)],
+            cwd=str(ROOT),
+            env=_hook_env(project_dir),
+            input=stdin_text,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=SCRIPT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess([sys.executable, str(script)], 124, "", "")
 
 
 def _state_path(project_dir: Path) -> tuple[str, Path]:
@@ -178,214 +184,85 @@ def command_state_path(args: argparse.Namespace) -> int:
 
 def command_lookup_tier(args: argparse.Namespace) -> int:
     del args
-    result = subprocess.run(
-        [sys.executable, str(SCRIPTS_DIR / "lookup_mode.py")],
-        cwd=str(ROOT),
-        env=_hook_env(ROOT),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+    result = _run_script("lookup_mode.py", ROOT)
+    if result.returncode == 124:
+        print("codex_memory: lookup timed out", file=sys.stderr)
+        return result.returncode
+    if result.returncode != 0:
+        print("codex_memory: lookup failed", file=sys.stderr)
+        return result.returncode
     sys.stdout.write(result.stdout)
-    if result.stderr:
-        sys.stderr.write(result.stderr)
     return result.returncode
 
 
 def command_daily_log(args: argparse.Namespace) -> int:
-    """Tag the daily log for a Codex session event.
-
-    Phase 0.5 fix: previously every `codex-turn-end` wrote a metadata-
-    only block (slug + root) into the daily log even when no transcript
-    was available. This produced ~15-30 stub blocks per day per project,
-    drowning real content and triggering spurious compile passes.
-
-    New behavior:
-    - If `--transcript` is provided AND non-empty: forward to
-      `session_end_project_tag.py` AND `flush_memory.py` (full path,
-      same as Claude Code SessionEnd).
-    - If `--transcript` is empty (Codex CLI doesn't expose transcripts
-      the way Claude Code does): skip the daily-log write entirely and
-      record only an activity heartbeat in state.json. This avoids
-      stub pollution while preserving "this project was touched today"
-      observability for the SessionStart context injector.
-
-    The old behavior is available via `--force-stub` for callers that
-    explicitly want a breadcrumb even without content (rare).
-    """
-    project_dir = _project_dir(args.cwd)
-    session_id = args.session_id or f"codex-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-
-    # Build the payload for session_end_project_tag.py
-    payload = {
-        "session_id": session_id,
-        "reason": args.reason,
-        "transcript_path": getattr(args, "transcript", "") or "",
-    }
-
-    transcript_path = payload["transcript_path"]
-    force_stub = bool(getattr(args, "force_stub", False))
-
-    if not transcript_path and not force_stub:
-        # No transcript available — record heartbeat in state.json only,
-        # do NOT pollute knowledge/daily/ with stub blocks.
-        slug, _ = _state_path(project_dir)
-        _record_heartbeat(slug, project_dir, args.reason, session_id)
-        if args.json:
-            print(
-                json.dumps(
-                    {
-                        "cwd": str(project_dir),
-                        "slug": slug,
-                        "daily_log_written": False,
-                        "heartbeat_recorded": True,
-                        "reason": args.reason,
-                        "session_id": session_id,
-                        "note": "no transcript — daily log not polluted (Phase 0.5)",
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            )
-        else:
-            print(f"Heartbeat recorded for slug: {slug} (no daily-log stub)")
-            print(f"Reason: {args.reason}")
+    """Normalize a Codex lifecycle event and present shared ingest results."""
+    try:
+        envelope = normalize_event(
+            "codex",
+            "session_end",
+            {
+                "session_id": getattr(args, "session_id", None),
+                "cwd": getattr(args, "cwd", None),
+                "reason": getattr(args, "reason", None),
+                "transcript": getattr(args, "transcript", None),
+            },
+        )
+    except Exception:  # noqa: BLE001
+        print("codex_memory: capture skipped", file=sys.stderr)
         return 0
 
-    # Transcript available — full path through session_end_project_tag.py
-    # AND flush_memory.py to extract durable content.
-    result = _run_script(
-        "session_end_project_tag.py",
-        project_dir,
-        stdin_text=json.dumps(payload, ensure_ascii=False),
-    )
+    session_id = envelope.session or ""
+    reason = envelope.payload["reason"] or ""
+    force_stub = bool(getattr(args, "force_stub", False))
+    json_output = bool(getattr(args, "json", False))
+    raw_trigger = getattr(args, "trigger", "")
+    trigger = redact_secrets(raw_trigger) if isinstance(raw_trigger, str) else ""
+    trigger = trigger or reason or "codex"
+    try:
+        result = ingest_event(envelope, force_stub=force_stub, trigger=trigger)
+    except Exception:  # noqa: BLE001
+        print("codex_memory: capture failed", file=sys.stderr)
+        return 0
 
-    # If we have a real transcript, also kick off flush_memory to
-    # extract durable content (decisions/lessons/gotchas). This is
-    # the same path Claude Code takes on SessionEnd.
-    flush_spawned = False
-    if transcript_path and Path(transcript_path).exists():
-        # flush_memory --event only accepts session-end|pre-compact.
-        # Map Codex reasons into that enum; keep original reason in --trigger.
-        flush_event = "session-end"
-        reason = (args.reason or "").lower()
-        if "compact" in reason:
-            flush_event = "pre-compact"
-        trigger = args.trigger or args.reason or "codex"
-        _spawn_flush_memory(session_id, flush_event, transcript_path, trigger)
-        flush_spawned = True
+    project_dir = _project_dir(envelope.worktree or os.getcwd())
+    slug = result.get("slug")
+    transcript_path = result.get("transcript_path") or ""
+    returncode = int(result.get("returncode", 0))
 
-    if args.json:
-        slug, state_path = _state_path(project_dir)
+    if json_output:
+        state_path = PROJECTS_DIR / str(slug) / "state.md" if slug else None
         print(
             json.dumps(
                 {
                     "cwd": str(project_dir),
                     "slug": slug,
-                    "state_path": str(state_path),
-                    "daily_log_written": result.returncode == 0,
-                    "flush_spawned": flush_spawned,
-                    "reason": args.reason,
+                    "state_path": str(state_path) if state_path else None,
+                    "daily_log_written": result["daily_log_written"],
+                    "heartbeat_recorded": result["heartbeat_recorded"],
+                    "flush_spawned": result["flush_spawned"],
+                    "reason": reason,
                     "session_id": session_id,
                 },
                 ensure_ascii=False,
                 indent=2,
             )
         )
-        return result.returncode
+        return returncode
 
-    if result.returncode == 0:
-        slug, _ = _state_path(project_dir)
+    if returncode == 0:
+        if result["heartbeat_recorded"]:
+            print(f"Heartbeat recorded for slug: {slug} (no daily-log stub)")
+            print(f"Reason: {reason}")
+            return 0
         print(f"Daily log tagged for slug: {slug}")
-        print(f"Reason: {args.reason}")
+        print(f"Reason: {reason}")
         print(f"Session id: {session_id}")
-        if flush_spawned:
+        if result["flush_spawned"]:
             print(f"Flush spawned for transcript: {transcript_path}")
     else:
-        print(result.stderr.strip() or result.stdout.strip(), file=sys.stderr)
-    return result.returncode
-
-
-def _record_heartbeat(
-    slug: str,
-    project_dir: Path,
-    reason: str,
-    session_id: str,
-) -> None:
-    """Record a no-content heartbeat in state.json.
-
-    Used when Codex turn-end fires without a transcript. Replaces the
-    old behavior of writing empty stub blocks into knowledge/daily/. The
-    heartbeat is visible in state.json under `codex_heartbeats` so the
-    SessionStart context injector can still surface "this project was
-    active N hours ago" — without polluting the daily log corpus.
-    """
-    try:
-        from memory_state import update_state  # type: ignore
-    except ImportError:
-        return  # best-effort, never crash the hook
-
-    now_iso = datetime.now().isoformat(timespec="seconds")
-
-    def _mutate(state: dict) -> None:
-        state.setdefault("codex_heartbeats", {})
-        state["codex_heartbeats"][slug] = {
-            "at": now_iso,
-            "reason": reason,
-            "session_id": session_id,
-            "project_root": str(project_dir),
-        }
-        # Keep only the most recent 50 heartbeats across all projects.
-        if len(state["codex_heartbeats"]) > 50:
-            # Sort by timestamp and keep newest 50.
-            items = sorted(
-                state["codex_heartbeats"].items(),
-                key=lambda kv: kv[1].get("at", ""),
-                reverse=True,
-            )[:50]
-            state["codex_heartbeats"] = dict(items)
-
-    try:
-        update_state(_mutate)
-    except Exception as e:  # noqa: BLE001
-        print(f"codex_memory: {type(e).__name__}: {e}", file=sys.stderr)
-
-
-def _spawn_flush_memory(
-    session_id: str,
-    event: str,
-    transcript: str,
-    trigger: str,
-) -> None:
-    """Detach-spawn flush_memory.py for a Codex session.
-
-    Best-effort: if spawn fails, the heartbeat is still recorded and
-    the daily log will simply not have a content block for this event.
-    """
-    try:
-        from memory_state import spawn_detached  # type: ignore
-    except ImportError:
-        return
-
-    try:
-        spawn_detached(
-            [
-                sys.executable,
-                str(SCRIPTS_DIR / "flush_memory.py"),
-                "--event",
-                event,
-                "--session-id",
-                session_id,
-                "--transcript",
-                transcript,
-                "--trigger",
-                trigger,
-            ],
-        )
-    except Exception as e:  # noqa: BLE001
-        print(f"codex_memory: {type(e).__name__}: {e}", file=sys.stderr)
+        print("codex_memory: capture failed", file=sys.stderr)
+    return returncode
 
 
 def main() -> int:

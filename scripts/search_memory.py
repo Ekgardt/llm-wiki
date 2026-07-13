@@ -26,6 +26,7 @@ import os
 import re
 import sqlite3
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -206,6 +207,14 @@ def _needs_rebuild(pages: list[Path]) -> bool:
     """Check if any page is newer than the index, or if pages were added/removed."""
     if not INDEX_FILE.exists():
         return True
+    try:
+        conn = sqlite3.connect(str(INDEX_FILE))
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(pages)")}
+        conn.close()
+        if "slug" not in columns:
+            return True
+    except sqlite3.Error:
+        return True
     # Manifest check: if the set of indexed paths differs from the
     # current set (e.g. a page was deleted), trigger rebuild.
     current_paths = sorted(p.relative_to(ROOT).as_posix() for p in pages)
@@ -239,14 +248,14 @@ def _build_index(pages: list[Path]) -> None:
     see a partially-built index or a missing-index window.
     """
     INDEX_DIR.mkdir(parents=True, exist_ok=True)
-    tmp_file = INDEX_FILE.with_suffix(".sqlite.tmp")
-
-    # Clean up any stale temp file from a previous failed build.
-    if tmp_file.exists():
-        tmp_file.unlink()
-
-    conn = sqlite3.connect(str(tmp_file))
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{INDEX_FILE.name}.", suffix=".tmp", dir=INDEX_DIR
+    )
+    os.close(fd)
+    tmp_file = Path(tmp_name)
+    conn = None
     try:
+        conn = sqlite3.connect(str(tmp_file))
         conn.execute(
             """
             CREATE VIRTUAL TABLE pages USING fts5(
@@ -256,6 +265,7 @@ def _build_index(pages: list[Path]) -> None:
                 body,
                 project UNINDEXED,
                 timestamp UNINDEXED,
+                slug,
                 tokenize = 'porter unicode61'
             )
             """
@@ -273,30 +283,29 @@ def _build_index(pages: list[Path]) -> None:
             timestamp = _extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or ""
             # Truncate timestamp to date only for filtering
             timestamp = timestamp[:10] if timestamp else ""
+            slug = p.stem.replace("-", " ").replace("_", " ")
             conn.execute(
-                "INSERT INTO pages (path, title, summary, body, project, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
-                (rel_path, title, summary, body, project.lower(), timestamp),
+                "INSERT INTO pages (path, title, summary, body, project, timestamp, slug) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (rel_path, title, summary, body, project.lower(), timestamp, slug),
             )
 
         conn.commit()
-    except Exception:
-        # Build failed — remove the temp file so the live index (if any)
-        # remains untouched and usable for searches.
         conn.close()
+        conn = None
+
+        # Atomic swap keeps the live index valid while concurrent builders work
+        # in independent temporary files in the same directory.
+        os.replace(str(tmp_file), str(INDEX_FILE))
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
         try:
             tmp_file.unlink()
-        except OSError:
+        except FileNotFoundError:
             pass
-        raise
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-    # Atomic swap: rename temp → live. On the same filesystem this is
-    # atomic at the OS level, so concurrent readers never see a gap.
-    os.replace(str(tmp_file), str(INDEX_FILE))
 
     # Write paths manifest so deletions are detected on the next check.
     try:
@@ -400,6 +409,9 @@ def search(
     since: str | None = None,
     as_of: str | None = None,
     semantic: bool = False,
+    page_paths: list[Path] | None = None,
+    graph: bool = True,
+    rerank: bool = True,
 ) -> list[dict]:
     """Run a hybrid BM25 + optional vector search.
 
@@ -415,7 +427,7 @@ def search(
     if not query or not query.strip():
         return []
 
-    pages = _collect_pages(scope)
+    pages = page_paths if page_paths is not None else _collect_pages(scope)
     if not pages:
         return []
 
@@ -577,12 +589,13 @@ def search(
 
     # Optional: graph-neighbor boost (3rd retrieval signal)
     graph_boosts = None
-    try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from graph_neighbors import boost_graph_neighbors
-        graph_boosts = boost_graph_neighbors(bm25_results, vector_results)
-    except Exception:
-        pass
+    if graph:
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from graph_neighbors import boost_graph_neighbors
+            graph_boosts = boost_graph_neighbors(bm25_results, vector_results)
+        except Exception:
+            pass
 
     # Fuse results: BM25 + Vector + Graph-neighbor via RRF
     if vector_results or graph_boosts:
@@ -593,11 +606,11 @@ def search(
                 if r.get("project", "").lower() == project.lower():
                     r["fused_score"] = round(r["fused_score"] * 1.5, 4)
             fused.sort(key=lambda x: x.get("fused_score", 0), reverse=True)
-        return _maybe_rerank(query, fused, limit)
+        return _maybe_rerank(query, fused, limit) if rerank else fused[:limit]
 
     # BM25 only (fallback)
     bm25_results.sort(key=lambda x: x["score"], reverse=True)
-    return _maybe_rerank(query, bm25_results, limit)
+    return _maybe_rerank(query, bm25_results, limit) if rerank else bm25_results[:limit]
 
 
 def _rrf_fuse_triple(
@@ -732,8 +745,8 @@ def _load_or_build_vectors(pages: list[Path]) -> dict | None:
     """Load cached embeddings or build them fresh.
 
     v4.0: Uses memory-mapped .npy format for vectors (instant load) +
-    small .json for metadata. Falls back to legacy vectors.json if .npy
-    doesn't exist yet (backward compat during migration).
+    small .json for metadata. Rebuilds the cache when either file is
+    missing or the indexed page set has changed.
     """
     current_paths = sorted(
         p.relative_to(ROOT).as_posix() for p in pages if p.exists()

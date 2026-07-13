@@ -11,7 +11,7 @@ timestamp: 2026-07-03T05:48:32
 One-sentence summary: New source material is captured into `knowledge/inbox/` or `knowledge/raw/`, then compiled into durable wiki pages.
 
 ## Steps
-1. **Capture source** into `knowledge/inbox/articles/` (unprocessed staging) or directly into `knowledge/raw/` if the material is immediately trusted. Use Obsidian Web Clipper for web pages; drop PDFs, transcripts, and datasets as files.
+1. **Capture source** into `knowledge/inbox/articles/` (unprocessed staging) or directly into `knowledge/raw/` if the material is immediately trusted. Save web pages, PDFs, transcripts, and datasets as files using any local tool; no viewer-specific ingestion path is required.
 2. **Review what is already covered** in `knowledge/notes/`. Read `knowledge/index.md` and any relevant concept/entity/synthesis pages. The goal is to decide whether the new material updates existing pages or warrants new ones.
 3. **Create or update durable pages** under `knowledge/notes/`. Every factual claim carries a `Source:` line pointing at the `knowledge/raw/` or `knowledge/inbox/` file. If the source is not yet in `raw/`, mark inferred sections with [[Preliminary Flagging]].
 4. **Add a raw-source record** under `knowledge/notes/` if the new material is a named external artifact (article, thread, paper) — this protects the vault from single-point dependence on external URLs.

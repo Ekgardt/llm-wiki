@@ -28,10 +28,11 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import sys
 import uuid
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -102,12 +103,18 @@ def list_pending(max_age_days: int | None = None) -> list[dict[str, Any]]:
 
 def mark_attempt(task_id: str, success: bool) -> None:
     """Update task's attempt counter (failure) or delete (success)."""
+    if ".." in task_id or "/" in task_id or "\\" in task_id:
+        return
     qdir = _queue_dir()
     # Find task by id (filename starts with the id).
     candidates = list(qdir.glob(f"{task_id}*.json"))
     if not candidates:
         return
-    path = candidates[0]
+    path = candidates[0].resolve()
+    try:
+        path.relative_to(qdir.resolve())
+    except ValueError:
+        return
     try:
         task = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -141,11 +148,23 @@ def recover_stale_leases(max_age_seconds: int = 600) -> int:
     recovered = 0
     for p in qdir.glob("*.processing"):
         try:
-            if p.stat().st_mtime < cutoff:
-                target = p.with_suffix(".json")
-                p.rename(target)
-                recovered += 1
-        except OSError:
+            task = json.loads(p.read_text(encoding="utf-8"))
+            pid = task.get("lease_pid")
+            token = task.get("lease_token")
+            acquired = datetime.fromisoformat(task.get("lease_acquired_at", ""))
+            if not isinstance(pid, int) or pid <= 0 or not isinstance(token, str) or not token:
+                continue
+            if acquired.timestamp() >= cutoff:
+                continue
+            from memory_state import _is_pid_alive
+
+            if _is_pid_alive(pid):
+                continue
+            target = p.with_suffix(".json")
+            os.link(p, target)
+            p.unlink()
+            recovered += 1
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
             pass
     return recovered
 
@@ -196,8 +215,31 @@ def drain_with(processor: Callable[[dict], bool], max_tasks: int = 10) -> dict[s
             # Another drainer already leased it, or the file vanished.
             counts["skipped"] += 1
             continue
+        task["lease_pid"] = os.getpid()
+        task["lease_token"] = secrets.token_hex(16)
+        task["lease_acquired_at"] = datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        )
+        lease_tmp = lease_path.with_name(lease_path.name + ".tmp")
         try:
-            ok = bool(processor(task))
+            lease_tmp.write_text(
+                json.dumps(task, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            lease_tmp.replace(lease_path)
+        except OSError:
+            try:
+                lease_tmp.unlink(missing_ok=True)
+                lease_path.rename(path)
+            except OSError:
+                pass
+            counts["skipped"] += 1
+            continue
+        try:
+            processor_task = task.copy()
+            processor_task.pop("lease_pid", None)
+            processor_task.pop("lease_token", None)
+            processor_task.pop("lease_acquired_at", None)
+            ok = bool(processor(processor_task))
         except Exception as e:  # noqa: BLE001
             print(f"memory_queue: processor raised {type(e).__name__}: {e}", file=sys.stderr)
             ok = False
@@ -209,7 +251,15 @@ def drain_with(processor: Callable[[dict], bool], max_tasks: int = 10) -> dict[s
             counts["ok"] += 1
         else:
             # Release the lease: rename back so mark_attempt can find it.
+            task.pop("lease_pid", None)
+            task.pop("lease_token", None)
+            task.pop("lease_acquired_at", None)
+            lease_tmp = lease_path.with_name(lease_path.name + ".tmp")
             try:
+                lease_tmp.write_text(
+                    json.dumps(task, indent=2, ensure_ascii=False), encoding="utf-8"
+                )
+                lease_tmp.replace(lease_path)
                 lease_path.rename(path)
             except OSError:
                 pass

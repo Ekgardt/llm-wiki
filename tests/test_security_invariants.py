@@ -152,6 +152,12 @@ class TestRedactionBeforePersistence:
         out = redact_secrets(f"token: {jwt}")
         assert jwt not in out
 
+    def test_entropy_token_redacted(self):
+        from secret_redact import redact_secrets
+
+        out = redact_secrets("entropy=short-secret entropy: another-secret")
+        assert out == "entropy=[REDACTED] entropy: [REDACTED]"
+
     def test_redact_does_not_redact_sha256(self):
         """Git SHA hashes (pure hex) must NOT be redacted."""
         from secret_redact import redact_secrets

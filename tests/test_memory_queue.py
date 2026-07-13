@@ -10,7 +10,9 @@ Locks in:
 from __future__ import annotations
 
 import json
+import os
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -63,6 +65,15 @@ def test_mark_attempt_failure_increments_counter(clean_queue):
     assert pending[0]["last_attempt_at"] is not None
 
 
+def test_mark_attempt_rejects_path_traversal(clean_queue, tmp_path):
+    sentinel = tmp_path / "queue-parent-sentinel.json"
+    sentinel.write_text('{"id": "sentinel"}', encoding="utf-8")
+
+    clean_queue.mark_attempt("../queue-parent-sentinel", success=True)
+
+    assert sentinel.exists()
+
+
 def test_drain_processes_all_success(clean_queue):
     for i in range(3):
         clean_queue.enqueue("query", {"prompt": f"q{i}"})
@@ -92,6 +103,40 @@ def test_drain_marks_failed_and_continues(clean_queue):
     assert len(pending) == 1
     assert pending[0]["payload"]["prompt"] == "fail"
     assert pending[0]["attempts"] == 1
+    assert "lease_pid" not in pending[0]
+    assert "lease_token" not in pending[0]
+    assert "lease_acquired_at" not in pending[0]
+
+
+def test_drain_persists_owner_metadata_before_processing(clean_queue):
+    clean_queue.enqueue("query", {"prompt": "owned"})
+    observed = {}
+    passed_to_processor = {}
+
+    def processor(task):
+        passed_to_processor.update(task)
+        lease = next(clean_queue._queue_dir().glob("*.processing"))
+        observed.update(json.loads(lease.read_text(encoding="utf-8")))
+        return True
+
+    clean_queue.drain_with(processor)
+
+    assert observed["lease_pid"] == os.getpid()
+    assert isinstance(observed["lease_token"], str) and observed["lease_token"]
+    assert datetime.fromisoformat(observed["lease_acquired_at"])
+    assert "lease_pid" not in passed_to_processor
+    assert "lease_token" not in passed_to_processor
+    assert "lease_acquired_at" not in passed_to_processor
+
+
+def test_queue_recovery_leaves_legacy_ownerless_lease_untouched(clean_queue):
+    lease = clean_queue._queue_dir() / "legacy.processing"
+    lease.write_text(json.dumps({"id": "legacy"}), encoding="utf-8")
+    old = (datetime.now() - timedelta(minutes=20)).timestamp()
+    os.utime(lease, (old, old))
+
+    assert clean_queue.recover_stale_leases() == 0
+    assert lease.exists()
 
 
 def test_drain_skips_permanently_failed(clean_queue):

@@ -43,6 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from maybe_compile import spawn_compile_if_idle  # noqa: E402
 from memory_state import (  # noqa: E402
     ROOT,
+    STATE_ROOT,
     file_hash,
     load_state,
     update_state,
@@ -115,6 +116,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--session-id", default="unknown")
     p.add_argument("--transcript", default="")
     p.add_argument("--trigger", default="")
+    p.add_argument("--ephemeral-transcript", action="store_true")
     return p.parse_args()
 
 
@@ -124,30 +126,24 @@ def _transcript_path_allowed(path: Path) -> bool:
     `transcript_path` arrives from hook JSON (untrusted input). A broad
     allowlist (e.g. all of ``$HOME``) would let a crafted payload point
     at ``~/.ssh/id_rsa`` and ship its contents to the LLM. Instead we
-    restrict to the specific directories where Claude Code, Codex, and
-    OpenCode store session transcripts, plus the system temp dir and the
-    vault-local cache for testing.
+    restrict to exact Claude/Codex session subtrees and the dedicated
+    state-root transient cache.
     """
-    import tempfile
-
     try:
+        absolute = path.absolute()
+        if not absolute.is_file() or any(
+            candidate.is_symlink() for candidate in (absolute, *absolute.parents)
+        ):
+            return False
         p = path.resolve()
     except OSError:
         return False
 
     allowed_prefixes: list[Path] = []
-    # Claude Code transcripts
     home = Path.home()
-    allowed_prefixes.append(home / ".claude")
-    # Codex transcripts
-    allowed_prefixes.append(home / ".codex")
-    # OpenCode transcripts
-    allowed_prefixes.append(home / ".config" / "opencode")
-    # Vault-local temp (for testing)
-    if ROOT.exists():
-        allowed_prefixes.append(ROOT / "cache")
-    # System temp (for Claude Code compacted transcripts)
-    allowed_prefixes.append(Path(tempfile.gettempdir()))
+    allowed_prefixes.append(home / ".claude" / "projects")
+    allowed_prefixes.append(home / ".codex" / "sessions")
+    allowed_prefixes.append(STATE_ROOT / "cache" / "transient-transcripts")
 
     # Must also have a known transcript extension.
     if p.suffix not in (".jsonl", ".json", ".txt", ".log"):
@@ -165,6 +161,15 @@ def _transcript_path_allowed(path: Path) -> bool:
         except ValueError:
             continue
     return False
+
+
+def _cleanup_ephemeral_transcript(path: str) -> None:
+    try:
+        candidate = Path(path).resolve()
+        candidate.relative_to((STATE_ROOT / "cache" / "transient-transcripts").resolve())
+        candidate.unlink(missing_ok=True)
+    except (OSError, ValueError):
+        pass
 
 
 def read_transcript_tail(path: Path, max_chars: int = MAX_TRANSCRIPT_CHARS) -> str:
@@ -382,8 +387,7 @@ def maybe_trigger_compile(state: dict, daily_path: Path, tier: str) -> None:
     state["compile_triggers"] = state["compile_triggers"][-20:]
 
 
-def main() -> int:
-    args = parse_args()
+def _run_flush(args: argparse.Namespace) -> int:
     # Read-only peek for the dedupe short-circuit; the real write happens
     # inside update_state() below so we don't race with compile_memory.
     if should_skip(load_state(), args.session_id, args.event):
@@ -463,6 +467,15 @@ def main() -> int:
             maybe_trigger_compile(state, _dp, _ft)
         update_state(_trigger_and_persist)
     return 0
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        return _run_flush(args)
+    finally:
+        if args.ephemeral_transcript and args.transcript:
+            _cleanup_ephemeral_transcript(args.transcript)
 
 
 if __name__ == "__main__":

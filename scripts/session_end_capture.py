@@ -14,7 +14,16 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT, spawn_detached  # noqa: E402
+from memory_state import ROOT, STATE_ROOT, spawn_detached  # noqa: E402
+
+
+def _cleanup_ephemeral(path: str) -> None:
+    try:
+        candidate = Path(path).resolve()
+        candidate.relative_to((STATE_ROOT / "cache" / "transient-transcripts").resolve())
+        candidate.unlink(missing_ok=True)
+    except (OSError, ValueError):
+        pass
 
 
 def main() -> int:
@@ -31,6 +40,8 @@ def main() -> int:
     transcript_path = payload.get("transcript_path", "")
     session_id = payload.get("session_id", "unknown")
     reason = payload.get("reason", "")
+    trigger = payload.get("trigger") or reason
+    ephemeral = payload.get("ephemeral_transcript") is True
 
     args = [
         sys.executable,
@@ -38,9 +49,17 @@ def main() -> int:
         "--event", "session-end",
         "--session-id", str(session_id),
         "--transcript", str(transcript_path),
-        "--trigger", str(reason),
+        "--trigger", str(trigger),
     ]
-    spawn_detached(args)
+    if ephemeral:
+        args.append("--ephemeral-transcript")
+    try:
+        spawned = spawn_detached(args)
+    except Exception:  # noqa: BLE001
+        spawned = None
+    if ephemeral and spawned is None:
+        _cleanup_ephemeral(str(transcript_path))
+    print(json.dumps({"flush_started": spawned is not None}))
     return 0
 
 

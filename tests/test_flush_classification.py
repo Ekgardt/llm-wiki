@@ -12,6 +12,7 @@ Locks in:
 """
 from __future__ import annotations
 
+from argparse import Namespace
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -120,6 +121,170 @@ def test_classify_case_insensitive_token():
     for variant in ["flush_major", "Flush_Major", "FLUSH_MAJOR"]:
         tier, _ = flush_memory._classify_response(variant + "\n\nbody")
         assert tier == "major", f"failed for {variant!r}"
+
+
+def test_flush_cleans_ephemeral_transcript_on_early_return(monkeypatch, tmp_path):
+    import flush_memory
+
+    state_root = tmp_path / "state"
+    transient = state_root / "cache" / "transient-transcripts" / "transient.txt"
+    transient.parent.mkdir(parents=True)
+    transient.write_text("redacted transcript", encoding="utf-8")
+    monkeypatch.setattr(flush_memory, "STATE_ROOT", state_root)
+    monkeypatch.setattr(
+        flush_memory,
+        "parse_args",
+        lambda: Namespace(
+            event="session-end",
+            session_id="session-1",
+            transcript=str(transient),
+            trigger="opencode",
+            ephemeral_transcript=True,
+        ),
+    )
+    monkeypatch.setattr(flush_memory, "load_state", lambda: {})
+    monkeypatch.setattr(flush_memory, "should_skip", lambda *args: True)
+
+    assert flush_memory.main() == 0
+    assert not transient.exists()
+
+
+def test_flush_allows_transcript_under_external_state_cache(monkeypatch, tmp_path):
+    import tempfile
+
+    import flush_memory
+
+    state_root = tmp_path / "external state"
+    transcript = state_root / "cache" / "transient-transcripts" / "event.txt"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text("safe", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "different-home")
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path / "different-temp"))
+    monkeypatch.setattr(flush_memory, "ROOT", tmp_path / "different-vault")
+    monkeypatch.setattr(flush_memory, "STATE_ROOT", state_root, raising=False)
+
+    assert flush_memory._transcript_path_allowed(transcript)
+
+
+def test_flush_rejects_system_temp_and_broad_vault_cache(monkeypatch, tmp_path):
+    import tempfile
+
+    import flush_memory
+
+    system_temp = tmp_path / "system-temp"
+    broad_cache = tmp_path / "vault" / "cache"
+    system_temp.mkdir()
+    broad_cache.mkdir(parents=True)
+    temp_transcript = system_temp / "session.jsonl"
+    cache_transcript = broad_cache / "session.txt"
+    temp_transcript.write_text("safe", encoding="utf-8")
+    cache_transcript.write_text("safe", encoding="utf-8")
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(system_temp))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(flush_memory, "ROOT", tmp_path / "vault")
+    monkeypatch.setattr(flush_memory, "STATE_ROOT", tmp_path / "state")
+
+    assert not flush_memory._transcript_path_allowed(temp_transcript)
+    assert not flush_memory._transcript_path_allowed(cache_transcript)
+
+
+def test_flush_rejects_symlink_and_non_file_in_transient_directory(
+    monkeypatch, tmp_path
+):
+    import flush_memory
+
+    state_root = tmp_path / "state"
+    transient_dir = state_root / "cache" / "transient-transcripts"
+    transient_dir.mkdir(parents=True)
+    target = transient_dir / "target.txt"
+    link = transient_dir / "link.txt"
+    directory = transient_dir / "directory.txt"
+    target.write_text("safe", encoding="utf-8")
+    directory.mkdir()
+    monkeypatch.setattr(flush_memory, "STATE_ROOT", state_root)
+
+    assert not flush_memory._transcript_path_allowed(directory)
+    assert flush_memory._transcript_path_allowed(target)
+    try:
+        link.symlink_to(target)
+    except OSError:
+        return
+
+    assert not flush_memory._transcript_path_allowed(link)
+
+
+def test_flush_rejects_agent_config_files_outside_exact_session_subtrees(
+    monkeypatch, tmp_path
+):
+    import flush_memory
+
+    home = tmp_path / "home"
+    rejected = [
+        home / ".claude" / "settings.json",
+        home / ".codex" / "auth.json",
+        home / ".codex" / "config.json",
+        home / ".config" / "opencode" / "opencode.json",
+    ]
+    for path in rejected:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("private", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setattr(flush_memory, "STATE_ROOT", tmp_path / "state")
+
+    assert all(not flush_memory._transcript_path_allowed(path) for path in rejected)
+
+
+def test_flush_accepts_only_exact_session_and_state_transient_subtrees(
+    monkeypatch, tmp_path
+):
+    import flush_memory
+
+    home = tmp_path / "home"
+    state_root = tmp_path / "state"
+    vault_root = tmp_path / "vault"
+    accepted = [
+        home / ".claude" / "projects" / "project" / "session.jsonl",
+        home / ".codex" / "sessions" / "2026" / "session.jsonl",
+        state_root / "cache" / "transient-transcripts" / "event.txt",
+    ]
+    rejected_vault_transient = (
+        vault_root / "cache" / "transient-transcripts" / "event.txt"
+    )
+    for path in [*accepted, rejected_vault_transient]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("safe", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setattr(flush_memory, "ROOT", vault_root)
+    monkeypatch.setattr(flush_memory, "STATE_ROOT", state_root)
+
+    assert all(flush_memory._transcript_path_allowed(path) for path in accepted)
+    assert not flush_memory._transcript_path_allowed(rejected_vault_transient)
+
+
+def test_flush_ephemeral_cleanup_rejects_paths_outside_transient_cache(
+    monkeypatch, tmp_path
+):
+    import flush_memory
+
+    protected = tmp_path / "protected.txt"
+    protected.write_text("keep", encoding="utf-8")
+    monkeypatch.setattr(flush_memory, "STATE_ROOT", tmp_path / "state")
+    monkeypatch.setattr(
+        flush_memory,
+        "parse_args",
+        lambda: Namespace(
+            event="session-end",
+            session_id="session-1",
+            transcript=str(protected),
+            trigger="opencode",
+            ephemeral_transcript=True,
+        ),
+    )
+    monkeypatch.setattr(flush_memory, "load_state", lambda: {})
+    monkeypatch.setattr(flush_memory, "should_skip", lambda *args: True)
+
+    assert flush_memory.main() == 0
+    assert protected.exists()
 
 
 # ---------------------------------------------------------------------------
