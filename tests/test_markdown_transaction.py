@@ -5,6 +5,8 @@ import inspect
 import os
 import sqlite3
 import stat
+import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -355,9 +357,9 @@ def test_replace_uses_random_same_directory_temp_and_os_replace(
     replacements = []
     real_replace = os.replace
 
-    def recording_replace(source, destination):
+    def recording_replace(source, destination, *args, **kwargs):
         replacements.append((Path(source), Path(destination)))
-        real_replace(source, destination)
+        real_replace(source, destination, *args, **kwargs)
 
     monkeypatch.setattr(markdown_transaction.os, "replace", recording_replace)
     coordinator = MarkdownCoordinator(vault, state_root)
@@ -373,7 +375,13 @@ def test_replace_uses_random_same_directory_temp_and_os_replace(
     coordinator.apply(second.id)
 
     assert len(replacements) == 2
-    assert all(source.parent == target.parent and destination == target for source, destination in replacements)
+    if markdown_transaction._use_posix_dir_fd():
+        assert all(source.parent == Path() and destination == Path(target.name) for source, destination in replacements)
+    else:
+        assert all(
+            source.parent == target.parent and destination == target
+            for source, destination in replacements
+        )
     assert replacements[0][0].name != replacements[1][0].name
     assert not list(target.parent.glob(".*.tmp"))
 
@@ -389,6 +397,43 @@ def test_delete_refuses_unknown_bytes(vault: Path, state_root: Path):
     with pytest.raises(RuntimeError, match="before state"):
         coordinator.apply(transaction.id)
     assert target.read_bytes() == b"unknown"
+
+
+def test_apply_recovers_after_filesystem_mutation_before_applied_update(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    target = vault / "knowledge/notes/page.md"
+    target.write_bytes(b"before")
+    coordinator = MarkdownCoordinator(vault, state_root)
+    transaction = coordinator.prepare(
+        [MarkdownChange.replace("knowledge/notes/page.md", b"after")],
+        operation_id="crash-after-mutation",
+    )
+    mark_applied = coordinator._mark_operation_applied
+    injected = False
+
+    def fail_once(transaction_id, position):
+        nonlocal injected
+        if not injected:
+            injected = True
+            raise RuntimeError("injected after filesystem mutation")
+        mark_applied(transaction_id, position)
+
+    monkeypatch.setattr(coordinator, "_mark_operation_applied", fail_once)
+    with pytest.raises(RuntimeError, match="injected after filesystem mutation"):
+        coordinator.apply(transaction.id)
+    assert target.read_bytes() == b"after"
+    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+        assert database.execute(
+            'SELECT applied FROM "operation" WHERE transaction_id = ?', (transaction.id,)
+        ).fetchone()[0] == 0
+
+    monkeypatch.setattr(coordinator, "_mark_operation_applied", mark_applied)
+    assert coordinator.apply(transaction.id).state == "committed"
+    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+        assert database.execute(
+            'SELECT applied FROM "operation" WHERE transaction_id = ?', (transaction.id,)
+        ).fetchone()[0] == 1
 
 
 def test_coherent_read_returns_present_and_absent_states(vault: Path, state_root: Path):
@@ -425,21 +470,211 @@ def test_global_writer_gate_serializes_coordinators(vault: Path, state_root: Pat
         assert entered.wait(5)
         time.sleep(0.1)
         assert order == ["first"]
+        with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+            owner = database.execute(
+                "SELECT owner_token, process_id, heartbeat_at, expires_at, fencing_epoch "
+                "FROM writer_owners WHERE gate_name = 'global'"
+            ).fetchone()
+        assert owner is not None
+        assert owner[1] == os.getpid()
+        assert all(owner[index] for index in (0, 2, 3))
+        assert owner[4] >= 1
         release.set()
         one.result(timeout=5)
         two.result(timeout=5)
     assert order == ["first", "second"]
 
 
+def test_crashed_writer_owner_is_reclaimed_with_higher_fence(vault: Path, state_root: Path):
+    coordinator = MarkdownCoordinator(vault, state_root)
+    marker = state_root / "child-acquired"
+    code = """
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from markdown_transaction import MarkdownCoordinator
+coordinator = MarkdownCoordinator(Path(sys.argv[2]), Path(sys.argv[3]))
+with coordinator.writer_gate():
+    Path(sys.argv[4]).write_text('acquired', encoding='utf-8')
+    os._exit(0)
+"""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            code,
+            str(Path(markdown_transaction.__file__).parent),
+            str(vault),
+            str(state_root),
+            str(marker),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert marker.is_file()
+    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+        crashed = database.execute(
+            "SELECT process_id, owner_token, fencing_epoch FROM writer_owners "
+            "WHERE gate_name = 'global'"
+        ).fetchone()
+    assert crashed is not None
+
+    with coordinator.writer_gate():
+        with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+            recovered = database.execute(
+                "SELECT process_id, owner_token, fencing_epoch FROM writer_owners "
+                "WHERE gate_name = 'global'"
+            ).fetchone()
+        assert recovered[0] == os.getpid()
+        assert recovered[1] != crashed[1]
+        assert recovered[2] > crashed[2]
+
+
+def test_live_writer_heartbeat_renews_before_expiry(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(markdown_transaction, "_WRITER_LEASE_SECONDS", 0.3)
+    monkeypatch.setattr(markdown_transaction, "_WRITER_HEARTBEAT_SECONDS", 0.05)
+    coordinator = MarkdownCoordinator(vault, state_root)
+    with coordinator.writer_gate():
+        with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+            first = database.execute(
+                "SELECT owner_token, heartbeat_at, fencing_epoch FROM writer_owners "
+                "WHERE gate_name = 'global'"
+            ).fetchone()
+        time.sleep(0.4)
+        with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+            renewed = database.execute(
+                "SELECT owner_token, heartbeat_at, fencing_epoch FROM writer_owners "
+                "WHERE gate_name = 'global'"
+            ).fetchone()
+        assert renewed[0] == first[0]
+        assert renewed[1] > first[1]
+        assert renewed[2] == first[2]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX dir_fd semantics")
+def test_parent_swap_cannot_redirect_replace_outside_vault(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    notes = vault / "knowledge/notes"
+    original = vault / "knowledge/notes-original"
+    outside = vault.parent / "outside"
+    outside.mkdir()
+    target = notes / "page.md"
+    target.write_bytes(b"before")
+    (outside / "page.md").write_bytes(b"outside")
+    coordinator = MarkdownCoordinator(vault, state_root)
+    transaction = coordinator.prepare(
+        [MarkdownChange.replace("knowledge/notes/page.md", b"after")],
+        operation_id="parent-swap",
+    )
+
+    def swap_parent(path):
+        notes.rename(original)
+        notes.symlink_to(outside, target_is_directory=True)
+
+    monkeypatch.setattr(coordinator, "_before_target_mutation", swap_parent)
+    with pytest.raises(RuntimeError, match="parent identity"):
+        coordinator.apply(transaction.id)
+    assert (outside / "page.md").read_bytes() == b"outside"
+
+
+def test_windows_parent_identity_change_fails_closed(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    target = vault / "knowledge/notes/page.md"
+    target.write_bytes(b"before")
+    coordinator = MarkdownCoordinator(vault, state_root)
+    transaction = coordinator.prepare(
+        [MarkdownChange.replace("knowledge/notes/page.md", b"after")],
+        operation_id="parent-identity",
+    )
+    real_identity = coordinator._parent_identity
+    calls = 0
+
+    def changing_identity(path):
+        nonlocal calls
+        calls += 1
+        identity = real_identity(path)
+        return identity if calls == 1 else (identity[0], identity[1] + 1)
+
+    monkeypatch.setattr(markdown_transaction, "_use_posix_dir_fd", lambda: False)
+    monkeypatch.setattr(coordinator, "_parent_identity", changing_identity)
+    with pytest.raises(RuntimeError, match="parent identity"):
+        coordinator.apply(transaction.id)
+    assert target.read_bytes() == b"before"
+
+
+def test_windows_acl_hardening_verifies_owner_only_success(tmp_path: Path, monkeypatch):
+    path = tmp_path / "artifact"
+    path.write_bytes(b"artifact")
+    calls = []
+
+    def successful(command):
+        calls.append(command)
+        if len(calls) == 1:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return subprocess.CompletedProcess(command, 0, "artifact DOMAIN\\user:(F)\n", "")
+
+    monkeypatch.setattr(markdown_transaction, "_windows_acl_identity", lambda: "DOMAIN\\user")
+    monkeypatch.setattr(markdown_transaction, "_run_acl_command", successful)
+    markdown_transaction._harden_windows_acl(path)
+    assert len(calls) == 2
+    assert calls[0][0].casefold() == "icacls"
+    assert "DOMAIN\\user:(F)" in calls[0]
+
+
+def test_windows_acl_hardening_failure_is_not_silently_accepted(tmp_path: Path, monkeypatch):
+    path = tmp_path / "artifact"
+    path.write_bytes(b"artifact")
+    denied = subprocess.CompletedProcess(["icacls"], 5, "", "access denied")
+    monkeypatch.setattr(markdown_transaction, "_run_acl_command", lambda command: denied)
+    with pytest.raises(PermissionError, match="owner-only ACL"):
+        markdown_transaction._harden_windows_acl(path)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows ACL enforcement")
+def test_windows_acl_failure_aborts_transaction_preparation(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    denied = subprocess.CompletedProcess(["icacls"], 5, b"", b"access denied")
+    monkeypatch.setattr(markdown_transaction, "_run_acl_command", lambda command: denied)
+    coordinator = MarkdownCoordinator(vault, state_root)
+    with pytest.raises(PermissionError, match="owner-only ACL"):
+        coordinator.prepare(
+            [MarkdownChange.create("knowledge/notes/new.md", b"new")],
+            operation_id="acl-denied",
+        )
+    assert list((state_root / "run/transactions").iterdir()) == []
+
+
 def test_apply_fsyncs_changed_directories(vault: Path, state_root: Path, monkeypatch):
     synced = []
+    synced_descriptors = []
+    real_fsync = markdown_transaction.os.fsync
+
+    def recording_fsync(descriptor):
+        metadata = os.fstat(descriptor)
+        synced_descriptors.append((metadata.st_dev, metadata.st_ino))
+        real_fsync(descriptor)
+
     monkeypatch.setattr(markdown_transaction, "fsync_directory", lambda path: synced.append(Path(path)))
+    monkeypatch.setattr(markdown_transaction.os, "fsync", recording_fsync)
     coordinator = MarkdownCoordinator(vault, state_root)
     transaction = coordinator.prepare(
         [MarkdownChange.create("knowledge/notes/new.md", b"new")], operation_id="dirsync"
     )
     coordinator.apply(transaction.id)
-    assert vault / "knowledge/notes" in synced
+    if markdown_transaction._use_posix_dir_fd():
+        metadata = (vault / "knowledge/notes").stat()
+        assert (metadata.st_dev, metadata.st_ino) in synced_descriptors
+    else:
+        assert vault / "knowledge/notes" in synced
 
 
 def test_posix_directory_fsync_unsupported_error_is_tolerated(
@@ -453,11 +688,7 @@ def test_posix_directory_fsync_unsupported_error_is_tolerated(
         return real_open(path, flags, *args, **kwargs)
 
     monkeypatch.setattr("reliable_memory.os.open", unsupported)
-    coordinator = MarkdownCoordinator(vault, state_root)
-    transaction = coordinator.prepare(
-        [MarkdownChange.create("knowledge/notes/new.md", b"new")], operation_id="fallback"
-    )
-    assert coordinator.apply(transaction.id).state == "committed"
+    markdown_transaction.fsync_directory(vault / "knowledge/notes")
 
 
 def test_windows_sharing_violation_leaves_unknown_target_unchanged(
@@ -484,6 +715,21 @@ def test_database_has_required_tables_and_durability_pragmas(vault: Path, state_
     MarkdownCoordinator(vault, state_root)
     with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
         tables = {row[0] for row in database.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert {"transaction", "operation", "project_leases", "writer_owners", "maintenance_owners"} <= tables
+        assert {
+            "transaction",
+            "operation",
+            "project_leases",
+            "writer_owners",
+            "writer_fences",
+            "maintenance_owners",
+        } <= tables
+        owner_columns = {
+            row[1] for row in database.execute("PRAGMA table_info(writer_owners)")
+        }
+        assert {"owner_token", "process_id", "heartbeat_at", "expires_at", "fencing_epoch"} <= owner_columns
+        operation_columns = {
+            row[1] for row in database.execute('PRAGMA table_info("operation")')
+        }
+        assert {"parent_device", "parent_inode"} <= operation_columns
         assert database.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
         assert database.execute("PRAGMA synchronous").fetchone()[0] == 2
