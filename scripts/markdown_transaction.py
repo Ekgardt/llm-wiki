@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import copy
 import ctypes
@@ -89,6 +90,17 @@ class TransactionRecord:
     preconditions: Mapping[str, object]
     created_at: str
     updated_at: str
+    parent_transaction_id: str | None = None
+    error_code: str | None = None
+
+
+class TransactionFailure(RuntimeError):
+    """An apply failure with a stable machine-readable disposition."""
+
+    def __init__(self, message: str, code: str, state: str):
+        super().__init__(message)
+        self.code = code
+        self.state = state
 
 
 def _require_bytes(content: bytes) -> bytes:
@@ -367,7 +379,17 @@ class MarkdownCoordinator:
         self._initialize_database()
 
     def _connect(self) -> sqlite3.Connection:
-        return open_operational_db(self.database_path, busy_ms=DEFAULTS.markdown_busy_ms)
+        database = open_operational_db(
+            self.database_path, busy_ms=DEFAULTS.markdown_busy_ms
+        )
+        schema = database.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'transaction'"
+        ).fetchone()
+        if schema is not None and "conflicted" not in (schema["sql"] or ""):
+            # Stage 2 Task 2 shipped a narrower state constraint. Preserve those
+            # databases while allowing their rows to enter recovery-only states.
+            database.execute("PRAGMA ignore_check_constraints = ON")
+        return database
 
     def _initialize_database(self) -> None:
         with self._connect() as database:
@@ -378,11 +400,18 @@ class MarkdownCoordinator:
                         id TEXT PRIMARY KEY,
                         operation_id TEXT NOT NULL UNIQUE,
                         request_hash TEXT NOT NULL,
-                        state TEXT NOT NULL CHECK (state IN ('prepared', 'applying', 'committed')),
+                        state TEXT NOT NULL CHECK (state IN (
+                            'preparing', 'prepared', 'applying', 'committed',
+                            'discarded', 'conflicted', 'quarantined'
+                        )),
                         preconditions_json TEXT NOT NULL,
                         plan_hash TEXT NOT NULL,
                         created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL
+                        updated_at TEXT NOT NULL,
+                        parent_transaction_id TEXT,
+                        error_code TEXT,
+                        artifacts_pruned_at TEXT,
+                        owner_pid INTEGER
                     );
                     CREATE TABLE IF NOT EXISTS "operation" (
                         transaction_id TEXT NOT NULL REFERENCES "transaction"(id) ON DELETE CASCADE,
@@ -447,6 +476,23 @@ class MarkdownCoordinator:
                         database.execute(
                             f'ALTER TABLE "operation" ADD COLUMN {name} INTEGER'
                         )
+                transaction_columns = {
+                    row["name"]
+                    for row in database.execute('PRAGMA table_info("transaction")')
+                }
+                for name in (
+                    "parent_transaction_id",
+                    "error_code",
+                    "artifacts_pruned_at",
+                ):
+                    if name not in transaction_columns:
+                        database.execute(
+                            f'ALTER TABLE "transaction" ADD COLUMN {name} TEXT'
+                        )
+                if "owner_pid" not in transaction_columns:
+                    database.execute(
+                        'ALTER TABLE "transaction" ADD COLUMN owner_pid INTEGER'
+                    )
                 self._backfill_parent_identities(database)
 
     def _backfill_parent_identities(self, database: sqlite3.Connection) -> None:
@@ -482,6 +528,7 @@ class MarkdownCoordinator:
         operation_id: str,
         preconditions: Mapping[str, object] | None = None,
         validators: Sequence[Validator] = (),
+        _parent_transaction_id: str | None = None,
     ) -> TransactionRecord:
         if not isinstance(operation_id, str) or not operation_id:
             raise ValueError("operation_id must be a non-empty string")
@@ -493,6 +540,14 @@ class MarkdownCoordinator:
             raise ValueError("duplicate transaction target")
         persisted_preconditions = self._validate_preconditions(preconditions or {})
         request_hash = self._request_hash(normalized, persisted_preconditions)
+        existing = self._record_for_operation_id(operation_id)
+        if existing is not None:
+            self.recover(_exclude_transaction_id=existing.id)
+            if self._request_hash_for_operation_id(operation_id) != request_hash:
+                raise ValueError("operation_id is already bound to a different request")
+            return existing
+
+        self.recover()
         existing = self._record_for_operation_id(operation_id)
         if existing is not None:
             if self._request_hash_for_operation_id(operation_id) != request_hash:
@@ -514,6 +569,33 @@ class MarkdownCoordinator:
         except BaseException:
             self._remove_artifacts(artifact_root)
             raise
+
+        timestamp = _now()
+        try:
+            with self._connect() as database, begin_immediate(database):
+                database.execute(
+                    'INSERT INTO "transaction" '
+                    "(id, operation_id, request_hash, state, preconditions_json, plan_hash, "
+                    "created_at, updated_at, parent_transaction_id, owner_pid) "
+                    "VALUES (?, ?, ?, 'preparing', ?, '', ?, ?, ?, ?)",
+                    (
+                        transaction_id,
+                        operation_id,
+                        request_hash,
+                        canonical_json_bytes(persisted_preconditions).decode("utf-8"),
+                        timestamp,
+                        timestamp,
+                        _parent_transaction_id,
+                        os.getpid(),
+                    ),
+                )
+        except sqlite3.IntegrityError:
+            self._remove_artifacts(artifact_root)
+            existing = self._record_for_operation_id(operation_id)
+            if existing is None or self._request_hash_for_operation_id(operation_id) != request_hash:
+                raise ValueError("operation_id is already bound to a different request") from None
+            return existing
+        self._killpoint("after_preparing", _parent_transaction_id)
 
         operations: list[MarkdownOperation] = []
         parent_identities: list[tuple[int, int]] = []
@@ -544,6 +626,8 @@ class MarkdownCoordinator:
                     }
                 )
 
+            self._killpoint("after_images_fsynced", _parent_transaction_id)
+
             plan: dict[str, object] = {
                 "schema_version": "markdown-transaction/v1",
                 "transaction_id": transaction_id,
@@ -564,21 +648,16 @@ class MarkdownCoordinator:
             for directory in (before_root, after_root, artifact_root, self.transaction_root):
                 fsync_directory(directory)
 
-            timestamp = _now()
             try:
                 with self._connect() as database, begin_immediate(database):
                     database.execute(
-                        'INSERT INTO "transaction" '
-                        "(id, operation_id, request_hash, state, preconditions_json, plan_hash, "
-                        "created_at, updated_at) VALUES (?, ?, ?, 'prepared', ?, ?, ?, ?)",
+                        'UPDATE "transaction" SET state = \'prepared\', plan_hash = ?, '
+                        "updated_at = ?, owner_pid = NULL "
+                        "WHERE id = ? AND state = 'preparing'",
                         (
-                            transaction_id,
-                            operation_id,
-                            request_hash,
-                            canonical_json_bytes(persisted_preconditions).decode("utf-8"),
                             sha256_bytes(plan_bytes),
                             timestamp,
-                            timestamp,
+                            transaction_id,
                         ),
                     )
                     database.executemany(
@@ -600,49 +679,354 @@ class MarkdownCoordinator:
                         ],
                     )
             except sqlite3.IntegrityError:
-                existing = self._record_for_operation_id(operation_id)
-                if existing is None or self._request_hash_for_operation_id(operation_id) != request_hash:
-                    raise ValueError("operation_id is already bound to a different request") from None
-                self._remove_artifacts(artifact_root)
-                return existing
+                raise RuntimeError("transaction operations could not be persisted") from None
+            self._killpoint("after_prepared", _parent_transaction_id)
             return self._record(transaction_id)
         except BaseException:
-            if self._record_if_present(transaction_id) is None:
+            record = self._record_if_present(transaction_id)
+            if record is None or record.state == "preparing":
+                with self._connect() as database, begin_immediate(database):
+                    database.execute(
+                        'DELETE FROM "transaction" WHERE id = ? AND state = \'preparing\'',
+                        (transaction_id,),
+                    )
                 self._remove_artifacts(artifact_root)
             raise
 
     def apply(self, transaction_id: str) -> TransactionRecord:
         with self.writer_gate():
-            record = self._record(transaction_id)
-            if record.state == "committed":
-                return record
-            if record.state not in {"prepared", "applying"}:
-                raise RuntimeError(f"transaction cannot be applied from state {record.state}")
-            rows = self._operation_rows(transaction_id)
-            reconciled_after = self._reconcile_operation_states(transaction_id, rows)
-            self._check_preconditions(record.preconditions, reconciled_after)
-            rows = self._operation_rows(transaction_id)
-            with self._connect() as database, begin_immediate(database):
-                database.execute(
-                    'UPDATE "transaction" SET state = \'applying\', updated_at = ? WHERE id = ?',
-                    (_now(), transaction_id),
+            try:
+                return self._apply_locked(transaction_id)
+            except TransactionFailure as exc:
+                self._set_transaction_state(
+                    transaction_id, exc.state, error_code=exc.code
                 )
+                raise
+            except RuntimeError as exc:
+                message = str(exc)
+                if "after-image is corrupt" in message or "plan hash mismatch" in message:
+                    recovered = self._recover_corrupt_after_image(transaction_id)
+                    raise TransactionFailure(
+                        message, "after_image_corrupt", recovered.state
+                    ) from exc
+                elif "after state mismatch" in message:
+                    failure = TransactionFailure(
+                        message, "unknown_target_bytes", "conflicted"
+                    )
+                elif "before state mismatch" in message:
+                    failure = TransactionFailure(
+                        message, "before_hash_mismatch", "conflicted"
+                    )
+                else:
+                    raise
+                self._set_transaction_state(
+                    transaction_id, failure.state, error_code=failure.code
+                )
+                raise failure from exc
 
-            plan = self._load_verified_plan(record)
-            for row, operation_plan in zip(rows, plan["operations"], strict=True):
-                if row["applied"]:
-                    self._require_operation_state(row, row["after_hash"], "after state")
-                    continue
-                self._mutate_and_mark(transaction_id, row, operation_plan)
+    def _apply_locked(self, transaction_id: str) -> TransactionRecord:
+        record = self._record(transaction_id)
+        if record.state == "committed":
+            return record
+        if record.state not in {"prepared", "applying"}:
+            raise RuntimeError(f"transaction cannot be applied from state {record.state}")
+        plan = self._load_verified_plan(record)
+        rows = self._operation_rows(transaction_id)
+        if "project_lease" in record.preconditions:
+            self._check_preconditions(
+                {"project_lease": record.preconditions["project_lease"]}, set()
+            )
+        reconciled_after = self._reconcile_operation_states(transaction_id, rows)
+        self._check_preconditions(record.preconditions, reconciled_after)
+        rows = self._operation_rows(transaction_id)
+        with self._connect() as database, begin_immediate(database):
+            database.execute(
+                'UPDATE "transaction" SET state = \'applying\', updated_at = ? WHERE id = ?',
+                (_now(), transaction_id),
+            )
+        self._killpoint("after_applying", record.parent_transaction_id)
 
-            for row in self._operation_rows(transaction_id):
+        for row, operation_plan in zip(rows, plan["operations"], strict=True):
+            if row["applied"]:
                 self._require_operation_state(row, row["after_hash"], "after state")
-            with self._connect() as database, begin_immediate(database):
-                database.execute(
-                    'UPDATE "transaction" SET state = \'committed\', updated_at = ? WHERE id = ?',
-                    (_now(), transaction_id),
+                continue
+            self._mutate_and_mark(transaction_id, row, operation_plan)
+            self._killpoint("after_each_target", record.parent_transaction_id)
+
+        for row in self._operation_rows(transaction_id):
+            self._require_operation_state(row, row["after_hash"], "after state")
+        self._killpoint("before_commit", record.parent_transaction_id)
+        with self._connect() as database, begin_immediate(database):
+            database.execute(
+                'UPDATE "transaction" SET state = \'committed\', updated_at = ? WHERE id = ?',
+                (_now(), transaction_id),
+            )
+        result = self._record(transaction_id)
+        self._killpoint("after_commit", record.parent_transaction_id)
+        return result
+
+    def recover(
+        self, *, _exclude_transaction_id: str | None = None
+    ) -> list[TransactionRecord]:
+        """Converge every incomplete transaction without overwriting unknown bytes."""
+        recovered: list[TransactionRecord] = []
+        with self.writer_gate():
+            with self._connect() as database:
+                rows = [
+                    (row["id"], row["state"], row["owner_pid"])
+                    for row in database.execute(
+                        'SELECT id, state, owner_pid FROM "transaction" '
+                        "WHERE state IN ('preparing', 'prepared', 'applying') "
+                        "ORDER BY created_at, id"
+                    )
+                ]
+            for transaction_id, selected_state, owner_pid in rows:
+                if transaction_id == _exclude_transaction_id:
+                    continue
+                if (
+                    selected_state == "preparing"
+                    and owner_pid is not None
+                    and _pid_alive(owner_pid)
+                ):
+                    continue
+                record = self._record(transaction_id)
+                if record.state == "preparing":
+                    self._set_transaction_state(transaction_id, "discarded")
+                    self._remove_artifacts(self.transaction_root / transaction_id)
+                    recovered.append(self._record(transaction_id))
+                    continue
+                try:
+                    recovered.append(self._apply_locked(transaction_id))
+                except TransactionFailure as exc:
+                    self._set_transaction_state(
+                        transaction_id, exc.state, error_code=exc.code
+                    )
+                    recovered.append(self._record(transaction_id))
+                except RuntimeError as exc:
+                    message = str(exc)
+                    if "after-image is corrupt" in message or "plan hash mismatch" in message:
+                        recovered.append(self._recover_corrupt_after_image(transaction_id))
+                    elif "before state mismatch" in message:
+                        rows = self._operation_rows(transaction_id)
+                        create_conflict = any(
+                            row["kind"] == "create"
+                            and self._operation_hash(row) != row["before_hash"]
+                            for row in rows
+                        )
+                        code = (
+                            "before_hash_mismatch"
+                            if create_conflict
+                            else "unknown_target_bytes"
+                        )
+                        self._set_transaction_state(
+                            transaction_id, "conflicted", error_code=code
+                        )
+                        recovered.append(self._record(transaction_id))
+                    elif "after state mismatch" in message:
+                        self._set_transaction_state(
+                            transaction_id,
+                            "conflicted",
+                            error_code="unknown_target_bytes",
+                        )
+                        recovered.append(self._record(transaction_id))
+                    else:
+                        raise
+        return recovered
+
+    def _recover_corrupt_after_image(self, transaction_id: str) -> TransactionRecord:
+        rows = self._operation_rows(transaction_id)
+        before_states: list[object] = []
+        current_hashes: list[str] = []
+        for row in rows:
+            current = self._operation_hash(row)
+            current_hashes.append(current)
+            if current not in {row["before_hash"], row["after_hash"]}:
+                self._set_transaction_state(
+                    transaction_id,
+                    "quarantined",
+                    error_code="after_image_corrupt",
                 )
-            return self._record(transaction_id)
+                return self._record(transaction_id)
+            if row["before_hash"] == ABSENT:
+                before_states.append(ABSENT)
+                continue
+            artifact = (
+                self.transaction_root
+                / transaction_id
+                / "before"
+                / f"{row['position']:06d}.bin"
+            )
+            try:
+                content = artifact.read_bytes()
+            except OSError:
+                content = b""
+            if sha256_bytes(content) != row["before_hash"]:
+                self._set_transaction_state(
+                    transaction_id,
+                    "quarantined",
+                    error_code="after_image_corrupt",
+                )
+                return self._record(transaction_id)
+            before_states.append(
+                {
+                    "sha256": row["before_hash"],
+                    "artifact": f"before/{row['position']:06d}.bin",
+                }
+            )
+
+        for row, current, before_state in zip(
+            rows, current_hashes, before_states, strict=True
+        ):
+            if current == row["before_hash"]:
+                continue
+            inverse = {
+                "transaction_id": transaction_id,
+                "position": row["position"],
+                "kind": "delete"
+                if row["before_hash"] == ABSENT
+                else "create"
+                if row["after_hash"] == ABSENT
+                else "replace",
+                "path": row["path"],
+                "before_hash": row["after_hash"],
+                "after_hash": row["before_hash"],
+                "parent_device": row["parent_device"],
+                "parent_inode": row["parent_inode"],
+            }
+            try:
+                self._apply_operation(inverse, {"after": before_state})
+            except RuntimeError:
+                self._set_transaction_state(
+                    transaction_id,
+                    "quarantined",
+                    error_code="after_image_corrupt",
+                )
+                return self._record(transaction_id)
+        self._set_transaction_state(
+            transaction_id, "discarded", error_code="after_image_corrupt"
+        )
+        return self._record(transaction_id)
+
+    def undo(self, transaction_id: str) -> TransactionRecord:
+        with self.writer_gate():
+            return self._prepare_undo(transaction_id)
+
+    def _prepare_undo(self, transaction_id: str) -> TransactionRecord:
+        original = self._record(transaction_id)
+        if original.state != "committed":
+            raise RuntimeError("only a committed transaction can be undone")
+        if _parse_timestamp(original.updated_at) < datetime.now(timezone.utc) - timedelta(
+            days=30
+        ):
+            raise RuntimeError("transaction is outside the 30-day undo window")
+        if not (self.transaction_root / transaction_id).is_dir():
+            raise RuntimeError("transaction undo images are no longer retained")
+        rows = self._operation_rows(transaction_id)
+        for row in rows:
+            if self._operation_hash(row) != row["after_hash"]:
+                raise RuntimeError("undo precondition failed: current target changed")
+
+        changes: list[MarkdownChange] = []
+        preconditions: dict[str, object] = {}
+        for row in rows:
+            preconditions[row["path"]] = row["after_hash"]
+            if row["before_hash"] == ABSENT:
+                changes.append(MarkdownChange.delete(row["path"]))
+                continue
+            before = (
+                self.transaction_root
+                / transaction_id
+                / "before"
+                / f"{row['position']:06d}.bin"
+            ).read_bytes()
+            if sha256_bytes(before) != row["before_hash"]:
+                raise RuntimeError("transaction before-image is corrupt")
+            if row["after_hash"] == ABSENT:
+                changes.append(MarkdownChange.create(row["path"], before))
+            else:
+                changes.append(MarkdownChange.replace(row["path"], before))
+        return self.prepare(
+            changes,
+            operation_id=f"undo:{transaction_id}:{uuid.uuid4().hex}",
+            preconditions=preconditions,
+            _parent_transaction_id=transaction_id,
+        )
+
+    def prune(
+        self, *, retention_days: int = 30, now: datetime | None = None
+    ) -> int:
+        if retention_days < 0:
+            raise ValueError("retention_days must be non-negative")
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            raise ValueError("now must be timezone-aware")
+        cutoff = current - timedelta(days=retention_days)
+        pruned = 0
+        with self.writer_gate():
+            with self._connect() as database:
+                rows = list(
+                    database.execute(
+                        'SELECT id, updated_at FROM "transaction" '
+                        "WHERE state IN ('committed', 'discarded') "
+                        "AND artifacts_pruned_at IS NULL"
+                    )
+                )
+            for row in rows:
+                if _parse_timestamp(row["updated_at"]) >= cutoff:
+                    continue
+                artifact_root = self.transaction_root / row["id"]
+                if not artifact_root.exists():
+                    continue
+                self._remove_artifacts(artifact_root)
+                with self._connect() as database, begin_immediate(database):
+                    database.execute(
+                        'UPDATE "transaction" SET artifacts_pruned_at = ? WHERE id = ?',
+                        (_now(), row["id"]),
+                    )
+                pruned += 1
+        return pruned
+
+    def deletion_blockers(self) -> list[dict[str, str]]:
+        blockers: list[dict[str, str]] = []
+        now = datetime.now(timezone.utc)
+        with self._connect() as database:
+            rows = list(
+                database.execute(
+                    'SELECT id, state, error_code, updated_at, artifacts_pruned_at '
+                    'FROM "transaction" ORDER BY created_at, id'
+                )
+            )
+        for row in rows:
+            code: str | None = None
+            if row["state"] in {"preparing", "prepared", "applying"}:
+                code = "nonterminal_transaction"
+            elif row["state"] in {"conflicted", "quarantined"}:
+                code = row["error_code"] or "transaction_requires_attention"
+            elif (
+                row["state"] == "committed"
+                and row["artifacts_pruned_at"] is None
+                and _parse_timestamp(row["updated_at"]) >= now - timedelta(days=30)
+            ):
+                code = "undo_retention"
+            if code is not None:
+                blockers.append(
+                    {
+                        "transaction_id": row["id"],
+                        "state": row["state"],
+                        "code": code,
+                    }
+                )
+        return blockers
+
+    def _set_transaction_state(
+        self, transaction_id: str, state: str, *, error_code: str | None = None
+    ) -> None:
+        with self._connect() as database, begin_immediate(database):
+            database.execute(
+                'UPDATE "transaction" SET state = ?, error_code = ?, updated_at = ? '
+                "WHERE id = ?",
+                (state, error_code, _now(), transaction_id),
+            )
 
     @contextlib.contextmanager
     def writer_gate(self) -> Iterator[None]:
@@ -834,6 +1218,25 @@ class MarkdownCoordinator:
             raise TypeError("preconditions must be a mapping")
         result: dict[str, object] = {}
         for path, expected in preconditions.items():
+            if path == "project_lease":
+                if not isinstance(expected, Mapping):
+                    raise TypeError("project_lease precondition must be a mapping")
+                required = {"project", "lease_token", "fencing_epoch", "expires_at"}
+                if set(expected) != required:
+                    raise ValueError("project_lease precondition has invalid fields")
+                if (
+                    not isinstance(expected["project"], str)
+                    or not expected["project"]
+                    or not isinstance(expected["lease_token"], str)
+                    or not expected["lease_token"]
+                    or not isinstance(expected["fencing_epoch"], int)
+                    or expected["fencing_epoch"] < 1
+                    or not isinstance(expected["expires_at"], str)
+                ):
+                    raise ValueError("project_lease precondition has invalid values")
+                _parse_timestamp(expected["expires_at"])
+                result[path] = dict(expected)
+                continue
             self._target(path)
             if expected != ABSENT and (
                 not isinstance(expected, str)
@@ -1016,10 +1419,46 @@ class MarkdownCoordinator:
         self, preconditions: Mapping[str, object], reconciled_after: set[str]
     ) -> None:
         for path, expected in preconditions.items():
+            if path == "project_lease":
+                assert isinstance(expected, Mapping)
+                with self._connect() as database:
+                    row = database.execute(
+                        "SELECT * FROM project_leases WHERE project = ?",
+                        (expected["project"],),
+                    ).fetchone()
+                now = datetime.now(timezone.utc)
+                if (
+                    row is None
+                    or row["lease_token"] != expected["lease_token"]
+                    or row["fencing_epoch"] != expected["fencing_epoch"]
+                    or _parse_timestamp(row["expires_at"]) <= now
+                    or _parse_timestamp(str(expected["expires_at"])) <= now
+                ):
+                    raise TransactionFailure(
+                        "persisted project lease precondition failed",
+                        "precondition_failed",
+                        "quarantined",
+                    )
+                continue
             if path in reconciled_after:
                 continue
             if self._current_hash(path) != expected:
-                raise RuntimeError(f"persisted precondition failed for {path}")
+                raise TransactionFailure(
+                    f"persisted precondition failed for {path}",
+                    "precondition_failed",
+                    "quarantined",
+                )
+
+    def _killpoint(self, name: str, parent_transaction_id: str | None = None) -> None:
+        prefix = "undo_" if parent_transaction_id is not None else ""
+        aliases = {name, f"{name[:6]}{prefix}{name[6:]}" if name.startswith("after_") else name}
+        if name == "after_each_target" and parent_transaction_id is not None:
+            aliases.add("after_each_undo_target")
+        if name == "before_commit" and parent_transaction_id is not None:
+            aliases.add("before_undo_commit")
+        configured = os.environ.get("LLM_WIKI_TRANSACTION_KILLPOINT")
+        if configured in aliases:
+            os._exit(86)
 
     def _reconcile_operation_states(
         self, transaction_id: str, rows: Sequence[sqlite3.Row]
@@ -1227,15 +1666,19 @@ class MarkdownCoordinator:
 
     def _load_verified_plan(self, record: TransactionRecord) -> dict[str, object]:
         plan_path = self.transaction_root / record.id / "plan.json"
-        plan_bytes = plan_path.read_bytes()
-        with self._connect() as database:
-            expected = database.execute(
-                'SELECT plan_hash FROM "transaction" WHERE id = ?', (record.id,)
-            ).fetchone()["plan_hash"]
-        if sha256_bytes(plan_bytes) != expected:
-            raise RuntimeError("transaction plan hash mismatch")
-        plan = json.loads(plan_bytes)
-        validate_schema(plan, _SCHEMA)
+        try:
+            plan_bytes = plan_path.read_bytes()
+            with self._connect() as database:
+                expected = database.execute(
+                    'SELECT plan_hash FROM "transaction" WHERE id = ?', (record.id,)
+                ).fetchone()["plan_hash"]
+            if sha256_bytes(plan_bytes) != expected:
+                raise RuntimeError("transaction plan hash mismatch")
+            plan = json.loads(plan_bytes)
+            validate_schema(plan, _SCHEMA)
+            self._verify_plan_artifacts(plan, self.transaction_root / record.id)
+        except (AssertionError, KeyError, OSError, RuntimeError, ValueError) as exc:
+            raise RuntimeError("transaction after-image is corrupt") from exc
         return plan
 
     def _operation_rows(self, transaction_id: str) -> list[sqlite3.Row]:
@@ -1282,6 +1725,8 @@ class MarkdownCoordinator:
             preconditions=json.loads(row["preconditions_json"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            parent_transaction_id=row["parent_transaction_id"],
+            error_code=row["error_code"],
         )
 
     def _record_for_operation_id(self, operation_id: str) -> TransactionRecord | None:
@@ -1307,3 +1752,45 @@ class MarkdownCoordinator:
             else:
                 path.unlink()
         root.rmdir()
+
+
+def _redacted_record(record: TransactionRecord) -> dict[str, str | None]:
+    return {
+        "transaction_id": record.id,
+        "state": record.state,
+        "code": record.error_code,
+    }
+
+
+def _main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("recover", help="recover incomplete transactions")
+    undo_parser = subparsers.add_parser("undo", help="undo a committed transaction")
+    undo_parser.add_argument("transaction_id")
+    prune_parser = subparsers.add_parser("prune", help="prune expired transaction images")
+    prune_parser.add_argument("--retention-days", type=int, default=30)
+    args = parser.parse_args()
+
+    vault = Path(
+        os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent)
+    ).resolve()
+    state_root = Path(os.environ.get("LLM_WIKI_STATE_ROOT", vault)).resolve()
+    coordinator = MarkdownCoordinator(vault, state_root)
+    if args.command == "recover":
+        payload: object = [_redacted_record(record) for record in coordinator.recover()]
+    elif args.command == "undo":
+        undo = coordinator.undo(args.transaction_id)
+        committed = coordinator.apply(undo.id)
+        payload = {
+            **_redacted_record(committed),
+            "parent_transaction_id": committed.parent_transaction_id,
+        }
+    else:
+        payload = {"pruned": coordinator.prune(retention_days=args.retention_days)}
+    print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())
