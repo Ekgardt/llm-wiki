@@ -116,8 +116,11 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
   un-ignored to restore Evidence links.
 - `knowledge/notes/` — durable OKF pages, flat `<slug>.md`. Public examples
   tracked via allowlist; personal pages gitignored.
-- `knowledge/projects/<slug>/` — per-project `state.md`, `context.md`,
-  `.blackboard/`. Template tracked; real projects gitignored.
+- `knowledge/projects/<slug>/` — generated `state.md`, append-only `journal.md`,
+  `context.md`, `.blackboard/`. Template tracked; real projects gitignored.
+- `knowledge/daily/archive/` — private immutable BagIt-style daily-log bags and
+  a derived archive index. Archive means move, never delete; evidence resolves by
+  logical ID, source hash, and byte span.
 - `knowledge/raw/` — immutable sources. Gitignored (personal).
 - `knowledge/inbox/` — unprocessed staging. Gitignored.
 - `knowledge/feedback/` — correction candidates (JSON). Gitignored.
@@ -127,14 +130,21 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
   `vectors_meta.json` (metadata),
   `code_tools.json` (fresh code-tool detection and active semantic capabilities).
   v4.0: `lancedb/` (LanceDB vector store, optional), `models/` (ML model cache),
-  `access_log.jsonl` (retrieval analytics).
+  `access_log.jsonl` (retrieval analytics), `compile/` (validated compile-plan
+  action cache).
 - `logs/` — `lint-YYYY-MM-DD.md`, `compile-last.log`, `session-start-last.txt`.
-- `run/` — `state.json` (compile hashes, dedupe, heartbeats),
-  `compile.pid` (maybe_compile lock), `queue/` (deferred LLM tasks),
-  `state.json.lock`.
+- `run/` — `state.json`, `compile.pid`, `markdown-transactions.sqlite3`,
+  `transactions/`, `queue.sqlite3`, `queue-results/`, and locks. Existing
+  `queue/*.json` is a one-time migration source only after Stage 2.
 - `cache/cognee/` — optional semantic graph data (only if Cognee installed).
 
-**Runtime is regenerated on demand.** Deleting `cache/`, `logs/`, `run/` is safe — the next pipeline run recreates them.
+**Runtime deletion contract.** `cache/` and `logs/` are regenerated on demand.
+`run/` contains recoverable but operationally significant transactions and queued
+work. Delete it only after `doctor` reports no nonterminal, conflicted, or
+quarantined transaction, no transaction inside the 30-day undo window, and no
+retained queue task or result, and no live project lease, writer, queue worker, or
+maintenance owner. Deleting eligible committed artifacts loses undo history.
+Installers and repair commands never remove it silently.
 
 ## Forbidden at vault root
 

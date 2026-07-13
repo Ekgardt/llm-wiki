@@ -59,11 +59,11 @@ knowledge/
   inbox/      # unprocessed staging
   feedback/   # correction candidates
 
-# RUNTIME (inside the vault, gitignored — regenerated on demand)
+# RUNTIME (inside the vault, gitignored)
 # Override root via LLM_WIKI_STATE_ROOT (tests use a temp dir).
 cache/     # FTS5 / vector / graph indexes (+ cache/cognee/ for optional graph)
 logs/      # lint reports, compile logs, SessionStart debug dumps
-run/       # state.json, compile.pid, queue/, locks
+run/       # state, transactions, queue database/results, locks
 ```
 
 **Env contracts:**
@@ -80,6 +80,14 @@ actions (12 task-shaped tools, uniform response envelope, health/context
 resources). Native hooks, plugins, and wrappers are thin lifecycle adapters
 for events MCP cannot observe. Automatic health context is injected only when
 `doctor` reports degraded/error findings.
+
+**Reliable mutation boundary:** automatic Markdown writes use recoverable
+transactions with before/after hashes. Project handoff is projected from an
+append-only `journal.md`. `cache/` and `logs/` are disposable; `run/` must not be
+deleted while doctor reports a nonterminal, conflicted, or quarantined
+transaction, a transaction inside the 30-day undo window, or any retained queue
+task or result, or while a project lease, writer, queue worker, or maintenance
+owner is live. Deleting eligible committed artifacts loses undo history.
 
 **Forbidden at vault root:** `wiki/`, `memory/`, `outputs/`, `state/`,
 `LLM-wiki-state/` (legacy sibling layout — removed). Runtime lives **inside**
@@ -247,8 +255,8 @@ contradiction checks, and playbook crystallization. Backend is
 **auto-detected** via `scripts/llm_client.py` — no API keys required.
 
 Priority: OpenCode → Codex → Claude CLI → OpenAI → Ollama. If none available,
-the call is enqueued to a persistent queue (`run/queue/`) and processed at
-the next active session.
+the call is enqueued in `run/queue.sqlite3` and processed at the next active
+session. Legacy `run/queue/*.json` files are migration input only.
 
 Override via `MEMORY_LLM_PROVIDER` env var. `fake` returns a canned response
 for tests/e2e.
@@ -277,5 +285,6 @@ uv run python scripts/access_tracking.py --flush   # flush access counts
 uv run python scripts/build_tiers.py --all          # generate L1 overviews
 ```
 
-Runtime state (under `cache/`, `logs/`, `run/`) is gitignored and
-regenerated on demand — never commit it.
+Runtime state is gitignored and never committed. `cache/` and `logs/` are
+regenerable; `run/` is operational state and follows the deletion contract in
+section 1.
