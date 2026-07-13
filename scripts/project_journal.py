@@ -303,6 +303,11 @@ class ProjectStore:
                         "WHERE project = ? AND sequence = ?",
                         (row["project"], row["sequence"]),
                     )
+                    database.execute(
+                        "UPDATE project_checkpoint_attempts SET state = 'committed' "
+                        "WHERE transaction_id = ?",
+                        (transaction_id,),
+                    )
                     if (row["project"], row["sequence"]) in candidates:
                         recovered.append(self._receipt(row))
                 elif record is not None and record.state in {"conflicted", "quarantined"}:
@@ -310,6 +315,11 @@ class ProjectStore:
                         "UPDATE project_checkpoints SET state = 'quarantined' "
                         "WHERE project = ? AND sequence = ?",
                         (row["project"], row["sequence"]),
+                    )
+                    database.execute(
+                        "UPDATE project_checkpoint_attempts SET state = 'quarantined' "
+                        "WHERE transaction_id = ?",
+                        (transaction_id,),
                     )
                 elif record is None:
                     replay.append(self.coordinator._project_reservation(row))
@@ -509,8 +519,10 @@ class ProjectStore:
             idempotency_key=row.idempotency_key,
             event_json=row.event_json,
             operation_id=row.operation_id,
+            attempt_number=row.attempt_number,
             state="committed",
             transaction_id=transaction.id,
+            parent_operation_id=row.parent_operation_id,
             duplicate=row.duplicate,
         )
         return self._receipt(refreshed)
@@ -552,6 +564,12 @@ class ProjectStore:
         with self.coordinator._connect() as database, begin_immediate(database):
             database.execute(
                 "UPDATE project_checkpoints SET state = ? WHERE project = ? AND sequence = ?",
+                (state, slug, sequence),
+            )
+            database.execute(
+                "UPDATE project_checkpoint_attempts SET state = ? WHERE operation_id = "
+                "(SELECT operation_id FROM project_checkpoints "
+                "WHERE project = ? AND sequence = ?)",
                 (state, slug, sequence),
             )
 

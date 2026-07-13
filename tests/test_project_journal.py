@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -461,6 +462,106 @@ def test_new_epoch_wins_before_recovery_and_old_checkpoint_touches_nothing(
             "SELECT state FROM project_checkpoints WHERE project = 'demo'"
         ).fetchone()[0]
     assert state == "quarantined"
+
+
+def test_expired_prepared_checkpoint_replays_same_reservation_with_new_attempt(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    store = ProjectStore(vault, state_root)
+    event = checkpoint_event()
+
+    def crash_before_apply(transaction_id: str):
+        raise RuntimeError(f"crash before {transaction_id}")
+
+    monkeypatch.setattr(store.coordinator, "apply", crash_before_apply)
+    with pytest.raises(RuntimeError, match="crash before"):
+        store.checkpoint("demo", event, "agent-a")
+    with sqlite3.connect(store.coordinator.database_path) as database:
+        first_operation = database.execute(
+            "SELECT operation_id FROM project_checkpoints WHERE project = 'demo'"
+        ).fetchone()[0]
+        database.execute(
+            "UPDATE project_leases SET expires_at = '2000-01-01T00:00:00Z' "
+            "WHERE project = 'demo'"
+        )
+        database.commit()
+
+    replay_store = ProjectStore(vault, state_root)
+    receipt = replay_store.checkpoint("demo", event, "agent-b")
+    duplicate = replay_store.checkpoint("demo", event, "agent-b")
+
+    assert receipt.sequence == duplicate.sequence == 1
+    assert duplicate.duplicate is True
+    assert receipt.transaction_id == duplicate.transaction_id
+    assert replay_store.read_journal("demo").count('"occurrence_id":"evt-1"') == 1
+    assert (vault / "knowledge/projects/demo/state.md").exists()
+    with sqlite3.connect(replay_store.coordinator.database_path) as database:
+        attempts = database.execute(
+            "SELECT attempt_number, operation_id, parent_operation_id, transaction_id, state "
+            "FROM project_checkpoint_attempts WHERE project = 'demo' "
+            "ORDER BY attempt_number"
+        ).fetchall()
+        current = database.execute(
+            "SELECT sequence, attempt_number, operation_id, transaction_id, state "
+            "FROM project_checkpoints WHERE project = 'demo'"
+        ).fetchone()
+    assert len(attempts) == 2
+    assert attempts[0][0] == 1
+    assert attempts[0][1] == first_operation
+    assert attempts[0][2] is None
+    assert attempts[0][4] == "quarantined"
+    assert attempts[1][0] == 2
+    assert attempts[1][1] != first_operation
+    assert attempts[1][2] == first_operation
+    assert attempts[1][3] == receipt.transaction_id
+    assert attempts[1][4] == "committed"
+    assert current == (1, 2, attempts[1][1], receipt.transaction_id, "committed")
+
+
+def test_concurrent_duplicate_replay_creates_one_forward_attempt(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    store = ProjectStore(vault, state_root)
+    event = checkpoint_event()
+
+    def crash_before_apply(transaction_id: str):
+        raise RuntimeError(f"crash before {transaction_id}")
+
+    monkeypatch.setattr(store.coordinator, "apply", crash_before_apply)
+    with pytest.raises(RuntimeError, match="crash before"):
+        store.checkpoint("demo", event, "agent-a")
+    with sqlite3.connect(store.coordinator.database_path) as database:
+        database.execute(
+            "UPDATE project_leases SET expires_at = '2000-01-01T00:00:00Z' "
+            "WHERE project = 'demo'"
+        )
+        database.commit()
+    barrier = threading.Barrier(2)
+
+    def replay(owner: str):
+        replay_store = ProjectStore(vault, state_root)
+        barrier.wait()
+        for _ in range(100):
+            try:
+                return replay_store.checkpoint("demo", event, owner)
+            except ProjectLeaseBusy:
+                time.sleep(0.01)
+        raise AssertionError("replay lease was never released")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        receipts = list(pool.map(replay, ("agent-b", "agent-c")))
+
+    assert [receipt.sequence for receipt in receipts] == [1, 1]
+    assert sorted(receipt.duplicate for receipt in receipts) == [False, True]
+    assert len({receipt.transaction_id for receipt in receipts}) == 1
+    replay_store = ProjectStore(vault, state_root)
+    assert replay_store.read_journal("demo").count('"occurrence_id":"evt-1"') == 1
+    with sqlite3.connect(replay_store.coordinator.database_path) as database:
+        attempts = database.execute(
+            "SELECT attempt_number, state FROM project_checkpoint_attempts "
+            "WHERE project = 'demo' ORDER BY attempt_number"
+        ).fetchall()
+    assert attempts == [(1, "quarantined"), (2, "committed")]
 
 
 def test_recover_replays_reservation_left_before_prepare(

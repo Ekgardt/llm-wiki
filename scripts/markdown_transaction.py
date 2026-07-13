@@ -105,8 +105,10 @@ class ProjectCheckpointReservation:
     idempotency_key: str
     event_json: str
     operation_id: str
+    attempt_number: int
     state: str
     transaction_id: str | None = None
+    parent_operation_id: str | None = None
     duplicate: bool = False
 
 
@@ -482,6 +484,8 @@ class MarkdownCoordinator:
                         lease_token TEXT NOT NULL,
                         fencing_epoch INTEGER NOT NULL,
                         operation_id TEXT NOT NULL UNIQUE,
+                        attempt_number INTEGER NOT NULL DEFAULT 1,
+                        parent_operation_id TEXT,
                         transaction_id TEXT,
                         state TEXT NOT NULL CHECK (state IN (
                             'reserved', 'prepared', 'committed', 'quarantined'
@@ -489,6 +493,21 @@ class MarkdownCoordinator:
                         PRIMARY KEY (project, sequence),
                         UNIQUE (project, occurrence_id),
                         UNIQUE (project, idempotency_key)
+                    );
+                    CREATE TABLE IF NOT EXISTS project_checkpoint_attempts (
+                        project TEXT NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        attempt_number INTEGER NOT NULL,
+                        operation_id TEXT NOT NULL UNIQUE,
+                        parent_operation_id TEXT,
+                        lease_token TEXT NOT NULL,
+                        fencing_epoch INTEGER NOT NULL,
+                        transaction_id TEXT,
+                        state TEXT NOT NULL CHECK (state IN (
+                            'reserved', 'prepared', 'committed', 'quarantined'
+                        )),
+                        created_at TEXT NOT NULL,
+                        PRIMARY KEY (project, sequence, attempt_number)
                     );
                     CREATE TABLE IF NOT EXISTS writer_owners (
                         gate_name TEXT PRIMARY KEY,
@@ -575,6 +594,25 @@ class MarkdownCoordinator:
                         "CREATE UNIQUE INDEX IF NOT EXISTS project_checkpoint_operation "
                         "ON project_checkpoints(operation_id)"
                     )
+                if "attempt_number" not in checkpoint_columns:
+                    database.execute(
+                        "ALTER TABLE project_checkpoints "
+                        "ADD COLUMN attempt_number INTEGER NOT NULL DEFAULT 1"
+                    )
+                if "parent_operation_id" not in checkpoint_columns:
+                    database.execute(
+                        "ALTER TABLE project_checkpoints ADD COLUMN parent_operation_id TEXT"
+                    )
+                database.execute(
+                    "INSERT OR IGNORE INTO project_checkpoint_attempts "
+                    "(project, sequence, attempt_number, operation_id, "
+                    "parent_operation_id, lease_token, fencing_epoch, transaction_id, "
+                    "state, created_at) "
+                    "SELECT project, sequence, attempt_number, operation_id, "
+                    "parent_operation_id, lease_token, fencing_epoch, transaction_id, "
+                    "state, ? FROM project_checkpoints WHERE operation_id IS NOT NULL",
+                    (_now(),),
+                )
                 self._backfill_parent_identities(database)
 
     def reserve_project_checkpoint(
@@ -620,6 +658,53 @@ class MarkdownCoordinator:
                 )
             existing = occurrence or deduplicated
             if existing is not None:
+                if existing["state"] == "quarantined":
+                    attempt_number = int(existing["attempt_number"]) + 1
+                    parent_operation_id = str(existing["operation_id"])
+                    operation_id = self._project_attempt_operation_id(
+                        project,
+                        int(existing["sequence"]),
+                        attempt_number,
+                        int(precondition["fencing_epoch"]),
+                        str(existing["event_json"]),
+                    )
+                    database.execute(
+                        "UPDATE project_checkpoints SET lease_token = ?, "
+                        "fencing_epoch = ?, operation_id = ?, attempt_number = ?, "
+                        "parent_operation_id = ?, transaction_id = NULL, state = 'reserved' "
+                        "WHERE project = ? AND sequence = ? AND state = 'quarantined'",
+                        (
+                            precondition["lease_token"],
+                            precondition["fencing_epoch"],
+                            operation_id,
+                            attempt_number,
+                            parent_operation_id,
+                            project,
+                            existing["sequence"],
+                        ),
+                    )
+                    database.execute(
+                        "INSERT INTO project_checkpoint_attempts "
+                        "(project, sequence, attempt_number, operation_id, "
+                        "parent_operation_id, lease_token, fencing_epoch, state, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, 'reserved', ?)",
+                        (
+                            project,
+                            existing["sequence"],
+                            attempt_number,
+                            operation_id,
+                            parent_operation_id,
+                            precondition["lease_token"],
+                            precondition["fencing_epoch"],
+                            _now(),
+                        ),
+                    )
+                    advanced = database.execute(
+                        "SELECT * FROM project_checkpoints "
+                        "WHERE project = ? AND sequence = ?",
+                        (project, existing["sequence"]),
+                    ).fetchone()
+                    return self._project_reservation(advanced)
                 return self._project_reservation(existing, duplicate=True)
             row = database.execute(
                 "SELECT COALESCE(MAX(sequence), 0) AS last_sequence, "
@@ -635,15 +720,18 @@ class MarkdownCoordinator:
                 last_applied_sequence=int(row["last_applied_sequence"]),
             )
             event_json = canonical_json_bytes(full_event).decode("utf-8")
-            operation_id = (
-                f"project:{project}:{sequence}:{precondition['fencing_epoch']}:"
-                f"{sha256_bytes(event_json.encode('utf-8'))}"
+            operation_id = self._project_attempt_operation_id(
+                project,
+                sequence,
+                1,
+                int(precondition["fencing_epoch"]),
+                event_json,
             )
             database.execute(
                 "INSERT INTO project_checkpoints "
                 "(project, sequence, occurrence_id, idempotency_key, event_json, "
-                "lease_token, fencing_epoch, operation_id, state) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'reserved')",
+                "lease_token, fencing_epoch, operation_id, attempt_number, state) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'reserved')",
                 (
                     project,
                     sequence,
@@ -655,11 +743,38 @@ class MarkdownCoordinator:
                     operation_id,
                 ),
             )
+            database.execute(
+                "INSERT INTO project_checkpoint_attempts "
+                "(project, sequence, attempt_number, operation_id, lease_token, "
+                "fencing_epoch, state, created_at) "
+                "VALUES (?, ?, 1, ?, ?, ?, 'reserved', ?)",
+                (
+                    project,
+                    sequence,
+                    operation_id,
+                    precondition["lease_token"],
+                    precondition["fencing_epoch"],
+                    _now(),
+                ),
+            )
             reserved = database.execute(
                 "SELECT * FROM project_checkpoints WHERE project = ? AND sequence = ?",
                 (project, sequence),
             ).fetchone()
         return self._project_reservation(reserved)
+
+    @staticmethod
+    def _project_attempt_operation_id(
+        project: str,
+        sequence: int,
+        attempt_number: int,
+        fencing_epoch: int,
+        event_json: str,
+    ) -> str:
+        return (
+            f"project:{project}:{sequence}:attempt:{attempt_number}:"
+            f"epoch:{fencing_epoch}:{sha256_bytes(event_json.encode('utf-8'))}"
+        )
 
     @staticmethod
     def normalize_project_checkpoint(
@@ -705,9 +820,13 @@ class MarkdownCoordinator:
             idempotency_key=str(row["idempotency_key"]),
             event_json=str(row["event_json"]),
             operation_id=str(row["operation_id"]),
+            attempt_number=int(row["attempt_number"]),
             state=str(row["state"]),
             transaction_id=str(row["transaction_id"])
             if row["transaction_id"]
+            else None,
+            parent_operation_id=str(row["parent_operation_id"])
+            if row["parent_operation_id"]
             else None,
             duplicate=duplicate,
         )
@@ -968,6 +1087,17 @@ class MarkdownCoordinator:
                 "precondition_failed",
                 "quarantined",
             )
+        attempt = database.execute(
+            "UPDATE project_checkpoint_attempts SET transaction_id = ?, "
+            "state = 'prepared' WHERE operation_id = ? AND state = 'reserved'",
+            (transaction_id, reservation.operation_id),
+        )
+        if attempt.rowcount != 1:
+            raise TransactionFailure(
+                "project checkpoint attempt is no longer available",
+                "precondition_failed",
+                "quarantined",
+            )
 
     def apply(self, transaction_id: str) -> TransactionRecord:
         with self.writer_gate():
@@ -1118,6 +1248,11 @@ class MarkdownCoordinator:
                 )
                 database.execute(
                     "UPDATE project_checkpoints SET state = 'committed' "
+                    "WHERE transaction_id = ? AND state = 'prepared'",
+                    (record.id,),
+                )
+                database.execute(
+                    "UPDATE project_checkpoint_attempts SET state = 'committed' "
                     "WHERE transaction_id = ? AND state = 'prepared'",
                     (record.id,),
                 )
@@ -1413,6 +1548,11 @@ class MarkdownCoordinator:
             with self._connect() as database, begin_immediate(database):
                 database.execute(
                     "UPDATE project_checkpoints SET state = 'quarantined' "
+                    "WHERE operation_id = ?",
+                    (record.operation_id,),
+                )
+                database.execute(
+                    "UPDATE project_checkpoint_attempts SET state = 'quarantined' "
                     "WHERE operation_id = ?",
                     (record.operation_id,),
                 )
