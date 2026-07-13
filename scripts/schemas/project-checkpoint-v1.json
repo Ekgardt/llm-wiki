@@ -5,41 +5,41 @@
   "required": ["schema_version", "occurrence_id", "idempotency_key", "project", "sequence", "provenance", "trigger", "reason", "delta", "evidence_event_ids", "last_applied_sequence"],
   "properties": {
     "schema_version": {"const": "project-checkpoint/v1"},
-    "occurrence_id": {"type": "string", "minLength": 1},
-    "idempotency_key": {"type": "string", "minLength": 1},
-    "project": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
+    "occurrence_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 256},
+    "project": {"type": "string", "maxLength": 256, "pattern": "^[a-z0-9][a-z0-9-]*$"},
     "sequence": {"type": "integer", "minimum": 1},
     "provenance": {
       "type": "object",
       "required": ["agent", "session", "worktree", "branch", "source_event"],
       "properties": {
-        "agent": {"type": "string", "minLength": 1},
-        "session": {"type": "string", "minLength": 1},
-        "worktree": {"type": "string", "minLength": 1},
-        "branch": {"type": "string", "minLength": 1},
-        "source_event": {"type": "string", "minLength": 1}
+        "agent": {"type": "string", "minLength": 1, "maxLength": 256},
+        "session": {"type": "string", "minLength": 1, "maxLength": 256},
+        "worktree": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "branch": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "source_event": {"type": "string", "minLength": 1, "maxLength": 256}
       },
       "additionalProperties": false
     },
-    "trigger": {"type": "string", "minLength": 1},
-    "reason": {"type": "string", "minLength": 1},
+    "trigger": {"type": "string", "minLength": 1, "maxLength": 256},
+    "reason": {"type": "string", "minLength": 1, "maxLength": 4096},
     "delta": {
       "type": "object",
       "required": ["goal", "phase", "current_task", "next_actions", "decisions", "blockers", "changed_files", "commands", "verification"],
       "properties": {
-        "goal": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string"}}, "additionalProperties": false},
-        "phase": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string"}}, "additionalProperties": false},
-        "current_task": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string"}}, "additionalProperties": false},
-        "next_actions": {"type": "array", "items": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string"}}, "additionalProperties": false}},
-        "decisions": {"type": "array", "items": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string"}}, "additionalProperties": false}},
-        "blockers": {"type": "array", "items": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string"}}, "additionalProperties": false}},
-        "changed_files": {"type": "array", "items": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string"}}, "additionalProperties": false}},
-        "commands": {"type": "array", "items": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string"}}, "additionalProperties": false}},
-        "verification": {"type": "array", "items": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string"}}, "additionalProperties": false}}
+        "goal": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 256}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string", "maxLength": 4096}}, "additionalProperties": false},
+        "phase": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 256}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string", "maxLength": 4096}}, "additionalProperties": false},
+        "current_task": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 256}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string", "maxLength": 4096}}, "additionalProperties": false},
+        "next_actions": {"type": "array", "maxItems": 10, "items": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 256}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string", "maxLength": 4096}}, "additionalProperties": false}},
+        "decisions": {"type": "array", "maxItems": 100, "items": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 256}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string", "maxLength": 4096}}, "additionalProperties": false}},
+        "blockers": {"type": "array", "maxItems": 100, "items": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 256}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string", "maxLength": 4096}}, "additionalProperties": false}},
+        "changed_files": {"type": "array", "maxItems": 100, "items": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 256}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string", "maxLength": 4096}}, "additionalProperties": false}},
+        "commands": {"type": "array", "maxItems": 100, "items": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 256}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string", "maxLength": 4096}}, "additionalProperties": false}},
+        "verification": {"type": "array", "maxItems": 100, "items": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 256}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string", "maxLength": 4096}}, "additionalProperties": false}}
       },
       "additionalProperties": false
     },
-    "evidence_event_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "evidence_event_ids": {"type": "array", "maxItems": 100, "items": {"type": "string", "minLength": 1, "maxLength": 256}},
     "last_applied_sequence": {"type": "integer", "minimum": 0}
   },
   "additionalProperties": false

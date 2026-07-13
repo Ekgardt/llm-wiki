@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -8,11 +9,15 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import project_journal
 import pytest
 from markdown_transaction import MarkdownChange, ProjectPendingPriorError
 from project_journal import (
     JOURNAL_HEADER,
+    MAX_JOURNAL_BYTES,
+    MAX_JOURNAL_EVENTS,
     ProjectFenceError,
+    ProjectJournalReadError,
     ProjectJournalRebuildRequired,
     ProjectLeaseBusy,
     ProjectStore,
@@ -224,6 +229,41 @@ def test_invalid_event_does_not_reserve_sequence_or_idempotency(
     assert receipt.sequence == 1
 
 
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda event: event.update(occurrence_id="x" * 257),
+        lambda event: event["delta"]["goal"].update(value="x" * 4097),
+        lambda event: event["delta"].update(
+            next_actions=[
+                {"id": f"next-{index}", "action": "upsert", "value": "next"}
+                for index in range(11)
+            ]
+        ),
+        lambda event: event["delta"].update(
+            decisions=[
+                {"id": f"decision-{index}", "action": "upsert", "value": "decision"}
+                for index in range(101)
+            ]
+        ),
+        lambda event: event.update(
+            evidence_event_ids=[f"evidence-{index}" for index in range(101)]
+        ),
+    ],
+)
+def test_oversized_checkpoint_fields_are_rejected_before_reservation(
+    project_store: ProjectStore, mutate
+):
+    event = checkpoint_event()
+    mutate(event)
+
+    with pytest.raises(SchemaValidationError):
+        project_store.checkpoint("demo", event, "agent-a")
+
+    with sqlite3.connect(project_store.coordinator.database_path) as database:
+        assert database.execute("SELECT * FROM project_checkpoints").fetchall() == []
+
+
 def test_event_is_normalized_before_reservation(project_store: ProjectStore):
     event = checkpoint_event("e\u0301vt", "ke\u0301y")
     event["delta"]["goal"]["value"] = "Cafe\u0301"
@@ -234,6 +274,154 @@ def test_event_is_normalized_before_reservation(project_store: ProjectStore):
     assert receipt.occurrence_id == "\u00e9vt"
     assert receipt.idempotency_key == "k\u00e9y"
     assert record["delta"]["goal"]["value"] == "Caf\u00e9"
+
+
+def test_journal_read_rejects_symlink(
+    vault: Path, state_root: Path, tmp_path: Path
+):
+    store = ProjectStore(vault, state_root)
+    journal = vault / "knowledge/projects/demo/journal.md"
+    outside = tmp_path / "outside.md"
+    outside.write_text("private", encoding="utf-8")
+    try:
+        journal.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unavailable: {exc}")
+
+    with pytest.raises(ProjectJournalReadError) as linked:
+        store.read_journal("demo")
+    assert linked.value.code == "unsafe_path"
+
+
+def test_journal_read_rejects_non_regular_file(vault: Path, state_root: Path):
+    journal = vault / "knowledge/projects/demo/journal.md"
+    journal.mkdir()
+    with pytest.raises(ProjectJournalReadError) as directory:
+        ProjectStore(vault, state_root).read_journal("demo")
+    assert directory.value.code == "not_regular"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="FIFO test requires POSIX")
+def test_journal_read_rejects_fifo_without_blocking(vault: Path, state_root: Path):
+    journal = vault / "knowledge/projects/demo/journal.md"
+    os.mkfifo(journal)
+
+    with pytest.raises(ProjectJournalReadError) as failure:
+        ProjectStore(vault, state_root).read_journal("demo")
+
+    assert failure.value.code == "not_regular"
+
+
+def test_journal_read_and_event_count_are_bounded(vault: Path, state_root: Path):
+    store = ProjectStore(vault, state_root)
+    journal = vault / "knowledge/projects/demo/journal.md"
+    journal.write_bytes(b"x" * (MAX_JOURNAL_BYTES + 1))
+
+    with pytest.raises(ProjectJournalReadError) as oversized:
+        store.read_journal("demo")
+    assert oversized.value.code == "too_large"
+
+    event = checkpoint_event()
+    records = []
+    for index in range(MAX_JOURNAL_EVENTS + 1):
+        record = dict(event)
+        record.update(
+            occurrence_id=f"evt-{index}",
+            idempotency_key=f"key-{index}",
+            project="demo",
+            sequence=index + 1,
+            last_applied_sequence=index,
+        )
+        records.append(canonical_json_bytes(record))
+    content = JOURNAL_HEADER.encode("utf-8") + b"\n".join(records) + b"\n"
+
+    with pytest.raises(ProjectJournalReadError) as too_many:
+        store._journal_events("demo", content)
+    assert too_many.value.code == "too_many_events"
+
+
+def test_journal_read_rejects_file_change_during_read(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    journal = vault / "knowledge/projects/demo/journal.md"
+    journal.write_bytes(JOURNAL_HEADER.encode("utf-8"))
+    fstat = project_journal.os.fstat
+    calls = 0
+
+    def changed_after_read(descriptor: int):
+        nonlocal calls
+        metadata = fstat(descriptor)
+        calls += 1
+        if calls == 2:
+            values = list(metadata)
+            values[6] += 1
+            return os.stat_result(values)
+        return metadata
+
+    monkeypatch.setattr(project_journal.os, "fstat", changed_after_read)
+
+    with pytest.raises(ProjectJournalReadError) as changed:
+        ProjectStore(vault, state_root).read_journal("demo")
+
+    assert changed.value.code == "changed"
+
+
+def test_existing_journal_line_is_validated_once_per_checkpoint(
+    project_store: ProjectStore, monkeypatch: pytest.MonkeyPatch
+):
+    project_store.checkpoint("demo", checkpoint_event(), "agent-a")
+    validate = project_journal.validate_schema
+    existing_validations = 0
+
+    def count_existing(instance, schema):
+        nonlocal existing_validations
+        if isinstance(instance, dict) and instance.get("occurrence_id") == "evt-1":
+            existing_validations += 1
+        return validate(instance, schema)
+
+    monkeypatch.setattr(project_journal, "validate_schema", count_existing)
+
+    project_store.checkpoint(
+        "demo", checkpoint_event("evt-2", "single-parse:event-2"), "agent-a"
+    )
+
+    assert existing_validations == 1
+
+
+def test_slow_checkpoint_phases_renew_lease_before_apply(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    now = datetime.now(timezone.utc)
+    store = ProjectStore(vault, state_root, clock=lambda: now)
+    heartbeat = store.heartbeat
+    heartbeats: list[datetime] = []
+
+    def record_heartbeat(lease, *args, **kwargs):
+        heartbeats.append(now)
+        return heartbeat(lease, *args, **kwargs)
+
+    def slow(method):
+        def wrapped(*args, **kwargs):
+            nonlocal now
+            result = method(*args, **kwargs)
+            now += timedelta(seconds=11)
+            return result
+
+        return wrapped
+
+    monkeypatch.setattr(store, "heartbeat", record_heartbeat)
+    monkeypatch.setattr(store, "_read_journal_bytes", slow(store._read_journal_bytes))
+    monkeypatch.setattr(store, "render_state", slow(store.render_state))
+    monkeypatch.setattr(store.coordinator, "prepare", slow(store.coordinator.prepare))
+
+    receipt = store.checkpoint("demo", checkpoint_event(), "agent-a")
+
+    assert receipt.sequence == 1
+    assert len(heartbeats) >= 7
+    with sqlite3.connect(store.coordinator.database_path) as database:
+        assert database.execute(
+            "SELECT state FROM project_checkpoints WHERE project = 'demo'"
+        ).fetchone()[0] == "committed"
 
 
 def test_checkpoint_is_append_only_idempotent_and_projects_state(

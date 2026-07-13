@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import secrets
+import stat
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -37,6 +39,8 @@ schema_version: project-checkpoint/v1
 _SCHEMA = Path(__file__).with_name("schemas") / "project-checkpoint-v1.json"
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _HEARTBEAT_SECONDS = 10
+MAX_JOURNAL_BYTES = 8 * 1024 * 1024
+MAX_JOURNAL_EVENTS = 1000
 _MAX_VALUE_CHARS = 240
 _MAX_LIST_ITEMS = {
     "next_actions": 5,
@@ -68,6 +72,15 @@ class ProjectJournalRebuildRequired(RuntimeError):
         self.project = project
         self.sequence = sequence
         self.journal_head = journal_head
+
+
+class ProjectJournalReadError(RuntimeError):
+    """A journal cannot be safely read as a bounded regular file."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.status = code
 
 
 @dataclass(frozen=True)
@@ -106,6 +119,29 @@ def _timestamp(value: datetime) -> str:
 
 def _parse_timestamp(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _is_reparse(metadata: os.stat_result) -> bool:
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+
+def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _same_snapshot(left: os.stat_result, right: os.stat_result) -> bool:
+    return _same_identity(left, right) and (
+        left.st_mode,
+        left.st_size,
+        left.st_mtime_ns,
+        left.st_ctime_ns,
+    ) == (
+        right.st_mode,
+        right.st_size,
+        right.st_mtime_ns,
+        right.st_ctime_ns,
+    )
 
 
 def _require_slug(slug: str) -> str:
@@ -220,8 +256,6 @@ class ProjectStore:
         if not isinstance(ttl, int) or isinstance(ttl, bool) or ttl <= _HEARTBEAT_SECONDS:
             raise ValueError("project lease ttl must be an integer greater than 10 seconds")
         current_time = now or self._clock()
-        if current_time < lease.heartbeat_due_at:
-            raise ValueError("project lease heartbeat is not due")
         expires_at = current_time + timedelta(seconds=ttl)
         with self.coordinator._connect() as database, begin_immediate(database):
             updated = database.execute(
@@ -377,12 +411,92 @@ class ProjectStore:
     def _read_journal_bytes(self, slug: str) -> bytes:
         slug = _require_slug(slug)
         path = self.vault / "knowledge" / "projects" / slug / "journal.md"
+        self._validate_journal_parent(path.parent)
         try:
-            return path.read_bytes()
+            before = os.lstat(path)
         except FileNotFoundError:
             return b""
+        if stat.S_ISLNK(before.st_mode) or _is_reparse(before):
+            raise ProjectJournalReadError("unsafe_path", "project journal is a link")
+        if not stat.S_ISREG(before.st_mode):
+            raise ProjectJournalReadError("not_regular", "project journal is not a regular file")
+        if before.st_size > MAX_JOURNAL_BYTES:
+            raise ProjectJournalReadError(
+                "too_large", f"project journal exceeds {MAX_JOURNAL_BYTES} bytes"
+            )
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        try:
+            descriptor = os.open(path, flags)
+        except (OSError, ValueError) as exc:
+            raise ProjectJournalReadError(
+                "unsafe_path", "project journal cannot be opened safely"
+            ) from exc
+        try:
+            opened = os.fstat(descriptor)
+            if not _same_identity(before, opened):
+                raise ProjectJournalReadError("changed", "project journal changed before open")
+            if not stat.S_ISREG(opened.st_mode):
+                raise ProjectJournalReadError(
+                    "not_regular", "project journal is not a regular file"
+                )
+            chunks: list[bytes] = []
+            remaining = MAX_JOURNAL_BYTES + 1
+            while remaining:
+                chunk = os.read(descriptor, min(remaining, 1024 * 1024))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            content = b"".join(chunks)
+            after = os.fstat(descriptor)
+            if not _same_snapshot(opened, after) or len(content) != after.st_size:
+                raise ProjectJournalReadError(
+                    "changed", "project journal changed while reading"
+                )
+            if len(content) > MAX_JOURNAL_BYTES:
+                raise ProjectJournalReadError(
+                    "too_large", f"project journal exceeds {MAX_JOURNAL_BYTES} bytes"
+                )
+            return content
+        finally:
+            os.close(descriptor)
 
-    def render_state(self, events: Sequence[Mapping[str, object]]) -> bytes:
+    def _validate_journal_parent(self, parent: Path) -> None:
+        try:
+            relative = parent.relative_to(self.vault)
+        except ValueError as exc:
+            raise ProjectJournalReadError(
+                "unsafe_path", "journal parent escapes the vault"
+            ) from exc
+        current = self.vault
+        for part in relative.parts:
+            current = current / part
+            try:
+                metadata = os.lstat(current)
+            except FileNotFoundError as exc:
+                raise ProjectJournalReadError(
+                    "unsafe_path", "journal parent does not exist"
+                ) from exc
+            if stat.S_ISLNK(metadata.st_mode) or _is_reparse(metadata):
+                raise ProjectJournalReadError(
+                    "unsafe_path", "journal parent traverses a link"
+                )
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise ProjectJournalReadError(
+                    "unsafe_path", "journal parent is not a directory"
+                )
+
+    def render_state(
+        self,
+        events: Sequence[Mapping[str, object]],
+        *,
+        _validated: bool = False,
+    ) -> bytes:
         ordered = sorted(events, key=lambda item: int(item["sequence"]))
         active: dict[str, dict[str, str]] = {
             name: {}
@@ -401,7 +515,8 @@ class ProjectStore:
         project = "project"
         last_sequence = 0
         for event in ordered:
-            validate_schema(event, _SCHEMA)
+            if not _validated:
+                validate_schema(event, _SCHEMA)
             project = str(event["project"])
             sequence = int(event["sequence"])
             if sequence <= last_sequence:
@@ -493,8 +608,10 @@ class ProjectStore:
         event = json.loads(row.event_json)
         with self.coordinator._connect() as database:
             self.coordinator._check_project_head(database, slug, sequence)
+        lease = self.heartbeat(lease)
         current_journal = self._read_journal_bytes(slug)
         records = self._journal_events(slug, current_journal)
+        lease = self.heartbeat(lease)
         matching = [item for item in records if item["sequence"] == sequence]
         journal_head = int(records[-1]["sequence"]) if records else 0
         if not matching and journal_head != sequence - 1:
@@ -509,7 +626,9 @@ class ProjectStore:
             if canonical_json_bytes(matching[0]) != canonical_json_bytes(event):
                 raise ValueError("project journal sequence is bound to another event")
             journal = current_journal
-        state = self.render_state(records)
+        lease = self.heartbeat(lease)
+        state = self.render_state(records, _validated=True)
+        lease = self.heartbeat(lease)
         journal_path = f"knowledge/projects/{slug}/journal.md"
         state_path = f"knowledge/projects/{slug}/state.md"
         current_state_path = self.vault / state_path
@@ -533,12 +652,21 @@ class ProjectStore:
             if current_state_path.exists()
             else ABSENT,
         }
+        lease = self.heartbeat(lease)
+        preconditions["project_lease"] = {
+            "project": slug,
+            "lease_token": lease.token,
+            "fencing_epoch": lease.epoch,
+            "expires_at": _timestamp(lease.expires_at),
+        }
         transaction = self.coordinator.prepare(
             changes,
             operation_id=row.operation_id,
             preconditions=preconditions,
             project_reservation=row,
         )
+        lease = self.heartbeat(lease)
+        lease = self.heartbeat(lease)
         committed = self.coordinator.apply(transaction.id)
         if committed.state != "committed":
             raise RuntimeError("project checkpoint transaction did not commit")
@@ -566,11 +694,15 @@ class ProjectStore:
             raise ValueError("project journal must be UTF-8") from exc
         if not text.startswith(JOURNAL_HEADER):
             raise ValueError("project journal header is invalid")
+        lines = [line for line in text.removeprefix(JOURNAL_HEADER).splitlines() if line]
+        if len(lines) > MAX_JOURNAL_EVENTS:
+            raise ProjectJournalReadError(
+                "too_many_events",
+                f"project journal exceeds {MAX_JOURNAL_EVENTS} event lines",
+            )
         events: list[dict[str, object]] = []
         previous = 0
-        for line in text.removeprefix(JOURNAL_HEADER).splitlines():
-            if not line:
-                continue
+        for line in lines:
             event = json.loads(line)
             if canonical_json_bytes(event).decode("utf-8") != line:
                 raise ValueError("project journal event is not canonical JSON")
