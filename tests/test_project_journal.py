@@ -366,6 +366,79 @@ def test_journal_read_rejects_file_change_during_read(
     assert changed.value.code == "changed"
 
 
+def test_absent_journal_under_missing_project_directory_is_valid(
+    vault: Path, state_root: Path
+):
+    project = vault / "knowledge/projects/new-project"
+    assert not project.exists()
+    store = ProjectStore(vault, state_root)
+
+    assert store.read_journal("new-project") == ""
+    receipt = store.checkpoint("new-project", checkpoint_event(), "agent-a")
+
+    assert receipt.sequence == 1
+    assert (project / "journal.md").is_file()
+    assert (project / "state.md").is_file()
+
+
+def test_prospective_event_count_allows_limit_and_rejects_next_without_writes(
+    vault: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(project_journal, "MAX_JOURNAL_EVENTS", 2)
+    store = ProjectStore(vault, state_root)
+
+    first = store.checkpoint("demo", checkpoint_event(), "agent-a")
+    second = store.checkpoint(
+        "demo", checkpoint_event("evt-2", "limit:event-2"), "agent-a"
+    )
+    journal = vault / "knowledge/projects/demo/journal.md"
+    projection = vault / "knowledge/projects/demo/state.md"
+    before = (journal.read_bytes(), projection.read_bytes())
+
+    with pytest.raises(ProjectJournalReadError) as failure:
+        store.checkpoint(
+            "demo", checkpoint_event("evt-3", "limit:event-3"), "agent-a"
+        )
+
+    assert [first.sequence, second.sequence] == [1, 2]
+    assert failure.value.code == "too_many_events"
+    assert (journal.read_bytes(), projection.read_bytes()) == before
+
+
+def test_prospective_byte_limit_allows_exact_size_and_rejects_overflow(
+    vault: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store = ProjectStore(vault, state_root)
+    store.checkpoint("calib", checkpoint_event(), "agent-a")
+    exact_size = len(
+        (vault / "knowledge/projects/calib/journal.md").read_bytes()
+    )
+
+    monkeypatch.setattr(project_journal, "MAX_JOURNAL_BYTES", exact_size - 1)
+    with pytest.raises(ProjectJournalReadError) as too_small:
+        store.checkpoint("small", checkpoint_event(), "agent-a")
+    assert too_small.value.code == "too_large"
+    assert not (vault / "knowledge/projects/small/journal.md").exists()
+
+    monkeypatch.setattr(project_journal, "MAX_JOURNAL_BYTES", exact_size)
+    exact = store.checkpoint("small", checkpoint_event(), "agent-a")
+    assert exact.sequence == 1
+    small_journal = vault / "knowledge/projects/small/journal.md"
+    assert len(small_journal.read_bytes()) == exact_size
+    before = small_journal.read_bytes()
+
+    with pytest.raises(ProjectJournalReadError) as overflow:
+        store.checkpoint(
+            "small", checkpoint_event("evt-2", "bytes:event-2"), "agent-a"
+        )
+    assert overflow.value.code == "too_large"
+    assert small_journal.read_bytes() == before
+
+
 def test_existing_journal_line_is_validated_once_per_checkpoint(
     project_store: ProjectStore, monkeypatch: pytest.MonkeyPatch
 ):

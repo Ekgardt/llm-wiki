@@ -307,6 +307,9 @@ class ProjectStore:
             self._set_checkpoint_state(slug, reserved.sequence, "quarantined")
             self._release(lease)
             raise
+        except ProjectJournalReadError:
+            self._release(lease)
+            raise
         except TransactionFailure as exc:
             if exc.code == "precondition_failed":
                 self._set_checkpoint_state(slug, reserved.sequence, "quarantined")
@@ -390,6 +393,9 @@ class ProjectStore:
             except ProjectPendingPriorError:
                 self._release(lease)
                 continue
+            except ProjectJournalReadError:
+                self._release(lease)
+                raise
             except TransactionFailure as exc:
                 if exc.code == "precondition_failed":
                     self._set_checkpoint_state(
@@ -478,10 +484,8 @@ class ProjectStore:
             current = current / part
             try:
                 metadata = os.lstat(current)
-            except FileNotFoundError as exc:
-                raise ProjectJournalReadError(
-                    "unsafe_path", "journal parent does not exist"
-                ) from exc
+            except FileNotFoundError:
+                return
             if stat.S_ISLNK(metadata.st_mode) or _is_reparse(metadata):
                 raise ProjectJournalReadError(
                     "unsafe_path", "journal parent traverses a link"
@@ -489,6 +493,29 @@ class ProjectStore:
             if not stat.S_ISDIR(metadata.st_mode):
                 raise ProjectJournalReadError(
                     "unsafe_path", "journal parent is not a directory"
+                )
+
+    def _ensure_project_directory(self, slug: str) -> None:
+        target = self.vault / "knowledge" / "projects" / _require_slug(slug)
+        relative = target.relative_to(self.vault)
+        current = self.vault
+        for part in relative.parts:
+            current = current / part
+            try:
+                metadata = os.lstat(current)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(current)
+                except FileExistsError:
+                    pass
+                metadata = os.lstat(current)
+            if stat.S_ISLNK(metadata.st_mode) or _is_reparse(metadata):
+                raise ProjectJournalReadError(
+                    "unsafe_path", "project directory traverses a link"
+                )
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise ProjectJournalReadError(
+                    "unsafe_path", "project path is not a directory"
                 )
 
     def render_state(
@@ -626,6 +653,15 @@ class ProjectStore:
             if canonical_json_bytes(matching[0]) != canonical_json_bytes(event):
                 raise ValueError("project journal sequence is bound to another event")
             journal = current_journal
+        if len(records) > MAX_JOURNAL_EVENTS:
+            raise ProjectJournalReadError(
+                "too_many_events",
+                f"project journal exceeds {MAX_JOURNAL_EVENTS} event lines",
+            )
+        if len(journal) > MAX_JOURNAL_BYTES:
+            raise ProjectJournalReadError(
+                "too_large", f"project journal exceeds {MAX_JOURNAL_BYTES} bytes"
+            )
         lease = self.heartbeat(lease)
         state = self.render_state(records, _validated=True)
         lease = self.heartbeat(lease)
@@ -653,6 +689,7 @@ class ProjectStore:
             else ABSENT,
         }
         lease = self.heartbeat(lease)
+        self._ensure_project_directory(slug)
         preconditions["project_lease"] = {
             "project": slug,
             "lease_token": lease.token,
