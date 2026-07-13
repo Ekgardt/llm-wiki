@@ -112,8 +112,7 @@ def _known_network_path(path: Path) -> bool:
     mounts = _parse_posix_mounts(mount_data, is_mountinfo=is_mountinfo)
     if system == "Darwin" and not mounts:
         mounts = _parse_darwin_mounts(_query_darwin_mounts())
-    raw_target = str(path).replace("\\", "/")
-    target = raw_target if raw_target.startswith("/") else str(path.absolute()).replace("\\", "/")
+    target = str(path.resolve(strict=False)).replace("\\", "/")
     matching = [entry for entry in mounts if _path_is_under(target, entry[0])]
     if not matching:
         return False
@@ -250,10 +249,10 @@ def _sqlite_lock_probe(root: Path) -> bool:
 def validate_state_root(path: Path) -> None:
     """Fail closed when a runtime root lacks known-safe local lock semantics."""
     path = Path(path)
-    if _known_network_path(path):
-        raise UnsafeStateRoot(f"state root must use a local filesystem: {path}")
     if _windows_reparse_point(path):
         raise UnsafeStateRoot(f"state root must not traverse a Windows reparse point: {path}")
+    if _known_network_path(path):
+        raise UnsafeStateRoot(f"state root must use a local filesystem: {path}")
     cloud_names = {"dropbox", "googledrive", "google drive", "iclouddrive", "onedrive"}
     if any(part.casefold() in cloud_names for part in path.parts):
         warnings.warn(

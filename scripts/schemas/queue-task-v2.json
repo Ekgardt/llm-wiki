@@ -39,9 +39,48 @@
       "additionalProperties": false
     },
     "input_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "dedupe_key": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
     "state": {"enum": ["ready", "leased", "blocked", "succeeded", "dead", "cancelled"]},
     "priority": {"type": "integer", "minimum": -100, "maximum": 100},
-    "attempts": {"type": "integer", "minimum": 0, "maximum": 8}
+    "created_at": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$"},
+    "updated_at": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$"},
+    "available_at": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$"},
+    "attempts": {"type": "integer", "minimum": 0, "maximum": 8},
+    "lease_token": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
+    "lease_expires_at": {"oneOf": [{"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$"}, {"type": "null"}]},
+    "lease_heartbeat_at": {"oneOf": [{"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$"}, {"type": "null"}]},
+    "error_code": {"oneOf": [{"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}, {"type": "null"}]},
+    "blocked_capability": {"oneOf": [{"type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,127}$"}, {"type": "null"}]},
+    "result_reference": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["result_id", "manifest_path", "sha256"],
+          "properties": {
+            "result_id": {"type": "string", "minLength": 1},
+            "manifest_path": {"type": "string", "minLength": 1},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "attempt_history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["attempt", "started_at", "outcome"],
+        "properties": {
+          "attempt": {"type": "integer", "minimum": 1, "maximum": 8},
+          "started_at": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$"},
+          "finished_at": {"oneOf": [{"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$"}, {"type": "null"}]},
+          "outcome": {"enum": ["succeeded", "failed", "blocked", "cancelled", "lease_expired"]},
+          "error_code": {"oneOf": [{"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}, {"type": "null"}]}
+        },
+        "additionalProperties": false
+      }
+    }
   },
   "additionalProperties": false
 }

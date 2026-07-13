@@ -92,6 +92,110 @@ def test_queue_schema_accepts_closed_redacted_payload_envelope():
         validate_schema(task, SCHEMA_DIR / "queue-task-v2.json")
 
 
+def test_queue_schema_accepts_full_operational_metadata_record():
+    task = {
+        "schema_version": "queue-task/v2",
+        "task_id": "task-1",
+        "kind": "compile",
+        "handler_version": 2,
+        "payload": {
+            "version": 1,
+            "kind": "compile",
+            "data_hash": "a" * 64,
+            "redacted_data": {"fields": []},
+        },
+        "input_hash": "b" * 64,
+        "dedupe_key": "compile:daily:2026-07-13",
+        "state": "dead",
+        "priority": 25,
+        "created_at": "2026-07-13T00:00:00Z",
+        "updated_at": "2026-07-13T00:02:00Z",
+        "available_at": "2026-07-13T00:01:00Z",
+        "attempts": 1,
+        "lease_token": None,
+        "lease_expires_at": None,
+        "lease_heartbeat_at": None,
+        "error_code": "provider_unavailable",
+        "blocked_capability": "llm.compile",
+        "result_reference": {
+            "result_id": "result-1",
+            "manifest_path": "run/results/result-1.json",
+            "sha256": "c" * 64,
+        },
+        "attempt_history": [
+            {
+                "attempt": 1,
+                "started_at": "2026-07-13T00:00:00Z",
+                "finished_at": "2026-07-13T00:00:05Z",
+                "outcome": "failed",
+                "error_code": "provider_unavailable",
+            }
+        ],
+    }
+    validate_schema(task, SCHEMA_DIR / "queue-task-v2.json")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("available_at", 123),
+        ("lease_token", 123),
+        ("error_code", "Not Stable"),
+        ("attempt_history", [{"attempt": 1, "started_at": "now", "outcome": "unknown"}]),
+    ],
+)
+def test_queue_schema_rejects_invalid_operational_metadata(field, value):
+    task = {
+        "schema_version": "queue-task/v2",
+        "task_id": "task-1",
+        "kind": "compile",
+        "handler_version": 1,
+        "payload": {
+            "version": 1,
+            "kind": "compile",
+            "data_hash": "a" * 64,
+            "redacted_data": {"fields": []},
+        },
+        "input_hash": "b" * 64,
+        "state": "ready",
+        "priority": 0,
+        "attempts": 0,
+        field: value,
+    }
+    with pytest.raises(SchemaValidationError):
+        validate_schema(task, SCHEMA_DIR / "queue-task-v2.json")
+
+
+def test_queue_attempt_history_rejects_unknown_fields():
+    history = {
+        "attempt": 1,
+        "started_at": "2026-07-13T00:00:00Z",
+        "finished_at": None,
+        "outcome": "blocked",
+        "error_code": None,
+        "mutable_note": "not allowed",
+    }
+    task = {
+        "schema_version": "queue-task/v2",
+        "task_id": "task-1",
+        "kind": "compile",
+        "handler_version": 1,
+        "payload": {
+            "version": 1,
+            "kind": "compile",
+            "data_hash": "a" * 64,
+            "redacted_data": {"fields": []},
+        },
+        "input_hash": "b" * 64,
+        "state": "blocked",
+        "priority": 0,
+        "attempts": 1,
+        "attempt_history": [history],
+    }
+    with pytest.raises(SchemaValidationError, match="unknown"):
+        validate_schema(task, SCHEMA_DIR / "queue-task-v2.json")
+
+
 def test_project_checkpoint_schema_covers_provenance_and_stable_delta_semantics():
     change = {"id": "stable-1", "action": "upsert", "value": "active"}
     checkpoint = {

@@ -155,9 +155,30 @@ def test_posix_network_mount_detection_uses_longest_mount_point(monkeypatch):
     monkeypatch.setattr(
         reliable_memory, "_read_posix_mount_data", lambda: (mount_data, True), raising=False
     )
+    monkeypatch.setattr(type(Path("/")), "resolve", lambda self, *, strict=False: self)
     assert reliable_memory._known_network_path(Path("/uncovered")) is True
     assert reliable_memory._known_network_path(Path("/srv/local/state")) is False
     assert reliable_memory._known_network_path(Path("/srv/network/state")) is True
+
+
+def test_posix_mount_detection_resolves_symlink_target(monkeypatch):
+    mount_data = """
+36 25 8:1 / / rw,relatime - ext4 /dev/sda1 rw
+37 36 0:44 / /mnt/network rw,relatime - nfs server:/share rw
+"""
+    link = Path("/local/state-link")
+    calls = []
+
+    def resolve(self, *, strict=False):
+        calls.append((self, strict))
+        return Path("/mnt/network/state")
+
+    monkeypatch.setattr(reliable_memory, "_platform_system", lambda: "Linux")
+    monkeypatch.setattr(reliable_memory, "_read_posix_mount_data", lambda: (mount_data, True))
+    monkeypatch.setattr(type(link), "resolve", resolve)
+
+    assert reliable_memory._known_network_path(link) is True
+    assert calls == [(link, False)]
 
 
 def test_posix_proc_mounts_network_types_are_detected(monkeypatch):
@@ -166,6 +187,7 @@ def test_posix_proc_mounts_network_types_are_detected(monkeypatch):
     monkeypatch.setattr(
         reliable_memory, "_read_posix_mount_data", lambda: (mounts, False), raising=False
     )
+    monkeypatch.setattr(type(Path("/")), "resolve", lambda self, *, strict=False: self)
     assert reliable_memory._known_network_path(Path("/mnt/nfs/state")) is True
     assert reliable_memory._known_network_path(Path("/mnt/ssh/state")) is True
 
@@ -180,6 +202,7 @@ server:/team on /Volumes/Team Share (nfs, nodev, nosuid)
     monkeypatch.setattr(reliable_memory, "_platform_system", lambda: "Darwin")
     monkeypatch.setattr(reliable_memory, "_read_posix_mount_data", lambda: ("", True))
     monkeypatch.setattr(reliable_memory, "_query_darwin_mounts", lambda: mount_output, raising=False)
+    monkeypatch.setattr(type(Path("/")), "resolve", lambda self, *, strict=False: self)
 
     assert reliable_memory._known_network_path(Path("/Volumes/Team Share/project")) is True
     assert reliable_memory._known_network_path(Path("/Volumes/Team Share/local/state")) is False
@@ -244,6 +267,10 @@ def test_unsupported_owner_bits_skip_chmod_explicitly(tmp_path, monkeypatch):
 
 def test_state_root_rejects_windows_reparse_point(tmp_path, monkeypatch):
     monkeypatch.setattr("reliable_memory._windows_reparse_point", lambda path: True)
+    monkeypatch.setattr(
+        "reliable_memory._known_network_path",
+        lambda path: pytest.fail("network probing must follow reparse rejection"),
+    )
     with pytest.raises(UnsafeStateRoot, match="reparse"):
         validate_state_root(tmp_path)
 
