@@ -176,6 +176,7 @@ class MarkdownCoordinator:
     def prepare(
         self,
         changes: Sequence[MarkdownChange],
+        *,
         operation_id: str,
         preconditions: Mapping[str, object] | None = None,
         validators: Sequence[Validator] = (),

@@ -13,6 +13,7 @@ OWASP LLM Top 10 (2025) coverage:
 """
 from __future__ import annotations
 
+import ast
 import re
 import sys
 from pathlib import Path
@@ -555,7 +556,61 @@ class TestSingleDailyWritePath:
 
 
 # ---------------------------------------------------------------------------
-# INVARIANT 11: Compile snapshot excludes superseded pages
+# INVARIANT 11: Markdown transactions never invoke Git or external work
+# ---------------------------------------------------------------------------
+
+
+class TestMarkdownTransactionBoundary:
+    """The writer boundary must stay deterministic and fail closed."""
+
+    def test_transaction_module_has_no_git_subprocess_or_command(self):
+        source = (SCRIPTS / "markdown_transaction.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        subprocess_imports = [
+            node
+            for node in ast.walk(tree)
+            if (
+                isinstance(node, ast.Import)
+                and any(alias.name == "subprocess" for alias in node.names)
+            )
+            or (isinstance(node, ast.ImportFrom) and node.module == "subprocess")
+        ]
+        command_calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr
+            in {"run", "Popen", "call", "check_call", "check_output", "system", "popen"}
+        ]
+        git_commands = [
+            value.value
+            for call in command_calls
+            for value in ast.walk(call)
+            if isinstance(value, ast.Constant)
+            and isinstance(value.value, str)
+            and re.search(r"(^|\s)git(?:\.exe)?(?:\s|$)", value.value, re.IGNORECASE)
+        ]
+        assert subprocess_imports == []
+        assert git_commands == []
+
+    def test_external_work_fails_closed_while_writer_gate_is_held(self, tmp_path):
+        from markdown_transaction import MarkdownCoordinator
+
+        vault = tmp_path / "vault"
+        state_root = tmp_path / "state"
+        (vault / "knowledge/notes").mkdir(parents=True)
+        coordinator = MarkdownCoordinator(vault, state_root)
+
+        with coordinator.writer_gate():
+            assert coordinator.writer_gate_held()
+            with pytest.raises(RuntimeError, match="writer gate"):
+                coordinator.assert_external_work_allowed()
+        assert not coordinator.writer_gate_held()
+
+
+# ---------------------------------------------------------------------------
+# INVARIANT 12: Compile snapshot excludes superseded pages
 # ---------------------------------------------------------------------------
 
 

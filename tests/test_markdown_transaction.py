@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import inspect
 import os
 import sqlite3
 import stat
@@ -65,6 +66,11 @@ def test_prepare_and_apply_create_replace_delete(vault: Path, state_root: Path):
     assert (vault / "knowledge/index.md").read_bytes() == b"index-v2\n"
     assert (vault / "knowledge/log.md").read_bytes() == b"log-v2\n"
     assert not old.exists()
+
+
+def test_prepare_requires_keyword_only_operation_id():
+    parameter = inspect.signature(MarkdownCoordinator.prepare).parameters["operation_id"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
 
 
 def test_prepare_captures_before_images_and_fsyncs_every_artifact(
@@ -385,15 +391,8 @@ def test_delete_refuses_unknown_bytes(vault: Path, state_root: Path):
     assert target.read_bytes() == b"unknown"
 
 
-def test_writer_gate_blocks_external_work_and_coherent_read(
-    vault: Path, state_root: Path
-):
+def test_coherent_read_returns_present_and_absent_states(vault: Path, state_root: Path):
     coordinator = MarkdownCoordinator(vault, state_root)
-    with coordinator.writer_gate():
-        assert coordinator.writer_gate_held()
-        with pytest.raises(RuntimeError, match="writer gate"):
-            coordinator.assert_external_work_allowed()
-    assert not coordinator.writer_gate_held()
     assert coordinator.coherent_read(
         [Path("knowledge/index.md"), Path("knowledge/notes/missing.md")]
     ) == {
@@ -488,9 +487,3 @@ def test_database_has_required_tables_and_durability_pragmas(vault: Path, state_
         assert {"transaction", "operation", "project_leases", "writer_owners", "maintenance_owners"} <= tables
         assert database.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
         assert database.execute("PRAGMA synchronous").fetchone()[0] == 2
-
-
-def test_transaction_module_never_invokes_git_subprocess():
-    source = Path(markdown_transaction.__file__).read_text(encoding="utf-8")
-    assert "subprocess" not in source
-    assert "git " not in source
