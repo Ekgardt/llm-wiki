@@ -157,6 +157,79 @@ c.apply(undo.id)
     assert target.read_bytes() == expected
 
 
+def test_dead_preparing_with_complete_fsynced_plan_rolls_forward(
+    vault: Path, state_root: Path
+):
+    code = """
+import sys
+from pathlib import Path
+from markdown_transaction import MarkdownChange, MarkdownCoordinator
+c = MarkdownCoordinator(Path(sys.argv[1]), Path(sys.argv[2]))
+c.prepare([MarkdownChange.create('knowledge/notes/new.md', b'new')], operation_id='durable-plan')
+"""
+    crashed = _crash_process(vault, state_root, "after_plan_fsynced", code)
+    assert crashed.returncode == 86, crashed.stderr
+
+    recovered = MarkdownCoordinator(vault, state_root).recover()
+
+    assert [(record.operation_id, record.state) for record in recovered] == [
+        ("durable-plan", "committed")
+    ]
+    assert (vault / "knowledge/notes/new.md").read_bytes() == b"new"
+
+
+def test_complete_dead_preparing_with_unknown_target_conflicts_instead_of_discarding(
+    vault: Path, state_root: Path
+):
+    code = """
+import sys
+from pathlib import Path
+from markdown_transaction import MarkdownChange, MarkdownCoordinator
+c = MarkdownCoordinator(Path(sys.argv[1]), Path(sys.argv[2]))
+c.prepare([MarkdownChange.create('knowledge/notes/new.md', b'new')], operation_id='durable-conflict')
+"""
+    crashed = _crash_process(vault, state_root, "after_plan_fsynced", code)
+    assert crashed.returncode == 86, crashed.stderr
+    target = vault / "knowledge/notes/new.md"
+    target.write_bytes(b"unknown")
+
+    recovered = MarkdownCoordinator(vault, state_root).recover()[0]
+
+    assert (recovered.state, recovered.error_code) == (
+        "conflicted",
+        "before_hash_mismatch",
+    )
+    assert target.read_bytes() == b"unknown"
+
+
+def test_dead_preparing_with_malformed_manifest_is_discarded(
+    vault: Path, state_root: Path
+):
+    code = """
+import sys
+from pathlib import Path
+from markdown_transaction import MarkdownChange, MarkdownCoordinator
+c = MarkdownCoordinator(Path(sys.argv[1]), Path(sys.argv[2]))
+c.prepare([MarkdownChange.create('knowledge/notes/new.md', b'new')], operation_id='bad-manifest')
+"""
+    crashed = _crash_process(vault, state_root, "after_plan_fsynced", code)
+    assert crashed.returncode == 86, crashed.stderr
+    transaction_root = state_root / "run/transactions"
+    artifact_root = next(transaction_root.iterdir())
+    manifest_path = artifact_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest["operations"][0]["parent_device"] = "not-an-integer"
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+    recovered = MarkdownCoordinator(vault, state_root).recover()[0]
+
+    assert recovered.state == "discarded"
+    assert not (vault / "knowledge/notes/new.md").exists()
+
+
 @pytest.mark.parametrize("state", ["prepared", "applying"])
 def test_recover_rolls_forward_prepared_and_applying(
     vault: Path, state_root: Path, state: str
@@ -369,6 +442,172 @@ def test_project_lease_precondition_is_persisted_and_rechecked_before_apply(
     assert (vault / "knowledge/index.md").read_bytes() == b"index-v1\n"
 
 
+def test_stale_prepared_transaction_does_not_rollback_external_after_hash_bytes(
+    vault: Path, state_root: Path
+):
+    coordinator = MarkdownCoordinator(vault, state_root)
+    expires = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat().replace(
+        "+00:00", "Z"
+    )
+    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+        database.execute(
+            "INSERT INTO project_leases VALUES (?, ?, ?, ?, ?, ?)",
+            ("demo", "token", 1, "agent", expires, expires),
+        )
+        database.commit()
+    transaction = coordinator.prepare(
+        [MarkdownChange.create("knowledge/projects/demo/journal.md", b"same-bytes")],
+        operation_id="stale-before-apply",
+        preconditions={
+            "project_lease": {
+                "project": "demo",
+                "lease_token": "token",
+                "fencing_epoch": 1,
+                "expires_at": expires,
+            }
+        },
+    )
+    journal = vault / "knowledge/projects/demo/journal.md"
+    journal.write_bytes(b"same-bytes")
+    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+        database.execute(
+            "UPDATE project_leases SET lease_token = 'new-token', fencing_epoch = 2 "
+            "WHERE project = 'demo'"
+        )
+        database.commit()
+
+    recovered = coordinator.recover()[0]
+
+    assert recovered.state == "quarantined"
+    assert journal.read_bytes() == b"same-bytes"
+    assert coordinator._record(transaction.id).error_code == "precondition_failed"
+
+
+@pytest.mark.parametrize("expire_after_call", [1, 2])
+def test_obsolete_lease_after_partial_checkpoint_rolls_back_journal_and_projection(
+    vault: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    expire_after_call: int,
+):
+    journal = vault / "knowledge/projects/demo/journal.md"
+    journal.write_bytes(b"old-event\n")
+    projection = vault / "knowledge/index.md"
+    coordinator = MarkdownCoordinator(vault, state_root)
+    expires = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat().replace(
+        "+00:00", "Z"
+    )
+    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+        database.execute(
+            "INSERT INTO project_leases VALUES (?, ?, ?, ?, ?, ?)",
+            ("demo", "token", 1, "agent", expires, expires),
+        )
+        database.commit()
+    transaction = coordinator.prepare(
+        [
+            MarkdownChange.replace(
+                "knowledge/projects/demo/journal.md", b"old-event\nnew-event\n"
+            ),
+            MarkdownChange.replace("knowledge/index.md", b"projected-new-event\n"),
+        ],
+        operation_id="partial-checkpoint",
+        preconditions={
+            "project_lease": {
+                "project": "demo",
+                "lease_token": "token",
+                "fencing_epoch": 1,
+                "expires_at": expires,
+            }
+        },
+    )
+    mutate = coordinator._mutate_and_mark
+    calls = 0
+
+    def expire_after_journal(*args, **kwargs):
+        nonlocal calls
+        mutate(*args, **kwargs)
+        calls += 1
+        if calls == expire_after_call:
+            with sqlite3.connect(
+                state_root / "run/markdown-transactions.sqlite3"
+            ) as database:
+                database.execute(
+                    "UPDATE project_leases SET lease_token = 'new-token', fencing_epoch = 2 "
+                    "WHERE project = 'demo'"
+                )
+                database.commit()
+
+    monkeypatch.setattr(coordinator, "_mutate_and_mark", expire_after_journal)
+
+    with pytest.raises(RuntimeError, match="precondition"):
+        coordinator.apply(transaction.id)
+
+    record = coordinator._record(transaction.id)
+    assert (record.state, record.error_code) == ("quarantined", "precondition_failed")
+    assert journal.read_bytes() == b"old-event\n"
+    assert projection.read_bytes() == b"index-v1\n"
+
+
+def test_partial_checkpoint_rollback_leaves_unknown_journal_bytes_untouched(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    journal = vault / "knowledge/projects/demo/journal.md"
+    journal.write_bytes(b"old-event\n")
+    coordinator = MarkdownCoordinator(vault, state_root)
+    expires = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat().replace(
+        "+00:00", "Z"
+    )
+    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+        database.execute(
+            "INSERT INTO project_leases VALUES (?, ?, ?, ?, ?, ?)",
+            ("demo", "token", 1, "agent", expires, expires),
+        )
+        database.commit()
+    transaction = coordinator.prepare(
+        [
+            MarkdownChange.replace(
+                "knowledge/projects/demo/journal.md", b"old-event\nnew-event\n"
+            ),
+            MarkdownChange.replace("knowledge/index.md", b"projection\n"),
+        ],
+        operation_id="partial-checkpoint-unknown",
+        preconditions={
+            "project_lease": {
+                "project": "demo",
+                "lease_token": "token",
+                "fencing_epoch": 1,
+                "expires_at": expires,
+            }
+        },
+    )
+    mutate = coordinator._mutate_and_mark
+    calls = 0
+
+    def external_edit_after_journal(*args, **kwargs):
+        nonlocal calls
+        mutate(*args, **kwargs)
+        calls += 1
+        if calls == 1:
+            journal.write_bytes(b"private unknown journal bytes")
+            with sqlite3.connect(
+                state_root / "run/markdown-transactions.sqlite3"
+            ) as database:
+                database.execute(
+                    "UPDATE project_leases SET lease_token = 'new-token', fencing_epoch = 2 "
+                    "WHERE project = 'demo'"
+                )
+                database.commit()
+
+    monkeypatch.setattr(coordinator, "_mutate_and_mark", external_edit_after_journal)
+
+    with pytest.raises(RuntimeError, match="precondition"):
+        coordinator.apply(transaction.id)
+
+    assert coordinator._record(transaction.id).state == "quarantined"
+    assert journal.read_bytes() == b"private unknown journal bytes"
+    assert (vault / "knowledge/index.md").read_bytes() == b"index-v1\n"
+
+
 def test_prepare_recovers_pending_transactions_before_snapshot(
     vault: Path, state_root: Path
 ):
@@ -385,6 +624,39 @@ def test_prepare_recovers_pending_transactions_before_snapshot(
 
     assert _row(state_root, first.id)["state"] == "committed"
     assert second.operations[0].before_hash == sha256_bytes(b"index-v2")
+
+
+def test_same_operation_id_retry_returns_recovered_committed_record(
+    vault: Path, state_root: Path
+):
+    coordinator = MarkdownCoordinator(vault, state_root)
+    changes = [MarkdownChange.create("knowledge/notes/new.md", b"new")]
+    first = coordinator.prepare(changes, operation_id="same-recovery")
+
+    retried = coordinator.prepare(changes, operation_id="same-recovery")
+
+    assert retried.id == first.id
+    assert retried.state == "committed"
+    assert (vault / "knowledge/notes/new.md").read_bytes() == b"new"
+
+
+def test_same_operation_id_retry_returns_recovered_conflict(
+    vault: Path, state_root: Path
+):
+    target = vault / "knowledge/notes/new.md"
+    coordinator = MarkdownCoordinator(vault, state_root)
+    changes = [MarkdownChange.create("knowledge/notes/new.md", b"new")]
+    first = coordinator.prepare(changes, operation_id="same-conflict")
+    target.write_bytes(b"unknown")
+
+    retried = coordinator.prepare(changes, operation_id="same-conflict")
+
+    assert retried.id == first.id
+    assert (retried.state, retried.error_code) == (
+        "conflicted",
+        "before_hash_mismatch",
+    )
+    assert target.read_bytes() == b"unknown"
 
 
 def test_concurrent_recovery_is_safe(vault: Path, state_root: Path):
@@ -404,6 +676,61 @@ def test_concurrent_recovery_is_safe(vault: Path, state_root: Path):
 
     assert all(not result or result[0].state == "committed" for result in results)
     assert _row(state_root, transaction.id)["state"] == "committed"
+    assert (vault / "knowledge/notes/new.md").read_bytes() == b"new"
+
+
+def test_two_subprocesses_recover_the_same_transaction_safely(
+    vault: Path, state_root: Path, tmp_path: Path
+):
+    coordinator = MarkdownCoordinator(vault, state_root)
+    transaction = coordinator.prepare(
+        [MarkdownChange.create("knowledge/notes/new.md", b"new")],
+        operation_id="process-recovery",
+    )
+    scripts = Path(__file__).parents[1] / "scripts"
+    barrier = tmp_path / "barrier"
+    barrier.mkdir()
+    code = """
+import json
+import sys
+import time
+from pathlib import Path
+from markdown_transaction import MarkdownCoordinator
+vault, state, barrier, name = map(Path, sys.argv[1:])
+(barrier / name).write_text('ready', encoding='ascii')
+deadline = time.monotonic() + 10
+while len(list(barrier.glob('ready-*'))) < 2:
+    if time.monotonic() >= deadline:
+        raise TimeoutError('barrier')
+    time.sleep(0.01)
+records = MarkdownCoordinator(vault, state).recover()
+print(json.dumps([record.state for record in records]))
+"""
+    env = os.environ | {"PYTHONPATH": str(scripts)}
+    processes = [
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                code,
+                str(vault),
+                str(state_root),
+                str(barrier),
+                f"ready-{number}",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        for number in range(2)
+    ]
+    outputs = [process.communicate(timeout=20) for process in processes]
+
+    assert [process.returncode for process in processes] == [0, 0], outputs
+    states = [json.loads(stdout) for stdout, _ in outputs]
+    assert sorted(states, key=len) == [[], ["committed"]]
+    assert coordinator._record(transaction.id).state == "committed"
     assert (vault / "knowledge/notes/new.md").read_bytes() == b"new"
 
 
@@ -532,6 +859,38 @@ def test_prune_retains_artifacts_for_thirty_days_then_removes_them(
     assert not (state_root / "run/transactions" / transaction.id).exists()
 
 
+@pytest.mark.parametrize("retention_days", [-1, 0, 29])
+def test_prune_rejects_retention_shorter_than_fixed_undo_window(
+    vault: Path, state_root: Path, retention_days: int
+):
+    coordinator = MarkdownCoordinator(vault, state_root)
+    with pytest.raises(ValueError, match="at least 30"):
+        coordinator.prune(retention_days=retention_days)
+
+
+def test_prune_honors_supplied_retention_longer_than_thirty_days(
+    vault: Path, state_root: Path
+):
+    coordinator = MarkdownCoordinator(vault, state_root)
+    transaction = coordinator.prepare(
+        [MarkdownChange.create("knowledge/notes/new.md", b"new")],
+        operation_id="prune-sixty",
+    )
+    coordinator.apply(transaction.id)
+    created = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+        database.execute(
+            'UPDATE "transaction" SET updated_at = ? WHERE id = ?',
+            (created.isoformat().replace("+00:00", "Z"), transaction.id),
+        )
+        database.commit()
+
+    assert coordinator.prune(
+        retention_days=60, now=created + timedelta(days=31)
+    ) == 0
+    assert (state_root / "run/transactions" / transaction.id).is_dir()
+
+
 @pytest.mark.parametrize("state", ["prepared", "applying", "conflicted", "quarantined"])
 def test_prune_never_removes_protected_states(
     vault: Path, state_root: Path, state: str
@@ -625,6 +984,98 @@ def test_cli_recover_undo_and_prune_are_explicit_and_redacted(
         env=env,
     )
     assert json.loads(pruned.stdout) == {"pruned": 0}
+
+
+def test_cli_domain_failure_is_canonical_bounded_and_redacted(
+    vault: Path, state_root: Path
+):
+    target = vault / "knowledge/notes/private-name.md"
+    target.write_bytes(b"before")
+    coordinator = MarkdownCoordinator(vault, state_root)
+    transaction = coordinator.prepare(
+        [MarkdownChange.replace("knowledge/notes/private-name.md", b"after")],
+        operation_id="private-operation",
+    )
+    coordinator.apply(transaction.id)
+    target.write_bytes(b"private secret image bytes")
+    script = Path(__file__).parents[1] / "scripts/markdown_transaction.py"
+    env = os.environ | {
+        "LLM_WIKI_ROOT": str(vault),
+        "LLM_WIKI_STATE_ROOT": str(state_root),
+    }
+
+    failed = subprocess.run(
+        [sys.executable, str(script), "undo", transaction.id],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert failed.returncode != 0
+    assert failed.stderr == ""
+    assert len(failed.stdout) <= 256
+    assert failed.stdout == (
+        '{"code":"undo_precondition_failed","state":"committed",'
+        f'"transaction_id":"{transaction.id}"}}\n'
+    )
+    assert "private" not in failed.stdout
+    assert "Traceback" not in failed.stdout + failed.stderr
+
+
+def test_cli_conflict_report_is_canonical_and_redacted(vault: Path, state_root: Path):
+    target = vault / "knowledge/notes/private-conflict.md"
+    coordinator = MarkdownCoordinator(vault, state_root)
+    transaction = coordinator.prepare(
+        [MarkdownChange.create("knowledge/notes/private-conflict.md", b"after")],
+        operation_id="private-conflict-operation",
+    )
+    target.write_bytes(b"private conflict bytes")
+    script = Path(__file__).parents[1] / "scripts/markdown_transaction.py"
+    env = os.environ | {
+        "LLM_WIKI_ROOT": str(vault),
+        "LLM_WIKI_STATE_ROOT": str(state_root),
+    }
+
+    result = subprocess.run(
+        [sys.executable, str(script), "recover"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode != 0
+    assert result.stderr == ""
+    assert result.stdout == (
+        '[{"code":"before_hash_mismatch","state":"conflicted",'
+        f'"transaction_id":"{transaction.id}"}}]\n'
+    )
+    assert "private" not in result.stdout
+
+
+def test_cli_rejects_short_prune_window_as_redacted_json(
+    vault: Path, state_root: Path
+):
+    MarkdownCoordinator(vault, state_root)
+    script = Path(__file__).parents[1] / "scripts/markdown_transaction.py"
+    env = os.environ | {
+        "LLM_WIKI_ROOT": str(vault),
+        "LLM_WIKI_STATE_ROOT": str(state_root),
+    }
+    failed = subprocess.run(
+        [sys.executable, str(script), "prune", "--retention-days", "29"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert failed.returncode != 0
+    assert failed.stderr == ""
+    assert failed.stdout == (
+        '{"code":"retention_too_short","state":null,"transaction_id":null}\n'
+    )
 
 
 def test_record_exposes_absent_hash_without_target_content(vault: Path, state_root: Path):

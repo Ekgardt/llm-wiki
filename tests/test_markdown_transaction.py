@@ -102,6 +102,7 @@ def test_prepare_captures_before_images_and_fsyncs_every_artifact(
         "before/000000.bin",
         "after/000000.bin",
         "plan.json",
+        "manifest.json",
     }
     if os.name != "nt":
         assert stat.S_IMODE(artifact_root.stat().st_mode) == 0o700
@@ -134,7 +135,8 @@ def test_prepare_is_idempotent_by_operation_id(vault: Path, state_root: Path):
     changes = [MarkdownChange.create("knowledge/notes/new.md", b"new\n")]
     first = coordinator.prepare(changes, operation_id="same")
     second = coordinator.prepare(changes, operation_id="same")
-    assert second == first
+    assert second.id == first.id
+    assert second.state == "committed"
 
     with pytest.raises(ValueError, match="operation_id"):
         coordinator.prepare(
