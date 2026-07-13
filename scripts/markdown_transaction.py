@@ -121,6 +121,22 @@ class TransactionFailure(RuntimeError):
         self.state = state
 
 
+class ProjectPendingPriorError(TransactionFailure):
+    """A project checkpoint is blocked by an unapplied lower sequence."""
+
+    status = "pending_prior"
+
+    def __init__(self, project: str, sequence: int, prior_sequence: int):
+        super().__init__(
+            f"project {project!r} sequence {sequence} waits for sequence {prior_sequence}",
+            "pending_prior",
+            "prepared",
+        )
+        self.project = project
+        self.sequence = sequence
+        self.prior_sequence = prior_sequence
+
+
 class TargetBoundaryFailure(RuntimeError):
     """A persisted target no longer has its prepared containment identity."""
 
@@ -1067,6 +1083,7 @@ class MarkdownCoordinator:
         lease = preconditions["project_lease"]
         assert isinstance(lease, Mapping)
         self._check_project_lease(database, lease)
+        self._check_project_head(database, reservation.project, reservation.sequence)
         cursor = database.execute(
             "UPDATE project_checkpoints SET transaction_id = ?, state = 'prepared', "
             "lease_token = ?, fencing_epoch = ? "
@@ -1097,6 +1114,30 @@ class MarkdownCoordinator:
                 "project checkpoint attempt is no longer available",
                 "precondition_failed",
                 "quarantined",
+            )
+
+    @staticmethod
+    def _check_project_head(
+        database: sqlite3.Connection, project: str, sequence: int
+    ) -> None:
+        prior = database.execute(
+            "SELECT sequence FROM project_checkpoints WHERE project = ? "
+            "AND sequence < ? AND state != 'committed' ORDER BY sequence LIMIT 1",
+            (project, sequence),
+        ).fetchone()
+        if prior is not None:
+            raise ProjectPendingPriorError(project, sequence, int(prior["sequence"]))
+
+    def _check_project_transaction_head(
+        self, database: sqlite3.Connection, transaction_id: str
+    ) -> None:
+        reservation = database.execute(
+            "SELECT project, sequence FROM project_checkpoints WHERE transaction_id = ?",
+            (transaction_id,),
+        ).fetchone()
+        if reservation is not None:
+            self._check_project_head(
+                database, str(reservation["project"]), int(reservation["sequence"])
             )
 
     def apply(self, transaction_id: str) -> TransactionRecord:
@@ -1213,6 +1254,7 @@ class MarkdownCoordinator:
             self._check_preconditions(
                 record.preconditions, operation_states, database=database
             )
+            self._check_project_transaction_head(database, record.id)
             self._local.mutation_database = database
             try:
                 operations = plan["operations"]
@@ -1543,6 +1585,8 @@ class MarkdownCoordinator:
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     operations,
                 )
+        except ProjectPendingPriorError:
+            return "invalid"
         except TransactionFailure as exc:
             self._set_transaction_state(record.id, "quarantined", error_code=exc.code)
             with self._connect() as database, begin_immediate(database):

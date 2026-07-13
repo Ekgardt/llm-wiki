@@ -15,6 +15,7 @@ from markdown_transaction import (
     MarkdownChange,
     MarkdownCoordinator,
     ProjectCheckpointReservation,
+    ProjectPendingPriorError,
     TransactionFailure,
 )
 from reliable_memory import (
@@ -53,6 +54,20 @@ class ProjectFenceError(RuntimeError):
 
 class ProjectLeaseBusy(ProjectFenceError):
     """Another owner holds the current project lease."""
+
+
+class ProjectJournalRebuildRequired(RuntimeError):
+    """Append-only journal ordering requires an explicit verified rebuild."""
+
+    status = "journal_rebuild_required"
+
+    def __init__(self, project: str, sequence: int, journal_head: int):
+        super().__init__(
+            f"project {project!r} sequence {sequence} follows journal sequence {journal_head}"
+        )
+        self.project = project
+        self.sequence = sequence
+        self.journal_head = journal_head
 
 
 @dataclass(frozen=True)
@@ -251,6 +266,13 @@ class ProjectStore:
             return self._receipt(reserved, duplicate=True)
         try:
             receipt = self._project_reserved(reserved, lease)
+        except ProjectPendingPriorError:
+            self._release(lease)
+            raise
+        except ProjectJournalRebuildRequired:
+            self._set_checkpoint_state(slug, reserved.sequence, "quarantined")
+            self._release(lease)
+            raise
         except TransactionFailure as exc:
             if exc.code == "precondition_failed":
                 self._set_checkpoint_state(slug, reserved.sequence, "quarantined")
@@ -331,6 +353,9 @@ class ProjectStore:
                 continue
             try:
                 recovered.append(self._project_reserved(row, lease))
+            except ProjectPendingPriorError:
+                self._release(lease)
+                continue
             except TransactionFailure as exc:
                 if exc.code == "precondition_failed":
                     self._set_checkpoint_state(
@@ -466,9 +491,14 @@ class ProjectStore:
         slug = row.project
         sequence = row.sequence
         event = json.loads(row.event_json)
+        with self.coordinator._connect() as database:
+            self.coordinator._check_project_head(database, slug, sequence)
         current_journal = self._read_journal_bytes(slug)
         records = self._journal_events(slug, current_journal)
         matching = [item for item in records if item["sequence"] == sequence]
+        journal_head = int(records[-1]["sequence"]) if records else 0
+        if not matching and journal_head != sequence - 1:
+            raise ProjectJournalRebuildRequired(slug, sequence, journal_head)
         if not matching:
             journal = current_journal or JOURNAL_HEADER.encode("utf-8")
             if not journal.endswith(b"\n"):

@@ -9,10 +9,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from markdown_transaction import MarkdownChange
+from markdown_transaction import MarkdownChange, ProjectPendingPriorError
 from project_journal import (
     JOURNAL_HEADER,
     ProjectFenceError,
+    ProjectJournalRebuildRequired,
     ProjectLeaseBusy,
     ProjectStore,
 )
@@ -377,7 +378,7 @@ def test_final_apply_rechecks_lease_and_rejects_stale_epoch(
     assert not (vault / "knowledge/projects/demo/state.md").exists()
 
 
-def test_valid_checkpoint_after_fenced_reservation_records_last_applied_sequence(
+def test_fenced_reservation_blocks_later_sequence_until_replayed(
     vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
     store = ProjectStore(vault, state_root)
@@ -403,14 +404,20 @@ def test_valid_checkpoint_after_fenced_reservation_records_last_applied_sequence
         )
         database.commit()
 
-    receipt = store.checkpoint(
+    with pytest.raises(ProjectPendingPriorError):
+        store.checkpoint(
+            "demo", checkpoint_event("evt-2", "event-after-fence"), "agent-a"
+        )
+
+    first = store.checkpoint("demo", checkpoint_event(), "agent-a")
+    second = store.checkpoint(
         "demo", checkpoint_event("evt-2", "event-after-fence"), "agent-a"
     )
-    event = journal_records(store)[0]
+    events = journal_records(store)
 
-    assert receipt.sequence == 2
-    assert event["sequence"] == 2
-    assert event["last_applied_sequence"] == 0
+    assert [first.sequence, second.sequence] == [1, 2]
+    assert [event["sequence"] for event in events] == [1, 2]
+    assert [event["last_applied_sequence"] for event in events] == [0, 0]
 
 
 def test_recover_replays_prepared_checkpoint(
@@ -562,6 +569,158 @@ def test_concurrent_duplicate_replay_creates_one_forward_attempt(
             "WHERE project = 'demo' ORDER BY attempt_number"
         ).fetchall()
     assert attempts == [(1, "quarantined"), (2, "committed")]
+
+
+def test_newer_sequence_waits_for_quarantined_prior_then_appends_in_order(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    store = ProjectStore(vault, state_root)
+    first_event = checkpoint_event("evt-first", "head:first")
+    second_event = checkpoint_event("evt-second", "head:second")
+
+    def crash_before_apply(transaction_id: str):
+        raise RuntimeError(f"crash before {transaction_id}")
+
+    monkeypatch.setattr(store.coordinator, "apply", crash_before_apply)
+    with pytest.raises(RuntimeError, match="crash before"):
+        store.checkpoint("demo", first_event, "agent-a")
+    monkeypatch.undo()
+    with sqlite3.connect(store.coordinator.database_path) as database:
+        database.execute(
+            "UPDATE project_leases SET expires_at = '2000-01-01T00:00:00Z' "
+            "WHERE project = 'demo'"
+        )
+        database.commit()
+
+    with pytest.raises(ProjectPendingPriorError) as blocked:
+        ProjectStore(vault, state_root).checkpoint("demo", second_event, "agent-b")
+
+    assert blocked.value.code == "pending_prior"
+    assert blocked.value.prior_sequence == 1
+    assert not (vault / "knowledge/projects/demo/journal.md").exists()
+    with sqlite3.connect(store.coordinator.database_path) as database:
+        rows = database.execute(
+            "SELECT sequence, state FROM project_checkpoints "
+            "WHERE project = 'demo' ORDER BY sequence"
+        ).fetchall()
+    assert rows == [(1, "quarantined"), (2, "reserved")]
+
+    first = ProjectStore(vault, state_root).checkpoint("demo", first_event, "agent-c")
+    second = ProjectStore(vault, state_root).checkpoint("demo", second_event, "agent-d")
+
+    assert [first.sequence, second.sequence] == [1, 2]
+    assert [record["sequence"] for record in journal_records(ProjectStore(vault, state_root))] == [
+        1,
+        2,
+    ]
+
+
+def test_concurrent_newer_sequence_retries_after_crashed_head(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    store = ProjectStore(vault, state_root)
+    first_event = checkpoint_event("evt-first", "race:first")
+    second_event = checkpoint_event("evt-second", "race:second")
+
+    def crash_before_apply(transaction_id: str):
+        raise RuntimeError(f"crash before {transaction_id}")
+
+    monkeypatch.setattr(store.coordinator, "apply", crash_before_apply)
+    with pytest.raises(RuntimeError, match="crash before"):
+        store.checkpoint("demo", first_event, "agent-a")
+    monkeypatch.undo()
+    with sqlite3.connect(store.coordinator.database_path) as database:
+        database.execute(
+            "UPDATE project_leases SET expires_at = '2000-01-01T00:00:00Z' "
+            "WHERE project = 'demo'"
+        )
+        database.commit()
+    newer_blocked = threading.Event()
+    head_committed = threading.Event()
+
+    def replay_newer():
+        newer_store = ProjectStore(vault, state_root)
+        with pytest.raises(ProjectPendingPriorError):
+            newer_store.checkpoint("demo", second_event, "agent-b")
+        newer_blocked.set()
+        assert head_committed.wait(5)
+        return newer_store.checkpoint("demo", second_event, "agent-b")
+
+    def replay_head():
+        assert newer_blocked.wait(5)
+        receipt = ProjectStore(vault, state_root).checkpoint(
+            "demo", first_event, "agent-c"
+        )
+        head_committed.set()
+        return receipt
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        newer = pool.submit(replay_newer)
+        head = pool.submit(replay_head)
+        receipts = [head.result(timeout=10), newer.result(timeout=10)]
+
+    assert [receipt.sequence for receipt in receipts] == [1, 2]
+    assert [record["occurrence_id"] for record in journal_records(ProjectStore(vault, state_root))] == [
+        "evt-first",
+        "evt-second",
+    ]
+
+
+def test_legacy_out_of_order_journal_is_quarantined_without_rewriting_bytes(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    store = ProjectStore(vault, state_root)
+    first_event = checkpoint_event("evt-first", "legacy:first")
+    second_event = checkpoint_event("evt-second", "legacy:second")
+
+    def crash_before_apply(transaction_id: str):
+        raise RuntimeError(f"crash before {transaction_id}")
+
+    monkeypatch.setattr(store.coordinator, "apply", crash_before_apply)
+    with pytest.raises(RuntimeError, match="crash before"):
+        store.checkpoint("demo", first_event, "agent-a")
+    monkeypatch.undo()
+    with sqlite3.connect(store.coordinator.database_path) as database:
+        database.execute(
+            "UPDATE project_leases SET expires_at = '2000-01-01T00:00:00Z' "
+            "WHERE project = 'demo'"
+        )
+        database.commit()
+    with pytest.raises(ProjectPendingPriorError):
+        ProjectStore(vault, state_root).checkpoint("demo", second_event, "agent-b")
+
+    with sqlite3.connect(store.coordinator.database_path) as database:
+        second_json = database.execute(
+            "SELECT event_json FROM project_checkpoints "
+            "WHERE project = 'demo' AND sequence = 2"
+        ).fetchone()[0]
+        database.execute(
+            "UPDATE project_checkpoints SET state = 'committed' "
+            "WHERE project = 'demo' AND sequence = 2"
+        )
+        database.execute(
+            "UPDATE project_checkpoint_attempts SET state = 'committed' "
+            "WHERE project = 'demo' AND sequence = 2"
+        )
+        database.commit()
+    journal = vault / "knowledge/projects/demo/journal.md"
+    projection = vault / "knowledge/projects/demo/state.md"
+    legacy_journal = JOURNAL_HEADER.encode("utf-8") + second_json.encode("utf-8") + b"\n"
+    journal.write_bytes(legacy_journal)
+    projection.write_bytes(b"legacy projection\n")
+
+    with pytest.raises(ProjectJournalRebuildRequired) as blocked:
+        ProjectStore(vault, state_root).checkpoint("demo", first_event, "agent-c")
+
+    assert blocked.value.status == "journal_rebuild_required"
+    assert journal.read_bytes() == legacy_journal
+    assert projection.read_bytes() == b"legacy projection\n"
+    with sqlite3.connect(store.coordinator.database_path) as database:
+        first_state = database.execute(
+            "SELECT state FROM project_checkpoints "
+            "WHERE project = 'demo' AND sequence = 1"
+        ).fetchone()[0]
+    assert first_state == "quarantined"
 
 
 def test_recover_replays_reservation_left_before_prepare(
