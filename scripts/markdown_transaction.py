@@ -955,7 +955,6 @@ class MarkdownCoordinator:
                     persisted["parent_inode"],
                 )
                 parent_mismatch = parent_mismatch or current_parent != parent_identity
-                current_hash = self._current_hash(path)
                 operations.append(
                     (
                         record.id,
@@ -966,7 +965,7 @@ class MarkdownCoordinator:
                         after_hash,
                         parent_identity[0],
                         parent_identity[1],
-                        int(current_hash == after_hash),
+                        0,
                     )
                 )
                 request_changes.append(
@@ -1017,9 +1016,8 @@ class MarkdownCoordinator:
         return value
 
     def _rollback_for_quarantine(self, transaction_id: str, error_code: str) -> None:
-        transaction_state = self._record(transaction_id).state
         for row in self._operation_rows(transaction_id):
-            if not row["applied"] and transaction_state != "applying":
+            if not row["applied"]:
                 continue
             current = self._operation_hash(row)
             if current != row["after_hash"]:

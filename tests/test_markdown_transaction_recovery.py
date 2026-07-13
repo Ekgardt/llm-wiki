@@ -178,6 +178,122 @@ c.prepare([MarkdownChange.create('knowledge/notes/new.md', b'new')], operation_i
     assert (vault / "knowledge/notes/new.md").read_bytes() == b"new"
 
 
+@pytest.mark.parametrize(
+    ("kind", "before", "after"),
+    [
+        ("create", None, b"external journal bytes"),
+        ("replace", b"before journal bytes", b"external replacement bytes"),
+        ("delete", b"before journal bytes", None),
+    ],
+)
+def test_dead_preparing_never_owns_ambiguous_matching_after_bytes(
+    vault: Path,
+    state_root: Path,
+    kind: str,
+    before: bytes | None,
+    after: bytes | None,
+):
+    target = vault / "knowledge/projects/demo/journal.md"
+    if before is not None:
+        target.write_bytes(before)
+    expires = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat().replace(
+        "+00:00", "Z"
+    )
+    MarkdownCoordinator(vault, state_root)
+    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+        database.execute(
+            "INSERT INTO project_leases VALUES (?, ?, ?, ?, ?, ?)",
+            ("demo", "token", 1, "agent", expires, expires),
+        )
+        database.commit()
+    code = """
+import sys
+from pathlib import Path
+from markdown_transaction import MarkdownChange, MarkdownCoordinator
+vault, state, kind, expires = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], sys.argv[4]
+path = 'knowledge/projects/demo/journal.md'
+change = {
+    'create': MarkdownChange.create(path, b'external journal bytes'),
+    'replace': MarkdownChange.replace(path, b'external replacement bytes'),
+    'delete': MarkdownChange.delete(path),
+}[kind]
+c = MarkdownCoordinator(vault, state)
+c.prepare([change], operation_id=f'ambiguous:{kind}', preconditions={
+    'project_lease': {
+        'project': 'demo', 'lease_token': 'token', 'fencing_epoch': 1,
+        'expires_at': expires,
+    }
+})
+"""
+    crashed = _crash_process(
+        vault, state_root, "after_plan_fsynced", code, kind, expires
+    )
+    assert crashed.returncode == 86, crashed.stderr
+    if after is None:
+        target.unlink()
+    else:
+        target.write_bytes(after)
+    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+        database.execute(
+            "UPDATE project_leases SET lease_token = 'new-token', fencing_epoch = 2 "
+            "WHERE project = 'demo'"
+        )
+        database.commit()
+
+    recovered = MarkdownCoordinator(vault, state_root).recover()[0]
+
+    assert (recovered.state, recovered.error_code) == (
+        "quarantined",
+        "precondition_failed",
+    )
+    assert (target.read_bytes() if target.exists() else None) == after
+    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+        assert database.execute(
+            'SELECT applied FROM "operation" WHERE transaction_id = ?',
+            (recovered.id,),
+        ).fetchone()[0] == 0
+
+
+def test_dead_preparing_matching_after_rolls_forward_with_valid_precondition(
+    vault: Path, state_root: Path
+):
+    expires = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat().replace(
+        "+00:00", "Z"
+    )
+    MarkdownCoordinator(vault, state_root)
+    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+        database.execute(
+            "INSERT INTO project_leases VALUES (?, ?, ?, ?, ?, ?)",
+            ("demo", "token", 1, "agent", expires, expires),
+        )
+        database.commit()
+    code = """
+import sys
+from pathlib import Path
+from markdown_transaction import MarkdownChange, MarkdownCoordinator
+c = MarkdownCoordinator(Path(sys.argv[1]), Path(sys.argv[2]))
+c.prepare(
+    [MarkdownChange.create('knowledge/projects/demo/journal.md', b'journal bytes')],
+    operation_id='valid-ambiguous',
+    preconditions={'project_lease': {
+        'project': 'demo', 'lease_token': 'token', 'fencing_epoch': 1,
+        'expires_at': sys.argv[3],
+    }},
+)
+"""
+    crashed = _crash_process(
+        vault, state_root, "after_plan_fsynced", code, expires
+    )
+    assert crashed.returncode == 86, crashed.stderr
+    target = vault / "knowledge/projects/demo/journal.md"
+    target.write_bytes(b"journal bytes")
+
+    recovered = MarkdownCoordinator(vault, state_root).recover()[0]
+
+    assert recovered.state == "committed"
+    assert target.read_bytes() == b"journal bytes"
+
+
 def test_complete_dead_preparing_with_unknown_target_conflicts_instead_of_discarding(
     vault: Path, state_root: Path
 ):
