@@ -355,13 +355,22 @@ def test_replace_uses_random_same_directory_temp_and_os_replace(
     target = vault / "knowledge/notes/page.md"
     target.write_bytes(b"before")
     replacements = []
-    real_replace = os.replace
+    if os.name == "nt":
+        real_replace = markdown_transaction._rename_windows_handle
 
-    def recording_replace(source, destination, *args, **kwargs):
-        replacements.append((Path(source), Path(destination)))
-        real_replace(source, destination, *args, **kwargs)
+        def recording_replace(handle, parent_handle, destination, *, replace):
+            replacements.append((destination, replace))
+            real_replace(handle, parent_handle, destination, replace=replace)
 
-    monkeypatch.setattr(markdown_transaction.os, "replace", recording_replace)
+        monkeypatch.setattr(markdown_transaction, "_rename_windows_handle", recording_replace)
+    else:
+        real_replace = os.replace
+
+        def recording_replace(source, destination, *args, **kwargs):
+            replacements.append((Path(source), Path(destination)))
+            real_replace(source, destination, *args, **kwargs)
+
+        monkeypatch.setattr(markdown_transaction.os, "replace", recording_replace)
     coordinator = MarkdownCoordinator(vault, state_root)
     first = coordinator.prepare(
         [MarkdownChange.replace("knowledge/notes/page.md", b"after-one")],
@@ -375,14 +384,17 @@ def test_replace_uses_random_same_directory_temp_and_os_replace(
     coordinator.apply(second.id)
 
     assert len(replacements) == 2
-    if markdown_transaction._use_posix_dir_fd():
+    if os.name == "nt":
+        assert replacements == [(target.name, True), (target.name, True)]
+    elif markdown_transaction._use_posix_dir_fd():
         assert all(source.parent == Path() and destination == Path(target.name) for source, destination in replacements)
     else:
         assert all(
             source.parent == target.parent and destination == target
             for source, destination in replacements
         )
-    assert replacements[0][0].name != replacements[1][0].name
+    if os.name != "nt":
+        assert replacements[0][0].name != replacements[1][0].name
     assert not list(target.parent.glob(".*.tmp"))
 
 
@@ -408,6 +420,7 @@ def test_apply_recovers_after_filesystem_mutation_before_applied_update(
     transaction = coordinator.prepare(
         [MarkdownChange.replace("knowledge/notes/page.md", b"after")],
         operation_id="crash-after-mutation",
+        preconditions={"knowledge/notes/page.md": sha256_bytes(b"before")},
     )
     mark_applied = coordinator._mark_operation_applied
     injected = False
@@ -557,6 +570,39 @@ def test_live_writer_heartbeat_renews_before_expiry(
         assert renewed[2] == first[2]
 
 
+def test_reclaimed_writer_fails_fence_before_filesystem_mutation(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    target = vault / "knowledge/notes/page.md"
+    target.write_bytes(b"before")
+    old = MarkdownCoordinator(vault, state_root)
+    new = MarkdownCoordinator(vault, state_root)
+    transaction = old.prepare(
+        [MarkdownChange.replace("knowledge/notes/page.md", b"after")],
+        operation_id="expired-writer",
+    )
+    monkeypatch.setattr(old, "_heartbeat_writer_gate", lambda *args: None)
+    old_gate = old.writer_gate()
+    old_gate.__enter__()
+    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+        database.execute(
+            "UPDATE writer_owners SET expires_at = '2000-01-01T00:00:00Z' "
+            "WHERE gate_name = 'global'"
+        )
+        database.commit()
+
+    new_gate = new.writer_gate()
+    new_gate.__enter__()
+    try:
+        with pytest.raises(RuntimeError, match="writer gate ownership"):
+            old.apply(transaction.id)
+        assert target.read_bytes() == b"before"
+    finally:
+        new_gate.__exit__(None, None, None)
+        with pytest.raises(RuntimeError, match="writer gate ownership"):
+            old_gate.__exit__(None, None, None)
+
+
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX dir_fd semantics")
 def test_parent_swap_cannot_redirect_replace_outside_vault(
     vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
@@ -608,6 +654,48 @@ def test_windows_parent_identity_change_fails_closed(
     with pytest.raises(RuntimeError, match="parent identity"):
         coordinator.apply(transaction.id)
     assert target.read_bytes() == b"before"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows directory sharing semantics")
+def test_windows_parent_swap_cannot_redirect_handle_relative_mutation(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    notes = vault / "knowledge/notes"
+    original = vault / "knowledge/notes-original"
+    outside = vault.parent / "outside"
+    outside.mkdir()
+    target = notes / "page.md"
+    target.write_bytes(b"before")
+    (outside / "page.md").write_bytes(b"outside")
+    coordinator = MarkdownCoordinator(vault, state_root)
+    transaction = coordinator.prepare(
+        [MarkdownChange.replace("knowledge/notes/page.md", b"after")],
+        operation_id="windows-parent-swap",
+    )
+    blocked = []
+    swapped = []
+
+    def attempt_swap(path):
+        try:
+            notes.rename(original)
+            outside.rename(notes)
+            swapped.append(True)
+        except OSError:
+            blocked.append(True)
+
+    monkeypatch.setattr(coordinator, "_before_target_mutation", attempt_swap)
+    try:
+        result = coordinator.apply(transaction.id)
+    except RuntimeError as exc:
+        assert swapped == [True]
+        assert "parent identity" in str(exc)
+        assert (notes / "page.md").read_bytes() == b"outside"
+        assert (original / "page.md").read_bytes() == b"after"
+    else:
+        assert blocked == [True]
+        assert result.state == "committed"
+        assert target.read_bytes() == b"after"
+        assert (outside / "page.md").read_bytes() == b"outside"
 
 
 def test_windows_acl_hardening_verifies_owner_only_success(tmp_path: Path, monkeypatch):
@@ -702,10 +790,13 @@ def test_windows_sharing_violation_leaves_unknown_target_unchanged(
         operation_id="sharing",
     )
 
-    def sharing_violation(source, destination):
-        raise PermissionError(32, "sharing violation", str(destination))
+    def sharing_violation(*args, **kwargs):
+        raise PermissionError(32, "sharing violation", str(args[-1]))
 
-    monkeypatch.setattr(markdown_transaction.os, "replace", sharing_violation)
+    if os.name == "nt":
+        monkeypatch.setattr(markdown_transaction, "_rename_windows_handle", sharing_violation)
+    else:
+        monkeypatch.setattr(markdown_transaction.os, "replace", sharing_violation)
     with pytest.raises(PermissionError, match="sharing violation"):
         coordinator.apply(transaction.id)
     assert target.read_bytes() == b"before"
@@ -733,3 +824,71 @@ def test_database_has_required_tables_and_durability_pragmas(vault: Path, state_
         assert {"parent_device", "parent_inode"} <= operation_columns
         assert database.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
         assert database.execute("PRAGMA synchronous").fetchone()[0] == 2
+
+
+@pytest.mark.parametrize("target_content", [b"before", b"unknown"])
+def test_schema_migration_validates_and_recaptures_prepared_parent_identity(
+    vault: Path, state_root: Path, target_content: bytes
+):
+    target = vault / "knowledge/notes/page.md"
+    target.write_bytes(target_content)
+    run_root = state_root / "run"
+    run_root.mkdir(parents=True)
+    database_path = run_root / "markdown-transactions.sqlite3"
+    with sqlite3.connect(database_path) as database:
+        database.executescript(
+            """
+            CREATE TABLE "transaction" (
+                id TEXT PRIMARY KEY,
+                operation_id TEXT NOT NULL UNIQUE,
+                request_hash TEXT NOT NULL,
+                state TEXT NOT NULL,
+                preconditions_json TEXT NOT NULL,
+                plan_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE "operation" (
+                transaction_id TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                path TEXT NOT NULL,
+                before_hash TEXT NOT NULL,
+                after_hash TEXT NOT NULL,
+                applied INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (transaction_id, position)
+            );
+            """
+        )
+        database.execute(
+            'INSERT INTO "transaction" VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            ("legacy-tx", "legacy-op", "r", "prepared", "{}", "p", "now", "now"),
+        )
+        database.execute(
+            'INSERT INTO "operation" VALUES (?, ?, ?, ?, ?, ?, ?)',
+            (
+                "legacy-tx",
+                0,
+                "replace",
+                "knowledge/notes/page.md",
+                sha256_bytes(b"before"),
+                sha256_bytes(b"after"),
+                0,
+            ),
+        )
+        database.commit()
+
+    if target_content == b"unknown":
+        with pytest.raises(RuntimeError, match="unknown target bytes"):
+            MarkdownCoordinator(vault, state_root)
+        return
+
+    MarkdownCoordinator(vault, state_root)
+
+    with sqlite3.connect(database_path) as database:
+        identity = database.execute(
+            'SELECT parent_device, parent_inode FROM "operation" '
+            "WHERE transaction_id = 'legacy-tx'"
+        ).fetchone()
+    metadata = target.parent.stat()
+    assert identity == (metadata.st_dev, metadata.st_ino)

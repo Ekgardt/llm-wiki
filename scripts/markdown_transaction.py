@@ -17,6 +17,7 @@ import time
 import unicodedata
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -199,6 +200,153 @@ def _harden_owner_only(path: Path, mode: int) -> None:
         _set_owner_only(path, mode)
 
 
+class _WindowsFileInformation(ctypes.Structure):
+    _fields_ = [
+        ("file_attributes", wintypes.DWORD),
+        ("creation_time", wintypes.FILETIME),
+        ("last_access_time", wintypes.FILETIME),
+        ("last_write_time", wintypes.FILETIME),
+        ("volume_serial_number", wintypes.DWORD),
+        ("file_size_high", wintypes.DWORD),
+        ("file_size_low", wintypes.DWORD),
+        ("number_of_links", wintypes.DWORD),
+        ("file_index_high", wintypes.DWORD),
+        ("file_index_low", wintypes.DWORD),
+    ]
+
+
+class _WindowsRenameInformation(ctypes.Structure):
+    _fields_ = [
+        ("flags", wintypes.DWORD),
+        ("root_directory", wintypes.HANDLE),
+        ("file_name_length", wintypes.DWORD),
+        ("file_name", wintypes.WCHAR * 1),
+    ]
+
+
+class _WindowsDispositionInformation(ctypes.Structure):
+    _fields_ = [("delete_file", wintypes.BOOL)]
+
+
+class _WindowsIoStatusBlock(ctypes.Structure):
+    _fields_ = [("status", ctypes.c_ssize_t), ("information", ctypes.c_size_t)]
+
+
+def _open_windows_directory(path: Path) -> int:
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateFileW.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    file_read_attributes = 0x80
+    file_share_read = 0x1
+    file_share_write = 0x2
+    open_existing = 3
+    file_flag_backup_semantics = 0x02000000
+    file_flag_open_reparse_point = 0x00200000
+    handle = kernel32.CreateFileW(
+        str(path),
+        file_read_attributes,
+        file_share_read | file_share_write,
+        None,
+        open_existing,
+        file_flag_backup_semantics | file_flag_open_reparse_point,
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle == invalid_handle:
+        raise OSError(ctypes.get_last_error(), f"cannot lock Windows directory: {path}")
+    information = _WindowsFileInformation()
+    if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(information)):
+        error = ctypes.get_last_error()
+        kernel32.CloseHandle(handle)
+        raise OSError(error, f"cannot identify Windows directory: {path}")
+    if information.file_attributes & 0x400:
+        kernel32.CloseHandle(handle)
+        raise RuntimeError(f"Windows directory handle resolves to a reparse point: {path}")
+    return handle
+
+
+def _close_windows_handle(handle: int) -> None:
+    if not ctypes.windll.kernel32.CloseHandle(handle):
+        raise OSError(ctypes.get_last_error(), "cannot close Windows directory handle")
+
+
+def _open_windows_file_for_mutation(path: Path) -> int:
+    kernel32 = ctypes.windll.kernel32
+    generic_read = 0x80000000
+    delete_access = 0x00010000
+    share_read = 0x1
+    share_delete = 0x4
+    open_existing = 3
+    open_reparse_point = 0x00200000
+    handle = kernel32.CreateFileW(
+        str(path),
+        generic_read | delete_access,
+        share_read | share_delete,
+        None,
+        open_existing,
+        open_reparse_point,
+        None,
+    )
+    if handle == ctypes.c_void_p(-1).value:
+        raise OSError(ctypes.get_last_error(), f"cannot open Windows mutation handle: {path}")
+    return handle
+
+
+def _rename_windows_handle(
+    file_handle: int, parent_handle: int, target_name: str, *, replace: bool
+) -> None:
+    encoded_name = target_name.encode("utf-16-le")
+    name_offset = _WindowsRenameInformation.file_name.offset
+    buffer = ctypes.create_string_buffer(ctypes.sizeof(_WindowsRenameInformation) + len(encoded_name))
+    information = _WindowsRenameInformation.from_buffer(buffer)
+    information.flags = int(replace)
+    information.root_directory = parent_handle
+    information.file_name_length = len(encoded_name)
+    ctypes.memmove(ctypes.addressof(buffer) + name_offset, encoded_name, len(encoded_name))
+    file_rename_information = 10
+    io_status = _WindowsIoStatusBlock()
+    ntdll = ctypes.windll.ntdll
+    ntdll.NtSetInformationFile.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(_WindowsIoStatusBlock),
+        wintypes.LPVOID,
+        wintypes.ULONG,
+        ctypes.c_int,
+    )
+    ntdll.NtSetInformationFile.restype = ctypes.c_long
+    status = ntdll.NtSetInformationFile(
+        file_handle,
+        ctypes.byref(io_status),
+        buffer,
+        len(buffer),
+        file_rename_information,
+    )
+    if status < 0:
+        error = ntdll.RtlNtStatusToDosError(status)
+        raise OSError(error, f"cannot publish Windows target: {target_name}")
+
+
+def _delete_windows_handle(file_handle: int) -> None:
+    information = _WindowsDispositionInformation(True)
+    file_disposition_info = 4
+    kernel32 = ctypes.windll.kernel32
+    if not kernel32.SetFileInformationByHandle(
+        file_handle,
+        file_disposition_info,
+        ctypes.byref(information),
+        ctypes.sizeof(information),
+    ):
+        raise OSError(kernel32.GetLastError(), "cannot delete Windows target")
+
+
 class MarkdownCoordinator:
     """Prepare and apply durable multi-file Markdown transactions."""
 
@@ -299,6 +447,33 @@ class MarkdownCoordinator:
                         database.execute(
                             f'ALTER TABLE "operation" ADD COLUMN {name} INTEGER'
                         )
+                self._backfill_parent_identities(database)
+
+    def _backfill_parent_identities(self, database: sqlite3.Connection) -> None:
+        rows = database.execute(
+            'SELECT operation.*, "transaction".state AS transaction_state '
+            'FROM "operation" JOIN "transaction" '
+            'ON "transaction".id = operation.transaction_id '
+            "WHERE (operation.parent_device IS NULL OR operation.parent_inode IS NULL) "
+            "AND \"transaction\".state IN ('prepared', 'applying')"
+        ).fetchall()
+        for row in rows:
+            target = self._target(row["path"])
+            content, identity = self._capture_target(target)
+            current_hash = ABSENT if content is None else sha256_bytes(content)
+            expected_hashes = {row["after_hash"]} if row["applied"] else {
+                row["before_hash"],
+                row["after_hash"],
+            }
+            if current_hash not in expected_hashes:
+                raise RuntimeError(
+                    f"cannot migrate parent identity with unknown target bytes: {row['path']}"
+                )
+            database.execute(
+                'UPDATE "operation" SET parent_device = ?, parent_inode = ? '
+                "WHERE transaction_id = ? AND position = ?",
+                (identity[0], identity[1], row["transaction_id"], row["position"]),
+            )
 
     def prepare(
         self,
@@ -443,9 +618,9 @@ class MarkdownCoordinator:
                 return record
             if record.state not in {"prepared", "applying"}:
                 raise RuntimeError(f"transaction cannot be applied from state {record.state}")
-            self._check_preconditions(record.preconditions)
             rows = self._operation_rows(transaction_id)
-            self._reconcile_operation_states(transaction_id, rows)
+            reconciled_after = self._reconcile_operation_states(transaction_id, rows)
+            self._check_preconditions(record.preconditions, reconciled_after)
             rows = self._operation_rows(transaction_id)
             with self._connect() as database, begin_immediate(database):
                 database.execute(
@@ -458,9 +633,7 @@ class MarkdownCoordinator:
                 if row["applied"]:
                     self._require_operation_state(row, row["after_hash"], "after state")
                     continue
-                self._apply_operation(row, operation_plan)
-                self._require_operation_state(row, row["after_hash"], "after state")
-                self._mark_operation_applied(transaction_id, row["position"])
+                self._mutate_and_mark(transaction_id, row, operation_plan)
 
             for row in self._operation_rows(transaction_id):
                 self._require_operation_state(row, row["after_hash"], "after state")
@@ -738,11 +911,12 @@ class MarkdownCoordinator:
 
     def _capture_target(self, target: Path) -> tuple[bytes | None, tuple[int, int]]:
         if not _use_posix_dir_fd():
-            before = self._parent_identity(target.parent)
-            content = self._read_target(target)
-            if self._parent_identity(target.parent) != before:
-                raise RuntimeError(f"parent identity changed while reading {target}")
-            return content, before
+            with self._hold_windows_parent(target.parent):
+                before = self._parent_identity(target.parent)
+                content = self._read_target(target)
+                if self._parent_identity(target.parent) != before:
+                    raise RuntimeError(f"parent identity changed while reading {target}")
+                return content, before
         flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(target.parent, flags)
         try:
@@ -762,13 +936,14 @@ class MarkdownCoordinator:
         if None in expected:
             raise RuntimeError(f"transaction lacks parent identity for {row['path']}")
         if not _use_posix_dir_fd():
-            if self._parent_identity(target.parent) != expected:
-                raise RuntimeError(f"parent identity mismatch for {row['path']}")
-            try:
-                yield target, None
-            finally:
+            with self._hold_windows_parent(target.parent):
                 if self._parent_identity(target.parent) != expected:
                     raise RuntimeError(f"parent identity mismatch for {row['path']}")
+                try:
+                    yield target, None
+                finally:
+                    if self._parent_identity(target.parent) != expected:
+                        raise RuntimeError(f"parent identity mismatch for {row['path']}")
             return
 
         flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -782,6 +957,37 @@ class MarkdownCoordinator:
                 raise RuntimeError(f"parent identity mismatch for {row['path']}")
         finally:
             os.close(descriptor)
+
+    @contextlib.contextmanager
+    def _hold_windows_parent(self, parent: Path) -> Iterator[None]:
+        if os.name != "nt":
+            raise RuntimeError("safe non-POSIX mutation requires Windows directory handles")
+        try:
+            relative = parent.relative_to(self.vault)
+        except ValueError as exc:
+            raise RuntimeError("target parent is outside the vault") from exc
+        paths = [self.vault]
+        current = self.vault
+        for part in relative.parts:
+            current = current / part
+            paths.append(current)
+        handles: list[int] = []
+        previous_parent_handle = getattr(self._local, "windows_parent_handle", None)
+        try:
+            for path in paths:
+                handles.append(_open_windows_directory(path))
+            self._local.windows_parent_handle = handles[-1]
+            yield
+        finally:
+            self._local.windows_parent_handle = previous_parent_handle
+            close_error: OSError | None = None
+            for handle in reversed(handles):
+                try:
+                    _close_windows_handle(handle)
+                except OSError as exc:
+                    close_error = close_error or exc
+            if close_error is not None:
+                raise close_error
 
     def _read_from_parent(self, parent_descriptor: int, name: str) -> bytes | None:
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
@@ -806,31 +1012,89 @@ class MarkdownCoordinator:
         content = self._read_target(self._target(path))
         return ABSENT if content is None else sha256_bytes(content)
 
-    def _check_preconditions(self, preconditions: Mapping[str, object]) -> None:
+    def _check_preconditions(
+        self, preconditions: Mapping[str, object], reconciled_after: set[str]
+    ) -> None:
         for path, expected in preconditions.items():
+            if path in reconciled_after:
+                continue
             if self._current_hash(path) != expected:
                 raise RuntimeError(f"persisted precondition failed for {path}")
 
     def _reconcile_operation_states(
         self, transaction_id: str, rows: Sequence[sqlite3.Row]
-    ) -> None:
+    ) -> set[str]:
+        reconciled_after: set[str] = set()
         for row in rows:
             current = self._operation_hash(row)
             if row["applied"]:
                 if current != row["after_hash"]:
                     raise RuntimeError(f"after state mismatch for {row['path']}")
+                reconciled_after.add(row["path"])
             elif current == row["after_hash"]:
                 self._mark_operation_applied(transaction_id, row["position"])
+                reconciled_after.add(row["path"])
             elif current != row["before_hash"]:
                 raise RuntimeError(f"before state mismatch for {row['path']}")
+        return reconciled_after
 
     def _mark_operation_applied(self, transaction_id: str, position: int) -> None:
+        active_database = getattr(self._local, "mutation_database", None)
+        if active_database is not None:
+            active_database.execute(
+                'UPDATE "operation" SET applied = 1 '
+                "WHERE transaction_id = ? AND position = ?",
+                (transaction_id, position),
+            )
+            return
         with self._connect() as database, begin_immediate(database):
+            self._assert_writer_ownership(database)
             database.execute(
                 'UPDATE "operation" SET applied = 1 '
                 "WHERE transaction_id = ? AND position = ?",
                 (transaction_id, position),
             )
+
+    def _mutate_and_mark(
+        self,
+        transaction_id: str,
+        row: sqlite3.Row,
+        operation_plan: Mapping[str, object],
+    ) -> None:
+        with self._connect() as database, begin_immediate(database):
+            self._assert_writer_ownership(database)
+            self._local.mutation_database = database
+            try:
+                self._apply_operation(row, operation_plan)
+                self._require_operation_state(row, row["after_hash"], "after state")
+                self._mark_operation_applied(transaction_id, row["position"])
+            finally:
+                self._local.mutation_database = None
+
+    def _assert_writer_ownership(self, database: sqlite3.Connection) -> None:
+        owner_token = getattr(self._local, "gate_token", None)
+        fencing_epoch = getattr(self._local, "gate_fence", None)
+        row = database.execute(
+            "SELECT owner_token, fencing_epoch FROM writer_owners WHERE gate_name = 'global'"
+        ).fetchone()
+        if (
+            row is None
+            or row["owner_token"] != owner_token
+            or row["fencing_epoch"] != fencing_epoch
+        ):
+            raise RuntimeError("Markdown writer gate ownership was lost before mutation")
+        cursor = database.execute(
+            "UPDATE writer_owners SET heartbeat_at = ?, expires_at = ? "
+            "WHERE gate_name = 'global' AND owner_token = ? AND fencing_epoch = ?",
+            (
+                _now(),
+                _future_timestamp(_WRITER_LEASE_SECONDS),
+                owner_token,
+                fencing_epoch,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError("Markdown writer gate ownership was lost before mutation")
 
     def _require_operation_state(self, row: sqlite3.Row, expected: str, label: str) -> None:
         if self._operation_hash(row) != expected:
@@ -842,20 +1106,14 @@ class MarkdownCoordinator:
             current_hash = ABSENT if current is None else sha256_bytes(current)
             if current_hash != row["before_hash"]:
                 raise RuntimeError(f"before state mismatch for {row['path']}")
+            if parent_descriptor is None:
+                self._apply_windows_operation(row, operation_plan, target)
+                return
             self._before_target_mutation(target)
-            if parent_descriptor is None and self._parent_identity(target.parent) != (
-                row["parent_device"],
-                row["parent_inode"],
-            ):
-                raise RuntimeError(f"parent identity mismatch for {row['path']}")
 
             if row["kind"] == "delete":
-                if parent_descriptor is None:
-                    target.unlink()
-                    fsync_directory(target.parent)
-                else:
-                    os.unlink(target.name, dir_fd=parent_descriptor)
-                    os.fsync(parent_descriptor)
+                os.unlink(target.name, dir_fd=parent_descriptor)
+                os.fsync(parent_descriptor)
                 return
 
             after = operation_plan["after"]
@@ -866,36 +1124,24 @@ class MarkdownCoordinator:
             if sha256_bytes(content) != row["after_hash"]:
                 raise RuntimeError(f"transaction after-image is corrupt for {row['path']}")
             temporary_name = f".{target.name}.{uuid.uuid4().hex}.tmp"
-            temporary = target.parent / temporary_name
             try:
-                if parent_descriptor is None:
-                    self._write_new_file(temporary, content, owner_only=False)
-                else:
-                    self._write_new_file_at(parent_descriptor, temporary_name, content)
+                self._write_new_file_at(parent_descriptor, temporary_name, content)
                 current = self._read_operation_target(target, parent_descriptor)
                 current_hash = ABSENT if current is None else sha256_bytes(current)
                 if current_hash != row["before_hash"]:
                     raise RuntimeError(f"before state mismatch for {row['path']}")
                 if row["kind"] == "create":
                     try:
-                        if parent_descriptor is None:
-                            os.link(temporary, target)
-                        else:
-                            os.link(
-                                temporary_name,
-                                target.name,
-                                src_dir_fd=parent_descriptor,
-                                dst_dir_fd=parent_descriptor,
-                                follow_symlinks=False,
-                            )
+                        os.link(
+                            temporary_name,
+                            target.name,
+                            src_dir_fd=parent_descriptor,
+                            dst_dir_fd=parent_descriptor,
+                            follow_symlinks=False,
+                        )
                     except FileExistsError as exc:
                         raise RuntimeError(f"before state mismatch for {row['path']}") from exc
-                    if parent_descriptor is None:
-                        temporary.unlink()
-                    else:
-                        os.unlink(temporary_name, dir_fd=parent_descriptor)
-                elif parent_descriptor is None:
-                    os.replace(temporary, target)
+                    os.unlink(temporary_name, dir_fd=parent_descriptor)
                 else:
                     os.replace(
                         temporary_name,
@@ -903,21 +1149,64 @@ class MarkdownCoordinator:
                         src_dir_fd=parent_descriptor,
                         dst_dir_fd=parent_descriptor,
                     )
-                if parent_descriptor is None:
-                    fsync_directory(target.parent)
-                else:
-                    os.fsync(parent_descriptor)
+                os.fsync(parent_descriptor)
                 actual = self._read_operation_target(target, parent_descriptor)
                 actual_hash = ABSENT if actual is None else sha256_bytes(actual)
                 if actual_hash != row["after_hash"]:
                     raise RuntimeError(f"after state mismatch for {row['path']}")
             finally:
-                if parent_descriptor is None:
-                    with contextlib.suppress(FileNotFoundError):
-                        temporary.unlink()
-                else:
-                    with contextlib.suppress(FileNotFoundError):
-                        os.unlink(temporary_name, dir_fd=parent_descriptor)
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(temporary_name, dir_fd=parent_descriptor)
+
+    def _apply_windows_operation(
+        self,
+        row: sqlite3.Row,
+        operation_plan: Mapping[str, object],
+        target: Path,
+    ) -> None:
+        parent_handle = getattr(self._local, "windows_parent_handle", None)
+        if parent_handle is None:
+            raise RuntimeError("Windows parent handle is not held at mutation")
+        if row["kind"] == "delete":
+            target_handle = _open_windows_file_for_mutation(target)
+            try:
+                self._before_target_mutation(target)
+                _delete_windows_handle(target_handle)
+            finally:
+                _close_windows_handle(target_handle)
+            fsync_directory(target.parent)
+            return
+
+        after = operation_plan["after"]
+        if not isinstance(after, dict):
+            raise RuntimeError("transaction after-image is absent")
+        artifact = self.transaction_root / row["transaction_id"] / str(after["artifact"])
+        content = artifact.read_bytes()
+        if sha256_bytes(content) != row["after_hash"]:
+            raise RuntimeError(f"transaction after-image is corrupt for {row['path']}")
+        temporary = target.parent / f".{target.name}.{uuid.uuid4().hex}.tmp"
+        self._write_new_file(temporary, content, owner_only=False)
+        try:
+            temporary_handle = _open_windows_file_for_mutation(temporary)
+        except BaseException:
+            temporary.unlink()
+            raise
+        renamed = False
+        try:
+            self._before_target_mutation(target)
+            _rename_windows_handle(
+                temporary_handle,
+                parent_handle,
+                target.name,
+                replace=row["kind"] == "replace",
+            )
+            renamed = True
+            fsync_directory(target.parent)
+        finally:
+            if not renamed:
+                with contextlib.suppress(OSError):
+                    _delete_windows_handle(temporary_handle)
+            _close_windows_handle(temporary_handle)
 
     def _before_target_mutation(self, target: Path) -> None:
         """Failure-injection boundary after parent binding and before mutation."""
