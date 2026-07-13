@@ -137,12 +137,15 @@ class ProjectStore:
         owner: str,
         ttl: int = 30,
         *,
+        token: str | None = None,
         now: datetime | None = None,
     ) -> ProjectLease:
         slug = _require_slug(slug)
         owner = _require_owner(owner)
         if not isinstance(ttl, int) or isinstance(ttl, bool) or ttl <= _HEARTBEAT_SECONDS:
             raise ValueError("project lease ttl must be an integer greater than 10 seconds")
+        if token is not None and (not isinstance(token, str) or not token):
+            raise ValueError("project lease token must be a non-empty string")
         current_time = now or self._clock()
         expires_at = current_time + timedelta(seconds=ttl)
         with self.coordinator._connect() as database, begin_immediate(database):
@@ -150,9 +153,25 @@ class ProjectStore:
                 "SELECT * FROM project_leases WHERE project = ?", (slug,)
             ).fetchone()
             if row is not None and _parse_timestamp(row["expires_at"]) > current_time:
-                if row["owner"] != owner:
-                    raise ProjectLeaseBusy(f"project {slug!r} is leased by another owner")
-                return _lease_from_row(row)
+                if row["owner"] != owner or token is None or row["lease_token"] != token:
+                    raise ProjectLeaseBusy(f"project {slug!r} is leased by another invocation")
+                database.execute(
+                    "UPDATE project_leases SET expires_at = ?, heartbeat_at = ? "
+                    "WHERE project = ? AND lease_token = ? AND fencing_epoch = ?",
+                    (
+                        _timestamp(expires_at),
+                        _timestamp(current_time),
+                        slug,
+                        token,
+                        row["fencing_epoch"],
+                    ),
+                )
+                renewed = dict(row)
+                renewed["expires_at"] = _timestamp(expires_at)
+                renewed["heartbeat_at"] = _timestamp(current_time)
+                return _lease_from_row(renewed)
+            if token is not None:
+                raise ProjectFenceError("project lease token is stale or expired")
             epoch = 1 if row is None else int(row["fencing_epoch"]) + 1
             token = secrets.token_hex(32)
             database.execute(
@@ -223,9 +242,10 @@ class ProjectStore:
     ) -> CheckpointReceipt:
         slug = _require_slug(slug)
         _require_owner(owner)
+        normalized_event = self.coordinator.normalize_project_checkpoint(slug, event)
         self.recover(slug)
         lease = self.acquire_lease(slug, owner)
-        reserved, duplicate = self._reserve(slug, event, lease)
+        reserved, duplicate = self._reserve(slug, normalized_event, lease)
         if duplicate and reserved.state == "committed":
             self._release(lease)
             return self._receipt(reserved, duplicate=True)

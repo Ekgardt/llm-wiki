@@ -49,6 +49,9 @@ _ALLOWED_DIRECTORIES = (
 )
 _ALLOWED_FILES = {"knowledge/index.md", "knowledge/log.md"}
 _SCHEMA = Path(__file__).with_name("schemas") / "markdown-transaction-v1.json"
+_PROJECT_CHECKPOINT_SCHEMA = (
+    Path(__file__).with_name("schemas") / "project-checkpoint-v1.json"
+)
 _WRITER_LEASE_SECONDS = 2.0
 _WRITER_HEARTBEAT_SECONDS = 0.5
 _WRITER_WAIT_SECONDS = DEFAULTS.markdown_busy_ms / 1_000
@@ -581,15 +584,8 @@ class MarkdownCoordinator:
         lease: Mapping[str, object],
     ) -> ProjectCheckpointReservation:
         """Atomically fence and reserve one idempotent project sequence."""
-        if not isinstance(project, str) or not project:
-            raise ValueError("project must be a non-empty string")
-        if not isinstance(event, Mapping):
-            raise TypeError("checkpoint event must be a mapping")
+        base = self.normalize_project_checkpoint(project, event)
         allocated = {"project", "sequence", "last_applied_sequence"}
-        if allocated.intersection(event):
-            raise ValueError("checkpoint event contains coordinator-allocated fields")
-        base = dict(event)
-        canonical_json_bytes(base)
         occurrence_id = base.get("occurrence_id")
         idempotency_key = base.get("idempotency_key")
         if not isinstance(occurrence_id, str) or not occurrence_id:
@@ -664,6 +660,24 @@ class MarkdownCoordinator:
                 (project, sequence),
             ).fetchone()
         return self._project_reservation(reserved)
+
+    @staticmethod
+    def normalize_project_checkpoint(
+        project: str, event: Mapping[str, object]
+    ) -> dict[str, object]:
+        """Canonicalize and fully validate an event before reserving any state."""
+        if not isinstance(project, str) or not project:
+            raise ValueError("project must be a non-empty string")
+        if not isinstance(event, Mapping):
+            raise TypeError("checkpoint event must be a mapping")
+        allocated = {"project", "sequence", "last_applied_sequence"}
+        if allocated.intersection(event):
+            raise ValueError("checkpoint event contains coordinator-allocated fields")
+        normalized = json.loads(canonical_json_bytes(dict(event)))
+        candidate = copy.deepcopy(normalized)
+        candidate.update(project=project, sequence=1, last_applied_sequence=0)
+        validate_schema(candidate, _PROJECT_CHECKPOINT_SCHEMA)
+        return normalized
 
     @staticmethod
     def _require_same_checkpoint_event(

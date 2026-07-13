@@ -15,7 +15,7 @@ from project_journal import (
     ProjectLeaseBusy,
     ProjectStore,
 )
-from reliable_memory import canonical_json_bytes, validate_schema
+from reliable_memory import SchemaValidationError, canonical_json_bytes, validate_schema
 
 
 @pytest.fixture
@@ -173,10 +173,65 @@ def test_active_lease_is_exclusive_and_heartbeat_extends_it(
     assert renewed.heartbeat_due_at == now + timedelta(seconds=10)
 
 
+def test_same_owner_cannot_alias_active_lease_and_exact_token_can_renew(
+    vault: Path, state_root: Path
+):
+    now = datetime(2026, 7, 13, tzinfo=timezone.utc)
+    store = ProjectStore(vault, state_root, clock=lambda: now)
+    lease = store.acquire_lease("demo", "agent-a")
+
+    with pytest.raises(ProjectLeaseBusy):
+        store.acquire_lease("demo", "agent-a")
+    with pytest.raises(ProjectLeaseBusy):
+        store.acquire_lease("demo", "agent-a", token="wrong-token")
+
+    now += timedelta(seconds=5)
+    renewed = store.acquire_lease("demo", "agent-a", token=lease.token)
+
+    assert renewed.token == lease.token
+    assert renewed.epoch == lease.epoch
+    assert renewed.expires_at == now + timedelta(seconds=30)
+
+
 @pytest.mark.parametrize("slug", ["../demo", "Demo", "demo/name", "", "demo_1"])
 def test_slug_safety_is_preserved(project_store: ProjectStore, slug: str):
     with pytest.raises(ValueError):
         project_store.acquire_lease(slug, "agent-a")
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda event: event.pop("provenance"),
+        lambda event: event.update(unexpected=True),
+        lambda event: event["delta"]["goal"].update(action="invalid"),
+    ],
+)
+def test_invalid_event_does_not_reserve_sequence_or_idempotency(
+    project_store: ProjectStore, mutate
+):
+    invalid = checkpoint_event()
+    mutate(invalid)
+
+    with pytest.raises(SchemaValidationError):
+        project_store.checkpoint("demo", invalid, "agent-a")
+
+    with sqlite3.connect(project_store.coordinator.database_path) as database:
+        assert database.execute("SELECT * FROM project_checkpoints").fetchall() == []
+    receipt = project_store.checkpoint("demo", checkpoint_event(), "agent-a")
+    assert receipt.sequence == 1
+
+
+def test_event_is_normalized_before_reservation(project_store: ProjectStore):
+    event = checkpoint_event("e\u0301vt", "ke\u0301y")
+    event["delta"]["goal"]["value"] = "Cafe\u0301"
+
+    receipt = project_store.checkpoint("demo", event, "agent-a")
+    record = journal_records(project_store)[0]
+
+    assert receipt.occurrence_id == "\u00e9vt"
+    assert receipt.idempotency_key == "k\u00e9y"
+    assert record["delta"]["goal"]["value"] == "Caf\u00e9"
 
 
 def test_checkpoint_is_append_only_idempotent_and_projects_state(
@@ -340,6 +395,12 @@ def test_valid_checkpoint_after_fenced_reservation_records_last_applied_sequence
     with pytest.raises(ProjectFenceError):
         store.checkpoint("demo", checkpoint_event(), "agent-a")
     monkeypatch.setattr(store.coordinator, "apply", real_apply)
+    with sqlite3.connect(store.coordinator.database_path) as database:
+        database.execute(
+            "UPDATE project_leases SET expires_at = '2000-01-01T00:00:00Z' "
+            "WHERE project = 'demo'"
+        )
+        database.commit()
 
     receipt = store.checkpoint(
         "demo", checkpoint_event("evt-2", "event-after-fence"), "agent-a"
@@ -455,3 +516,48 @@ def test_simultaneous_projectors_append_once_per_event(vault: Path, state_root: 
         in ProjectStore(vault, state_root).read_journal("demo")
         for record in records
     )
+
+
+def test_same_owner_simultaneous_projectors_retry_without_sharing_lease(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    first_store = ProjectStore(vault, state_root)
+    second_store = ProjectStore(vault, state_root)
+    first_reserved = threading.Event()
+    release_first = threading.Event()
+    project = first_store._project_reserved
+
+    def pause_first(reservation, lease):
+        first_reserved.set()
+        assert release_first.wait(5)
+        return project(reservation, lease)
+
+    monkeypatch.setattr(first_store, "_project_reserved", pause_first)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        first = pool.submit(
+            first_store.checkpoint,
+            "demo",
+            checkpoint_event("evt-first", "same-owner:first"),
+            "agent-a",
+        )
+        assert first_reserved.wait(5)
+        with pytest.raises(ProjectLeaseBusy):
+            second_store.checkpoint(
+                "demo",
+                checkpoint_event("evt-second", "same-owner:second"),
+                "agent-a",
+            )
+        release_first.set()
+        first_receipt = first.result(timeout=5)
+
+    second_receipt = second_store.checkpoint(
+        "demo",
+        checkpoint_event("evt-second", "same-owner:second"),
+        "agent-a",
+    )
+
+    assert [first_receipt.sequence, second_receipt.sequence] == [1, 2]
+    assert [record["occurrence_id"] for record in journal_records(second_store)] == [
+        "evt-first",
+        "evt-second",
+    ]
