@@ -748,12 +748,11 @@ class MarkdownCoordinator:
             raise RuntimeError(f"transaction cannot be applied from state {record.state}")
         plan = self._load_verified_plan(record)
         rows = self._operation_rows(transaction_id)
-        if "project_lease" in record.preconditions:
-            self._check_preconditions(
-                {"project_lease": record.preconditions["project_lease"]}, set()
-            )
-        reconciled_after = self._reconcile_operation_states(transaction_id, rows)
-        self._check_preconditions(record.preconditions, reconciled_after)
+        operation_states = {
+            row["path"]: (row["before_hash"], row["after_hash"]) for row in rows
+        }
+        self._check_preconditions(record.preconditions, operation_states)
+        self._reconcile_operation_states(transaction_id, rows)
         rows = self._operation_rows(transaction_id)
         with self._connect() as database, begin_immediate(database):
             database.execute(
@@ -763,16 +762,14 @@ class MarkdownCoordinator:
         self._killpoint("after_applying", record.parent_transaction_id)
 
         for row, operation_plan in zip(rows, plan["operations"], strict=True):
-            self._check_preconditions(record.preconditions, reconciled_after)
+            self._check_preconditions(record.preconditions, operation_states)
             if row["applied"]:
                 self._require_operation_state(row, row["after_hash"], "after state")
-                reconciled_after.add(row["path"])
                 continue
             self._mutate_and_mark(transaction_id, row, operation_plan)
-            reconciled_after.add(row["path"])
             self._killpoint("after_each_target", record.parent_transaction_id)
 
-        self._check_preconditions(record.preconditions, reconciled_after)
+        self._check_preconditions(record.preconditions, operation_states)
         for row in self._operation_rows(transaction_id):
             self._require_operation_state(row, row["after_hash"], "after state")
         self._killpoint("before_commit", record.parent_transaction_id)
@@ -1658,7 +1655,9 @@ class MarkdownCoordinator:
         return ABSENT if content is None else sha256_bytes(content)
 
     def _check_preconditions(
-        self, preconditions: Mapping[str, object], reconciled_after: set[str]
+        self,
+        preconditions: Mapping[str, object],
+        operation_states: Mapping[str, tuple[str, str]],
     ) -> None:
         for path, expected in preconditions.items():
             if path == "project_lease":
@@ -1682,14 +1681,21 @@ class MarkdownCoordinator:
                         "quarantined",
                     )
                 continue
-            if path in reconciled_after:
+            current = self._current_hash(path)
+            if current == expected:
                 continue
-            if self._current_hash(path) != expected:
-                raise TransactionFailure(
-                    f"persisted precondition failed for {path}",
-                    "precondition_failed",
-                    "quarantined",
-                )
+            operation_state = operation_states.get(path)
+            if (
+                operation_state is not None
+                and expected == operation_state[0]
+                and current == operation_state[1]
+            ):
+                continue
+            raise TransactionFailure(
+                f"persisted precondition failed for {path}",
+                "precondition_failed",
+                "quarantined",
+            )
 
     def _killpoint(self, name: str, parent_transaction_id: str | None = None) -> None:
         prefix = "undo_" if parent_transaction_id is not None else ""

@@ -599,6 +599,63 @@ def test_stale_prepared_transaction_does_not_rollback_external_after_hash_bytes(
     assert coordinator._record(transaction.id).error_code == "precondition_failed"
 
 
+def test_unrelated_guard_fails_before_ambiguous_after_state_is_inferred_applied(
+    vault: Path, state_root: Path
+):
+    target = vault / "knowledge/notes/page.md"
+    target.write_bytes(b"before")
+    guard = vault / "knowledge/index.md"
+    coordinator = MarkdownCoordinator(vault, state_root)
+    transaction = coordinator.prepare(
+        [MarkdownChange.replace("knowledge/notes/page.md", b"ambiguous-after")],
+        operation_id="unrelated-guard-before-reconcile",
+        preconditions={
+            "knowledge/notes/page.md": sha256_bytes(b"before"),
+            "knowledge/index.md": sha256_bytes(guard.read_bytes()),
+        },
+    )
+    target.write_bytes(b"ambiguous-after")
+    guard.write_bytes(b"changed-guard")
+
+    recovered = coordinator.recover()[0]
+
+    assert (recovered.state, recovered.error_code) == (
+        "quarantined",
+        "precondition_failed",
+    )
+    assert target.read_bytes() == b"ambiguous-after"
+    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+        assert database.execute(
+            'SELECT applied FROM "operation" WHERE transaction_id = ?',
+            (transaction.id,),
+        ).fetchone()[0] == 0
+
+
+def test_same_target_precondition_accepts_after_state_for_crash_reconciliation(
+    vault: Path, state_root: Path
+):
+    target = vault / "knowledge/notes/page.md"
+    target.write_bytes(b"before")
+    coordinator = MarkdownCoordinator(vault, state_root)
+    transaction = coordinator.prepare(
+        [MarkdownChange.replace("knowledge/notes/page.md", b"after")],
+        operation_id="same-target-crash",
+        preconditions={"knowledge/notes/page.md": sha256_bytes(b"before")},
+    )
+    _set_state(state_root, transaction.id, "applying")
+    target.write_bytes(b"after")
+
+    recovered = coordinator.recover()[0]
+
+    assert recovered.state == "committed"
+    assert target.read_bytes() == b"after"
+    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+        assert database.execute(
+            'SELECT applied FROM "operation" WHERE transaction_id = ?',
+            (transaction.id,),
+        ).fetchone()[0] == 1
+
+
 @pytest.mark.parametrize("expire_after_call", [1, 2])
 def test_obsolete_lease_after_partial_checkpoint_rolls_back_journal_and_projection(
     vault: Path,
