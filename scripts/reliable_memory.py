@@ -10,6 +10,7 @@ import json
 import os
 import platform
 import re
+import secrets
 import sqlite3
 import stat
 import subprocess
@@ -218,7 +219,7 @@ def _windows_reparse_point(path: Path) -> bool:
 
 
 def _sqlite_lock_probe(root: Path) -> bool:
-    probe = root / ".llm-wiki-lock-probe.sqlite3"
+    probe = root / f".llm-wiki-lock-probe-{secrets.token_hex(16)}.sqlite3"
     first: sqlite3.Connection | None = None
     second: sqlite3.Connection | None = None
     try:

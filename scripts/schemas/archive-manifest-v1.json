@@ -2,21 +2,21 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://llm-wiki.local/schemas/archive-manifest-v1.json",
   "type": "object",
-  "required": ["schema_version", "logical_daily_id", "original_path", "source_hash", "payload_hash", "compile_receipt", "queue_preflight", "operations", "evidence", "pins", "retention_days"],
+  "required": ["schema_version", "logical_daily_id", "original_path", "source_hash", "payload_hash", "compile_receipt_ref", "queue_preflight", "operations", "evidence", "pins", "retention_days"],
   "properties": {
     "schema_version": {"const": "archive-manifest/v1"},
     "logical_daily_id": {"type": "string", "minLength": 1},
     "original_path": {"type": "string", "minLength": 1},
     "source_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "payload_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "compile_receipt": {
+    "compile_receipt_ref": {
       "type": "object",
-      "required": ["schema_version", "receipt_id", "path", "sha256"],
+      "required": ["schema", "path", "source_digest", "receipt_file_hash"],
       "properties": {
-        "schema_version": {"const": "compile-receipt/v2"},
-        "receipt_id": {"type": "string", "minLength": 1},
+        "schema": {"const": "compile-receipt-ref/v1"},
         "path": {"type": "string", "minLength": 1},
-        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        "source_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "receipt_file_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
       },
       "additionalProperties": false
     },

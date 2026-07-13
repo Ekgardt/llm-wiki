@@ -240,11 +240,11 @@ def test_archive_manifest_requires_receipt_queue_preflight_and_terminal_operatio
         "original_path": "knowledge/daily/2026-01-01.md",
         "source_hash": "a" * 64,
         "payload_hash": "b" * 64,
-        "compile_receipt": {
-            "schema_version": "compile-receipt/v2",
-            "receipt_id": "receipt-1",
+        "compile_receipt_ref": {
+            "schema": "compile-receipt-ref/v1",
             "path": "knowledge/daily/2026-01-01.md",
-            "sha256": "c" * 64,
+            "source_digest": "c" * 64,
+            "receipt_file_hash": "d" * 64,
         },
         "queue_preflight": {
             "checked_at": "2026-07-13T00:00:00Z",
@@ -258,6 +258,33 @@ def test_archive_manifest_requires_receipt_queue_preflight_and_terminal_operatio
     }
     validate_schema(manifest, SCHEMA_DIR / "archive-manifest-v1.json")
     manifest["operations"][0]["state"] = "ready"
+    with pytest.raises(SchemaValidationError):
+        validate_schema(manifest, SCHEMA_DIR / "archive-manifest-v1.json")
+
+
+def test_archive_manifest_rejects_receipt_payload_masquerading_as_reference():
+    manifest = {
+        "schema_version": "archive-manifest/v1",
+        "logical_daily_id": "2026-01-01",
+        "original_path": "knowledge/daily/2026-01-01.md",
+        "source_hash": "a" * 64,
+        "payload_hash": "b" * 64,
+        "compile_receipt": {
+            "schema_version": "compile-receipt/v2",
+            "receipt_id": "receipt-1",
+            "path": "knowledge/daily/2026-01-01.md",
+            "sha256": "c" * 64,
+        },
+        "queue_preflight": {
+            "checked_at": "2026-07-13T00:00:00Z",
+            "passed": True,
+            "blocking_task_ids": [],
+        },
+        "operations": [],
+        "evidence": [],
+        "pins": [],
+        "retention_days": 30,
+    }
     with pytest.raises(SchemaValidationError):
         validate_schema(manifest, SCHEMA_DIR / "archive-manifest-v1.json")
 

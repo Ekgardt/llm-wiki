@@ -4,7 +4,9 @@ import os
 import sqlite3
 import stat
 import subprocess
+import threading
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path, PurePosixPath
 
@@ -299,3 +301,28 @@ def test_normal_lock_contention_is_reported_by_sqlite(tmp_path):
         first.rollback()
         first.close()
         second.close()
+
+
+def test_concurrent_state_root_validation_uses_unique_probe_databases(tmp_path, monkeypatch):
+    root = tmp_path / "state"
+    root.mkdir()
+    connected_paths = []
+    connected_paths_lock = threading.Lock()
+    real_connect = sqlite3.connect
+
+    def recording_connect(database, *args, **kwargs):
+        with connected_paths_lock:
+            connected_paths.append(Path(database))
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(reliable_memory.sqlite3, "connect", recording_connect)
+    monkeypatch.setattr(reliable_memory, "_known_network_path", lambda path: False)
+    monkeypatch.setattr(reliable_memory, "_windows_reparse_point", lambda path: False)
+    monkeypatch.setattr(reliable_memory, "_set_owner_only", lambda path, mode: True)
+    with ThreadPoolExecutor(max_workers=24) as executor:
+        results = list(executor.map(lambda _index: validate_state_root(root), range(64)))
+
+    assert results == [None] * 64
+    probes = {path for path in connected_paths if path.name.startswith(".llm-wiki-lock-probe-")}
+    assert len(probes) == 64
+    assert not list(root.glob(".llm-wiki-lock-probe-*"))
