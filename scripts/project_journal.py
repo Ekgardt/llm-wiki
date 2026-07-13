@@ -14,6 +14,7 @@ from markdown_transaction import (
     ABSENT,
     MarkdownChange,
     MarkdownCoordinator,
+    ProjectCheckpointReservation,
     TransactionFailure,
 )
 from reliable_memory import (
@@ -129,28 +130,6 @@ class ProjectStore:
         self.vault = self.coordinator.vault
         self.state_root = self.coordinator.state_root
         self._clock = clock
-        self._initialize_database()
-
-    def _initialize_database(self) -> None:
-        with self.coordinator._connect() as database, begin_immediate(database):
-            database.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS project_checkpoints (
-                    project TEXT NOT NULL,
-                    sequence INTEGER NOT NULL,
-                    occurrence_id TEXT NOT NULL,
-                    idempotency_key TEXT NOT NULL,
-                    event_json TEXT NOT NULL,
-                    lease_token TEXT NOT NULL,
-                    fencing_epoch INTEGER NOT NULL,
-                    transaction_id TEXT,
-                    state TEXT NOT NULL CHECK (state IN ('reserved', 'prepared', 'committed', 'quarantined')),
-                    PRIMARY KEY (project, sequence),
-                    UNIQUE (project, occurrence_id),
-                    UNIQUE (project, idempotency_key)
-                );
-                """
-            )
 
     def acquire_lease(
         self,
@@ -247,14 +226,14 @@ class ProjectStore:
         self.recover(slug)
         lease = self.acquire_lease(slug, owner)
         reserved, duplicate = self._reserve(slug, event, lease)
-        if duplicate and reserved["state"] == "committed":
+        if duplicate and reserved.state == "committed":
             self._release(lease)
             return self._receipt(reserved, duplicate=True)
         try:
             receipt = self._project_reserved(reserved, lease)
         except TransactionFailure as exc:
             if exc.code == "precondition_failed":
-                self._set_checkpoint_state(slug, int(reserved["sequence"]), "quarantined")
+                self._set_checkpoint_state(slug, reserved.sequence, "quarantined")
                 raise ProjectFenceError("project lease changed before checkpoint apply") from exc
             raise
         except BaseException:
@@ -277,8 +256,16 @@ class ProjectStore:
 
         records = {record.id: record for record in self.coordinator.recover()}
         recovered: list[CheckpointReceipt] = []
-        replay: list[dict[str, object]] = []
+        replay: list[ProjectCheckpointReservation] = []
         with self.coordinator._connect() as database, begin_immediate(database):
+            for project, sequence in sorted(candidates):
+                committed = database.execute(
+                    "SELECT * FROM project_checkpoints WHERE project = ? "
+                    "AND sequence = ? AND state = 'committed'",
+                    (project, sequence),
+                ).fetchone()
+                if committed is not None:
+                    recovered.append(self._receipt(committed))
             query = "SELECT * FROM project_checkpoints WHERE state IN ('prepared', 'reserved')"
             parameters = ()
             if slug is not None:
@@ -299,23 +286,15 @@ class ProjectStore:
                     if (row["project"], row["sequence"]) in candidates:
                         recovered.append(self._receipt(row))
                 elif record is not None and record.state in {"conflicted", "quarantined"}:
-                    if record.error_code == "precondition_failed":
-                        database.execute(
-                            "UPDATE project_checkpoints SET state = 'reserved', "
-                            "transaction_id = NULL WHERE project = ? AND sequence = ?",
-                            (row["project"], row["sequence"]),
-                        )
-                        replay.append(dict(row))
-                    else:
-                        database.execute(
-                            "UPDATE project_checkpoints SET state = 'quarantined' "
-                            "WHERE project = ? AND sequence = ?",
-                            (row["project"], row["sequence"]),
-                        )
+                    database.execute(
+                        "UPDATE project_checkpoints SET state = 'quarantined' "
+                        "WHERE project = ? AND sequence = ?",
+                        (row["project"], row["sequence"]),
+                    )
                 elif record is None:
-                    replay.append(dict(row))
+                    replay.append(self.coordinator._project_reservation(row))
         for row in replay:
-            project = str(row["project"])
+            project = row.project
             try:
                 lease = self.acquire_lease(project, "project-recovery")
             except ProjectLeaseBusy:
@@ -325,7 +304,7 @@ class ProjectStore:
             except TransactionFailure as exc:
                 if exc.code == "precondition_failed":
                     self._set_checkpoint_state(
-                        project, int(row["sequence"]), "quarantined"
+                        project, row.sequence, "quarantined"
                     )
                     continue
                 raise
@@ -436,91 +415,27 @@ class ProjectStore:
         slug: str,
         event: Mapping[str, object],
         lease: ProjectLease,
-    ):
+    ) -> tuple[ProjectCheckpointReservation, bool]:
         if not isinstance(event, Mapping):
             raise TypeError("checkpoint event must be a mapping")
-        allocated = {"project", "sequence", "last_applied_sequence"}
-        if allocated.intersection(event):
-            raise ValueError("checkpoint event contains store-allocated fields")
-        base = dict(event)
-        canonical_json_bytes(base)
-        occurrence_id = base.get("occurrence_id")
-        idempotency_key = base.get("idempotency_key")
-        if not isinstance(occurrence_id, str) or not occurrence_id:
-            raise ValueError("checkpoint occurrence_id must be a non-empty string")
-        if not isinstance(idempotency_key, str) or not idempotency_key:
-            raise ValueError("checkpoint idempotency_key must be a non-empty string")
-        now = self._clock()
-        with self.coordinator._connect() as database, begin_immediate(database):
-            self._assert_lease(database, lease, now)
-            occurrence = database.execute(
-                "SELECT * FROM project_checkpoints WHERE project = ? AND occurrence_id = ?",
-                (slug, occurrence_id),
-            ).fetchone()
-            deduplicated = database.execute(
-                "SELECT * FROM project_checkpoints WHERE project = ? AND idempotency_key = ?",
-                (slug, idempotency_key),
-            ).fetchone()
-            if occurrence is not None and occurrence["idempotency_key"] != idempotency_key:
-                raise ValueError("occurrence_id is already bound to another idempotency key")
-            if occurrence is not None:
-                stored = json.loads(occurrence["event_json"])
-                for field in allocated:
-                    stored.pop(field)
-                if canonical_json_bytes(stored) != canonical_json_bytes(base):
-                    raise ValueError("occurrence_id is already bound to another event")
-            if deduplicated is not None:
-                stored = json.loads(deduplicated["event_json"])
-                for field in allocated | {"occurrence_id"}:
-                    stored.pop(field)
-                requested = dict(base)
-                requested.pop("occurrence_id")
-                if canonical_json_bytes(stored) != canonical_json_bytes(requested):
-                    raise ValueError("idempotency_key is already bound to another event")
-            existing = occurrence or deduplicated
-            if existing is not None:
-                return existing, True
-            row = database.execute(
-                "SELECT COALESCE(MAX(sequence), 0) AS last_sequence, "
-                "COALESCE(MAX(CASE WHEN state = 'committed' THEN sequence END), 0) "
-                "AS last_applied_sequence "
-                "FROM project_checkpoints WHERE project = ?",
-                (slug,),
-            ).fetchone()
-            last_sequence = int(row["last_sequence"])
-            last_applied_sequence = int(row["last_applied_sequence"])
-            full_event = dict(base)
-            full_event.update(
-                project=slug,
-                sequence=last_sequence + 1,
-                last_applied_sequence=last_applied_sequence,
-            )
-            validate_schema(full_event, _SCHEMA)
-            event_json = canonical_json_bytes(full_event).decode("utf-8")
-            database.execute(
-                "INSERT INTO project_checkpoints "
-                "(project, sequence, occurrence_id, idempotency_key, event_json, "
-                "lease_token, fencing_epoch, state) VALUES (?, ?, ?, ?, ?, ?, ?, 'reserved')",
-                (
-                    slug,
-                    last_sequence + 1,
-                    occurrence_id,
-                    idempotency_key,
-                    event_json,
-                    lease.token,
-                    lease.epoch,
-                ),
-            )
-            reserved = database.execute(
-                "SELECT * FROM project_checkpoints WHERE project = ? AND sequence = ?",
-                (slug, last_sequence + 1),
-            ).fetchone()
-        return reserved, False
+        precondition = {
+            "project": slug,
+            "lease_token": lease.token,
+            "fencing_epoch": lease.epoch,
+            "expires_at": _timestamp(lease.expires_at),
+        }
+        reservation = self.coordinator.reserve_project_checkpoint(
+            slug, event, precondition
+        )
+        validate_schema(json.loads(reservation.event_json), _SCHEMA)
+        return reservation, reservation.duplicate
 
-    def _project_reserved(self, row, lease: ProjectLease) -> CheckpointReceipt:
-        slug = str(row["project"])
-        sequence = int(row["sequence"])
-        event = json.loads(row["event_json"])
+    def _project_reserved(
+        self, row: ProjectCheckpointReservation, lease: ProjectLease
+    ) -> CheckpointReceipt:
+        slug = row.project
+        sequence = row.sequence
+        event = json.loads(row.event_json)
         current_journal = self._read_journal_bytes(slug)
         records = self._journal_events(slug, current_journal)
         matching = [item for item in records if item["sequence"] == sequence]
@@ -558,25 +473,26 @@ class ProjectStore:
             if current_state_path.exists()
             else ABSENT,
         }
-        operation_id = f"project:{slug}:{sequence}:{lease.epoch}:{sha256_bytes(canonical_json_bytes(event))}"
         transaction = self.coordinator.prepare(
             changes,
-            operation_id=operation_id,
+            operation_id=row.operation_id,
             preconditions=preconditions,
+            project_reservation=row,
         )
-        with self.coordinator._connect() as database, begin_immediate(database):
-            self._assert_lease(database, lease, self._clock())
-            database.execute(
-                "UPDATE project_checkpoints SET transaction_id = ?, state = 'prepared', "
-                "lease_token = ?, fencing_epoch = ? WHERE project = ? AND sequence = ?",
-                (transaction.id, lease.token, lease.epoch, slug, sequence),
-            )
         committed = self.coordinator.apply(transaction.id)
         if committed.state != "committed":
             raise RuntimeError("project checkpoint transaction did not commit")
-        self._set_checkpoint_state(slug, sequence, "committed")
-        refreshed = dict(row)
-        refreshed["transaction_id"] = transaction.id
+        refreshed = ProjectCheckpointReservation(
+            project=row.project,
+            sequence=row.sequence,
+            occurrence_id=row.occurrence_id,
+            idempotency_key=row.idempotency_key,
+            event_json=row.event_json,
+            operation_id=row.operation_id,
+            state="committed",
+            transaction_id=transaction.id,
+            duplicate=row.duplicate,
+        )
         return self._receipt(refreshed)
 
     def _journal_events(self, slug: str, content: bytes) -> list[dict[str, object]]:
@@ -603,20 +519,6 @@ class ProjectStore:
             events.append(event)
         return events
 
-    def _assert_lease(self, database, lease: ProjectLease, now: datetime) -> None:
-        row = database.execute(
-            "SELECT * FROM project_leases WHERE project = ?", (lease.slug,)
-        ).fetchone()
-        if (
-            row is None
-            or row["lease_token"] != lease.token
-            or row["fencing_epoch"] != lease.epoch
-            or row["owner"] != lease.owner
-            or _parse_timestamp(row["expires_at"]) <= now
-            or lease.expires_at <= now
-        ):
-            raise ProjectFenceError("project lease is stale or expired")
-
     def _release(self, lease: ProjectLease) -> None:
         now = self._clock()
         with self.coordinator._connect() as database, begin_immediate(database):
@@ -634,7 +536,19 @@ class ProjectStore:
             )
 
     @staticmethod
-    def _receipt(row: Mapping[str, object], duplicate: bool = False) -> CheckpointReceipt:
+    def _receipt(
+        row: Mapping[str, object] | ProjectCheckpointReservation,
+        duplicate: bool = False,
+    ) -> CheckpointReceipt:
+        if isinstance(row, ProjectCheckpointReservation):
+            return CheckpointReceipt(
+                project=row.project,
+                sequence=row.sequence,
+                occurrence_id=row.occurrence_id,
+                idempotency_key=row.idempotency_key,
+                transaction_id=row.transaction_id,
+                duplicate=duplicate,
+            )
         return CheckpointReceipt(
             project=str(row["project"]),
             sequence=int(row["sequence"]),

@@ -94,6 +94,19 @@ class TransactionRecord:
     error_code: str | None = None
 
 
+@dataclass(frozen=True)
+class ProjectCheckpointReservation:
+    project: str
+    sequence: int
+    occurrence_id: str
+    idempotency_key: str
+    event_json: str
+    operation_id: str
+    state: str
+    transaction_id: str | None = None
+    duplicate: bool = False
+
+
 class TransactionFailure(RuntimeError):
     """An apply failure with a stable machine-readable disposition."""
 
@@ -457,6 +470,23 @@ class MarkdownCoordinator:
                         expires_at TEXT NOT NULL,
                         heartbeat_at TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS project_checkpoints (
+                        project TEXT NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        occurrence_id TEXT NOT NULL,
+                        idempotency_key TEXT NOT NULL,
+                        event_json TEXT NOT NULL,
+                        lease_token TEXT NOT NULL,
+                        fencing_epoch INTEGER NOT NULL,
+                        operation_id TEXT NOT NULL UNIQUE,
+                        transaction_id TEXT,
+                        state TEXT NOT NULL CHECK (state IN (
+                            'reserved', 'prepared', 'committed', 'quarantined'
+                        )),
+                        PRIMARY KEY (project, sequence),
+                        UNIQUE (project, occurrence_id),
+                        UNIQUE (project, idempotency_key)
+                    );
                     CREATE TABLE IF NOT EXISTS writer_owners (
                         gate_name TEXT PRIMARY KEY,
                         owner_token TEXT NOT NULL,
@@ -516,7 +546,157 @@ class MarkdownCoordinator:
                     database.execute(
                         'ALTER TABLE "transaction" ADD COLUMN owner_pid INTEGER'
                     )
+                checkpoint_columns = {
+                    row["name"]
+                    for row in database.execute("PRAGMA table_info(project_checkpoints)")
+                }
+                if "operation_id" not in checkpoint_columns:
+                    database.execute(
+                        "ALTER TABLE project_checkpoints ADD COLUMN operation_id TEXT"
+                    )
+                    rows = database.execute(
+                        "SELECT project, sequence, event_json FROM project_checkpoints"
+                    ).fetchall()
+                    for row in rows:
+                        event_hash = sha256_bytes(row["event_json"].encode("utf-8"))
+                        database.execute(
+                            "UPDATE project_checkpoints SET operation_id = ? "
+                            "WHERE project = ? AND sequence = ?",
+                            (
+                                f"project:{row['project']}:{row['sequence']}:migrated:{event_hash}",
+                                row["project"],
+                                row["sequence"],
+                            ),
+                        )
+                    database.execute(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS project_checkpoint_operation "
+                        "ON project_checkpoints(operation_id)"
+                    )
                 self._backfill_parent_identities(database)
+
+    def reserve_project_checkpoint(
+        self,
+        project: str,
+        event: Mapping[str, object],
+        lease: Mapping[str, object],
+    ) -> ProjectCheckpointReservation:
+        """Atomically fence and reserve one idempotent project sequence."""
+        if not isinstance(project, str) or not project:
+            raise ValueError("project must be a non-empty string")
+        if not isinstance(event, Mapping):
+            raise TypeError("checkpoint event must be a mapping")
+        allocated = {"project", "sequence", "last_applied_sequence"}
+        if allocated.intersection(event):
+            raise ValueError("checkpoint event contains coordinator-allocated fields")
+        base = dict(event)
+        canonical_json_bytes(base)
+        occurrence_id = base.get("occurrence_id")
+        idempotency_key = base.get("idempotency_key")
+        if not isinstance(occurrence_id, str) or not occurrence_id:
+            raise ValueError("checkpoint occurrence_id must be a non-empty string")
+        if not isinstance(idempotency_key, str) or not idempotency_key:
+            raise ValueError("checkpoint idempotency_key must be a non-empty string")
+        precondition = self._validate_preconditions({"project_lease": lease})[
+            "project_lease"
+        ]
+        assert isinstance(precondition, Mapping)
+        if precondition["project"] != project:
+            raise ValueError("project lease does not match checkpoint project")
+        with self._connect() as database, begin_immediate(database):
+            self._check_project_lease(database, precondition)
+            occurrence = database.execute(
+                "SELECT * FROM project_checkpoints "
+                "WHERE project = ? AND occurrence_id = ?",
+                (project, occurrence_id),
+            ).fetchone()
+            deduplicated = database.execute(
+                "SELECT * FROM project_checkpoints "
+                "WHERE project = ? AND idempotency_key = ?",
+                (project, idempotency_key),
+            ).fetchone()
+            if occurrence is not None and occurrence["idempotency_key"] != idempotency_key:
+                raise ValueError("occurrence_id is already bound to another idempotency key")
+            if occurrence is not None:
+                self._require_same_checkpoint_event(occurrence, base, allocated)
+            if deduplicated is not None:
+                self._require_same_checkpoint_event(
+                    deduplicated, base, allocated | {"occurrence_id"}
+                )
+            existing = occurrence or deduplicated
+            if existing is not None:
+                return self._project_reservation(existing, duplicate=True)
+            row = database.execute(
+                "SELECT COALESCE(MAX(sequence), 0) AS last_sequence, "
+                "COALESCE(MAX(CASE WHEN state = 'committed' THEN sequence END), 0) "
+                "AS last_applied_sequence FROM project_checkpoints WHERE project = ?",
+                (project,),
+            ).fetchone()
+            sequence = int(row["last_sequence"]) + 1
+            full_event = dict(base)
+            full_event.update(
+                project=project,
+                sequence=sequence,
+                last_applied_sequence=int(row["last_applied_sequence"]),
+            )
+            event_json = canonical_json_bytes(full_event).decode("utf-8")
+            operation_id = (
+                f"project:{project}:{sequence}:{precondition['fencing_epoch']}:"
+                f"{sha256_bytes(event_json.encode('utf-8'))}"
+            )
+            database.execute(
+                "INSERT INTO project_checkpoints "
+                "(project, sequence, occurrence_id, idempotency_key, event_json, "
+                "lease_token, fencing_epoch, operation_id, state) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'reserved')",
+                (
+                    project,
+                    sequence,
+                    occurrence_id,
+                    idempotency_key,
+                    event_json,
+                    precondition["lease_token"],
+                    precondition["fencing_epoch"],
+                    operation_id,
+                ),
+            )
+            reserved = database.execute(
+                "SELECT * FROM project_checkpoints WHERE project = ? AND sequence = ?",
+                (project, sequence),
+            ).fetchone()
+        return self._project_reservation(reserved)
+
+    @staticmethod
+    def _require_same_checkpoint_event(
+        row: sqlite3.Row,
+        requested: Mapping[str, object],
+        ignored: set[str],
+    ) -> None:
+        stored = json.loads(row["event_json"])
+        candidate = dict(requested)
+        for field in ignored:
+            stored.pop(field, None)
+            candidate.pop(field, None)
+        if canonical_json_bytes(stored) != canonical_json_bytes(candidate):
+            label = "idempotency_key" if "occurrence_id" in ignored else "occurrence_id"
+            raise ValueError(f"{label} is already bound to another event")
+
+    @staticmethod
+    def _project_reservation(
+        row: Mapping[str, object], *, duplicate: bool = False
+    ) -> ProjectCheckpointReservation:
+        return ProjectCheckpointReservation(
+            project=str(row["project"]),
+            sequence=int(row["sequence"]),
+            occurrence_id=str(row["occurrence_id"]),
+            idempotency_key=str(row["idempotency_key"]),
+            event_json=str(row["event_json"]),
+            operation_id=str(row["operation_id"]),
+            state=str(row["state"]),
+            transaction_id=str(row["transaction_id"])
+            if row["transaction_id"]
+            else None,
+            duplicate=duplicate,
+        )
 
     def _backfill_parent_identities(self, database: sqlite3.Connection) -> None:
         rows = database.execute(
@@ -551,6 +731,7 @@ class MarkdownCoordinator:
         operation_id: str,
         preconditions: Mapping[str, object] | None = None,
         validators: Sequence[Validator] = (),
+        project_reservation: ProjectCheckpointReservation | None = None,
         _parent_transaction_id: str | None = None,
     ) -> TransactionRecord:
         if not isinstance(operation_id, str) or not operation_id:
@@ -562,6 +743,13 @@ class MarkdownCoordinator:
         if len(paths) != len(set(paths)):
             raise ValueError("duplicate transaction target")
         persisted_preconditions = self._validate_preconditions(preconditions or {})
+        if project_reservation is not None:
+            if not isinstance(project_reservation, ProjectCheckpointReservation):
+                raise TypeError("project_reservation must be a ProjectCheckpointReservation")
+            if project_reservation.operation_id != operation_id:
+                raise ValueError("project reservation operation_id does not match")
+            if "project_lease" not in persisted_preconditions:
+                raise ValueError("project reservation requires a project lease precondition")
         request_hash = self._request_hash(normalized, persisted_preconditions)
         self.recover()
         existing = self._record_for_operation_id(operation_id)
@@ -686,6 +874,13 @@ class MarkdownCoordinator:
 
             try:
                 with self._connect() as database, begin_immediate(database):
+                    if project_reservation is not None:
+                        self._bind_project_reservation(
+                            database,
+                            project_reservation,
+                            transaction_id,
+                            persisted_preconditions,
+                        )
                     database.execute(
                         'UPDATE "transaction" SET state = \'prepared\', plan_hash = ?, '
                         "updated_at = ?, owner_pid = NULL "
@@ -728,6 +923,37 @@ class MarkdownCoordinator:
                     )
                 self._remove_artifacts(artifact_root)
             raise
+
+    def _bind_project_reservation(
+        self,
+        database: sqlite3.Connection,
+        reservation: ProjectCheckpointReservation,
+        transaction_id: str,
+        preconditions: Mapping[str, object],
+    ) -> None:
+        lease = preconditions["project_lease"]
+        assert isinstance(lease, Mapping)
+        self._check_project_lease(database, lease)
+        cursor = database.execute(
+            "UPDATE project_checkpoints SET transaction_id = ?, state = 'prepared', "
+            "lease_token = ?, fencing_epoch = ? "
+            "WHERE project = ? AND sequence = ? AND operation_id = ? "
+            "AND state IN ('reserved', 'prepared')",
+            (
+                transaction_id,
+                lease["lease_token"],
+                lease["fencing_epoch"],
+                reservation.project,
+                reservation.sequence,
+                reservation.operation_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise TransactionFailure(
+                "project checkpoint reservation is no longer available",
+                "precondition_failed",
+                "quarantined",
+            )
 
     def apply(self, transaction_id: str) -> TransactionRecord:
         with self.writer_gate():
@@ -785,6 +1011,8 @@ class MarkdownCoordinator:
         operation_states = {
             row["path"]: (row["before_hash"], row["after_hash"]) for row in rows
         }
+        if "project_lease" in record.preconditions:
+            return self._apply_project_locked(record, plan, rows, operation_states)
         self._check_preconditions(record.preconditions, operation_states)
         self._reconcile_operation_states(transaction_id, rows)
         rows = self._operation_rows(transaction_id)
@@ -815,6 +1043,112 @@ class MarkdownCoordinator:
         result = self._record(transaction_id)
         self._killpoint("after_commit", record.parent_transaction_id)
         return result
+
+    def _apply_project_locked(
+        self,
+        record: TransactionRecord,
+        plan: Mapping[str, object],
+        rows: Sequence[sqlite3.Row],
+        operation_states: Mapping[str, tuple[str, str]],
+    ) -> TransactionRecord:
+        self._check_preconditions(record.preconditions, operation_states)
+        self._reconcile_operation_states(record.id, rows)
+        rows = self._operation_rows(record.id)
+        with self._connect() as database, begin_immediate(database):
+            self._assert_writer_ownership(database)
+            database.execute(
+                'UPDATE "transaction" SET state = \'applying\', updated_at = ? '
+                "WHERE id = ?",
+                (_now(), record.id),
+            )
+        self._killpoint("after_applying", record.parent_transaction_id)
+
+        changed: list[sqlite3.Row] = []
+        with self._connect() as database, begin_immediate(database):
+            self._assert_writer_ownership(database)
+            self._check_preconditions(
+                record.preconditions, operation_states, database=database
+            )
+            self._local.mutation_database = database
+            try:
+                operations = plan["operations"]
+                assert isinstance(operations, list)
+                for row, operation_plan in zip(rows, operations, strict=True):
+                    self._check_preconditions(
+                        record.preconditions, operation_states, database=database
+                    )
+                    if row["applied"]:
+                        self._require_operation_state(row, row["after_hash"], "after state")
+                        continue
+                    assert isinstance(operation_plan, Mapping)
+                    self._mutate_and_mark(record.id, row, operation_plan)
+                    changed.append(row)
+                    self._check_preconditions(
+                        record.preconditions, operation_states, database=database
+                    )
+                    self._killpoint("after_each_target", record.parent_transaction_id)
+
+                self._check_preconditions(
+                    record.preconditions, operation_states, database=database
+                )
+                for row in rows:
+                    self._require_operation_state(row, row["after_hash"], "after state")
+                self._killpoint("before_commit", record.parent_transaction_id)
+                self._check_preconditions(
+                    record.preconditions, operation_states, database=database
+                )
+                database.execute(
+                    'UPDATE "transaction" SET state = \'committed\', updated_at = ? '
+                    "WHERE id = ?",
+                    (_now(), record.id),
+                )
+                database.execute(
+                    "UPDATE project_checkpoints SET state = 'committed' "
+                    "WHERE transaction_id = ? AND state = 'prepared'",
+                    (record.id,),
+                )
+            except BaseException:
+                self._restore_inflight_operations(record.id, changed)
+                raise
+            finally:
+                self._local.mutation_database = None
+        result = self._record(record.id)
+        self._killpoint("after_commit", record.parent_transaction_id)
+        return result
+
+    def _restore_inflight_operations(
+        self, transaction_id: str, changed: Sequence[sqlite3.Row]
+    ) -> None:
+        for row in reversed(changed):
+            if self._operation_hash(row) != row["after_hash"]:
+                continue
+            before_state: object = ABSENT
+            if row["before_hash"] != ABSENT:
+                artifact = (
+                    self.transaction_root
+                    / transaction_id
+                    / "before"
+                    / f"{row['position']:06d}.bin"
+                )
+                content = artifact.read_bytes()
+                if sha256_bytes(content) != row["before_hash"]:
+                    raise RuntimeError(f"transaction before-image is corrupt for {row['path']}")
+                before_state = {
+                    "sha256": row["before_hash"],
+                    "artifact": f"before/{row['position']:06d}.bin",
+                }
+            inverse = dict(row)
+            inverse.update(
+                kind="delete"
+                if row["before_hash"] == ABSENT
+                else "create"
+                if row["after_hash"] == ABSENT
+                else "replace",
+                before_hash=row["after_hash"],
+                after_hash=row["before_hash"],
+            )
+            self._apply_operation(inverse, {"after": before_state})
+            self._require_operation_state(inverse, row["before_hash"], "restored state")
 
     def recover(self) -> list[TransactionRecord]:
         """Converge every incomplete transaction without overwriting unknown bytes."""
@@ -1033,20 +1367,42 @@ class MarkdownCoordinator:
         except (AssertionError, KeyError, OSError, TypeError, ValueError):
             return "invalid"
 
-        with self._connect() as database, begin_immediate(database):
-            cursor = database.execute(
-                'UPDATE "transaction" SET state = \'prepared\', plan_hash = ?, '
-                "updated_at = ?, owner_pid = NULL WHERE id = ? AND state = 'preparing'",
-                (manifest["plan_hash"], _now(), record.id),
-            )
-            if cursor.rowcount != 1:
-                return "invalid"
-            database.executemany(
-                'INSERT INTO "operation" '
-                "(transaction_id, position, kind, path, before_hash, after_hash, "
-                "parent_device, parent_inode, applied) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                operations,
-            )
+        try:
+            with self._connect() as database, begin_immediate(database):
+                reservation_row = database.execute(
+                    "SELECT * FROM project_checkpoints WHERE operation_id = ?",
+                    (record.operation_id,),
+                ).fetchone()
+                if reservation_row is not None:
+                    self._bind_project_reservation(
+                        database,
+                        self._project_reservation(reservation_row),
+                        record.id,
+                        record.preconditions,
+                    )
+                cursor = database.execute(
+                    'UPDATE "transaction" SET state = \'prepared\', plan_hash = ?, '
+                    "updated_at = ?, owner_pid = NULL WHERE id = ? AND state = 'preparing'",
+                    (manifest["plan_hash"], _now(), record.id),
+                )
+                if cursor.rowcount != 1:
+                    return "invalid"
+                database.executemany(
+                    'INSERT INTO "operation" '
+                    "(transaction_id, position, kind, path, before_hash, after_hash, "
+                    "parent_device, parent_inode, applied) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    operations,
+                )
+        except TransactionFailure as exc:
+            self._set_transaction_state(record.id, "quarantined", error_code=exc.code)
+            with self._connect() as database, begin_immediate(database):
+                database.execute(
+                    "UPDATE project_checkpoints SET state = 'quarantined' "
+                    "WHERE operation_id = ?",
+                    (record.operation_id,),
+                )
+            return "quarantined"
         if parent_mismatch:
             self._set_transaction_state(
                 record.id, "quarantined", error_code="parent_identity_changed"
@@ -1741,28 +2097,17 @@ class MarkdownCoordinator:
         self,
         preconditions: Mapping[str, object],
         operation_states: Mapping[str, tuple[str, str]],
+        *,
+        database: sqlite3.Connection | None = None,
     ) -> None:
         for path, expected in preconditions.items():
             if path == "project_lease":
                 assert isinstance(expected, Mapping)
-                with self._connect() as database:
-                    row = database.execute(
-                        "SELECT * FROM project_leases WHERE project = ?",
-                        (expected["project"],),
-                    ).fetchone()
-                now = datetime.now(timezone.utc)
-                if (
-                    row is None
-                    or row["lease_token"] != expected["lease_token"]
-                    or row["fencing_epoch"] != expected["fencing_epoch"]
-                    or _parse_timestamp(row["expires_at"]) <= now
-                    or _parse_timestamp(str(expected["expires_at"])) <= now
-                ):
-                    raise TransactionFailure(
-                        "persisted project lease precondition failed",
-                        "precondition_failed",
-                        "quarantined",
-                    )
+                if database is not None:
+                    self._check_project_lease(database, expected)
+                else:
+                    with self._connect() as lease_database:
+                        self._check_project_lease(lease_database, expected)
                 continue
             current = self._current_hash(path)
             if current == expected:
@@ -1776,6 +2121,28 @@ class MarkdownCoordinator:
                 continue
             raise TransactionFailure(
                 f"persisted precondition failed for {path}",
+                "precondition_failed",
+                "quarantined",
+            )
+
+    @staticmethod
+    def _check_project_lease(
+        database: sqlite3.Connection, expected: Mapping[str, object]
+    ) -> None:
+        row = database.execute(
+            "SELECT * FROM project_leases WHERE project = ?",
+            (expected["project"],),
+        ).fetchone()
+        now = datetime.now(timezone.utc)
+        if (
+            row is None
+            or row["lease_token"] != expected["lease_token"]
+            or row["fencing_epoch"] != expected["fencing_epoch"]
+            or _parse_timestamp(row["expires_at"]) <= now
+            or _parse_timestamp(str(expected["expires_at"])) <= now
+        ):
+            raise TransactionFailure(
+                "persisted project lease precondition failed",
                 "precondition_failed",
                 "quarantined",
             )
@@ -1831,6 +2198,13 @@ class MarkdownCoordinator:
         row: sqlite3.Row,
         operation_plan: Mapping[str, object],
     ) -> None:
+        active_database = getattr(self._local, "mutation_database", None)
+        if active_database is not None:
+            self._assert_writer_ownership(active_database)
+            self._apply_operation(row, operation_plan)
+            self._require_operation_state(row, row["after_hash"], "after state")
+            self._mark_operation_applied(transaction_id, row["position"])
+            return
         with self._connect() as database, begin_immediate(database):
             self._assert_writer_ownership(database)
             self._local.mutation_database = database

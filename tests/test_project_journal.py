@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from markdown_transaction import MarkdownChange
 from project_journal import (
     JOURNAL_HEADER,
     ProjectFenceError,
@@ -114,6 +115,46 @@ def test_lease_uses_random_token_monotonic_epoch_and_default_timing(
     second = store.acquire_lease("demo", "agent-b")
     assert second.token != first.token
     assert second.epoch == first.epoch + 1
+
+
+def test_coordinator_reserves_idempotency_sequence_and_preparation_binding(
+    vault: Path, state_root: Path
+):
+    store = ProjectStore(vault, state_root)
+    lease = store.acquire_lease("demo", "agent-a")
+    precondition = {
+        "project": "demo",
+        "lease_token": lease.token,
+        "fencing_epoch": lease.epoch,
+        "expires_at": lease.expires_at.isoformat().replace("+00:00", "Z"),
+    }
+
+    reservation = store.coordinator.reserve_project_checkpoint(
+        "demo", checkpoint_event(), precondition
+    )
+    duplicate = store.coordinator.reserve_project_checkpoint(
+        "demo", checkpoint_event("evt-retry"), precondition
+    )
+    transaction = store.coordinator.prepare(
+        [
+            MarkdownChange.create(
+                "knowledge/projects/demo/journal.md",
+                b"reserved-event\n",
+            )
+        ],
+        operation_id=reservation.operation_id,
+        preconditions={"project_lease": precondition},
+        project_reservation=reservation,
+    )
+
+    assert reservation.sequence == duplicate.sequence == 1
+    assert duplicate.duplicate is True
+    with sqlite3.connect(store.coordinator.database_path) as database:
+        row = database.execute(
+            "SELECT sequence, operation_id, transaction_id, state "
+            "FROM project_checkpoints WHERE project = 'demo'"
+        ).fetchone()
+    assert row == (1, reservation.operation_id, transaction.id, "prepared")
 
 
 def test_active_lease_is_exclusive_and_heartbeat_extends_it(
@@ -331,6 +372,34 @@ def test_recover_replays_prepared_checkpoint(
     assert [(receipt.sequence, receipt.duplicate) for receipt in recovered] == [(1, False)]
     assert len(journal_records(ProjectStore(vault, state_root))) == 1
     assert (vault / "knowledge/projects/demo/state.md").exists()
+
+
+def test_new_epoch_wins_before_recovery_and_old_checkpoint_touches_nothing(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    store = ProjectStore(vault, state_root)
+
+    def crash_before_apply(transaction_id: str):
+        raise RuntimeError(f"crash before {transaction_id}")
+
+    monkeypatch.setattr(store.coordinator, "apply", crash_before_apply)
+    with pytest.raises(RuntimeError, match="crash before"):
+        store.checkpoint("demo", checkpoint_event(), "agent-a")
+    with sqlite3.connect(store.coordinator.database_path) as database:
+        database.execute(
+            "UPDATE project_leases SET lease_token = 'new-token', fencing_epoch = 2 "
+            "WHERE project = 'demo'"
+        )
+        database.commit()
+
+    assert ProjectStore(vault, state_root).recover("demo") == []
+    assert not (vault / "knowledge/projects/demo/journal.md").exists()
+    assert not (vault / "knowledge/projects/demo/state.md").exists()
+    with sqlite3.connect(store.coordinator.database_path) as database:
+        state = database.execute(
+            "SELECT state FROM project_checkpoints WHERE project = 'demo'"
+        ).fetchone()[0]
+    assert state == "quarantined"
 
 
 def test_recover_replays_reservation_left_before_prepare(

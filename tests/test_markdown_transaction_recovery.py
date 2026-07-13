@@ -5,6 +5,8 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,6 +14,7 @@ from pathlib import Path
 import markdown_transaction
 import pytest
 from markdown_transaction import ABSENT, MarkdownChange, MarkdownCoordinator
+from project_journal import ProjectStore
 from reliable_memory import sha256_bytes
 
 
@@ -293,6 +296,65 @@ c.prepare(
 
     assert recovered.state == "committed"
     assert target.read_bytes() == b"journal bytes"
+
+
+def test_project_recovery_promotion_binds_reserved_checkpoint(
+    vault: Path, state_root: Path
+):
+    event = {
+        "schema_version": "project-checkpoint/v1",
+        "occurrence_id": "evt-crash",
+        "idempotency_key": "checkpoint:crash",
+        "provenance": {
+            "agent": "agent-a",
+            "session": "session-1",
+            "worktree": "D:/work/wiki",
+            "branch": "feature/journal",
+            "source_event": "event-1",
+        },
+        "trigger": "task_completed",
+        "reason": "crash recovery",
+        "delta": {
+            "goal": {"id": "g", "action": "upsert", "value": "Recover"},
+            "phase": {"id": "p", "action": "upsert", "value": "Test"},
+            "current_task": {"id": "t", "action": "upsert", "value": "Replay"},
+            "next_actions": [],
+            "decisions": [],
+            "blockers": [],
+            "changed_files": [],
+            "commands": [],
+            "verification": [],
+        },
+        "evidence_event_ids": ["event-1"],
+    }
+    code = """
+import json, sys
+from pathlib import Path
+from project_journal import ProjectStore
+store = ProjectStore(Path(sys.argv[1]), Path(sys.argv[2]))
+store.checkpoint('demo', json.loads(sys.argv[3]), 'agent-a')
+"""
+
+    crashed = _crash_process(
+        vault,
+        state_root,
+        "after_plan_fsynced",
+        code,
+        json.dumps(event, separators=(",", ":")),
+    )
+    assert crashed.returncode == 86, crashed.stderr
+
+    recovered = ProjectStore(vault, state_root).recover("demo")
+
+    assert [receipt.sequence for receipt in recovered] == [1]
+    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+        row = database.execute(
+            "SELECT state, transaction_id FROM project_checkpoints WHERE project = 'demo'"
+        ).fetchone()
+    assert row[0] == "committed"
+    assert row[1]
+    assert (vault / "knowledge/projects/demo/journal.md").exists()
+    assert (vault / "knowledge/projects/demo/state.md").exists()
 
 
 def test_complete_dead_preparing_with_unknown_target_conflicts_instead_of_discarding(
@@ -815,12 +877,12 @@ def test_same_target_precondition_accepts_after_state_for_crash_reconciliation(
         ).fetchone()[0] == 1
 
 
-@pytest.mark.parametrize("expire_after_call", [1, 2])
-def test_obsolete_lease_after_partial_checkpoint_rolls_back_journal_and_projection(
+@pytest.mark.parametrize("takeover_after_call", [1, 2])
+def test_takeover_during_partial_checkpoint_is_blocked_until_commit(
     vault: Path,
     state_root: Path,
     monkeypatch: pytest.MonkeyPatch,
-    expire_after_call: int,
+    takeover_after_call: int,
 ):
     journal = vault / "knowledge/projects/demo/journal.md"
     journal.write_bytes(b"old-event\n")
@@ -855,29 +917,201 @@ def test_obsolete_lease_after_partial_checkpoint_rolls_back_journal_and_projecti
     mutate = coordinator._mutate_and_mark
     calls = 0
 
-    def expire_after_journal(*args, **kwargs):
+    blocked = 0
+
+    def attempt_takeover(*args, **kwargs):
+        nonlocal blocked
         nonlocal calls
         mutate(*args, **kwargs)
         calls += 1
-        if calls == expire_after_call:
+        if calls == takeover_after_call:
             with sqlite3.connect(
-                state_root / "run/markdown-transactions.sqlite3"
+                state_root / "run/markdown-transactions.sqlite3", timeout=0.1
             ) as database:
-                database.execute(
-                    "UPDATE project_leases SET lease_token = 'new-token', fencing_epoch = 2 "
-                    "WHERE project = 'demo'"
-                )
-                database.commit()
+                with pytest.raises(sqlite3.OperationalError, match="locked"):
+                    database.execute(
+                        "UPDATE project_leases SET lease_token = 'new-token', "
+                        "fencing_epoch = 2 WHERE project = 'demo'"
+                    )
+                    database.commit()
+                blocked += 1
 
-    monkeypatch.setattr(coordinator, "_mutate_and_mark", expire_after_journal)
+    monkeypatch.setattr(coordinator, "_mutate_and_mark", attempt_takeover)
+
+    committed = coordinator.apply(transaction.id)
+
+    assert committed.state == "committed"
+    assert blocked == 1
+    assert journal.read_bytes() == b"old-event\nnew-event\n"
+    assert projection.read_bytes() == b"projected-new-event\n"
+
+
+def test_project_takeover_is_locked_out_from_final_check_through_commit(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    coordinator = MarkdownCoordinator(vault, state_root)
+    expires = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat().replace(
+        "+00:00", "Z"
+    )
+    with sqlite3.connect(coordinator.database_path) as database:
+        database.execute(
+            "INSERT INTO project_leases VALUES (?, ?, ?, ?, ?, ?)",
+            ("demo", "old-token", 1, "agent-a", expires, expires),
+        )
+        database.commit()
+    transaction = coordinator.prepare(
+        [MarkdownChange.create("knowledge/projects/demo/journal.md", b"event\n")],
+        operation_id="project-final-fence",
+        preconditions={
+            "project_lease": {
+                "project": "demo",
+                "lease_token": "old-token",
+                "fencing_epoch": 1,
+                "expires_at": expires,
+            }
+        },
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    mutate = coordinator._mutate_and_mark
+
+    def pause_before_mutation(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return mutate(*args, **kwargs)
+
+    monkeypatch.setattr(coordinator, "_mutate_and_mark", pause_before_mutation)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        applying = pool.submit(coordinator.apply, transaction.id)
+        assert entered.wait(5)
+        with sqlite3.connect(coordinator.database_path, timeout=0.1) as contender:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                contender.execute(
+                    "UPDATE project_leases SET lease_token = 'new-token', "
+                    "fencing_epoch = 2 WHERE project = 'demo'"
+                )
+                contender.commit()
+        release.set()
+        assert applying.result(timeout=5).state == "committed"
+
+    with sqlite3.connect(coordinator.database_path) as database:
+        database.execute(
+            "UPDATE project_leases SET lease_token = 'new-token', fencing_epoch = 2 "
+            "WHERE project = 'demo'"
+        )
+        database.commit()
+    assert (vault / "knowledge/projects/demo/journal.md").read_bytes() == b"event\n"
+
+
+def test_new_project_epoch_wins_before_final_fence_and_old_touches_nothing(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    coordinator = MarkdownCoordinator(vault, state_root)
+    expires = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat().replace(
+        "+00:00", "Z"
+    )
+    with sqlite3.connect(coordinator.database_path) as database:
+        database.execute(
+            "INSERT INTO project_leases VALUES (?, ?, ?, ?, ?, ?)",
+            ("demo", "old-token", 1, "agent-a", expires, expires),
+        )
+        database.commit()
+    transaction = coordinator.prepare(
+        [MarkdownChange.create("knowledge/projects/demo/journal.md", b"event\n")],
+        operation_id="project-new-epoch-wins",
+        preconditions={
+            "project_lease": {
+                "project": "demo",
+                "lease_token": "old-token",
+                "fencing_epoch": 1,
+                "expires_at": expires,
+            }
+        },
+    )
+    early_check_done = threading.Event()
+    takeover_done = threading.Event()
+    check = coordinator._check_preconditions
+    paused = False
+
+    def pause_after_early_check(*args, **kwargs):
+        nonlocal paused
+        result = check(*args, **kwargs)
+        if kwargs.get("database") is None and not paused:
+            paused = True
+            early_check_done.set()
+            assert takeover_done.wait(5)
+        return result
+
+    monkeypatch.setattr(coordinator, "_check_preconditions", pause_after_early_check)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        applying = pool.submit(coordinator.apply, transaction.id)
+        assert early_check_done.wait(5)
+        with sqlite3.connect(coordinator.database_path) as database:
+            database.execute(
+                "UPDATE project_leases SET lease_token = 'new-token', "
+                "fencing_epoch = 2 WHERE project = 'demo'"
+            )
+            database.commit()
+        takeover_done.set()
+        with pytest.raises(RuntimeError, match="precondition"):
+            applying.result(timeout=5)
+
+    assert not (vault / "knowledge/projects/demo/journal.md").exists()
+    assert coordinator._record(transaction.id).state == "quarantined"
+
+
+def test_project_lease_expiry_during_apply_restores_all_targets(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    coordinator = MarkdownCoordinator(vault, state_root)
+    journal = vault / "knowledge/projects/demo/journal.md"
+    journal.write_bytes(b"old-event\n")
+    expires = (datetime.now(timezone.utc) + timedelta(seconds=0.5)).isoformat().replace(
+        "+00:00", "Z"
+    )
+    with sqlite3.connect(coordinator.database_path) as database:
+        database.execute(
+            "INSERT INTO project_leases VALUES (?, ?, ?, ?, ?, ?)",
+            ("demo", "token", 1, "agent", expires, expires),
+        )
+        database.commit()
+    transaction = coordinator.prepare(
+        [
+            MarkdownChange.replace(
+                "knowledge/projects/demo/journal.md", b"new-event\n"
+            ),
+            MarkdownChange.replace("knowledge/index.md", b"projected\n"),
+        ],
+        operation_id="project-expiry-during-apply",
+        preconditions={
+            "project_lease": {
+                "project": "demo",
+                "lease_token": "token",
+                "fencing_epoch": 1,
+                "expires_at": expires,
+            }
+        },
+    )
+    before_mutation = coordinator._before_target_mutation
+    delayed = False
+
+    def expire_during_first_mutation(target: Path):
+        nonlocal delayed
+        before_mutation(target)
+        if not delayed:
+            delayed = True
+            time.sleep(0.6)
+
+    monkeypatch.setattr(
+        coordinator, "_before_target_mutation", expire_during_first_mutation
+    )
 
     with pytest.raises(RuntimeError, match="precondition"):
         coordinator.apply(transaction.id)
 
-    record = coordinator._record(transaction.id)
-    assert (record.state, record.error_code) == ("quarantined", "precondition_failed")
     assert journal.read_bytes() == b"old-event\n"
-    assert projection.read_bytes() == b"index-v1\n"
+    assert (vault / "knowledge/index.md").read_bytes() == b"index-v1\n"
+    assert coordinator._record(transaction.id).state == "quarantined"
 
 
 def test_partial_checkpoint_rollback_leaves_unknown_journal_bytes_untouched(
@@ -921,21 +1155,13 @@ def test_partial_checkpoint_rollback_leaves_unknown_journal_bytes_untouched(
         calls += 1
         if calls == 1:
             journal.write_bytes(b"private unknown journal bytes")
-            with sqlite3.connect(
-                state_root / "run/markdown-transactions.sqlite3"
-            ) as database:
-                database.execute(
-                    "UPDATE project_leases SET lease_token = 'new-token', fencing_epoch = 2 "
-                    "WHERE project = 'demo'"
-                )
-                database.commit()
 
     monkeypatch.setattr(coordinator, "_mutate_and_mark", external_edit_after_journal)
 
-    with pytest.raises(RuntimeError, match="precondition"):
+    with pytest.raises(RuntimeError, match="after state mismatch"):
         coordinator.apply(transaction.id)
 
-    assert coordinator._record(transaction.id).state == "quarantined"
+    assert coordinator._record(transaction.id).state == "conflicted"
     assert journal.read_bytes() == b"private unknown journal bytes"
     assert (vault / "knowledge/index.md").read_bytes() == b"index-v1\n"
 
