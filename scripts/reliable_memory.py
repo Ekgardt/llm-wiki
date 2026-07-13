@@ -12,6 +12,7 @@ import platform
 import re
 import sqlite3
 import stat
+import subprocess
 import unicodedata
 import warnings
 from collections.abc import Iterator
@@ -106,17 +107,18 @@ def _known_network_path(path: Path) -> bool:
             return False
         drive_type_remote = 4
         return ctypes.windll.kernel32.GetDriveTypeW(anchor) == drive_type_remote
+    system = _platform_system()
     mount_data, is_mountinfo = _read_posix_mount_data()
     mounts = _parse_posix_mounts(mount_data, is_mountinfo=is_mountinfo)
+    if system == "Darwin" and not mounts:
+        mounts = _parse_darwin_mounts(_query_darwin_mounts())
     raw_target = str(path).replace("\\", "/")
     target = raw_target if raw_target.startswith("/") else str(path.absolute()).replace("\\", "/")
     matching = [entry for entry in mounts if _path_is_under(target, entry[0])]
     if not matching:
         return False
     _mount_point, filesystem = max(matching, key=lambda entry: len(entry[0]))
-    return filesystem in {"nfs", "nfs4", "cifs", "smbfs", "sshfs", "9p", "ceph"} or (
-        filesystem.endswith(".sshfs")
-    )
+    return _is_network_filesystem(filesystem)
 
 
 def _platform_system() -> str:
@@ -135,6 +137,22 @@ def _read_posix_mount_data() -> tuple[str, bool]:
     return "", True
 
 
+def _query_darwin_mounts() -> str:
+    try:
+        result = subprocess.run(
+            ["/sbin/mount"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout[:1_048_576]
+
+
 def _parse_posix_mounts(data: str, *, is_mountinfo: bool) -> list[tuple[str, str]]:
     mounts: list[tuple[str, str]] = []
     for line in data.splitlines():
@@ -149,6 +167,31 @@ def _parse_posix_mounts(data: str, *, is_mountinfo: bool) -> list[tuple[str, str
             continue
         mounts.append((_decode_mount_path(mount_point), filesystem.casefold()))
     return mounts
+
+
+def _parse_darwin_mounts(data: str) -> list[tuple[str, str]]:
+    mounts: list[tuple[str, str]] = []
+    for line in data.splitlines():
+        match = re.match(r"^.* on (.+) \(([^,()]+)(?:,|\))", line)
+        if match is None:
+            continue
+        mount_point, filesystem = match.groups()
+        mounts.append((_decode_mount_path(mount_point), filesystem.casefold()))
+    return mounts
+
+
+def _is_network_filesystem(filesystem: str) -> bool:
+    return filesystem in {
+        "9p",
+        "afpfs",
+        "ceph",
+        "cifs",
+        "nfs",
+        "nfs4",
+        "smbfs",
+        "sshfs",
+        "webdav",
+    } or filesystem.endswith(".sshfs")
 
 
 def _decode_mount_path(value: str) -> str:

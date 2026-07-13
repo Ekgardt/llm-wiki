@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import stat
+import subprocess
 import unicodedata
 from dataclasses import asdict
 from pathlib import Path, PurePosixPath
@@ -167,6 +168,47 @@ def test_posix_proc_mounts_network_types_are_detected(monkeypatch):
     )
     assert reliable_memory._known_network_path(Path("/mnt/nfs/state")) is True
     assert reliable_memory._known_network_path(Path("/mnt/ssh/state")) is True
+
+
+def test_darwin_mount_detection_handles_spaces_escapes_and_longest_match(monkeypatch):
+    mount_output = """
+/dev/disk3s1s1 on / (apfs, sealed, local, read-only)
+server:/team on /Volumes/Team Share (nfs, nodev, nosuid)
+/dev/disk4s1 on /Volumes/Team Share/local (apfs, local)
+//user@server/share on /Volumes/SMB\\040Share (smbfs, nodev, nosuid)
+"""
+    monkeypatch.setattr(reliable_memory, "_platform_system", lambda: "Darwin")
+    monkeypatch.setattr(reliable_memory, "_read_posix_mount_data", lambda: ("", True))
+    monkeypatch.setattr(reliable_memory, "_query_darwin_mounts", lambda: mount_output, raising=False)
+
+    assert reliable_memory._known_network_path(Path("/Volumes/Team Share/project")) is True
+    assert reliable_memory._known_network_path(Path("/Volumes/Team Share/local/state")) is False
+    assert reliable_memory._known_network_path(Path("/Volumes/SMB Share/state")) is True
+
+
+def test_darwin_mount_query_timeout_fails_open_for_unknown_path(monkeypatch):
+    monkeypatch.setattr(reliable_memory, "_platform_system", lambda: "Darwin")
+    monkeypatch.setattr(reliable_memory, "_read_posix_mount_data", lambda: ("", True))
+
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(reliable_memory.subprocess, "run", timeout)
+    assert reliable_memory._query_darwin_mounts() == ""
+    assert reliable_memory._known_network_path(Path("/Users/local/state")) is False
+
+
+def test_darwin_mount_query_is_bounded(monkeypatch):
+    observed = {}
+
+    def completed(command, **kwargs):
+        observed.update(command=command, **kwargs)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(reliable_memory.subprocess, "run", completed)
+    assert reliable_memory._query_darwin_mounts() == ""
+    assert observed["timeout"] <= 2
+    assert observed["check"] is False
 
 
 def test_owner_permission_errors_are_not_suppressed(tmp_path, monkeypatch):
