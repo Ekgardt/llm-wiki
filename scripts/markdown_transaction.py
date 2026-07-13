@@ -1116,6 +1116,57 @@ class MarkdownCoordinator:
                 "quarantined",
             )
 
+    def refresh_project_lease_precondition(
+        self,
+        transaction_id: str,
+        lease: Mapping[str, object],
+    ) -> TransactionRecord:
+        """Refresh a prepared transaction's lease fence without changing its plan."""
+        refreshed = self._validate_preconditions({"project_lease": lease})[
+            "project_lease"
+        ]
+        assert isinstance(refreshed, Mapping)
+        with self._connect() as database, begin_immediate(database):
+            row = database.execute(
+                'SELECT state, preconditions_json FROM "transaction" WHERE id = ?',
+                (transaction_id,),
+            ).fetchone()
+            if row is None or row["state"] != "prepared":
+                raise TransactionFailure(
+                    "project lease refresh requires a prepared transaction",
+                    "precondition_failed",
+                    "quarantined",
+                )
+            preconditions = json.loads(row["preconditions_json"])
+            previous = preconditions.get("project_lease")
+            if not isinstance(previous, dict) or any(
+                previous.get(field) != refreshed[field]
+                for field in ("project", "lease_token", "fencing_epoch")
+            ):
+                raise TransactionFailure(
+                    "project lease changed before transaction refresh",
+                    "precondition_failed",
+                    "quarantined",
+                )
+            self._check_project_lease(database, refreshed)
+            preconditions["project_lease"] = dict(refreshed)
+            updated = database.execute(
+                'UPDATE "transaction" SET preconditions_json = ?, updated_at = ? '
+                "WHERE id = ? AND state = 'prepared'",
+                (
+                    canonical_json_bytes(preconditions).decode("utf-8"),
+                    _now(),
+                    transaction_id,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise TransactionFailure(
+                    "project transaction changed during lease refresh",
+                    "precondition_failed",
+                    "quarantined",
+                )
+        return self._record(transaction_id)
+
     @staticmethod
     def _check_project_head(
         database: sqlite3.Connection, project: str, sequence: int

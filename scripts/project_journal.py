@@ -294,33 +294,24 @@ class ProjectStore:
         normalized_event = self.coordinator.normalize_project_checkpoint(slug, event)
         self.recover(slug)
         lease = self.acquire_lease(slug, owner)
-        reserved, duplicate = self._reserve(slug, normalized_event, lease)
-        if duplicate and reserved.state == "committed":
-            self._release(lease)
-            return self._receipt(reserved, duplicate=True)
         try:
-            receipt = self._project_reserved(reserved, lease)
-        except ProjectPendingPriorError:
-            self._release(lease)
-            raise
-        except ProjectJournalRebuildRequired:
-            self._set_checkpoint_state(slug, reserved.sequence, "quarantined")
-            self._release(lease)
-            raise
-        except ProjectJournalReadError:
-            self._release(lease)
-            raise
-        except TransactionFailure as exc:
-            if exc.code == "precondition_failed":
+            reserved, duplicate = self._reserve(slug, normalized_event, lease)
+            if duplicate and reserved.state == "committed":
+                return self._receipt(reserved, duplicate=True)
+            try:
+                return self._project_reserved(reserved, lease)
+            except ProjectJournalRebuildRequired:
                 self._set_checkpoint_state(slug, reserved.sequence, "quarantined")
-                raise ProjectFenceError("project lease changed before checkpoint apply") from exc
-            raise
-        except BaseException:
-            # A prepared transaction remains recoverable while its short lease is valid.
-            raise
-        else:
+                raise
+            except TransactionFailure as exc:
+                if exc.code == "precondition_failed":
+                    self._set_checkpoint_state(slug, reserved.sequence, "quarantined")
+                    raise ProjectFenceError(
+                        "project lease changed before checkpoint apply"
+                    ) from exc
+                raise
+        finally:
             self._release(lease)
-            return receipt
 
     def recover(self, slug: str | None = None) -> list[CheckpointReceipt]:
         if slug is not None:
@@ -391,11 +382,7 @@ class ProjectStore:
             try:
                 recovered.append(self._project_reserved(row, lease))
             except ProjectPendingPriorError:
-                self._release(lease)
                 continue
-            except ProjectJournalReadError:
-                self._release(lease)
-                raise
             except TransactionFailure as exc:
                 if exc.code == "precondition_failed":
                     self._set_checkpoint_state(
@@ -403,7 +390,7 @@ class ProjectStore:
                     )
                     continue
                 raise
-            else:
+            finally:
                 self._release(lease)
         return recovered
 
@@ -703,7 +690,25 @@ class ProjectStore:
             project_reservation=row,
         )
         lease = self.heartbeat(lease)
+        self.coordinator.refresh_project_lease_precondition(
+            transaction.id,
+            {
+                "project": slug,
+                "lease_token": lease.token,
+                "fencing_epoch": lease.epoch,
+                "expires_at": _timestamp(lease.expires_at),
+            },
+        )
         lease = self.heartbeat(lease)
+        self.coordinator.refresh_project_lease_precondition(
+            transaction.id,
+            {
+                "project": slug,
+                "lease_token": lease.token,
+                "fencing_epoch": lease.epoch,
+                "expires_at": _timestamp(lease.expires_at),
+            },
+        )
         committed = self.coordinator.apply(transaction.id)
         if committed.state != "committed":
             raise RuntimeError("project checkpoint transaction did not commit")

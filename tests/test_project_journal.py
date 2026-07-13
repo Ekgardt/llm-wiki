@@ -9,9 +9,14 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import markdown_transaction
 import project_journal
 import pytest
-from markdown_transaction import MarkdownChange, ProjectPendingPriorError
+from markdown_transaction import (
+    MarkdownChange,
+    ProjectPendingPriorError,
+    TransactionFailure,
+)
 from project_journal import (
     JOURNAL_HEADER,
     MAX_JOURNAL_BYTES,
@@ -106,6 +111,10 @@ def checkpoint_event(
 def journal_records(store: ProjectStore, slug: str = "demo") -> list[dict[str, object]]:
     text = store.read_journal(slug)
     return [json.loads(line) for line in text.removeprefix(JOURNAL_HEADER).splitlines()]
+
+
+def _parse_test_timestamp(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def test_lease_uses_random_token_monotonic_epoch_and_default_timing(
@@ -681,7 +690,7 @@ def test_fenced_reservation_blocks_later_sequence_until_replayed(
     assert [event["last_applied_sequence"] for event in events] == [0, 0]
 
 
-def test_recover_replays_prepared_checkpoint(
+def test_released_prepared_checkpoint_requires_forward_replay(
     vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
     store = ProjectStore(vault, state_root)
@@ -699,7 +708,14 @@ def test_recover_replays_prepared_checkpoint(
     recovered = ProjectStore(vault, state_root).recover("demo")
 
     assert transaction_id
-    assert [(receipt.sequence, receipt.duplicate) for receipt in recovered] == [(1, False)]
+    assert recovered == []
+    assert not (vault / "knowledge/projects/demo/journal.md").exists()
+
+    replayed = ProjectStore(vault, state_root).checkpoint(
+        "demo", checkpoint_event(), "agent-b"
+    )
+
+    assert replayed.sequence == 1
     assert len(journal_records(ProjectStore(vault, state_root))) == 1
     assert (vault / "knowledge/projects/demo/state.md").exists()
 
@@ -1082,3 +1098,215 @@ def test_same_owner_simultaneous_projectors_retry_without_sharing_lease(
         "evt-first",
         "evt-second",
     ]
+
+
+def test_checkpoint_failure_releases_lease_for_immediate_retry(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    failing = ProjectStore(vault, state_root)
+
+    def fail_after_reservation(*args, **kwargs):
+        raise RuntimeError("injected checkpoint failure")
+
+    monkeypatch.setattr(failing, "_project_reserved", fail_after_reservation)
+    with pytest.raises(RuntimeError, match="injected checkpoint failure"):
+        failing.checkpoint("demo", checkpoint_event(), "agent-a")
+
+    retried = ProjectStore(vault, state_root).checkpoint(
+        "demo", checkpoint_event(), "agent-b"
+    )
+    assert retried.sequence == 1
+    assert (vault / "knowledge/projects/demo/journal.md").exists()
+
+
+@pytest.mark.parametrize("phase", ["prepare", "apply"])
+def test_prepare_and_apply_failures_release_lease_for_retry(
+    vault: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+):
+    failing = ProjectStore(vault, state_root)
+
+    def injected_failure(*args, **kwargs):
+        raise RuntimeError(f"injected {phase} failure")
+
+    monkeypatch.setattr(failing.coordinator, phase, injected_failure)
+    with pytest.raises(RuntimeError, match=f"injected {phase} failure"):
+        failing.checkpoint("demo", checkpoint_event(), "agent-a")
+    monkeypatch.undo()
+
+    retried = ProjectStore(vault, state_root).checkpoint(
+        "demo", checkpoint_event(), "agent-b"
+    )
+
+    assert retried.sequence == 1
+    assert (vault / "knowledge/projects/demo/journal.md").exists()
+
+
+def test_recover_failure_releases_lease_for_immediate_retry(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    store = ProjectStore(vault, state_root)
+
+    def fail_prepare(*args, **kwargs):
+        raise RuntimeError("leave reservation")
+
+    monkeypatch.setattr(store.coordinator, "prepare", fail_prepare)
+    with pytest.raises(RuntimeError, match="leave reservation"):
+        store.checkpoint("demo", checkpoint_event(), "agent-a")
+    with sqlite3.connect(store.coordinator.database_path) as database:
+        database.execute(
+            "UPDATE project_leases SET expires_at = '2000-01-01T00:00:00Z' "
+            "WHERE project = 'demo'"
+        )
+        database.commit()
+    recovering = ProjectStore(vault, state_root)
+
+    def fail_replay(*args, **kwargs):
+        raise RuntimeError("injected recovery failure")
+
+    monkeypatch.setattr(recovering, "_project_reserved", fail_replay)
+    with pytest.raises(RuntimeError, match="injected recovery failure"):
+        recovering.recover("demo")
+
+    replacement = ProjectStore(vault, state_root).acquire_lease("demo", "agent-b")
+    assert replacement.owner == "agent-b"
+
+
+def test_releasing_stale_token_never_releases_successor(
+    vault: Path, state_root: Path
+):
+    store = ProjectStore(vault, state_root)
+    stale = store.acquire_lease("demo", "agent-a")
+    with sqlite3.connect(store.coordinator.database_path) as database:
+        database.execute(
+            "UPDATE project_leases SET expires_at = '2000-01-01T00:00:00Z' "
+            "WHERE project = 'demo'"
+        )
+        database.commit()
+    successor = store.acquire_lease("demo", "agent-b")
+
+    store._release(stale)
+
+    with pytest.raises(ProjectLeaseBusy):
+        store.acquire_lease("demo", "agent-c")
+    with sqlite3.connect(store.coordinator.database_path) as database:
+        token = database.execute(
+            "SELECT lease_token FROM project_leases WHERE project = 'demo'"
+        ).fetchone()[0]
+    assert token == successor.token
+
+
+def test_successful_checkpoint_releases_lease_once(
+    project_store: ProjectStore, monkeypatch: pytest.MonkeyPatch
+):
+    release = project_store._release
+    released: list[str] = []
+
+    def count_release(lease):
+        released.append(lease.token)
+        return release(lease)
+
+    monkeypatch.setattr(project_store, "_release", count_release)
+
+    project_store.checkpoint("demo", checkpoint_event(), "agent-a")
+
+    assert len(released) == 1
+
+
+def test_post_prepare_heartbeat_refreshes_persisted_lease_precondition(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    now = datetime.now(timezone.utc)
+    store = ProjectStore(vault, state_root, clock=lambda: now)
+    real_prepare = store.coordinator.prepare
+    initial_expiry = ""
+
+    def slow_prepare(*args, **kwargs):
+        nonlocal now, initial_expiry
+        initial_expiry = kwargs["preconditions"]["project_lease"]["expires_at"]
+        transaction = real_prepare(*args, **kwargs)
+        now += timedelta(seconds=20)
+        return transaction
+
+    real_refresh = store.coordinator.refresh_project_lease_precondition
+    refreshes = 0
+
+    def advance_after_first_refresh(transaction_id, lease):
+        nonlocal now, refreshes
+        result = real_refresh(transaction_id, lease)
+        refreshes += 1
+        if refreshes == 1:
+            now += timedelta(seconds=15)
+        return result
+
+    class FakeDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now if tz is not None else now.replace(tzinfo=None)
+
+    monkeypatch.setattr(markdown_transaction, "datetime", FakeDateTime)
+    monkeypatch.setattr(store.coordinator, "prepare", slow_prepare)
+    monkeypatch.setattr(
+        store.coordinator,
+        "refresh_project_lease_precondition",
+        advance_after_first_refresh,
+    )
+
+    receipt = store.checkpoint("demo", checkpoint_event(), "agent-a")
+
+    assert receipt.sequence == 1
+    assert refreshes == 2
+    assert _parse_test_timestamp(initial_expiry) < now
+    with sqlite3.connect(store.coordinator.database_path) as database:
+        persisted = json.loads(
+            database.execute(
+                'SELECT preconditions_json FROM "transaction" WHERE id = ?',
+                (receipt.transaction_id,),
+            ).fetchone()[0]
+        )
+    assert _parse_test_timestamp(persisted["project_lease"]["expires_at"]) > now
+
+
+def test_prepared_lease_refresh_rejects_successor_token(
+    vault: Path, state_root: Path
+):
+    store = ProjectStore(vault, state_root)
+    lease = store.acquire_lease("demo", "agent-a")
+    reservation, _ = store._reserve("demo", checkpoint_event(), lease)
+    store._ensure_project_directory("demo")
+    precondition = {
+        "project": "demo",
+        "lease_token": lease.token,
+        "fencing_epoch": lease.epoch,
+        "expires_at": lease.expires_at.isoformat().replace("+00:00", "Z"),
+    }
+    transaction = store.coordinator.prepare(
+        [MarkdownChange.create("knowledge/projects/demo/journal.md", b"event\n")],
+        operation_id=reservation.operation_id,
+        preconditions={"project_lease": precondition},
+        project_reservation=reservation,
+    )
+    with sqlite3.connect(store.coordinator.database_path) as database:
+        database.execute(
+            "UPDATE project_leases SET lease_token = 'successor', fencing_epoch = 2 "
+            "WHERE project = 'demo'"
+        )
+        database.commit()
+
+    with pytest.raises(TransactionFailure) as rejected:
+        store.coordinator.refresh_project_lease_precondition(
+            transaction.id,
+            {
+                "project": "demo",
+                "lease_token": "successor",
+                "fencing_epoch": 2,
+                "expires_at": (
+                    datetime.now(timezone.utc) + timedelta(minutes=1)
+                ).isoformat().replace("+00:00", "Z"),
+            },
+        )
+
+    assert rejected.value.code == "precondition_failed"
+    assert store.coordinator._record(transaction.id).state == "prepared"
