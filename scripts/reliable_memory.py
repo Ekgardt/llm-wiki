@@ -8,6 +8,7 @@ import errno
 import hashlib
 import json
 import os
+import platform
 import re
 import sqlite3
 import stat
@@ -99,13 +100,64 @@ def _known_network_path(path: Path) -> bool:
     raw = str(path)
     if raw.startswith(("\\\\", "//")):
         return True
-    if os.name != "nt":
+    if _platform_system() == "Windows":
+        anchor = path.resolve(strict=False).anchor
+        if not anchor:
+            return False
+        drive_type_remote = 4
+        return ctypes.windll.kernel32.GetDriveTypeW(anchor) == drive_type_remote
+    mount_data, is_mountinfo = _read_posix_mount_data()
+    mounts = _parse_posix_mounts(mount_data, is_mountinfo=is_mountinfo)
+    raw_target = str(path).replace("\\", "/")
+    target = raw_target if raw_target.startswith("/") else str(path.absolute()).replace("\\", "/")
+    matching = [entry for entry in mounts if _path_is_under(target, entry[0])]
+    if not matching:
         return False
-    anchor = path.resolve(strict=False).anchor
-    if not anchor:
-        return False
-    drive_type_remote = 4
-    return ctypes.windll.kernel32.GetDriveTypeW(anchor) == drive_type_remote
+    _mount_point, filesystem = max(matching, key=lambda entry: len(entry[0]))
+    return filesystem in {"nfs", "nfs4", "cifs", "smbfs", "sshfs", "9p", "ceph"} or (
+        filesystem.endswith(".sshfs")
+    )
+
+
+def _platform_system() -> str:
+    return platform.system()
+
+
+def _read_posix_mount_data() -> tuple[str, bool]:
+    for path, is_mountinfo in (
+        (Path("/proc/self/mountinfo"), True),
+        (Path("/proc/mounts"), False),
+    ):
+        try:
+            return path.read_text(encoding="utf-8"), is_mountinfo
+        except OSError:
+            continue
+    return "", True
+
+
+def _parse_posix_mounts(data: str, *, is_mountinfo: bool) -> list[tuple[str, str]]:
+    mounts: list[tuple[str, str]] = []
+    for line in data.splitlines():
+        try:
+            if is_mountinfo:
+                left, right = line.split(" - ", 1)
+                mount_point = left.split()[4]
+                filesystem = right.split()[0]
+            else:
+                _source, mount_point, filesystem, *_rest = line.split()
+        except (IndexError, ValueError):
+            continue
+        mounts.append((_decode_mount_path(mount_point), filesystem.casefold()))
+    return mounts
+
+
+def _decode_mount_path(value: str) -> str:
+    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), value)
+
+
+def _path_is_under(path: str, mount_point: str) -> bool:
+    mount_point = mount_point.rstrip("/") or "/"
+    return mount_point == "/" or path == mount_point or path.startswith(f"{mount_point}/")
 
 
 def _windows_reparse_point(path: Path) -> bool:
@@ -167,14 +219,34 @@ def validate_state_root(path: Path) -> None:
             stacklevel=2,
         )
     path.mkdir(parents=True, exist_ok=True)
-    _restrict_mode(path, 0o700)
+    _set_owner_only(path, 0o700)
     if not _sqlite_lock_probe(path):
         raise UnsafeStateRoot(f"state root failed the SQLite two-connection locking probe: {path}")
 
 
-def _restrict_mode(path: Path, mode: int) -> None:
-    with contextlib.suppress(OSError):
+def _owner_permissions_supported(path: Path) -> bool:
+    return _platform_system() != "Windows" and os.name == "posix"
+
+
+def _set_owner_only(path: Path, mode: int) -> bool:
+    if not _owner_permissions_supported(path):
+        return False
+    try:
         path.chmod(mode)
+    except OSError as exc:
+        unsupported = {errno.ENOSYS, errno.ENOTSUP, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP)}
+        if exc.errno not in unsupported:
+            raise
+        warnings.warn(
+            f"owner-only permission bits are unsupported for {path}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return False
+    actual = stat.S_IMODE(path.stat().st_mode)
+    if actual != mode:
+        raise PermissionError(f"owner-only mode {mode:o} was not applied to {path}: got {actual:o}")
+    return True
 
 
 def open_operational_db(path: Path, *, busy_ms: int) -> sqlite3.Connection:
@@ -192,7 +264,7 @@ def open_operational_db(path: Path, *, busy_ms: int) -> sqlite3.Connection:
             raise sqlite3.OperationalError(f"SQLite refused journal_mode=DELETE: {mode}")
         connection.execute("PRAGMA synchronous=FULL")
         connection.execute("PRAGMA foreign_keys=ON")
-        _restrict_mode(path, 0o600)
+        _set_owner_only(path, 0o600)
         return connection
     except Exception:
         connection.close()

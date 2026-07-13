@@ -2,30 +2,45 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://llm-wiki.local/schemas/project-checkpoint-v1.json",
   "type": "object",
-  "required": ["schema_version", "occurrence_id", "idempotency_key", "project", "sequence", "trigger", "reason", "delta"],
+  "required": ["schema_version", "occurrence_id", "idempotency_key", "project", "sequence", "provenance", "trigger", "reason", "delta", "evidence_event_ids", "last_applied_sequence"],
   "properties": {
     "schema_version": {"const": "project-checkpoint/v1"},
     "occurrence_id": {"type": "string", "minLength": 1},
     "idempotency_key": {"type": "string", "minLength": 1},
     "project": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
     "sequence": {"type": "integer", "minimum": 1},
+    "provenance": {
+      "type": "object",
+      "required": ["agent", "session", "worktree", "branch", "source_event"],
+      "properties": {
+        "agent": {"type": "string", "minLength": 1},
+        "session": {"type": "string", "minLength": 1},
+        "worktree": {"type": "string", "minLength": 1},
+        "branch": {"type": "string", "minLength": 1},
+        "source_event": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
     "trigger": {"type": "string", "minLength": 1},
     "reason": {"type": "string", "minLength": 1},
     "delta": {
       "type": "object",
+      "required": ["goal", "phase", "current_task", "next_actions", "decisions", "blockers", "changed_files", "commands", "verification"],
       "properties": {
-        "goal": {"type": "string"},
-        "phase": {"type": "string"},
-        "current_task": {"type": "string"},
-        "next_actions": {"type": "array", "items": {"type": "string"}},
-        "decisions": {"type": "array", "items": {"type": "string"}},
-        "blockers": {"type": "array", "items": {"type": "string"}},
-        "changed_files": {"type": "array", "items": {"type": "string"}},
-        "commands": {"type": "array", "items": {"type": "string"}},
-        "verification": {"type": "array", "items": {"type": "string"}}
+        "goal": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string"}}, "additionalProperties": false},
+        "phase": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string"}}, "additionalProperties": false},
+        "current_task": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string"}}, "additionalProperties": false},
+        "next_actions": {"type": "array", "items": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string"}}, "additionalProperties": false}},
+        "decisions": {"type": "array", "items": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string"}}, "additionalProperties": false}},
+        "blockers": {"type": "array", "items": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string"}}, "additionalProperties": false}},
+        "changed_files": {"type": "array", "items": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string"}}, "additionalProperties": false}},
+        "commands": {"type": "array", "items": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string"}}, "additionalProperties": false}},
+        "verification": {"type": "array", "items": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string"}}, "additionalProperties": false}}
       },
       "additionalProperties": false
-    }
+    },
+    "evidence_event_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "last_applied_sequence": {"type": "integer", "minimum": 0}
   },
   "additionalProperties": false
 }

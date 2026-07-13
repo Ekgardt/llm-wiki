@@ -2,14 +2,46 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://llm-wiki.local/schemas/archive-manifest-v1.json",
   "type": "object",
-  "required": ["schema_version", "logical_daily_id", "original_path", "source_hash", "payload_hash", "operation_ids", "evidence", "pins", "retention_days"],
+  "required": ["schema_version", "logical_daily_id", "original_path", "source_hash", "payload_hash", "compile_receipt", "queue_preflight", "operations", "evidence", "pins", "retention_days"],
   "properties": {
     "schema_version": {"const": "archive-manifest/v1"},
     "logical_daily_id": {"type": "string", "minLength": 1},
     "original_path": {"type": "string", "minLength": 1},
     "source_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "payload_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "operation_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "compile_receipt": {
+      "type": "object",
+      "required": ["schema_version", "receipt_id", "path", "sha256"],
+      "properties": {
+        "schema_version": {"const": "compile-receipt/v2"},
+        "receipt_id": {"type": "string", "minLength": 1},
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "queue_preflight": {
+      "type": "object",
+      "required": ["checked_at", "passed", "blocking_task_ids"],
+      "properties": {
+        "checked_at": {"type": "string", "minLength": 1},
+        "passed": {"type": "boolean"},
+        "blocking_task_ids": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      },
+      "additionalProperties": false
+    },
+    "operations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["operation_id", "state"],
+        "properties": {
+          "operation_id": {"type": "string", "minLength": 1},
+          "state": {"enum": ["succeeded", "dead", "cancelled"]}
+        },
+        "additionalProperties": false
+      }
+    },
     "evidence": {
       "type": "array",
       "items": {

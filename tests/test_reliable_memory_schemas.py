@@ -63,6 +63,101 @@ def test_queue_schema_has_exactly_six_approved_states():
     assert states == ["ready", "leased", "blocked", "succeeded", "dead", "cancelled"]
 
 
+def test_queue_schema_accepts_closed_redacted_payload_envelope():
+    task = {
+        "schema_version": "queue-task/v2",
+        "task_id": "task-1",
+        "kind": "compile",
+        "handler_version": 1,
+        "payload": {
+            "version": 1,
+            "kind": "compile",
+            "data_hash": "a" * 64,
+            "redacted_data": {
+                "fields": [{"name": "source", "value": "[redacted]", "redacted": True}]
+            },
+        },
+        "input_hash": "b" * 64,
+        "state": "ready",
+        "priority": 0,
+        "attempts": 0,
+    }
+    validate_schema(task, SCHEMA_DIR / "queue-task-v2.json")
+    task["handler_version"] = 0
+    with pytest.raises(SchemaValidationError):
+        validate_schema(task, SCHEMA_DIR / "queue-task-v2.json")
+    task["handler_version"] = 1
+    task["payload"]["redacted_data"]["secret"] = "open"
+    with pytest.raises(SchemaValidationError, match="unknown"):
+        validate_schema(task, SCHEMA_DIR / "queue-task-v2.json")
+
+
+def test_project_checkpoint_schema_covers_provenance_and_stable_delta_semantics():
+    change = {"id": "stable-1", "action": "upsert", "value": "active"}
+    checkpoint = {
+        "schema_version": "project-checkpoint/v1",
+        "occurrence_id": "occ-1",
+        "idempotency_key": "session:event",
+        "project": "reliable-memory",
+        "sequence": 2,
+        "provenance": {
+            "agent": "opencode",
+            "session": "session-1",
+            "worktree": "D:/projects/llm-wiki",
+            "branch": "feature",
+            "source_event": "post-tool",
+        },
+        "trigger": "task-complete",
+        "reason": "checkpoint",
+        "delta": {
+            "goal": change,
+            "phase": change,
+            "current_task": change,
+            "next_actions": [change],
+            "decisions": [change],
+            "blockers": [{"id": "block-1", "action": "close", "value": "resolved"}],
+            "changed_files": [change],
+            "commands": [change],
+            "verification": [change],
+        },
+        "evidence_event_ids": ["event-1"],
+        "last_applied_sequence": 1,
+    }
+    validate_schema(checkpoint, SCHEMA_DIR / "project-checkpoint-v1.json")
+    checkpoint["delta"]["goal"]["action"] = "append"
+    with pytest.raises(SchemaValidationError):
+        validate_schema(checkpoint, SCHEMA_DIR / "project-checkpoint-v1.json")
+
+
+def test_archive_manifest_requires_receipt_queue_preflight_and_terminal_operations():
+    manifest = {
+        "schema_version": "archive-manifest/v1",
+        "logical_daily_id": "2026-01-01",
+        "original_path": "knowledge/daily/2026-01-01.md",
+        "source_hash": "a" * 64,
+        "payload_hash": "b" * 64,
+        "compile_receipt": {
+            "schema_version": "compile-receipt/v2",
+            "receipt_id": "receipt-1",
+            "path": "knowledge/daily/2026-01-01.md",
+            "sha256": "c" * 64,
+        },
+        "queue_preflight": {
+            "checked_at": "2026-07-13T00:00:00Z",
+            "passed": True,
+            "blocking_task_ids": [],
+        },
+        "operations": [{"operation_id": "compile:1", "state": "succeeded"}],
+        "evidence": [],
+        "pins": [],
+        "retention_days": 30,
+    }
+    validate_schema(manifest, SCHEMA_DIR / "archive-manifest-v1.json")
+    manifest["operations"][0]["state"] = "ready"
+    with pytest.raises(SchemaValidationError):
+        validate_schema(manifest, SCHEMA_DIR / "archive-manifest-v1.json")
+
+
 def test_compile_plan_accepts_absent_content_for_delete():
     validate_schema(
         {

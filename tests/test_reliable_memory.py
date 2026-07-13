@@ -5,9 +5,10 @@ import sqlite3
 import stat
 import unicodedata
 from dataclasses import asdict
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 import pytest
+import reliable_memory
 from reliable_memory import (
     DEFAULTS,
     UnsafeStateRoot,
@@ -141,6 +142,62 @@ def test_state_root_rejects_known_network_path(tmp_path, monkeypatch):
     monkeypatch.setattr("reliable_memory._known_network_path", lambda path: True)
     with pytest.raises(UnsafeStateRoot, match="local filesystem"):
         validate_state_root(tmp_path)
+
+
+def test_posix_network_mount_detection_uses_longest_mount_point(monkeypatch):
+    mount_data = """
+36 25 0:32 / / rw,relatime - nfs4 server:/root rw
+37 36 8:1 / /srv/local rw,relatime - ext4 /dev/sda1 rw
+38 36 0:44 / /srv/network rw,relatime - cifs //server/share rw
+"""
+    monkeypatch.setattr(reliable_memory, "_platform_system", lambda: "Linux", raising=False)
+    monkeypatch.setattr(
+        reliable_memory, "_read_posix_mount_data", lambda: (mount_data, True), raising=False
+    )
+    assert reliable_memory._known_network_path(Path("/uncovered")) is True
+    assert reliable_memory._known_network_path(Path("/srv/local/state")) is False
+    assert reliable_memory._known_network_path(Path("/srv/network/state")) is True
+
+
+def test_posix_proc_mounts_network_types_are_detected(monkeypatch):
+    mounts = "server:/nfs /mnt/nfs nfs rw 0 0\nsshfs /mnt/ssh fuse.sshfs rw 0 0\n"
+    monkeypatch.setattr(reliable_memory, "_platform_system", lambda: "Linux", raising=False)
+    monkeypatch.setattr(
+        reliable_memory, "_read_posix_mount_data", lambda: (mounts, False), raising=False
+    )
+    assert reliable_memory._known_network_path(Path("/mnt/nfs/state")) is True
+    assert reliable_memory._known_network_path(Path("/mnt/ssh/state")) is True
+
+
+def test_owner_permission_errors_are_not_suppressed(tmp_path, monkeypatch):
+    monkeypatch.setattr(reliable_memory, "_owner_permissions_supported", lambda path: True, raising=False)
+
+    def deny_chmod(self, mode):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(Path, "chmod", deny_chmod)
+    with pytest.raises(PermissionError, match="denied"):
+        validate_state_root(tmp_path / "state")
+
+
+def test_owner_mode_must_match_after_chmod(tmp_path, monkeypatch):
+    root = tmp_path / "state"
+    root.mkdir(mode=0o755)
+    monkeypatch.setattr(reliable_memory, "_owner_permissions_supported", lambda path: True, raising=False)
+    monkeypatch.setattr(Path, "chmod", lambda self, mode: None)
+    with pytest.raises(PermissionError, match="owner-only"):
+        validate_state_root(root)
+
+
+def test_unsupported_owner_bits_skip_chmod_explicitly(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        reliable_memory, "_owner_permissions_supported", lambda path: False, raising=False
+    )
+    monkeypatch.setattr(
+        Path, "chmod", lambda self, mode: pytest.fail("chmod must not run when modes are unsupported")
+    )
+    monkeypatch.setattr(reliable_memory, "_sqlite_lock_probe", lambda path: True)
+    validate_state_root(tmp_path / "state")
 
 
 def test_state_root_rejects_windows_reparse_point(tmp_path, monkeypatch):
