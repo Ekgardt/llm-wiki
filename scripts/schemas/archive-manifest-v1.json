@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/archive-manifest-v1.json",
+  "type": "object",
+  "required": ["schema_version", "logical_daily_id", "original_path", "source_hash", "payload_hash", "operation_ids", "evidence", "pins", "retention_days"],
+  "properties": {
+    "schema_version": {"const": "archive-manifest/v1"},
+    "logical_daily_id": {"type": "string", "minLength": 1},
+    "original_path": {"type": "string", "minLength": 1},
+    "source_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "payload_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "operation_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["block_id", "byte_start", "byte_end", "line_start", "line_end", "sha256"],
+        "properties": {
+          "block_id": {"type": "string", "minLength": 1},
+          "byte_start": {"type": "integer", "minimum": 0},
+          "byte_end": {"type": "integer", "minimum": 0},
+          "line_start": {"type": "integer", "minimum": 1},
+          "line_end": {"type": "integer", "minimum": 1},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "pins": {"type": "array", "items": {"type": "string"}},
+    "retention_days": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

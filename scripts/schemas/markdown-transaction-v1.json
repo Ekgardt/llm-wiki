@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/markdown-transaction-v1.json",
+  "type": "object",
+  "required": ["schema_version", "transaction_id", "operations"],
+  "properties": {
+    "schema_version": {"const": "markdown-transaction/v1"},
+    "transaction_id": {"type": "string", "minLength": 1},
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["kind", "path", "before", "after"],
+        "properties": {
+          "kind": {"enum": ["create", "replace", "delete"]},
+          "path": {"type": "string", "minLength": 1},
+          "before": {
+            "oneOf": [
+              {"const": "absent"},
+              {
+                "type": "object",
+                "required": ["sha256", "artifact"],
+                "properties": {
+                  "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "artifact": {"type": "string", "minLength": 1}
+                },
+                "additionalProperties": false
+              }
+            ]
+          },
+          "after": {
+            "oneOf": [
+              {"const": "absent"},
+              {
+                "type": "object",
+                "required": ["sha256", "artifact"],
+                "properties": {
+                  "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "artifact": {"type": "string", "minLength": 1}
+                },
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

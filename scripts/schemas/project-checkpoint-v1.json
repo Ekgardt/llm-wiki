@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/project-checkpoint-v1.json",
+  "type": "object",
+  "required": ["schema_version", "occurrence_id", "idempotency_key", "project", "sequence", "trigger", "reason", "delta"],
+  "properties": {
+    "schema_version": {"const": "project-checkpoint/v1"},
+    "occurrence_id": {"type": "string", "minLength": 1},
+    "idempotency_key": {"type": "string", "minLength": 1},
+    "project": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
+    "sequence": {"type": "integer", "minimum": 1},
+    "trigger": {"type": "string", "minLength": 1},
+    "reason": {"type": "string", "minLength": 1},
+    "delta": {
+      "type": "object",
+      "properties": {
+        "goal": {"type": "string"},
+        "phase": {"type": "string"},
+        "current_task": {"type": "string"},
+        "next_actions": {"type": "array", "items": {"type": "string"}},
+        "decisions": {"type": "array", "items": {"type": "string"}},
+        "blockers": {"type": "array", "items": {"type": "string"}},
+        "changed_files": {"type": "array", "items": {"type": "string"}},
+        "commands": {"type": "array", "items": {"type": "string"}},
+        "verification": {"type": "array", "items": {"type": "string"}}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

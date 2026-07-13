@@ -1,0 +1,342 @@
+"""Shared durability and validation primitives for reliable memory operations."""
+
+from __future__ import annotations
+
+import contextlib
+import ctypes
+import errno
+import hashlib
+import json
+import os
+import re
+import sqlite3
+import stat
+import unicodedata
+import warnings
+from collections.abc import Iterator
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+
+@dataclass(frozen=True)
+class ReliableMemoryDefaults:
+    markdown_busy_ms: int = 10_000
+    queue_busy_ms: int = 5_000
+    transaction_retention_days: int = 30
+    artifact_retention_days: int = 30
+    archive_hot_days: int = 90
+    project_lease_seconds: int = 30
+    project_heartbeat_seconds: int = 10
+    checkpoint_debounce_seconds: int = 30
+    checkpoint_fallback_events: int = 20
+    queue_lease_seconds: int = 120
+    queue_heartbeat_seconds: int = 40
+    queue_max_attempts: int = 8
+    retry_base_seconds: int = 30
+    retry_cap_seconds: int = 3_600
+    worker_max_tasks: int = 20
+    worker_max_seconds: int = 600
+    worker_idle_seconds: int = 2
+    priority_min: int = -100
+    priority_max: int = 100
+    queue_result_retention_days: int = 30
+    dead_task_retention_days: int | None = None
+
+
+DEFAULTS = ReliableMemoryDefaults()
+
+
+class UnsafeStateRoot(ValueError):
+    """Raised when runtime state cannot safely use local SQLite locking."""
+
+
+class SchemaValidationError(ValueError):
+    """Raised when an instance does not satisfy a committed schema."""
+
+
+def _canonical_value(value: object) -> object:
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        raise TypeError("canonical JSON does not permit float values")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        return unicodedata.normalize("NFC", value)
+    if isinstance(value, list):
+        return [_canonical_value(item) for item in value]
+    if isinstance(value, dict):
+        normalized: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("canonical JSON object keys must be strings")
+            normalized_key = unicodedata.normalize("NFC", key)
+            if normalized_key in normalized:
+                raise ValueError(f"normalized object-key collision: {normalized_key!r}")
+            normalized[normalized_key] = _canonical_value(item)
+        return normalized
+    raise TypeError(f"canonical JSON does not permit {type(value).__name__} values")
+
+
+def canonical_json_bytes(value: object) -> bytes:
+    """Encode the restricted JSON domain deterministically as UTF-8."""
+    normalized = _canonical_value(value)
+    return json.dumps(
+        normalized,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _known_network_path(path: Path) -> bool:
+    raw = str(path)
+    if raw.startswith(("\\\\", "//")):
+        return True
+    if os.name != "nt":
+        return False
+    anchor = path.resolve(strict=False).anchor
+    if not anchor:
+        return False
+    drive_type_remote = 4
+    return ctypes.windll.kernel32.GetDriveTypeW(anchor) == drive_type_remote
+
+
+def _windows_reparse_point(path: Path) -> bool:
+    if os.name != "nt":
+        return False
+    current = path.absolute()
+    candidates = [current, *current.parents]
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        attributes = getattr(candidate.stat(follow_symlinks=False), "st_file_attributes", 0)
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if attributes & reparse_flag:
+            return True
+    return False
+
+
+def _sqlite_lock_probe(root: Path) -> bool:
+    probe = root / ".llm-wiki-lock-probe.sqlite3"
+    first: sqlite3.Connection | None = None
+    second: sqlite3.Connection | None = None
+    try:
+        first = sqlite3.connect(probe, timeout=0)
+        second = sqlite3.connect(probe, timeout=0)
+        first.execute("PRAGMA journal_mode=DELETE")
+        first.execute("BEGIN IMMEDIATE")
+        try:
+            second.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            return "locked" in str(exc).lower() or "busy" in str(exc).lower()
+        else:
+            second.rollback()
+            return False
+    except sqlite3.Error:
+        return False
+    finally:
+        if first is not None:
+            first.rollback()
+            first.close()
+        if second is not None:
+            second.close()
+        for suffix in ("", "-journal", "-shm", "-wal"):
+            with contextlib.suppress(OSError):
+                Path(f"{probe}{suffix}").unlink()
+
+
+def validate_state_root(path: Path) -> None:
+    """Fail closed when a runtime root lacks known-safe local lock semantics."""
+    path = Path(path)
+    if _known_network_path(path):
+        raise UnsafeStateRoot(f"state root must use a local filesystem: {path}")
+    if _windows_reparse_point(path):
+        raise UnsafeStateRoot(f"state root must not traverse a Windows reparse point: {path}")
+    cloud_names = {"dropbox", "googledrive", "google drive", "iclouddrive", "onedrive"}
+    if any(part.casefold() in cloud_names for part in path.parts):
+        warnings.warn(
+            f"state root appears to be cloud-synchronized; local locking is only probed: {path}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    path.mkdir(parents=True, exist_ok=True)
+    _restrict_mode(path, 0o700)
+    if not _sqlite_lock_probe(path):
+        raise UnsafeStateRoot(f"state root failed the SQLite two-connection locking probe: {path}")
+
+
+def _restrict_mode(path: Path, mode: int) -> None:
+    with contextlib.suppress(OSError):
+        path.chmod(mode)
+
+
+def open_operational_db(path: Path, *, busy_ms: int) -> sqlite3.Connection:
+    """Open an owner-restricted rollback-journal operational database."""
+    if busy_ms < 0:
+        raise ValueError("busy_ms must be non-negative")
+    path = Path(path)
+    validate_state_root(path.parent)
+    connection = sqlite3.connect(path, timeout=busy_ms / 1_000)
+    try:
+        connection.row_factory = sqlite3.Row
+        connection.execute(f"PRAGMA busy_timeout={busy_ms:d}")
+        mode = connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
+        if str(mode).casefold() != "delete":
+            raise sqlite3.OperationalError(f"SQLite refused journal_mode=DELETE: {mode}")
+        connection.execute("PRAGMA synchronous=FULL")
+        connection.execute("PRAGMA foreign_keys=ON")
+        _restrict_mode(path, 0o600)
+        return connection
+    except Exception:
+        connection.close()
+        raise
+
+
+@contextlib.contextmanager
+def begin_immediate(connection: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        yield connection
+    except BaseException:
+        connection.rollback()
+        raise
+    else:
+        connection.commit()
+
+
+def fsync_file(path: Path) -> None:
+    with Path(path).open("rb+") as handle:
+        os.fsync(handle.fileno())
+
+
+def fsync_directory(path: Path) -> None:
+    """Sync directory metadata where the platform exposes directory handles."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptor = os.open(Path(path), flags)
+    except OSError as exc:
+        if exc.errno in {errno.EACCES, errno.EINVAL, errno.ENOTSUP, errno.EPERM}:
+            return
+        raise
+    try:
+        try:
+            os.fsync(descriptor)
+        except OSError as exc:
+            if exc.errno not in {errno.EACCES, errno.EBADF, errno.EINVAL, errno.ENOTSUP, errno.EPERM}:
+                raise
+    finally:
+        os.close(descriptor)
+
+
+def restricted_relative_path(value: str, allowed_roots: tuple[str, ...]) -> PurePosixPath:
+    if not isinstance(value, str) or not value or "\\" in value or "//" in value:
+        raise ValueError("path must be a non-empty normalized POSIX relative path")
+    if re.match(r"^[A-Za-z]:", value):
+        raise ValueError("drive-qualified paths are forbidden")
+    path = PurePosixPath(value)
+    if path.is_absolute() or str(path) != value or any(part in {"", ".", ".."} for part in path.parts):
+        raise ValueError("path must be normalized and relative")
+    roots = tuple(PurePosixPath(root) for root in allowed_roots)
+    if not roots or not any(path == root or root in path.parents for root in roots):
+        raise ValueError("path is outside every allowed root")
+    return path
+
+
+def validate_schema(instance: object, schema_path: Path) -> None:
+    """Validate the closed JSON Schema subset used by committed contracts."""
+    try:
+        schema = json.loads(Path(schema_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SchemaValidationError(f"cannot load schema {schema_path}: {exc}") from exc
+    _validate_rule(instance, schema, "$")
+
+
+def _validate_rule(instance: object, rule: dict[str, Any], location: str) -> None:
+    if "oneOf" in rule:
+        matches = 0
+        for option in rule["oneOf"]:
+            try:
+                _validate_rule(instance, option, location)
+            except SchemaValidationError:
+                continue
+            matches += 1
+        if matches != 1:
+            raise SchemaValidationError(f"{location}: expected exactly one oneOf match, got {matches}")
+    if "const" in rule and not _json_equal(instance, rule["const"]):
+        raise SchemaValidationError(f"{location}: expected const {rule['const']!r}")
+    if "enum" in rule and not any(_json_equal(instance, candidate) for candidate in rule["enum"]):
+        raise SchemaValidationError(f"{location}: value is not in enum")
+
+    expected = rule.get("type")
+    if expected is not None and not _matches_type(instance, expected):
+        raise SchemaValidationError(f"{location}: expected {expected}")
+
+    if expected == "object":
+        assert isinstance(instance, dict)
+        required = rule.get("required", [])
+        missing = [key for key in required if key not in instance]
+        if missing:
+            raise SchemaValidationError(f"{location}: missing required properties {missing}")
+        properties = rule.get("properties", {})
+        if rule.get("additionalProperties") is False:
+            unknown = sorted(set(instance) - set(properties))
+            if unknown:
+                raise SchemaValidationError(f"{location}: unknown properties {unknown}")
+        for key, value in instance.items():
+            if key in properties:
+                _validate_rule(value, properties[key], f"{location}.{key}")
+    elif expected == "array":
+        assert isinstance(instance, list)
+        _check_bound(len(instance), rule, "minItems", "maxItems", location)
+        if "items" in rule:
+            for index, item in enumerate(instance):
+                _validate_rule(item, rule["items"], f"{location}[{index}]")
+    elif expected == "string":
+        assert isinstance(instance, str)
+        _check_bound(len(instance), rule, "minLength", "maxLength", location)
+        if "pattern" in rule and re.search(rule["pattern"], instance) is None:
+            raise SchemaValidationError(f"{location}: string does not match pattern")
+    elif expected in {"integer", "number"}:
+        assert isinstance(instance, (int, float)) and not isinstance(instance, bool)
+        _check_bound(instance, rule, "minimum", "maximum", location)
+
+
+def _matches_type(instance: object, expected: str) -> bool:
+    checks = {
+        "object": lambda: isinstance(instance, dict),
+        "array": lambda: isinstance(instance, list),
+        "string": lambda: isinstance(instance, str),
+        "integer": lambda: isinstance(instance, int) and not isinstance(instance, bool),
+        "number": lambda: isinstance(instance, (int, float)) and not isinstance(instance, bool),
+        "boolean": lambda: isinstance(instance, bool),
+        "null": lambda: instance is None,
+    }
+    if expected not in checks:
+        raise SchemaValidationError(f"unsupported schema type: {expected}")
+    return checks[expected]()
+
+
+def _json_equal(left: object, right: object) -> bool:
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left == right
+    return left == right
+
+
+def _check_bound(
+    value: int | float,
+    rule: dict[str, Any],
+    minimum_name: str,
+    maximum_name: str,
+    location: str,
+) -> None:
+    if minimum_name in rule and value < rule[minimum_name]:
+        raise SchemaValidationError(f"{location}: below {minimum_name}")
+    if maximum_name in rule and value > rule[maximum_name]:
+        raise SchemaValidationError(f"{location}: above {maximum_name}")

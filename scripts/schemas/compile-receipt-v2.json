@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/compile-receipt-v2.json",
+  "type": "object",
+  "required": ["schema_version", "source_digest", "action_key", "state", "operation_ids", "evidence_hashes"],
+  "properties": {
+    "schema_version": {"const": "compile-receipt/v2"},
+    "source_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "action_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "state": {"enum": ["completed", "failed"]},
+    "operation_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "evidence_hashes": {"type": "array", "items": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+  },
+  "additionalProperties": false
+}
