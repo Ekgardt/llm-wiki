@@ -13,6 +13,7 @@ Never fails — always exits 0. Errors go to stderr.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -119,6 +120,29 @@ def locked_append(daily_path: Path, text: str) -> None:
             f.write(text)
             if not text.endswith("\n"):
                 f.write("\n")
+
+
+def locked_append_once(daily_path: Path, text: str, operation_id: str) -> bool:
+    """Append one operation exactly once while holding the daily-log lock."""
+    if not operation_id:
+        raise ValueError("operation_id must be non-empty")
+    marker_id = hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
+    marker = f"<!-- llm-wiki-operation:{marker_id} -->"
+    daily_path.parent.mkdir(parents=True, exist_ok=True)
+    with _daily_lock():
+        if daily_path.exists() and marker in daily_path.read_text(encoding="utf-8"):
+            return False
+        with daily_path.open("a", encoding="utf-8") as handle:
+            header = (
+                f"# Daily Session Memory — {daily_path.stem}\n"
+                if daily_path.stat().st_size == 0
+                else ""
+            )
+            ending = "" if text.endswith("\n") else "\n"
+            handle.write(f"{header}\n{marker}\n{text}{ending}")
+            handle.flush()
+            os.fsync(handle.fileno())
+        return True
 
 
 def append_daily(slug: str, session_id: str, block: str) -> Path:

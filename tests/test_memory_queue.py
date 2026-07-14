@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 import sqlite3
 import stat
 import sys
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from inspect import signature
 from pathlib import Path
@@ -81,6 +83,40 @@ def test_enqueue_stores_closed_canonical_redacted_payload(queue: MemoryQueue) ->
         ).fetchone()[0]
     assert "payload" not in columns
     assert json.loads(stored) == task.payload
+
+
+def test_enqueue_recursively_redacts_secret_keys_and_value_patterns(
+    queue: MemoryQueue,
+) -> None:
+    task_id = queue.enqueue(
+        "query",
+        1,
+        {
+            "password": "plain",
+            "nested": {
+                "API-Key": "plain-api-key",
+                "items": [
+                    {"authorization": "Basic abc"},
+                    {"safe": "Bearer token: ghp_abcdefghijklmnopqrstuvwxyz012345"},
+                    {"cookie": {"session": "secret"}},
+                ],
+            },
+            "safe": "ok",
+        },
+    )
+    payload = queue.get(task_id).payload
+    assert payload == {
+        "nested": {
+            "API-Key": "[REDACTED]",
+            "items": [
+                {"authorization": "[REDACTED]"},
+                {"safe": "Bearer token: [REDACTED]"},
+                {"cookie": "[REDACTED]"},
+            ],
+        },
+        "password": "[REDACTED]",
+        "safe": "ok",
+    }
 
 
 def test_enqueue_validates_priority_and_deduplicates(queue: MemoryQueue) -> None:
@@ -184,6 +220,64 @@ def test_result_publication_is_stable_owner_only_and_no_clobber(
         assert stat.S_IMODE(result_path.stat().st_mode) == 0o600
 
 
+def test_result_directory_is_fsynced_before_database_reference(
+    queue: MemoryQueue, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import memory_queue
+
+    task_id = queue.enqueue("query", 1, {})
+    lease = queue.claim("worker")
+    assert lease is not None
+    monkeypatch.setattr(
+        memory_queue,
+        "fsync_directory",
+        lambda path: (_ for _ in ()).throw(OSError("simulated power loss")),
+        raising=False,
+    )
+    with pytest.raises(OSError, match="power loss"):
+        queue.publish_result(lease, operation_id=task_id, result=b"answer")
+    assert queue.get(task_id).result_reference is None
+
+
+def test_queue_hardens_directory_database_temp_and_result(
+    tmp_path: Path, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import memory_queue
+
+    protected: list[tuple[Path, int]] = []
+    monkeypatch.setattr(
+        memory_queue,
+        "_harden_owner_only",
+        lambda path, mode: protected.append((Path(path), mode)),
+        raising=False,
+    )
+    queue = MemoryQueue(tmp_path, clock=clock, rng=random.Random(1))
+    task_id = queue.enqueue("query", 1, {})
+    lease = queue.claim("worker")
+    assert lease is not None
+    queue.publish_result(lease, operation_id=task_id, result=b"answer")
+    paths = {path for path, _mode in protected}
+    assert queue.results_dir in paths
+    assert queue.db_path in paths
+    assert any(path.suffix == ".tmp" for path in paths)
+    assert queue.state_root / queue.get(task_id).result_reference in paths
+
+
+def test_queue_acl_failure_is_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import memory_queue
+
+    monkeypatch.setattr(
+        memory_queue,
+        "_harden_owner_only",
+        lambda path, mode: (_ for _ in ()).throw(PermissionError("ACL denied")),
+        raising=False,
+    )
+    with pytest.raises(PermissionError, match="ACL denied"):
+        MemoryQueue(tmp_path)
+
+
 def test_acknowledge_requires_published_result(queue: MemoryQueue) -> None:
     queue.enqueue("query", 1, {})
     lease = queue.claim("worker")
@@ -227,6 +321,24 @@ def test_retry_uses_full_jitter_and_longer_retry_after(
     assert task.state == "ready"
     assert task.attempts == 1
     assert task.available_at == clock() + timedelta(seconds=90)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (math.inf, None),
+        (-math.inf, None),
+        (math.nan, None),
+        (-1, None),
+        ("9" * 100, 604800.0),
+        (10**100, 604800.0),
+        (datetime.max.replace(tzinfo=timezone.utc), 604800.0),
+    ],
+)
+def test_retry_after_is_finite_nonnegative_and_safely_bounded(
+    clock: FakeClock, value: object, expected: float | None
+) -> None:
+    assert MemoryQueue._retry_after_seconds(value, clock()) == expected
 
 
 def test_retry_without_retry_after_uses_seeded_full_jitter(
@@ -303,6 +415,24 @@ def test_eighth_expired_lease_goes_dead_without_ninth_claim(
     assert task.error_code == "attempts_exhausted"
     assert len(task.attempt_history) == 8
     assert task.attempt_history[-1].outcome == "lease_expired"
+    assert task.attempt_history[-1].error_code == "attempts_exhausted"
+
+
+def test_startup_retires_legacy_ready_task_at_attempt_limit(
+    tmp_path: Path, clock: FakeClock
+) -> None:
+    queue = MemoryQueue(tmp_path, clock=clock, rng=random.Random(1))
+    task_id = queue.enqueue("query", 1, {})
+    with sqlite3.connect(queue.db_path) as connection:
+        connection.execute(
+            "UPDATE tasks SET attempts=8, state='ready' WHERE id=?", (task_id,)
+        )
+
+    restarted = MemoryQueue(tmp_path, clock=clock, rng=random.Random(2))
+    task = restarted.get(task_id)
+    assert task.state == "dead"
+    assert task.error_code == "attempts_exhausted"
+    assert task.attempt_history[-1].attempt == 8
     assert task.attempt_history[-1].error_code == "attempts_exhausted"
 
 
@@ -408,14 +538,18 @@ def test_manual_flush_handler_is_preserved(tmp_path: Path, monkeypatch: pytest.M
     import llm_client
     import memory_queue
 
-    captured: list[tuple[Path, str]] = []
+    captured: list[tuple[Path, str, str]] = []
     monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
     monkeypatch.setattr(llm_client, "call_llm", lambda *args, **kwargs: "major body")
     monkeypatch.setattr(flush_memory, "_classify_response", lambda result: ("major", result))
     monkeypatch.setattr(
         daily_log_append,
-        "locked_append",
-        lambda path, block: captured.append((Path(path), block)),
+        "locked_append_once",
+        lambda path, block, operation_id: captured.append(
+            (Path(path), block, operation_id)
+        )
+        or True,
+        raising=False,
     )
 
     assert memory_queue._manual_processor(
@@ -433,3 +567,72 @@ def test_manual_flush_handler_is_preserved(tmp_path: Path, monkeypatch: pytest.M
     )
     assert captured[0][0] == tmp_path / "knowledge" / "daily" / "2026-07-14.md"
     assert "major body" in captured[0][1]
+    assert captured[0][2] == "flush-id"
+
+
+def test_deferred_flush_operation_is_appended_once_under_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import daily_log_append
+
+    daily = tmp_path / "knowledge" / "daily" / "2026-07-14.md"
+    monkeypatch.setattr(daily_log_append, "_daily_lock", nullcontext)
+    assert daily_log_append.locked_append_once(daily, "\nbody\n", "stable-op") is True
+    assert daily_log_append.locked_append_once(daily, "\nbody\n", "stable-op") is False
+    content = daily.read_text(encoding="utf-8")
+    assert content.count("body") == 1
+    assert "stable-op" not in content
+    assert content.count("llm-wiki-operation:") == 1
+
+
+@pytest.mark.parametrize("day", ["../outside", "2026-7-14", "2026-07-14/../../x", ""])
+def test_deferred_flush_rejects_invalid_or_traversing_day(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, day: str
+) -> None:
+    import llm_client
+    import memory_queue
+
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+    monkeypatch.setattr(llm_client, "call_llm", lambda *args, **kwargs: "must not run")
+    assert memory_queue._manual_processor(
+        {"id": "op", "type": "flush", "payload": {"prompt": "p", "day": day}}
+    ) is False
+    assert not list(tmp_path.rglob("*.md"))
+
+
+def test_manual_query_returns_fenced_result_without_write_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import llm_client
+    import memory_queue
+
+    monkeypatch.setattr(llm_client, "call_llm", lambda *args, **kwargs: "answer")
+    monkeypatch.setattr(
+        Path,
+        "write_text",
+        lambda *args, **kwargs: pytest.fail("query results must use publish_result"),
+    )
+    result = memory_queue._manual_processor(
+        {
+            "id": "stable-query",
+            "type": "query",
+            "payload": {"prompt": "hello", "output_path": str(tmp_path / "escape.txt")},
+        }
+    )
+    assert result.data == b"answer"
+
+
+def test_manual_query_result_is_published_by_queue_fence(
+    tmp_path: Path, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import llm_client
+    import memory_queue
+
+    queue = MemoryQueue(tmp_path, clock=clock, rng=random.Random(4))
+    monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
+    monkeypatch.setattr(llm_client, "call_llm", lambda *args, **kwargs: "answer")
+    task_id = queue.enqueue("query", 1, {"prompt": "hello"})
+    assert memory_queue.drain_with(memory_queue._manual_processor, max_tasks=1)["ok"] == 1
+    task = queue.get(task_id)
+    assert task.state == "succeeded"
+    assert (queue.state_root / task.result_reference).read_bytes() == b"answer"

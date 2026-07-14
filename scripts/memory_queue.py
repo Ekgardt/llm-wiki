@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import email.utils
 import json
+import math
 import os
 import random
+import re
 import sqlite3
 import sys
 import uuid
@@ -20,6 +22,7 @@ from reliable_memory import (
     _set_owner_only,
     begin_immediate,
     canonical_json_bytes,
+    fsync_directory,
     fsync_file,
     open_operational_db,
     sha256_bytes,
@@ -29,6 +32,23 @@ from secret_redact import redact_secrets
 _STATES = ("ready", "leased", "blocked", "succeeded", "dead", "cancelled")
 _TERMINAL_STATES = ("succeeded", "dead", "cancelled")
 _PERMANENT_CODES = {"invalid_input", "unsupported_version"}
+_MAX_RETRY_AFTER_SECONDS = 7 * 24 * 60 * 60
+_SECRET_KEYS = {
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+    "credential",
+    "credentials",
+    "pass",
+    "passwd",
+    "passphrase",
+    "password",
+    "private_key",
+    "secret",
+    "set_cookie",
+    "token",
+}
 
 
 class LeaseFenceError(RuntimeError):
@@ -45,6 +65,11 @@ class QueueFailure:
     permanent: bool = False
     blocked_capability: str | None = None
     retry_after: float | datetime | str | None = None
+
+
+@dataclass(frozen=True)
+class DeferredResult:
+    data: bytes
 
 
 @dataclass(frozen=True)
@@ -115,14 +140,34 @@ def _parse_timestamp(value: str | None) -> datetime | None:
     return _as_utc(datetime.fromisoformat(value)) if value is not None else None
 
 
+def _is_secret_key(key: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "_", key.casefold()).strip("_")
+    return normalized in _SECRET_KEYS or normalized.endswith(
+        ("_api_key", "_authorization", "_cookie", "_credential", "_password", "_secret", "_token")
+    )
+
+
 def _redact_payload(value: object) -> object:
     if isinstance(value, str):
         return redact_secrets(value)
     if isinstance(value, list):
         return [_redact_payload(item) for item in value]
     if isinstance(value, dict):
-        return {key: _redact_payload(item) for key, item in value.items()}
+        return {
+            key: "[REDACTED]" if _is_secret_key(key) else _redact_payload(item)
+            for key, item in value.items()
+        }
     return value
+
+
+def _harden_owner_only(path: Path, mode: int) -> None:
+    if os.name == "nt":
+        from markdown_transaction import _harden_windows_acl
+
+        _harden_windows_acl(path)
+        return
+    if not _set_owner_only(path, mode):
+        raise PermissionError(f"could not apply owner-only permissions to {path}")
 
 
 class MemoryQueue:
@@ -141,14 +186,25 @@ class MemoryQueue:
         self.results_dir = self.run_dir / "queue-results"
         self._clock = clock or _utc_now
         self._rng = rng or random.SystemRandom()
+        self._db_hardened = False
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.results_dir.mkdir(parents=True, exist_ok=True)
-        _set_owner_only(self.results_dir, 0o700)
+        _harden_owner_only(self.results_dir, 0o700)
         with self._connect() as connection:
             self._create_schema(connection)
+            with begin_immediate(connection):
+                self._retire_exhausted_ready(connection, _as_utc(self._clock()))
 
     def _connect(self) -> sqlite3.Connection:
-        return open_operational_db(self.db_path, busy_ms=DEFAULTS.queue_busy_ms)
+        connection = open_operational_db(self.db_path, busy_ms=DEFAULTS.queue_busy_ms)
+        if not self._db_hardened:
+            try:
+                _harden_owner_only(self.db_path, 0o600)
+            except Exception:
+                connection.close()
+                raise
+            self._db_hardened = True
+        return connection
 
     @staticmethod
     def _create_schema(connection: sqlite3.Connection) -> None:
@@ -201,6 +257,38 @@ class MemoryQueue:
         }
         if "last_attempt_at" not in columns:
             connection.execute("ALTER TABLE tasks ADD COLUMN last_attempt_at TEXT")
+
+    @staticmethod
+    def _retire_exhausted_ready(
+        connection: sqlite3.Connection, now: datetime
+    ) -> None:
+        rows = connection.execute(
+            "SELECT * FROM tasks WHERE state='ready' AND attempts >= ?",
+            (DEFAULTS.queue_max_attempts,),
+        ).fetchall()
+        for row in rows:
+            connection.execute(
+                """INSERT INTO attempt_history(
+                       task_id, attempt, started_at, finished_at, outcome, error_code
+                   ) VALUES (?, ?, ?, ?, 'failed', 'attempts_exhausted')""",
+                (
+                    row["id"],
+                    row["attempts"],
+                    row["last_attempt_at"] or row["updated_at"],
+                    _timestamp(now),
+                ),
+            )
+            connection.execute(
+                """UPDATE tasks SET state='dead', error_code='attempts_exhausted',
+                       updated_at=?, last_attempt_at=COALESCE(last_attempt_at, ?)
+                   WHERE id=? AND state='ready' AND attempts >= ?""",
+                (
+                    _timestamp(now),
+                    _timestamp(now),
+                    row["id"],
+                    DEFAULTS.queue_max_attempts,
+                ),
+            )
 
     def enqueue(
         self,
@@ -414,12 +502,14 @@ class MemoryQueue:
         temporary = self.results_dir / f".{result_name}.{uuid.uuid4().hex}.tmp"
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         descriptor = os.open(temporary, flags, 0o600)
+        descriptor_open = True
         try:
+            _harden_owner_only(temporary, 0o600)
             with os.fdopen(descriptor, "wb") as handle:
+                descriptor_open = False
                 handle.write(result)
                 handle.flush()
                 os.fsync(handle.fileno())
-            _set_owner_only(temporary, 0o600)
             now = _as_utc(self._clock())
             with self._connect() as connection, begin_immediate(connection):
                 row = self._require_lease(connection, lease, now)
@@ -438,8 +528,9 @@ class MemoryQueue:
                             raise ResultConflictError(
                                 "operation ID already has different result bytes"
                             ) from None
-                    _set_owner_only(target, 0o600)
+                    _harden_owner_only(target, 0o600)
                     fsync_file(target)
+                fsync_directory(self.results_dir)
                 connection.execute(
                     """UPDATE tasks SET result_reference=?, result_operation_id=?, updated_at=?
                        WHERE id=?""",
@@ -447,6 +538,8 @@ class MemoryQueue:
                 )
                 return str(existing_reference or relative)
         finally:
+            if descriptor_open:
+                os.close(descriptor)
             try:
                 temporary.unlink()
             except OSError:
@@ -524,19 +617,31 @@ class MemoryQueue:
     def _retry_after_seconds(
         value: float | datetime | str | None, now: datetime
     ) -> float | None:
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return float(value) if value >= 0 else None
+        if isinstance(value, int) and not isinstance(value, bool):
+            if value < 0:
+                return None
+            return float(min(value, _MAX_RETRY_AFTER_SECONDS))
+        if isinstance(value, float):
+            if not math.isfinite(value) or value < 0:
+                return None
+            return min(value, float(_MAX_RETRY_AFTER_SECONDS))
         if isinstance(value, datetime):
-            return max(0.0, (_as_utc(value) - now).total_seconds())
+            seconds = max(0.0, (_as_utc(value) - now).total_seconds())
+            return min(seconds, float(_MAX_RETRY_AFTER_SECONDS))
         if isinstance(value, str):
             stripped = value.strip()
             if stripped.isdigit():
-                return float(stripped)
+                try:
+                    seconds = int(stripped)
+                except ValueError:
+                    return None
+                return float(min(seconds, _MAX_RETRY_AFTER_SECONDS))
             try:
                 parsed = email.utils.parsedate_to_datetime(stripped)
             except (TypeError, ValueError, OverflowError):
                 return None
-            return max(0.0, (_as_utc(parsed) - now).total_seconds())
+            seconds = max(0.0, (_as_utc(parsed) - now).total_seconds())
+            return min(seconds, float(_MAX_RETRY_AFTER_SECONDS))
         return None
 
     @staticmethod
@@ -777,7 +882,9 @@ def recover_stale_leases(max_age_seconds: int = 600) -> int:
     return _queue().recover_expired_leases()
 
 
-def drain_with(processor: Callable[[dict], bool], max_tasks: int = 10) -> dict[str, int]:
+def drain_with(
+    processor: Callable[[dict], bool | DeferredResult], max_tasks: int = 10
+) -> dict[str, int]:
     """Run handlers outside transactions and fence completion with a result marker."""
     counts = {"ok": 0, "failed": 0, "skipped": 0}
     queue = _queue()
@@ -787,14 +894,16 @@ def drain_with(processor: Callable[[dict], bool], max_tasks: int = 10) -> dict[s
         if lease is None:
             break
         try:
-            succeeded = bool(processor(_compat_task(lease)))
+            outcome = processor(_compat_task(lease))
+            succeeded = bool(outcome)
         except Exception as exc:  # noqa: BLE001
             print(
                 f"memory_queue: processor raised {type(exc).__name__}: {exc}", file=sys.stderr
             )
             succeeded = False
         if succeeded:
-            queue.publish_result(lease, operation_id=lease.id, result=b"")
+            result = outcome.data if isinstance(outcome, DeferredResult) else b""
+            queue.publish_result(lease, operation_id=lease.id, result=result)
             queue.acknowledge(lease)
             counts["ok"] += 1
         else:
@@ -817,7 +926,7 @@ def status() -> dict[str, Any]:
     }
 
 
-def _manual_processor(task: dict[str, Any]) -> bool:
+def _manual_processor(task: dict[str, Any]) -> bool | DeferredResult:
     from llm_client import call_llm
 
     task_type = task.get("type")
@@ -833,21 +942,27 @@ def _manual_processor(task: dict[str, Any]) -> bool:
         )
         if not result:
             return False
-        output_path = payload.get("output_path")
-        results_dir = _queue().results_dir
-        if not output_path:
-            output_path = results_dir / f"{task['id']}.txt"
-        else:
-            output_path = Path(output_path).resolve()
-            try:
-                output_path.relative_to(results_dir.resolve())
-            except ValueError:
-                return False
-        Path(output_path).write_text(result, encoding="utf-8")
-        return True
+        return DeferredResult(result.encode("utf-8"))
     if task_type == "flush":
         prompt = payload.get("prompt", "")
         if not prompt:
+            return False
+        now = _utc_now()
+        raw_day = payload.get("day")
+        day = now.strftime("%Y-%m-%d") if raw_day is None else raw_day
+        if not isinstance(day, str) or re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) is None:
+            return False
+        try:
+            if datetime.strptime(day, "%Y-%m-%d").strftime("%Y-%m-%d") != day:
+                return False
+        except ValueError:
+            return False
+        root = Path(os.environ.get("LLM_WIKI_ROOT", ".")).resolve()
+        daily_dir = (root / "knowledge" / "daily").resolve()
+        daily_path = (daily_dir / f"{day}.md").resolve()
+        try:
+            daily_path.relative_to(daily_dir)
+        except ValueError:
             return False
         result = call_llm(
             prompt,
@@ -856,26 +971,18 @@ def _manual_processor(task: dict[str, Any]) -> bool:
         )
         if not result:
             return False
-        from daily_log_append import locked_append
+        from daily_log_append import locked_append_once
         from flush_memory import _classify_response
 
         tier, body = _classify_response(result)
         if tier != "ok" and body:
-            now = _utc_now()
-            day = payload.get("day") or now.strftime("%Y-%m-%d")
-            daily_path = (
-                Path(os.environ.get("LLM_WIKI_ROOT", "."))
-                / "knowledge"
-                / "daily"
-                / f"{day}.md"
-            )
             session_id = payload.get("session_id", "deferred")
             event = payload.get("event", "session-end")
             block = (
                 f"\n## [{now.strftime('%H:%M:%S')}] deferred-{event} | {session_id}\n"
                 f"- Tier: `{tier}`\n\n{redact_secrets(body)}\n"
             )
-            locked_append(daily_path, block)
+            locked_append_once(daily_path, block, str(task["id"]))
         return True
     if task_type == "compile":
         from maybe_compile import spawn_compile_if_idle
