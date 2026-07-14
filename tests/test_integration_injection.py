@@ -396,6 +396,164 @@ def test_session_start_recovers_transactions_then_project_before_handoff(
     assert output["hookSpecificOutput"]["additionalContext"] == "bounded handoff"
 
 
+def test_session_start_recovers_interrupted_first_checkpoint_before_journal_exists(
+    monkeypatch, tmp_path, capsys
+):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import session_start_project_state
+
+    vault = tmp_path / "vault"
+    project = tmp_path / "project"
+    project.mkdir()
+    project_state = vault / "knowledge/projects/demo"
+    project_state.mkdir(parents=True)
+    calls = []
+
+    class Coordinator:
+        def recover(self):
+            calls.append("transactions")
+
+    class Store:
+        def __init__(self, vault_root, state_root):
+            self.coordinator = Coordinator()
+
+        def recover(self, slug):
+            calls.append(("project", slug))
+            (project_state / "journal.md").write_text("recovered", encoding="utf-8")
+
+        def projection(self, slug):
+            calls.append(("projection", slug))
+            return object()
+
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+    monkeypatch.setattr(session_start_project_state, "_compute_slug", lambda *args: "demo")
+    monkeypatch.setattr(session_start_project_state, "ProjectStore", Store)
+    monkeypatch.setattr(
+        session_start_project_state,
+        "build_handoff",
+        lambda projection, max_chars: "recovered first checkpoint",
+    )
+
+    assert not (project_state / "journal.md").exists()
+    assert session_start_project_state.main() == 0
+    output = json.loads(capsys.readouterr().out)
+    assert calls == [
+        "transactions",
+        ("project", "demo"),
+        ("projection", "demo"),
+    ]
+    assert output["hookSpecificOutput"]["additionalContext"] == "recovered first checkpoint"
+
+
+def test_opencode_session_start_appends_recovered_bounded_project_handoff(monkeypatch):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import integration_adapter
+
+    calls = []
+
+    class Coordinator:
+        def recover(self):
+            calls.append("transactions")
+
+    class Store:
+        def __init__(self, vault_root, state_root):
+            self.coordinator = Coordinator()
+
+        def recover(self, slug):
+            calls.append(("project", slug))
+
+        def projection(self, slug):
+            calls.append(("projection", slug))
+            return object()
+
+    monkeypatch.setattr(integration_adapter, "_observe_checkpoint_fail_open", lambda event: None)
+    monkeypatch.setattr(
+        integration_adapter, "_project_context", lambda event: ("demo", Path("C:/project"))
+    )
+    monkeypatch.setattr(integration_adapter, "_record_activity", lambda *args: True)
+    monkeypatch.setattr(integration_adapter, "spawn_detached", lambda args: None)
+    monkeypatch.setattr(
+        integration_adapter,
+        "build_session_start_context",
+        lambda: "# General memory\n",
+    )
+    monkeypatch.setattr(integration_adapter, "ProjectStore", Store)
+    monkeypatch.setattr(
+        integration_adapter,
+        "build_handoff",
+        lambda projection, max_chars: (
+            calls.append(("handoff", max_chars))
+            or "# Project handoff\n\n- `project:demo`\n- `sequence:7`\n"
+        ),
+        raising=False,
+    )
+    envelope = integration_adapter.normalize_event(
+        "opencode",
+        "session_start",
+        {"sessionId": "s1", "directory": "C:/project"},
+    )
+
+    result = integration_adapter.ingest_event(envelope)
+
+    assert calls == [
+        "transactions",
+        ("project", "demo"),
+        ("projection", "demo"),
+        ("handoff", 2400),
+    ]
+    assert "# General memory" in result["context"]
+    assert "project:demo" in result["context"]
+    assert "sequence:7" in result["context"]
+
+
+def test_opencode_session_start_project_recovery_is_fail_open(monkeypatch):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import integration_adapter
+
+    class Store:
+        def __init__(self, *args):
+            raise RuntimeError("recovery unavailable")
+
+    errors = []
+    monkeypatch.setattr(integration_adapter, "_observe_checkpoint_fail_open", lambda event: None)
+    monkeypatch.setattr(
+        integration_adapter, "_project_context", lambda event: ("demo", Path("C:/project"))
+    )
+    monkeypatch.setattr(integration_adapter, "_record_activity", lambda *args: True)
+    monkeypatch.setattr(integration_adapter, "spawn_detached", lambda args: None)
+    monkeypatch.setattr(
+        integration_adapter,
+        "build_session_start_context",
+        lambda: "# General memory\n",
+    )
+    monkeypatch.setattr(integration_adapter, "ProjectStore", Store)
+    monkeypatch.setattr(
+        integration_adapter, "_log_checkpoint_error", lambda error: errors.append(str(error))
+    )
+    envelope = integration_adapter.normalize_event(
+        "opencode", "session_start", {"directory": "C:/project"}
+    )
+
+    result = integration_adapter.ingest_event(envelope)
+
+    assert result["context"] == "# General memory\n"
+    assert errors == ["recovery unavailable"]
+
+
 def test_claude_hooks_cover_compaction_failure_stop_and_end_signals():
     settings = json.loads(
         (ROOT / "integrations" / "claude-code" / "settings.json").read_text(encoding="utf-8")
@@ -443,7 +601,11 @@ def test_opencode_node_harness_forwards_bounded_tail_and_escaped_paths(tmp_path)
     root = str(tmp_path / "Vault With Spaces")
     directory = str(tmp_path / "Project With Spaces")
     adapter_context = json.dumps({
-        "context": "# Project memory context\n\n## Health\n\nScheduler degraded."
+        "context": (
+            "# Project memory context\n\n## Health\n\nScheduler degraded.\n\n"
+            "# Project handoff\n\n## MCP identifiers\n"
+            "- `project:demo`\n- `sequence:7`\n"
+        )
     })
     script = textwrap.dedent(
         f"""
@@ -512,6 +674,8 @@ def test_opencode_node_harness_forwards_bounded_tail_and_escaped_paths(tmp_path)
     compact_payload = json.loads(observed["commands"][1]["stdin"])
     assert compact_payload["transcript_text"].startswith("m8-")
     assert "## Health" in observed["system"][0]
+    assert "project:demo" in observed["system"][0]
+    assert "sequence:7" in observed["system"][0]
     assert observed["commands"][0]["args"] == [
         "uv",
         "run",

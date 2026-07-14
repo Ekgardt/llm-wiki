@@ -16,7 +16,7 @@ from typing import Any
 from event_envelope import EventEnvelope, build_event_envelope
 from maybe_compile import spawn_compile_if_idle
 from memory_state import ROOT, STATE_ROOT, spawn_detached, update_state
-from project_journal import CheckpointReducer, ProjectStore
+from project_journal import CheckpointReducer, ProjectStore, build_handoff
 from secret_redact import redact_secrets
 from session_start_context import build_context as build_session_start_context
 from session_start_project_state import _compute_slug
@@ -765,6 +765,27 @@ def _run_session_start_maintenance() -> int:
     return 0
 
 
+def _recover_project_handoff(slug: str | None, project_dir: Path | None) -> str:
+    if not slug or project_dir is None:
+        return ""
+    try:
+        store = ProjectStore(ROOT, STATE_ROOT)
+        store.coordinator.recover()
+        store.recover(slug)
+        return build_handoff(store.projection(slug), max_chars=2400)
+    except Exception as exc:  # noqa: BLE001
+        _log_checkpoint_error(exc)
+        return ""
+
+
+def _append_context(context: str, handoff: str) -> str:
+    if not handoff:
+        return context
+    if not context:
+        return handoff
+    return context.rstrip() + "\n\n" + handoff
+
+
 def ingest_event(
     envelope: EventEnvelope,
     *,
@@ -791,7 +812,10 @@ def ingest_event(
             "--maintenance",
         ])
         result["maintenance_scheduled"] = maintenance_pid is not None
-        result["context"] = build_session_start_context()
+        result["context"] = _append_context(
+            build_session_start_context(),
+            _recover_project_handoff(slug, project_dir),
+        )
     elif envelope.event_type == "user_prompt":
         _run_delegate("user_prompt_capture.py", payload, forward_stdout=True, project_dir=project_dir)
     elif envelope.event_type == "post_tool_use":
