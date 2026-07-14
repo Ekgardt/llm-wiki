@@ -36,7 +36,7 @@ def test_next_candidate_records_ordered_identity_and_failure_before_call(monkeyp
 
 def test_call_candidate_reports_unavailable_without_calling_backend(monkeypatch):
     descriptor = llm_client.provider_candidates("codex", max_tokens=10)[0]
-    monkeypatch.setitem(llm_client._PROBES, "codex", lambda: False)
+    monkeypatch.setitem(llm_client._PROBES, "codex", lambda descriptor: False)
     monkeypatch.setitem(
         llm_client._BACKENDS,
         "codex",
@@ -56,8 +56,9 @@ def test_explicit_probe_then_call_does_not_probe_twice(monkeypatch):
     descriptor = llm_client.provider_candidates("codex", max_tokens=10)[0]
     probes = []
 
-    def probe():
+    def probe(actual_descriptor):
         probes.append(True)
+        assert actual_descriptor is descriptor
         return True
 
     monkeypatch.setitem(llm_client._PROBES, "codex", probe)
@@ -78,7 +79,7 @@ def test_explicit_probe_then_call_does_not_probe_twice(monkeypatch):
 
 def test_call_candidate_returns_actual_identity_and_native_structured_mode(monkeypatch):
     descriptor = llm_client.provider_candidates("openai", max_tokens=10)[0]
-    monkeypatch.setitem(llm_client._PROBES, "openai", lambda: True)
+    monkeypatch.setitem(llm_client._PROBES, "openai", lambda descriptor: True)
     monkeypatch.setitem(llm_client._BACKENDS, "openai", lambda *args, **kwargs: '{"ok":true}')
 
     result = llm_client.call_candidate(
@@ -99,7 +100,7 @@ def test_call_candidate_returns_actual_identity_and_native_structured_mode(monke
 def test_prompt_structured_mode_passes_schema_instruction_to_legacy_backend(monkeypatch):
     descriptor = llm_client.provider_candidates("codex", max_tokens=10)[0]
     captured = []
-    monkeypatch.setitem(llm_client._PROBES, "codex", lambda: True)
+    monkeypatch.setitem(llm_client._PROBES, "codex", lambda descriptor: True)
 
     def backend(descriptor, prompt, system_prompt, schema):
         captured.append(system_prompt)
@@ -153,7 +154,7 @@ def test_call_candidate_uses_resolved_model_and_settings_after_env_changes(monke
     descriptor = llm_client.provider_candidates("openai", max_tokens=321)[0]
     monkeypatch.setenv("MEMORY_LLM_MODEL", "changed-model")
     captured = []
-    monkeypatch.setitem(llm_client._PROBES, "openai", lambda: True)
+    monkeypatch.setitem(llm_client._PROBES, "openai", lambda descriptor: True)
 
     def backend(actual_descriptor, prompt, system_prompt, schema):
         captured.append(actual_descriptor)
@@ -191,7 +192,7 @@ def test_http_backend_uses_captured_endpoint_after_env_drift(provider, monkeypat
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     descriptor = llm_client.provider_candidates(provider, max_tokens=321)[0]
     monkeypatch.setenv("MEMORY_LLM_BASE_URL", "https://second.example/v1")
-    monkeypatch.setitem(llm_client._PROBES, provider, lambda: True)
+    monkeypatch.setitem(llm_client._PROBES, provider, lambda descriptor: True)
     requests = []
 
     class Response:
@@ -218,6 +219,32 @@ def test_http_backend_uses_captured_endpoint_after_env_drift(provider, monkeypat
 
     assert result.text == "answer"
     assert requests[0].full_url == "https://first.example/v1/chat/completions"
+
+
+def test_ollama_probe_uses_captured_remote_endpoint_after_env_drift(monkeypatch):
+    monkeypatch.setenv("MEMORY_LLM_BASE_URL", "http://remote.example:22123/v1")
+    descriptor = llm_client.provider_candidates("ollama", max_tokens=321)[0]
+    monkeypatch.setenv("MEMORY_LLM_BASE_URL", "http://localhost:11434/v1")
+    requests = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def urlopen(request, timeout):
+        requests.append((request, timeout))
+        return Response()
+
+    monkeypatch.setattr(llm_client.urllib.request, "urlopen", urlopen)
+
+    assert llm_client.probe_candidate(descriptor) is True
+    assert requests[0][0].full_url == "http://remote.example:22123/api/tags"
+    assert requests[0][1] == 1.0
 
 
 def test_call_candidate_rejects_max_tokens_different_from_descriptor(monkeypatch):

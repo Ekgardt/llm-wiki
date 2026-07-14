@@ -129,7 +129,7 @@ def probe_candidate(descriptor: ProviderDescriptor) -> bool:
     if probe is None:
         return False
     try:
-        return bool(probe())
+        return bool(probe(descriptor))
     except Exception:  # noqa: BLE001 - provider probes are an isolation boundary
         return False
 
@@ -338,7 +338,7 @@ def _endpoint_identity(endpoint: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _probe_opencode() -> bool:
+def _probe_opencode(descriptor: ProviderDescriptor) -> bool:
     """Is OpenCode server alive on localhost:4096 (or OPENCODE_PORT)?"""
     port = int(os.environ.get("OPENCODE_PORT", "4096"))
     try:
@@ -351,29 +351,40 @@ def _probe_opencode() -> bool:
         return False
 
 
-def _probe_codex() -> bool:
+def _probe_codex(descriptor: ProviderDescriptor) -> bool:
     return _find_codex_binary() is not None
 
 
-def _probe_claude() -> bool:
+def _probe_claude(descriptor: ProviderDescriptor) -> bool:
     return shutil.which("claude") is not None
 
 
-def _probe_openai() -> bool:
+def _probe_openai(descriptor: ProviderDescriptor) -> bool:
     return bool(
         os.environ.get("MEMORY_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
     )
 
 
-def _probe_ollama() -> bool:
+def _probe_ollama(descriptor: ProviderDescriptor) -> bool:
+    if descriptor._endpoint is None:
+        return False
     try:
-        with socket.create_connection(("127.0.0.1", 11434), timeout=0.5):
-            return True
-    except OSError:
+        parsed = urllib.parse.urlsplit(descriptor._endpoint)
+        path = parsed.path.rstrip("/")
+        if path.endswith("/v1"):
+            path = path[:-3]
+        tags_path = f"{path}/api/tags" if path else "/api/tags"
+        tags_url = urllib.parse.urlunsplit(
+            (parsed.scheme, parsed.netloc, tags_path, "", "")
+        )
+        request = urllib.request.Request(tags_url)
+        with urllib.request.urlopen(request, timeout=1.0) as response:
+            return response.status == 200
+    except (OSError, ValueError, urllib.error.URLError):
         return False
 
 
-def _probe_fake() -> bool:
+def _probe_fake(descriptor: ProviderDescriptor) -> bool:
     return True
 
 
@@ -745,9 +756,9 @@ def _cli() -> int:
     if len(sys.argv) < 2:
         print("Usage: python llm_client.py \"<prompt>\"", file=sys.stderr)
         print("\nBackend availability:", file=sys.stderr)
-        for name, probe in _PROBES.items():
+        for name in _PROBES:
             try:
-                alive = bool(probe())
+                alive = probe_candidate(provider_candidates(name)[0])
             except Exception:  # noqa: BLE001
                 alive = False
             print(f"  {name}: {'ALIVE' if alive else 'not available'}", file=sys.stderr)
@@ -755,9 +766,9 @@ def _cli() -> int:
     prompt = sys.argv[1]
     system = sys.argv[2] if len(sys.argv) > 2 else ""
     print("--- backend availability ---", file=sys.stderr)
-    for name, probe in _PROBES.items():
+    for name in _PROBES:
         try:
-            alive = bool(probe())
+            alive = probe_candidate(provider_candidates(name)[0])
         except Exception:  # noqa: BLE001
             alive = False
         print(f"  {name}: {'ALIVE' if alive else 'not available'}", file=sys.stderr)
