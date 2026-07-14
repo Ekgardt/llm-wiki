@@ -9,7 +9,7 @@ import sys
 import threading
 import time
 import unicodedata
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -33,6 +33,9 @@ CANDIDATE_SCHEMA = SCHEMA_DIR / "claim-candidate-v1.json"
 RELATION_SCHEMA = SCHEMA_DIR / "claim-relations-v1.json"
 MAX_CLAIM_PAGE_BYTES = 4 * 1024 * 1024
 MAX_CANDIDATES = 50
+MAX_DECIMAL_CHARS = 128
+MAX_DECIMAL_DIGITS = 128
+MAX_DECIMAL_EXPONENT = 128
 CLAIM_INDEX_SCHEMA_VERSION = "claim-index/v1"
 RELATIONS = frozenset(
     {
@@ -71,6 +74,10 @@ _EXTRACTION_FIELDS = {
     "extractor_version",
 }
 _RFC3339_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
+_DECIMAL_INPUT_RE = re.compile(
+    r"^[+-]?(?:(?P<integer>\d+)(?:\.(?P<fraction>\d*))?|"
+    r"\.(?P<leading_fraction>\d+))(?:[eE](?P<exponent>[+-]?\d+))?$"
+)
 
 
 class EvidenceMismatch(ValueError):
@@ -173,6 +180,33 @@ def _canonical_decimal(value: object) -> str:
         source = value
     else:
         source = str(value)
+    if len(source) > MAX_DECIMAL_CHARS:
+        raise ValueError("number value exceeds the input length limit")
+    match = _DECIMAL_INPUT_RE.fullmatch(source)
+    if match is None:
+        raise ValueError("number value is invalid")
+    integer = match["integer"] or ""
+    fraction = match["fraction"]
+    if fraction is None:
+        fraction = match["leading_fraction"] or ""
+    coefficient_digits = len(integer) + len(fraction)
+    if coefficient_digits > MAX_DECIMAL_DIGITS:
+        raise ValueError("number value exceeds the coefficient digit limit")
+    exponent_text = match["exponent"] or "0"
+    if len(exponent_text.lstrip("+-")) > 3:
+        raise ValueError("number value exponent is out of range")
+    exponent = int(exponent_text)
+    if abs(exponent) > MAX_DECIMAL_EXPONENT:
+        raise ValueError("number value exponent is out of range")
+    decimal_position = len(integer) + exponent
+    if decimal_position <= 0:
+        expanded_digits = 1 - decimal_position + coefficient_digits
+    elif decimal_position >= coefficient_digits:
+        expanded_digits = decimal_position
+    else:
+        expanded_digits = coefficient_digits
+    if expanded_digits > MAX_DECIMAL_DIGITS:
+        raise ValueError("number value exceeds the expanded digit limit")
     try:
         number = Decimal(source)
     except InvalidOperation as exc:
@@ -182,6 +216,8 @@ def _canonical_decimal(value: object) -> str:
     result = format(number, "f")
     if "." in result:
         result = result.rstrip("0").rstrip(".")
+    if len(result) > MAX_DECIMAL_CHARS:
+        raise ValueError("number value exceeds the canonical length limit")
     if Decimal(result).is_zero():
         return "0"
     return result
@@ -604,11 +640,53 @@ class ClaimIndex:
             (CLAIM_INDEX_SCHEMA_VERSION,),
         )
 
-    def rebuild(self, pages: Sequence[Path]) -> None:
+    def rebuild(
+        self,
+        sources: Sequence[Path] | Callable[[], Sequence[Path]] | None = None,
+    ) -> None:
         validate_state_root(self.path.parent)
         _restrict_owner_only(self.path.parent, 0o700)
         with _exclusive_file_lock(self.lock_path):
+            pages = self._rebuild_pages(sources)
             self._rebuild_locked(pages)
+
+    def _rebuild_pages(
+        self,
+        sources: Sequence[Path] | Callable[[], Sequence[Path]] | None,
+    ) -> list[Path]:
+        if callable(sources):
+            pages = list(sources())
+        else:
+            roots = list(sources) if sources is not None else [
+                self.vault / "knowledge/notes",
+                self.vault / "knowledge/projects",
+            ]
+            pages = []
+            allowed_roots = (
+                self.vault / "knowledge/notes",
+                self.vault / "knowledge/projects",
+            )
+            for root in roots:
+                resolved = Path(root).resolve(strict=True)
+                if resolved not in allowed_roots:
+                    raise ValueError(
+                        "claim rebuild sequences must contain canonical knowledge roots"
+                    )
+                if Path(root).is_symlink() or not Path(root).is_dir():
+                    raise PermissionError("claim rebuild root must be a regular directory")
+                if resolved == allowed_roots[0]:
+                    pages.extend(resolved.rglob("*.md"))
+                else:
+                    pages.extend(
+                        page
+                        for page in resolved.rglob("*.md")
+                        if page.name in {"context.md", "journal.md", "state.md"}
+                    )
+        if len(pages) > 10_000:
+            raise ValueError("claim rebuild page discovery exceeds 10000 pages")
+        if any(not isinstance(page, Path) for page in pages):
+            raise TypeError("claim rebuild provider must return Path values")
+        return sorted(pages)
 
     def _rebuild_locked(self, pages: Sequence[Path]) -> None:
         rows: list[tuple[object, ...]] = []

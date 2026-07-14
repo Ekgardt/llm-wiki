@@ -173,7 +173,9 @@ def check_evidence_references(pages: list[Path]) -> list[str]:
             text = read_stable_bytes(
                 page, MAX_LINT_PAGE_BYTES, label="lint evidence page"
             ).decode("utf-8", errors="strict")
-            references = extract_evidence_references(text)
+            references = extract_evidence_references(
+                CLAIMS_SECTION_RE.sub("", text)
+            )
         except (OSError, UnicodeDecodeError, ValueError) as exc:
             findings.append(f"{_rel(page)}: evidence scan failed: {exc}")
             continue
@@ -354,6 +356,7 @@ SUPERSEDED_BY_RE = re.compile(r"^superseded_by:\s*\[?\[?([^\]\n]+?)\]?\]?\s*$", 
 SOURCES_FIELD_RE = re.compile(r"^sources:", re.MULTILINE)
 SOURCE_SECTION_RE = re.compile(r"^##\s*(?:Source|Evidence|Provenance)", re.MULTILINE)
 CANDIDATE_JSON_RE = re.compile(r"(?ms)```json[ \t]*\r?\n([^\r\n]+)\r?\n```")
+CLAIMS_SECTION_RE = re.compile(r"(?ms)^## Claims[ \t]*\r?\n.*?(?=^## |\Z)")
 
 
 # Page types where claims need provenance. Skill / rule / project-state
@@ -444,6 +447,7 @@ def check_invalid_type_value(pages: list[Path]) -> list[str]:
 def _validate_claim_schemas(pages: list[Path]) -> list[str]:
     """Validate canonical claim ledgers and quarantined inbox candidates."""
     findings: list[str] = []
+    resolver = EvidenceResolver(ROOT, state_root=STATE_ROOT)
     for page in pages:
         try:
             raw = read_stable_bytes(
@@ -472,10 +476,21 @@ def _validate_claim_schemas(pages: list[Path]) -> list[str]:
                     raise ValueError("claim-candidate record is not restricted canonical JSON")
                 validate_schema(candidate, CANDIDATE_SCHEMA)
                 validate_claim_record(candidate["claim"])
+                records = [candidate["claim"]]
             else:
                 ledger = parse_claim_ledger(raw)
                 if ledger is None and b"## Claims" in raw:
                     raise ValueError("Claims heading is malformed")
+                records = ledger["claims"] if ledger is not None else []
+            for record in records:
+                evidence = record["evidence"]
+                resolved = resolver.resolve(evidence["reference"])
+                if (
+                    resolved.sha256 != evidence["sha256"]
+                    or resolved.bytes.decode("utf-8", errors="strict")
+                    != evidence["text"]
+                ):
+                    raise ValueError("claim evidence does not match resolved bytes")
         except (OSError, UnicodeDecodeError, ValueError, TypeError, KeyError) as exc:
             try:
                 label = _rel(page)

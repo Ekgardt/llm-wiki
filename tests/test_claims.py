@@ -176,6 +176,25 @@ def test_numeric_values_normalize_decimal_strings_without_binary_floats(pipeline
             pipeline.extract(block, record)
 
 
+@pytest.mark.parametrize(
+    "value",
+    ["9" * 129, "1e129", "1e-129", "1e999999999999999999999999999999"],
+)
+def test_decimal_bounds_reject_before_decimal_construction(
+    value: str, monkeypatch
+) -> None:
+    import claims
+
+    class DecimalMustNotRun:
+        def __new__(cls, _value):
+            raise AssertionError("Decimal constructed before lexical bounds")
+
+    monkeypatch.setattr(claims, "Decimal", DecimalMustNotRun)
+
+    with pytest.raises(ValueError, match="number"):
+        claims._canonical_decimal(value)
+
+
 def test_validated_record_binds_fingerprint_observation_and_literal_hash(pipeline) -> None:
     from claims import validate_claim_record
 
@@ -231,7 +250,7 @@ def test_claim_index_rebuilds_derived_delete_full_database_and_bounds_candidates
     page.write_bytes(ledger_page(normalized.record))
     state = tmp_path / "state"
     index = ClaimIndex(state)
-    index.rebuild([page])
+    index.rebuild([page.parent])
 
     assert index.path == state / "cache/claims.sqlite3"
     with sqlite3.connect(index.path) as database:
@@ -240,7 +259,7 @@ def test_claim_index_rebuilds_derived_delete_full_database_and_bounds_candidates
     assert len(index.candidates(normalized, limit=1)) == 1
     assert index.candidates(normalized, limit=0) == []
     page.write_bytes(b"---\ntype: concept\n---\n# Ledgerless\n")
-    index.rebuild([page])
+    index.rebuild([page.parent])
     assert index.candidates(normalized) == []
 
 
@@ -252,15 +271,17 @@ def test_claim_index_rejects_escape_symlink_oversize_and_unbounded_limit(
     index = ClaimIndex(tmp_path / "state")
     outside = tmp_path / "outside.md"
     outside.write_text("x", encoding="utf-8")
-    with pytest.raises((PermissionError, ValueError)):
+    with pytest.raises(ValueError, match="canonical knowledge roots"):
         index.rebuild([outside])
+    with pytest.raises((PermissionError, ValueError)):
+        index.rebuild(lambda: [outside])
     with pytest.raises(ValueError, match="limit"):
         index.candidates(None, limit=51)
     huge = tmp_path / "knowledge/notes/huge.md"
     huge.parent.mkdir(parents=True)
     huge.write_bytes(b"x" * (4 * 1024 * 1024 + 1))
     with pytest.raises(ValueError, match="exceeds"):
-        index.rebuild([huge])
+        index.rebuild(lambda: [huge])
     if hasattr(os, "symlink"):
         link = huge.with_name("link.md")
         try:
@@ -268,7 +289,7 @@ def test_claim_index_rejects_escape_symlink_oversize_and_unbounded_limit(
         except OSError:
             pytest.skip("symlinks unavailable")
         with pytest.raises(PermissionError):
-            index.rebuild([link])
+            index.rebuild(lambda: [link])
 
 
 def test_claim_index_serializes_scan_and_publish_so_stale_rebuild_cannot_win(
@@ -299,8 +320,8 @@ def test_claim_index_serializes_scan_and_publish_so_stale_rebuild_cannot_win(
         return original(page)
 
     stale._page_bytes = slow_read
-    stale_thread = threading.Thread(target=stale.rebuild, args=([old_page],))
-    fresh_thread = threading.Thread(target=fresh.rebuild, args=([new_page],))
+    stale_thread = threading.Thread(target=stale.rebuild, args=(lambda: [old_page],))
+    fresh_thread = threading.Thread(target=fresh.rebuild, args=(lambda: [new_page],))
     stale_thread.start()
     assert entered.wait(5)
     fresh_thread.start()
@@ -312,6 +333,54 @@ def test_claim_index_serializes_scan_and_publish_so_stale_rebuild_cannot_win(
     assert not stale_thread.is_alive() and not fresh_thread.is_alive()
     assert [item.page for item in fresh.candidates(normalized)] == [
         "knowledge/notes/new.md"
+    ]
+
+
+def test_claim_index_evaluates_page_provider_only_after_rebuild_lock(
+    pipeline, tmp_path: Path
+) -> None:
+    from claims import ClaimIndex, _exclusive_file_lock
+
+    normalized = pipeline.normalize(
+        pipeline.verify_literal(pipeline.extract(pipeline.split_blocks(source_bytes())[0], raw_claim())[0])
+    )
+    notes = tmp_path / "knowledge/notes"
+    notes.mkdir(parents=True)
+    old_page = notes / "old.md"
+    new_page = notes / "new.md"
+    old_page.write_bytes(ledger_page(normalized.record))
+    index = ClaimIndex(tmp_path / "state")
+    provider_called = threading.Event()
+    errors: list[BaseException] = []
+
+    def provider() -> list[Path]:
+        provider_called.set()
+        return sorted(notes.glob("*.md"))
+
+    def rebuild() -> None:
+        try:
+            index.rebuild(provider)
+        except BaseException as exc:
+            errors.append(exc)
+
+    index.path.parent.mkdir(parents=True)
+    with _exclusive_file_lock(index.lock_path):
+        worker = threading.Thread(target=rebuild)
+        worker.start()
+        time.sleep(0.2)
+        assert worker.is_alive()
+        assert not provider_called.is_set()
+        newer = json.loads(json.dumps(normalized.record))
+        newer["id"] = "claim:newer:0"
+        new_page.write_bytes(ledger_page(newer))
+    worker.join(5)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert provider_called.is_set()
+    assert [item.page for item in index.candidates(normalized)] == [
+        "knowledge/notes/new.md",
+        "knowledge/notes/old.md",
     ]
 
 
@@ -357,7 +426,7 @@ def test_claim_index_rebuild_replaces_incompatible_disposable_schema(
         database.execute("INSERT INTO claim_index_meta VALUES ('claim-index/obsolete')")
 
     index = ClaimIndex(state)
-    index.rebuild([page])
+    index.rebuild(lambda: [page])
 
     with sqlite3.connect(database_path) as database:
         columns = [row[1] for row in database.execute("PRAGMA table_info(claim)")]
@@ -400,7 +469,7 @@ def test_claim_index_rebuild_replaces_shape_compatible_but_untrusted_schema(
             "INSERT INTO claim_index_meta VALUES (?)", (CLAIM_INDEX_SCHEMA_VERSION,)
         )
 
-    ClaimIndex(state).rebuild([page])
+    ClaimIndex(state).rebuild(lambda: [page])
 
     with sqlite3.connect(database_path) as database:
         columns = [tuple(row[1:6]) for row in database.execute("PRAGMA table_info(claim)")]
@@ -432,7 +501,7 @@ def test_claim_index_failed_publication_rolls_back_previous_snapshot(
     page.parent.mkdir(parents=True)
     page.write_bytes(ledger_page(normalized.record))
     index = ClaimIndex(tmp_path / "state")
-    index.rebuild([page])
+    index.rebuild(lambda: [page])
     duplicate_ledger = {
         "schema_version": "claim-ledger/v1",
         "claims": [normalized.record, normalized.record],
@@ -446,7 +515,7 @@ def test_claim_index_failed_publication_rolls_back_previous_snapshot(
     )
 
     with pytest.raises(sqlite3.IntegrityError):
-        index.rebuild([page])
+        index.rebuild(lambda: [page])
 
     assert len(index.candidates(normalized)) == 1
 
@@ -486,6 +555,39 @@ def test_lint_validates_claim_ledgers_and_candidates(tmp_path: Path, monkeypatch
     candidate.parent.mkdir(parents=True)
     candidate.write_text("---\ntype: claim-candidate\n---\n# C\n", encoding="utf-8")
     assert lint_memory.check_claim_schemas([candidate])
+
+
+def test_lint_skips_claim_json_in_prose_scan_but_resolves_claim_evidence(
+    pipeline, tmp_path: Path, monkeypatch
+) -> None:
+    import lint_memory
+
+    monkeypatch.setattr(lint_memory, "ROOT", tmp_path)
+    normalized = pipeline.normalize(
+        pipeline.verify_literal(pipeline.extract(pipeline.split_blocks(source_bytes())[0], raw_claim())[0])
+    )
+    page = tmp_path / "knowledge/notes/claim.md"
+    page.parent.mkdir(parents=True)
+    page.write_bytes(ledger_page(normalized.record))
+
+    assert lint_memory.check_evidence_references([page]) == []
+    assert lint_memory.check_claim_schemas([page]) == []
+
+    malformed = json.loads(json.dumps(normalized.record))
+    malformed["evidence"]["reference"] = malformed["evidence"]["reference"].replace(
+        malformed["evidence"]["reference"].split("sha256:", 1)[1][:64], "0" * 64
+    )
+    page.write_bytes(ledger_page(malformed))
+    findings = lint_memory.check_claim_schemas([page])
+    assert len(findings) == 1
+    assert "hash mismatch" in findings[0]
+
+    page.write_text(
+        "## Evidence\n- `daily:2026-01-02 broken`\n\n## Claims\nnot-json\n",
+        encoding="utf-8",
+    )
+    assert lint_memory.check_evidence_references([page])
+    assert lint_memory.check_claim_schemas([page])
 
 
 def test_lint_candidate_location_and_project_claim_page_selection(
