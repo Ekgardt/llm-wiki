@@ -183,6 +183,27 @@ class TestHelperFunctions:
         assert "page_count" in result
         assert "retrieval_tier" in result
 
+    def test_check_contradiction_returns_structured_assessment(self, monkeypatch):
+        import mcp_server
+
+        monkeypatch.setattr(
+            mcp_server,
+            "_assess_contradiction_text",
+            lambda claim: {
+                "assessments": [],
+                "evidence": [],
+                "validity": {"status": "unverified"},
+                "recommendations": ["quarantine"],
+            },
+        )
+        result = mcp_server._check_contradiction("plain string claim")
+        assert set(result) == {
+            "assessments",
+            "evidence",
+            "validity",
+            "recommendations",
+        }
+
     def test_vault_status_returns_dict(self):
         from mcp_server import _vault_status
         result = _vault_status()

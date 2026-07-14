@@ -30,7 +30,7 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,6 +45,7 @@ from compile_cache import (  # noqa: E402
     CompileCallDescriptor,
     SourceDescriptor,
 )
+from contradiction_pipeline import ContradictionPipeline  # noqa: E402
 from evidence_resolver import EvidenceRef, EvidenceResolver  # noqa: E402
 from llm_client import call_candidate, probe_candidate, provider_candidates  # noqa: E402
 from markdown_transaction import MarkdownChange, MarkdownCoordinator  # noqa: E402
@@ -238,6 +239,19 @@ class CompileApplyResult:
     commit_sequence: int
     committed_at: str
     action_key: str
+
+
+def assess_claim_contradictions(
+    source: bytes,
+    extraction: Mapping[str, object],
+    *,
+    pipeline: ContradictionPipeline,
+    benchmark_gate: bool = False,
+):
+    """Run verified claim extraction through the sole lifecycle policy boundary."""
+    return pipeline.assess_raw(
+        source, extraction, benchmark_gate=benchmark_gate
+    )
 
 
 def _logical_path(path: Path) -> str:

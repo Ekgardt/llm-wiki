@@ -328,10 +328,15 @@ def _get_context(slugs: list[str], include: list[str] | None = None) -> dict:
     return result
 
 
-def _check_contradiction(claim: str) -> list[dict]:
-    """Find pages that might contradict a claim."""
-    from search_memory import search
-    return search(claim, limit=5)
+def _assess_contradiction_text(claim: str) -> dict:
+    from contradiction_pipeline import assess_text
+
+    return assess_text(claim)
+
+
+def _check_contradiction(claim: str) -> dict:
+    """Assess a claim and return evidence, validity, and lifecycle advice."""
+    return _assess_contradiction_text(claim)
 
 
 def _log_decision(summary: str, rationale: str = "") -> dict:
