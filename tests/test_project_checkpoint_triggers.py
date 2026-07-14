@@ -29,7 +29,7 @@ def reducer() -> CheckpointReducer:
         ({"type": "file_changed", "significant": True}, "file_change"),
         ({"type": "public_contract_changed"}, "public_contract_change"),
         ({"type": "test_result_changed"}, "test_result_change"),
-        ({"type": "session_end", "dirty": True}, "session_end"),
+        ({"type": "session_end"}, "session_end"),
     ],
 )
 def test_exact_checkpoint_triggers(event, expected):
@@ -42,8 +42,18 @@ def test_token_thresholds_fire_at_60_then_every_10_and_force_80(reducer):
     assert reducer.observe({"type": "token_usage", "percent": 59}, now=NOW) is None
     assert reducer.observe({"type": "token_usage", "percent": 60}, now=NOW).reason == "token_60"
     assert reducer.observe({"type": "token_usage", "percent": 69}, now=NOW) is None
-    assert reducer.observe({"type": "token_usage", "percent": 70}, now=NOW).reason == "token_70"
-    decision = reducer.observe({"type": "token_usage", "percent": 80}, now=NOW)
+    assert reducer.observe({"type": "token_usage", "percent": 70}, now=NOW) is None
+    assert (
+        reducer.observe(
+            {"type": "token_usage", "percent": 70},
+            now=NOW + timedelta(seconds=30),
+        ).reason
+        == "token_70"
+    )
+    decision = reducer.observe(
+        {"type": "token_usage", "percent": 80},
+        now=NOW + timedelta(seconds=31),
+    )
     assert decision.reason == "token_forced_80"
     assert decision.forced is True
     assert reducer.observe({"type": "token_usage", "percent": 81}, now=NOW) is None
@@ -64,6 +74,21 @@ def test_dirty_elapsed_thresholds_are_checked_only_on_observed_events():
     )
 
 
+def test_dirty_thresholds_emit_first_unseen_threshold_in_order_after_long_gap():
+    reducer = CheckpointReducer(host_progress_signals=True)
+    assert reducer.observe({"type": "mutation", "dirty": True}, now=NOW) is None
+    assert (
+        reducer.observe({"type": "read"}, now=NOW + timedelta(minutes=31)).reason
+        == "dirty_10_minutes"
+    )
+    assert (
+        reducer.observe(
+            {"type": "read"}, now=NOW + timedelta(minutes=31, seconds=30)
+        ).reason
+        == "dirty_30_minutes"
+    )
+
+
 def test_debounced_dirty_threshold_remains_pending_for_next_event():
     reducer = CheckpointReducer(host_progress_signals=True)
     assert reducer.observe({"type": "mutation", "dirty": True}, now=NOW) is None
@@ -80,8 +105,8 @@ def test_first_observation_above_60_does_not_skip_token_threshold():
     assert reducer.observe({"type": "token_usage", "percent": 75}, now=NOW).reason == "token_60"
 
 
-@pytest.mark.parametrize("event_type", ["stop", "session_idle", "session_end"])
-def test_dirty_stop_idle_and_end_checkpoint(event_type):
+@pytest.mark.parametrize("event_type", ["stop", "session_idle"])
+def test_dirty_stop_and_idle_checkpoint(event_type):
     decision = CheckpointReducer().observe(
         {"type": event_type, "dirty": True}, now=NOW
     )
@@ -89,8 +114,21 @@ def test_dirty_stop_idle_and_end_checkpoint(event_type):
     assert decision.reason == {
         "stop": "dirty_stop",
         "session_idle": "dirty_idle",
-        "session_end": "session_end",
     }[event_type]
+
+
+def test_session_end_checkpoints_even_when_clean():
+    decision = CheckpointReducer().observe(
+        {"type": "session_end", "dirty": False}, now=NOW
+    )
+    assert decision.reason == "session_end"
+
+
+@pytest.mark.parametrize("event_type", ["stop", "session_idle"])
+def test_clean_stop_and_idle_do_not_checkpoint(event_type):
+    assert CheckpointReducer().observe(
+        {"type": event_type, "dirty": False}, now=NOW
+    ) is None
 
 
 def test_session_start_always_requests_recovery():
@@ -118,7 +156,7 @@ def test_ordinary_triggers_are_debounced_for_30_seconds():
         {"type": "task_cancelled"},
         {"type": "significant_failure"},
         {"type": "ownership_transferred"},
-        {"type": "session_end", "dirty": True},
+        {"type": "session_end"},
     ],
 )
 def test_bypass_triggers_ignore_ordinary_debounce(event):
@@ -153,6 +191,61 @@ def test_fallback_is_disabled_when_host_supplies_progress_signals():
             {"type": "mutation", "changed": True},
             now=NOW + timedelta(seconds=index),
         ) is None
+
+
+def test_precompact_does_not_disable_significant_event_fallback():
+    reducer = CheckpointReducer()
+    assert reducer.observe({"type": "pre_compact"}, now=NOW)
+    for index in range(1, 20):
+        assert reducer.observe(
+            {"type": "mutation", "changed": True, "event_id": f"write-{index}"},
+            now=NOW + timedelta(seconds=30 + index),
+        ) is None
+    assert reducer.observe(
+        {"type": "mutation", "changed": True, "event_id": "write-20"},
+        now=NOW + timedelta(seconds=50),
+    ).reason == "significant_event_20"
+
+
+@pytest.mark.parametrize(
+    "signal",
+    [
+        {"type": "token_usage", "percent": 10},
+        {"type": "compaction_confirmed"},
+    ],
+)
+def test_actual_progress_signal_disables_fallback(signal):
+    reducer = CheckpointReducer()
+    reducer.observe(signal, now=NOW)
+    for index in range(20):
+        assert reducer.observe(
+            {"type": "mutation", "changed": True, "event_id": f"write-{index}"},
+            now=NOW + timedelta(seconds=31 + index),
+        ) is None
+
+
+def test_legacy_static_host_capability_does_not_disable_fallback():
+    reducer = CheckpointReducer.from_state({"host_progress_signals": True})
+    for index in range(19):
+        assert reducer.observe(
+            {"type": "mutation", "changed": True, "event_id": f"write-{index}"},
+            now=NOW + timedelta(seconds=index),
+        ) is None
+    assert reducer.observe(
+        {"type": "mutation", "changed": True, "event_id": "write-20"},
+        now=NOW + timedelta(seconds=31),
+    ).reason == "significant_event_20"
+
+
+def test_significant_file_mutation_triggers_file_change_but_read_does_not():
+    reducer = CheckpointReducer()
+    assert reducer.observe(
+        {"type": "mutation", "changed": True, "significant": True}, now=NOW
+    ).reason == "file_change"
+    assert reducer.observe(
+        {"type": "read", "changed": False, "significant": False},
+        now=NOW + timedelta(seconds=31),
+    ) is None
 
 
 def test_repeated_reads_unchanged_status_and_duplicate_event_ids_do_not_count():

@@ -136,7 +136,6 @@ class CheckpointReducer:
         {
             "pre_compact",
             "compaction_confirmed",
-            "token_usage",
             "decision",
             "task_completed",
             "task_cancelled",
@@ -233,10 +232,10 @@ class CheckpointReducer:
         reason: str | None = None
         forced = False
         pending_dirty_threshold: int | None = None
+        pending_token_threshold: int | None = None
         if event_type == "session_start":
             reason = "session_start_recovery"
         elif event_type == "pre_compact":
-            self.host_progress_signals = True
             reason = "before_compaction"
         elif event_type == "compaction_confirmed":
             self.host_progress_signals = True
@@ -249,24 +248,24 @@ class CheckpointReducer:
                 if bounded >= self.token_threshold:
                     threshold = 80 if bounded >= 80 else self.token_threshold
                     reason = f"token_{threshold}"
-                    self.token_threshold = threshold + 10
+                    pending_token_threshold = threshold
                     if threshold == 80:
                         reason = "token_forced_80"
                         forced = True
-        elif event_type == "session_end" and dirty_active:
+        elif event_type == "session_end":
             reason = "session_end"
         elif event_type == "stop" and dirty_active:
             reason = "dirty_stop"
         elif event_type == "session_idle" and dirty_active:
             reason = "dirty_idle"
-        elif event_type == "file_changed" and event.get("significant") is True:
+        elif event_type in {"file_changed", "mutation"} and event.get("significant") is True:
             reason = "file_change"
         else:
             reason = self._REASONS.get(event_type)
 
         if reason is None and self.dirty_since is not None:
             elapsed = current_time - self.dirty_since
-            for minutes in (30, 10):
+            for minutes in (10, 30):
                 if elapsed >= timedelta(minutes=minutes) and minutes not in self.dirty_thresholds:
                     pending_dirty_threshold = minutes
                     reason = f"dirty_{minutes}_minutes"
@@ -282,7 +281,7 @@ class CheckpointReducer:
         if reason is None:
             return None
 
-        bypass = event_type in self._BYPASS_TYPES
+        bypass = event_type in self._BYPASS_TYPES or forced
         if (
             not bypass
             and self.last_checkpoint_at is not None
@@ -291,12 +290,14 @@ class CheckpointReducer:
             return None
         if pending_dirty_threshold is not None:
             self.dirty_thresholds.add(pending_dirty_threshold)
+        if pending_token_threshold is not None:
+            self.token_threshold = pending_token_threshold + 10
         self.last_checkpoint_at = current_time
         return CheckpointDecision(reason, forced)
 
     def to_state(self) -> dict[str, object]:
         return {
-            "host_progress_signals": self.host_progress_signals,
+            "progress_signal_observed": self.host_progress_signals,
             "significant_count": self.significant_count,
             "token_threshold": self.token_threshold,
             "dirty_since": _timestamp(self.dirty_since) if self.dirty_since else None,
@@ -315,7 +316,7 @@ class CheckpointReducer:
         thresholds = value.get("dirty_thresholds")
         event_ids = value.get("observed_event_ids")
         return cls(
-            host_progress_signals=value.get("host_progress_signals") is True,
+            host_progress_signals=value.get("progress_signal_observed") is True,
             significant_count=int(value.get("significant_count") or 0),
             token_threshold=int(value.get("token_threshold") or 60),
             dirty_since=(

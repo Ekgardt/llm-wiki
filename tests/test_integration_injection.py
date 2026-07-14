@@ -19,6 +19,8 @@ import subprocess
 import textwrap
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -81,6 +83,42 @@ def test_normalization_preserves_only_available_checkpoint_signals():
     assert supplied.payload["compaction_confirmed"] is True
     assert "token_percent" not in unavailable.payload
     assert "compaction_confirmed" not in unavailable.payload
+    assert "host_progress_signals" not in unavailable.payload
+
+
+def test_significant_file_tool_normalizes_to_file_change_observation():
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    from integration_adapter import _checkpoint_observation, normalize_event
+
+    write = normalize_event(
+        "opencode",
+        "post_tool_use",
+        {
+            "sessionId": "s1",
+            "directory": "C:/project",
+            "tool": "edit",
+            "input": {"filePath": "src/app.py"},
+        },
+    )
+    read = normalize_event(
+        "opencode",
+        "post_tool_use",
+        {
+            "sessionId": "s1",
+            "directory": "C:/project",
+            "tool": "read",
+            "input": {"filePath": "src/app.py"},
+        },
+    )
+
+    assert _checkpoint_observation(write)["type"] == "file_changed"
+    assert _checkpoint_observation(write)["significant"] is True
+    assert _checkpoint_observation(read)["type"] == "post_tool_use"
+    assert "significant" not in _checkpoint_observation(read)
 
 
 def test_host_tool_call_id_separates_repeated_mutations():
@@ -137,6 +175,63 @@ def test_adapter_observes_same_envelope_once_before_delegate(monkeypatch):
     assert calls[1][1]["event_id"] == calls[0][1].event_id
 
 
+def test_delegate_runs_when_checkpoint_observation_fails(monkeypatch, capsys):
+    import io
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import integration_adapter
+
+    calls = []
+    monkeypatch.setattr(
+        integration_adapter,
+        "_observe_project_checkpoint",
+        lambda envelope: (_ for _ in ()).throw(RuntimeError("x" * 2000)),
+    )
+    monkeypatch.setattr(
+        integration_adapter,
+        "_run_delegate",
+        lambda *args, **kwargs: calls.append(args[0]) or None,
+    )
+    monkeypatch.setattr(
+        integration_adapter,
+        "_log_checkpoint_error",
+        lambda error: calls.append(("logged", len(str(error)))),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(json.dumps({"session_id": "s1", "cwd": "C:/project"})),
+    )
+
+    assert integration_adapter.main(
+        ["--source", "codex", "--event", "session_end", "--delegate", "session_end_capture.py"]
+    ) == 0
+    assert calls == [("logged", 2000), "session_end_capture.py"]
+    assert "capture skipped" not in capsys.readouterr().err
+
+
+def test_checkpoint_error_text_is_single_line_redacted_and_bounded():
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import integration_adapter
+
+    secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
+    text = integration_adapter._bounded_checkpoint_error(
+        RuntimeError(f"first\nAuthorization: Bearer {secret}" + "x" * 2000)
+    )
+
+    assert "\n" not in text
+    assert secret not in text
+    assert len(text) <= integration_adapter.MAX_CHECKPOINT_ERROR_CHARS
+
+
 def test_adapter_observes_before_direct_ingestion(monkeypatch):
     import sys
 
@@ -163,6 +258,85 @@ def test_adapter_observes_before_direct_ingestion(monkeypatch):
 
     integration_adapter.ingest_event(envelope)
     assert calls == [("observe", envelope.event_id), ("ingest", envelope.event_id)]
+
+
+def test_direct_ingestion_continues_when_checkpoint_observation_fails(monkeypatch):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import integration_adapter
+
+    envelope = integration_adapter.normalize_event(
+        "codex", "session_end", {"session_id": "s1", "cwd": "C:/project"}
+    )
+    calls = []
+    monkeypatch.setattr(
+        integration_adapter,
+        "_observe_project_checkpoint",
+        lambda observed: (_ for _ in ()).throw(RuntimeError("checkpoint failed")),
+    )
+    monkeypatch.setattr(
+        integration_adapter,
+        "_log_checkpoint_error",
+        lambda error: calls.append("logged"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        integration_adapter,
+        "_record_activity",
+        lambda *args: calls.append("ingested") or True,
+    )
+    monkeypatch.setattr(integration_adapter, "_project_context", lambda event: ("demo", ROOT))
+
+    result = integration_adapter.ingest_event(envelope)
+    assert calls == ["logged", "ingested"]
+    assert result["heartbeat_recorded"] is True
+
+
+def test_failed_checkpoint_does_not_persist_event_dedupe_and_retry_succeeds(monkeypatch):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import integration_adapter
+
+    state = {}
+    attempts = []
+
+    def update(mutator, **kwargs):
+        mutator(state)
+        return state
+
+    class Store:
+        def __init__(self, *args):
+            pass
+
+        def checkpoint(self, *args):
+            attempts.append(args)
+            if len(attempts) == 1:
+                raise RuntimeError("temporary checkpoint failure")
+
+    envelope = integration_adapter.normalize_event(
+        "codex",
+        "session_end",
+        {"session_id": "s1", "cwd": "C:/project", "event_id": "end-1"},
+        occurred_at=integration_adapter.datetime.fromisoformat("2026-07-13T12:00:00+00:00"),
+    )
+    monkeypatch.setattr(integration_adapter, "update_state", update)
+    monkeypatch.setattr(integration_adapter, "ProjectStore", Store)
+    monkeypatch.setattr(integration_adapter, "_project_context", lambda event: ("demo", ROOT))
+
+    with pytest.raises(RuntimeError, match="temporary checkpoint failure"):
+        integration_adapter._observe_project_checkpoint(envelope)
+    assert state.get("project_checkpoint_reducers", {}) == {}
+
+    integration_adapter._observe_project_checkpoint(envelope)
+    reducer_state = state["project_checkpoint_reducers"]["demo:s1"]
+    assert envelope.event_id in reducer_state["observed_event_ids"]
+    assert len(attempts) == 2
 
 
 def test_session_start_recovers_transactions_then_project_before_handoff(
@@ -433,6 +607,7 @@ def test_opencode_forwards_known_mutation_and_dirty_idle_without_fake_progress_s
     tool, idle = json.loads(result.stdout)
     assert tool["changed"] is True
     assert tool["dirty"] is True
+    assert tool["significant"] is True
     assert idle["dirty"] is True
     for payload in (tool, idle):
         assert "token_percent" not in payload

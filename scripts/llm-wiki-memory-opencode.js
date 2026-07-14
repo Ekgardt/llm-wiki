@@ -141,7 +141,7 @@ export const LlmWikiMemoryPlugin = async ({ client, directory }) => {
       if (id && changed) dirtySessions.add(id);
       await forwardLifecycle("post_tool_use", {
         ...(input || {}),
-        ...(changed ? { changed: true, dirty: true } : {}),
+        ...(changed ? { changed: true, dirty: true, significant: true } : {}),
       });
     },
 

@@ -25,6 +25,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 DELEGATE_TIMEOUT_SECONDS = 10
 MAINTENANCE_DRAIN_TIMEOUT_SECONDS = 600
 MAX_TRANSCRIPT_TEXT_CHARS = 8000
+MAX_CHECKPOINT_ERROR_CHARS = 500
 TRANSIENT_CREATE_ATTEMPTS = 10
 SOURCES = frozenset({"claude", "opencode", "codex"})
 EVENTS = frozenset(
@@ -163,9 +164,9 @@ def normalize_event(
         if payload["tool_name"] in {"Edit", "Write", "MultiEdit", "NotebookEdit"}:
             payload.setdefault("changed", True)
             payload.setdefault("dirty", True)
+            payload.setdefault("significant", True)
         if payload.get("checkpoint_type") == "significant_failure":
             payload["significant_failure"] = True
-    payload["host_progress_signals"] = source in {"claude", "opencode"}
     if event == "session_start" and payload.get("reason") == "compact":
         payload["compaction_confirmed"] = True
 
@@ -298,6 +299,8 @@ def _checkpoint_observation(envelope: EventEnvelope) -> dict[str, object]:
     if envelope.event_type == "post_tool_use" and event_type == "post_tool_use":
         if envelope.severity in {"error", "fatal"}:
             event_type = "significant_failure"
+        elif payload.get("changed") is True and payload.get("significant") is True:
+            event_type = "file_changed"
         elif payload.get("changed") is True:
             event_type = "mutation"
     observation: dict[str, object] = {
@@ -363,17 +366,19 @@ def _observe_project_checkpoint(envelope: EventEnvelope) -> None:
     state_key = f"{slug}:{session_key}"
 
     def mutate(state: dict[str, Any]) -> None:
-        reducers = state.setdefault("project_checkpoint_reducers", {})
+        existing = state.get("project_checkpoint_reducers")
+        reducers = existing if isinstance(existing, dict) else {}
         reducer_state = reducers.get(state_key)
         reducer = CheckpointReducer.from_state(
             reducer_state if isinstance(reducer_state, Mapping) else None
         )
-        if not reducer_state:
-            reducer.host_progress_signals = (
-                envelope.payload.get("host_progress_signals") is True
-            )
-        decision_box.append(reducer.observe(observation, now=envelope.occurred_at))
-        reducers[state_key] = reducer.to_state()
+        decision = reducer.observe(observation, now=envelope.occurred_at)
+        decision_box.append(decision)
+        if decision is not None and decision.reason != "session_start_recovery":
+            return
+        persisted = state.setdefault("project_checkpoint_reducers", {})
+        persisted[state_key] = reducer.to_state()
+        reducers = persisted
         if len(reducers) > 128:
             reducers.pop(next(iter(reducers)))
 
@@ -386,6 +391,44 @@ def _observe_project_checkpoint(envelope: EventEnvelope) -> None:
         _checkpoint_event(envelope, slug, decision.reason),
         f"lifecycle:{envelope.event_id[:16]}",
     )
+
+    def commit(state: dict[str, Any]) -> None:
+        reducers = state.setdefault("project_checkpoint_reducers", {})
+        reducer_state = reducers.get(state_key)
+        reducer = CheckpointReducer.from_state(
+            reducer_state if isinstance(reducer_state, Mapping) else None
+        )
+        reducer.observe(observation, now=envelope.occurred_at)
+        reducers[state_key] = reducer.to_state()
+        if len(reducers) > 128:
+            reducers.pop(next(iter(reducers)))
+
+    update_state(commit, lock_timeout=0.5)
+
+
+def _bounded_checkpoint_error(error: BaseException) -> str:
+    message = redact_secrets(f"{type(error).__name__}: {error}")
+    return " ".join(message.split())[:MAX_CHECKPOINT_ERROR_CHARS]
+
+
+def _log_checkpoint_error(error: BaseException) -> None:
+    """Best-effort bounded diagnostics for fail-open lifecycle capture."""
+    try:
+        message = _bounded_checkpoint_error(error)
+        log_path = STATE_ROOT / "logs" / "hook-errors.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().isoformat(timespec="seconds")
+        with log_path.open("a", encoding="utf-8") as stream:
+            stream.write(f"[{timestamp}] project checkpoint: {message}\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _observe_checkpoint_fail_open(envelope: EventEnvelope) -> None:
+    try:
+        _observe_project_checkpoint(envelope)
+    except Exception as exc:  # noqa: BLE001
+        _log_checkpoint_error(exc)
 
 
 def _project_context(envelope: EventEnvelope) -> tuple[str | None, Path | None]:
@@ -729,7 +772,7 @@ def ingest_event(
     trigger: str | None = None,
 ) -> dict[str, Any]:
     """Apply shared lifecycle persistence policy to a normalized envelope."""
-    _observe_project_checkpoint(envelope)
+    _observe_checkpoint_fail_open(envelope)
     payload = _canonical_capture_payload(envelope)
     slug, project_dir = _project_context(envelope)
     result: dict[str, Any] = {
@@ -838,7 +881,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             raw["checkpoint_type"] = args.checkpoint_type
         envelope = normalize_event(args.source, args.event, raw)
         if args.delegate:
-            _observe_project_checkpoint(envelope)
+            _observe_checkpoint_fail_open(envelope)
             _run_delegate(
                 args.delegate,
                 _canonical_capture_payload(envelope),
