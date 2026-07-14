@@ -467,6 +467,88 @@ def test_new_claim_page_inserted_after_assessment_fails_tree_manifest_preconditi
     assert "claim_tree_manifest" in json.loads(row["preconditions_json"])
 
 
+def test_compile_same_id_replacement_after_assessment_quarantines_without_mutation(
+    vault, monkeypatch
+):
+    root, state_root = vault
+    daily = _daily(root)
+    import compile_memory
+    import contradiction_pipeline
+
+    old = _claim_record(
+        root, claim_id="shared", value="blue",
+        text="The prior state is blue.", authority="web",
+    )
+    replacement = {**old, "value": {"type": "string", "value": "red"}}
+    replacement["fingerprint"] = sha256_bytes(
+        canonical_json_bytes(
+            {
+                "subject": replacement["subject"],
+                "relation": replacement["relation"],
+                "value": replacement["value"],
+                "qualifiers": replacement["qualifiers"],
+                "validity": replacement["validity"],
+            }
+        )
+    )
+    existing = root / "knowledge/notes/existing.md"
+
+    def write_existing(record):
+        existing.write_bytes(
+            b"---\ntype: concept\n---\n# Existing\n\n## Claims\n```json\n"
+            + canonical_json_bytes(
+                {"schema_version": "claim-ledger/v1", "claims": [record]}
+            )
+            + b"\n```\n"
+        )
+
+    write_existing(old)
+    new = _claim_record(
+        root, claim_id="new", value="green",
+        text="A durable exact-byte observation.", authority="user",
+    )
+    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation["claims"] = [new]
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    plan = {
+        "schema_version": "compile-plan/v2",
+        "operations": [{
+            "kind": "create",
+            "path": "knowledge/notes/exact-byte-pattern.md",
+            "content": canonical_json_bytes(operation).decode(),
+        }],
+    }
+    original_assess = contradiction_pipeline.ContradictionPipeline.assess
+    replaced = False
+
+    def assess_then_replace(self, *args, **kwargs):
+        nonlocal replaced
+        result = original_assess(self, *args, **kwargs)
+        if result.lifecycle_mutations and not replaced:
+            write_existing(replacement)
+            replaced = True
+        return result
+
+    monkeypatch.setattr(
+        contradiction_pipeline.ContradictionPipeline, "assess", assess_then_replace
+    )
+    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args: [])
+    coordinator = MarkdownCoordinator(root, state_root)
+
+    result = compile_memory.apply_compile_plan(
+        inputs, plan, action_key="4" * 64, trigger="manual",
+        coordinator=coordinator, completed_at="2026-07-14T12:00:00Z",
+    )
+
+    assert result.operation_id.startswith("compile-quarantine:")
+    assert not (root / "knowledge/notes/exact-byte-pattern.md").exists()
+    assert len(list((root / "knowledge/inbox/claims").glob("*.md"))) == 1
+    current = existing.read_bytes()
+    assert replacement["fingerprint"].encode() in current
+    assert b'"lifecycle":"active"' in current
+    assert b'"lifecycle":"superseded"' not in current
+
+
 def test_committed_compile_clears_durable_source_failure(vault):
     root, state_root = vault
     daily = _daily(root)

@@ -62,10 +62,39 @@ class Evaluation:
     evaluator: str
 
 
+class StaleLifecycleTarget(ValueError):
+    """The ledger record no longer matches the claim that was assessed."""
+
+
+@dataclass(frozen=True, order=True)
+class LifecycleTarget:
+    page: str
+    claim_id: str
+    fingerprint: str
+    record_hash: str
+    evidence_hash: str
+
+    @classmethod
+    def from_indexed(cls, existing: IndexedClaim) -> LifecycleTarget:
+        record = existing.claim.record
+        evidence = record["evidence"]
+        assert isinstance(evidence, Mapping)
+        return cls(
+            existing.page,
+            str(record["id"]),
+            str(record["fingerprint"]),
+            sha256_bytes(canonical_json_bytes(record)),
+            str(evidence["sha256"]),
+        )
+
+    def canonical(self) -> dict[str, str]:
+        return asdict(self)
+
+
 @dataclass(frozen=True)
 class LifecycleDecision:
     recommendation: str
-    mutations: tuple[tuple[str, str], ...] = ()
+    mutations: tuple[LifecycleTarget, ...] = ()
     reason: str = ""
 
 
@@ -76,7 +105,7 @@ class ClaimAssessment:
     recommendation: str
     evidence: tuple[dict[str, object], ...]
     validity: dict[str, object]
-    lifecycle_mutations: tuple[tuple[str, str], ...]
+    lifecycle_mutations: tuple[LifecycleTarget, ...]
     candidate_path: str | None
     evaluations: tuple[Evaluation, ...] = ()
     evaluation_lineage: tuple[dict[str, object], ...] = ()
@@ -88,7 +117,7 @@ class ClaimAssessment:
             "recommendation": self.recommendation,
             "evidence": list(self.evidence),
             "validity": self.validity,
-            "lifecycle_mutations": [list(item) for item in self.lifecycle_mutations],
+            "lifecycle_mutations": [item.canonical() for item in self.lifecycle_mutations],
             "candidate_path": self.candidate_path,
             "evaluations": [asdict(item) for item in self.evaluations],
             "evaluation_lineage": list(self.evaluation_lineage),
@@ -197,7 +226,7 @@ def apply_policy(
         )
         if eligible:
             return LifecycleDecision(
-                "supersede", ((existing.page, str(old["id"])),), "authoritative overlap"
+                "supersede", (LifecycleTarget.from_indexed(existing),), "authoritative overlap"
             )
         return LifecycleDecision("quarantine", reason="supersession policy not satisfied")
     # Semantic supersession is intentionally disabled, including after calibration.
@@ -573,7 +602,7 @@ class ContradictionPipeline:
             canonical_json_bytes(
                 {
                     "candidate": candidate_identity,
-                    "mutations": [list(item) for item in decision.mutations],
+                    "mutations": [item.canonical() for item in decision.mutations],
                 }
             )
         )
@@ -590,7 +619,7 @@ class ContradictionPipeline:
 
     def plan_changes(
         self, assessments: Sequence[ClaimAssessment]
-    ) -> tuple[list[MarkdownChange], dict[str, str], tuple[str, ...]]:
+    ) -> tuple[list[MarkdownChange], dict[str, object], tuple[str, ...]]:
         if self.vault is None:
             raise ValueError("mutation planning requires a vault")
         changes: list[MarkdownChange] = []
@@ -653,14 +682,23 @@ class ContradictionPipeline:
         return current
 
     def _lifecycle_changes(
-        self, mutations: Sequence[tuple[str, str]]
-    ) -> tuple[list[MarkdownChange], dict[str, str]]:
-        grouped: dict[str, set[str]] = {}
-        for path, claim_id in mutations:
-            grouped.setdefault(path, set()).add(claim_id)
+        self, mutations: Sequence[LifecycleTarget]
+    ) -> tuple[list[MarkdownChange], dict[str, object]]:
+        grouped: dict[str, dict[str, LifecycleTarget]] = {}
+        for target in mutations:
+            claims = grouped.setdefault(target.page, {})
+            previous = claims.setdefault(target.claim_id, target)
+            if previous != target:
+                raise StaleLifecycleTarget(
+                    "lifecycle target identity conflicts within one decision"
+                )
         changes = []
-        preconditions = {}
-        for path, ids in grouped.items():
+        preconditions: dict[str, object] = {}
+        if mutations:
+            preconditions["claim_targets"] = [
+                item.canonical() for item in sorted(mutations)
+            ]
+        for path, targets in grouped.items():
             target = self.vault / path
             raw = read_stable_bytes(
                 target, MAX_CLAIM_PAGE_BYTES, label="claim lifecycle page"
@@ -672,11 +710,23 @@ class ContradictionPipeline:
             ledger = json.loads(match[2])
             found = set()
             for record in ledger["claims"]:
-                if record["id"] in ids:
+                claim_id = str(record["id"])
+                expected = targets.get(claim_id)
+                if expected is not None:
+                    evidence = record["evidence"]
+                    if (
+                        record["fingerprint"] != expected.fingerprint
+                        or sha256_bytes(canonical_json_bytes(record))
+                        != expected.record_hash
+                        or evidence["sha256"] != expected.evidence_hash
+                    ):
+                        raise StaleLifecycleTarget(
+                            f"lifecycle target identity changed: {path}#{claim_id}"
+                        )
                     record["lifecycle"] = "superseded"
-                    found.add(record["id"])
-            if found != ids:
-                raise ValueError("lifecycle target claim is missing")
+                    found.add(claim_id)
+            if found != set(targets):
+                raise StaleLifecycleTarget("lifecycle target claim identity is missing")
             encoded = canonical_json_bytes(ledger)
             after = raw[: match.start(2)] + encoded + raw[match.end(2) :]
             if page_is_superseded(ledger["claims"]):

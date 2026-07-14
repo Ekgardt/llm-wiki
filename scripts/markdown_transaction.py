@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
+from bounded_io import read_stable_bytes
 from claim_tree_manifest import (
     snapshot_claim_tree,
     validate_claim_tree_manifest,
@@ -2181,6 +2182,39 @@ class MarkdownCoordinator:
             raise TypeError("preconditions must be a mapping")
         result: dict[str, object] = {}
         for path, expected in preconditions.items():
+            if path == "claim_targets":
+                if not isinstance(expected, Sequence) or isinstance(expected, (str, bytes)):
+                    raise TypeError("claim_targets precondition must be an array")
+                if not 1 <= len(expected) <= 1000:
+                    raise ValueError("claim_targets precondition must be bounded")
+                targets = []
+                identities = set()
+                required = {
+                    "page", "claim_id", "fingerprint", "record_hash", "evidence_hash"
+                }
+                for item in expected:
+                    if not isinstance(item, Mapping) or set(item) != required:
+                        raise ValueError("claim_targets precondition has invalid fields")
+                    self._target(str(item["page"]))
+                    if not isinstance(item["claim_id"], str) or not item["claim_id"]:
+                        raise ValueError("claim_targets precondition has invalid claim id")
+                    for field in ("fingerprint", "record_hash", "evidence_hash"):
+                        value = item[field]
+                        if (
+                            not isinstance(value, str)
+                            or len(value) != 64
+                            or any(character not in "0123456789abcdef" for character in value)
+                        ):
+                            raise ValueError("claim_targets precondition has invalid hash")
+                    identity = (str(item["page"]), item["claim_id"])
+                    if identity in identities:
+                        raise ValueError("claim_targets precondition contains duplicates")
+                    identities.add(identity)
+                    targets.append(dict(item))
+                result[path] = sorted(
+                    targets, key=lambda item: (item["page"], item["claim_id"])
+                )
+                continue
             if path == "claim_tree_manifest":
                 result[path] = validate_claim_tree_manifest(expected)
                 continue
@@ -2523,6 +2557,10 @@ class MarkdownCoordinator:
         database: sqlite3.Connection | None = None,
     ) -> None:
         for path, expected in preconditions.items():
+            if path == "claim_targets":
+                assert isinstance(expected, Sequence)
+                self._check_claim_targets(expected, operation_states)
+                continue
             if path == "claim_tree_manifest":
                 assert isinstance(expected, Mapping)
                 current_manifest = snapshot_claim_tree(self.vault)
@@ -2558,6 +2596,49 @@ class MarkdownCoordinator:
                 "precondition_failed",
                 "quarantined",
             )
+
+    def _check_claim_targets(
+        self,
+        expected: Sequence[object],
+        operation_states: Mapping[str, tuple[str, str]],
+    ) -> None:
+        from claims import MAX_CLAIM_PAGE_BYTES, parse_claim_ledger
+
+        for item in expected:
+            assert isinstance(item, Mapping)
+            path = str(item["page"])
+            operation = operation_states.get(path)
+            if operation is not None and self._current_hash(path) == operation[1]:
+                continue
+            try:
+                content = read_stable_bytes(
+                    self._target(path),
+                    MAX_CLAIM_PAGE_BYTES,
+                    label="claim target precondition page",
+                )
+                ledger = parse_claim_ledger(content)
+                records = [] if ledger is None else [
+                    record
+                    for record in ledger["claims"]
+                    if str(record["id"]) == item["claim_id"]
+                ]
+                if len(records) != 1:
+                    raise ValueError("claim target is missing or ambiguous")
+                record = records[0]
+                evidence = record["evidence"]
+                matches = (
+                    record["fingerprint"] == item["fingerprint"]
+                    and sha256_bytes(canonical_json_bytes(record)) == item["record_hash"]
+                    and evidence["sha256"] == item["evidence_hash"]
+                )
+            except (OSError, TypeError, ValueError):
+                matches = False
+            if not matches:
+                raise TransactionFailure(
+                    f"persisted claim target precondition failed for {path}#{item['claim_id']}",
+                    "precondition_failed",
+                    "quarantined",
+                )
 
     @staticmethod
     def _claim_tree_matches(

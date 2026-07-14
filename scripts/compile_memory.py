@@ -55,6 +55,7 @@ from compile_cache import (  # noqa: E402
 )
 from contradiction_pipeline import (  # noqa: E402
     ContradictionPipeline,
+    StaleLifecycleTarget,
     default_secondary_search,
 )
 from evidence_resolver import EvidenceRef, EvidenceResolver  # noqa: E402
@@ -1105,6 +1106,58 @@ def apply_compile_plan(
         for assessment in assessments
     )
 
+    def commit_quarantine_batch() -> CompileApplyResult:
+        quarantine_changes: list[MarkdownChange] = []
+        quarantine_paths: list[str] = []
+        for pipeline, assessments in claim_groups:
+            forced = tuple(
+                replace(
+                    assessment,
+                    recommendation="quarantine",
+                    lifecycle_mutations=(),
+                    candidate_path=None,
+                )
+                for assessment in assessments
+            )
+            policy_changes, _policy_preconditions, candidate_paths = (
+                pipeline.plan_changes(forced)
+            )
+            quarantine_changes.extend(policy_changes)
+            quarantine_paths.extend(candidate_paths)
+        if not quarantine_changes:
+            raise ValueError("quarantined compile batch produced no candidates")
+        claim_groups[0][0].ensure_candidate_parent()
+        quarantine_operation_id = "compile-quarantine:" + sha256_bytes(
+            canonical_json_bytes(
+                {
+                    "action_key": action_key,
+                    "source_digests": source_digests,
+                    "candidate_paths": sorted(quarantine_paths),
+                }
+            )
+        )
+        transaction = coordinator.prepare(
+            sorted(quarantine_changes, key=lambda item: item.path),
+            operation_id=quarantine_operation_id,
+            preconditions={
+                **{path: "absent" for path in quarantine_paths},
+                "claim_tree_manifest": snapshot_claim_tree(ROOT),
+            },
+        )
+        coordinator.apply(transaction.id)
+        committed, sequence = _transaction_authority(
+            coordinator, quarantine_operation_id
+        )
+        return CompileApplyResult(
+            committed.id,
+            quarantine_operation_id,
+            committed.state,
+            tuple(sorted(quarantine_paths)),
+            sequence,
+            committed.updated_at,
+            action_key,
+        )
+
     with coordinator.writer_gate():
         coordinator.recover()
         existing = [read_compile_receipt(digest, coordinator) for digest in source_digests]
@@ -1131,56 +1184,7 @@ def apply_compile_plan(
             )
 
         if batch_quarantine:
-            quarantine_changes: list[MarkdownChange] = []
-            quarantine_paths: list[str] = []
-            for pipeline, assessments in claim_groups:
-                forced = tuple(
-                    replace(
-                        assessment,
-                        recommendation="quarantine",
-                        lifecycle_mutations=(),
-                        candidate_path=None,
-                    )
-                    for assessment in assessments
-                )
-                policy_changes, _policy_preconditions, candidate_paths = (
-                    pipeline.plan_changes(forced)
-                )
-                quarantine_changes.extend(policy_changes)
-                quarantine_paths.extend(candidate_paths)
-            if not quarantine_changes:
-                raise ValueError("quarantined compile batch produced no candidates")
-            claim_groups[0][0].ensure_candidate_parent()
-            quarantine_operation_id = "compile-quarantine:" + sha256_bytes(
-                canonical_json_bytes(
-                    {
-                        "action_key": action_key,
-                        "source_digests": source_digests,
-                        "candidate_paths": sorted(quarantine_paths),
-                    }
-                )
-            )
-            transaction = coordinator.prepare(
-                sorted(quarantine_changes, key=lambda item: item.path),
-                operation_id=quarantine_operation_id,
-                preconditions={
-                    **{path: "absent" for path in quarantine_paths},
-                    "claim_tree_manifest": claim_tree_manifest,
-                },
-            )
-            committed = coordinator.apply(transaction.id)
-            committed, sequence = _transaction_authority(
-                coordinator, quarantine_operation_id
-            )
-            return CompileApplyResult(
-                committed.id,
-                quarantine_operation_id,
-                committed.state,
-                tuple(sorted(quarantine_paths)),
-                sequence,
-                committed.updated_at,
-                action_key,
-            )
+            return commit_quarantine_batch()
 
         pending: dict[str, bytes | None] = {}
         changes: list[MarkdownChange] = []
@@ -1280,9 +1284,12 @@ def apply_compile_plan(
 
         candidate_needed = False
         for pipeline, assessments in claim_groups:
-            policy_changes, policy_preconditions, candidate_paths = pipeline.plan_changes(
-                assessments
-            )
+            try:
+                policy_changes, policy_preconditions, candidate_paths = (
+                    pipeline.plan_changes(assessments)
+                )
+            except StaleLifecycleTarget:
+                return commit_quarantine_batch()
             candidate_needed = candidate_needed or bool(candidate_paths)
             for change in policy_changes:
                 if change.path in {item.path for item in changes}:

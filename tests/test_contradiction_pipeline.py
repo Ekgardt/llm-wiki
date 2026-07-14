@@ -102,7 +102,17 @@ def test_functional_conflict_supersedes_only_with_overlap_authority_and_ledger()
     )
     assert result.contradiction_class == "contradiction"
     assert result.recommendation == "supersede"
-    assert result.lifecycle_mutations == (("knowledge/notes/existing.md", "existing"),)
+    assert len(result.lifecycle_mutations) == 1
+    target = result.lifecycle_mutations[0]
+    assert target.page == "knowledge/notes/existing.md"
+    assert target.claim_id == "existing"
+    assert target.fingerprint == indexed("blue", authority="web").claim.record["fingerprint"]
+    assert target.record_hash == sha256_bytes(
+        canonical_json_bytes(indexed("blue", authority="web").claim.record)
+    )
+    assert target.evidence_hash == indexed("blue", authority="web").claim.record["evidence"][
+        "sha256"
+    ]
 
     ledgerless = IndexedClaim(
         "knowledge/notes/existing.md", indexed("blue").claim, ledger_backed=False
@@ -388,10 +398,12 @@ def test_all_compatible_supersession_mutations_are_sorted_and_conflicts_quaranti
     result = ContradictionPipeline(evaluators=()).assess(
         claim("red"), candidates=candidates
     )
-    assert result.lifecycle_mutations == (
+    assert [
+        (item.page, item.claim_id) for item in result.lifecycle_mutations
+    ] == [
         ("knowledge/notes/a.md", "a"),
         ("knowledge/notes/z.md", "z"),
-    )
+    ]
 
     refinement = IndexedClaim(
         "knowledge/notes/r.md",
@@ -553,6 +565,97 @@ def test_lifecycle_write_uses_bounded_cas_and_rejects_concurrent_edit(tmp_path, 
         pipeline.assess(claim("red"), candidates=[old])
 
     assert b"concurrent" in page.read_bytes()
+    assert b'"lifecycle":"active"' in page.read_bytes()
+
+
+def test_lifecycle_render_rejects_reused_claim_id_with_different_identity(tmp_path):
+    from contradiction_pipeline import ContradictionPipeline, StaleLifecycleTarget
+    from markdown_transaction import MarkdownCoordinator
+
+    vault = tmp_path / "vault"
+    state = tmp_path / "state"
+    (vault / "knowledge/inbox/claims").mkdir(parents=True)
+    (vault / "knowledge/notes").mkdir()
+    (vault / "knowledge/projects").mkdir()
+    state.mkdir()
+    assessed = indexed("blue", authority="web")
+    replacement = indexed("red", authority="web")
+    page = vault / assessed.page
+    page.write_bytes(
+        b"---\ntype: concept\n---\n# Existing\n\n## Claims\n```json\n"
+        + canonical_json_bytes(
+            {"schema_version": "claim-ledger/v1", "claims": [replacement.claim.record]}
+        )
+        + b"\n```\n"
+    )
+    pipeline = ContradictionPipeline(
+        vault=vault,
+        coordinator=MarkdownCoordinator(vault, state),
+        source_page="knowledge/notes/new.md",
+    )
+
+    with pytest.raises(StaleLifecycleTarget, match="identity"):
+        pipeline.assess(claim("green"), candidates=[assessed])
+
+    current = page.read_bytes()
+    assert replacement.claim.record["fingerprint"].encode() in current
+    assert b'"lifecycle":"active"' in current
+    assert b'"lifecycle":"superseded"' not in current
+
+
+def test_lifecycle_transaction_rejects_same_id_replacement_after_prepare(
+    tmp_path, monkeypatch
+):
+    from contradiction_pipeline import ContradictionPipeline
+    from markdown_transaction import MarkdownCoordinator, TransactionFailure
+
+    vault = tmp_path / "vault"
+    state = tmp_path / "state"
+    (vault / "knowledge/inbox/claims").mkdir(parents=True)
+    (vault / "knowledge/notes").mkdir()
+    (vault / "knowledge/projects").mkdir()
+    state.mkdir()
+    assessed = indexed("blue", authority="web")
+    replacement = indexed("red", authority="web")
+    page = vault / assessed.page
+    page.write_bytes(
+        b"---\ntype: concept\n---\n# Existing\n\n## Claims\n```json\n"
+        + canonical_json_bytes(
+            {"schema_version": "claim-ledger/v1", "claims": [assessed.claim.record]}
+        )
+        + b"\n```\n"
+    )
+    coordinator = MarkdownCoordinator(vault, state)
+    original_apply = coordinator.apply
+
+    def replace_then_apply(transaction_id):
+        page.write_bytes(
+            b"---\ntype: concept\n---\n# Existing\n\n## Claims\n```json\n"
+            + canonical_json_bytes(
+                {"schema_version": "claim-ledger/v1", "claims": [replacement.claim.record]}
+            )
+            + b"\n```\n"
+        )
+        return original_apply(transaction_id)
+
+    monkeypatch.setattr(coordinator, "apply", replace_then_apply)
+    pipeline = ContradictionPipeline(
+        vault=vault, coordinator=coordinator, source_page="knowledge/notes/new.md"
+    )
+
+    with pytest.raises(TransactionFailure, match="claim target"):
+        pipeline.assess(claim("green"), candidates=[assessed])
+
+    with coordinator._connect() as database:
+        persisted = json.loads(
+            database.execute(
+                'SELECT preconditions_json FROM "transaction" ORDER BY rowid DESC LIMIT 1'
+            ).fetchone()["preconditions_json"]
+        )
+    assert persisted["claim_targets"][0]["fingerprint"] == assessed.claim.record[
+        "fingerprint"
+    ]
+    assert replacement.claim.record["fingerprint"].encode() in page.read_bytes()
     assert b'"lifecycle":"active"' in page.read_bytes()
 
 
