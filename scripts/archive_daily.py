@@ -41,6 +41,7 @@ from markdown_transaction import (  # noqa: E402
 from memory_queue import MemoryQueue, QueueOperationError, SourceFence  # noqa: E402
 from memory_state import ROOT, STATE_ROOT  # noqa: E402
 from reliable_memory import (  # noqa: E402
+    DEFAULTS,
     _set_owner_only,
     canonical_json_bytes,
     fsync_directory,
@@ -78,6 +79,10 @@ class ArchiveConflict(RuntimeError):
     code = "archive_source_conflict"
 
 
+class ArchiveFenceConflict(RuntimeError):
+    code = "archive_source_fence_lost"
+
+
 class DailyArchiver:
     """Check retention policy, publish sealed bags, and recover mixed states."""
 
@@ -88,6 +93,9 @@ class DailyArchiver:
         *,
         clock: Callable[[], datetime] | None = None,
         killpoint: Callable[[str], None] | None = None,
+        queue: MemoryQueue | None = None,
+        source_heartbeat_seconds: int = DEFAULTS.queue_heartbeat_seconds,
+        source_lease_seconds: int = DEFAULTS.queue_lease_seconds,
     ) -> None:
         self.vault = Path(vault).resolve(strict=True)
         self.state_root = Path(state_root)
@@ -96,6 +104,9 @@ class DailyArchiver:
         self.coordinator = MarkdownCoordinator(self.vault, self.state_root)
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.killpoint = killpoint or (lambda _point: None)
+        self.queue = queue or MemoryQueue(self.state_root)
+        self.source_heartbeat_seconds = source_heartbeat_seconds
+        self.source_lease_seconds = source_lease_seconds
 
     def eligible(
         self,
@@ -192,7 +203,7 @@ class DailyArchiver:
         logical_path = f"knowledge/daily/{source.name}"
         if (
             not skip_queue_database_checks
-            and MemoryQueue(self.state_root).source_failure(logical_path, digest) is not None
+            and self.queue.source_failure(logical_path, digest) is not None
         ):
             reasons.append("source_failure")
         if not ignore_current_writer and self._writer_active():
@@ -308,44 +319,79 @@ class DailyArchiver:
             content = read_stable_bytes(source, MAX_DAILY_BYTES, label="daily archive source")
             if sha256_bytes(content) != eligibility.source_sha256:
                 raise RuntimeError("daily source changed during archive preflight")
-            queue = MemoryQueue(self.state_root)
-            fence = queue.acquire_source_fence(daily_id, eligibility.source_sha256)
+            queue = self.queue
+            fence = queue.acquire_source_fence(
+                daily_id,
+                eligibility.source_sha256,
+                lease_seconds=self.source_lease_seconds,
+            )
             try:
-                if queue.source_failure(
-                    f"knowledge/daily/{daily_id}.md", eligibility.source_sha256
-                ) is not None:
-                    raise ValueError("daily is not archive eligible: source_failure")
-                final_bag, publish_build = self._build_bag(
-                    daily_id, content, eligibility, hot_days=hot_days
-                )
-                published = False
                 try:
-                    self.killpoint("after_build")
-                    self.killpoint("before_publish_rename")
-                    self._prepare_build_for_publish(publish_build)
-                    publish_build.replace(final_bag)
-                    published = True
-                    fsync_directory(final_bag.parent)
-                    self.killpoint("after_publish_rename")
-                    validated = validate_bag(
-                        final_bag, coordinator=self.coordinator, vault=self.vault
-                    )
-                    if validated.manifest["source_hash"] != eligibility.source_sha256:
-                        raise RuntimeError("published archive failed source revalidation")
-                    self.killpoint("after_revalidate")
-                    self._remove_flat_under_finalization(
-                        queue,
+                    with queue.source_fence_heartbeat(
                         fence,
-                        hot_days=hot_days,
-                        transaction_retention_days=transaction_retention_days,
-                    )
-                    self.killpoint("after_source_delete")
-                except BaseException:
-                    if not published:
-                        self._remove_build(publish_build)
+                        heartbeat_seconds=self.source_heartbeat_seconds,
+                        lease_seconds=self.source_lease_seconds,
+                    ) as heartbeat:
+                        if queue.source_failure(
+                            f"knowledge/daily/{daily_id}.md",
+                            eligibility.source_sha256,
+                        ) is not None:
+                            raise ValueError(
+                                "daily is not archive eligible: source_failure"
+                            )
+                        final_bag, publish_build = self._build_bag(
+                            daily_id, content, eligibility, hot_days=hot_days
+                        )
+                        published = False
+                        try:
+                            self.killpoint("after_build")
+                            heartbeat.refresh()
+                            self.killpoint("before_publish_rename")
+                            self._prepare_build_for_publish(publish_build)
+                            heartbeat.refresh()
+                            publish_build.replace(final_bag)
+                            published = True
+                            fsync_directory(final_bag.parent)
+                            self.killpoint("after_publish_rename")
+                            validated = validate_bag(
+                                final_bag,
+                                coordinator=self.coordinator,
+                                vault=self.vault,
+                            )
+                            if (
+                                validated.manifest["source_hash"]
+                                != eligibility.source_sha256
+                            ):
+                                raise RuntimeError(
+                                    "published archive failed source revalidation"
+                                )
+                            self.killpoint("after_revalidate")
+                            self._remove_flat_under_finalization(
+                                queue,
+                                heartbeat.refresh(),
+                                hot_days=hot_days,
+                                transaction_retention_days=transaction_retention_days,
+                            )
+                            self.killpoint("after_source_delete")
+                        except BaseException:
+                            if not published:
+                                self._remove_build(publish_build)
+                            raise
+                except QueueOperationError as exc:
+                    if exc.code == "source_fence_lost":
+                        raise ArchiveFenceConflict(
+                            "archive source fence heartbeat was lost"
+                        ) from exc
                     raise
             finally:
-                queue.release_source_fence(fence.token)
+                had_error = sys.exc_info()[0] is not None
+                try:
+                    queue.release_source_fence(fence.token)
+                except QueueOperationError:
+                    if not had_error:
+                        raise ArchiveFenceConflict(
+                            "archive source fence was lost before release"
+                        )
             self.rebuild_index()
             return ArchiveReceipt(daily_id, eligibility.source_sha256, final_bag, "archived")
 
@@ -698,17 +744,38 @@ class DailyArchiver:
         hot_days: int,
         transaction_retention_days: int,
     ) -> None:
-        queue = MemoryQueue(self.state_root)
-        fence = queue.acquire_source_fence(daily_id, digest)
+        queue = self.queue
+        fence = queue.acquire_source_fence(
+            daily_id, digest, lease_seconds=self.source_lease_seconds
+        )
         try:
-            self._remove_flat_under_finalization(
-                queue,
-                fence,
-                hot_days=hot_days,
-                transaction_retention_days=transaction_retention_days,
-            )
+            try:
+                with queue.source_fence_heartbeat(
+                    fence,
+                    heartbeat_seconds=self.source_heartbeat_seconds,
+                    lease_seconds=self.source_lease_seconds,
+                ) as heartbeat:
+                    self._remove_flat_under_finalization(
+                        queue,
+                        heartbeat.refresh(),
+                        hot_days=hot_days,
+                        transaction_retention_days=transaction_retention_days,
+                    )
+            except QueueOperationError as exc:
+                if exc.code == "source_fence_lost":
+                    raise ArchiveFenceConflict(
+                        "archive source fence heartbeat was lost"
+                    ) from exc
+                raise
         finally:
-            queue.release_source_fence(fence.token)
+            had_error = sys.exc_info()[0] is not None
+            try:
+                queue.release_source_fence(fence.token)
+            except QueueOperationError:
+                if not had_error:
+                    raise ArchiveFenceConflict(
+                        "archive source fence was lost before release"
+                    )
 
     def _remove_flat_under_finalization(
         self,
@@ -847,7 +914,7 @@ class DailyArchiver:
 
     def _queue_references(self, daily_id: str, digest: str) -> list[str]:
         try:
-            return list(MemoryQueue(self.state_root).referencing_source_tasks(daily_id, digest))
+            return list(self.queue.referencing_source_tasks(daily_id, digest))
         except (OSError, QueueOperationError, sqlite3.Error):
             return ["queue-unreadable"]
 

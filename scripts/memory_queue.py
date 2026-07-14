@@ -196,6 +196,7 @@ class SourceFence:
     token: str
     owner_pid: int
     acquired_at: datetime
+    heartbeat_at: datetime
     expires_at: datetime
 
 
@@ -425,7 +426,9 @@ class MemoryQueue:
                 source_digest TEXT NOT NULL UNIQUE,
                 token TEXT NOT NULL UNIQUE,
                 owner_pid INTEGER NOT NULL,
-                acquired_at TEXT NOT NULL
+                acquired_at TEXT NOT NULL,
+                heartbeat_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS source_failures (
                 logical_path TEXT NOT NULL,
@@ -461,6 +464,20 @@ class MemoryQueue:
         if "redrive_of" not in columns:
             connection.execute(
                 "ALTER TABLE tasks ADD COLUMN redrive_of TEXT REFERENCES tasks(id)"
+            )
+        source_fence_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(source_fences)").fetchall()
+        }
+        if "heartbeat_at" not in source_fence_columns:
+            connection.execute("ALTER TABLE source_fences ADD COLUMN heartbeat_at TEXT")
+            connection.execute(
+                "UPDATE source_fences SET heartbeat_at=acquired_at WHERE heartbeat_at IS NULL"
+            )
+        if "expires_at" not in source_fence_columns:
+            connection.execute("ALTER TABLE source_fences ADD COLUMN expires_at TEXT")
+            connection.execute(
+                "UPDATE source_fences SET expires_at=acquired_at WHERE expires_at IS NULL"
             )
 
     @staticmethod
@@ -1380,14 +1397,11 @@ class MemoryQueue:
     def _delete_stale_source_fences(self, connection: sqlite3.Connection) -> None:
         now = _as_utc(self._clock())
         rows = connection.execute(
-            "SELECT token, owner_pid, acquired_at FROM source_fences"
+            "SELECT token, owner_pid, expires_at FROM source_fences"
         ).fetchall()
         for row in rows:
-            acquired_at = _parse_timestamp(str(row["acquired_at"]))
-            expired = (
-                acquired_at is None
-                or acquired_at + timedelta(seconds=DEFAULTS.queue_lease_seconds) <= now
-            )
+            expires_at = _parse_timestamp(str(row["expires_at"]))
+            expired = expires_at is None or expires_at <= now
             if expired or not _pid_is_alive(int(row["owner_pid"])):
                 connection.execute(
                     "DELETE FROM source_fences WHERE token=?", (row["token"],)
@@ -1429,11 +1443,19 @@ class MemoryQueue:
                     matches.append(str(row["id"]))
             return tuple(matches)
 
-    def acquire_source_fence(self, daily_id: str, source_digest: str) -> SourceFence:
+    def acquire_source_fence(
+        self,
+        daily_id: str,
+        source_digest: str,
+        *,
+        lease_seconds: int = DEFAULTS.queue_lease_seconds,
+    ) -> SourceFence:
         self._validate_source_identity(daily_id, source_digest)
+        if not isinstance(lease_seconds, int) or isinstance(lease_seconds, bool) or lease_seconds <= 0:
+            raise ValueError("source fence lease must be a positive integer")
         token = f"{self._rng.getrandbits(256):064x}"
         acquired = _as_utc(self._clock())
-        expires = acquired + timedelta(seconds=DEFAULTS.queue_lease_seconds)
+        expires = acquired + timedelta(seconds=lease_seconds)
         with self._connect() as connection, begin_immediate(connection):
             self._delete_stale_source_fences(connection)
             for row in connection.execute(
@@ -1447,15 +1469,92 @@ class MemoryQueue:
             try:
                 connection.execute(
                     "INSERT INTO source_fences "
-                    "(daily_id, source_digest, token, owner_pid, acquired_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (daily_id, source_digest, token, os.getpid(), _timestamp(acquired)),
+                    "(daily_id, source_digest, token, owner_pid, acquired_at, "
+                    "heartbeat_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        daily_id,
+                        source_digest,
+                        token,
+                        os.getpid(),
+                        _timestamp(acquired),
+                        _timestamp(acquired),
+                        _timestamp(expires),
+                    ),
                 )
             except sqlite3.IntegrityError as exc:
                 raise QueueOperationError("source_fenced") from exc
         return SourceFence(
-            daily_id, source_digest, token, os.getpid(), acquired, expires
+            daily_id,
+            source_digest,
+            token,
+            os.getpid(),
+            acquired,
+            acquired,
+            expires,
         )
+
+    def heartbeat_source_fence(
+        self,
+        fence: SourceFence,
+        *,
+        lease_seconds: int = DEFAULTS.queue_lease_seconds,
+    ) -> SourceFence:
+        if not isinstance(fence, SourceFence):
+            raise TypeError("source heartbeat requires a SourceFence")
+        if not isinstance(lease_seconds, int) or isinstance(lease_seconds, bool) or lease_seconds <= 0:
+            raise ValueError("source fence lease must be a positive integer")
+        now = _as_utc(self._clock())
+        expires = now + timedelta(seconds=lease_seconds)
+        with self._connect() as connection, begin_immediate(connection):
+            self._delete_stale_source_fences(connection)
+            changed = connection.execute(
+                """UPDATE source_fences SET heartbeat_at=?, expires_at=?
+                   WHERE daily_id=? AND source_digest=? AND token=? AND owner_pid=?
+                     AND acquired_at=? AND heartbeat_at=? AND expires_at=?""",
+                (
+                    _timestamp(now),
+                    _timestamp(expires),
+                    fence.daily_id,
+                    fence.source_digest,
+                    fence.token,
+                    fence.owner_pid,
+                    _timestamp(fence.acquired_at),
+                    _timestamp(fence.heartbeat_at),
+                    _timestamp(fence.expires_at),
+                ),
+            ).rowcount
+            if changed != 1 or now >= fence.expires_at:
+                raise QueueOperationError("source_fence_lost")
+        return replace(fence, heartbeat_at=now, expires_at=expires)
+
+    @contextmanager
+    def source_fence_heartbeat(
+        self,
+        fence: SourceFence,
+        *,
+        heartbeat_seconds: int = DEFAULTS.queue_heartbeat_seconds,
+        lease_seconds: int = DEFAULTS.queue_lease_seconds,
+    ):
+        if (
+            not isinstance(heartbeat_seconds, int)
+            or isinstance(heartbeat_seconds, bool)
+            or heartbeat_seconds <= 0
+            or not isinstance(lease_seconds, int)
+            or isinstance(lease_seconds, bool)
+            or lease_seconds <= heartbeat_seconds
+        ):
+            raise ValueError("source heartbeat interval must be shorter than its lease")
+        heartbeat = _SourceFenceHeartbeat(
+            self,
+            fence,
+            heartbeat_seconds=heartbeat_seconds,
+            lease_seconds=lease_seconds,
+        )
+        heartbeat.start()
+        try:
+            yield heartbeat
+        finally:
+            heartbeat.stop()
 
     @contextmanager
     def source_finalization(self, fence: SourceFence):
@@ -1464,11 +1563,14 @@ class MemoryQueue:
         with self._connect() as connection, begin_immediate(connection):
             self._delete_stale_source_fences(connection)
             row = connection.execute(
-                "SELECT daily_id, source_digest, token, owner_pid, acquired_at "
+                "SELECT daily_id, source_digest, token, owner_pid, acquired_at, expires_at "
                 "FROM source_fences WHERE token=?",
                 (fence.token,),
             ).fetchone()
             now = _as_utc(self._clock())
+            row_expires_at = (
+                None if row is None else _parse_timestamp(str(row["expires_at"]))
+            )
             if (
                 row is None
                 or str(row["daily_id"]) != fence.daily_id
@@ -1477,7 +1579,8 @@ class MemoryQueue:
                 or int(row["owner_pid"]) != os.getpid()
                 or fence.owner_pid != os.getpid()
                 or str(row["acquired_at"]) != _timestamp(fence.acquired_at)
-                or now >= fence.expires_at
+                or row_expires_at is None
+                or now >= row_expires_at
             ):
                 raise QueueOperationError("source_fence_lost")
             logical_path = f"knowledge/daily/{fence.daily_id}.md"
@@ -2526,6 +2629,65 @@ def purge(*, terminal_before: datetime, export_path: Path) -> PurgeReceipt:
 def retained_queue_state() -> bool:
     """Return whether queue records or results block deletion of run/."""
     return _queue().retains_run_directory()
+
+
+class _SourceFenceHeartbeat:
+    def __init__(
+        self,
+        queue: MemoryQueue,
+        fence: SourceFence,
+        *,
+        heartbeat_seconds: int,
+        lease_seconds: int,
+    ) -> None:
+        self._queue = queue
+        self._fence = fence
+        self._heartbeat_seconds = heartbeat_seconds
+        self._lease_seconds = lease_seconds
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self.error: Exception | None = None
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"memory-source-fence-heartbeat-{fence.daily_id}",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join()
+
+    def current(self) -> SourceFence:
+        with self._lock:
+            if self.error is not None:
+                raise QueueOperationError("source_fence_lost") from self.error
+            return self._fence
+
+    def refresh(self) -> SourceFence:
+        with self._lock:
+            if self.error is not None:
+                raise QueueOperationError("source_fence_lost") from self.error
+            try:
+                self._fence = self._queue.heartbeat_source_fence(
+                    self._fence, lease_seconds=self._lease_seconds
+                )
+            except Exception as exc:
+                self.error = exc
+                self._stop.set()
+                raise QueueOperationError("source_fence_lost") from exc
+            return self._fence
+
+    def _run(self) -> None:
+        while not self._queue._heartbeat_wait(  # noqa: SLF001 - injected queue seam
+            self._stop, self._heartbeat_seconds
+        ):
+            try:
+                self.refresh()
+            except QueueOperationError:
+                return
 
 
 class _LeaseHeartbeat:

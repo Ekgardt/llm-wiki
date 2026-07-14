@@ -3,18 +3,33 @@ from __future__ import annotations
 import errno
 import json
 import os
+import random
 import shutil
 import sqlite3
 import stat
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from markdown_transaction import MarkdownChange, MarkdownCoordinator  # noqa: E402
 from reliable_memory import sha256_bytes  # noqa: E402
+
+
+class _LockedClock:
+    def __init__(self) -> None:
+        self.value = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
+        self.lock = threading.Lock()
+
+    def __call__(self) -> datetime:
+        with self.lock:
+            return self.value
+
+    def advance(self, seconds: float) -> None:
+        with self.lock:
+            self.value += timedelta(seconds=seconds)
 
 
 @pytest.fixture
@@ -809,6 +824,103 @@ def test_failure_created_after_publish_prevents_recovery_source_delete(
 
     assert daily.exists()
     assert bag.exists()
+
+
+def test_archive_heartbeats_source_fence_past_original_lease(
+    archive_vault,
+) -> None:
+    from memory_queue import MemoryQueue
+
+    root, state_root, daily = archive_vault
+    clock = _LockedClock()
+    four_heartbeats = threading.Event()
+    waits: list[float] = []
+
+    def wait(stop: threading.Event, interval: float) -> bool:
+        waits.append(interval)
+        clock.advance(interval)
+        if len(waits) == 4:
+            four_heartbeats.set()
+            return stop.wait(5)
+        return False
+
+    queue = MemoryQueue(state_root, clock=clock, heartbeat_wait=wait)
+
+    def hold_build(point: str) -> None:
+        if point == "after_build":
+            assert four_heartbeats.wait(5)
+
+    archived = _archiver(
+        root,
+        state_root,
+        queue=queue,
+        killpoint=hold_build,
+    ).archive(daily.stem)
+
+    assert archived.state == "archived"
+    assert not daily.exists()
+    assert waits[:4] == [40] * 4
+    assert not any(
+        thread.name.startswith("memory-source-fence-heartbeat-") and thread.is_alive()
+        for thread in threading.enumerate()
+    )
+
+
+def test_archive_stops_before_publish_when_source_heartbeat_loses_takeover(
+    archive_vault, monkeypatch
+) -> None:
+    from memory_queue import MemoryQueue, QueueOperationError
+
+    root, state_root, daily = archive_vault
+    clock = _LockedClock()
+    heartbeat_lost = threading.Event()
+    replacements = []
+
+    def wait(stop: threading.Event, interval: float) -> bool:
+        del stop, interval
+        clock.advance(121)
+        replacement_queue = MemoryQueue(
+            state_root, clock=clock, rng=random.Random(99)
+        )
+        replacements.append(
+            replacement_queue.acquire_source_fence(
+                daily.stem, sha256_bytes(daily.read_bytes())
+            )
+        )
+        return False
+
+    queue = MemoryQueue(state_root, clock=clock, heartbeat_wait=wait)
+    original_heartbeat = queue.heartbeat_source_fence
+
+    def observe_lost(fence, *, lease_seconds=120):
+        try:
+            return original_heartbeat(fence, lease_seconds=lease_seconds)
+        except QueueOperationError:
+            heartbeat_lost.set()
+            raise
+
+    monkeypatch.setattr(queue, "heartbeat_source_fence", observe_lost)
+
+    def hold_build(point: str) -> None:
+        if point == "after_build":
+            assert heartbeat_lost.wait(5)
+
+    with pytest.raises(RuntimeError) as raised:
+        _archiver(
+            root,
+            state_root,
+            queue=queue,
+            killpoint=hold_build,
+        ).archive(daily.stem)
+
+    assert getattr(raised.value, "code", None) == "archive_source_fence_lost"
+    assert replacements
+    assert daily.exists()
+    assert not list((root / "knowledge/daily/archive").rglob("bag-*"))
+    assert not any(
+        thread.name.startswith("memory-source-fence-heartbeat-") and thread.is_alive()
+        for thread in threading.enumerate()
+    )
 
 
 def test_failure_winning_finalization_race_preserves_flat_source(

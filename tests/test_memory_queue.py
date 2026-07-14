@@ -163,7 +163,7 @@ def test_source_finalization_rejects_expired_fence(queue: MemoryQueue) -> None:
     fence = queue.acquire_source_fence(daily_id, digest)
     with sqlite3.connect(queue.db_path) as connection:
         connection.execute(
-            "UPDATE source_fences SET acquired_at=? WHERE token=?",
+            "UPDATE source_fences SET expires_at=? WHERE token=?",
             ("2000-01-01T00:00:00+00:00", fence.token),
         )
 
