@@ -68,13 +68,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event session_end --delegate session_end_capture.py",
+            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event session_end",
             "timeout": 15
-          },
-          {
-            "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event session_end --delegate session_end_project_tag.py",
-            "timeout": 10
           }
         ]
       }

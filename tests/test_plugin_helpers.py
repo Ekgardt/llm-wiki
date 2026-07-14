@@ -805,7 +805,7 @@ def test_claude_hooks_route_through_shared_adapter_and_preserve_contract():
     expected = {
         "SessionStart": ([15, 10], "session_start"),
         "PreCompact": ([15], "pre_compact"),
-        "SessionEnd": ([15, 10], "session_end"),
+        "SessionEnd": ([15], "session_end"),
         "UserPromptSubmit": ([5], "user_prompt"),
         "PostToolUse": ([5], "post_tool_use"),
     }

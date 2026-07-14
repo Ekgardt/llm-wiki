@@ -825,6 +825,88 @@ def test_current_task_transition_list_replays_close_open_close_without_resurrect
     assert "## Current task\n- None" in state
 
 
+def test_goal_and_phase_transition_lists_do_not_resurrect_closed_values(
+    project_store: ProjectStore,
+):
+    project_store.checkpoint("demo", checkpoint_event(), "agent-a")
+    transition = checkpoint_event(
+        "evt-2",
+        "goal-phase-transition",
+        delta={
+            "goal": {"id": "goal-2", "action": "close", "value": "done"},
+            "phase": {"id": "phase-2", "action": "close", "value": "done"},
+            "goal_operations": [
+                {"id": "goal-1", "action": "close", "value": "old done"},
+                {"id": "goal-2", "action": "upsert", "value": "new"},
+                {"id": "goal-2", "action": "close", "value": "new done"},
+            ],
+            "phase_operations": [
+                {"id": "phase-1", "action": "close", "value": "old done"},
+                {"id": "phase-2", "action": "upsert", "value": "new"},
+                {"id": "phase-2", "action": "close", "value": "new done"},
+            ],
+        },
+    )
+
+    project_store.checkpoint("demo", transition, "agent-a")
+
+    projection = project_store.projection("demo")
+    assert projection.goal == {}
+    assert projection.phase == {}
+
+
+def test_owned_legacy_state_is_bootstrapped_before_first_empty_checkpoint(
+    project_store: ProjectStore, vault: Path, tmp_path: Path
+):
+    project_root = tmp_path / "legacy-project"
+    project_root.mkdir()
+    state = vault / "knowledge/projects/demo/state.md"
+    state.write_text(
+        "---\ntype: project-state\ntitle: Legacy\nproject: demo\ngenerated: true\n---\n"
+        "# Legacy\n\n## Source\n"
+        f"- Project root: `{project_root}`\n\n"
+        "## Goal\n- Ship legacy goal\n\n"
+        "## Current task\n- Preserve legacy task\n\n"
+        "## Next actions\n- Run legacy tests\n\n"
+        "## Recent decisions\n- Keep legacy design\n\n"
+        "## Open blockers\n- Waiting on legacy input\n",
+        encoding="utf-8",
+    )
+    event = checkpoint_event(
+        "session-end-1",
+        "session-end-1",
+        delta={
+            "goal": {"id": "checkpoint-none", "action": "close", "value": ""},
+            "phase": {"id": "checkpoint-none", "action": "close", "value": ""},
+            "current_task": {"id": "checkpoint-none", "action": "close", "value": ""},
+            "next_actions": [],
+            "decisions": [],
+            "blockers": [],
+            "changed_files": [],
+            "commands": [],
+            "verification": [],
+        },
+    )
+    event["provenance"]["worktree"] = str(project_root)
+
+    project_store.checkpoint("demo", event, "agent-a")
+    restarted = ProjectStore(vault, project_store.state_root)
+    restarted.checkpoint("demo", event, "agent-a")
+
+    records = journal_records(restarted)
+    assert [record["reason"] for record in records] == ["bootstrap_legacy_state", "durable progress"]
+    rendered = state.read_text(encoding="utf-8")
+    for value in (
+        "Ship legacy goal",
+        "Preserve legacy task",
+        "Run legacy tests",
+        "Keep legacy design",
+        "Waiting on legacy input",
+        f"- Project root: `{project_root}`",
+    ):
+        assert value in rendered
+
+
 def test_idempotency_key_deduplicates_a_new_occurrence(project_store: ProjectStore):
     first = project_store.checkpoint("demo", checkpoint_event(), "agent-a")
     duplicate = project_store.checkpoint(

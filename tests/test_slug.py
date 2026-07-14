@@ -15,6 +15,7 @@ from session_start_project_state import (
     _compute_slug,
     _git_remote_slug,
     _path_hash_suffix,
+    _render_new_state,
     _slug_owns_dir,
 )
 
@@ -194,6 +195,24 @@ def test_compute_slug_idempotent(tmp_path: Path):
     )
     slug_second = _compute_slug(proj, projects)
     assert slug_first == slug_second
+
+
+def test_rendered_template_has_no_placeholders_and_preserves_slug_ownership(tmp_path: Path):
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    project = tmp_path / "My Project"
+    project.mkdir()
+    template = Path(__file__).resolve().parent.parent / "knowledge/projects/_template/state.md"
+
+    rendered = _render_new_state(template, "my-project", project)
+    state_dir = projects / "my-project"
+    state_dir.mkdir()
+    (state_dir / "state.md").write_text(rendered, encoding="utf-8")
+
+    assert "<project-slug>" not in rendered
+    assert "project: my-project" in rendered
+    assert f"- Project root: `{project}`" in rendered
+    assert _compute_slug(project, projects) == "my-project"
 
 
 def test_compute_slug_hash_suffix_last_resort(tmp_path: Path):

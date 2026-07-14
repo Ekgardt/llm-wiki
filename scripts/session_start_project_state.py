@@ -358,6 +358,8 @@ def _render_new_state(state_template: Path, slug: str, project_dir: Path) -> str
     tmpl = state_template.read_text(encoding="utf-8")
     filled = (
         tmpl
+        .replace("<project-slug>", slug)
+        .replace("<absolute-path>", str(project_dir))
         .replace("<Project Name>", slug)
         .replace("<what this project is, in one sentence>",
                  f"(new project at `{project_dir}`, pending description)")

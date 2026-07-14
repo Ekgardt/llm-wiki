@@ -91,6 +91,31 @@ def test_normalization_preserves_only_available_checkpoint_signals():
     assert "host_progress_signals" not in unavailable.payload
 
 
+def test_malformed_project_delta_is_rejected_before_durable_enqueue():
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import integration_adapter
+
+    secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
+    with pytest.raises(ValueError, match="invalid project delta") as rejected:
+        integration_adapter.normalize_event(
+            "claude",
+            "post_tool_use",
+            {
+                "tool_name": "Read",
+                "tool_input": {"file_path": "src/app.py"},
+                "project_delta": {
+                    **integration_adapter._empty_delta(),
+                    "blockers": [{"id": secret, "action": "append", "value": "bad"}],
+                },
+            },
+        )
+    assert secret not in str(rejected.value)
+
+
 def test_significant_file_tool_normalizes_to_file_change_observation():
     import sys
 
@@ -996,6 +1021,56 @@ def test_bypass_flush_batches_205_pending_events_across_failure_and_restart(monk
     assert len(checkpoints) == 3
 
 
+def test_single_oversized_valid_delta_splits_before_enqueue(monkeypatch):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import integration_adapter
+
+    state = {}
+    checkpoints = []
+
+    def update(mutator, **kwargs):
+        mutator(state)
+        return state
+
+    class Store:
+        def __init__(self, *args):
+            pass
+
+        def checkpoint(self, slug, event, owner, **kwargs):
+            checkpoints.append(event)
+
+    delta = integration_adapter._empty_delta()
+    delta["decisions"] = [
+        {"id": f"decision-{index}", "action": "upsert", "value": str(index)}
+        for index in range(205)
+    ]
+    envelope = integration_adapter.normalize_event(
+        "claude",
+        "post_tool_use",
+        {
+            "session_id": "s1",
+            "cwd": "C:/project",
+            "event_id": "oversized-1",
+            "tool_name": "Read",
+            "tool_input": {"file_path": "src/app.py"},
+            "checkpoint_type": "decision",
+            "project_delta": delta,
+        },
+    )
+    monkeypatch.setattr(integration_adapter, "update_state", update)
+    monkeypatch.setattr(integration_adapter, "ProjectStore", Store)
+    monkeypatch.setattr(integration_adapter, "_project_context", lambda event: ("demo", ROOT))
+
+    integration_adapter._observe_project_checkpoint(envelope)
+
+    assert [len(item["delta"]["decisions"]) for item in checkpoints] == [100, 100, 5]
+    assert state["project_checkpoint_pending"]["demo"] == []
+
+
 def test_session_start_recovers_transactions_then_project_before_handoff(
     monkeypatch, tmp_path, capsys
 ):
@@ -1360,6 +1435,57 @@ def test_claude_hooks_cover_compaction_failure_stop_and_end_signals():
     assert "--event session_end" not in stop_command
     assert "--delegate" not in stop_command
     assert "--checkpoint-type significant_failure" in failure_command
+
+
+def test_claude_session_end_uses_one_adapter_occurrence_for_both_side_effects(monkeypatch):
+    import io
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import integration_adapter
+
+    settings = json.loads(
+        (ROOT / "integrations/claude-code/settings.json").read_text(encoding="utf-8")
+    )
+    hooks = settings["hooks"]["SessionEnd"][0]["hooks"]
+    assert len(hooks) == 1
+    assert "--event session_end" in hooks[0]["command"]
+    assert "--delegate" not in hooks[0]["command"]
+
+    calls = []
+    monkeypatch.setattr(
+        integration_adapter,
+        "_observe_project_checkpoint",
+        lambda envelope: calls.append(("observe", envelope.event_id)),
+    )
+    monkeypatch.setattr(
+        integration_adapter,
+        "_run_delegate",
+        lambda name, payload, **kwargs: calls.append(("delegate", name))
+        or type("Result", (), {"returncode": 0, "stdout": '{"flush_started": true}'})(),
+    )
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(
+                {
+                    "session_id": "s1",
+                    "cwd": "C:/project",
+                    "transcript_path": "session.jsonl",
+                }
+            )
+        ),
+    )
+
+    assert integration_adapter.main(["--source", "claude", "--event", "session_end"]) == 0
+    assert [name for kind, name in calls if kind == "delegate"] == [
+        "session_end_project_tag.py",
+        "session_end_capture.py",
+    ]
+    assert len([item for item in calls if item[0] == "observe"]) == 1
 
 
 def test_codex_wrapper_recovers_project_state_before_launch():

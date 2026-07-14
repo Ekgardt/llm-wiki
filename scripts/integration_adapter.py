@@ -141,6 +141,52 @@ def _tool_payload(source: str, raw: Mapping[str, Any]) -> dict[str, str]:
     return {"tool_name": tool_name, "target": target}
 
 
+def _canonical_delta_operation(value: object) -> dict[str, str]:
+    if not isinstance(value, Mapping) or set(value) != {"id", "action", "value"}:
+        raise ValueError("invalid project delta")
+    item_id = value.get("id")
+    action = value.get("action")
+    text = value.get("value")
+    if (
+        not isinstance(item_id, str)
+        or not 1 <= len(item_id) <= 256
+        or action not in {"upsert", "close"}
+        or not isinstance(text, str)
+        or len(text) > 4096
+    ):
+        raise ValueError("invalid project delta")
+    return {"id": item_id, "action": str(action), "value": text}
+
+
+def _canonical_project_delta(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        raise ValueError("invalid project delta")
+    scalar_names = ("goal", "phase", "current_task")
+    list_names = (
+        "next_actions",
+        "decisions",
+        "blockers",
+        "changed_files",
+        "commands",
+        "verification",
+    )
+    operation_names = tuple(f"{name}_operations" for name in scalar_names)
+    if set(value) - set(scalar_names + list_names + operation_names):
+        raise ValueError("invalid project delta")
+    canonical = _empty_delta()
+    for name in scalar_names:
+        if name in value:
+            canonical[name] = _canonical_delta_operation(value[name])
+    for name in operation_names + list_names:
+        if name not in value:
+            continue
+        operations = value[name]
+        if not isinstance(operations, list) or len(operations) > 10_000:
+            raise ValueError("invalid project delta")
+        canonical[name] = [_canonical_delta_operation(item) for item in operations]
+    return canonical
+
+
 def normalize_event(
     source: str,
     event: str,
@@ -183,6 +229,8 @@ def normalize_event(
     for name in CHECKPOINT_SIGNAL_FIELDS:
         if name in raw:
             payload[name] = raw[name]
+    if "project_delta" in payload:
+        payload["project_delta"] = _canonical_project_delta(payload["project_delta"])
     if event in OCCURRENCE_EVENTS and isinstance(raw.get("occurrence_id"), str):
         payload["occurrence_id"] = raw["occurrence_id"]
     if event == "post_tool_use":
@@ -365,7 +413,9 @@ def _empty_delta() -> dict[str, object]:
     close = {"id": "checkpoint-none", "action": "close", "value": ""}
     return {
         "goal": dict(close),
+        "goal_operations": [],
         "phase": dict(close),
+        "phase_operations": [],
         "current_task": dict(close),
         "current_task_operations": [],
         "next_actions": [],
@@ -415,6 +465,84 @@ def _pending_checkpoint(
     }
 
 
+def _split_project_delta(delta: Mapping[str, object]) -> list[dict[str, object]]:
+    scalar_names = ("goal", "phase", "current_task")
+    list_limits = {
+        "next_actions": 10,
+        "decisions": 100,
+        "blockers": 100,
+        "changed_files": 100,
+        "commands": 100,
+        "verification": 100,
+    }
+    scalar_operations = {
+        name: _scalar_delta_operations(delta, name) for name in scalar_names
+    }
+    chunk_count = max(
+        [1]
+        + [
+            (len(operations) + 99) // 100
+            for operations in scalar_operations.values()
+        ]
+        + [
+            (len(delta[name]) + limit - 1) // limit
+            for name, limit in list_limits.items()
+            if isinstance(delta[name], list)
+        ]
+    )
+    if chunk_count == 1:
+        return [dict(delta)]
+    chunks: list[dict[str, object]] = []
+    for index in range(chunk_count):
+        chunk = _empty_delta()
+        for name, operations in scalar_operations.items():
+            selected = operations[index * 100 : (index + 1) * 100]
+            if selected:
+                chunk[name] = selected[-1]
+                chunk[f"{name}_operations"] = selected
+        for name, limit in list_limits.items():
+            operations = delta[name]
+            assert isinstance(operations, list)
+            chunk[name] = operations[index * limit : (index + 1) * limit]
+        chunks.append(chunk)
+    return chunks
+
+
+def _pending_checkpoints(
+    envelope: EventEnvelope, slug: str, state_key: str
+) -> list[dict[str, object]]:
+    pending = _pending_checkpoint(envelope, slug, state_key)
+    delta = envelope.to_dict()["payload"].get("project_delta")
+    if not isinstance(delta, Mapping):
+        return [pending]
+    chunks = _split_project_delta(delta)
+    if len(chunks) == 1:
+        return [pending]
+    result: list[dict[str, object]] = []
+    for index, chunk in enumerate(chunks):
+        item = dict(pending)
+        event_id = f"{envelope.event_id}:part:{index + 1}"
+        item["event_id"] = event_id
+        item["has_project_delta"] = True
+        checkpoint = dict(pending["checkpoint_event"])
+        checkpoint["occurrence_id"] = event_id
+        checkpoint["idempotency_key"] = f"{event_id}:pending"
+        checkpoint["delta"] = chunk
+        checkpoint["evidence_event_ids"] = [event_id]
+        item["checkpoint_event"] = checkpoint
+        if index < len(chunks) - 1:
+            item["observation"] = {
+                "type": "coalesced_delta",
+                "event_id": event_id,
+            }
+        else:
+            observation = dict(pending["observation"])
+            observation["event_id"] = event_id
+            item["observation"] = observation
+        result.append(item)
+    return result
+
+
 def _release_pending_claims(queue_key: str, owner: str) -> None:
     def release(state: dict[str, Any]) -> None:
         pending = state.get("project_checkpoint_pending")
@@ -445,11 +573,13 @@ def _has_pending_delta(item: Mapping[str, object]) -> bool:
     return normalized != _empty_delta()
 
 
-def _task_delta_operations(delta: Mapping[str, object]) -> list[dict[str, object]]:
-    supplied = delta.get("current_task_operations")
+def _scalar_delta_operations(
+    delta: Mapping[str, object], name: str
+) -> list[dict[str, object]]:
+    supplied = delta.get(f"{name}_operations")
     if isinstance(supplied, list) and supplied:
         return [dict(item) for item in supplied if isinstance(item, Mapping)]
-    operation = delta["current_task"]
+    operation = delta[name]
     assert isinstance(operation, Mapping)
     if operation.get("id") == "checkpoint-none" and operation.get("action") == "close":
         return []
@@ -470,18 +600,21 @@ def _bounded_pending_batch_count(items: Sequence[Mapping[str, object]]) -> int:
         )
     }
     evidence: set[str] = set()
-    task_count = 0
+    scalar_counts = {name: 0 for name in ("goal", "phase", "current_task")}
     accepted = 0
     for item in items:
         next_evidence = evidence | {str(item["event_id"])}
-        next_task_count = task_count
+        next_scalar_counts = dict(scalar_counts)
         next_list_ids = {name: set(values) for name, values in list_ids.items()}
         if _has_pending_delta(item):
             checkpoint = item["checkpoint_event"]
             assert isinstance(checkpoint, Mapping)
             delta = checkpoint["delta"]
             assert isinstance(delta, Mapping)
-            next_task_count += len(_task_delta_operations(delta))
+            for name in next_scalar_counts:
+                next_scalar_counts[name] += len(
+                    _scalar_delta_operations(delta, name)
+                )
             for name, ids in next_list_ids.items():
                 operations = delta[name]
                 assert isinstance(operations, list)
@@ -492,12 +625,12 @@ def _bounded_pending_batch_count(items: Sequence[Mapping[str, object]]) -> int:
                 )
         if (
             len(next_evidence) > 100
-            or next_task_count > 100
+            or any(count > 100 for count in next_scalar_counts.values())
             or any(len(ids) > list_limits.get(name, 100) for name, ids in next_list_ids.items())
         ):
             break
         evidence = next_evidence
-        task_count = next_task_count
+        scalar_counts = next_scalar_counts
         list_ids = next_list_ids
         accepted += 1
     return max(1, accepted)
@@ -507,9 +640,8 @@ def _merge_pending_checkpoints(
     items: Sequence[Mapping[str, object]], decision: CheckpointDecision
 ) -> dict[str, object]:
     scalar_operations: dict[str, list[dict[str, object]]] = {
-        name: [] for name in ("goal", "phase")
+        name: [] for name in ("goal", "phase", "current_task")
     }
-    task_operations: list[dict[str, object]] = []
     list_operations: dict[str, dict[str, dict[str, object]]] = {
         name: {}
         for name in (
@@ -533,14 +665,7 @@ def _merge_pending_checkpoints(
         delta = checkpoint["delta"]
         assert isinstance(delta, Mapping)
         for name, operations in scalar_operations.items():
-            operation = delta[name]
-            assert isinstance(operation, Mapping)
-            if not (
-                operation.get("id") == "checkpoint-none"
-                and operation.get("action") == "close"
-            ):
-                operations.append(dict(operation))
-        task_operations.extend(_task_delta_operations(delta))
+            operations.extend(_scalar_delta_operations(delta, name))
         for name, operations in list_operations.items():
             values = delta[name]
             assert isinstance(values, list)
@@ -554,9 +679,7 @@ def _merge_pending_checkpoints(
     for name, operations in scalar_operations.items():
         if operations:
             merged_delta[name] = operations[-1]
-    if task_operations:
-        merged_delta["current_task"] = task_operations[-1]
-        merged_delta["current_task_operations"] = task_operations
+            merged_delta[f"{name}_operations"] = operations
     for name, operations in list_operations.items():
         merged_delta[name] = list(operations.values())
 
@@ -764,19 +887,24 @@ def _observe_project_checkpoint(
         return
     session_key = envelope.session or "unknown"
     state_key = f"{slug}:{session_key}"
-    pending_event = _pending_checkpoint(envelope, slug, state_key)
+    pending_events = _pending_checkpoints(envelope, slug, state_key)
 
     def enqueue(state: dict[str, Any]) -> None:
         reducers = state.get("project_checkpoint_reducers")
         reducer_state = reducers.get(state_key) if isinstance(reducers, dict) else None
-        if isinstance(reducer_state, Mapping) and envelope.event_id in set(
-            reducer_state.get("observed_event_ids", [])
-        ):
-            return
+        observed = (
+            set(reducer_state.get("observed_event_ids", []))
+            if isinstance(reducer_state, Mapping)
+            else set()
+        )
         pending = state.setdefault("project_checkpoint_pending", {})
         queue = pending.setdefault(slug, [])
-        if not any(item.get("event_id") == envelope.event_id for item in queue):
-            queue.append(pending_event)
+        queued = {item.get("event_id") for item in queue}
+        for pending_event in pending_events:
+            event_id = pending_event["event_id"]
+            if event_id not in observed and event_id not in queued:
+                queue.append(pending_event)
+                queued.add(event_id)
 
     update_state(enqueue, lock_timeout=0.5)
     _drain_project_checkpoints(

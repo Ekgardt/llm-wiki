@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import stat
 import unicodedata
@@ -686,6 +687,15 @@ class ProjectStore:
         _require_owner(owner)
         normalized_event = self.coordinator.normalize_project_checkpoint(slug, event)
         self.recover(slug, writer_wait_seconds=writer_wait_seconds)
+        if normalized_event["occurrence_id"] != f"bootstrap-state:{slug}":
+            bootstrap = self._legacy_bootstrap_event(slug, normalized_event)
+            if bootstrap is not None:
+                self.checkpoint(
+                    slug,
+                    bootstrap,
+                    owner,
+                    writer_wait_seconds=writer_wait_seconds,
+                )
         lease = self.acquire_lease(slug, owner)
         try:
             reserved, duplicate = self._reserve(slug, normalized_event, lease)
@@ -709,6 +719,109 @@ class ProjectStore:
                 raise
         finally:
             self._release(lease)
+
+    def _legacy_bootstrap_event(
+        self, slug: str, event: Mapping[str, object]
+    ) -> dict[str, object] | None:
+        if self._read_journal_bytes(slug):
+            return None
+        state = self._read_projection_bytes(slug)
+        if state is None:
+            return None
+        text = state.decode("utf-8", errors="replace")
+        provenance = event.get("provenance")
+        if not isinstance(provenance, Mapping):
+            return None
+        worktree = provenance.get("worktree")
+        owned = re.search(r"^- Project root:\s*`([^`]+)`", text, re.MULTILINE)
+        if not owned or not isinstance(worktree, str):
+            return None
+        try:
+            if Path(owned.group(1)).resolve() != Path(worktree).resolve():
+                return None
+        except (OSError, ValueError):
+            if owned.group(1) != worktree:
+                return None
+
+        def section(title: str) -> list[str]:
+            match = re.search(
+                rf"^## {re.escape(title)}\s*$\n(.*?)(?=^## |\Z)",
+                text,
+                re.MULTILINE | re.DOTALL,
+            )
+            if not match:
+                return []
+            values = []
+            for line in match.group(1).splitlines():
+                value = re.sub(r"^-\s*(?:`[^`]+`:\s*)?", "", line).strip()
+                if value and value.lower() != "none":
+                    values.append(value)
+            return values
+
+        goal = section("Goal")
+        phase = section("Phase")
+        task = section("Current task")
+        next_actions = section("Next actions")
+        decisions = section("Recent decisions")
+        blockers = section("Open blockers")
+        if not any((goal, phase, task, next_actions, decisions, blockers)):
+            return None
+        close = {"id": "checkpoint-none", "action": "close", "value": ""}
+        delta: dict[str, object] = {
+            "goal": (
+                {"id": "bootstrap-goal", "action": "upsert", "value": goal[-1]}
+                if goal
+                else dict(close)
+            ),
+            "goal_operations": [],
+            "phase": (
+                {"id": "bootstrap-phase", "action": "upsert", "value": phase[-1]}
+                if phase
+                else dict(close)
+            ),
+            "phase_operations": [],
+            "current_task": (
+                {"id": "bootstrap-task", "action": "upsert", "value": task[-1]}
+                if task
+                else dict(close)
+            ),
+            "current_task_operations": [],
+            "next_actions": [
+                {"id": f"bootstrap-next-{index}", "action": "upsert", "value": value}
+                for index, value in enumerate(next_actions[:10], 1)
+            ],
+            "decisions": [
+                {
+                    "id": f"bootstrap-decision-{index}",
+                    "action": "upsert",
+                    "value": value,
+                }
+                for index, value in enumerate(decisions[:100], 1)
+            ],
+            "blockers": [
+                {
+                    "id": f"bootstrap-blocker-{index}",
+                    "action": "upsert",
+                    "value": value,
+                }
+                for index, value in enumerate(blockers[:100], 1)
+            ],
+            "changed_files": [],
+            "commands": [],
+            "verification": [],
+        }
+        seed_provenance = dict(provenance)
+        seed_provenance["source_event"] = "bootstrap-state"
+        return {
+            "schema_version": "project-checkpoint/v1",
+            "occurrence_id": f"bootstrap-state:{slug}",
+            "idempotency_key": f"bootstrap-state:v1:{slug}",
+            "provenance": seed_provenance,
+            "trigger": "legacy_state_bootstrap",
+            "reason": "bootstrap_legacy_state",
+            "delta": delta,
+            "evidence_event_ids": ["bootstrap-state"],
+        }
 
     def recover(
         self,
@@ -982,6 +1095,12 @@ class ProjectStore:
                 operation = delta[name]
                 assert isinstance(operation, Mapping)
                 self._reduce(active[name], operation)
+            for name in ("goal", "phase"):
+                scalar_operations = delta.get(f"{name}_operations", [])
+                assert isinstance(scalar_operations, list)
+                for operation in scalar_operations:
+                    assert isinstance(operation, Mapping)
+                    self._reduce(active[name], operation)
             task_operations = delta.get("current_task_operations", [])
             assert isinstance(task_operations, list)
             for operation in task_operations:
@@ -1045,6 +1164,12 @@ class ProjectStore:
                 operation = delta[name]
                 assert isinstance(operation, Mapping)
                 self._reduce(getattr(active, name), operation)
+            for name in ("goal", "phase"):
+                scalar_operations = delta.get(f"{name}_operations", [])
+                assert isinstance(scalar_operations, list)
+                for operation in scalar_operations:
+                    assert isinstance(operation, Mapping)
+                    self._reduce(getattr(active, name), operation)
             task_operations = delta.get("current_task_operations", [])
             assert isinstance(task_operations, list)
             for operation in task_operations:
