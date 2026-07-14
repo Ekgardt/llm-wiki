@@ -293,19 +293,8 @@ def _receipt_path(digest: str) -> Path:
     return DAILY_DIR / "receipts" / f"{digest}.md"
 
 
-def read_compile_receipt(
-    digest: str,
-    coordinator: MarkdownCoordinator,
-    *,
-    path: Path | None = None,
-    vault: Path | None = None,
-) -> dict[str, object] | None:
-    path = _receipt_path(digest) if path is None else Path(path)
-    vault = ROOT if vault is None else Path(vault)
-    try:
-        raw_bytes = read_stable_bytes(path, MAX_RECEIPT_BYTES, label="compile receipt")
-    except FileNotFoundError:
-        return None
+def parse_compile_receipt(raw_bytes: bytes, digest: str) -> dict[str, object]:
+    """Validate canonical receipt bytes without requiring live transaction state."""
     try:
         text = raw_bytes.decode("utf-8", errors="strict")
         frontmatter, body = text.split("---\n", 2)[1:]
@@ -351,6 +340,43 @@ def read_compile_receipt(
         )
         if record["operation_id"] != expected_operation_id:
             raise ValueError("compile receipt operation identity is invalid")
+        operation_paths = [operation["path"] for operation in record["operations"]]
+        if len(operation_paths) != len(set(operation_paths)):
+            raise ValueError("compile receipt operation paths are duplicated")
+        for evidence in record["evidence"]:
+            if (
+                evidence["source_digest"] != digest
+                or evidence["operation_path"] not in set(operation_paths)
+            ):
+                raise ValueError("compile receipt evidence scope is invalid")
+        return record
+    except (
+        IndexError,
+        KeyError,
+        TypeError,
+        ValueError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise ValueError("compile receipt is corrupt") from exc
+
+
+def read_compile_receipt(
+    digest: str,
+    coordinator: MarkdownCoordinator,
+    *,
+    path: Path | None = None,
+    vault: Path | None = None,
+) -> dict[str, object] | None:
+    path = _receipt_path(digest) if path is None else Path(path)
+    vault = ROOT if vault is None else Path(vault)
+    try:
+        raw_bytes = read_stable_bytes(path, MAX_RECEIPT_BYTES, label="compile receipt")
+    except FileNotFoundError:
+        return None
+    try:
+        record = parse_compile_receipt(raw_bytes, digest)
+        expected_operation_id = str(record["operation_id"])
         transaction = coordinator._record_for_operation_id(expected_operation_id)
         if transaction is None or transaction.state != "committed":
             raise ValueError("compile receipt has no committed transaction authority")
@@ -359,9 +385,6 @@ def read_compile_receipt(
         receipt_operation = transaction_operations.get(relative)
         if receipt_operation is None or receipt_operation.after_hash != sha256_bytes(raw_bytes):
             raise ValueError("compile receipt bytes are not transaction-authoritative")
-        operation_paths = [operation["path"] for operation in record["operations"]]
-        if len(operation_paths) != len(set(operation_paths)):
-            raise ValueError("compile receipt operation paths are duplicated")
         for operation in record["operations"]:
             authoritative = transaction_operations.get(operation["path"])
             if (
@@ -370,14 +393,6 @@ def read_compile_receipt(
                 or authoritative.after_hash != operation["after_sha256"]
             ):
                 raise ValueError("compile receipt operation integrity failed")
-        for evidence in record["evidence"]:
-            if (
-                evidence["source_digest"] != digest
-                or evidence["operation_path"] not in {
-                    operation["path"] for operation in record["operations"]
-                }
-            ):
-                raise ValueError("compile receipt evidence scope is invalid")
         return record
     except (
         IndexError,

@@ -1461,7 +1461,10 @@ class MemoryQueue:
             source_fence = connection.execute(
                 "SELECT 1 FROM source_fences LIMIT 1"
             ).fetchone()
-        if task is not None or source_fence is not None:
+            source_failure = connection.execute(
+                "SELECT 1 FROM source_failures LIMIT 1"
+            ).fetchone()
+        if task is not None or source_fence is not None or source_failure is not None:
             return True
         quarantine = self.run_dir / "queue-quarantine"
         try:

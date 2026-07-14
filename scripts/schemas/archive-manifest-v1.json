@@ -16,7 +16,23 @@
         "schema": {"const": "compile-receipt-ref/v1"},
         "path": {"type": "string", "minLength": 1},
         "source_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "receipt_file_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        "receipt_file_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "embedded_path": {"const": "compile-receipt.md"}
+      },
+      "additionalProperties": false
+    },
+    "compile_authority": {
+      "type": "object",
+      "required": ["schema", "transaction_id", "state", "committed_at", "commit_sequence", "operation_ids", "coordinator_record", "coordinator_record_digest"],
+      "properties": {
+        "schema": {"const": "archive-compile-authority/v1"},
+        "transaction_id": {"type": "string", "minLength": 1, "maxLength": 200},
+        "state": {"const": "committed"},
+        "committed_at": {"type": "string", "minLength": 20, "maxLength": 40},
+        "commit_sequence": {"type": "integer", "minimum": 1},
+        "operation_ids": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"type": "string", "minLength": 1, "maxLength": 200}},
+        "coordinator_record": {"type": "object"},
+        "coordinator_record_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
       },
       "additionalProperties": false
     },

@@ -27,6 +27,7 @@ from evidence_resolver import (  # noqa: E402
     _line_span,
     _regular_directory,
     bounded_directory_entries,
+    compile_authority_attestation,
     validate_bag,
 )
 from markdown_transaction import (  # noqa: E402
@@ -280,7 +281,12 @@ class DailyArchiver:
             )
             source_digest = sha256_bytes(source_bytes)
             self._recover_hidden_builds()
-            reused = self._recover_daily(daily_id, source_digest)
+            reused = self._recover_daily(
+                daily_id,
+                source_digest,
+                hot_days=hot_days,
+                transaction_retention_days=transaction_retention_days,
+            )
             if reused is not None:
                 return reused
             eligibility = self._eligible(
@@ -332,7 +338,14 @@ class DailyArchiver:
             self.rebuild_index()
             return ArchiveReceipt(daily_id, eligibility.source_sha256, final_bag, "archived")
 
-    def _recover_daily(self, daily_id: str, digest: str) -> ArchiveReceipt | None:
+    def _recover_daily(
+        self,
+        daily_id: str,
+        digest: str,
+        *,
+        hot_days: int,
+        transaction_retention_days: int,
+    ) -> ArchiveReceipt | None:
         exact: list[Path] = []
         conflicts: list[Path] = []
         for path in self._archive_paths(hidden=False):
@@ -353,17 +366,17 @@ class DailyArchiver:
         keeper = exact[0]
         for duplicate in exact[1:]:
             self._quarantine(duplicate, daily_id, digest, reason="duplicate_exact_match")
-        queue = MemoryQueue(self.state_root)
-        fence = queue.acquire_source_fence(daily_id, digest)
-        try:
-            flat = self.daily_root / f"{daily_id}.md"
-            flat_bytes = read_stable_bytes(flat, MAX_DAILY_BYTES, label="daily duplicate")
-            if sha256_bytes(flat_bytes) != digest:
-                self._quarantine(keeper, daily_id, digest)
-                return None
-            self._remove_flat(daily_id, digest)
-        finally:
-            queue.release_source_fence(fence.token)
+        flat = self.daily_root / f"{daily_id}.md"
+        flat_bytes = read_stable_bytes(flat, MAX_DAILY_BYTES, label="daily duplicate")
+        if sha256_bytes(flat_bytes) != digest:
+            self._quarantine(keeper, daily_id, digest)
+            return None
+        self._remove_flat_after_eligibility_recheck(
+            daily_id,
+            digest,
+            hot_days=hot_days,
+            transaction_retention_days=transaction_retention_days,
+        )
         self.rebuild_index()
         return ArchiveReceipt(daily_id, digest, keeper, "recovered")
 
@@ -456,6 +469,32 @@ class DailyArchiver:
         receipt_bytes = read_stable_bytes(
             receipt_path, MAX_POLICY_BYTES, label="compile receipt"
         )
+        from compile_memory import read_compile_receipt
+
+        authoritative_receipt = read_compile_receipt(
+            digest,
+            self.coordinator,
+            path=receipt_path,
+            vault=self.vault,
+        )
+        if authoritative_receipt != receipt:
+            raise RuntimeError("compile receipt authority changed during archive")
+        transaction = self.coordinator._record_for_operation_id(
+            str(receipt["operation_id"])
+        )
+        if transaction is None or transaction.state != "committed":
+            raise RuntimeError("compile transaction authority is not committed")
+        with self.coordinator._connect() as database:
+            sequence_row = database.execute(
+                'SELECT rowid AS commit_sequence FROM "transaction" WHERE id=?',
+                (transaction.id,),
+            ).fetchone()
+        if sequence_row is None:
+            raise RuntimeError("compile transaction authority disappeared")
+        compile_authority = compile_authority_attestation(
+            transaction, int(sequence_row["commit_sequence"])
+        )
+        (publish_build / "compile-receipt.md").write_bytes(receipt_bytes)
         evidence = [
             {
                 "block_id": block_id,
@@ -478,7 +517,9 @@ class DailyArchiver:
                 "path": receipt_path.relative_to(self.vault).as_posix(),
                 "source_digest": digest,
                 "receipt_file_hash": sha256_bytes(receipt_bytes),
+                "embedded_path": "compile-receipt.md",
             },
+            "compile_authority": compile_authority,
             "queue_preflight": {
                 "checked_at": now.isoformat().replace("+00:00", "Z"),
                 "passed": True,
@@ -498,6 +539,7 @@ class DailyArchiver:
             "archive-manifest.json",
             "bag-info.txt",
             "bagit.txt",
+            "compile-receipt.md",
             "manifest-sha256.txt",
         )
         (publish_build / "tagmanifest-sha256.txt").write_bytes(
@@ -637,7 +679,40 @@ class DailyArchiver:
         )
         self.coordinator.apply(transaction.id)
 
-    def recover(self) -> list[ArchiveReceipt]:
+    def _remove_flat_after_eligibility_recheck(
+        self,
+        daily_id: str,
+        digest: str,
+        *,
+        hot_days: int,
+        transaction_retention_days: int,
+    ) -> None:
+        queue = MemoryQueue(self.state_root)
+        fence = queue.acquire_source_fence(daily_id, digest)
+        try:
+            source = self.daily_root / f"{daily_id}.md"
+            eligibility = self._eligible(
+                source,
+                hot_days=hot_days,
+                transaction_retention_days=transaction_retention_days,
+                ignore_current_writer=True,
+            )
+            if eligibility.source_sha256 != digest:
+                raise RuntimeError("daily source changed before recovery removal")
+            if not eligibility.eligible:
+                raise ValueError(
+                    "daily is not archive eligible: " + ", ".join(eligibility.reasons)
+                )
+            self._remove_flat(daily_id, digest)
+        finally:
+            queue.release_source_fence(fence.token)
+
+    def recover(
+        self,
+        *,
+        hot_days: int = DEFAULT_HOT_DAYS,
+        transaction_retention_days: int = DEFAULT_TRANSACTION_RETENTION_DAYS,
+    ) -> list[ArchiveReceipt]:
         recovered: list[ArchiveReceipt] = []
         if not self.archive_root.exists():
             return recovered
@@ -666,12 +741,12 @@ class DailyArchiver:
                             digest,
                             reason="duplicate_exact_match",
                         )
-                    queue = MemoryQueue(self.state_root)
-                    fence = queue.acquire_source_fence(daily_id, digest)
-                    try:
-                        self._remove_flat(daily_id, digest)
-                    finally:
-                        queue.release_source_fence(fence.token)
+                    self._remove_flat_after_eligibility_recheck(
+                        daily_id,
+                        digest,
+                        hot_days=hot_days,
+                        transaction_retention_days=transaction_retention_days,
+                    )
                     recovered.extend((ArchiveReceipt(daily_id, digest, keeper, "recovered"),))
                 else:
                     for path in paths:

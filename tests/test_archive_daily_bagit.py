@@ -258,6 +258,124 @@ def test_archive_publishes_complete_valid_bag_then_transactionally_removes_sourc
     assert removal is not None and removal.state == "committed"
 
 
+def test_archived_evidence_resolves_after_eligible_run_state_is_deleted(
+    archive_vault,
+) -> None:
+    from evidence_resolver import EvidenceRef, EvidenceResolver
+
+    root, state_root, daily = archive_vault
+    archived = _archiver(root, state_root).archive(daily.stem)
+    manifest = json.loads((archived.bag_path / "archive-manifest.json").read_bytes())
+    embedded_receipt = archived.bag_path / "compile-receipt.md"
+    assert embedded_receipt.read_bytes() == root.joinpath(
+        f"knowledge/daily/receipts/{archived.source_sha256}.md"
+    ).read_bytes()
+    assert set(manifest["compile_authority"]) == {
+        "commit_sequence",
+        "committed_at",
+        "coordinator_record",
+        "coordinator_record_digest",
+        "operation_ids",
+        "schema",
+        "state",
+        "transaction_id",
+    }
+    evidence = manifest["evidence"][0]
+    ref = EvidenceRef(
+        daily.stem,
+        archived.source_sha256,
+        evidence["block_id"],
+        evidence["byte_start"],
+        evidence["byte_end"],
+    )
+    shutil.rmtree(state_root / "run")
+
+    resolved = EvidenceResolver(root, state_root=state_root).resolve(ref)
+
+    assert resolved.location == "archive"
+    assert resolved.bytes == archived.bag_path.joinpath(
+        f"data/{daily.name}"
+    ).read_bytes()[evidence["byte_start"] : evidence["byte_end"]]
+
+
+def test_forged_embedded_receipt_fails_after_outer_hashes_are_rebuilt(
+    archive_vault,
+) -> None:
+    from archive_daily import DailyArchiver
+    from evidence_resolver import EvidenceResolutionError, validate_bag
+    from reliable_memory import canonical_json_bytes
+
+    root, state_root, daily = archive_vault
+    archived = _archiver(root, state_root).archive(daily.stem)
+    forged = root / "forged-self-contained-bag"
+    shutil.copytree(archived.bag_path, forged)
+    for path in (forged, *forged.rglob("*")):
+        path.chmod(0o700 if path.is_dir() else 0o600)
+    embedded = forged / "compile-receipt.md"
+    embedded.write_bytes(embedded.read_bytes().replace(b'"state":"completed"', b'"state":"forged"'))
+    manifest_path = forged / "archive-manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest["compile_receipt_ref"]["receipt_file_hash"] = sha256_bytes(
+        embedded.read_bytes()
+    )
+    manifest_path.write_bytes(canonical_json_bytes(manifest))
+    tags = (
+        "archive-manifest.json",
+        "bag-info.txt",
+        "bagit.txt",
+        "compile-receipt.md",
+        "manifest-sha256.txt",
+    )
+    (forged / "tagmanifest-sha256.txt").write_bytes(
+        "".join(
+            f"{sha256_bytes((forged / name).read_bytes())}  {name}\n" for name in tags
+        ).encode()
+    )
+    DailyArchiver._seal(forged)
+    shutil.rmtree(state_root / "run")
+
+    with pytest.raises(EvidenceResolutionError, match="compile receipt"):
+        validate_bag(forged, vault=root)
+
+
+def test_forged_offline_coordinator_record_fails_its_attested_digest(
+    archive_vault,
+) -> None:
+    from archive_daily import DailyArchiver
+    from evidence_resolver import EvidenceResolutionError, validate_bag
+    from reliable_memory import canonical_json_bytes
+
+    root, state_root, daily = archive_vault
+    archived = _archiver(root, state_root).archive(daily.stem)
+    forged = root / "forged-coordinator-record-bag"
+    shutil.copytree(archived.bag_path, forged)
+    for path in (forged, *forged.rglob("*")):
+        path.chmod(0o700 if path.is_dir() else 0o600)
+    manifest_path = forged / "archive-manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest["compile_authority"]["coordinator_record"]["updated_at"] = (
+        "2026-01-01T00:00:00Z"
+    )
+    manifest_path.write_bytes(canonical_json_bytes(manifest))
+    tags = (
+        "archive-manifest.json",
+        "bag-info.txt",
+        "bagit.txt",
+        "compile-receipt.md",
+        "manifest-sha256.txt",
+    )
+    (forged / "tagmanifest-sha256.txt").write_bytes(
+        "".join(
+            f"{sha256_bytes((forged / name).read_bytes())}  {name}\n" for name in tags
+        ).encode()
+    )
+    DailyArchiver._seal(forged)
+    shutil.rmtree(state_root / "run")
+
+    with pytest.raises(EvidenceResolutionError, match="authority"):
+        validate_bag(forged, vault=root)
+
+
 def test_bag_validation_rechecks_receipt_hash_and_transaction_authority(
     archive_vault,
 ) -> None:
@@ -266,20 +384,23 @@ def test_bag_validation_rechecks_receipt_hash_and_transaction_authority(
     root, state_root, daily = archive_vault
     receipt = _archiver(root, state_root).archive(daily.stem)
     coordinator = MarkdownCoordinator(root, state_root)
-    digest = receipt.source_sha256
     copy = root / "receipt-authority-copy"
     shutil.copytree(receipt.bag_path, copy)
-    receipt_path = root / f"knowledge/daily/receipts/{digest}.md"
-    receipt_path.write_bytes(receipt_path.read_bytes() + b"tampered")
+    for path in (copy, *copy.rglob("*")):
+        path.chmod(0o700 if path.is_dir() else 0o600)
     manifest_path = copy / "archive-manifest.json"
     manifest = json.loads(manifest_path.read_bytes())
-    manifest["compile_receipt_ref"]["receipt_file_hash"] = sha256_bytes(
-        receipt_path.read_bytes()
-    )
+    manifest["compile_authority"]["commit_sequence"] += 1
     from reliable_memory import canonical_json_bytes
 
     manifest_path.write_bytes(canonical_json_bytes(manifest))
-    tags = ("archive-manifest.json", "bag-info.txt", "bagit.txt", "manifest-sha256.txt")
+    tags = (
+        "archive-manifest.json",
+        "bag-info.txt",
+        "bagit.txt",
+        "compile-receipt.md",
+        "manifest-sha256.txt",
+    )
     (copy / "tagmanifest-sha256.txt").write_bytes(
         "".join(
             f"{sha256_bytes((copy / name).read_bytes())}  {name}\n" for name in tags
@@ -289,7 +410,7 @@ def test_bag_validation_rechecks_receipt_hash_and_transaction_authority(
 
     DailyArchiver._seal(copy)
 
-    with pytest.raises(EvidenceResolutionError, match="authoritative"):
+    with pytest.raises(EvidenceResolutionError, match="coordinator"):
         validate_bag(copy, coordinator=coordinator, vault=root)
 
 
@@ -303,7 +424,13 @@ def test_bag_info_requires_exact_fields_order_and_no_duplicates(archive_vault) -
     shutil.copytree(archived.bag_path, copy)
     info = copy / "bag-info.txt"
     info.write_bytes(info.read_bytes() + b"External-Identifier: daily:2026-01-01\n")
-    tags = ("archive-manifest.json", "bag-info.txt", "bagit.txt", "manifest-sha256.txt")
+    tags = (
+        "archive-manifest.json",
+        "bag-info.txt",
+        "bagit.txt",
+        "compile-receipt.md",
+        "manifest-sha256.txt",
+    )
     (copy / "tagmanifest-sha256.txt").write_bytes(
         "".join(
             f"{sha256_bytes((copy / name).read_bytes())}  {name}\n" for name in tags
@@ -650,6 +777,37 @@ def test_archive_starts_with_recovery_and_reuses_exact_published_bag(
     assert result.bag_path == original
     assert result.state == "recovered"
     assert len(_archiver(root, state_root)._archive_paths(hidden=False)) == 1
+
+
+def test_failure_created_after_publish_prevents_recovery_source_delete(
+    archive_vault,
+) -> None:
+    from memory_queue import MemoryQueue
+
+    root, state_root, daily = archive_vault
+    digest = sha256_bytes(daily.read_bytes())
+
+    def fail_after_publish(point: str) -> None:
+        if point == "after_publish_rename":
+            MemoryQueue(state_root).record_source_failure(
+                f"knowledge/daily/{daily.name}",
+                digest,
+                error_code="late_compile_failure",
+                producer="compile",
+            )
+            raise RuntimeError("crash after late failure")
+
+    with pytest.raises(RuntimeError, match="late failure"):
+        _archiver(root, state_root, killpoint=fail_after_publish).archive(daily.stem)
+    bag = next(
+        path for path in (root / "knowledge/daily/archive").rglob("bag-*") if path.is_dir()
+    )
+
+    with pytest.raises(ValueError, match="source_failure"):
+        _archiver(root, state_root).recover()
+
+    assert daily.exists()
+    assert bag.exists()
 
 
 def test_mismatched_existing_bag_raises_stable_conflict_and_preserves_both_payloads(

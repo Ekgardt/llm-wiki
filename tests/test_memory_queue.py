@@ -204,6 +204,21 @@ def test_cancelled_terminal_resolution_clears_source_failure(queue: MemoryQueue)
     assert queue.source_failure(logical_path, digest) is None
 
 
+def test_source_failure_retains_run_directory(queue: MemoryQueue) -> None:
+    logical_path = "knowledge/daily/2026-01-01.md"
+    digest = "f" * 64
+    queue.record_source_failure(
+        logical_path,
+        digest,
+        error_code="compile_failed",
+        producer="compile",
+    )
+
+    assert queue.retains_run_directory() is True
+    queue.clear_source_failure(logical_path, digest)
+    assert queue.retains_run_directory() is False
+
+
 def test_enqueue_recursively_redacts_secret_keys_and_value_patterns(
     queue: MemoryQueue,
 ) -> None:
