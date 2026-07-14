@@ -21,6 +21,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -655,6 +656,209 @@ def test_session_start_maintenance_does_not_debounce_or_drop_following_delta(mon
     assert len(checkpoints) == 1
     assert checkpoints[0]["occurrence_id"] == ordinary.event_id
     assert checkpoints[0]["delta"] == delta
+
+
+def test_debounced_deltas_flush_in_order_on_later_observation_exactly_once(monkeypatch):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import integration_adapter
+    from project_journal import CheckpointReducer
+
+    start = integration_adapter.datetime.fromisoformat("2026-07-13T12:00:00+00:00")
+    state = {
+        "project_checkpoint_reducers": {
+            "demo:s1": CheckpointReducer(last_checkpoint_at=start).to_state()
+        }
+    }
+    checkpoints = []
+
+    def update(mutator, **kwargs):
+        mutator(state)
+        return state
+
+    class Store:
+        def __init__(self, *args):
+            pass
+
+        def checkpoint(self, slug, event, owner, **kwargs):
+            checkpoints.append(event)
+
+    def delta(**changes):
+        value = integration_adapter._empty_delta()
+        value.update(changes)
+        return value
+
+    def event(event_id, seconds, checkpoint_type=None, project_delta=None):
+        raw = {
+            "session_id": "s1",
+            "cwd": "C:/project",
+            "event_id": event_id,
+            "tool_name": "Read",
+            "tool_input": {"file_path": "src/app.py"},
+        }
+        if checkpoint_type:
+            raw["checkpoint_type"] = checkpoint_type
+        if project_delta:
+            raw["project_delta"] = project_delta
+        return integration_adapter.normalize_event(
+            "claude",
+            "post_tool_use",
+            raw,
+            occurred_at=start + timedelta(seconds=seconds),
+        )
+
+    monkeypatch.setattr(integration_adapter, "update_state", update)
+    monkeypatch.setattr(integration_adapter, "ProjectStore", Store)
+    monkeypatch.setattr(integration_adapter, "_project_context", lambda envelope: ("demo", ROOT))
+    correction = event(
+        "correction-1",
+        1,
+        "correction",
+        delta(
+            current_task={"id": "task-1", "action": "upsert", "value": "First"}
+        ),
+    )
+    blocker = event(
+        "blocker-1",
+        2,
+        "blocker_opened",
+        delta(
+            blockers=[
+                {"id": "blocker-1", "action": "upsert", "value": "Waiting"}
+            ]
+        ),
+    )
+    file_change = event(
+        "file-1",
+        3,
+        "file_changed",
+        delta(
+            current_task={"id": "task-1", "action": "upsert", "value": "Latest"},
+            blockers=[
+                {"id": "blocker-1", "action": "close", "value": "Resolved"}
+            ],
+            changed_files=[
+                {"id": "src/app.py", "action": "upsert", "value": "src/app.py"}
+            ],
+        ),
+    )
+    timer = event("timer-1", 31)
+
+    for envelope in (correction, blocker, file_change):
+        integration_adapter._observe_project_checkpoint(envelope)
+    assert checkpoints == []
+    assert [
+        item["event_id"] for item in state["project_checkpoint_pending"]["demo"]
+    ] == [correction.event_id, blocker.event_id, file_change.event_id]
+
+    state = json.loads(json.dumps(state))
+    integration_adapter._observe_project_checkpoint(timer)
+    assert len(checkpoints) == 1
+    merged = checkpoints[0]
+    assert merged["delta"]["current_task"]["value"] == "Latest"
+    assert merged["delta"]["blockers"] == [
+        {"id": "blocker-1", "action": "close", "value": "Resolved"}
+    ]
+    assert merged["delta"]["changed_files"] == [
+        {"id": "src/app.py", "action": "upsert", "value": "src/app.py"}
+    ]
+    assert merged["evidence_event_ids"] == [
+        correction.event_id,
+        blocker.event_id,
+        file_change.event_id,
+        timer.event_id,
+    ]
+    assert state["project_checkpoint_pending"]["demo"] == []
+
+    state = json.loads(json.dumps(state))
+    integration_adapter._observe_project_checkpoint(timer)
+    assert len(checkpoints) == 1
+
+
+def test_bypass_event_immediately_flushes_debounced_delta_once_after_restart(monkeypatch):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import integration_adapter
+    from project_journal import CheckpointReducer
+
+    start = integration_adapter.datetime.fromisoformat("2026-07-13T12:00:00+00:00")
+    state = {
+        "project_checkpoint_reducers": {
+            "demo:s1": CheckpointReducer(last_checkpoint_at=start).to_state()
+        }
+    }
+    checkpoints = []
+
+    def update(mutator, **kwargs):
+        mutator(state)
+        return state
+
+    class Store:
+        def __init__(self, *args):
+            pass
+
+        def checkpoint(self, slug, event, owner, **kwargs):
+            checkpoints.append(event)
+
+    def make_event(event_id, seconds, checkpoint_type, field, operation):
+        project_delta = integration_adapter._empty_delta()
+        project_delta[field] = operation
+        return integration_adapter.normalize_event(
+            "claude",
+            "post_tool_use",
+            {
+                "session_id": "s1",
+                "cwd": "C:/project",
+                "event_id": event_id,
+                "tool_name": "Read",
+                "tool_input": {"file_path": "src/app.py"},
+                "checkpoint_type": checkpoint_type,
+                "project_delta": project_delta,
+            },
+            occurred_at=start + timedelta(seconds=seconds),
+        )
+
+    monkeypatch.setattr(integration_adapter, "update_state", update)
+    monkeypatch.setattr(integration_adapter, "ProjectStore", Store)
+    monkeypatch.setattr(integration_adapter, "_project_context", lambda envelope: ("demo", ROOT))
+    correction = make_event(
+        "correction-1",
+        1,
+        "correction",
+        "current_task",
+        {"id": "task-1", "action": "upsert", "value": "Keep me"},
+    )
+    decision = make_event(
+        "decision-1",
+        2,
+        "decision",
+        "decisions",
+        [{"id": "decision-1", "action": "upsert", "value": "Flush now"}],
+    )
+
+    integration_adapter._observe_project_checkpoint(correction)
+    assert checkpoints == []
+    integration_adapter._observe_project_checkpoint(decision)
+
+    assert len(checkpoints) == 1
+    assert checkpoints[0]["reason"] == "decision"
+    assert checkpoints[0]["delta"]["current_task"]["value"] == "Keep me"
+    assert checkpoints[0]["delta"]["decisions"][0]["value"] == "Flush now"
+    assert checkpoints[0]["evidence_event_ids"] == [
+        correction.event_id,
+        decision.event_id,
+    ]
+    assert state["project_checkpoint_pending"]["demo"] == []
+
+    state = json.loads(json.dumps(state))
+    integration_adapter._observe_project_checkpoint(decision)
+    assert len(checkpoints) == 1
 
 
 def test_session_start_recovers_transactions_then_project_before_handoff(

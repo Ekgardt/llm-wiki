@@ -11,7 +11,7 @@ import sys
 import time
 import uuid
 from collections.abc import Mapping, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +20,7 @@ from maybe_compile import spawn_compile_if_idle
 from memory_state import ROOT, STATE_ROOT, spawn_detached, update_state
 from project_journal import (
     SESSION_START_RECOVERY_SECONDS,
+    CheckpointDecision,
     CheckpointReducer,
     ProjectStore,
     recover_project_handoff,
@@ -407,23 +408,98 @@ def _pending_checkpoint(
         "occurred_at": envelope.occurred_at.isoformat(),
         "observation": _checkpoint_observation(envelope),
         "checkpoint_event": _checkpoint_event(envelope, slug, "pending"),
+        "has_project_delta": isinstance(envelope.payload.get("project_delta"), Mapping),
     }
 
 
-def _release_pending_claim(queue_key: str, event_id: str, owner: str) -> None:
+def _release_pending_claims(queue_key: str, owner: str) -> None:
     def release(state: dict[str, Any]) -> None:
         pending = state.get("project_checkpoint_pending")
         if not isinstance(pending, dict):
             return
         queue = pending.get(queue_key)
-        if not isinstance(queue, list) or not queue:
+        if not isinstance(queue, list):
             return
-        item = queue[0]
-        if item.get("event_id") == event_id and item.get("claim_owner") == owner:
-            item.pop("claim_owner", None)
-            item.pop("claim_until", None)
+        for item in queue:
+            if item.get("claim_owner") == owner:
+                item.pop("claim_owner", None)
+                item.pop("claim_until", None)
 
     update_state(release, lock_timeout=0.5)
+
+
+def _has_pending_delta(item: Mapping[str, object]) -> bool:
+    if "has_project_delta" in item:
+        return item.get("has_project_delta") is True
+    checkpoint = item.get("checkpoint_event")
+    if not isinstance(checkpoint, Mapping):
+        return False
+    delta = checkpoint.get("delta")
+    return isinstance(delta, Mapping) and dict(delta) != _empty_delta()
+
+
+def _merge_pending_checkpoints(
+    items: Sequence[Mapping[str, object]], decision: CheckpointDecision
+) -> dict[str, object]:
+    scalar_operations: dict[str, dict[str, dict[str, object]]] = {
+        name: {} for name in ("goal", "phase", "current_task")
+    }
+    list_operations: dict[str, dict[str, dict[str, object]]] = {
+        name: {}
+        for name in (
+            "next_actions",
+            "decisions",
+            "blockers",
+            "changed_files",
+            "commands",
+            "verification",
+        )
+    }
+    evidence: list[str] = []
+    for item in items:
+        event_id = str(item["event_id"])
+        if event_id not in evidence:
+            evidence.append(event_id)
+        if not _has_pending_delta(item):
+            continue
+        checkpoint = item["checkpoint_event"]
+        assert isinstance(checkpoint, Mapping)
+        delta = checkpoint["delta"]
+        assert isinstance(delta, Mapping)
+        for name, operations in scalar_operations.items():
+            operation = delta[name]
+            assert isinstance(operation, Mapping)
+            item_id = str(operation["id"])
+            operations.pop(item_id, None)
+            operations[item_id] = dict(operation)
+        for name, operations in list_operations.items():
+            values = delta[name]
+            assert isinstance(values, list)
+            for operation in values:
+                assert isinstance(operation, Mapping)
+                item_id = str(operation["id"])
+                operations.pop(item_id, None)
+                operations[item_id] = dict(operation)
+
+    merged_delta = _empty_delta()
+    for name, operations in scalar_operations.items():
+        active = [item for item in operations.values() if item.get("action") == "upsert"]
+        if active:
+            merged_delta[name] = active[-1]
+        elif operations:
+            merged_delta[name] = next(reversed(operations.values()))
+    limits = {"next_actions": 10}
+    for name, operations in list_operations.items():
+        merged_delta[name] = list(operations.values())[-limits.get(name, 100) :]
+
+    checkpoint = dict(items[-1]["checkpoint_event"])
+    event_id = str(items[-1]["event_id"])
+    checkpoint["occurrence_id"] = event_id
+    checkpoint["idempotency_key"] = f"{event_id}:{decision.reason}"
+    checkpoint["reason"] = decision.reason
+    checkpoint["delta"] = merged_delta
+    checkpoint["evidence_event_ids"] = evidence
+    return checkpoint
 
 
 def _drain_project_checkpoints(
@@ -434,7 +510,7 @@ def _drain_project_checkpoints(
 ) -> None:
     owner = f"{os.getpid()}:{secrets.token_hex(8)}"
     while True:
-        claimed: list[tuple[dict[str, object], CheckpointReducer, object]] = []
+        claimed: list[tuple[list[dict[str, object]], dict[str, object]]] = []
 
         def claim(state: dict[str, Any]) -> None:
             pending = state.get("project_checkpoint_pending")
@@ -443,39 +519,83 @@ def _drain_project_checkpoints(
             queue = pending.get(queue_key)
             if not isinstance(queue, list) or not queue:
                 return
-            item = queue[0]
             now = time.time()
-            claim_until = item.get("claim_until")
-            if (
-                item.get("claim_owner") not in {None, owner}
-                and isinstance(claim_until, (int, float))
-                and claim_until > now
-            ):
-                return
-            item["claim_owner"] = owner
-            item["claim_until"] = now + PENDING_CLAIM_SECONDS
-            state_key = str(item["state_key"])
             reducers = state.get("project_checkpoint_reducers")
-            reducer_state = reducers.get(state_key) if isinstance(reducers, dict) else None
-            reducer = CheckpointReducer.from_state(
-                reducer_state if isinstance(reducer_state, Mapping) else None
+            for item in queue:
+                claim_until = item.get("claim_until")
+                if (
+                    item.get("claim_owner") not in {None, owner}
+                    and isinstance(claim_until, (int, float))
+                    and claim_until > now
+                ):
+                    return
+            for item in queue:
+                item["claim_owner"] = owner
+                item["claim_until"] = now + PENDING_CLAIM_SECONDS
+            claimed.append(
+                (
+                    [dict(item) for item in queue],
+                    dict(reducers) if isinstance(reducers, dict) else {},
+                )
             )
-            observation = item["observation"]
-            assert isinstance(observation, Mapping)
-            occurred_at = datetime.fromisoformat(str(item["occurred_at"]))
-            decision = reducer.observe(observation, now=occurred_at, commit=False)
-            claimed.append((dict(item), reducer, decision))
 
         update_state(claim, lock_timeout=0.5)
         if not claimed:
             return
-        item, reducer, decision = claimed[0]
-        event_id = str(item["event_id"])
-        try:
+        items, reducer_states = claimed[0]
+        reducers: dict[str, CheckpointReducer] = {}
+        decisions: list[CheckpointDecision | None] = []
+        checkpoint_index: int | None = None
+        checkpoint_decision: CheckpointDecision | None = None
+        for index, item in enumerate(items):
+            state_key = str(item["state_key"])
+            if state_key not in reducers:
+                reducer_state = reducer_states.get(state_key)
+                reducers[state_key] = CheckpointReducer.from_state(
+                    reducer_state if isinstance(reducer_state, Mapping) else None
+                )
+            observation = item["observation"]
+            assert isinstance(observation, Mapping)
+            occurred_at = datetime.fromisoformat(str(item["occurred_at"]))
+            decision = reducers[state_key].observe(
+                observation, now=occurred_at, commit=False
+            )
+            decisions.append(decision)
             if decision is not None and not decision.maintenance:
-                checkpoint = dict(item["checkpoint_event"])
-                checkpoint["idempotency_key"] = f"{event_id}:{decision.reason}"
-                checkpoint["reason"] = decision.reason
+                checkpoint_index = index
+                checkpoint_decision = decision
+                break
+
+        if checkpoint_index is None and any(_has_pending_delta(item) for item in items):
+            latest = datetime.fromisoformat(str(items[-1]["occurred_at"]))
+            due = any(
+                _has_pending_delta(item)
+                and (
+                    reducers[str(item["state_key"])].last_checkpoint_at is None
+                    or latest - reducers[str(item["state_key"])].last_checkpoint_at
+                    >= timedelta(seconds=30)
+                )
+                for item in items
+            )
+            if due:
+                checkpoint_index = len(items) - 1
+                checkpoint_decision = CheckpointDecision(
+                    "debounce_flush", checkpoint_at=latest
+                )
+            else:
+                _release_pending_claims(queue_key, owner)
+                return
+
+        flush_count = checkpoint_index + 1 if checkpoint_index is not None else len(items)
+        selected = items[:flush_count]
+        selected_decisions = decisions[:flush_count]
+        if checkpoint_decision is not None and len(selected_decisions) < flush_count:
+            selected_decisions.extend([None] * (flush_count - len(selected_decisions)))
+        trigger_state_key = str(selected[-1]["state_key"])
+        try:
+            if checkpoint_decision is not None:
+                checkpoint = _merge_pending_checkpoints(selected, checkpoint_decision)
+                event_id = str(selected[-1]["event_id"])
                 store = ProjectStore(ROOT, STATE_ROOT)
                 if writer_wait_seconds is None:
                     store.checkpoint(
@@ -490,19 +610,20 @@ def _drain_project_checkpoints(
                         f"lifecycle:{event_id[:16]}",
                         writer_wait_seconds=writer_wait_seconds,
                     )
-            reducer.commit_observation(
-                decision,
-                outcome=(
-                    "no_checkpoint"
-                    if decision is None
-                    else "maintenance"
-                    if decision.maintenance
-                    else "checkpoint"
-                ),
-            )
-            reducer_state = reducer.to_state()
+                reducers[trigger_state_key].commit_observation(
+                    checkpoint_decision, outcome="checkpoint"
+                )
+            else:
+                for item, decision in zip(selected, selected_decisions):
+                    if decision is not None:
+                        reducers[str(item["state_key"])].commit_observation(
+                            decision, outcome="maintenance"
+                        )
+            committed_reducers = {
+                state_key: reducer.to_state() for state_key, reducer in reducers.items()
+            }
         except Exception:
-            _release_pending_claim(queue_key, event_id, owner)
+            _release_pending_claims(queue_key, owner)
             raise
 
         def commit(state: dict[str, Any]) -> None:
@@ -510,20 +631,25 @@ def _drain_project_checkpoints(
             queue = pending.setdefault(queue_key, [])
             if not queue:
                 return
-            head = queue[0]
-            if head.get("event_id") != event_id or head.get("claim_owner") != owner:
+            expected_ids = [str(item["event_id"]) for item in selected]
+            if [str(item.get("event_id")) for item in queue[:flush_count]] != expected_ids:
+                raise RuntimeError("project checkpoint pending prefix changed")
+            if any(item.get("claim_owner") != owner for item in queue[:flush_count]):
                 raise RuntimeError("project checkpoint pending claim changed")
-            state_key = str(head["state_key"])
             reducers = state.setdefault("project_checkpoint_reducers", {})
-            reducers[state_key] = reducer_state
-            queue.pop(0)
+            reducers.update(committed_reducers)
+            del queue[:flush_count]
+            for item in queue:
+                if item.get("claim_owner") == owner:
+                    item.pop("claim_owner", None)
+                    item.pop("claim_until", None)
             if len(reducers) > 128:
                 reducers.pop(next(iter(reducers)))
 
         try:
             update_state(commit, lock_timeout=0.5)
         except Exception:
-            _release_pending_claim(queue_key, event_id, owner)
+            _release_pending_claims(queue_key, owner)
             raise
 
 
