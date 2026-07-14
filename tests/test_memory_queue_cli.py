@@ -23,6 +23,10 @@ def _sleep_processor(task: dict) -> bool:
     return True
 
 
+def _result_processor(task: dict) -> memory_queue.DeferredResult:
+    return memory_queue.DeferredResult(b"x" * task["payload"]["size"])
+
+
 def test_worker_defaults_are_bounded_and_process_twenty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -121,6 +125,47 @@ def test_worker_child_process_is_terminated_at_deadline() -> None:
         )
 
     assert time.monotonic() - started < 2
+
+
+def test_worker_child_drains_one_megabyte_result_before_join() -> None:
+    result = memory_queue._run_processor_child(
+        _result_processor,
+        {"payload": {"size": 1024 * 1024}},
+        10,
+    )
+
+    assert isinstance(result, memory_queue.DeferredResult)
+    assert len(result.data) == 1024 * 1024
+
+
+def test_worker_child_drains_result_at_queue_size_limit() -> None:
+    result = memory_queue._run_processor_child(
+        _result_processor,
+        {"payload": {"size": memory_queue._MAX_RESULT_BYTES}},
+        10,
+    )
+
+    assert isinstance(result, memory_queue.DeferredResult)
+    assert len(result.data) == memory_queue._MAX_RESULT_BYTES
+
+
+def test_worker_child_rejects_oversize_result_without_deadlock() -> None:
+    with pytest.raises(memory_queue.QueueOperationError) as raised:
+        memory_queue._run_processor_child(
+            _result_processor,
+            {"payload": {"size": memory_queue._MAX_RESULT_BYTES + 1}},
+            10,
+        )
+
+    assert raised.value.code == "processor_result_oversize"
+
+
+@pytest.mark.parametrize("frame", [b"", b"unknown", b"Ttrailing", b"Eextra"])
+def test_worker_child_rejects_malformed_ipc_frame(frame: bytes) -> None:
+    with pytest.raises(memory_queue.QueueOperationError) as raised:
+        memory_queue._decode_processor_frame(frame)
+
+    assert raised.value.code == "processor_result_malformed"
 
 
 def test_idle_sleep_is_capped_by_worker_remaining_budget(

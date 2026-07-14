@@ -1827,16 +1827,44 @@ def _processor_child_entry(
     try:
         outcome = processor(task)
         if isinstance(outcome, DeferredResult):
-            sender.send(("deferred", outcome.data))
+            sender.send_bytes(b"D" + outcome.data)
         else:
-            sender.send(("value", bool(outcome)))
+            sender.send_bytes(b"T" if bool(outcome) else b"F")
     except Exception:  # noqa: BLE001 - parent receives a stable code only
         try:
-            sender.send(("error", None))
+            sender.send_bytes(b"E")
         except (BrokenPipeError, EOFError, OSError):
             pass
     finally:
         sender.close()
+
+
+def _terminate_processor_child(process: multiprocessing.Process) -> None:
+    if not process.is_alive():
+        return
+    process.terminate()
+    process.join(0.2)
+    if process.is_alive():
+        process.kill()
+        process.join(0.2)
+
+
+def _decode_processor_frame(frame: bytes) -> bool | DeferredResult:
+    if not frame:
+        raise QueueOperationError("processor_result_malformed")
+    tag = frame[:1]
+    if tag == b"D":
+        data = frame[1:]
+        if len(data) > _MAX_RESULT_BYTES:
+            raise QueueOperationError("processor_result_oversize")
+        return DeferredResult(data)
+    if frame == b"T":
+        return True
+    if frame == b"F":
+        return False
+    if frame == b"E":
+        raise QueueOperationError("processor_exception")
+    raise QueueOperationError("processor_result_malformed")
 
 
 def _run_processor_child(
@@ -1853,30 +1881,36 @@ def _run_processor_child(
         args=(sender, processor, task),
         daemon=False,
     )
+    deadline = time.monotonic() + timeout
     try:
         process.start()
         sender.close()
-        process.join(timeout)
-        if process.is_alive():
-            process.terminate()
-            process.join(1)
-            if process.is_alive():
-                process.kill()
-                process.join()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not receiver.poll(remaining):
+            _terminate_processor_child(process)
             raise TimeoutError
-        if not receiver.poll():
+        try:
+            frame = receiver.recv_bytes(_MAX_RESULT_BYTES + 1)
+        except OSError:
+            _terminate_processor_child(process)
+            raise QueueOperationError("processor_result_oversize") from None
+        except EOFError:
+            _terminate_processor_child(process)
+            raise QueueOperationError("processor_result_malformed") from None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _terminate_processor_child(process)
+            raise TimeoutError
+        process.join(remaining)
+        if process.is_alive():
+            _terminate_processor_child(process)
+            raise TimeoutError
+        if process.exitcode != 0:
             raise QueueOperationError("processor_child_failed")
-        kind, value = receiver.recv()
-        if kind == "deferred":
-            return DeferredResult(value)
-        if kind == "value":
-            return bool(value)
-        raise QueueOperationError("processor_exception")
+        return _decode_processor_frame(frame)
     finally:
         receiver.close()
-        if process.is_alive():
-            process.kill()
-            process.join()
+        _terminate_processor_child(process)
 
 
 def _work_one(
