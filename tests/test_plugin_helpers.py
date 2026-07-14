@@ -184,7 +184,13 @@ def test_opencode_tool_names_are_mapped_to_shared_capture_names():
         captured_at=FIXED_TIME,
     )
 
-    assert envelope.payload == {"tool_name": "Edit", "target": "src/auth.py"}
+    assert envelope.payload == {
+        "tool_name": "Edit",
+        "target": "src/auth.py",
+        "changed": True,
+        "dirty": True,
+        "significant": True,
+    }
 
 
 def test_session_transcript_text_is_redacted_and_bounded():
