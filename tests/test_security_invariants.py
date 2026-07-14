@@ -247,20 +247,11 @@ class TestPathSafety:
         """compile_memory must reject traversal in category field."""
         import compile_memory
 
-        plan = {
-            "operations": [{
-                "action": "create",
-                "category": evil,
-                "slug": "test",
-                "title": "T",
-                "summary": "s",
-                "body_markdown": "b",
-                "evidence": [],
-            }],
-            "audit": {},
-        }
-        touched, audit = compile_memory._execute_plan(plan, [], dry_run=True)
-        assert touched == [], f"Traversal input {evil!r} was not rejected"
+        categories = compile_memory.RAW_PLAN_SCHEMA["properties"]["operations"][
+            "items"
+        ]["properties"]["category"]["enum"]
+        assert evil not in categories
+        assert not hasattr(compile_memory, "_execute_plan")
 
     @pytest.mark.parametrize("evil", TRAVERSAL_INPUTS)
     def test_feedback_candidate_id_rejects_traversal(self, evil):
@@ -453,71 +444,27 @@ class TestDailyLockExclusivity:
 class TestCompileEvidenceEnforcement:
     """Compile create operations MUST cite at least 1 evidence item."""
 
-    def test_create_without_evidence_is_dropped(self, tmp_path, monkeypatch):
-        """A create operation with empty evidence must be dropped."""
+    def test_create_without_evidence_is_rejected_by_closed_schema(self):
         import compile_memory
 
-        knowledge = tmp_path / "knowledge" / "notes"
-        knowledge.mkdir(parents=True)
-        monkeypatch.setattr(compile_memory, "KNOWLEDGE", knowledge)
-        monkeypatch.setattr(compile_memory, "ROOT", tmp_path)
+        evidence = compile_memory.RAW_PLAN_SCHEMA["properties"]["operations"][
+            "items"
+        ]["properties"]["evidence"]
+        assert evidence["minItems"] == 1
+        assert not hasattr(compile_memory, "_execute_plan")
 
-        plan = {
-            "operations": [
-                {
-                    "action": "create",
-                    "category": "patterns",
-                    "slug": "no-evidence-test",
-                    "title": "Test",
-                    "summary": "s",
-                    "body_markdown": "b",
-                    "evidence": [],  # EMPTY evidence
-                }
-            ],
-            "audit": {},
-        }
-        touched, audit = compile_memory._execute_plan(plan, [], dry_run=False)
-        assert touched == [], "Create with empty evidence should be dropped"
-        assert "no evidence" in audit.lower(), (
-            f"Audit should explain WHY the op was dropped: {audit}"
-        )
-
-    def test_create_with_valid_evidence_passes(self, tmp_path, monkeypatch):
-        """A create operation with verified evidence should proceed."""
+    def test_evidence_requires_exact_quote_and_claim(self):
         import compile_memory
 
-        knowledge = tmp_path / "knowledge" / "notes"
-        knowledge.mkdir(parents=True)
-        monkeypatch.setattr(compile_memory, "KNOWLEDGE", knowledge)
-        monkeypatch.setattr(compile_memory, "ROOT", tmp_path)
-        # Mock evidence verification to return 1 verified, 0 failed
-        monkeypatch.setattr(compile_memory, "_verify_evidence", lambda ev, dp: (1, 0))
-
-        plan = {
-            "operations": [
-                {
-                    "action": "create",
-                    "category": "patterns",
-                    "slug": "with-evidence-test",
-                    "title": "Test",
-                    "summary": "s",
-                    "body_markdown": "b",
-                    "evidence": [
-                        {
-                            "daily_date": "2026-07-11",
-                            "timestamp": "10:00:00",
-                            "claim": "test claim",
-                        }
-                    ],
-                }
-            ],
-            "audit": {},
+        item = compile_memory.RAW_PLAN_SCHEMA["properties"]["operations"][
+            "items"
+        ]["properties"]["evidence"]["items"]
+        assert set(item["required"]) == {
+            "daily_date",
+            "timestamp",
+            "quoted_text",
+            "claim",
         }
-        touched, audit = compile_memory._execute_plan(plan, [], dry_run=False)
-        assert len(touched) == 1, (
-            f"Create with valid evidence should succeed. "
-            f"touched={touched}, audit={audit}"
-        )
 
 
 # ---------------------------------------------------------------------------

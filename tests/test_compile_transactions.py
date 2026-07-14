@@ -159,10 +159,10 @@ def test_compile_transaction_commits_page_index_log_and_receipt(vault):
     assert record["source_digest"] == inputs.dailies[0].sha256
     assert record["action_key"] == "a" * 64
     assert record["state"] == "completed"
-    assert record["operation_ids"] == [result.operation_id]
-    assert record["evidence_hashes"] == [
-        sha256_bytes(b"A durable exact-byte observation.")
-    ]
+    assert record["operation_id"] == result.operation_id
+    assert record["evidence"][0]["quote_sha256"] == sha256_bytes(
+        b"A durable exact-byte observation."
+    )
     validate_schema(
         record,
         Path(compile_memory.__file__).with_name("schemas") / "compile-receipt-v2.json",
@@ -188,18 +188,20 @@ def test_append_after_snapshot_remains_pending_even_after_receipt(vault):
     selected = compile_memory.select_dailies(
         Namespace(file=None, all=False),
         {"compiled_daily_hashes": {daily.name: inputs.dailies[0].sha256}},
+        coordinator=MarkdownCoordinator(root, state_root),
     )
     assert selected == [daily]
 
 
 def test_legacy_hash_without_v2_receipt_forces_compile(vault):
-    root, _state_root = vault
+    root, state_root = vault
     daily = _daily(root)
     import compile_memory
 
     selected = compile_memory.select_dailies(
         Namespace(file=None, all=False),
         {"compiled_daily_hashes": {daily.name: sha256_bytes(daily.read_bytes())}},
+        coordinator=MarkdownCoordinator(root, state_root),
     )
 
     assert selected == [daily]
@@ -240,7 +242,9 @@ def test_resolver_uses_exact_snapshot_for_draft_and_critique_and_caches(vault, m
 
     monkeypatch.setattr(compile_memory, "call_candidate", call)
     cache = CompileCache(state_root)
-    resolved = compile_memory.resolve_compile_plan(inputs, cache)
+    resolved = compile_memory.resolve_compile_plan(
+        inputs, cache, coordinator=MarkdownCoordinator(root, state_root)
+    )
 
     exact = inputs.dailies[0].content.decode("utf-8")
     assert len(calls) == 2
@@ -273,14 +277,15 @@ def test_resolver_cache_hit_revalidates_without_llm(vault, monkeypatch):
         ),
     )
     cache = CompileCache(state_root)
-    first = compile_memory.resolve_compile_plan(inputs, cache)
+    coordinator = MarkdownCoordinator(root, state_root)
+    first = compile_memory.resolve_compile_plan(inputs, cache, coordinator=coordinator)
     monkeypatch.setattr(
         compile_memory,
         "call_candidate",
         lambda *args, **kwargs: pytest.fail("cache hit called the LLM"),
     )
 
-    second = compile_memory.resolve_compile_plan(inputs, cache)
+    second = compile_memory.resolve_compile_plan(inputs, cache, coordinator=coordinator)
 
     assert second.plan == first.plan
     assert second.action == first.action
@@ -307,7 +312,11 @@ def test_failed_evidence_is_not_cached(vault, monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="validated compile plan"):
-        compile_memory.resolve_compile_plan(inputs, CompileCache(state_root))
+        compile_memory.resolve_compile_plan(
+            inputs,
+            CompileCache(state_root),
+            coordinator=MarkdownCoordinator(root, state_root),
+        )
 
     assert not list((state_root / "cache/compile").glob("*.json"))
 
@@ -335,11 +344,15 @@ def test_provider_failure_recomputes_descriptor_with_actual_fallback(vault, monk
         )
 
     monkeypatch.setattr(compile_memory, "call_candidate", call)
-    resolved = compile_memory.resolve_compile_plan(inputs, CompileCache(state_root))
+    resolved = compile_memory.resolve_compile_plan(
+        inputs,
+        CompileCache(state_root),
+        coordinator=MarkdownCoordinator(root, state_root),
+    )
 
     assert resolved.action.draft_calls[0].provider == "second"
     assert resolved.action.draft_calls[0].fallback_from == (
-        "first:first-model:provider_error",
+        "draft:first:first-model:provider_error",
     )
 
 
@@ -430,7 +443,11 @@ def test_cache_contains_semantics_not_rendered_markdown(vault, monkeypatch):
         ),
     )
 
-    resolved = compile_memory.resolve_compile_plan(inputs, CompileCache(state_root))
+    resolved = compile_memory.resolve_compile_plan(
+        inputs,
+        CompileCache(state_root),
+        coordinator=MarkdownCoordinator(root, state_root),
+    )
     cache_bytes = next((state_root / "cache/compile").glob("*.json")).read_bytes()
 
     assert b"One-sentence summary:" not in cache_bytes
@@ -454,7 +471,7 @@ def test_run_records_snapshot_hash_only_after_commit(vault, monkeypatch):
     )
     monkeypatch.setattr(compile_memory, "_mark_finished", lambda *args, **kwargs: None)
 
-    def resolve(inputs, cache):
+    def resolve(inputs, cache, *, coordinator):
         daily.write_bytes(original + b"later append\n")
         return SimpleNamespace(
             plan={"schema_version": "compile-plan/v2", "operations": []},
@@ -472,7 +489,9 @@ def test_run_records_snapshot_hash_only_after_commit(vault, monkeypatch):
         daily.name: sha256_bytes(original),
     }
     assert compile_memory.select_dailies(
-        Namespace(file=None, all=False), state
+        Namespace(file=None, all=False),
+        state,
+        coordinator=MarkdownCoordinator(root, compile_memory.STATE_ROOT),
     ) == [daily]
 
 
@@ -512,6 +531,10 @@ def test_prompt_fallback_output_is_schema_checked_before_cache(vault, monkeypatc
     )
 
     with pytest.raises(RuntimeError, match="validated compile plan"):
-        compile_memory.resolve_compile_plan(inputs, CompileCache(state_root))
+        compile_memory.resolve_compile_plan(
+            inputs,
+            CompileCache(state_root),
+            coordinator=MarkdownCoordinator(root, state_root),
+        )
 
     assert not list((state_root / "cache/compile").glob("*.json"))

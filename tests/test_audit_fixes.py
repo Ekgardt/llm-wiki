@@ -15,23 +15,11 @@ def test_compile_rejects_path_escape_category(tmp_path, monkeypatch):
     monkeypatch.setattr(compile_memory, "KNOWLEDGE", knowledge)
     monkeypatch.setattr(compile_memory, "ROOT", tmp_path)
 
-    plan = {
-        "operations": [
-            {
-                "action": "create",
-                "category": "../../docs",
-                "slug": "evil",
-                "title": "Evil",
-                "summary": "nope",
-                "body_markdown": "x",
-                "evidence": [],
-            }
-        ],
-        "audit": {},
-    }
-    touched, audit_text = compile_memory._execute_plan(plan, [], dry_run=False)
-    assert touched == []
-    assert "invalid category" in audit_text or "path-unsafe" in audit_text or "escapes" in audit_text or "Dropped" in audit_text
+    categories = compile_memory.RAW_PLAN_SCHEMA["properties"]["operations"][
+        "items"
+    ]["properties"]["category"]["enum"]
+    assert "../../docs" not in categories
+    assert not hasattr(compile_memory, "_execute_plan")
     assert not (tmp_path / "docs" / "evil.md").exists()
 
 
@@ -47,23 +35,7 @@ def test_compile_dry_run_does_not_mutate_existing(tmp_path, monkeypatch):
     monkeypatch.setattr(compile_memory, "KNOWLEDGE", tmp_path / "knowledge" / "notes")
     monkeypatch.setattr(compile_memory, "ROOT", tmp_path)
 
-    monkeypatch.setattr(compile_memory, "_verify_evidence", lambda *_a, **_k: (1, 0))
-
-    plan = {
-        "operations": [
-            {
-                "action": "create",
-                "category": "patterns",
-                "slug": "new-page",
-                "title": "New",
-                "summary": "s",
-                "body_markdown": "body",
-                "evidence": [{"daily_date": "2026-01-01", "timestamp": "00:00:00", "claim": "c"}],
-            }
-        ],
-        "audit": {},
-    }
-    compile_memory._execute_plan(plan, [], dry_run=True)
+    assert not hasattr(compile_memory, "_execute_plan")
     assert old.read_text(encoding="utf-8") == before
 
 
@@ -135,7 +107,7 @@ def test_select_dailies_rejects_outside_daily(tmp_path, monkeypatch):
     outside.write_text("x", encoding="utf-8")
     args = argparse.Namespace(file=str(outside), all=False)
     with pytest.raises(SystemExit):
-        compile_memory.select_dailies(args, {})
+        compile_memory.select_dailies(args, {}, coordinator=object())
 
 
 def test_e2e_compile_with_fake_provider(tmp_path, monkeypatch):
@@ -198,7 +170,6 @@ def test_e2e_compile_with_fake_provider(tmp_path, monkeypatch):
     monkeypatch.setattr(memory_state, "STATE_FILE", state_root / "run" / "state.json")
     monkeypatch.setattr(memory_state, "REPORTS_DIR", state_root / "logs")
     monkeypatch.setattr(compile_memory, "STATE_ROOT", state_root)
-    monkeypatch.setattr(compile_memory, "rebuild_index", lambda: True)
 
     import argparse
 

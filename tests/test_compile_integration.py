@@ -116,14 +116,10 @@ class TestCompileWithFakeProvider:
         result = call_llm_json("test", "my system", 100)
         assert result == '{"ok": true}'
 
-    def test_critique_skipped_for_fake_provider(self):
-        """Critique pass must be skipped when MEMORY_LLM_PROVIDER=fake."""
-        os.environ["MEMORY_LLM_PROVIDER"] = "fake"
-        from compile_memory import _critique_plan
-        plan = {"operations": [{"slug": "test"}]}
-        result_plan, result_text = _critique_plan(plan, [])
-        assert result_plan == plan
-        assert result_text == ""
+    def test_legacy_critique_entry_point_is_removed(self):
+        import compile_memory
+
+        assert not hasattr(compile_memory, "_critique_plan")
 
     def test_empty_operations_compile(self, monkeypatch):
         """Compile with empty operations should succeed (no-op)."""

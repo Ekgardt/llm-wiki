@@ -36,6 +36,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from bounded_io import read_stable_bytes  # noqa: E402
 from compile_cache import (  # noqa: E402
     COMPILE_PLAN_SCHEMA_HASH,
     COMPILE_PLAN_SCHEMA_VERSION,
@@ -51,11 +52,15 @@ from memory_state import (  # noqa: E402
     STATE_ROOT,
     _is_pid_alive,
     atomic_write,
-    file_hash,
     load_state,
     update_state,
 )
-from reliable_memory import canonical_json_bytes, sha256_bytes, validate_schema  # noqa: E402
+from reliable_memory import (  # noqa: E402
+    _validate_rule,
+    canonical_json_bytes,
+    sha256_bytes,
+    validate_schema,
+)
 
 MEMORY = ROOT / "knowledge"
 DAILY_DIR = MEMORY / "daily"
@@ -69,6 +74,20 @@ COMPILE_PLAN_SCHEMA = Path(__file__).with_name("schemas") / "compile-plan-v2.jso
 COMPILE_RECEIPT_SCHEMA = Path(__file__).with_name("schemas") / "compile-receipt-v2.json"
 COMPILER_VERSION = "2.0.0"
 NORMALIZATION_VERSION = "normalize-v2"
+MAX_SOURCE_BYTES = 4 * 1024 * 1024
+MAX_TOTAL_SOURCE_BYTES = 32 * 1024 * 1024
+MAX_SOURCE_COUNT = 2_000
+MAX_PROVIDER_RESPONSE_BYTES = 4 * 1024 * 1024
+MAX_OPERATIONS = 100
+MAX_EVIDENCE_PER_OPERATION = 32
+MAX_RELATED = 64
+MAX_AFTER_IMAGE_BYTES = 4 * 1024 * 1024
+MAX_RECEIPT_BYTES = 1024 * 1024
+MAX_LOG_BYTES = 4 * 1024 * 1024
+MAX_INDEX_BYTES = 4 * 1024 * 1024
+ALLOWED_CATEGORIES = frozenset(
+    {"concepts", "decisions", "patterns", "debugging", "qa"}
+)
 DRAFT_PROGRAM = "compile-draft/v2: skeptical exact-evidence semantic operations"
 CRITIQUE_PROGRAM = "compile-critique/v2: specificity durability evidence completeness"
 DRAFT_SYSTEM = "You are a skeptical memory editor. Return only the requested JSON."
@@ -77,8 +96,53 @@ RAW_PLAN_SCHEMA = {
     "type": "object",
     "required": ["operations"],
     "properties": {
-        "operations": {"type": "array", "items": {"type": "object"}},
-        "audit": {"type": "object"},
+        "operations": {
+            "type": "array",
+            "maxItems": MAX_OPERATIONS,
+            "items": {
+                "type": "object",
+                "required": [
+                    "action", "category", "slug", "title", "summary",
+                    "body_section", "body_markdown", "evidence", "related"
+                ],
+                "properties": {
+                    "action": {"enum": ["create", "update"]},
+                    "category": {"enum": sorted(ALLOWED_CATEGORIES)},
+                    "slug": {"type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+                    "title": {"type": "string", "minLength": 1, "maxLength": 200, "pattern": "^[^\\r\\n]+$"},
+                    "summary": {"type": "string", "minLength": 1, "maxLength": 500, "pattern": "^[^\\r\\n]+$"},
+                    "body_section": {"enum": ["Lesson", "Decision", "Symptom / Cause / Resolution", "Answer"]},
+                    "body_markdown": {"type": "string", "minLength": 1, "maxLength": 20000},
+                    "evidence": {
+                        "type": "array", "minItems": 1, "maxItems": MAX_EVIDENCE_PER_OPERATION,
+                        "items": {
+                            "type": "object",
+                            "required": ["daily_date", "timestamp", "quoted_text", "claim"],
+                            "properties": {
+                                "daily_date": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+                                "timestamp": {"type": "string", "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]$"},
+                                "quoted_text": {"type": "string", "minLength": 1, "maxLength": 4000},
+                                "claim": {"type": "string", "minLength": 1, "maxLength": 1000, "pattern": "^[^\\r\\n]+$"}
+                            },
+                            "additionalProperties": False
+                        }
+                    },
+                    "related": {"type": "array", "maxItems": MAX_RELATED, "items": {"type": "string", "maxLength": 200, "pattern": "^\\[\\[[^\\r\\n]+\\]\\]$"}}
+                },
+                "additionalProperties": False
+            }
+        },
+        "audit": {
+            "type": "object",
+            "properties": {
+                "verified": {"type": "integer", "minimum": 0},
+                "dedup": {"type": "integer", "minimum": 0},
+                "stubs": {"type": "integer", "minimum": 0},
+                "contradictions": {"type": "integer", "minimum": 0},
+                "rejected": {"type": "integer", "minimum": 0}
+            },
+            "additionalProperties": False
+        },
     },
     "additionalProperties": False,
 }
@@ -86,7 +150,18 @@ CRITIQUE_SCHEMA = {
     "type": "object",
     "required": ["reviews"],
     "properties": {
-        "reviews": {"type": "array", "items": {"type": "object"}},
+        "reviews": {
+            "type": "array", "maxItems": MAX_OPERATIONS,
+            "items": {
+                "type": "object", "required": ["slug", "verdict", "reason"],
+                "properties": {
+                    "slug": {"type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+                    "verdict": {"enum": ["pass", "drop"]},
+                    "reason": {"type": "string", "minLength": 1, "maxLength": 1000}
+                },
+                "additionalProperties": False
+            }
+        },
     },
     "additionalProperties": False,
 }
@@ -103,10 +178,6 @@ CRITIQUE_PROGRAM_HASH = sha256_bytes(
             "schema": CRITIQUE_SCHEMA,
         }
     )
-)
-
-ALLOWED_CATEGORIES = frozenset(
-    {"concepts", "decisions", "patterns", "debugging", "qa"}
 )
 
 # Singular form per category — used for OKF `type:` frontmatter. Avoids the
@@ -135,9 +206,17 @@ class SourceSnapshot:
 
 
 @dataclass(frozen=True)
+class TargetSnapshot:
+    logical_path: str
+    content: bytes
+    sha256: str
+
+
+@dataclass(frozen=True)
 class CompileInputs:
     dailies: tuple[DailySnapshot, ...]
     sources: tuple[SourceSnapshot, ...]
+    targets: tuple[TargetSnapshot, ...]
 
 
 @dataclass(frozen=True)
@@ -154,14 +233,17 @@ class CompileApplyResult:
     operation_id: str
     state: str
     touched: tuple[str, ...]
+    commit_sequence: int
+    committed_at: str
+    action_key: str
 
 
 def _logical_path(path: Path) -> str:
     return path.relative_to(ROOT).as_posix()
 
 
-def _snapshot(path: Path) -> SourceSnapshot:
-    content = path.read_bytes()
+def _snapshot(path: Path, *, label: str = "compile source") -> SourceSnapshot:
+    content = read_stable_bytes(path, MAX_SOURCE_BYTES, label=label)
     return SourceSnapshot(_logical_path(path), content, sha256_bytes(content))
 
 
@@ -169,53 +251,146 @@ def snapshot_compile_inputs(paths: Sequence[Path]) -> CompileInputs:
     """Capture every compile input once, before any model call."""
     dailies: list[DailySnapshot] = []
     sources: list[SourceSnapshot] = []
+    targets: list[TargetSnapshot] = []
+    total_source_bytes = 0
+
+    def add_source(source: SourceSnapshot) -> None:
+        nonlocal total_source_bytes
+        if len(sources) >= MAX_SOURCE_COUNT:
+            raise ValueError("compile source count exceeds limit")
+        total_source_bytes += len(source.content)
+        if total_source_bytes > MAX_TOTAL_SOURCE_BYTES:
+            raise ValueError("compile source bytes exceed limit")
+        sources.append(source)
+
     for path in sorted(map(Path, paths), key=lambda item: item.as_posix()):
-        content = path.read_bytes()
+        content = read_stable_bytes(path, MAX_SOURCE_BYTES, label="daily source")
         logical = _logical_path(path)
         digest = sha256_bytes(content)
         dailies.append(DailySnapshot(logical, content, digest))
-        sources.append(SourceSnapshot(logical, content, digest))
+        add_source(SourceSnapshot(logical, content, digest))
     for path in (AGENTS, INDEX, LOG):
         if path.exists():
-            sources.append(_snapshot(path))
+            add_source(_snapshot(path))
     if KNOWLEDGE.exists():
         for path in sorted(KNOWLEDGE.rglob("*.md")):
             if "archive" not in path.parts:
-                sources.append(_snapshot(path))
-    return CompileInputs(tuple(dailies), tuple(sorted(sources, key=lambda item: item.logical_path)))
+                source = _snapshot(path, label="knowledge page")
+                add_source(source)
+                targets.append(
+                    TargetSnapshot(source.logical_path, source.content, source.sha256)
+                )
+    return CompileInputs(
+        tuple(dailies),
+        tuple(sorted(sources, key=lambda item: item.logical_path)),
+        tuple(sorted(targets, key=lambda item: item.logical_path)),
+    )
 
 
 def _receipt_path(digest: str) -> Path:
     return DAILY_DIR / "receipts" / f"{digest}.md"
 
 
-def _has_v2_receipt(digest: str) -> bool:
+def read_compile_receipt(
+    digest: str, coordinator: MarkdownCoordinator
+) -> dict[str, object] | None:
     path = _receipt_path(digest)
-    if not path.is_file():
-        return False
     try:
-        text = path.read_text(encoding="utf-8")
-        raw = text.split("```json\n", 1)[1].split("\n```", 1)[0]
-        record = json.loads(raw)
+        raw_bytes = read_stable_bytes(path, MAX_RECEIPT_BYTES, label="compile receipt")
+    except FileNotFoundError:
+        return None
+    try:
+        text = raw_bytes.decode("utf-8", errors="strict")
+        frontmatter, body = text.split("---\n", 2)[1:]
+        fields = {}
+        for line in frontmatter.splitlines():
+            key, separator, value = line.partition(": ")
+            if not separator or key in fields:
+                raise ValueError("compile receipt frontmatter is invalid")
+            fields[key] = value
+        if set(fields) != {
+            "type", "source_digest", "action_key", "status", "timestamp",
+            "confidence", "source_authority"
+        }:
+            raise ValueError("compile receipt frontmatter fields are invalid")
+        timestamp = datetime.fromisoformat(fields["timestamp"].replace("Z", "+00:00"))
+        if timestamp.tzinfo is None:
+            raise ValueError("compile receipt timestamp must include a timezone")
+        prefix = "\n# Compile Receipt\n\nOne-sentence summary: This immutable receipt proves completion of a snapshot compile.\n\n## Record\n```json\n"
+        if not body.startswith(prefix) or not body.endswith("\n```\n"):
+            raise ValueError("compile receipt body is invalid")
+        canonical = body[len(prefix) : -5]
+        record = json.loads(canonical)
         validate_schema(record, COMPILE_RECEIPT_SCHEMA)
-        return (
-            canonical_json_bytes(record).decode("utf-8") == raw
-            and record["source_digest"] == digest
-            and record["state"] == "completed"
+        if canonical_json_bytes(record).decode() != canonical:
+            raise ValueError("compile receipt record is not canonical")
+        if fields != {
+            "type": "compile-receipt",
+            "source_digest": digest,
+            "action_key": record["action_key"],
+            "status": record["state"],
+            "timestamp": record["completed_at"],
+            "confidence": "high",
+            "source_authority": "ai-derived",
+        } or record["source_digest"] != digest:
+            raise ValueError("compile receipt frontmatter and record disagree")
+        input_digests = record["input_digests"]
+        if input_digests != sorted(set(input_digests)) or digest not in input_digests:
+            raise ValueError("compile receipt input digests are invalid")
+        expected_operation_id = "compile:" + sha256_bytes(
+            canonical_json_bytes(
+                {"action_key": record["action_key"], "source_digests": input_digests}
+            )
         )
-    except (OSError, ValueError, IndexError, KeyError):
-        return False
+        if record["operation_id"] != expected_operation_id:
+            raise ValueError("compile receipt operation identity is invalid")
+        transaction = coordinator._record_for_operation_id(expected_operation_id)
+        if transaction is None or transaction.state != "committed":
+            raise ValueError("compile receipt has no committed transaction authority")
+        transaction_operations = {item.path: item for item in transaction.operations}
+        relative = path.relative_to(ROOT).as_posix()
+        receipt_operation = transaction_operations.get(relative)
+        if receipt_operation is None or receipt_operation.after_hash != sha256_bytes(raw_bytes):
+            raise ValueError("compile receipt bytes are not transaction-authoritative")
+        operation_paths = [operation["path"] for operation in record["operations"]]
+        if len(operation_paths) != len(set(operation_paths)):
+            raise ValueError("compile receipt operation paths are duplicated")
+        for operation in record["operations"]:
+            authoritative = transaction_operations.get(operation["path"])
+            if (
+                authoritative is None
+                or authoritative.kind != operation["kind"]
+                or authoritative.after_hash != operation["after_sha256"]
+            ):
+                raise ValueError("compile receipt operation integrity failed")
+        for evidence in record["evidence"]:
+            if (
+                evidence["source_digest"] != digest
+                or evidence["operation_path"] not in {
+                    operation["path"] for operation in record["operations"]
+                }
+            ):
+                raise ValueError("compile receipt evidence scope is invalid")
+        return record
+    except (
+        IndexError,
+        KeyError,
+        TypeError,
+        ValueError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise ValueError("compile receipt is corrupt") from exc
 
 
 def resolve_compile_plan(
     inputs: CompileInputs,
     cache: CompileCache,
     *,
-    coordinator: MarkdownCoordinator | None = None,
+    coordinator: MarkdownCoordinator,
 ) -> ResolvedCompilePlan:
     """Resolve a validated semantic plan without entering the writer gate."""
-    if coordinator is not None:
-        coordinator.assert_external_work_allowed()
+    _assert_external_work_allowed(coordinator)
     forced = os.environ.get("MEMORY_LLM_PROVIDER", "").strip().lower()
     source_descriptors = tuple(
         SourceDescriptor(item.logical_path, len(item.content), item.sha256)
@@ -230,7 +405,7 @@ def resolve_compile_plan(
         descriptor = replace(candidate, fallback_from=lineage)
         if not probe_candidate(descriptor):
             failure = descriptor.resolution_failure or "unavailable"
-            lineage += (f"{descriptor.identity}:{failure}",)
+            lineage += (_failure_lineage("probe", descriptor, failure),)
             continue
         mode = (
             "native"
@@ -262,10 +437,12 @@ def resolve_compile_plan(
         )
         if draft.text is None:
             failure = draft.failure_class or "provider_error"
-            lineage += (f"{descriptor.identity}:{failure}",)
+            lineage += (_failure_lineage("draft", descriptor, failure),)
             continue
+        validation_stage = "draft"
         try:
             raw_plan = _parse_json_object(draft.text)
+            _validate_rule(raw_plan, RAW_PLAN_SCHEMA, "$draft")
             if set(raw_plan) - {"operations", "audit"}:
                 raise ValueError("draft output has unsupported fields")
             operations = raw_plan.get("operations")
@@ -273,6 +450,7 @@ def resolve_compile_plan(
                 raise ValueError("draft operations must be an array")
             action = without_critique
             if operations:
+                validation_stage = "critique"
                 critique = call_candidate(
                     descriptor,
                     _critique_prompt(inputs, operations),
@@ -282,10 +460,11 @@ def resolve_compile_plan(
                     available=True,
                 )
                 if critique.text is None:
-                    raise ValueError(
-                        f"critique failed: {critique.failure_class or 'provider_error'}"
-                    )
+                    failure = critique.failure_class or "provider_error"
+                    lineage += (_failure_lineage("critique", descriptor, failure),)
+                    continue
                 critique_plan = _parse_json_object(critique.text)
+                _validate_rule(critique_plan, CRITIQUE_SCHEMA, "$critique")
                 if set(critique_plan) != {"reviews"}:
                     raise ValueError("critique output has unsupported fields")
                 reviews = critique_plan.get("reviews")
@@ -302,10 +481,13 @@ def resolve_compile_plan(
                     if isinstance(item, dict) and item.get("slug") not in dropped
                 ]
                 action = with_critique
+                validation_stage = "normalize"
             normalized = _normalize_plan(operations, inputs)
             validate_compile_plan(normalized, inputs)
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-            lineage += (f"{descriptor.identity}:validation_error",)
+            lineage += (
+                _failure_lineage(validation_stage, descriptor, "validation_error"),
+            )
             continue
         key = cache.key(action)
         action_key = key or sha256_bytes(canonical_json_bytes(action.canonical()))
@@ -313,6 +495,20 @@ def resolve_compile_plan(
             cache.put(action, normalized)
         return ResolvedCompilePlan(normalized, action, action_key, False)
     raise RuntimeError("no LLM provider produced a validated compile plan")
+
+
+def _assert_external_work_allowed(coordinator: MarkdownCoordinator) -> None:
+    coordinator.assert_external_work_allowed()
+    with coordinator._connect() as database:
+        owner = database.execute(
+            "SELECT owner_token FROM writer_owners WHERE gate_name = 'global'"
+        ).fetchone()
+    if owner is not None:
+        raise RuntimeError("external LLM work is forbidden during persisted writer ownership")
+
+
+def _failure_lineage(stage: str, descriptor: object, code: str) -> str:
+    return f"{stage}:{descriptor.identity}:{code}"
 
 
 def _call_descriptor(
@@ -350,7 +546,7 @@ def _action_descriptor(
 
 def _input_blob(inputs: CompileInputs) -> str:
     return "\n\n".join(
-        f"### FILE: {item.logical_path}\n{item.content.decode('utf-8', errors='replace')}"
+        f"### FILE: {item.logical_path}\n{item.content.decode('utf-8', errors='strict')}"
         for item in inputs.sources
     )
 
@@ -378,6 +574,11 @@ OPERATIONS
 
 
 def _parse_json_object(text: str) -> dict[str, object]:
+    if len(text) > MAX_PROVIDER_RESPONSE_BYTES:
+        raise ValueError("provider response exceeds byte limit")
+    encoded = text.encode("utf-8", errors="strict")
+    if len(encoded) > MAX_PROVIDER_RESPONSE_BYTES:
+        raise ValueError("provider response exceeds byte limit")
     raw = _extract_json_block(text)
     value = json.loads(raw)
     if not isinstance(value, dict):
@@ -395,6 +596,11 @@ def _normalize_plan(
             raise ValueError("draft operation must be an object")
         semantic, _hashes = _validate_semantic_operation(operation, inputs)
         path = f"knowledge/notes/{semantic['slug']}.md"
+        target = _target_snapshot(inputs, path)
+        if semantic["action"] == "create" and target is not None:
+            raise ValueError("create target existed in the immutable snapshot")
+        if semantic["action"] == "update" and target is None:
+            raise ValueError("update target was absent from the immutable snapshot")
         if path in paths:
             raise ValueError("compile plan operation paths must be unique")
         paths.add(path)
@@ -425,6 +631,11 @@ def validate_compile_plan(plan: dict[str, object], inputs: CompileInputs) -> boo
             raise ValueError("compile operation content must be an object")
         semantic, _hashes = _validate_semantic_operation(semantic, inputs)
         expected = f"knowledge/notes/{semantic['slug']}.md"
+        target = _target_snapshot(inputs, expected)
+        if semantic["action"] == "create" and target is not None:
+            raise ValueError("create target existed in the immutable snapshot")
+        if semantic["action"] == "update" and target is None:
+            raise ValueError("update target was absent from the immutable snapshot")
         if planned["path"] != expected:
             raise ValueError("compile operation path does not match its slug")
         expected_kind = "create" if semantic["action"] == "create" else "replace"
@@ -450,12 +661,17 @@ def _escape_yaml(value: object) -> str:
 
 def _daily_for_evidence(inputs: CompileInputs, date: str) -> DailySnapshot | None:
     suffix = f"/{date}.md"
-    return next((item for item in inputs.dailies if item.logical_path.endswith(suffix)), None)
+    matches = [item for item in inputs.dailies if item.logical_path.endswith(suffix)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _target_snapshot(inputs: CompileInputs, path: str) -> TargetSnapshot | None:
+    return next((item for item in inputs.targets if item.logical_path == path), None)
 
 
 def _validate_semantic_operation(
     operation: dict[str, object], inputs: CompileInputs
-) -> tuple[dict[str, object], list[str]]:
+) -> tuple[dict[str, object], list[dict[str, str]]]:
     required = {
         "action",
         "category",
@@ -463,41 +679,113 @@ def _validate_semantic_operation(
         "title",
         "summary",
         "body_markdown",
+        "body_section",
         "evidence",
+        "related",
     }
-    allowed = required | {"body_section", "related"}
+    allowed = required
     if not required.issubset(operation):
         raise ValueError("compile operation is missing semantic fields")
     if set(operation) - allowed:
         raise ValueError("compile operation has unsupported semantic fields")
-    if operation["action"] not in {"create", "update"}:
+    if not isinstance(operation["action"], str) or operation["action"] not in {
+        "create",
+        "update",
+    }:
         raise ValueError("compile operation action is invalid")
-    category = str(operation["category"]).strip().lower()
+    if not isinstance(operation["category"], str):
+        raise ValueError("compile operation category must be a string")
+    category = operation["category"]
     if category not in ALLOWED_CATEGORIES:
         raise ValueError("compile operation category is invalid")
-    slug = str(operation["slug"])
-    normalized_slug = re.sub(r"[^a-z0-9-]", "-", slug.lower()).strip("-")
-    if not normalized_slug or normalized_slug != slug:
+    slug = operation["slug"]
+    if (
+        not isinstance(slug, str)
+        or len(slug) > 120
+        or re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", slug) is None
+    ):
         raise ValueError("compile operation slug is not normalized")
+    string_bounds = {
+        "title": (1, 200),
+        "summary": (1, 500),
+        "body_markdown": (1, 20_000),
+    }
+    for field, (minimum, maximum) in string_bounds.items():
+        value = operation[field]
+        if (
+            not isinstance(value, str)
+            or not minimum <= len(value) <= maximum
+            or (field in {"title", "summary"} and any(char in value for char in "\r\n"))
+        ):
+            raise ValueError(f"compile operation {field} has invalid type or length")
+    body_section = operation.get("body_section", "Lesson")
+    if body_section not in {
+        "Lesson",
+        "Decision",
+        "Symptom / Cause / Resolution",
+        "Answer",
+    }:
+        raise ValueError("compile operation body_section is invalid")
+    related = operation.get("related", [])
+    if (
+        not isinstance(related, list)
+        or len(related) > MAX_RELATED
+        or any(
+            not isinstance(item, str)
+            or len(item) > 200
+            or re.fullmatch(r"\[\[[^\r\n]+\]\]", item) is None
+            for item in related
+        )
+    ):
+        raise ValueError("compile operation related links are invalid")
     evidence = operation["evidence"]
-    if not isinstance(evidence, list) or not evidence:
+    if (
+        not isinstance(evidence, list)
+        or not evidence
+        or len(evidence) > MAX_EVIDENCE_PER_OPERATION
+    ):
         raise ValueError("compile operation requires evidence")
-    evidence_hashes: list[str] = []
+    evidence_bindings: list[dict[str, str]] = []
     for item in evidence:
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or set(item) != {
+            "daily_date",
+            "timestamp",
+            "quoted_text",
+            "claim",
+        }:
             raise ValueError("compile evidence must be an object")
         date = item.get("daily_date")
         timestamp = item.get("timestamp")
         quote = item.get("quoted_text")
-        if not all(isinstance(value, str) and value for value in (date, timestamp, quote)):
+        claim = item.get("claim")
+        if (
+            not isinstance(date, str)
+            or re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) is None
+            or not isinstance(timestamp, str)
+            or re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d", timestamp) is None
+            or not isinstance(quote, str)
+            or not 1 <= len(quote) <= 4_000
+            or not isinstance(claim, str)
+            or not 1 <= len(claim) <= 1_000
+            or any(char in claim for char in "\r\n")
+        ):
             raise ValueError("compile evidence is incomplete")
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+        except ValueError as exc:
+            raise ValueError("compile evidence date is invalid") from exc
         source = _daily_for_evidence(inputs, date)
         quote_bytes = quote.encode("utf-8")
-        marker = f"[{timestamp}]".encode()
-        marker_at = source.content.find(marker) if source is not None else -1
+        header = re.compile(
+            rb"(?m)^## \[" + re.escape(timestamp.encode()) + rb"\][^\r\n]*\r?$"
+        )
+        matches = list(header.finditer(source.content)) if source is not None else []
+        if len(matches) != 1:
+            raise ValueError("compile evidence timestamp block is ambiguous or missing")
+        marker_at = matches[0].start()
         next_header = (
-            source.content.find(b"\n## [", marker_at + len(marker))
-            if source is not None and marker_at >= 0
+            source.content.find(b"\n## [", matches[0].end())
+            if source is not None
             else -1
         )
         block = (
@@ -509,10 +797,16 @@ def _validate_semantic_operation(
         )
         if quote_bytes not in block:
             raise ValueError("compile evidence does not match the immutable snapshot")
-        evidence_hashes.append(sha256_bytes(quote_bytes))
+        evidence_bindings.append(
+            {
+                "source_path": source.logical_path,
+                "source_digest": source.sha256,
+                "quote_sha256": sha256_bytes(quote_bytes),
+            }
+        )
     normalized = json.loads(canonical_json_bytes(operation))
     assert isinstance(normalized, dict)
-    return normalized, evidence_hashes
+    return normalized, evidence_bindings
 
 
 def _render_page(operation: dict[str, object], completed_at: str) -> bytes:
@@ -564,18 +858,30 @@ def _append_log_bytes(content: bytes, entry: str) -> bytes:
 
 def _receipt_bytes(
     source_digest: str,
+    input_digests: list[str],
     action_key: str,
     operation_id: str,
-    evidence_hashes: list[str],
+    operations: list[dict[str, str]],
+    evidence: list[dict[str, str]],
     completed_at: str,
 ) -> bytes:
     record = {
         "schema_version": "compile-receipt/v2",
         "source_digest": source_digest,
+        "input_digests": input_digests,
         "action_key": action_key,
         "state": "completed",
-        "operation_ids": [operation_id],
-        "evidence_hashes": sorted(set(evidence_hashes)),
+        "completed_at": completed_at,
+        "operation_id": operation_id,
+        "operations": operations,
+        "evidence": sorted(
+            (
+                item for item in evidence if item["source_digest"] == source_digest
+            ),
+            key=lambda item: (
+                item["operation_path"], item["source_path"], item["quote_sha256"]
+            ),
+        ),
     }
     validate_schema(record, COMPILE_RECEIPT_SCHEMA)
     canonical = canonical_json_bytes(record).decode("utf-8")
@@ -619,16 +925,36 @@ def apply_compile_plan(
 
     with coordinator.writer_gate():
         coordinator.recover()
-        existing = [_has_v2_receipt(digest) for digest in source_digests]
-        if existing and all(existing):
-            return CompileApplyResult(None, operation_id, "committed", ())
-        if any(existing):
-            raise RuntimeError("compile receipt set is incomplete")
+        existing = [read_compile_receipt(digest, coordinator) for digest in source_digests]
+        if existing and all(item is not None for item in existing):
+            receipt_records = [item for item in existing if item is not None]
+            authority_ids = {str(item["operation_id"]) for item in receipt_records}
+            authority_keys = {str(item["action_key"]) for item in receipt_records}
+            if len(authority_ids) != 1 or len(authority_keys) != 1:
+                raise ValueError("compile receipts disagree about transaction authority")
+            authoritative_operation_id = authority_ids.pop()
+            authoritative_action_key = authority_keys.pop()
+            transaction, sequence = _transaction_authority(
+                coordinator, authoritative_operation_id
+            )
+            return CompileApplyResult(
+                transaction.id,
+                authoritative_operation_id,
+                "committed",
+                (),
+                sequence,
+                transaction.updated_at,
+                authoritative_action_key,
+            )
 
         pending: dict[str, bytes | None] = {}
         changes: list[MarkdownChange] = []
         touched: list[str] = []
-        evidence_hashes: list[str] = []
+        receipt_operations: list[dict[str, str]] = []
+        evidence_bindings: list[dict[str, str]] = []
+        preconditions: dict[str, str] = {
+            item.logical_path: item.sha256 for item in inputs.targets
+        }
         operations = plan.get("operations")
         assert isinstance(operations, list)
         for planned in operations:
@@ -636,16 +962,17 @@ def apply_compile_plan(
             semantic = json.loads(str(planned["content"]))
             if not isinstance(semantic, dict):
                 raise ValueError("compile operation content must describe an object")
-            semantic, hashes = _validate_semantic_operation(semantic, inputs)
-            evidence_hashes.extend(hashes)
+            semantic, bindings = _validate_semantic_operation(semantic, inputs)
             path = str(planned["path"])
             expected = f"knowledge/notes/{semantic['slug']}.md"
             if path != expected:
                 raise ValueError("compile operation path does not match its slug")
-            target = ROOT / Path(path)
             page = _render_page(semantic, completed_at)
-            if target.exists():
-                existing_page = target.read_bytes().rstrip()
+            target = _target_snapshot(inputs, path)
+            if planned["kind"] == "replace":
+                if target is None:
+                    raise ValueError("replace target was absent from snapshot")
+                existing_page = target.content.rstrip()
                 update = (
                     f"\n\n## Update ({completed_at[:10]})\n{semantic['body_markdown']}\n\n"
                     "## Evidence\n"
@@ -656,54 +983,130 @@ def apply_compile_plan(
                     + "\n"
                 ).encode("utf-8")
                 page = existing_page + update
-                changes.append(MarkdownChange.replace(path, page))
+                changes.append(
+                    MarkdownChange.replace(
+                        path, page, max_before_bytes=MAX_AFTER_IMAGE_BYTES
+                    )
+                )
+                preconditions[path] = target.sha256
             else:
-                changes.append(MarkdownChange.create(path, page))
+                if target is not None:
+                    raise ValueError("create target existed in snapshot")
+                changes.append(
+                    MarkdownChange.create(
+                        path, page, max_before_bytes=MAX_AFTER_IMAGE_BYTES
+                    )
+                )
+                preconditions[path] = "absent"
+            if len(page) > MAX_AFTER_IMAGE_BYTES:
+                raise ValueError("compiled page exceeds after-image limit")
             pending[path] = page
             touched.append(path)
+            receipt_operations.append(
+                {
+                    "kind": str(planned["kind"]),
+                    "path": path,
+                    "after_sha256": sha256_bytes(page),
+                }
+            )
+            evidence_bindings.extend(
+                {"operation_path": path, **binding} for binding in bindings
+            )
 
         from rebuild_memory_index import build_index_bytes
 
-        index_bytes = build_index_bytes(ROOT, pending)
+        base_notes = {
+            item.logical_path: item.content for item in inputs.targets
+        }
+        index_bytes = build_index_bytes(ROOT, pending, base=base_notes)
         log_entry = (
             f"- {completed_at[:10]} — {'Automated' if trigger == 'auto' else 'Manual'} "
             f"compile completed for snapshot {', '.join(source_digests)}. "
             f"Touched: {', '.join(touched) if touched else 'none'}."
         )
-        log_before = LOG.read_bytes() if LOG.exists() else b"# Session Memory Log\n"
-        changes.append(
-            MarkdownChange.replace("knowledge/index.md", index_bytes)
-            if INDEX.exists()
-            else MarkdownChange.create("knowledge/index.md", index_bytes)
+        source_by_path = {item.logical_path: item for item in inputs.sources}
+        index_source = source_by_path.get("knowledge/index.md")
+        log_source = source_by_path.get("knowledge/log.md")
+        log_before = log_source.content if log_source is not None else b"# Session Memory Log\n"
+        preconditions["knowledge/index.md"] = (
+            index_source.sha256 if index_source is not None else "absent"
+        )
+        preconditions["knowledge/log.md"] = (
+            log_source.sha256 if log_source is not None else "absent"
         )
         changes.append(
-            MarkdownChange.replace("knowledge/log.md", _append_log_bytes(log_before, log_entry))
-            if LOG.exists()
-            else MarkdownChange.create("knowledge/log.md", _append_log_bytes(log_before, log_entry))
+            MarkdownChange.replace(
+                "knowledge/index.md", index_bytes, max_before_bytes=MAX_INDEX_BYTES
+            )
+            if index_source is not None
+            else MarkdownChange.create(
+                "knowledge/index.md", index_bytes, max_before_bytes=MAX_INDEX_BYTES
+            )
+        )
+        log_bytes = _append_log_bytes(log_before, log_entry)
+        if len(log_bytes) > MAX_LOG_BYTES:
+            raise ValueError("knowledge log exceeds after-image limit")
+        changes.append(
+            MarkdownChange.replace(
+                "knowledge/log.md", log_bytes, max_before_bytes=MAX_LOG_BYTES
+            )
+            if log_source is not None
+            else MarkdownChange.create(
+                "knowledge/log.md", log_bytes, max_before_bytes=MAX_LOG_BYTES
+            )
         )
         for digest in source_digests:
             relative = f"knowledge/daily/receipts/{digest}.md"
+            receipt_bytes = _receipt_bytes(
+                digest,
+                source_digests,
+                action_key,
+                operation_id,
+                receipt_operations,
+                evidence_bindings,
+                completed_at,
+            )
+            if len(receipt_bytes) > MAX_RECEIPT_BYTES:
+                raise ValueError("compile receipt exceeds after-image limit")
             changes.append(
                 MarkdownChange.create(
                     relative,
-                    _receipt_bytes(
-                        digest,
-                        action_key,
-                        operation_id,
-                        evidence_hashes,
-                        completed_at,
-                    ),
+                    receipt_bytes,
+                    max_before_bytes=MAX_RECEIPT_BYTES,
                 )
             )
+            preconditions[relative] = "absent"
 
-        transaction = coordinator.prepare(changes, operation_id=operation_id)
+        transaction = coordinator.prepare(
+            changes, operation_id=operation_id, preconditions=preconditions
+        )
         committed = coordinator.apply(transaction.id)
+        committed, sequence = _transaction_authority(coordinator, operation_id)
         return CompileApplyResult(
             committed.id,
             operation_id,
             committed.state,
             tuple(touched),
+            sequence,
+            committed.updated_at,
+            action_key,
         )
+
+
+def _transaction_authority(
+    coordinator: MarkdownCoordinator, operation_id: str
+) -> tuple[object, int]:
+    transaction = coordinator._record_for_operation_id(operation_id)
+    if transaction is None or transaction.state != "committed":
+        raise ValueError("compile transaction is not committed")
+    with coordinator._connect() as database:
+        row = database.execute(
+            'SELECT rowid AS commit_sequence FROM "transaction" WHERE id = ?',
+            (transaction.id,),
+        ).fetchone()
+    if row is None:
+        raise ValueError("compile transaction authority disappeared")
+    return transaction, int(row["commit_sequence"])
 
 
 def parse_args() -> argparse.Namespace:
@@ -721,7 +1124,12 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def select_dailies(args: argparse.Namespace, state: dict) -> list[Path]:
+def select_dailies(
+    args: argparse.Namespace,
+    state: dict,
+    *,
+    coordinator: MarkdownCoordinator,
+) -> list[Path]:
     if args.file:
         path = Path(args.file).resolve()
         daily_root = DAILY_DIR.resolve()
@@ -735,11 +1143,12 @@ def select_dailies(args: argparse.Namespace, state: dict) -> list[Path]:
             raise SystemExit(f"compile_memory: --file must be an existing .md daily log: {path}")
         return [path]
     all_dailies = sorted(DAILY_DIR.glob("*.md"))
-    if args.all:
-        return all_dailies
     changed: list[Path] = []
     for p in all_dailies:
-        if not _has_v2_receipt(file_hash(p)):
+        content = read_stable_bytes(p, MAX_SOURCE_BYTES, label="daily source")
+        digest = sha256_bytes(content)
+        receipt = read_compile_receipt(digest, coordinator)
+        if receipt is None:
             changed.append(p)
     return changed
 
@@ -960,11 +1369,11 @@ Output ONLY the JSON object. No markdown fences, no commentary, no
     # Multi-pass compile: critique pass (v4.0).
     # A second LLM call reviews each operation against quality criteria.
     # Operations that fail specificity/durability checks are dropped.
-    plan, critique_text = _critique_plan(plan, daily_paths)
+    plan, critique_text = _critique_plan(plan, daily_paths)  # noqa: F821
 
     # Execute the plan deterministically — this is where Python writes
     # files and verifies citations. Returns (touched, audit_text).
-    touched, audit_text = _execute_plan(plan, daily_paths, dry_run)
+    touched, audit_text = _execute_plan(plan, daily_paths, dry_run)  # noqa: F821
     if critique_text:
         audit_text = critique_text + "\n" + audit_text
     return touched, audit_text
@@ -1402,6 +1811,11 @@ def append_log(entry: str) -> None:
         atomic_write(LOG, content + line)
 
 
+# The pre-v2 compiler remains below only as migration history for old audit parsers.
+# Remove every callable mutation entry point from the loaded module.
+del run_compile, _critique_plan, _execute_plan, rebuild_index, append_log
+
+
 def _mark_started(trigger: str) -> None:
     started_iso = datetime.now().isoformat(timespec="seconds")
 
@@ -1537,7 +1951,8 @@ def main() -> int:
 
 def _run(args: argparse.Namespace) -> int:
     state = load_state()
-    dailies = select_dailies(args, state)
+    coordinator = MarkdownCoordinator(ROOT, STATE_ROOT)
+    dailies = select_dailies(args, state, coordinator=coordinator)
     if not dailies:
         print("compile_memory: no changed daily logs; nothing to do.")
         _mark_finished(args.trigger, "ok")
@@ -1549,7 +1964,9 @@ def _run(args: argparse.Namespace) -> int:
 
     inputs = snapshot_compile_inputs(dailies)
     try:
-        resolved = resolve_compile_plan(inputs, CompileCache(STATE_ROOT))
+        resolved = resolve_compile_plan(
+            inputs, CompileCache(STATE_ROOT), coordinator=coordinator
+        )
     except Exception as exc:  # noqa: BLE001 - provider/cache boundary is fail-closed
         error = f"{type(exc).__name__}: {exc}"
         print(f"compile_memory: FAILED — {error}")
@@ -1570,7 +1987,7 @@ def _run(args: argparse.Namespace) -> int:
             resolved.plan,
             action_key=resolved.action_key,
             trigger=args.trigger,
-            coordinator=MarkdownCoordinator(ROOT, STATE_ROOT),
+            coordinator=coordinator,
         )
     except Exception as exc:  # noqa: BLE001 - no diagnostic state is a commit receipt
         error = f"{type(exc).__name__}: {exc}"
@@ -1578,26 +1995,77 @@ def _run(args: argparse.Namespace) -> int:
         _mark_finished(args.trigger, "error", error)
         return 1
 
-    now_iso = datetime.now().isoformat(timespec="seconds")
     snapshot_hashes = {
         Path(item.logical_path).name: item.sha256 for item in inputs.dailies
     }
 
     def _mutate(s: dict) -> None:
-        s.setdefault("compiled_daily_hashes", {})
-        s["compiled_daily_hashes"].update(snapshot_hashes)
-        s["last_compile_at"] = now_iso
-        s["last_compile_trigger"] = args.trigger
-        s["last_compiled_files"] = list(snapshot_hashes)
-        s["last_compiled_touched"] = list(result.touched)
-        s["last_index_rebuild_ok"] = True
-        s["last_compile_action_key"] = resolved.action_key
-        s["last_compile_operation_id"] = result.operation_id
+        merge_compile_diagnostics(
+            s,
+            commit_sequence=result.commit_sequence,
+            committed_at=result.committed_at,
+            hashes=snapshot_hashes,
+            operation_id=result.operation_id,
+            action_key=result.action_key,
+            touched=result.touched,
+            trigger=args.trigger,
+        )
 
     update_state(_mutate)
     _mark_finished(args.trigger, "ok")
     print("compile_memory: done.")
     return 0
+
+
+def merge_compile_diagnostics(
+    state: dict[str, object],
+    *,
+    commit_sequence: int,
+    committed_at: str,
+    hashes: dict[str, str],
+    operation_id: str,
+    action_key: str,
+    touched: tuple[str, ...],
+    trigger: str,
+) -> None:
+    compiled = state.setdefault("compiled_daily_hashes", {})
+    if not isinstance(compiled, dict):
+        raise ValueError("compiled_daily_hashes must be a mapping")
+    commit_versions = state.setdefault("compiled_daily_commits", {})
+    if not isinstance(commit_versions, dict):
+        raise ValueError("compiled_daily_commits must be a mapping")
+    for name, digest in hashes.items():
+        previous = commit_versions.get(name, {})
+        previous_at = previous.get("committed_at", "") if isinstance(previous, dict) else ""
+        previous_sequence = previous.get("sequence", -1) if isinstance(previous, dict) else -1
+        if not isinstance(previous_at, str):
+            previous_at = ""
+        if not isinstance(previous_sequence, int) or isinstance(previous_sequence, bool):
+            previous_sequence = -1
+        if (committed_at, commit_sequence) <= (previous_at, previous_sequence):
+            continue
+        compiled[name] = digest
+        commit_versions[name] = {
+            "committed_at": committed_at,
+            "sequence": commit_sequence,
+        }
+    previous_sequence = state.get("last_compile_commit_sequence", -1)
+    previous_at = state.get("last_compile_committed_at", "")
+    if not isinstance(previous_sequence, int) or isinstance(previous_sequence, bool):
+        previous_sequence = -1
+    if not isinstance(previous_at, str):
+        previous_at = ""
+    if (committed_at, commit_sequence) <= (previous_at, previous_sequence):
+        return
+    state["last_compile_commit_sequence"] = commit_sequence
+    state["last_compile_committed_at"] = committed_at
+    state["last_compile_at"] = committed_at
+    state["last_compile_trigger"] = trigger
+    state["last_compiled_files"] = sorted(hashes)
+    state["last_compiled_touched"] = list(touched)
+    state["last_index_rebuild_ok"] = True
+    state["last_compile_action_key"] = action_key
+    state["last_compile_operation_id"] = operation_id
 
 
 if __name__ == "__main__":

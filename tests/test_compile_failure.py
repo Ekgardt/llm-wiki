@@ -65,7 +65,7 @@ def test_failed_compile_does_not_mark_hash(state_snapshot, monkeypatch):
     monkeypatch.setattr(
         compile_memory,
         "resolve_compile_plan",
-        lambda inputs, cache: (_ for _ in ()).throw(
+        lambda inputs, cache, **kwargs: (_ for _ in ()).throw(
             RuntimeError("regression-test-induced")
         ),
     )
@@ -78,7 +78,7 @@ def test_failed_compile_does_not_mark_hash(state_snapshot, monkeypatch):
     monkeypatch.setattr(
         compile_memory,
         "select_dailies",
-        lambda args, state: [fake_daily],
+        lambda args, state, **kwargs: [fake_daily],
     )
     monkeypatch.setattr("sys.argv", ["compile_memory.py", "--trigger", "manual"])
 
