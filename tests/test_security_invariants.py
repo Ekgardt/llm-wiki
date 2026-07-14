@@ -110,9 +110,36 @@ class TestNoLLMBypass:
                     )
 
     def test_only_daily_archiver_has_directory_publication_exception(self):
+        rename_apis = {"rename", "replace", "move"}
         offenders = set()
         for path in SCRIPTS.glob("*.py"):
-            if "publish_build.replace(final_bag)" in path.read_text(encoding="utf-8"):
+            source = path.read_text(encoding="utf-8")
+            tree = ast.parse(source)
+            archive_assignments = [
+                ast.get_source_segment(source, node) or ""
+                for node in ast.walk(tree)
+                if isinstance(node, (ast.Assign, ast.AnnAssign))
+            ]
+            rename_calls = [
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in rename_apis
+            ]
+            has_archive_boundary = any(
+                "daily" in assignment.casefold()
+                and "archive" in assignment.casefold()
+                for assignment in archive_assignments
+            ) or any(
+                all(
+                    token in (ast.get_source_segment(source, call) or "").casefold()
+                    for token in ("daily", "archive")
+                )
+                for call in rename_calls
+            )
+            has_directory_rename = bool(rename_calls)
+            if has_archive_boundary and has_directory_rename:
                 offenders.add(path.name)
         assert offenders == {"archive_daily.py"}
 

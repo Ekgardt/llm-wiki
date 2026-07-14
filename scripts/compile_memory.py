@@ -293,9 +293,14 @@ def _receipt_path(digest: str) -> Path:
 
 
 def read_compile_receipt(
-    digest: str, coordinator: MarkdownCoordinator
+    digest: str,
+    coordinator: MarkdownCoordinator,
+    *,
+    path: Path | None = None,
+    vault: Path | None = None,
 ) -> dict[str, object] | None:
-    path = _receipt_path(digest)
+    path = _receipt_path(digest) if path is None else Path(path)
+    vault = ROOT if vault is None else Path(vault)
     try:
         raw_bytes = read_stable_bytes(path, MAX_RECEIPT_BYTES, label="compile receipt")
     except FileNotFoundError:
@@ -349,7 +354,7 @@ def read_compile_receipt(
         if transaction is None or transaction.state != "committed":
             raise ValueError("compile receipt has no committed transaction authority")
         transaction_operations = {item.path: item for item in transaction.operations}
-        relative = path.relative_to(ROOT).as_posix()
+        relative = path.relative_to(vault).as_posix()
         receipt_operation = transaction_operations.get(relative)
         if receipt_operation is None or receipt_operation.after_hash != sha256_bytes(raw_bytes):
             raise ValueError("compile receipt bytes are not transaction-authoritative")

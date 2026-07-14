@@ -38,6 +38,12 @@ from pathlib import Path, PureWindowsPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from bounded_io import read_stable_bytes  # noqa: E402
+
+MAX_MCP_PAGE_BYTES = 4 * 1024 * 1024
+MAX_MCP_EVIDENCE_BYTES = 64 * 1024
+MAX_MCP_TOTAL_EVIDENCE_BYTES = 256 * 1024
+
 MCP_AVAILABLE = False
 MCP_RESOURCES_AVAILABLE = False
 MCP_STRUCTURED_OUTPUT_AVAILABLE = False
@@ -201,7 +207,7 @@ def _search_vault(query: str, limit: int = 8) -> list[dict]:
 
 def _read_page(slug: str) -> dict:
     """Read a full page by slug."""
-    from memory_state import ROOT
+    from memory_state import ROOT, STATE_ROOT
 
     windows_path = PureWindowsPath(slug)
     if (
@@ -212,16 +218,16 @@ def _read_page(slug: str) -> dict:
         or Path(slug).is_absolute()
     ):
         return {"error": f"Invalid page slug: {slug}"}
-    notes_dir = (ROOT / "knowledge" / "notes").resolve()
-    try:
-        page_path = (notes_dir / f"{slug}.md").resolve()
-    except OSError:
-        return {"error": f"Invalid page slug: {slug}"}
-    if page_path.parent != notes_dir:
-        return {"error": f"Invalid page slug: {slug}"}
+    notes_dir = ROOT / "knowledge" / "notes"
+    page_path = notes_dir / f"{slug}.md"
     if not page_path.exists():
         return {"error": f"Page not found: {slug}"}
-    content = page_path.read_text(encoding="utf-8")
+    try:
+        content = read_stable_bytes(
+            page_path, MAX_MCP_PAGE_BYTES, label="MCP page"
+        ).decode("utf-8", errors="strict")
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        return {"error": f"Page read failed for {slug}: {exc}"}
     from evidence_resolver import (
         EvidenceResolutionError,
         EvidenceResolver,
@@ -229,10 +235,20 @@ def _read_page(slug: str) -> dict:
     )
 
     evidence = []
-    resolver = EvidenceResolver(ROOT)
+    evidence_bytes = 0
+    resolver = EvidenceResolver(ROOT, state_root=STATE_ROOT)
     try:
         for reference in extract_evidence_references(content):
             resolved = resolver.resolve(reference)
+            if len(resolved.bytes) > MAX_MCP_EVIDENCE_BYTES:
+                raise EvidenceResolutionError(
+                    f"evidence slice exceeds {MAX_MCP_EVIDENCE_BYTES} bytes"
+                )
+            evidence_bytes += len(resolved.bytes)
+            if evidence_bytes > MAX_MCP_TOTAL_EVIDENCE_BYTES:
+                raise EvidenceResolutionError(
+                    f"total evidence exceeds {MAX_MCP_TOTAL_EVIDENCE_BYTES} bytes"
+                )
             evidence.append(
                 {
                     "reference": str(reference),

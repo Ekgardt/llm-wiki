@@ -21,7 +21,7 @@ import time
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -186,6 +186,15 @@ class QueueOwnerLease:
     epoch: int
     expires_at: datetime
     ttl_seconds: int
+
+
+@dataclass(frozen=True)
+class SourceFence:
+    daily_id: str
+    source_digest: str
+    token: str
+    owner_pid: int
+    acquired_at: datetime
 
 
 @dataclass(frozen=True)
@@ -409,6 +418,13 @@ class MemoryQueue:
             );
             CREATE INDEX IF NOT EXISTS queue_claim_order
                 ON tasks(state, priority DESC, available_at, created_at);
+            CREATE TABLE IF NOT EXISTS source_fences (
+                daily_id TEXT PRIMARY KEY,
+                source_digest TEXT NOT NULL UNIQUE,
+                token TEXT NOT NULL UNIQUE,
+                owner_pid INTEGER NOT NULL,
+                acquired_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS attempt_history (
                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                 task_id TEXT NOT NULL REFERENCES tasks(id),
@@ -510,6 +526,8 @@ class MemoryQueue:
         task_id = uuid.UUID(int=self._rng.getrandbits(128)).hex
         try:
             with self._connect() as connection, begin_immediate(connection):
+                self._delete_stale_source_fences(connection)
+                self._assert_payload_not_fenced(connection, payload_json)
                 connection.execute(
                     """INSERT INTO tasks(
                            id, kind, handler_version, payload_json, input_hash, dedupe_key,
@@ -558,9 +576,15 @@ class MemoryQueue:
         now = _as_utc(self._clock())
         with self._connect() as connection, begin_immediate(connection):
             self._expire_leases(connection, now, attempt_limit)
+            self._delete_stale_source_fences(connection)
             row = connection.execute(
                 """SELECT * FROM tasks
                    WHERE state = 'ready' AND attempts < ? AND available_at <= ?
+                     AND NOT EXISTS (
+                         SELECT 1 FROM source_fences f
+                         WHERE instr(tasks.payload_json, f.daily_id) > 0
+                            OR instr(tasks.payload_json, f.source_digest) > 0
+                     )
                    ORDER BY priority DESC, available_at, created_at, rowid LIMIT 1""",
                 (attempt_limit, _timestamp(now)),
             ).fetchone()
@@ -606,10 +630,15 @@ class MemoryQueue:
         """Claim one known task for the legacy mark_attempt facade."""
         now = _as_utc(self._clock())
         with self._connect() as connection, begin_immediate(connection):
+            self._delete_stale_source_fences(connection)
             row = connection.execute(
                 "SELECT * FROM tasks WHERE id=? AND state='ready'", (task_id,)
             ).fetchone()
             if row is None:
+                return None
+            try:
+                self._assert_payload_not_fenced(connection, str(row["payload_json"]))
+            except QueueOperationError:
                 return None
             token = f"{self._rng.getrandbits(256):064x}"
             expires = now + timedelta(seconds=DEFAULTS.queue_lease_seconds)
@@ -1131,6 +1160,8 @@ class MemoryQueue:
                 raise KeyError(task_id)
             if row["state"] != "dead":
                 raise QueueOperationError("redrive_requires_dead")
+            self._delete_stale_source_fences(connection)
+            self._assert_payload_not_fenced(connection, str(row["payload_json"]))
             payload_bytes = str(row["payload_json"]).encode("utf-8")
             replacement = uuid.UUID(int=self._rng.getrandbits(128)).hex
             connection.execute(
@@ -1153,10 +1184,111 @@ class MemoryQueue:
             )
         return replacement
 
+    @staticmethod
+    def _validate_source_identity(daily_id: str, source_digest: str) -> None:
+        if not isinstance(daily_id, str) or re.fullmatch(r"\d{4}-\d{2}-\d{2}", daily_id) is None:
+            raise ValueError("daily_id must be a canonical date")
+        try:
+            if date.fromisoformat(daily_id).isoformat() != daily_id:
+                raise ValueError
+        except ValueError as exc:
+            raise ValueError("daily_id must be a canonical date") from exc
+        if not isinstance(source_digest, str) or re.fullmatch(r"[0-9a-f]{64}", source_digest) is None:
+            raise ValueError("source_digest must be a lowercase SHA-256")
+
+    @staticmethod
+    def _payload_references_source(
+        payload_json: str, daily_id: str, source_digest: str
+    ) -> bool:
+        return daily_id in payload_json or source_digest in payload_json
+
+    def _delete_stale_source_fences(self, connection: sqlite3.Connection) -> None:
+        rows = connection.execute("SELECT token, owner_pid FROM source_fences").fetchall()
+        for row in rows:
+            if not _pid_is_alive(int(row["owner_pid"])):
+                connection.execute(
+                    "DELETE FROM source_fences WHERE token=?", (row["token"],)
+                )
+
+    def _assert_payload_not_fenced(
+        self, connection: sqlite3.Connection, payload_json: str
+    ) -> None:
+        for row in connection.execute(
+            "SELECT daily_id, source_digest FROM source_fences"
+        ):
+            if self._payload_references_source(
+                payload_json, str(row["daily_id"]), str(row["source_digest"])
+            ):
+                raise QueueOperationError("source_fenced")
+
+    def referencing_source_tasks(
+        self,
+        daily_id: str,
+        source_digest: str,
+        *,
+        states: tuple[str, ...] = ("ready", "leased", "blocked", "dead"),
+    ) -> tuple[str, ...]:
+        self._validate_source_identity(daily_id, source_digest)
+        if not states or any(state not in _STATES for state in states):
+            raise ValueError("invalid queue state")
+        placeholders = ",".join("?" for _ in states)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                f"SELECT id, payload_json FROM tasks WHERE state IN ({placeholders}) "
+                "ORDER BY created_at, rowid",  # noqa: S608 - generated placeholders
+                states,
+            )
+            matches = []
+            for row in cursor:
+                if self._payload_references_source(
+                    str(row["payload_json"]), daily_id, source_digest
+                ):
+                    matches.append(str(row["id"]))
+            return tuple(matches)
+
+    def acquire_source_fence(self, daily_id: str, source_digest: str) -> SourceFence:
+        self._validate_source_identity(daily_id, source_digest)
+        token = f"{self._rng.getrandbits(256):064x}"
+        acquired = _as_utc(self._clock())
+        with self._connect() as connection, begin_immediate(connection):
+            self._delete_stale_source_fences(connection)
+            for row in connection.execute(
+                "SELECT id, payload_json FROM tasks "
+                "WHERE state IN ('ready','leased','blocked','dead')"
+            ):
+                if self._payload_references_source(
+                    str(row["payload_json"]), daily_id, source_digest
+                ):
+                    raise QueueOperationError("source_referenced")
+            try:
+                connection.execute(
+                    "INSERT INTO source_fences "
+                    "(daily_id, source_digest, token, owner_pid, acquired_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (daily_id, source_digest, token, os.getpid(), _timestamp(acquired)),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise QueueOperationError("source_fenced") from exc
+        return SourceFence(daily_id, source_digest, token, os.getpid(), acquired)
+
+    def release_source_fence(self, token: str) -> None:
+        if not isinstance(token, str) or re.fullmatch(r"[0-9a-f]{64}", token) is None:
+            raise ValueError("source fence token is invalid")
+        with self._connect() as connection, begin_immediate(connection):
+            changed = connection.execute(
+                "DELETE FROM source_fences WHERE token=? AND owner_pid=?",
+                (token, os.getpid()),
+            ).rowcount
+            if changed != 1:
+                raise QueueOperationError("source_fence_lost")
+
     def retains_run_directory(self) -> bool:
         with self._connect() as connection:
             task = connection.execute("SELECT 1 FROM tasks LIMIT 1").fetchone()
-        if task is not None:
+            source_fence = connection.execute(
+                "SELECT 1 FROM source_fences LIMIT 1"
+            ).fetchone()
+        if task is not None or source_fence is not None:
             return True
         quarantine = self.run_dir / "queue-quarantine"
         try:

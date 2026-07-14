@@ -380,6 +380,89 @@ class TestHelperFunctions:
         assert "error" in result
         assert "evidence" in result["error"].lower()
 
+    def test_read_page_rejects_malformed_evidence_and_oversized_pages(
+        self, tmp_path, monkeypatch
+    ):
+        import mcp_server
+        import memory_state
+
+        notes = tmp_path / "knowledge/notes"
+        notes.mkdir(parents=True)
+        page = notes / "page.md"
+        page.write_text("`daily:2026-01-01 broken`", encoding="utf-8")
+        monkeypatch.setattr(memory_state, "ROOT", tmp_path)
+        assert "error" in mcp_server._read_page("page")
+
+        page.write_bytes(b"x" * (mcp_server.MAX_MCP_PAGE_BYTES + 1))
+        result = mcp_server._read_page("page")
+        assert "error" in result
+        assert "exceeds" in result["error"]
+
+    def test_read_page_caps_each_resolved_evidence_slice(self, tmp_path, monkeypatch):
+        import mcp_server
+        import memory_state
+        from reliable_memory import sha256_bytes
+
+        notes = tmp_path / "knowledge/notes"
+        daily = tmp_path / "knowledge/daily/2026-01-01.md"
+        notes.mkdir(parents=True)
+        daily.parent.mkdir(parents=True)
+        quote = b"x" * (mcp_server.MAX_MCP_EVIDENCE_BYTES + 1)
+        source = b"## [evt-1] event\n" + quote + b"\n"
+        daily.write_bytes(source)
+        start = source.index(quote)
+        reference = (
+            f"daily:2026-01-01 sha256:{sha256_bytes(source)} block:evt-1 "
+            f"bytes:{start}-{start + len(quote)}"
+        )
+        (notes / "page.md").write_text(f"`{reference}`", encoding="utf-8")
+        monkeypatch.setattr(memory_state, "ROOT", tmp_path)
+
+        result = mcp_server._read_page("page")
+
+        assert "error" in result
+        assert "slice exceeds" in result["error"]
+
+    def test_read_page_rejects_symlink_or_reparse_page(self, tmp_path, monkeypatch):
+        import mcp_server
+        import memory_state
+
+        notes = tmp_path / "knowledge/notes"
+        notes.mkdir(parents=True)
+        outside = tmp_path / "outside.md"
+        outside.write_text("secret", encoding="utf-8")
+        page = notes / "page.md"
+        try:
+            os.symlink(outside, page)
+        except OSError:
+            page.write_text("safe", encoding="utf-8")
+            original = Path.lstat
+
+            def reparse(path: Path):
+                result = original(path)
+                if path == page:
+                    return type(
+                        "ReparseStat",
+                        (),
+                        {
+                            "st_mode": result.st_mode,
+                            "st_file_attributes": 0x400,
+                            "st_size": result.st_size,
+                            "st_dev": result.st_dev,
+                            "st_ino": result.st_ino,
+                            "st_mtime_ns": result.st_mtime_ns,
+                        },
+                    )()
+                return result
+
+            monkeypatch.setattr(Path, "lstat", reparse)
+        monkeypatch.setattr(memory_state, "ROOT", tmp_path)
+
+        result = mcp_server._read_page("page")
+
+        assert "error" in result
+        assert "regular" in result["error"] or "symlink" in result["error"]
+
     def test_search_vault_returns_list(self):
         from mcp_server import _search_vault
         results = _search_vault("test")

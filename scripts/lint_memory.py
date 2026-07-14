@@ -39,12 +39,13 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from bounded_io import read_stable_bytes  # noqa: E402
 from evidence_resolver import (  # noqa: E402
     EvidenceResolutionError,
     EvidenceResolver,
     extract_evidence_references,
 )
-from memory_state import REPORTS_DIR, ROOT, file_hash, load_state  # noqa: E402
+from memory_state import REPORTS_DIR, ROOT, STATE_ROOT, file_hash, load_state  # noqa: E402
 from okf_types import CANONICAL_TYPES as VALID_TYPES  # noqa: E402
 from okf_types import TYPE_ALIASES  # noqa: E402
 from vault_editorial import (  # noqa: E402
@@ -67,6 +68,7 @@ WIKILINK_RE = re.compile(r"\[\[([^\]|#]+?)(?:\|[^\]]+)?\]\]")
 WORD_RE = re.compile(r"\b\w+\b")
 
 DEFAULT_SPARSE_WORDS = 200
+MAX_LINT_PAGE_BYTES = 4 * 1024 * 1024
 
 # Editorial page sets (EDITORIAL_NAMES, BACKLINK_EXEMPT_NAMES,
 # BROKEN_LINK_SKIP_NAMES) come from `vault_editorial` — shared with
@@ -153,11 +155,13 @@ def _resolve_link(target: str, search_roots: list[Path]) -> Path | None:
 
 def check_evidence_references(pages: list[Path]) -> list[str]:
     """Resolve every canonical logical evidence reference and fail closed."""
-    resolver = EvidenceResolver(ROOT)
+    resolver = EvidenceResolver(ROOT, state_root=STATE_ROOT)
     findings: list[str] = []
     for page in pages:
         try:
-            text = page.read_text(encoding="utf-8", errors="strict")
+            text = read_stable_bytes(
+                page, MAX_LINT_PAGE_BYTES, label="lint evidence page"
+            ).decode("utf-8", errors="strict")
             references = extract_evidence_references(text)
         except (OSError, UnicodeDecodeError, ValueError) as exc:
             findings.append(f"{_rel(page)}: evidence scan failed: {exc}")

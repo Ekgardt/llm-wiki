@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 
@@ -28,7 +29,11 @@ def _write_bag(root: Path, daily_id: str, source: bytes, *, suffix: str = "one")
         b"BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n"
     )
     (bag / "bag-info.txt").write_bytes(
-        f"External-Identifier: daily:{daily_id}\n".encode()
+        (
+            f"Bagging-Date: 2026-07-14\n"
+            f"Payload-Oxum: {len(source)}.1\n"
+            f"External-Identifier: daily:{daily_id}\n"
+        ).encode()
     )
     (bag / "manifest-sha256.txt").write_bytes(
         f"{_sha(source)}  {payload_name}\n".encode()
@@ -42,6 +47,15 @@ def _write_bag(root: Path, daily_id: str, source: bytes, *, suffix: str = "one")
         "line_end": 4,
         "sha256": _sha(source[block_start:]),
     }
+    receipt_path = root / f"knowledge/daily/receipts/{_sha(source)}.md"
+    receipt_hash = _sha(receipt_path.read_bytes()) if receipt_path.exists() else "a" * 64
+    operation_id = "compile:test"
+    if receipt_path.exists():
+        operation_id = json.loads(
+            receipt_path.read_text(encoding="utf-8")
+            .split("```json\n", 1)[1]
+            .split("\n```", 1)[0]
+        )["operation_id"]
     manifest = {
         "schema_version": "archive-manifest/v1",
         "logical_daily_id": daily_id,
@@ -52,14 +66,14 @@ def _write_bag(root: Path, daily_id: str, source: bytes, *, suffix: str = "one")
             "schema": "compile-receipt-ref/v1",
             "path": f"knowledge/daily/receipts/{_sha(source)}.md",
             "source_digest": _sha(source),
-            "receipt_file_hash": "a" * 64,
+            "receipt_file_hash": receipt_hash,
         },
         "queue_preflight": {
             "checked_at": "2026-07-14T00:00:00Z",
             "passed": True,
             "blocking_task_ids": [],
         },
-        "operations": [{"operation_id": "compile:test", "state": "succeeded"}],
+        "operations": [{"operation_id": operation_id, "state": "succeeded"}],
         "evidence": [evidence],
         "pins": [],
         "retention_days": 90,
@@ -70,6 +84,42 @@ def _write_bag(root: Path, daily_id: str, source: bytes, *, suffix: str = "one")
         "".join(f"{_sha((bag / name).read_bytes())}  {name}\n" for name in tags).encode()
     )
     return bag
+
+
+def _authorize_archive_source(
+    root: Path, source: bytes, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    import compile_memory
+    from markdown_transaction import MarkdownCoordinator
+
+    state_root = root / "state"
+    state_root.mkdir()
+    for relative in ("knowledge/daily/receipts", "knowledge/notes"):
+        (root / relative).mkdir(parents=True, exist_ok=True)
+    (root / "knowledge/index.md").write_bytes(b"# index\n")
+    (root / "knowledge/log.md").write_bytes(b"# log\n")
+    (root / "AGENTS.md").write_bytes(b"contract\n")
+    daily = root / "knowledge/daily/2026-01-01.md"
+    daily.write_bytes(source)
+    monkeypatch.setattr(compile_memory, "ROOT", root)
+    monkeypatch.setattr(compile_memory, "STATE_ROOT", state_root)
+    monkeypatch.setattr(compile_memory, "MEMORY", root / "knowledge")
+    monkeypatch.setattr(compile_memory, "DAILY_DIR", root / "knowledge/daily")
+    monkeypatch.setattr(compile_memory, "KNOWLEDGE", root / "knowledge/notes")
+    monkeypatch.setattr(compile_memory, "INDEX", root / "knowledge/index.md")
+    monkeypatch.setattr(compile_memory, "LOG", root / "knowledge/log.md")
+    monkeypatch.setattr(compile_memory, "AGENTS", root / "AGENTS.md")
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    compile_memory.apply_compile_plan(
+        inputs,
+        {"schema_version": "compile-plan/v2", "operations": []},
+        action_key="c" * 64,
+        trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T00:00:00Z",
+    )
+    daily.unlink()
+    return state_root
 
 
 @pytest.fixture
@@ -92,6 +142,42 @@ def test_parse_requires_exact_canonical_logical_reference() -> None:
     ):
         with pytest.raises(ValueError):
             EvidenceRef.parse(invalid)
+
+
+def test_direct_construction_enforces_the_same_reference_contract() -> None:
+    from evidence_resolver import EvidenceRef
+
+    with pytest.raises(ValueError, match="daily ID"):
+        EvidenceRef("../2026-01-01", "a" * 64, "evt-1", 1, 2)
+    with pytest.raises(ValueError, match="SHA-256"):
+        EvidenceRef("2026-01-01", "A" * 64, "evt-1", 1, 2)
+    with pytest.raises(ValueError, match="block ID"):
+        EvidenceRef("2026-01-01", "a" * 64, "../evt", 1, 2)
+    with pytest.raises(ValueError, match="half-open"):
+        EvidenceRef("2026-01-01", "a" * 64, "evt-1", 2, 2)
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        "daily:2026-01-01",
+        f"daily:2026-01-01 sha256:{'a' * 64} block:evt-1 bytes:1-2 trailing",
+        f"xdaily:2026-01-01 sha256:{'a' * 64} block:evt-1 bytes:1-2",
+        f"daily:2026-01-01 sha256:{'a' * 64} block:../evt bytes:1-2",
+    ],
+)
+def test_extraction_rejects_every_malformed_daily_candidate(candidate: str) -> None:
+    from evidence_resolver import extract_evidence_references
+
+    with pytest.raises(ValueError, match="evidence reference"):
+        extract_evidence_references(f"## Evidence\n- `{candidate}`\n")
+
+
+def test_block_parser_uses_reference_block_id_grammar() -> None:
+    from evidence_resolver import EvidenceResolutionError, _blocks
+
+    with pytest.raises(EvidenceResolutionError, match="block ID"):
+        _blocks(b"## [../evt] event\ntext\n")
 
 
 def test_flat_resolution_uses_utf8_half_open_bytes_lines_and_block_hash(vault: Path) -> None:
@@ -155,20 +241,27 @@ def test_flat_hash_mismatch_fails_closed_without_archive_fallback(vault: Path) -
         )
 
 
-def test_validated_archive_resolves_identically_and_ambiguity_fails(vault: Path) -> None:
+def test_validated_archive_resolves_identically_and_ambiguity_fails(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from evidence_resolver import EvidenceRef, EvidenceResolutionError, EvidenceResolver
 
     source = b"# day\n## [evt-1] event\narchived bytes\n"
-    _write_bag(vault, "2026-01-01", source)
+    state_root = _authorize_archive_source(vault, source, monkeypatch)
+    first = _write_bag(vault, "2026-01-01", source)
+    from archive_daily import DailyArchiver
+
+    DailyArchiver._seal(first)
     start = source.index(b"archived bytes")
     ref = EvidenceRef.parse(_reference("2026-01-01", source, "evt-1", start, len(source) - 1))
-    result = EvidenceResolver(vault).resolve(ref)
+    result = EvidenceResolver(vault, state_root=state_root).resolve(ref)
     assert result.bytes == b"archived bytes"
     assert result.location == "archive"
 
-    _write_bag(vault, "2026-01-01", source, suffix="two")
+    second = _write_bag(vault, "2026-01-01", source, suffix="two")
+    DailyArchiver._seal(second)
     with pytest.raises(EvidenceResolutionError, match="ambiguous"):
-        EvidenceResolver(vault).resolve(ref)
+        EvidenceResolver(vault, state_root=state_root).resolve(ref)
 
 
 def test_archive_validation_rejects_tamper_oversize_and_links(vault: Path) -> None:
@@ -194,3 +287,19 @@ def test_archive_validation_rejects_tamper_oversize_and_links(vault: Path) -> No
             pytest.skip("links require privileges on this platform")
         with pytest.raises(EvidenceResolutionError, match="non-symlink|regular"):
             EvidenceResolver(vault).resolve(ref)
+
+
+def test_archive_directory_limit_is_enforced_while_iterating(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import evidence_resolver
+
+    month = vault / "knowledge/daily/archive/2026-01"
+    month.mkdir()
+    for name in ("one", "two", "three"):
+        (month / name).mkdir()
+    monkeypatch.setattr(evidence_resolver, "MAX_DIRECTORY_ENTRIES", 2)
+    ref = evidence_resolver.EvidenceRef("2026-01-01", "a" * 64, "evt-1", 1, 2)
+
+    with pytest.raises(evidence_resolver.EvidenceResolutionError, match="entry scan limit"):
+        evidence_resolver.EvidenceResolver(vault)._resolve_archive(ref)

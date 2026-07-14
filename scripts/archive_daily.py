@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -25,13 +26,18 @@ from evidence_resolver import (  # noqa: E402
     _blocks,
     _line_span,
     _regular_directory,
+    bounded_directory_entries,
     validate_bag,
 )
 from markdown_transaction import (  # noqa: E402
     MarkdownChange,
     MarkdownCoordinator,
+    _acl_output_text,
     _harden_owner_only,
+    _run_acl_command,
+    _windows_acl_identity,
 )
+from memory_queue import MemoryQueue, QueueOperationError  # noqa: E402
 from memory_state import ROOT, STATE_ROOT  # noqa: E402
 from reliable_memory import (  # noqa: E402
     _set_owner_only,
@@ -44,6 +50,9 @@ from reliable_memory import (  # noqa: E402
 DEFAULT_HOT_DAYS = 90
 DEFAULT_TRANSACTION_RETENTION_DAYS = 30
 MAX_POLICY_BYTES = 1024 * 1024
+MAX_ARCHIVE_ENTRIES = 10_000
+MAX_ARCHIVE_MONTHS = 1_200
+ARCHIVE_WRITER_WAIT_SECONDS = 0.25
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
@@ -90,12 +99,13 @@ class DailyArchiver:
         hot_days: int = DEFAULT_HOT_DAYS,
         transaction_retention_days: int = DEFAULT_TRANSACTION_RETENTION_DAYS,
     ) -> Eligibility:
-        return self._eligible(
-            source,
-            hot_days=hot_days,
-            transaction_retention_days=transaction_retention_days,
-            ignore_current_writer=False,
-        )
+        with self.coordinator.writer_gate(wait_seconds=ARCHIVE_WRITER_WAIT_SECONDS):
+            return self._eligible(
+                source,
+                hot_days=hot_days,
+                transaction_retention_days=transaction_retention_days,
+                ignore_current_writer=True,
+            )
 
     def _eligible(
         self,
@@ -152,7 +162,7 @@ class DailyArchiver:
             if not blocks:
                 raise EvidenceResolutionError("daily has no evidence blocks")
             for block_id, start, end in blocks:
-                EvidenceResolver(self.vault).resolve(
+                EvidenceResolver(self.vault, state_root=self.state_root).resolve(
                     EvidenceRef(source.stem, digest, block_id, start, end)
                 )
         except (OSError, ValueError, EvidenceResolutionError):
@@ -167,12 +177,14 @@ class DailyArchiver:
             source.name, transaction_retention_days=transaction_retention_days
         ):
             reasons.append("active_transaction")
+        if receipt is not None and self._receipt_transaction_retained(
+            receipt, digest, transaction_retention_days
+        ):
+            reasons.append("transaction_retention")
         if not ignore_current_writer and self._writer_active():
             reasons.append("active_writer")
         if self._decision_references(source.stem, digest):
             reasons.append("decision_evidence")
-        if self._policy_contains("archive-failures.json", source.stem, digest):
-            reasons.append("failure")
         if self._policy_contains("archive-pins.json", source.stem, digest):
             reasons.append("manual_pin")
         return Eligibility(
@@ -213,6 +225,37 @@ class DailyArchiver:
         ):
             return "invalid"
 
+    def _receipt_transaction_retained(
+        self,
+        receipt: dict[str, object],
+        digest: str,
+        transaction_retention_days: int,
+    ) -> bool:
+        operation_id = receipt.get("operation_id")
+        if not isinstance(operation_id, str):
+            return True
+        transaction = self.coordinator._record_for_operation_id(operation_id)
+        if transaction is None or transaction.state != "committed":
+            return True
+        expected_paths = {
+            f"knowledge/daily/receipts/{digest}.md",
+            *(
+                str(item.get("path"))
+                for item in receipt.get("operations", [])
+                if isinstance(item, dict)
+            ),
+        }
+        if not expected_paths.issubset({item.path for item in transaction.operations}):
+            return True
+        cutoff = self.clock().astimezone(timezone.utc) - timedelta(
+            days=transaction_retention_days
+        )
+        try:
+            updated = datetime.fromisoformat(transaction.updated_at.replace("Z", "+00:00"))
+        except ValueError:
+            return True
+        return updated >= cutoff
+
     def archive(
         self,
         daily_id: str,
@@ -223,8 +266,15 @@ class DailyArchiver:
         if DATE_RE.fullmatch(daily_id) is None:
             raise ValueError("daily ID must be YYYY-MM-DD")
         source = self.daily_root / f"{daily_id}.md"
-        with self.coordinator.writer_gate():
+        with self.coordinator.writer_gate(wait_seconds=ARCHIVE_WRITER_WAIT_SECONDS):
             self.coordinator.recover()
+            source_bytes = read_stable_bytes(
+                source, MAX_DAILY_BYTES, label="daily archive source"
+            )
+            source_digest = sha256_bytes(source_bytes)
+            reused = self._recover_daily(daily_id, source_digest)
+            if reused is not None:
+                return reused
             eligibility = self._eligible(
                 source,
                 hot_days=hot_days,
@@ -238,29 +288,65 @@ class DailyArchiver:
             content = read_stable_bytes(source, MAX_DAILY_BYTES, label="daily archive source")
             if sha256_bytes(content) != eligibility.source_sha256:
                 raise RuntimeError("daily source changed during archive preflight")
-            final_bag, publish_build = self._build_bag(
-                daily_id, content, eligibility, hot_days=hot_days
-            )
-            published = False
+            queue = MemoryQueue(self.state_root)
+            fence = queue.acquire_source_fence(daily_id, eligibility.source_sha256)
             try:
-                self.killpoint("after_build")
-                self.killpoint("before_publish_rename")
-                publish_build.replace(final_bag)
-                published = True
-                fsync_directory(final_bag.parent)
-                self.killpoint("after_publish_rename")
-                validated = validate_bag(final_bag)
-                if validated.manifest["source_hash"] != eligibility.source_sha256:
-                    raise RuntimeError("published archive failed source revalidation")
-                self.killpoint("after_revalidate")
-                self._remove_flat(daily_id, eligibility.source_sha256)
-                self.killpoint("after_source_delete")
-            except BaseException:
-                if not published:
-                    self._remove_build(publish_build)
-                raise
+                final_bag, publish_build = self._build_bag(
+                    daily_id, content, eligibility, hot_days=hot_days
+                )
+                published = False
+                try:
+                    self.killpoint("after_build")
+                    self.killpoint("before_publish_rename")
+                    publish_build.replace(final_bag)
+                    published = True
+                    fsync_directory(final_bag.parent)
+                    self.killpoint("after_publish_rename")
+                    validated = validate_bag(
+                        final_bag, coordinator=self.coordinator, vault=self.vault
+                    )
+                    if validated.manifest["source_hash"] != eligibility.source_sha256:
+                        raise RuntimeError("published archive failed source revalidation")
+                    self.killpoint("after_revalidate")
+                    self._remove_flat(daily_id, eligibility.source_sha256)
+                    self.killpoint("after_source_delete")
+                except BaseException:
+                    if not published:
+                        self._remove_build(publish_build)
+                    raise
+            finally:
+                queue.release_source_fence(fence.token)
             self.rebuild_index()
             return ArchiveReceipt(daily_id, eligibility.source_sha256, final_bag, "archived")
+
+    def _recover_daily(self, daily_id: str, digest: str) -> ArchiveReceipt | None:
+        exact: list[Path] = []
+        for path in self._archive_paths(hidden=False):
+            bag = validate_bag(path, coordinator=self.coordinator, vault=self.vault)
+            if bag.manifest["logical_daily_id"] != daily_id:
+                continue
+            if bag.manifest["source_hash"] == digest:
+                exact.append(path)
+            else:
+                self._quarantine(path, daily_id, str(bag.manifest["source_hash"]))
+        if not exact:
+            return None
+        keeper = exact[0]
+        for duplicate in exact[1:]:
+            self._quarantine(duplicate, daily_id, digest, reason="duplicate_exact_match")
+        queue = MemoryQueue(self.state_root)
+        fence = queue.acquire_source_fence(daily_id, digest)
+        try:
+            flat = self.daily_root / f"{daily_id}.md"
+            flat_bytes = read_stable_bytes(flat, MAX_DAILY_BYTES, label="daily duplicate")
+            if sha256_bytes(flat_bytes) != digest:
+                self._quarantine(keeper, daily_id, digest)
+                return None
+            self._remove_flat(daily_id, digest)
+        finally:
+            queue.release_source_fence(fence.token)
+        self.rebuild_index()
+        return ArchiveReceipt(daily_id, digest, keeper, "recovered")
 
     def _build_bag(
         self,
@@ -278,6 +364,7 @@ class DailyArchiver:
         else:
             month.mkdir()
             _regular_directory(month, label="daily archive month")
+            fsync_directory(self.archive_root)
         _harden_owner_only(month, 0o700)
         nonce = uuid.uuid4().hex
         stamp = now.strftime("%Y%m%dT%H%M%S%fZ")
@@ -285,9 +372,11 @@ class DailyArchiver:
         publish_build = month / f".bag-{daily_id}.building-{nonce}"
         publish_build.mkdir()
         _harden_owner_only(publish_build, 0o700)
+        fsync_directory(month)
         data = publish_build / "data"
         data.mkdir()
         _set_owner_only(data, 0o700)
+        fsync_directory(publish_build)
         payload_name = f"data/{daily_id}.md"
         payload = publish_build / payload_name
         payload.write_bytes(content)
@@ -295,8 +384,8 @@ class DailyArchiver:
         bagit = b"BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n"
         bag_info = (
             f"Bagging-Date: {now.date().isoformat()}\n"
-            f"External-Identifier: daily:{daily_id}\n"
             f"Payload-Oxum: {len(content)}.1\n"
+            f"External-Identifier: daily:{daily_id}\n"
         ).encode()
         (publish_build / "bagit.txt").write_bytes(bagit)
         (publish_build / "bag-info.txt").write_bytes(bag_info)
@@ -359,20 +448,24 @@ class DailyArchiver:
                 for name in tag_names
             ).encode()
         )
-        for path in sorted(item for item in publish_build.rglob("*") if item.is_file()):
+        for path in sorted(
+            item for item in self._bounded_tree(publish_build) if item.is_file()
+        ):
             _set_owner_only(path, 0o600)
             fsync_file(path)
         fsync_directory(data)
         fsync_directory(publish_build)
-        validate_bag(publish_build)
         self._seal(publish_build)
+        validate_bag(
+            publish_build, coordinator=self.coordinator, vault=self.vault
+        )
         return final_bag, publish_build
 
     def _remove_flat(self, daily_id: str, digest: str) -> None:
         relative = f"knowledge/daily/{daily_id}.md"
         transaction = self.coordinator.prepare(
             [MarkdownChange.delete(relative, max_before_bytes=MAX_DAILY_BYTES)],
-            operation_id=f"archive-remove:{digest}",
+            operation_id=f"archive-remove:{daily_id}:{digest}",
             preconditions={relative: digest},
         )
         self.coordinator.apply(transaction.id)
@@ -382,23 +475,44 @@ class DailyArchiver:
         if not self.archive_root.exists():
             return recovered
         _regular_directory(self.archive_root, label="daily archive root")
-        with self.coordinator.writer_gate():
+        with self.coordinator.writer_gate(wait_seconds=ARCHIVE_WRITER_WAIT_SECONDS):
             for hidden in self._archive_paths(hidden=True):
                 self._remove_build(hidden)
+            grouped: dict[tuple[str, str], list[Path]] = {}
             for path in self._archive_paths(hidden=False):
-                bag = validate_bag(path)
+                bag = validate_bag(
+                    path, coordinator=self.coordinator, vault=self.vault
+                )
                 daily_id = str(bag.manifest["logical_daily_id"])
                 digest = str(bag.manifest["source_hash"])
+                grouped.setdefault((daily_id, digest), []).append(path)
+            for (daily_id, digest), paths in sorted(grouped.items()):
                 flat = self.daily_root / f"{daily_id}.md"
                 if not flat.exists():
                     continue
                 flat_bytes = read_stable_bytes(flat, MAX_DAILY_BYTES, label="daily duplicate")
                 if sha256_bytes(flat_bytes) == digest:
-                    self._remove_flat(daily_id, digest)
-                    recovered.extend((ArchiveReceipt(daily_id, digest, path, "recovered"),))
+                    keeper = paths[0]
+                    for duplicate in paths[1:]:
+                        self._quarantine(
+                            duplicate,
+                            daily_id,
+                            digest,
+                            reason="duplicate_exact_match",
+                        )
+                    queue = MemoryQueue(self.state_root)
+                    fence = queue.acquire_source_fence(daily_id, digest)
+                    try:
+                        self._remove_flat(daily_id, digest)
+                    finally:
+                        queue.release_source_fence(fence.token)
+                    recovered.extend((ArchiveReceipt(daily_id, digest, keeper, "recovered"),))
                 else:
-                    self._quarantine(path, daily_id, digest)
-                    recovered.extend((ArchiveReceipt(daily_id, digest, path, "quarantined"),))
+                    for path in paths:
+                        self._quarantine(path, daily_id, digest)
+                        recovered.extend(
+                            (ArchiveReceipt(daily_id, digest, path, "quarantined"),)
+                        )
             self.rebuild_index()
         return recovered
 
@@ -406,7 +520,7 @@ class DailyArchiver:
         self._ensure_archive_root()
         bags = []
         for path in self._archive_paths(hidden=False):
-            bag = validate_bag(path)
+            bag = validate_bag(path, coordinator=self.coordinator, vault=self.vault)
             bags.append(
                 {
                     "bag_path": path.relative_to(self.vault).as_posix(),
@@ -432,18 +546,22 @@ class DailyArchiver:
         else:
             self.archive_root.mkdir()
             _regular_directory(self.archive_root, label="daily archive root")
+            fsync_directory(self.daily_root)
         _harden_owner_only(self.archive_root, 0o700)
 
     def _archive_paths(self, *, hidden: bool) -> list[Path]:
         self._ensure_archive_root()
         paths: list[Path] = []
-        for month in sorted(self.archive_root.iterdir()):
+        months = bounded_directory_entries(
+            self.archive_root, MAX_ARCHIVE_MONTHS, label="daily archive root"
+        )
+        for month in sorted(months):
             if re.fullmatch(r"\d{4}-\d{2}", month.name) is None:
                 continue
             _regular_directory(month, label="daily archive month")
-            entries = list(month.iterdir())
-            if len(entries) > 10_000:
-                raise ValueError("daily archive month exceeds the entry scan limit")
+            entries = bounded_directory_entries(
+                month, MAX_ARCHIVE_ENTRIES, label="daily archive month"
+            )
             for entry in sorted(entries):
                 matches = ".building-" in entry.name if hidden else entry.name.startswith("bag-")
                 if not matches:
@@ -453,25 +571,25 @@ class DailyArchiver:
         return paths
 
     def _queue_references(self, daily_id: str, digest: str) -> list[str]:
-        database = self.state_root / "run" / "queue.sqlite3"
-        if not database.exists():
-            return []
-        markers = (daily_id, digest, f"knowledge/daily/{daily_id}.md")
         try:
-            with sqlite3.connect(database) as connection:
-                rows = connection.execute(
-                    "SELECT id, payload_json FROM tasks WHERE state IN ('ready','leased','blocked')"
-                ).fetchall()
-        except sqlite3.Error:
+            return list(MemoryQueue(self.state_root).referencing_source_tasks(daily_id, digest))
+        except (OSError, QueueOperationError, sqlite3.Error):
             return ["queue-unreadable"]
-        return [str(row[0]) for row in rows if any(marker in str(row[1]) for marker in markers)]
 
     def _legacy_queue_references(self, daily_id: str, digest: str) -> bool:
         legacy = self.state_root / "run" / "queue"
         if not legacy.exists():
             return False
         markers = (daily_id.encode(), digest.encode())
-        for path in sorted((*legacy.glob("*.json"), *legacy.glob("*.processing"))):
+        try:
+            entries = bounded_directory_entries(
+                legacy, MAX_ARCHIVE_ENTRIES, label="legacy queue directory"
+            )
+        except (OSError, ValueError):
+            return True
+        for path in sorted(
+            entry for entry in entries if entry.suffix in {".json", ".processing"}
+        ):
             try:
                 raw = read_stable_bytes(path, MAX_POLICY_BYTES, label="legacy queue task")
             except (OSError, ValueError):
@@ -524,7 +642,15 @@ class DailyArchiver:
             f"daily:{daily_id} sha256:{digest}",
             f"knowledge/daily/{daily_id}.md",
         )
-        for path in sorted(notes.rglob("*.md")):
+        try:
+            note_paths = [
+                path
+                for path in self._bounded_tree(notes)
+                if path.suffix == ".md" and path.is_file()
+            ]
+        except (OSError, ValueError):
+            return True
+        for path in sorted(note_paths):
             try:
                 raw = read_stable_bytes(path, MAX_POLICY_BYTES, label="decision page")
                 text = raw.decode("utf-8", errors="strict")
@@ -553,13 +679,38 @@ class DailyArchiver:
             "source_hashes", []
         )
 
-    def _quarantine(self, bag: Path, daily_id: str, digest: str) -> None:
+    def _quarantine(
+        self,
+        bag: Path,
+        daily_id: str,
+        digest: str,
+        *,
+        reason: str = "duplicate_hash_mismatch",
+    ) -> None:
         target = self.state_root / "run" / "archive-quarantine"
-        target.mkdir(parents=True, exist_ok=True)
+        bags = target / "bags"
+        if not target.exists():
+            target.mkdir(parents=True)
+            _harden_owner_only(target, 0o700)
+            fsync_directory(target.parent)
+        _regular_directory(target, label="archive quarantine root")
+        if not bags.exists():
+            bags.mkdir()
+            _harden_owner_only(bags, 0o700)
+            fsync_directory(target)
+        _regular_directory(bags, label="archive quarantine bags")
+        destination = bags / bag.name
+        if destination.exists():
+            destination = bags / f"{bag.name}-{uuid.uuid4().hex}"
+        original = bag.relative_to(self.vault).as_posix()
+        bag.replace(destination)
+        fsync_directory(bag.parent)
+        fsync_directory(bags)
         record = {
-            "bag_path": bag.relative_to(self.vault).as_posix(),
+            "bag_path": original,
+            "quarantine_path": destination.relative_to(self.state_root).as_posix(),
             "logical_daily_id": daily_id,
-            "reason": "duplicate_hash_mismatch",
+            "reason": reason,
             "source_hash": digest,
         }
         path = target / f"{sha256_bytes(canonical_json_bytes(record))}.json"
@@ -570,34 +721,74 @@ class DailyArchiver:
 
     @staticmethod
     def _seal(root: Path) -> None:
-        for path in sorted(item for item in root.rglob("*") if item.is_file()):
-            try:
-                path.chmod(stat.S_IREAD)
-            except OSError:
-                pass
-        for path in sorted((item for item in root.rglob("*") if item.is_dir()), reverse=True):
-            try:
-                path.chmod(stat.S_IREAD | stat.S_IEXEC)
-            except OSError:
-                pass
+        paths = [*sorted(DailyArchiver._bounded_tree(root), reverse=True), root]
         try:
-            root.chmod(stat.S_IREAD | stat.S_IEXEC)
-        except OSError:
-            pass
+            for path in paths:
+                DailyArchiver._set_archive_read_only(path)
+        except (OSError, PermissionError) as exc:
+            raise PermissionError(f"archive seal failed: {exc}") from exc
+
+    @staticmethod
+    def _bounded_tree(root: Path) -> list[Path]:
+        found: list[Path] = []
+        pending = [Path(root)]
+        while pending:
+            parent = pending.pop()
+            for entry in bounded_directory_entries(
+                parent, MAX_ARCHIVE_ENTRIES, label="archive package directory"
+            ):
+                found.append(entry)
+                if len(found) > MAX_ARCHIVE_ENTRIES:
+                    raise ValueError("archive package exceeds the entry scan limit")
+                if entry.is_dir() and not entry.is_symlink():
+                    _regular_directory(entry, label="archive package directory")
+                    pending.append(entry)
+        return found
+
+    @staticmethod
+    def _set_archive_read_only(path: Path) -> None:
+        if os.name == "nt":
+            identity = _windows_acl_identity()
+            access = "(OI)(CI)(RX)" if path.is_dir() else "(R)"
+            changed = _run_acl_command(
+                [
+                    "icacls",
+                    str(path),
+                    "/inheritance:r",
+                    "/grant:r",
+                    f"{identity}:{access}",
+                ]
+            )
+            verified = _run_acl_command(["icacls", str(path)])
+            acl = _acl_output_text(verified.stdout)
+            acl_lines = [line.strip() for line in acl.splitlines() if ":(" in line]
+            if (
+                changed.returncode != 0
+                or verified.returncode != 0
+                or not acl_lines
+                or any(identity.casefold() not in line.casefold() for line in acl_lines)
+                or any(marker in acl for marker in ("(F)", "(M)", "(W)"))
+            ):
+                raise PermissionError("archive read-only ACL verification failed")
+        else:
+            mode = 0o500 if path.is_dir() else 0o400
+            path.chmod(mode)
+            if stat.S_IMODE(path.stat().st_mode) != mode:
+                raise PermissionError("archive read-only mode verification failed")
 
     @staticmethod
     def _remove_build(path: Path) -> None:
         if not path.exists():
             return
-        for item in path.rglob("*"):
-            try:
-                item.chmod(0o700 if item.is_dir() else 0o600)
-            except OSError:
-                pass
-        try:
+        entries = DailyArchiver._bounded_tree(path)
+        if os.name == "nt":
+            _harden_owner_only(path, 0o700)
+            for item in sorted(entries, key=lambda value: len(value.parts)):
+                _harden_owner_only(item, 0o700 if item.is_dir() else 0o600)
+        else:
             path.chmod(0o700)
-        except OSError:
-            pass
+            for item in entries:
+                item.chmod(0o700 if item.is_dir() else 0o600)
         shutil.rmtree(path)
 
 
@@ -617,7 +808,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     archiver = DailyArchiver(ROOT, STATE_ROOT)
     results: list[ArchiveReceipt] = []
-    for source in sorted(archiver.daily_root.glob("*.md")):
+    daily_entries = bounded_directory_entries(
+        archiver.daily_root, MAX_ARCHIVE_ENTRIES, label="flat daily directory"
+    )
+    for source in sorted(
+        entry for entry in daily_entries if entry.suffix == ".md" and entry.is_file()
+    ):
         status = archiver.eligible(
             source,
             hot_days=args.hot_days,

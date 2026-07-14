@@ -26,6 +26,7 @@ from memory_queue import (  # noqa: E402
     LeaseFenceError,
     MemoryQueue,
     QueueFailure,
+    QueueOperationError,
     ResultConflictError,
 )
 from reliable_memory import canonical_json_bytes, sha256_bytes  # noqa: E402
@@ -97,6 +98,63 @@ def test_enqueue_stores_closed_canonical_redacted_payload(queue: MemoryQueue) ->
         ).fetchone()[0]
     assert "payload" not in columns
     assert json.loads(stored) == task.payload
+
+
+@pytest.mark.parametrize("state", ["ready", "leased", "blocked", "dead"])
+def test_source_fence_rejects_every_referencing_non_success_state(
+    queue: MemoryQueue, state: str
+) -> None:
+    daily_id = "2026-01-01"
+    digest = "a" * 64
+    task_id = queue.enqueue(
+        "compile", 1, {"daily_id": daily_id, "source_digest": digest}
+    )
+    with sqlite3.connect(queue.db_path) as connection:
+        connection.execute("UPDATE tasks SET state=? WHERE id=?", (state, task_id))
+
+    with pytest.raises(QueueOperationError, match="source_referenced"):
+        queue.acquire_source_fence(daily_id, digest)
+
+
+def test_source_fence_atomically_blocks_enqueue_claim_and_redrive(
+    queue: MemoryQueue,
+) -> None:
+    daily_id = "2026-01-01"
+    digest = "b" * 64
+    fence = queue.acquire_source_fence(daily_id, digest)
+
+    with pytest.raises(QueueOperationError, match="source_fenced"):
+        queue.enqueue("compile", 1, {"daily_id": daily_id})
+    with pytest.raises(QueueOperationError, match="source_fenced"):
+        queue.enqueue("compile", 1, {"source_digest": digest})
+
+    # A legacy/external writer cannot make fenced work claimable.
+    payload = canonical_json_bytes({"daily_id": daily_id}).decode()
+    now = "2026-07-14T12:00:00.000000+00:00"
+    with sqlite3.connect(queue.db_path) as connection:
+        connection.execute(
+            """INSERT INTO tasks(
+                   id, kind, handler_version, payload_json, input_hash, state,
+                   priority, created_at, updated_at, available_at
+               ) VALUES ('injected', 'compile', 1, ?, ?, 'ready', 0, ?, ?, ?)""",
+            (payload, sha256_bytes(payload.encode()), now, now, now),
+        )
+    assert queue.claim("worker") is None
+
+    with sqlite3.connect(queue.db_path) as connection:
+        connection.execute("UPDATE tasks SET state='dead' WHERE id='injected'")
+    with pytest.raises(QueueOperationError, match="source_fenced"):
+        queue.redrive("injected")
+
+    queue.release_source_fence(fence.token)
+    assert queue.enqueue("compile", 1, {"daily_id": daily_id})
+
+
+def test_source_fence_requires_canonical_daily_and_digest(queue: MemoryQueue) -> None:
+    with pytest.raises(ValueError):
+        queue.acquire_source_fence("../2026-01-01", "a" * 64)
+    with pytest.raises(ValueError):
+        queue.acquire_source_fence("2026-01-01", "A" * 64)
 
 
 def test_enqueue_recursively_redacts_secret_keys_and_value_patterns(

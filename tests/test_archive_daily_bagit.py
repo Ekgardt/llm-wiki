@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import stat
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from markdown_transaction import MarkdownChange, MarkdownCoordinator  # noqa: E402
@@ -44,6 +47,11 @@ def archive_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path
         coordinator=MarkdownCoordinator(root, state_root),
         completed_at="2026-07-01T00:00:00Z",
     )
+    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as connection:
+        connection.execute(
+            'UPDATE "transaction" SET updated_at="2026-05-01T00:00:00Z" '
+            'WHERE operation_id LIKE "compile:%"'
+        )
     return root, state_root, daily
 
 
@@ -94,12 +102,10 @@ def test_eligibility_rejects_nonterminal_compile_operation(archive_vault) -> Non
     ("blocker", "reason"),
     [
         ("manual_pin", "manual_pin"),
-        ("failure", "failure"),
         ("decision", "decision_evidence"),
         ("queue", "queue_reference"),
         ("legacy_queue", "legacy_queue_reference"),
         ("transaction", "active_transaction"),
-        ("writer", "active_writer"),
     ],
 )
 def test_eligibility_rejects_every_live_or_pinned_reference(
@@ -112,10 +118,6 @@ def test_eligibility_rejects_every_live_or_pinned_reference(
     if blocker == "manual_pin":
         (state_root / "run" / "archive-pins.json").write_text(
             json.dumps({"daily_ids": [daily.stem], "source_hashes": []}), encoding="utf-8"
-        )
-    elif blocker == "failure":
-        (state_root / "run" / "archive-failures.json").write_text(
-            json.dumps({"daily_ids": [daily.stem]}), encoding="utf-8"
         )
     elif blocker == "decision":
         (root / "knowledge/notes/decision.md").write_text(
@@ -136,15 +138,49 @@ def test_eligibility_rejects_every_live_or_pinned_reference(
             operation_id="pending-daily-delete",
             preconditions={f"knowledge/daily/{daily.name}": digest},
         )
-    elif blocker == "writer":
-        with coordinator.writer_gate():
-            result = _archiver(root, state_root).eligible(daily, hot_days=90)
-            assert reason in result.reasons
-            return
-
     result = _archiver(root, state_root).eligible(daily, hot_days=90)
     assert not result.eligible
     assert reason in result.reasons
+
+
+def test_eligibility_is_bounded_by_active_writer(archive_vault) -> None:
+    root, state_root, daily = archive_vault
+    coordinator = MarkdownCoordinator(root, state_root)
+    with coordinator.writer_gate():
+        with pytest.raises(TimeoutError, match="writer gate"):
+            _archiver(root, state_root).eligible(daily, hot_days=90)
+
+
+def test_recent_compile_receipt_transaction_pins_source_for_undo(archive_vault) -> None:
+    root, state_root, daily = archive_vault
+    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as connection:
+        connection.execute(
+            'UPDATE "transaction" SET updated_at="2026-07-14T11:00:00Z" '
+            'WHERE operation_id LIKE "compile:%"'
+        )
+
+    result = _archiver(root, state_root).eligible(
+        daily, hot_days=90, transaction_retention_days=30
+    )
+
+    assert not result.eligible
+    assert "transaction_retention" in result.reasons
+
+
+def test_dead_queue_reference_pins_source(archive_vault) -> None:
+    from memory_queue import MemoryQueue
+
+    root, state_root, daily = archive_vault
+    digest = sha256_bytes(daily.read_bytes())
+    queue = MemoryQueue(state_root)
+    task_id = queue.enqueue("compile", 1, {"daily_id": daily.stem, "digest": digest})
+    with sqlite3.connect(queue.db_path) as connection:
+        connection.execute("UPDATE tasks SET state='dead' WHERE id=?", (task_id,))
+
+    result = _archiver(root, state_root).eligible(daily, hot_days=90)
+
+    assert not result.eligible
+    assert "queue_reference" in result.reasons
 
 
 def test_archive_publishes_complete_valid_bag_then_transactionally_removes_source(
@@ -159,13 +195,22 @@ def test_archive_publishes_complete_valid_bag_then_transactionally_removes_sourc
 
     assert receipt.state == "archived"
     assert not daily.exists()
-    bag = validate_bag(receipt.bag_path)
+    bag = validate_bag(
+        receipt.bag_path,
+        coordinator=MarkdownCoordinator(root, state_root),
+        vault=root,
+    )
     assert bag.manifest["logical_daily_id"] == daily.stem
     assert bag.manifest["source_hash"] == digest
     assert bag.manifest["payload_hash"] == digest
     assert bag.manifest["queue_preflight"]["passed"] is True
     assert bag.manifest["retention_days"] == 90
     assert bag.manifest["operations"][0]["state"] == "succeeded"
+    assert (receipt.bag_path / "bag-info.txt").read_bytes() == (
+        b"Bagging-Date: 2026-07-14\n"
+        + f"Payload-Oxum: {len(source)}.1\n".encode()
+        + b"External-Identifier: daily:2026-01-01\n"
+    )
     assert not list(receipt.bag_path.parent.glob(".*.building-*"))
     assert not list(receipt.bag_path.rglob("*.gz"))
     if os.name == "posix":
@@ -180,7 +225,98 @@ def test_archive_publishes_complete_valid_bag_then_transactionally_removes_sourc
         evidence["byte_start"],
         evidence["byte_end"],
     )
-    assert EvidenceResolver(root).resolve(ref).bytes == source[evidence["byte_start"] :]
+    assert EvidenceResolver(root, state_root=state_root).resolve(ref).bytes == source[
+        evidence["byte_start"] :
+    ]
+    coordinator = MarkdownCoordinator(root, state_root)
+    removal = coordinator._record_for_operation_id(
+        f"archive-remove:{daily.stem}:{digest}"
+    )
+    assert removal is not None and removal.state == "committed"
+
+
+def test_bag_validation_rechecks_receipt_hash_and_transaction_authority(
+    archive_vault,
+) -> None:
+    from evidence_resolver import EvidenceResolutionError, validate_bag
+
+    root, state_root, daily = archive_vault
+    receipt = _archiver(root, state_root).archive(daily.stem)
+    coordinator = MarkdownCoordinator(root, state_root)
+    digest = receipt.source_sha256
+    copy = root / "receipt-authority-copy"
+    shutil.copytree(receipt.bag_path, copy)
+    receipt_path = root / f"knowledge/daily/receipts/{digest}.md"
+    receipt_path.write_bytes(receipt_path.read_bytes() + b"tampered")
+    manifest_path = copy / "archive-manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest["compile_receipt_ref"]["receipt_file_hash"] = sha256_bytes(
+        receipt_path.read_bytes()
+    )
+    from reliable_memory import canonical_json_bytes
+
+    manifest_path.write_bytes(canonical_json_bytes(manifest))
+    tags = ("archive-manifest.json", "bag-info.txt", "bagit.txt", "manifest-sha256.txt")
+    (copy / "tagmanifest-sha256.txt").write_bytes(
+        "".join(
+            f"{sha256_bytes((copy / name).read_bytes())}  {name}\n" for name in tags
+        ).encode()
+    )
+    from archive_daily import DailyArchiver
+
+    DailyArchiver._seal(copy)
+
+    with pytest.raises(EvidenceResolutionError, match="authoritative"):
+        validate_bag(copy, coordinator=coordinator, vault=root)
+
+
+def test_bag_info_requires_exact_fields_order_and_no_duplicates(archive_vault) -> None:
+    from archive_daily import DailyArchiver
+    from evidence_resolver import EvidenceResolutionError, validate_bag
+
+    root, state_root, daily = archive_vault
+    archived = _archiver(root, state_root).archive(daily.stem)
+    copy = root / "bag-info-copy"
+    shutil.copytree(archived.bag_path, copy)
+    info = copy / "bag-info.txt"
+    info.write_bytes(info.read_bytes() + b"External-Identifier: daily:2026-01-01\n")
+    tags = ("archive-manifest.json", "bag-info.txt", "bagit.txt", "manifest-sha256.txt")
+    (copy / "tagmanifest-sha256.txt").write_bytes(
+        "".join(
+            f"{sha256_bytes((copy / name).read_bytes())}  {name}\n" for name in tags
+        ).encode()
+    )
+    DailyArchiver._seal(copy)
+
+    with pytest.raises(EvidenceResolutionError, match="bag info"):
+        validate_bag(
+            copy,
+            coordinator=MarkdownCoordinator(root, state_root),
+            vault=root,
+        )
+
+
+def test_bag_validation_rejects_any_writable_member(
+    archive_vault, monkeypatch
+) -> None:
+    import evidence_resolver
+
+    root, state_root, daily = archive_vault
+    receipt = _archiver(root, state_root).archive(daily.stem)
+    payload = receipt.bag_path / f"data/{daily.name}"
+    original = evidence_resolver._archive_path_is_read_only
+    monkeypatch.setattr(
+        evidence_resolver,
+        "_archive_path_is_read_only",
+        lambda path: False if path == payload else original(path),
+    )
+
+    with pytest.raises(evidence_resolver.EvidenceResolutionError, match="immutable"):
+        evidence_resolver.validate_bag(
+            receipt.bag_path,
+            coordinator=MarkdownCoordinator(root, state_root),
+            vault=root,
+        )
 
 
 def test_archive_index_is_canonical_deterministic_and_derived(archive_vault) -> None:
@@ -202,6 +338,22 @@ def test_archive_index_is_canonical_deterministic_and_derived(archive_vault) -> 
     }
 
 
+def test_archiver_bounds_month_iteration_before_filtering(
+    archive_vault, monkeypatch
+) -> None:
+    import archive_daily
+
+    root, state_root, _daily = archive_vault
+    month = root / "knowledge/daily/archive/2026-01"
+    month.mkdir(parents=True)
+    (month / "unrelated-one").mkdir()
+    (month / "unrelated-two").mkdir()
+    monkeypatch.setattr(archive_daily, "MAX_ARCHIVE_ENTRIES", 1)
+
+    with pytest.raises(ValueError, match="entry scan limit"):
+        _archiver(root, state_root)._archive_paths(hidden=False)
+
+
 def test_archive_refuses_linked_archive_boundary_before_writing_outside(
     archive_vault,
 ) -> None:
@@ -219,6 +371,28 @@ def test_archive_refuses_linked_archive_boundary_before_writing_outside(
     assert list(outside.iterdir()) == []
 
 
+def test_archive_rejects_mocked_windows_reparse_boundary(
+    archive_vault, monkeypatch
+) -> None:
+    root, state_root, daily = archive_vault
+    archive_root = root / "knowledge/daily/archive"
+    archive_root.mkdir()
+    original = Path.lstat
+
+    def reparse(path: Path):
+        result = original(path)
+        if path == archive_root:
+            return SimpleNamespace(
+                st_mode=result.st_mode,
+                st_file_attributes=0x400,
+            )
+        return result
+
+    monkeypatch.setattr(Path, "lstat", reparse)
+    with pytest.raises(PermissionError, match="non-symlink"):
+        _archiver(root, state_root).archive(daily.stem)
+
+
 @pytest.mark.parametrize("killpoint", ["after_build", "before_publish_rename"])
 def test_kill_before_atomic_publish_never_exposes_final_bag(
     archive_vault, killpoint: str
@@ -233,6 +407,26 @@ def test_kill_before_atomic_publish_never_exposes_final_bag(
         _archiver(root, state_root, killpoint=crash).archive(daily.stem)
     assert daily.exists()
     assert not list((root / "knowledge/daily/archive").rglob("bag-*"))
+
+
+def test_windows_sharing_failure_keeps_source_and_releases_queue_fence(
+    archive_vault, monkeypatch
+) -> None:
+    from memory_queue import MemoryQueue
+
+    root, state_root, daily = archive_vault
+    original_replace = Path.replace
+
+    def sharing_failure(path: Path, target: Path):
+        if ".building-" in path.name:
+            raise PermissionError(32, "sharing violation", str(path))
+        return original_replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", sharing_failure)
+    with pytest.raises(PermissionError, match="sharing violation"):
+        _archiver(root, state_root).archive(daily.stem)
+    assert daily.exists()
+    assert MemoryQueue(state_root).enqueue("compile", 1, {"daily_id": daily.stem})
 
 
 def test_recovery_finishes_identical_duplicate_after_publish_crash(archive_vault) -> None:
@@ -252,6 +446,53 @@ def test_recovery_finishes_identical_duplicate_after_publish_crash(archive_vault
     recovered = _archiver(root, state_root).recover()
     assert [item.state for item in recovered] == ["recovered"]
     assert not daily.exists()
+
+
+def test_archive_starts_with_recovery_and_reuses_exact_published_bag(
+    archive_vault,
+) -> None:
+    root, state_root, daily = archive_vault
+
+    def crash(point: str) -> None:
+        if point == "after_publish_rename":
+            raise RuntimeError("crash")
+
+    with pytest.raises(RuntimeError):
+        _archiver(root, state_root, killpoint=crash).archive(daily.stem)
+    original = next(
+        path for path in (root / "knowledge/daily/archive").rglob("bag-*") if path.is_dir()
+    )
+
+    result = _archiver(root, state_root).archive(daily.stem)
+
+    assert result.bag_path == original
+    assert result.state == "recovered"
+    assert len(_archiver(root, state_root)._archive_paths(hidden=False)) == 1
+
+
+def test_recovery_reduces_exact_duplicate_bags_to_one_active_copy(archive_vault) -> None:
+    root, state_root, daily = archive_vault
+
+    def crash(point: str) -> None:
+        if point == "after_publish_rename":
+            raise RuntimeError("crash")
+
+    with pytest.raises(RuntimeError):
+        _archiver(root, state_root, killpoint=crash).archive(daily.stem)
+    bag = next(
+        path for path in (root / "knowledge/daily/archive").rglob("bag-*") if path.is_dir()
+    )
+    duplicate = bag.parent / f"bag-duplicate-{daily.stem}"
+    shutil.copytree(bag, duplicate)
+    from archive_daily import DailyArchiver
+
+    DailyArchiver._seal(duplicate)
+
+    _archiver(root, state_root).archive(daily.stem)
+
+    assert len(_archiver(root, state_root)._archive_paths(hidden=False)) == 1
+    quarantined = state_root / "run/archive-quarantine/bags"
+    assert any(path.is_dir() for path in quarantined.iterdir())
 
 
 @pytest.mark.parametrize("killpoint", ["after_revalidate", "after_source_delete"])
@@ -296,10 +537,118 @@ def test_recovery_quarantines_mismatched_duplicate_and_deletes_neither(archive_v
     recovered = _archiver(root, state_root).recover()
     assert [item.state for item in recovered] == ["quarantined"]
     assert daily.exists()
-    assert bag.exists()
+    assert not bag.exists()
+    moved = state_root / "run/archive-quarantine/bags" / bag.name
+    assert moved.is_dir()
     records = list((state_root / "run/archive-quarantine").glob("*.json"))
     assert len(records) == 1
     assert json.loads(records[0].read_bytes())["reason"] == "duplicate_hash_mismatch"
+
+
+@pytest.mark.parametrize("failure_point", ["after_publish_rename", "after_source_delete"])
+def test_archive_holds_queue_source_fence_until_failure_cleanup(
+    archive_vault, failure_point: str
+) -> None:
+    from memory_queue import MemoryQueue, QueueOperationError
+
+    root, state_root, daily = archive_vault
+    queue = MemoryQueue(state_root)
+
+    def inspect(point: str) -> None:
+        if point == failure_point:
+            with pytest.raises(QueueOperationError, match="source_fenced"):
+                queue.enqueue("compile", 1, {"daily_id": daily.stem})
+            raise RuntimeError("crash")
+
+    with pytest.raises(RuntimeError):
+        _archiver(root, state_root, killpoint=inspect).archive(daily.stem)
+
+    assert queue.enqueue("compile", 1, {"daily_id": daily.stem})
+
+
+def test_eligible_runs_inside_writer_gate(archive_vault, monkeypatch) -> None:
+    root, state_root, daily = archive_vault
+    archiver = _archiver(root, state_root)
+    entered = 0
+    original = archiver.coordinator.writer_gate
+
+    @contextmanager
+    def observed_gate(*, wait_seconds=None):
+        nonlocal entered
+        entered += 1
+        with original(wait_seconds=wait_seconds):
+            yield
+
+    monkeypatch.setattr(archiver.coordinator, "writer_gate", observed_gate)
+    assert archiver.eligible(daily, hot_days=90).eligible
+    assert entered == 1
+
+
+def test_sealing_and_parent_fsync_fail_closed(archive_vault, monkeypatch) -> None:
+    import archive_daily
+
+    root, state_root, daily = archive_vault
+    synced: list[Path] = []
+    original_sync = archive_daily.fsync_directory
+
+    def record_sync(path: Path) -> None:
+        synced.append(Path(path))
+        original_sync(path)
+
+    monkeypatch.setattr(archive_daily, "fsync_directory", record_sync)
+    result = _archiver(root, state_root).archive(daily.stem)
+    assert root / "knowledge/daily" in synced
+    assert root / "knowledge/daily/archive" in synced
+    assert result.bag_path.parent in synced
+
+    build = root / "seal-failure"
+    build.mkdir()
+    file = build / "payload"
+    file.write_bytes(b"x")
+    original_seal = archive_daily.DailyArchiver._set_archive_read_only
+
+    def fail_seal(path: Path) -> None:
+        if path == file:
+            raise OSError("denied")
+        original_seal(path)
+
+    monkeypatch.setattr(
+        archive_daily.DailyArchiver,
+        "_set_archive_read_only",
+        staticmethod(fail_seal),
+    )
+    with pytest.raises(PermissionError, match="seal"):
+        archive_daily.DailyArchiver._seal(build)
+
+
+def test_windows_read_only_acl_is_verified_and_fail_closed(tmp_path, monkeypatch) -> None:
+    import archive_daily
+
+    path = tmp_path / "bag"
+    path.mkdir()
+    monkeypatch.setattr(archive_daily.os, "name", "nt")
+    monkeypatch.setattr(archive_daily, "_windows_acl_identity", lambda: "DOMAIN\\owner")
+    calls = []
+
+    def acl(command):
+        calls.append(command)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=b"bag DOMAIN\\owner:(OI)(CI)(RX)\r\n",
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(archive_daily, "_run_acl_command", acl)
+    archive_daily.DailyArchiver._set_archive_read_only(path)
+    assert any("DOMAIN\\owner:(OI)(CI)(RX)" in part for part in calls[0])
+
+    monkeypatch.setattr(
+        archive_daily,
+        "_run_acl_command",
+        lambda command: SimpleNamespace(returncode=1, stdout=b"", stderr=b"denied"),
+    )
+    with pytest.raises(PermissionError, match="ACL"):
+        archive_daily.DailyArchiver._set_archive_read_only(path)
 
 
 def test_cli_exposes_hot_and_transaction_retention_flags() -> None:

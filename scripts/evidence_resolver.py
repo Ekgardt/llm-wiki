@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import stat
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 from bounded_io import read_stable_bytes
@@ -14,16 +16,17 @@ MAX_DAILY_BYTES = 16 * 1024 * 1024
 MAX_ARCHIVE_MANIFEST_BYTES = 1024 * 1024
 MAX_TAG_FILE_BYTES = 1024 * 1024
 MAX_BAGS_PER_MONTH = 10_000
+MAX_DIRECTORY_ENTRIES = 10_000
 ARCHIVE_SCHEMA = Path(__file__).with_name("schemas") / "archive-manifest-v1.json"
+_DAILY_ID_PATTERN = r"\d{4}-\d{2}-\d{2}"
+_SHA256_PATTERN = r"[0-9a-f]{64}"
+_BLOCK_ID_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}"
+_BLOCK_ID_RE = re.compile(_BLOCK_ID_PATTERN)
 _REF_RE = re.compile(
-    r"daily:(?P<daily>\d{4}-\d{2}-\d{2}) "
-    r"sha256:(?P<sha>[0-9a-f]{64}) "
-    r"block:(?P<block>[A-Za-z0-9][A-Za-z0-9._:-]{0,199}) "
+    rf"daily:(?P<daily>{_DAILY_ID_PATTERN}) "
+    rf"sha256:(?P<sha>{_SHA256_PATTERN}) "
+    rf"block:(?P<block>{_BLOCK_ID_PATTERN}) "
     r"bytes:(?P<start>0|[1-9]\d*)-(?P<end>0|[1-9]\d*)"
-)
-_REF_SEARCH_RE = re.compile(
-    r"daily:\d{4}-\d{2}-\d{2} sha256:[0-9a-f]{64} "
-    r"block:[A-Za-z0-9][A-Za-z0-9._:-]{0,199} bytes:(?:0|[1-9]\d*)-(?:0|[1-9]\d*)"
 )
 _HEADER_RE = re.compile(rb"(?m)^## \[([^\]\r\n]+)\][^\r\n]*(?:\r?\n|$)")
 _HASH_LINE_RE = re.compile(r"([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._/-]*)\n")
@@ -41,6 +44,32 @@ class EvidenceRef:
     byte_start: int
     byte_end: int
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.daily_id, str) or re.fullmatch(
+            _DAILY_ID_PATTERN, self.daily_id
+        ) is None:
+            raise ValueError("evidence daily ID is invalid")
+        try:
+            if date.fromisoformat(self.daily_id).isoformat() != self.daily_id:
+                raise ValueError
+        except ValueError as exc:
+            raise ValueError("evidence daily ID is invalid") from exc
+        if not isinstance(self.source_sha256, str) or re.fullmatch(
+            _SHA256_PATTERN, self.source_sha256
+        ) is None:
+            raise ValueError("evidence SHA-256 is invalid")
+        if not isinstance(self.block_id, str) or _BLOCK_ID_RE.fullmatch(self.block_id) is None:
+            raise ValueError("evidence block ID is invalid")
+        if (
+            not isinstance(self.byte_start, int)
+            or isinstance(self.byte_start, bool)
+            or not isinstance(self.byte_end, int)
+            or isinstance(self.byte_end, bool)
+            or self.byte_start < 0
+            or self.byte_start >= self.byte_end
+        ):
+            raise ValueError("evidence byte span must be non-empty and half-open")
+
     @classmethod
     def parse(cls, value: str) -> EvidenceRef:
         if not isinstance(value, str):
@@ -48,18 +77,13 @@ class EvidenceRef:
         match = _REF_RE.fullmatch(value)
         if match is None:
             raise ValueError("evidence reference is not canonical")
-        start, end = int(match["start"]), int(match["end"])
-        if start >= end:
-            raise ValueError("evidence byte span must be non-empty and half-open")
-        try:
-            from datetime import datetime
-
-            parsed = datetime.strptime(match["daily"], "%Y-%m-%d")
-        except ValueError as exc:
-            raise ValueError("evidence daily ID is invalid") from exc
-        if parsed.strftime("%Y-%m-%d") != match["daily"]:
-            raise ValueError("evidence daily ID is not canonical")
-        return cls(match["daily"], match["sha"], match["block"], start, end)
+        return cls(
+            match["daily"],
+            match["sha"],
+            match["block"],
+            int(match["start"]),
+            int(match["end"]),
+        )
 
     def __str__(self) -> str:
         return (
@@ -101,6 +125,41 @@ def _regular_directory(path: Path, *, label: str) -> None:
         raise PermissionError(f"{label} must be a regular non-symlink directory")
 
 
+def bounded_directory_entries(
+    path: Path, max_entries: int, *, label: str
+) -> list[Path]:
+    entries: list[Path] = []
+    for entry in Path(path).iterdir():
+        entries.append(entry)
+        if len(entries) > max_entries:
+            raise EvidenceResolutionError(f"{label} exceeds the entry scan limit")
+    return entries
+
+
+def _archive_path_is_read_only(path: Path) -> bool:
+    if os.name == "nt":
+        from markdown_transaction import (
+            _acl_output_text,
+            _run_acl_command,
+            _windows_acl_identity,
+        )
+
+        verified = _run_acl_command(["icacls", str(path)])
+        if verified.returncode != 0:
+            return False
+        identity = _windows_acl_identity()
+        acl = _acl_output_text(verified.stdout)
+        lines = [line.strip() for line in acl.splitlines() if ":(" in line]
+        return bool(lines) and all(
+            identity.casefold() in line.casefold() for line in lines
+        ) and not any(marker in acl for marker in ("(F)", "(M)", "(W)"))
+    expected = 0o500 if path.is_dir() else 0o400
+    try:
+        return stat.S_IMODE(path.stat(follow_symlinks=False).st_mode) == expected
+    except OSError:
+        return False
+
+
 def _parse_hash_file(raw: bytes, *, label: str) -> dict[str, str]:
     try:
         text = raw.decode("utf-8", errors="strict")
@@ -127,6 +186,8 @@ def _blocks(content: bytes) -> list[tuple[str, int, int]]:
             block_id = match[1].decode("utf-8", errors="strict")
         except UnicodeDecodeError as exc:
             raise EvidenceResolutionError("daily block ID is not UTF-8") from exc
+        if _BLOCK_ID_RE.fullmatch(block_id) is None:
+            raise EvidenceResolutionError("daily block ID is invalid")
         end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
         blocks.append((block_id, match.start(), end))
     return blocks
@@ -136,7 +197,12 @@ def _line_span(content: bytes, start: int, end: int) -> tuple[int, int]:
     return content[:start].count(b"\n") + 1, content[: end - 1].count(b"\n") + 2
 
 
-def validate_bag(path: Path) -> ValidatedBag:
+def validate_bag(
+    path: Path,
+    *,
+    coordinator: object | None = None,
+    vault: Path | None = None,
+) -> ValidatedBag:
     """Validate a complete, sealed BagIt daily package without following links."""
     path = Path(path)
     try:
@@ -149,7 +215,10 @@ def validate_bag(path: Path) -> ValidatedBag:
             "manifest-sha256.txt",
             "tagmanifest-sha256.txt",
         }
-        if {item.name for item in path.iterdir()} != expected:
+        if {
+            item.name
+            for item in bounded_directory_entries(path, 6, label="archive bag")
+        } != expected:
             raise EvidenceResolutionError("archive bag members are not canonical")
         _regular_directory(path / "data", label="archive payload directory")
         bagit = read_stable_bytes(path / "bagit.txt", 256, label="bagit tag")
@@ -170,7 +239,9 @@ def validate_bag(path: Path) -> ValidatedBag:
         if manifest["original_path"] != f"knowledge/daily/{daily_id}.md":
             raise EvidenceResolutionError("archive original path is invalid")
         payload_name = f"data/{daily_id}.md"
-        payload_entries = list((path / "data").iterdir())
+        payload_entries = bounded_directory_entries(
+            path / "data", 1, label="archive payload directory"
+        )
         if len(payload_entries) != 1 or payload_entries[0].name != f"{daily_id}.md":
             raise EvidenceResolutionError("archive payload members are not canonical")
         payload = read_stable_bytes(
@@ -194,6 +265,29 @@ def validate_bag(path: Path) -> ValidatedBag:
             or receipt_ref["source_digest"] != payload_hash
         ):
             raise EvidenceResolutionError("archive compile receipt reference is invalid")
+        if coordinator is None or vault is None:
+            raise EvidenceResolutionError("archive receipt authority is required")
+        receipt_path = Path(vault) / str(receipt_ref["path"])
+        receipt_bytes = read_stable_bytes(
+            receipt_path, MAX_ARCHIVE_MANIFEST_BYTES, label="archive compile receipt"
+        )
+        if sha256_bytes(receipt_bytes) != receipt_ref["receipt_file_hash"]:
+            raise EvidenceResolutionError("archive compile receipt hash mismatch")
+        try:
+            from compile_memory import read_compile_receipt
+
+            receipt = read_compile_receipt(
+                payload_hash,
+                coordinator,  # type: ignore[arg-type]
+                path=receipt_path,
+                vault=Path(vault),
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise EvidenceResolutionError("archive compile receipt is not authoritative") from exc
+        if receipt is None or manifest["operations"] != [
+            {"operation_id": receipt["operation_id"], "state": "succeeded"}
+        ]:
+            raise EvidenceResolutionError("archive compile receipt operation mismatch")
         if not manifest["operations"] or any(
             item["state"] not in {"succeeded", "dead", "cancelled"}
             for item in manifest["operations"]
@@ -236,7 +330,20 @@ def validate_bag(path: Path) -> ValidatedBag:
         ) != canonical_tags:
             raise EvidenceResolutionError("archive tag manifest is not canonical")
         bag_info = read_stable_bytes(path / "bag-info.txt", 4096, label="bag info")
-        if f"External-Identifier: daily:{daily_id}\n".encode() not in bag_info:
+        try:
+            bagging_date = date.fromisoformat(
+                bag_info.decode("utf-8", errors="strict").splitlines()[0].removeprefix(
+                    "Bagging-Date: "
+                )
+            ).isoformat()
+        except (IndexError, UnicodeDecodeError, ValueError) as exc:
+            raise EvidenceResolutionError("archive bag info is invalid") from exc
+        expected_bag_info = (
+            f"Bagging-Date: {bagging_date}\n"
+            f"Payload-Oxum: {len(payload)}.1\n"
+            f"External-Identifier: daily:{daily_id}\n"
+        ).encode()
+        if bag_info != expected_bag_info:
             raise EvidenceResolutionError("archive bag info is invalid")
         block_map = {block_id: (start, end) for block_id, start, end in _blocks(payload)}
         if len(block_map) != len(_blocks(payload)):
@@ -256,6 +363,14 @@ def validate_bag(path: Path) -> ValidatedBag:
                 != _line_span(payload, start, end)
             ):
                 raise EvidenceResolutionError("archive evidence hash or line span mismatch")
+        immutable_paths = [
+            path,
+            path / "data",
+            path / payload_name,
+            *(path / name for name in expected if name != "data"),
+        ]
+        if any(not _archive_path_is_read_only(item) for item in immutable_paths):
+            raise EvidenceResolutionError("archive bag is not immutable")
         return ValidatedBag(path, manifest, path / payload_name, payload)
     except EvidenceResolutionError:
         raise
@@ -264,8 +379,9 @@ def validate_bag(path: Path) -> ValidatedBag:
 
 
 class EvidenceResolver:
-    def __init__(self, vault: Path):
+    def __init__(self, vault: Path, *, state_root: Path | None = None):
         self.vault = Path(vault).resolve(strict=True)
+        self.state_root = state_root
         self.daily_root = self.vault / "knowledge" / "daily"
         self.archive_root = self.daily_root / "archive"
 
@@ -307,12 +423,25 @@ class EvidenceResolver:
         try:
             _regular_directory(self.archive_root, label="archive root")
             _regular_directory(month, label="archive month")
-            candidates = sorted(item for item in month.iterdir() if item.name.startswith("bag-"))
+            entries = bounded_directory_entries(
+                month, MAX_DIRECTORY_ENTRIES, label="archive month"
+            )
+            candidates = sorted(item for item in entries if item.name.startswith("bag-"))
             if len(candidates) > MAX_BAGS_PER_MONTH:
                 raise EvidenceResolutionError("archive month exceeds the bag scan limit")
             matches: list[ValidatedBag] = []
             for candidate in candidates:
-                bag = validate_bag(candidate)
+                if self.state_root is None:
+                    from memory_state import STATE_ROOT
+
+                    self.state_root = Path(STATE_ROOT)
+                from markdown_transaction import MarkdownCoordinator
+
+                bag = validate_bag(
+                    candidate,
+                    coordinator=MarkdownCoordinator(self.vault, self.state_root),
+                    vault=self.vault,
+                )
                 if bag.manifest["logical_daily_id"] != ref.daily_id:
                     continue
                 if bag.manifest["source_hash"] != ref.source_sha256:
@@ -366,7 +495,30 @@ class EvidenceResolver:
 
 
 def extract_evidence_references(text: str) -> list[EvidenceRef]:
-    """Extract canonical logical references in stable source order."""
+    """Parse every ``daily:`` candidate instead of skipping malformed references."""
     if not isinstance(text, str):
         raise TypeError("evidence source text must be a string")
-    return [EvidenceRef.parse(match.group(0)) for match in _REF_SEARCH_RE.finditer(text)]
+    references: list[EvidenceRef] = []
+    for line in text.splitlines():
+        cursor = 0
+        while True:
+            start = line.find("daily:", cursor)
+            if start < 0:
+                break
+            if start and (line[start - 1].isalnum() or line[start - 1] == "_"):
+                raise ValueError("evidence reference has an invalid prefix")
+            quoted = start > 0 and line[start - 1] == "`"
+            if quoted:
+                end = line.find("`", start)
+                if end < 0:
+                    raise ValueError("evidence reference has no closing delimiter")
+                candidate = line[start:end]
+                cursor = end + 1
+            else:
+                candidate = line[start:].strip()
+                cursor = len(line)
+            try:
+                references.append(EvidenceRef.parse(candidate))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"evidence reference is not canonical: {candidate}") from exc
+    return references
