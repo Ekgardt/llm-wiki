@@ -21,6 +21,10 @@ from compile_cache import (
 from reliable_memory import canonical_json_bytes, sha256_bytes
 
 
+def _accept_application(plan) -> bool:
+    return True
+
+
 def _plan(*operations) -> dict[str, object]:
     return {
         "schema_version": COMPILE_PLAN_SCHEMA_VERSION,
@@ -208,32 +212,13 @@ def test_same_provider_different_effective_endpoints_produce_distinct_keys(tmp_p
     assert first_key != second_key
 
 
-def test_endpoint_credentials_and_query_never_reach_canonical_or_cache_files(
-    tmp_path, monkeypatch
-):
+def test_rejected_endpoint_credentials_never_create_cache_files(tmp_path, monkeypatch):
     raw = "https://user:password@private.example/v1?api_key=secret#fragment"
     monkeypatch.setenv("MEMORY_LLM_BASE_URL", raw)
-    provider = llm_client.provider_candidates("openai", max_tokens=321)[0]
-    call = _call(
-        provider=provider.provider,
-        model=provider.model,
-        capabilities=provider.capabilities,
-        inference_settings=provider.inference_settings,
-        structured_output="native",
-    )
-    cache = CompileCache(tmp_path)
-    action = _action(draft_calls=(call,), critique_calls=())
 
-    path = cache.put(action, _plan())
-    serialized = (
-        canonical_json_bytes(provider.canonical())
-        + canonical_json_bytes(action.canonical())
-        + path.read_bytes()
-        + path.name.encode()
-    )
-
-    for secret in (b"user", b"password", b"api_key", b"secret", b"fragment"):
-        assert secret not in serialized
+    with pytest.raises(ValueError, match="must not contain"):
+        llm_client.provider_candidates("openai", max_tokens=321)
+    assert not (tmp_path / "cache" / "compile").exists()
 
 
 def test_restored_preferred_provider_does_not_hit_fallback_cache(tmp_path):
@@ -250,8 +235,8 @@ def test_restored_preferred_provider_does_not_hit_fallback_cache(tmp_path):
     preferred = _action()
     cache.put(fallback, _plan())
 
-    assert cache.get(preferred) is None
-    assert cache.get(fallback) == _plan()
+    assert cache.get(preferred, _accept_application) is None
+    assert cache.get(fallback, _accept_application) == _plan()
 
 
 def test_unknown_model_disables_persistent_key_and_write(tmp_path):
@@ -320,7 +305,7 @@ def test_broadened_acl_cache_hit_fails_closed(tmp_path, monkeypatch):
     cache.put(action, _plan())
     monkeypatch.setattr(compile_cache, "_is_owner_only", lambda path, mode: False)
 
-    assert cache.get(action) is None
+    assert cache.get(action, _accept_application) is None
 
 
 def test_remote_state_root_rejects_write_and_hit(tmp_path, monkeypatch):
@@ -330,7 +315,7 @@ def test_remote_state_root_rejects_write_and_hit(tmp_path, monkeypatch):
 
     with pytest.raises(PermissionError, match="local state root"):
         cache.put(action, _plan())
-    assert cache.get(action) is None
+    assert cache.get(action, _accept_application) is None
 
 
 def test_empty_successful_plan_is_cached_and_validator_runs_on_every_hit(tmp_path):
@@ -370,7 +355,7 @@ def test_digest_tamper_and_validator_rejection_fail_closed(tmp_path):
     )
     path.write_bytes(canonical_json_bytes(record))
 
-    assert cache.get(action) is None
+    assert cache.get(action, _accept_application) is None
 
     cache.put(action, _plan())
     assert cache.get(action, lambda plan: False) is None
@@ -387,11 +372,13 @@ def test_validator_exception_on_hit_fails_closed(tmp_path):
     assert cache.get(action, broken_validator) is None
 
 
-def test_non_normalized_plan_is_rejected(tmp_path):
+def test_get_requires_application_validator(tmp_path):
     cache = CompileCache(tmp_path)
+    action = _action()
+    cache.put(action, _plan())
 
-    with pytest.raises(ValueError, match="normalized compile plan"):
-        cache.put(_action(), _plan(), validator=lambda plan: False)
+    with pytest.raises(TypeError, match="validator"):
+        cache.get(action)
 
 
 @pytest.mark.parametrize(
@@ -433,8 +420,119 @@ def test_get_rejects_schema_invalid_payload_even_with_recomputed_digest(tmp_path
     record["payload"] = _plan({"kind": "create", "path": "knowledge/notes/a.md"})
     record["payload_digest"] = sha256_bytes(canonical_json_bytes(record["payload"]))
     path.write_bytes(canonical_json_bytes(record))
+    calls = []
 
-    assert cache.get(action) is None
+    assert cache.get(action, lambda plan: calls.append(plan) or True) is None
+    assert calls == []
+
+
+def test_get_rejects_oversize_entry_using_bounded_fd_read(tmp_path, monkeypatch):
+    cache = CompileCache(tmp_path)
+    action = _action()
+    path = cache.put(action, _plan())
+    with path.open("r+b") as handle:
+        handle.truncate(compile_cache.MAX_CACHE_ENTRY_BYTES + 1)
+    opened = []
+    real_open = compile_cache.os.open
+
+    def tracked_open(target, flags, *args, **kwargs):
+        opened.append(Path(target))
+        return real_open(target, flags, *args, **kwargs)
+
+    monkeypatch.setattr(compile_cache.os, "open", tracked_open)
+
+    assert cache.get(action, _accept_application) is None
+    assert path in opened
+
+
+def test_get_rejects_entry_replaced_between_lstat_and_open(tmp_path, monkeypatch):
+    cache = CompileCache(tmp_path)
+    action = _action()
+    target = cache.put(action, _plan())
+    other_action = replace(action, compiler_version="2.0.1")
+    replacement = cache.put(other_action, _plan())
+    real_open = compile_cache.os.open
+    replaced = False
+    validator_calls = []
+
+    def racing_open(path, flags, *args, **kwargs):
+        nonlocal replaced
+        if Path(path) == target and not replaced:
+            replaced = True
+            compile_cache.os.replace(replacement, target)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(compile_cache.os, "open", racing_open)
+
+    assert cache.get(action, lambda plan: validator_calls.append(plan) or True) is None
+    assert replaced is True
+    assert validator_calls == []
+
+
+def test_fd_read_rejects_same_inode_change_between_lstat_and_open(tmp_path, monkeypatch):
+    cache = CompileCache(tmp_path)
+    path = cache.put(_action(), _plan())
+    original = path.read_bytes()
+    changed = original.replace(b'"schema_version":1', b'"schema_version":2')
+    assert len(changed) == len(original)
+    real_open = compile_cache.os.open
+    modified = False
+
+    def racing_open(target, flags, *args, **kwargs):
+        nonlocal modified
+        if Path(target) == path and not modified:
+            modified = True
+            path.write_bytes(changed)
+        return real_open(target, flags, *args, **kwargs)
+
+    monkeypatch.setattr(compile_cache.os, "open", racing_open)
+
+    with pytest.raises(PermissionError, match="changed before open"):
+        compile_cache._read_cache_entry(path)
+
+
+def test_get_rejects_symlinked_entry_without_running_validator(tmp_path):
+    cache = CompileCache(tmp_path)
+    action = _action()
+    target = cache.put(action, _plan())
+    actual = target.with_suffix(".actual")
+    target.replace(actual)
+    try:
+        target.symlink_to(actual)
+    except OSError:
+        pytest.skip("file symlinks are unavailable")
+    validator_calls = []
+
+    assert cache.get(action, lambda plan: validator_calls.append(plan) or True) is None
+    assert validator_calls == []
+
+
+def test_put_rejects_oversize_entry_before_creating_temp_file(tmp_path, monkeypatch):
+    plan = _plan(
+        {
+            "kind": "create",
+            "path": "knowledge/notes/large.md",
+            "content": "x" * compile_cache.MAX_CACHE_ENTRY_BYTES,
+        }
+    )
+    monkeypatch.setattr(
+        compile_cache.tempfile,
+        "mkstemp",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("temp created")),
+    )
+
+    with pytest.raises(ValueError, match="too large"):
+        CompileCache(tmp_path).put(_action(), plan)
+
+
+def test_put_fsyncs_cache_directory_after_replace(tmp_path, monkeypatch):
+    synced = []
+    monkeypatch.setattr(compile_cache, "fsync_directory", lambda path: synced.append(Path(path)))
+    cache = CompileCache(tmp_path)
+
+    cache.put(_action(), _plan())
+
+    assert synced == [cache.cache_dir]
 
 
 def test_cache_rejects_action_for_uncommitted_schema(tmp_path):

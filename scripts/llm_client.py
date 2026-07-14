@@ -145,14 +145,25 @@ def call_candidate(
 ) -> LLMResult:
     """Probe and call one resolved candidate, returning a stable outcome."""
     effective_max_tokens = descriptor.inference_settings.get("max_tokens")
-    if (
-        not isinstance(effective_max_tokens, int)
-        or isinstance(effective_max_tokens, bool)
-        or effective_max_tokens <= 0
-    ):
-        raise ValueError("descriptor max_tokens must be a positive integer")
-    if max_tokens is not None and max_tokens != effective_max_tokens:
-        raise ValueError("max_tokens does not match the resolved provider descriptor")
+    max_tokens_enforced = descriptor.capabilities.get("max_tokens_enforced")
+    if max_tokens_enforced is True:
+        if (
+            not isinstance(effective_max_tokens, int)
+            or isinstance(effective_max_tokens, bool)
+            or effective_max_tokens <= 0
+        ):
+            raise ValueError("descriptor max_tokens must be a positive integer")
+        if max_tokens is not None and max_tokens != effective_max_tokens:
+            raise ValueError("max_tokens does not match the resolved provider descriptor")
+    elif max_tokens_enforced is False:
+        if effective_max_tokens != "backend_default":
+            raise ValueError("descriptor must record the backend token default")
+        if max_tokens is not None and (
+            not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens <= 0
+        ):
+            raise ValueError("max_tokens request must be a positive integer")
+    else:
+        raise ValueError("descriptor must declare whether max_tokens is enforced")
     structured_output = (
         "native"
         if schema is not None
@@ -273,28 +284,41 @@ def _provider_configuration(
         "structured_output": "native" if native else "prompt",
     }
     if provider == "fake":
+        capabilities = dict(capabilities)
+        capabilities["max_tokens_enforced"] = True
         return "fake-v1", capabilities, {"max_tokens": max_tokens}, None
+    if provider == "opencode":
+        capabilities = dict(capabilities)
+        capabilities["max_tokens_enforced"] = False
+        return None, capabilities, {"max_tokens": "backend_default"}, None
     if provider == "codex":
+        capabilities = dict(capabilities)
+        capabilities["max_tokens_enforced"] = False
         return (
             os.environ.get("MEMORY_CODEX_MODEL") or None,
             capabilities,
             {
-                "max_tokens": max_tokens,
+                "max_tokens": "backend_default",
                 "reasoning": os.environ.get("MEMORY_CODEX_REASONING", "low"),
             },
             None,
         )
     if provider == "claude":
+        capabilities = dict(capabilities)
+        capabilities["max_tokens_enforced"] = False
         return (
             os.environ.get("MEMORY_CLAUDE_MODEL") or None,
             capabilities,
-            {"max_tokens": max_tokens},
+            {"max_tokens": "backend_default"},
             None,
         )
     if provider == "openai":
-        endpoint = os.environ.get("MEMORY_LLM_BASE_URL", "https://api.openai.com/v1")
+        endpoint, endpoint_identity = _resolve_endpoint(
+            os.environ.get("MEMORY_LLM_BASE_URL", "https://api.openai.com/v1")
+        )
         capabilities = dict(capabilities)
-        capabilities["endpoint_sha256"] = _endpoint_identity(endpoint)
+        capabilities["endpoint_sha256"] = endpoint_identity
+        capabilities["max_tokens_enforced"] = True
         return (
             os.environ.get("MEMORY_LLM_MODEL", "gpt-4o-mini"),
             capabilities,
@@ -302,9 +326,12 @@ def _provider_configuration(
             endpoint,
         )
     if provider == "ollama":
-        endpoint = os.environ.get("MEMORY_LLM_BASE_URL", "http://localhost:11434/v1")
+        endpoint, endpoint_identity = _resolve_endpoint(
+            os.environ.get("MEMORY_LLM_BASE_URL", "http://localhost:11434/v1")
+        )
         capabilities = dict(capabilities)
-        capabilities["endpoint_sha256"] = _endpoint_identity(endpoint)
+        capabilities["endpoint_sha256"] = endpoint_identity
+        capabilities["max_tokens_enforced"] = True
         return (
             os.environ.get("MEMORY_LLM_MODEL", "qwen3:0.6b"),
             capabilities,
@@ -314,7 +341,7 @@ def _provider_configuration(
     return None, capabilities, {"max_tokens": max_tokens}, None
 
 
-def _endpoint_identity(endpoint: str) -> str:
+def _resolve_endpoint(endpoint: str) -> tuple[str, str]:
     try:
         parsed = urllib.parse.urlsplit(endpoint)
         scheme = parsed.scheme.casefold()
@@ -324,13 +351,20 @@ def _endpoint_identity(endpoint: str) -> str:
         raise ValueError("MEMORY_LLM_BASE_URL is not a valid HTTP endpoint") from exc
     if scheme not in {"http", "https"} or not hostname:
         raise ValueError("MEMORY_LLM_BASE_URL must use HTTP(S) with a hostname")
+    if (
+        parsed.username is not None
+        or parsed.password is not None
+        or "?" in endpoint
+        or "#" in endpoint
+    ):
+        raise ValueError("MEMORY_LLM_BASE_URL must not contain userinfo, query, or fragment")
     hostname = hostname.casefold()
     if ":" in hostname:
         hostname = f"[{hostname}]"
     effective_port = port or (443 if scheme == "https" else 80)
     path = parsed.path.rstrip("/")
     normalized = f"{scheme}://{hostname}:{effective_port}{path}"
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return normalized, hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------

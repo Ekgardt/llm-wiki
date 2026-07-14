@@ -171,7 +171,7 @@ def test_call_candidate_uses_resolved_model_and_settings_after_env_changes(monke
 
 
 def test_http_endpoint_identity_is_normalized_hashed_and_secret_safe(monkeypatch):
-    raw = "HTTPS://user:password@Example.COM:443/v1/?api_key=secret#fragment"
+    raw = "HTTPS://Example.COM:443/v1/"
     monkeypatch.setenv("MEMORY_LLM_BASE_URL", raw)
 
     descriptor = llm_client.provider_candidates("openai", max_tokens=321)[0]
@@ -181,9 +181,58 @@ def test_http_endpoint_identity_is_normalized_hashed_and_secret_safe(monkeypatch
     assert canonical["capabilities"]["endpoint_sha256"] == hashlib.sha256(
         b"https://example.com:443/v1"
     ).hexdigest()
-    assert descriptor._endpoint == raw
-    for secret in ("user", "password", "api_key", "secret", "fragment"):
-        assert secret not in encoded
+    assert descriptor._endpoint == "https://example.com:443/v1"
+    assert raw not in encoded
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://user:password@example.com/v1",
+        "https://example.com/v1?api_key=secret",
+        "https://example.com/v1?",
+        "https://example.com/v1#fragment",
+        "https://example.com/v1#",
+    ],
+)
+def test_http_endpoint_rejects_ambiguous_or_secret_bearing_url(endpoint, monkeypatch):
+    monkeypatch.setenv("MEMORY_LLM_BASE_URL", endpoint)
+
+    with pytest.raises(ValueError, match="must not contain"):
+        llm_client.provider_candidates("openai", max_tokens=321)
+
+
+@pytest.mark.parametrize("provider", ["codex", "claude"])
+def test_cli_descriptor_records_unenforced_backend_token_default(provider, monkeypatch):
+    monkeypatch.setenv("MEMORY_CODEX_MODEL", "gpt-5")
+    monkeypatch.setenv("MEMORY_CLAUDE_MODEL", "sonnet")
+
+    first = llm_client.provider_candidates(provider, max_tokens=100)[0]
+    second = llm_client.provider_candidates(provider, max_tokens=999)[0]
+
+    assert first.inference_settings["max_tokens"] == "backend_default"
+    assert first.capabilities["max_tokens_enforced"] is False
+    assert first.canonical() == second.canonical()
+
+
+@pytest.mark.parametrize("provider", ["codex", "claude"])
+def test_cli_call_allows_requested_tokens_but_result_keeps_actual_descriptor(
+    provider, monkeypatch
+):
+    descriptor = llm_client.provider_candidates(provider, max_tokens=321)[0]
+    monkeypatch.setitem(llm_client._PROBES, provider, lambda descriptor: True)
+    monkeypatch.setitem(llm_client._BACKENDS, provider, lambda *args: "answer")
+
+    result = llm_client.call_candidate(
+        descriptor,
+        "prompt",
+        "system",
+        max_tokens=999,
+    )
+
+    assert result.text == "answer"
+    assert result.descriptor is descriptor
+    assert result.descriptor.inference_settings["max_tokens"] == "backend_default"
 
 
 @pytest.mark.parametrize("provider", ["openai", "ollama"])
@@ -218,7 +267,7 @@ def test_http_backend_uses_captured_endpoint_after_env_drift(provider, monkeypat
     result = llm_client.call_candidate(descriptor, "prompt", "system")
 
     assert result.text == "answer"
-    assert requests[0].full_url == "https://first.example/v1/chat/completions"
+    assert requests[0].full_url == "https://first.example:443/v1/chat/completions"
 
 
 def test_ollama_probe_uses_captured_remote_endpoint_after_env_drift(monkeypatch):

@@ -6,7 +6,7 @@ import os
 import re
 import stat
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Protocol
@@ -20,10 +20,12 @@ from reliable_memory import (
     _known_network_path,
     _windows_reparse_point,
     canonical_json_bytes,
+    fsync_directory,
     sha256_bytes,
 )
 
 CACHE_SCHEMA_VERSION = 1
+MAX_CACHE_ENTRY_BYTES = 16 * 1024 * 1024
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _COMPILE_PLAN_SCHEMA_PATH = Path(__file__).resolve().parent / "schemas" / "compile-plan-v2.json"
 _COMPILE_PLAN_SCHEMA_BYTES = _COMPILE_PLAN_SCHEMA_PATH.read_bytes()
@@ -33,7 +35,7 @@ COMPILE_PLAN_SCHEMA_HASH = sha256_bytes(canonical_json_bytes(_COMPILE_PLAN_SCHEM
 
 
 class PlanValidator(Protocol):
-    def __call__(self, plan: dict[str, object]) -> bool | None: ...
+    def __call__(self, plan: dict[str, object]) -> bool: ...
 
 
 @dataclass(frozen=True, order=True)
@@ -160,7 +162,7 @@ class CompileCache:
     def get(
         self,
         action: CompileActionDescriptor,
-        validator: PlanValidator | None = None,
+        validator: PlanValidator,
     ) -> dict[str, object] | None:
         """Read and deterministically revalidate one cache entry, failing closed."""
         try:
@@ -170,12 +172,7 @@ class CompileCache:
             _validate_action_schema(action)
             self._validate_location(create=False)
             path = self.cache_dir / f"{key}.json"
-            if not path.exists() or path.is_symlink() or not path.is_file():
-                return None
-            _verify_owner_only(path, 0o600)
-            raw = path.read_bytes()
-            if len(raw) > 16 * 1024 * 1024:
-                return None
+            raw = _read_cache_entry(path)
             record = json.loads(raw.decode("utf-8"))
             if not isinstance(record, dict) or set(record) != {
                 "schema_version",
@@ -193,7 +190,9 @@ class CompileCache:
                 return None
             if sha256_bytes(canonical_json_bytes(payload)) != record["payload_digest"]:
                 return None
-            _validate_normalized_plan(payload, validator)
+            _validate_normalized_plan(payload)
+            if validator(payload) is not True:
+                raise ValueError("application validator rejected cached compile plan")
             return payload
         except Exception:  # noqa: BLE001 - cache reads and validators fail closed
             return None
@@ -202,7 +201,6 @@ class CompileCache:
         self,
         action: CompileActionDescriptor,
         normalized_plan: dict[str, object],
-        validator: PlanValidator | None = None,
         *,
         failure_class: str | None = None,
     ) -> Path:
@@ -213,8 +211,7 @@ class CompileCache:
         if key is None:
             raise ValueError("explicit model identity is required for persistent caching")
         _validate_action_schema(action)
-        _validate_normalized_plan(normalized_plan, validator)
-        self._validate_location(create=True)
+        _validate_normalized_plan(normalized_plan)
         payload = json.loads(canonical_json_bytes(normalized_plan))
         record = {
             "schema_version": CACHE_SCHEMA_VERSION,
@@ -223,6 +220,9 @@ class CompileCache:
             "payload": payload,
         }
         data = canonical_json_bytes(record)
+        if len(data) > MAX_CACHE_ENTRY_BYTES:
+            raise ValueError("canonical compile cache entry is too large")
+        self._validate_location(create=True)
         target = self.cache_dir / f"{key}.json"
         temporary: Path | None = None
         try:
@@ -237,6 +237,7 @@ class CompileCache:
                 raise PermissionError("cache staging file is not secure")
             os.replace(temporary, target)
             temporary = None
+            fsync_directory(self.cache_dir)
             _verify_owner_only(target, 0o600)
             return target
         finally:
@@ -302,7 +303,6 @@ def _restricted_mapping(value: Mapping[str, object], label: str) -> dict[str, ob
 
 def _validate_normalized_plan(
     plan: dict[str, object],
-    validator: Callable[[dict[str, object]], bool | None] | None,
 ) -> None:
     _validate_schema_value(plan, _COMPILE_PLAN_SCHEMA, "compile plan")
     if json.loads(canonical_json_bytes(plan)) != plan:
@@ -323,8 +323,55 @@ def _validate_normalized_plan(
         if path in seen_paths:
             raise ValueError("compile plan operation paths must be unique")
         seen_paths.add(path)
-    if validator is not None and validator(plan) is False:
-        raise ValueError("expected a validated normalized compile plan")
+
+
+def _read_cache_entry(path: Path) -> bytes:
+    metadata = path.lstat()
+    if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+        raise PermissionError("cache entry must be a regular non-symlink file")
+    _verify_owner_only(path, 0o600)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_size > MAX_CACHE_ENTRY_BYTES:
+            raise PermissionError("cache entry descriptor is not a bounded regular file")
+        metadata_identity = (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+        )
+        opened_identity = (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+        )
+        if metadata_identity != opened_identity:
+            raise PermissionError("cache entry changed before open")
+        if os.name == "posix" and stat.S_IMODE(opened.st_mode) != 0o600:
+            raise PermissionError("cache entry descriptor is not owner-only")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            raw = handle.read(MAX_CACHE_ENTRY_BYTES + 1)
+        if len(raw) > MAX_CACHE_ENTRY_BYTES:
+            raise ValueError("cache entry is too large")
+        after = os.fstat(descriptor)
+        current = path.lstat()
+        if opened_identity != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ) or opened_identity[:2] != (current.st_dev, current.st_ino):
+            raise PermissionError("cache entry changed during read")
+        _verify_owner_only(path, 0o600)
+        verified = path.lstat()
+        if opened_identity[:2] != (verified.st_dev, verified.st_ino):
+            raise PermissionError("cache entry changed during permission verification")
+        return raw
+    finally:
+        os.close(descriptor)
 
 
 def _validate_action_schema(action: CompileActionDescriptor) -> None:
