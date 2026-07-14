@@ -47,22 +47,34 @@ def state_snapshot(tmp_path):
 def test_failed_compile_does_not_mark_hash(state_snapshot, monkeypatch):
     import compile_memory  # noqa: WPS433
 
+    vault = state_snapshot["log_md"].parent / "vault"
+    daily_dir = vault / "knowledge/daily"
+    notes = vault / "knowledge/notes"
+    daily_dir.mkdir(parents=True)
+    notes.mkdir(parents=True)
+    fake_daily = daily_dir / "__test_fake__.md"
+    fake_daily.write_text("snapshot", encoding="utf-8")
+    agents = vault / "AGENTS.md"
+    agents.write_text("contract", encoding="utf-8")
+    monkeypatch.setattr(compile_memory, "ROOT", vault)
+    monkeypatch.setattr(compile_memory, "DAILY_DIR", daily_dir)
+    monkeypatch.setattr(compile_memory, "KNOWLEDGE", notes)
+    monkeypatch.setattr(compile_memory, "INDEX", vault / "knowledge/index.md")
     monkeypatch.setattr(compile_memory, "LOG", state_snapshot["log_md"])
-
-    # Patch run_compile to simulate a failure (no LLM response).
-    # Phase 4+ refactor: run_compile is now sync (was async when it
-    # used claude_agent-sdk; now uses llm_client.call_llm which is sync).
-    def fake_failure(daily_paths, dry_run):
-        return ([], "(compile failed: RuntimeError: regression-test-induced)")
-
-    monkeypatch.setattr(compile_memory, "run_compile", fake_failure)
+    monkeypatch.setattr(compile_memory, "AGENTS", agents)
+    monkeypatch.setattr(
+        compile_memory,
+        "resolve_compile_plan",
+        lambda inputs, cache: (_ for _ in ()).throw(
+            RuntimeError("regression-test-induced")
+        ),
+    )
 
     # On CI there are no daily logs (gitignored for privacy), so
     # select_dailies returns [] and main() exits 0 before calling
     # run_compile. Monkeypatch select_dailies to return a fake path
     # INSIDE the vault root (compile_memory does relative_to(ROOT)
     # on each daily path for display).
-    fake_daily = compile_memory.DAILY_DIR / "__test_fake__.md"
     monkeypatch.setattr(
         compile_memory,
         "select_dailies",

@@ -1,7 +1,7 @@
 """Contract tests for audit-flagged runtime paths.
 
 Covers:
-- compile_memory has module-level `re` (contradiction path)
+- compile_memory no longer exposes heuristic lifecycle mutation
 - feedback_capture stdin JSON (OpenCode plugin)
 - loop_detector matches real breadcrumb format
 - MEMORY_LLM_PROVIDER=fake smoke for compile plan apply
@@ -20,18 +20,12 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 
-def test_compile_memory_imports_re():
+def test_compile_memory_removes_heuristic_lifecycle_mutation():
     import compile_memory
 
-    assert hasattr(compile_memory, "re")
-    # Contradiction path must not NameError
-    result = compile_memory._check_contradictions_pre_write(
-        "patterns",
-        "new-page",
-        "new title about auth",
-        "we use JWT instead of sessions",
-    )
-    assert isinstance(result, list)
+    assert not hasattr(compile_memory, "_check_contradictions_pre_write")
+    assert not hasattr(compile_memory, "_mark_superseded")
+    assert not hasattr(compile_memory, "_mark_refined")
 
 
 def test_feedback_capture_stdin_json(tmp_path, monkeypatch):

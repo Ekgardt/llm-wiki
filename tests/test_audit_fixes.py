@@ -47,11 +47,6 @@ def test_compile_dry_run_does_not_mutate_existing(tmp_path, monkeypatch):
     monkeypatch.setattr(compile_memory, "KNOWLEDGE", tmp_path / "knowledge" / "notes")
     monkeypatch.setattr(compile_memory, "ROOT", tmp_path)
 
-    # Force a contradiction hit
-    def fake_contra(*_a, **_k):
-        return [old]
-
-    monkeypatch.setattr(compile_memory, "_check_contradictions_pre_write", fake_contra)
     monkeypatch.setattr(compile_memory, "_verify_evidence", lambda *_a, **_k: (1, 0))
 
     plan = {
