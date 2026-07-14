@@ -37,7 +37,7 @@ SCRIPT_TIMEOUT_SECONDS = 10
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 from integration_adapter import (  # noqa: E402
-    _observe_project_checkpoint,
+    _observe_checkpoint_fail_open,
     ingest_event,
     normalize_event,
 )
@@ -137,10 +137,7 @@ def command_project_state(args: argparse.Namespace) -> int:
         "session_start",
         {"cwd": str(project_dir), "reason": "codex-session-start"},
     )
-    try:
-        _observe_project_checkpoint(envelope)
-    except Exception:  # noqa: BLE001
-        pass
+    _observe_checkpoint_fail_open(envelope)
     result = _run_script("session_start_project_state.py", project_dir)
     if result.returncode != 0:
         print(result.stderr.strip() or result.stdout.strip(), file=sys.stderr)

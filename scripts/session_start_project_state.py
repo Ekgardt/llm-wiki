@@ -48,7 +48,7 @@ import unicodedata
 from datetime import datetime
 from pathlib import Path
 
-from project_journal import ProjectStore, build_handoff
+from project_journal import ProjectStore, recover_project_handoff
 
 # Force utf-8 on stdout (Windows cp1252 mojibakes Cyrillic otherwise).
 if hasattr(sys.stdout, "reconfigure"):
@@ -416,11 +416,9 @@ def main() -> int:
         if state_root is None:
             return _emit_empty()
         store = ProjectStore(vault, state_root)
-        store.coordinator.recover()
-        store.recover(slug)
-        projection = store.projection(slug)
-        if journal_path.is_file():
-            return _emit(build_handoff(projection, max_chars=MAX_CONTEXT_CHARS))
+        handoff = recover_project_handoff(store, slug, max_chars=MAX_CONTEXT_CHARS)
+        if journal_path.is_file() or handoff.degraded:
+            return _emit(handoff.context)
 
         # 3. Ensure state.md exists — creation gated on project markers.
         is_new = False

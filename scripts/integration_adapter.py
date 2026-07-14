@@ -17,7 +17,12 @@ from typing import Any
 from event_envelope import EventEnvelope, build_event_envelope
 from maybe_compile import spawn_compile_if_idle
 from memory_state import ROOT, STATE_ROOT, spawn_detached, update_state
-from project_journal import CheckpointReducer, ProjectStore, build_handoff
+from project_journal import (
+    SESSION_START_RECOVERY_SECONDS,
+    CheckpointReducer,
+    ProjectStore,
+    recover_project_handoff,
+)
 from secret_redact import redact_secrets
 from session_start_context import build_context as build_session_start_context
 from session_start_project_state import _compute_slug
@@ -27,8 +32,6 @@ DELEGATE_TIMEOUT_SECONDS = 10
 MAINTENANCE_DRAIN_TIMEOUT_SECONDS = 600
 MAX_TRANSCRIPT_TEXT_CHARS = 8000
 MAX_CHECKPOINT_ERROR_CHARS = 500
-SESSION_START_RECOVERY_SECONDS = 0.25
-MAX_PROJECT_HANDOFF_CHARS = 2400
 TRANSIENT_CREATE_ATTEMPTS = 10
 PENDING_CLAIM_SECONDS = 30.0
 SOURCES = frozenset({"claude", "opencode", "codex"})
@@ -877,26 +880,7 @@ def _recover_project_handoff(slug: str | None, project_dir: Path | None) -> str:
         return ""
     try:
         store = ProjectStore(ROOT, STATE_ROOT)
-        store.recover(slug, writer_wait_seconds=SESSION_START_RECOVERY_SECONDS)
-        return build_handoff(
-            store.projection(slug), max_chars=MAX_PROJECT_HANDOFF_CHARS
-        )
-    except TimeoutError:
-        warning = (
-            "## Recovery status\n"
-            "- Degraded: project recovery deferred due to writer contention.\n"
-            f"- MCP recovery ID: `recovery:project:{slug}`\n"
-        )
-        try:
-            projection = store.projection(slug)
-            handoff = build_handoff(
-                projection,
-                max_chars=MAX_PROJECT_HANDOFF_CHARS - len(warning) - 2,
-            )
-            return _append_context(handoff, warning)
-        except Exception as exc:  # noqa: BLE001
-            _log_checkpoint_error(exc)
-            return warning
+        return recover_project_handoff(store, slug).context
     except Exception as exc:  # noqa: BLE001
         _log_checkpoint_error(exc)
         return ""

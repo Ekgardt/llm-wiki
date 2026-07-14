@@ -497,6 +497,7 @@ def test_session_start_recovers_transactions_then_project_before_handoff(
     if str(scripts) not in sys.path:
         sys.path.insert(0, str(scripts))
     import session_start_project_state
+    from project_journal import ProjectProjection
 
     vault = tmp_path / "vault"
     project = tmp_path / "project"
@@ -513,24 +514,19 @@ def test_session_start_recovers_transactions_then_project_before_handoff(
         def __init__(self, vault_root, state_root):
             self.coordinator = Coordinator()
 
-        def recover(self, slug):
+        def recover(self, slug, **kwargs):
+            self.coordinator.recover()
             calls.append(("project", slug))
 
         def projection(self, slug):
             calls.append(("projection", slug))
-            return object()
+            return ProjectProjection(project=slug, last_applied_sequence=7)
 
     monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
     monkeypatch.setattr(session_start_project_state, "_compute_slug", lambda *args: "demo")
     monkeypatch.setattr(session_start_project_state, "ProjectStore", Store, raising=False)
-    monkeypatch.setattr(
-        session_start_project_state,
-        "build_handoff",
-        lambda projection, max_chars: calls.append(("handoff", max_chars)) or "bounded handoff",
-        raising=False,
-    )
     monkeypatch.setattr(sys, "stdin", io.StringIO("{}"))
 
     assert session_start_project_state.main() == 0
@@ -539,9 +535,10 @@ def test_session_start_recovers_transactions_then_project_before_handoff(
         "transactions",
         ("project", "demo"),
         ("projection", "demo"),
-        ("handoff", 2400),
     ]
-    assert output["hookSpecificOutput"]["additionalContext"] == "bounded handoff"
+    context = output["hookSpecificOutput"]["additionalContext"]
+    assert "project:demo" in context
+    assert "sequence:7" in context
 
 
 def test_session_start_recovers_interrupted_first_checkpoint_before_journal_exists(
@@ -553,6 +550,7 @@ def test_session_start_recovers_interrupted_first_checkpoint_before_journal_exis
     if str(scripts) not in sys.path:
         sys.path.insert(0, str(scripts))
     import session_start_project_state
+    from project_journal import ProjectProjection
 
     vault = tmp_path / "vault"
     project = tmp_path / "project"
@@ -569,25 +567,20 @@ def test_session_start_recovers_interrupted_first_checkpoint_before_journal_exis
         def __init__(self, vault_root, state_root):
             self.coordinator = Coordinator()
 
-        def recover(self, slug):
+        def recover(self, slug, **kwargs):
+            self.coordinator.recover()
             calls.append(("project", slug))
             (project_state / "journal.md").write_text("recovered", encoding="utf-8")
 
         def projection(self, slug):
             calls.append(("projection", slug))
-            return object()
+            return ProjectProjection(project=slug, last_applied_sequence=1)
 
     monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
     monkeypatch.setattr(session_start_project_state, "_compute_slug", lambda *args: "demo")
     monkeypatch.setattr(session_start_project_state, "ProjectStore", Store)
-    monkeypatch.setattr(
-        session_start_project_state,
-        "build_handoff",
-        lambda projection, max_chars: "recovered first checkpoint",
-    )
-
     assert not (project_state / "journal.md").exists()
     assert session_start_project_state.main() == 0
     output = json.loads(capsys.readouterr().out)
@@ -596,7 +589,9 @@ def test_session_start_recovers_interrupted_first_checkpoint_before_journal_exis
         ("project", "demo"),
         ("projection", "demo"),
     ]
-    assert output["hookSpecificOutput"]["additionalContext"] == "recovered first checkpoint"
+    context = output["hookSpecificOutput"]["additionalContext"]
+    assert "project:demo" in context
+    assert "sequence:1" in context
 
 
 def test_opencode_session_start_appends_recovered_bounded_project_handoff(monkeypatch):
@@ -606,6 +601,7 @@ def test_opencode_session_start_appends_recovered_bounded_project_handoff(monkey
     if str(scripts) not in sys.path:
         sys.path.insert(0, str(scripts))
     import integration_adapter
+    from project_journal import ProjectProjection
 
     calls = []
 
@@ -623,7 +619,7 @@ def test_opencode_session_start_appends_recovered_bounded_project_handoff(monkey
 
         def projection(self, slug):
             calls.append(("projection", slug))
-            return object()
+            return ProjectProjection(project=slug, last_applied_sequence=7)
 
     monkeypatch.setattr(integration_adapter, "_observe_checkpoint_fail_open", lambda event: None)
     monkeypatch.setattr(
@@ -637,15 +633,6 @@ def test_opencode_session_start_appends_recovered_bounded_project_handoff(monkey
         lambda: "# General memory\n",
     )
     monkeypatch.setattr(integration_adapter, "ProjectStore", Store)
-    monkeypatch.setattr(
-        integration_adapter,
-        "build_handoff",
-        lambda projection, max_chars: (
-            calls.append(("handoff", max_chars))
-            or "# Project handoff\n\n- `project:demo`\n- `sequence:7`\n"
-        ),
-        raising=False,
-    )
     envelope = integration_adapter.normalize_event(
         "opencode",
         "session_start",
@@ -658,7 +645,6 @@ def test_opencode_session_start_appends_recovered_bounded_project_handoff(monkey
         "transactions",
         ("project", "demo"),
         ("projection", "demo"),
-        ("handoff", 2400),
     ]
     assert "# General memory" in result["context"]
     assert "project:demo" in result["context"]
@@ -755,6 +741,102 @@ def test_opencode_session_start_writer_contention_is_bounded_and_degraded(
     assert "Degraded" in result["context"]
     assert "project:demo" in result["context"]
     assert "recovery:project:demo" in result["context"]
+
+
+@pytest.mark.parametrize("host", ["claude", "codex"])
+def test_claude_and_codex_project_state_are_bounded_under_writer_contention(
+    host, tmp_path
+):
+    import os
+    import shutil
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import integration_adapter
+    from project_journal import ProjectStore
+
+    vault = tmp_path / "vault"
+    state_root = tmp_path / "state"
+    project_dir = tmp_path / "demo"
+    (vault / "knowledge/projects/demo").mkdir(parents=True)
+    project_dir.mkdir()
+    store = ProjectStore(vault, state_root)
+    store.checkpoint(
+        "demo",
+        {
+            "schema_version": "project-checkpoint/v1",
+            "occurrence_id": "committed-context",
+            "idempotency_key": "committed-context",
+            "provenance": {
+                "agent": "test",
+                "session": "test",
+                "worktree": str(project_dir),
+                "branch": "test",
+                "source_event": "test",
+            },
+            "trigger": "decision",
+            "reason": "committed context",
+            "delta": integration_adapter._empty_delta(),
+            "evidence_event_ids": ["test"],
+        },
+        "test",
+    )
+    held = threading.Event()
+
+    def hold_writer():
+        with store.coordinator.writer_gate():
+            held.set()
+            time.sleep(2)
+
+    env = os.environ.copy()
+    env["LLM_WIKI_ROOT"] = str(vault)
+    env["LLM_WIKI_STATE_ROOT"] = str(state_root)
+    env["CLAUDE_PROJECT_DIR"] = str(project_dir)
+    command = [sys.executable, str(ROOT / "scripts/session_start_project_state.py")]
+    if host == "codex":
+        shutil.copytree(ROOT / "scripts", vault / "scripts")
+        command = [
+            sys.executable,
+            str(ROOT / "scripts/codex_memory.py"),
+            "project-state",
+            "--cwd",
+            str(project_dir),
+            "--json",
+        ]
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        holder = pool.submit(hold_writer)
+        assert held.wait(2)
+        started = time.perf_counter()
+        result = subprocess.run(
+            command,
+            cwd=str(vault),
+            env=env,
+            input="{}",
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+            check=False,
+        )
+        elapsed = time.perf_counter() - started
+        holder.result(timeout=5)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    if host == "claude":
+        context = payload["hookSpecificOutput"]["additionalContext"]
+    else:
+        context = payload["additional_context"]
+    assert elapsed < 1.5
+    assert len(context) <= 2400
+    assert "project:demo" in context
+    assert "sequence:1" in context
+    assert "Degraded" in context
+    assert "recovery:project:demo" in context
 
 
 def test_claude_hooks_cover_compaction_failure_stop_and_end_signals():
@@ -992,9 +1074,8 @@ def test_codex_project_state_observes_session_start_before_recovery(monkeypatch,
     calls = []
     monkeypatch.setattr(
         codex_memory,
-        "_observe_project_checkpoint",
+        "_observe_checkpoint_fail_open",
         lambda envelope: calls.append(("observe", envelope.event_type)),
-        raising=False,
     )
     monkeypatch.setattr(
         codex_memory,

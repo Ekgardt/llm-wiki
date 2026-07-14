@@ -41,6 +41,8 @@ _HEARTBEAT_SECONDS = 10
 MAX_JOURNAL_BYTES = 8 * 1024 * 1024
 MAX_PROJECTION_BYTES = 1024 * 1024
 MAX_JOURNAL_EVENTS = 1000
+SESSION_START_RECOVERY_SECONDS = 0.25
+MAX_PROJECT_HANDOFF_CHARS = 2400
 _MAX_VALUE_CHARS = 240
 _MAX_LIST_ITEMS = {
     "next_actions": 5,
@@ -126,6 +128,12 @@ class ProjectProjection:
     commands: dict[str, str] = field(default_factory=dict)
     verification: dict[str, str] = field(default_factory=dict)
     last_applied_sequence: int = 0
+
+
+@dataclass(frozen=True)
+class ProjectHandoffResult:
+    context: str
+    degraded: bool = False
 
 
 class CheckpointReducer:
@@ -380,6 +388,34 @@ def build_handoff(
     if len(suffix) >= max_chars:
         return suffix[-max_chars:]
     return body[: max_chars - len(suffix)].rstrip() + suffix
+
+
+def recover_project_handoff(
+    store: ProjectStore,
+    slug: str,
+    *,
+    writer_wait_seconds: float = SESSION_START_RECOVERY_SECONDS,
+    max_chars: int = MAX_PROJECT_HANDOFF_CHARS,
+) -> ProjectHandoffResult:
+    """Recover briefly, then render the last committed bounded project handoff."""
+    degraded = False
+    try:
+        store.recover(slug, writer_wait_seconds=writer_wait_seconds)
+    except TimeoutError:
+        degraded = True
+    projection = store.projection(slug)
+    if not degraded:
+        return ProjectHandoffResult(build_handoff(projection, max_chars=max_chars))
+    warning = (
+        "## Recovery status\n"
+        "- Degraded: project recovery deferred due to writer contention.\n"
+        f"- MCP recovery ID: `recovery:project:{slug}`\n"
+    )
+    handoff = build_handoff(
+        projection,
+        max_chars=max_chars - len(warning) - 2,
+    )
+    return ProjectHandoffResult(handoff.rstrip() + "\n\n" + warning, degraded=True)
 
 
 def _utc_now() -> datetime:
