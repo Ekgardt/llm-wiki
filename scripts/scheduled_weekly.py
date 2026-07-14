@@ -1,10 +1,10 @@
 """Weekly deep maintenance — runs Sunday 04:00 via Windows Task Scheduler.
 
 What it does:
-1. Everything the nightly pass does (drain + compile + lint).
+1. Everything the nightly pass does (queue work + compile + lint).
 2. OKF conformance sweep — backfills frontmatter on any new pages.
 3. LLM-judged contradiction check (optional, opt-in via env var).
-4. Prune permanently-failed queue tasks.
+4. Report queue status without deleting retained tasks.
 
 Designed to run unattended. Logs to $LLM_WIKI_STATE_ROOT/logs/weekly-YYYY-MM-DD.md.
 """
@@ -71,9 +71,9 @@ def main() -> int:
 
         # Step 1: full nightly-style pass.
         _wait_for_compile_idle(log)
-        log("Step 1: drain queue + compile + structural lint...")
+        log("Step 1: work queue + compile + structural lint...")
         # Yield the lock so the nightly subprocess can acquire it for
-        # drain/compile/lint; re-acquire afterwards to cover migrate/archive.
+        # queue work/compile/lint; re-acquire afterwards for migrate/archive.
         try:
             maint_lock.unlink()
         except OSError:
@@ -103,11 +103,11 @@ def main() -> int:
         if rc:
             failures += 1
 
-        # Step 3: prune permanently-failed queue tasks (attempts >= 5).
-        log("Step 3: pruning permanently-failed queue tasks...")
+        # Step 3: report retained queue tasks. Purge is always explicit and exported.
+        log("Step 3: reporting memory queue status...")
         rc = _run_step(
-            [sys.executable, str(ROOT / "scripts" / "memory_queue.py"), "clear-failed"],
-            log, "prune", timeout=60,
+            [sys.executable, str(ROOT / "scripts" / "memory_queue.py"), "status"],
+            log, "status", timeout=60,
         )
         if rc:
             failures += 1

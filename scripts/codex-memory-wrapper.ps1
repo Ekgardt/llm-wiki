@@ -105,12 +105,12 @@ function codex {
                         --reason $reason `
                         --json 2>$null | Out-Null
 
-                    # Drain pending memory-pipeline queue: any tasks that were
+                    # Work pending memory-pipeline queue: any tasks that were
                     # enqueued while no backend was available get serviced now
                     # by Codex LLM (via llm_client.py auto-detection).
-                    $drainResult = & uv run python scripts/memory_queue.py drain 2>&1
-                    if ($drainResult -match "drain complete") {
-                        Write-Host "[codex-memory] $drainResult" -ForegroundColor DarkGray
+                    $workResult = & uv run python scripts/memory_queue.py work 2>&1
+                    if ($workResult) {
+                        Write-Host "[codex-memory] $workResult" -ForegroundColor DarkGray
                     }
 
                     # Fire-and-forget compile trigger. Checks concurrency lock

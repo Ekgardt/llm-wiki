@@ -86,7 +86,7 @@ def test_redact_secrets_strips_bearer():
     assert "REDACTED" in out
 
 
-def test_memory_queue_drain_query_without_output_path(tmp_path, monkeypatch):
+def test_memory_queue_work_query_without_output_path(tmp_path, monkeypatch):
     import memory_queue
 
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
@@ -120,8 +120,8 @@ def test_memory_queue_drain_query_without_output_path(tmp_path, monkeypatch):
         Path(out).write_text(result, encoding="utf-8")
         return True
 
-    counts = memory_queue.drain_with(processor, max_tasks=5)
-    assert counts.get("ok", 0) >= 1, f"expected at least 1 ok, got {counts}"
+    summary = memory_queue.run_worker(processor, max_tasks=5, idle_seconds=0)
+    assert summary.succeeded >= 1, f"expected at least 1 ok, got {summary}"
 
 
 def test_select_dailies_rejects_outside_daily(tmp_path, monkeypatch):

@@ -1273,7 +1273,7 @@ def _cleanup_runtime_transient(path: Path) -> None:
 def _run_session_start_maintenance() -> int:
     try:
         subprocess.run(
-            [sys.executable, str(ROOT / "scripts" / "memory_queue.py"), "drain"],
+            [sys.executable, str(ROOT / "scripts" / "memory_queue.py"), "work"],
             cwd=str(ROOT),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,

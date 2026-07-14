@@ -1,7 +1,7 @@
 """Nightly consolidation — runs at 03:00 via Windows Task Scheduler.
 
 What it does:
-1. Drain any pending queue tasks (deferred LLM work).
+1. Work any pending queue tasks (deferred LLM work).
 2. Force-spawn compile to process all uncompiled daily logs.
 3. Run lint and append to a rolling log file.
 
@@ -134,11 +134,11 @@ def main() -> int:
         log(f"=== Nightly consolidation pass — {today} ===")
         failures = 0
 
-        # Step 1: drain deferred queue.
-        log("Step 1: draining deferred memory queue...")
+        # Step 1: run the bounded deferred queue worker.
+        log("Step 1: working deferred memory queue...")
         rc = _run_step(
-            [sys.executable, str(ROOT / "scripts" / "memory_queue.py"), "drain"],
-            log, "drain", timeout=600,
+            [sys.executable, str(ROOT / "scripts" / "memory_queue.py"), "work"],
+            log, "work", timeout=600,
         )
         if rc:
             failures += 1

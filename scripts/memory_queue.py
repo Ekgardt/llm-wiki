@@ -12,6 +12,7 @@ import sqlite3
 import stat
 import sys
 import threading
+import time
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -62,6 +63,22 @@ class ResultConflictError(RuntimeError):
     """Raised when an operation ID already names different result bytes."""
 
 
+class QueueOperationError(RuntimeError):
+    """Operator-visible queue failure with a stable, non-sensitive code."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+class MigrationBusy(QueueOperationError):
+    """Raised when migration cannot prove exclusive legacy ownership."""
+
+
+class LegacyBackendDisabled(QueueOperationError):
+    """Raised when a legacy writer is used after migration started."""
+
+
 @dataclass(frozen=True)
 class QueueFailure:
     error_code: str
@@ -107,6 +124,7 @@ class QueueTask:
     blocked_capability: str | None
     result_reference: str | None
     result_sha256: str | None
+    redrive_of: str | None
     attempt_history: tuple[AttemptRecord, ...]
 
 
@@ -124,6 +142,29 @@ class QueueLease:
     created_at: datetime
     last_attempt_at: datetime | None
     prior_attempts: int
+
+
+@dataclass(frozen=True)
+class MigrationReceipt:
+    imported: int
+    quarantined: int
+    task_ids: tuple[str, ...]
+    codes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class WorkerSummary:
+    processed: int
+    succeeded: int
+    failed: int
+    dead: int
+    skipped: int
+
+
+@dataclass(frozen=True)
+class PurgeReceipt:
+    purged: int
+    task_ids: tuple[str, ...]
 
 
 def _utc_now() -> datetime:
@@ -266,7 +307,7 @@ class MemoryQueue:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 available_at TEXT NOT NULL,
-                attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts BETWEEN 0 AND 8),
+                attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
                 last_attempt_at TEXT,
                 lease_owner TEXT,
                 lease_token TEXT,
@@ -277,7 +318,8 @@ class MemoryQueue:
                 blocked_capability TEXT,
                 result_reference TEXT,
                 result_sha256 TEXT,
-                result_operation_id TEXT
+                result_operation_id TEXT,
+                redrive_of TEXT REFERENCES tasks(id)
             );
             CREATE INDEX IF NOT EXISTS queue_claim_order
                 ON tasks(state, priority DESC, available_at, created_at);
@@ -304,6 +346,10 @@ class MemoryQueue:
             connection.execute("ALTER TABLE tasks ADD COLUMN last_attempt_at TEXT")
         if "result_sha256" not in columns:
             connection.execute("ALTER TABLE tasks ADD COLUMN result_sha256 TEXT")
+        if "redrive_of" not in columns:
+            connection.execute(
+                "ALTER TABLE tasks ADD COLUMN redrive_of TEXT REFERENCES tasks(id)"
+            )
 
     @staticmethod
     def _retire_exhausted_ready(
@@ -904,6 +950,150 @@ class MemoryQueue:
             )
             return True
 
+    def redrive(self, task_id: str) -> str:
+        original = self.get(task_id)
+        if original.state != "dead":
+            raise QueueOperationError("redrive_requires_dead")
+        replacement = self.enqueue(
+            original.kind,
+            original.handler_version,
+            original.payload,
+            priority=original.priority,
+        )
+        now = _as_utc(self._clock())
+        with self._connect() as connection, begin_immediate(connection):
+            connection.execute(
+                "UPDATE tasks SET redrive_of=?, updated_at=? WHERE id=?",
+                (task_id, _timestamp(now), replacement),
+            )
+        return replacement
+
+    def retains_run_directory(self) -> bool:
+        with self._connect() as connection:
+            task = connection.execute("SELECT 1 FROM tasks LIMIT 1").fetchone()
+        if task is not None:
+            return True
+        try:
+            return any(self.results_dir.iterdir())
+        except OSError:
+            return True
+
+    def purge(
+        self, *, terminal_before: datetime, export_path: Path
+    ) -> PurgeReceipt:
+        requested_cutoff = _as_utc(terminal_before)
+        retention_cutoff = _as_utc(self._clock()) - timedelta(
+            days=DEFAULTS.queue_result_retention_days
+        )
+        cutoff = min(requested_cutoff, retention_cutoff)
+        export = Path(export_path).resolve()
+        if export.exists():
+            raise QueueOperationError("export_exists")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT * FROM tasks
+                   WHERE state IN ('succeeded','cancelled') AND updated_at < ?
+                   ORDER BY created_at, rowid""",
+                (_timestamp(cutoff),),
+            ).fetchall()
+            histories = {
+                str(row["id"]): connection.execute(
+                    "SELECT * FROM attempt_history WHERE task_id=? ORDER BY sequence",
+                    (row["id"],),
+                ).fetchall()
+                for row in rows
+            }
+        task_ids = tuple(str(row["id"]) for row in rows)
+        records = [
+            _export_task_record(self._task_from_row(row, histories[str(row["id"])]))
+            for row in rows
+        ]
+        records_bytes = canonical_json_bytes(records)
+        export.parent.mkdir(parents=True, exist_ok=True)
+        export.mkdir()
+        _harden_owner_only(export, 0o700)
+        results_export = export / "results"
+        results_export.mkdir()
+        _harden_owner_only(results_export, 0o700)
+        result_manifest: list[dict[str, str]] = []
+        for row in rows:
+            reference = row["result_reference"]
+            digest = row["result_sha256"]
+            if reference is None:
+                continue
+            if not isinstance(digest, str) or self._validated_result_digest(reference) != digest:
+                raise QueueOperationError("result_verification_failed")
+            source = self.state_root / str(reference)
+            target = results_export / f"{row['id']}.result"
+            _write_durable_file(target, source.read_bytes())
+            result_manifest.append({"id": str(row["id"]), "sha256": digest})
+        records_path = export / "records.json"
+        _write_durable_file(records_path, records_bytes)
+        manifest = {
+            "records_sha256": sha256_bytes(records_bytes),
+            "results": result_manifest,
+            "task_ids": list(task_ids),
+        }
+        manifest_path = export / "manifest.json"
+        _write_durable_file(manifest_path, canonical_json_bytes(manifest))
+        fsync_directory(results_export)
+        fsync_directory(export)
+        fsync_directory(export.parent)
+        if sha256_bytes(records_path.read_bytes()) != manifest["records_sha256"]:
+            raise QueueOperationError("export_verification_failed")
+        for item in result_manifest:
+            exported = results_export / f"{item['id']}.result"
+            if sha256_bytes(exported.read_bytes()) != item["sha256"]:
+                raise QueueOperationError("export_verification_failed")
+        if canonical_json_bytes(json.loads(manifest_path.read_bytes())) != manifest_path.read_bytes():
+            raise QueueOperationError("export_verification_failed")
+        if not all(
+            _is_owner_only(path)
+            for path in (export, results_export, records_path, manifest_path)
+        ):
+            raise QueueOperationError("export_permissions_invalid")
+        if task_ids:
+            placeholders = ",".join("?" for _ in task_ids)
+            with self._connect() as connection, begin_immediate(connection):
+                current = connection.execute(
+                    f"""SELECT id, state, updated_at FROM tasks
+                        WHERE id IN ({placeholders})""",  # noqa: S608
+                    task_ids,
+                ).fetchall()
+                if len(current) != len(task_ids) or any(
+                    row["state"] not in ("succeeded", "cancelled")
+                    or row["updated_at"] >= _timestamp(cutoff)
+                    for row in current
+                ):
+                    raise QueueOperationError("purge_selection_changed")
+                connection.execute("DROP TRIGGER attempt_history_immutable_delete")
+                connection.execute(
+                    f"DELETE FROM attempt_history WHERE task_id IN ({placeholders})",  # noqa: S608
+                    task_ids,
+                )
+                connection.execute(
+                    f"DELETE FROM tasks WHERE id IN ({placeholders})",  # noqa: S608
+                    task_ids,
+                )
+                connection.execute(
+                    """CREATE TRIGGER attempt_history_immutable_delete
+                       BEFORE DELETE ON attempt_history BEGIN
+                       SELECT RAISE(ABORT, 'attempt history is immutable'); END"""
+                )
+            for row in rows:
+                reference = row["result_reference"]
+                if reference is None:
+                    continue
+                with self._connect() as connection:
+                    retained = connection.execute(
+                        "SELECT 1 FROM tasks WHERE result_reference=? LIMIT 1",
+                        (reference,),
+                    ).fetchone()
+                if retained is None:
+                    (self.state_root / str(reference)).unlink(missing_ok=True)
+            fsync_directory(self.results_dir)
+        return PurgeReceipt(len(task_ids), task_ids)
+
     def recover_expired_leases(self) -> int:
         now = _as_utc(self._clock())
         with self._connect() as connection, begin_immediate(connection):
@@ -974,6 +1164,7 @@ class MemoryQueue:
             blocked_capability=row["blocked_capability"],
             result_reference=row["result_reference"],
             result_sha256=row["result_sha256"],
+            redrive_of=row["redrive_of"],
             attempt_history=tuple(
                 AttemptRecord(
                     attempt=int(item["attempt"]),
@@ -999,6 +1190,246 @@ def _state_root() -> Path:
         return Path(os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent))
 
 
+def _pid_is_alive(pid: int) -> bool:
+    try:
+        from memory_state import _is_pid_alive
+
+        return _is_pid_alive(pid)
+    except Exception:  # noqa: BLE001 - inability to prove death is treated as live
+        return True
+
+
+def _migration_paths(state_root: Path) -> tuple[Path, Path, Path, Path]:
+    run_dir = Path(state_root).resolve() / "run"
+    return (
+        run_dir,
+        run_dir / "queue",
+        run_dir / "queue-migration.lock",
+        run_dir / "queue-migrated-v2",
+    )
+
+
+def _legacy_write_allowed(state_root: Path) -> bool:
+    _run_dir, _legacy_dir, lock, marker = _migration_paths(state_root)
+    if marker.exists():
+        raise LegacyBackendDisabled("legacy_backend_disabled")
+    if lock.exists():
+        raise LegacyBackendDisabled("legacy_migration_quiesced")
+    return True
+
+
+def _acquire_migration_lock(lock: Path) -> str:
+    owner = f"{os.getpid()}:{uuid.uuid4().hex}"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    _harden_owner_only(lock.parent, 0o700)
+    for _ in range(2):
+        try:
+            descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            try:
+                existing = lock.read_text(encoding="ascii").split(":", 1)[0]
+                pid = int(existing)
+            except (OSError, ValueError):
+                raise MigrationBusy("migration_busy") from None
+            if _pid_is_alive(pid):
+                raise MigrationBusy("migration_busy")
+            try:
+                lock.unlink()
+            except OSError:
+                raise MigrationBusy("migration_busy") from None
+            continue
+        with os.fdopen(descriptor, "w", encoding="ascii") as handle:
+            handle.write(owner)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _harden_owner_only(lock, 0o600)
+        fsync_directory(lock.parent)
+        return owner
+    raise MigrationBusy("migration_busy")
+
+
+def _release_migration_lock(lock: Path, owner: str) -> None:
+    try:
+        if lock.read_text(encoding="ascii") == owner:
+            lock.unlink()
+            fsync_directory(lock.parent)
+    except OSError:
+        pass
+
+
+def _scan_legacy_records(
+    legacy_dir: Path,
+) -> tuple[list[tuple[Path, dict[str, object]]], list[tuple[Path, bytes]]]:
+    valid: list[tuple[Path, dict[str, object]]] = []
+    malformed: list[tuple[Path, bytes]] = []
+    if not legacy_dir.exists():
+        return valid, malformed
+    paths = sorted((*legacy_dir.glob("*.json"), *legacy_dir.glob("*.processing")))
+    for path in paths:
+        raw = b""
+        try:
+            raw = path.read_bytes()
+            record = json.loads(raw)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            malformed.append((path, raw))
+            continue
+        if path.suffix == ".processing":
+            pid = record.get("lease_pid") if isinstance(record, dict) else None
+            if isinstance(pid, int) and pid > 0 and _pid_is_alive(pid):
+                raise MigrationBusy("legacy_owner_live")
+        if not _valid_legacy_record(record):
+            malformed.append((path, raw))
+            continue
+        valid.append((path, record))
+    return valid, malformed
+
+
+def _valid_legacy_record(record: object) -> bool:
+    if not isinstance(record, dict):
+        return False
+    return (
+        isinstance(record.get("id"), str)
+        and bool(record["id"])
+        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", record["id"])
+        is not None
+        and isinstance(record.get("type"), str)
+        and bool(record["type"])
+        and isinstance(record.get("payload"), dict)
+        and isinstance(record.get("attempts", 0), int)
+        and not isinstance(record.get("attempts", 0), bool)
+        and int(record.get("attempts", 0)) >= 0
+        and _safe_legacy_timestamp(record.get("enqueued_at")) is not None
+    )
+
+
+def _safe_legacy_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return _as_utc(datetime.fromisoformat(value))
+    except ValueError:
+        return None
+
+
+def _import_legacy_record(queue: MemoryQueue, record: dict[str, object], source: Path) -> str:
+    created = _safe_legacy_timestamp(record["enqueued_at"])
+    if created is None:
+        raise QueueOperationError("legacy_invalid")
+    last_attempt = _safe_legacy_timestamp(record.get("last_attempt_at"))
+    if source.suffix == ".processing":
+        last_attempt = _safe_legacy_timestamp(record.get("lease_acquired_at")) or last_attempt
+    attempts = int(record.get("attempts", 0))
+    payload = _redact_payload(dict(record["payload"]))
+    payload_bytes = canonical_json_bytes(payload)
+    state = "dead" if attempts >= DEFAULTS.queue_max_attempts else "ready"
+    updated = last_attempt or created
+    expected = (
+        str(record["type"]),
+        payload_bytes.decode("utf-8"),
+        sha256_bytes(payload_bytes),
+        state,
+        _timestamp(created),
+        _timestamp(updated),
+        _timestamp(updated),
+        attempts,
+        _timestamp(last_attempt) if last_attempt else None,
+        "attempts_exhausted" if state == "dead" else None,
+    )
+    with queue._connect() as connection, begin_immediate(connection):
+        connection.execute(
+            """INSERT OR IGNORE INTO tasks(
+                   id, kind, handler_version, payload_json, input_hash, state, priority,
+                   created_at, updated_at, available_at, attempts, last_attempt_at,
+                   error_code
+               ) VALUES (?, ?, 1, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)""",
+            (
+                record["id"],
+                *expected,
+            ),
+        )
+        stored = connection.execute(
+            """SELECT kind, payload_json, input_hash, state, created_at, updated_at,
+                      available_at, attempts, last_attempt_at, error_code
+               FROM tasks WHERE id=?""",
+            (record["id"],),
+        ).fetchone()
+        if stored is None or tuple(stored) != expected:
+            raise QueueOperationError("legacy_import_conflict")
+    return str(record["id"])
+
+
+def _quarantine_legacy_record(run_dir: Path, source: Path, raw: bytes) -> None:
+    quarantine = run_dir / "queue-quarantine"
+    quarantine.mkdir(parents=True, exist_ok=True)
+    _harden_owner_only(quarantine, 0o700)
+    digest = sha256_bytes(raw)
+    record = {
+        "code": "legacy_invalid",
+        "source_name": source.name,
+        "source_sha256": digest,
+    }
+    _write_durable_file(quarantine / f"{digest}.json", canonical_json_bytes(record))
+    fsync_directory(quarantine)
+
+
+def _write_durable_file(path: Path, data: bytes) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _harden_owner_only(temporary, 0o600)
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            if path.read_bytes() != data or not _is_owner_only(path):
+                raise QueueOperationError("durable_file_conflict") from None
+        else:
+            fsync_file(path)
+            fsync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def migrate_legacy_queue(state_root: Path) -> MigrationReceipt:
+    run_dir, legacy_dir, lock, marker = _migration_paths(state_root)
+    if marker.exists():
+        return MigrationReceipt(0, 0, (), ())
+    owner = _acquire_migration_lock(lock)
+    try:
+        if marker.exists():
+            return MigrationReceipt(0, 0, (), ())
+        valid, malformed = _scan_legacy_records(legacy_dir)
+        queue = MemoryQueue(Path(state_root)) if valid else None
+        imported: list[str] = []
+        for source, record in valid:
+            if queue is None:  # pragma: no cover - guarded by valid
+                raise AssertionError
+            imported.append(_import_legacy_record(queue, record, source))
+            source.unlink()
+        for source, raw in malformed:
+            _quarantine_legacy_record(run_dir, source, raw)
+            source.unlink(missing_ok=True)
+        if legacy_dir.exists():
+            fsync_directory(legacy_dir)
+        marker_record = {"version": 2}
+        _write_durable_file(marker, canonical_json_bytes(marker_record))
+        fsync_directory(run_dir)
+        codes = ("legacy_invalid",) if malformed else ()
+        return MigrationReceipt(len(imported), len(malformed), tuple(imported), codes)
+    finally:
+        _release_migration_lock(lock, owner)
+
+
+def _ensure_sqlite_enabled() -> None:
+    state_root = _state_root()
+    marker = _migration_paths(state_root)[3]
+    if not marker.exists():
+        migrate_legacy_queue(state_root)
+
+
 def _queue_dir() -> Path:
     """Compatibility path: SQLite and results now live directly under run/."""
     path = _state_root() / "run"
@@ -1007,6 +1438,7 @@ def _queue_dir() -> Path:
 
 
 def _queue() -> MemoryQueue:
+    _ensure_sqlite_enabled()
     return MemoryQueue(_state_root())
 
 
@@ -1029,6 +1461,41 @@ def _compat_task(task: QueueTask | QueueLease) -> dict[str, Any]:
             last_attempt.isoformat(timespec="seconds") if last_attempt else None
         ),
         "payload": task.payload,
+    }
+
+
+def _export_task_record(task: QueueTask) -> dict[str, object]:
+    return {
+        "attempt_history": [
+            {
+                "attempt": item.attempt,
+                "error_code": item.error_code,
+                "finished_at": _timestamp(item.finished_at),
+                "outcome": item.outcome,
+                "started_at": _timestamp(item.started_at),
+            }
+            for item in task.attempt_history
+        ],
+        "attempts": task.attempts,
+        "available_at": _timestamp(task.available_at),
+        "blocked_capability": task.blocked_capability,
+        "created_at": _timestamp(task.created_at),
+        "dedupe_key": task.dedupe_key,
+        "error_code": task.error_code,
+        "handler_version": task.handler_version,
+        "id": task.id,
+        "input_hash": task.input_hash,
+        "kind": task.kind,
+        "last_attempt_at": (
+            _timestamp(task.last_attempt_at) if task.last_attempt_at else None
+        ),
+        "payload": task.payload,
+        "priority": task.priority,
+        "redrive_of": task.redrive_of,
+        "result_reference": task.result_reference,
+        "result_sha256": task.result_sha256,
+        "state": task.state,
+        "updated_at": _timestamp(task.updated_at),
     }
 
 
@@ -1061,6 +1528,23 @@ def mark_attempt(task_id: str, success: bool) -> None:
 def recover_stale_leases(max_age_seconds: int = 600) -> int:
     del max_age_seconds
     return _queue().recover_expired_leases()
+
+
+def cancel(task_id: str) -> bool:
+    return _queue().cancel(task_id)
+
+
+def redrive(task_id: str) -> str:
+    return _queue().redrive(task_id)
+
+
+def purge(*, terminal_before: datetime, export_path: Path) -> PurgeReceipt:
+    return _queue().purge(terminal_before=terminal_before, export_path=export_path)
+
+
+def retained_queue_state() -> bool:
+    """Return whether queue records or results block deletion of run/."""
+    return _queue().retains_run_directory()
 
 
 class _LeaseHeartbeat:
@@ -1120,11 +1604,8 @@ def drain_with(
             try:
                 outcome = processor(_compat_task(lease))
                 succeeded = bool(outcome)
-            except Exception as exc:  # noqa: BLE001
-                print(
-                    f"memory_queue: processor raised {type(exc).__name__}: {exc}",
-                    file=sys.stderr,
-                )
+            except Exception:  # noqa: BLE001
+                print("processor_exception", file=sys.stderr)
                 succeeded = False
         finally:
             heartbeat.stop()
@@ -1147,6 +1628,51 @@ def drain_with(
     return counts
 
 
+def run_worker(
+    processor: Callable[[dict], bool | DeferredResult],
+    *,
+    max_tasks: int = DEFAULTS.worker_max_tasks,
+    max_seconds: int = DEFAULTS.worker_max_seconds,
+    idle_seconds: int = DEFAULTS.worker_idle_seconds,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> WorkerSummary:
+    """Run a short-lived worker bounded by tasks, wall time, and idle time."""
+    if max_tasks < 0 or max_seconds < 0 or idle_seconds < 0:
+        raise ValueError("worker limits must be non-negative")
+    started = monotonic()
+    idle_started: float | None = None
+    totals = {"ok": 0, "failed": 0, "dead": 0, "skipped": 0}
+    processed = 0
+    while processed < max_tasks:
+        now = monotonic()
+        if now - started >= max_seconds:
+            break
+        if idle_started is not None and now - idle_started >= idle_seconds:
+            break
+        counts = drain_with(processor, max_tasks=1)
+        handled = counts["ok"] + counts["failed"]
+        for key in totals:
+            totals[key] += counts[key]
+        if handled:
+            processed += handled
+            idle_started = None
+            continue
+        if idle_seconds == 0:
+            break
+        if idle_started is None:
+            idle_started = now
+        remaining = idle_seconds - (now - idle_started)
+        sleep(min(1.0, remaining))
+    return WorkerSummary(
+        processed,
+        totals["ok"],
+        totals["failed"],
+        totals["dead"],
+        totals["skipped"],
+    )
+
+
 def _count_terminal(counts: dict[str, int], task: QueueTask) -> None:
     if task.state == "succeeded":
         counts["ok"] += 1
@@ -1167,6 +1693,25 @@ def status() -> dict[str, Any]:
         "by_type": by_type,
         "permanently_failed": sum(task.state == "dead" for task in tasks),
         "queue_dir": str(queue.run_dir),
+    }
+
+
+def _operator_status() -> dict[str, object]:
+    tasks = _queue().list_tasks()
+    states = {state: 0 for state in _STATES}
+    capabilities: set[str] = set()
+    codes: set[str] = set()
+    for task in tasks:
+        states[task.state] += 1
+        if task.blocked_capability:
+            capabilities.add(task.blocked_capability)
+        if task.error_code:
+            codes.add(task.error_code)
+    return {
+        "counts": {"total": len(tasks)},
+        "states": states,
+        "capabilities": sorted(capabilities),
+        "codes": sorted(codes),
     }
 
 
@@ -1240,24 +1785,109 @@ def _cli() -> int:
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["list", "status", "drain", "clear-failed"])
+    parser.add_argument(
+        "command",
+        choices=["list", "status", "work", "cancel", "redrive", "migrate", "purge", "drain"],
+    )
+    parser.add_argument("task_id", nargs="?")
+    parser.add_argument("--max-tasks", type=int, default=DEFAULTS.worker_max_tasks)
+    parser.add_argument("--max-seconds", type=int, default=DEFAULTS.worker_max_seconds)
+    parser.add_argument("--idle-seconds", type=int, default=DEFAULTS.worker_idle_seconds)
+    parser.add_argument("--lease-seconds", type=int, default=DEFAULTS.queue_lease_seconds)
+    parser.add_argument(
+        "--heartbeat-seconds", type=int, default=DEFAULTS.queue_heartbeat_seconds
+    )
+    parser.add_argument("--max-attempts", type=int, default=DEFAULTS.queue_max_attempts)
+    parser.add_argument(
+        "--retry-base-seconds", type=int, default=DEFAULTS.retry_base_seconds
+    )
+    parser.add_argument(
+        "--retry-cap-seconds", type=int, default=DEFAULTS.retry_cap_seconds
+    )
+    parser.add_argument("--terminal-before")
+    parser.add_argument("--export", type=Path)
     args = parser.parse_args()
-    if args.command == "list":
-        for task in list_pending():
-            print(
-                f"  {task['id']}  type={task['type']}  attempts={task['attempts']} "
-                f"enqueued={task['enqueued_at']}"
+    try:
+        if args.command == "list":
+            records = [
+                {"id": task.id, "state": task.state} for task in _queue().list_tasks()
+            ]
+            print(json.dumps(records, sort_keys=True))
+            return 0
+        if args.command == "status":
+            print(json.dumps(_operator_status(), sort_keys=True))
+            return 0
+        if args.command == "drain":
+            counts = drain_with(_manual_processor, max_tasks=args.max_tasks)
+            print(json.dumps({"counts": counts}, sort_keys=True))
+            return 1 if counts["failed"] or counts["dead"] else 0
+        if args.command == "work":
+            summary = run_worker(
+                _manual_processor,
+                max_tasks=args.max_tasks,
+                max_seconds=args.max_seconds,
+                idle_seconds=args.idle_seconds,
             )
-        return 0
-    if args.command == "status":
-        print(json.dumps(status(), indent=2, ensure_ascii=False))
-        return 0
-    if args.command == "drain":
-        counts = drain_with(_manual_processor, max_tasks=20)
-        print(f"drain complete: {counts}")
-        return 1 if counts["failed"] or counts["dead"] else 0
-    print("dead tasks are retained; export-first purge is introduced in Task 7")
-    return 0
+            counts = {
+                "dead": summary.dead,
+                "failed": summary.failed,
+                "processed": summary.processed,
+                "skipped": summary.skipped,
+                "succeeded": summary.succeeded,
+            }
+            print(json.dumps({"counts": counts}, sort_keys=True))
+            return 1 if summary.failed or summary.dead else 0
+        if args.command == "migrate":
+            receipt = migrate_legacy_queue(_state_root())
+            print(
+                json.dumps(
+                    {
+                        "codes": list(receipt.codes),
+                        "counts": {
+                            "imported": receipt.imported,
+                            "quarantined": receipt.quarantined,
+                        },
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 0
+        if args.command in ("cancel", "redrive") and not args.task_id:
+            raise QueueOperationError("task_id_required")
+        if args.command == "cancel":
+            changed = cancel(args.task_id)
+            state = _queue().get(args.task_id).state if changed else "unchanged"
+            print(json.dumps({"id": args.task_id, "state": state}, sort_keys=True))
+            return 0 if changed else 1
+        if args.command == "redrive":
+            task_id = redrive(args.task_id)
+            print(json.dumps({"id": task_id, "state": "ready"}, sort_keys=True))
+            return 0
+        if args.command == "purge":
+            if args.terminal_before is None:
+                raise QueueOperationError("terminal_before_required")
+            if args.export is None:
+                raise QueueOperationError("export_required")
+            try:
+                terminal_before = datetime.fromisoformat(args.terminal_before)
+            except ValueError:
+                raise QueueOperationError("terminal_before_invalid") from None
+            receipt = purge(
+                terminal_before=terminal_before,
+                export_path=args.export,
+            )
+            print(
+                json.dumps(
+                    {"counts": {"purged": receipt.purged}, "ids": list(receipt.task_ids)},
+                    sort_keys=True,
+                )
+            )
+            return 0
+    except (QueueOperationError, KeyError) as exc:
+        code = exc.code if isinstance(exc, QueueOperationError) else "task_not_found"
+        print(json.dumps({"codes": [code]}, sort_keys=True))
+        return 2
+    return 2
 
 
 if __name__ == "__main__":
