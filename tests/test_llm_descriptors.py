@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import replace
 
 import llm_client
@@ -165,6 +167,57 @@ def test_call_candidate_uses_resolved_model_and_settings_after_env_changes(monke
     assert captured == [descriptor]
     assert captured[0].model == "resolved-model"
     assert captured[0].inference_settings["max_tokens"] == 321
+
+
+def test_http_endpoint_identity_is_normalized_hashed_and_secret_safe(monkeypatch):
+    raw = "HTTPS://user:password@Example.COM:443/v1/?api_key=secret#fragment"
+    monkeypatch.setenv("MEMORY_LLM_BASE_URL", raw)
+
+    descriptor = llm_client.provider_candidates("openai", max_tokens=321)[0]
+    canonical = descriptor.canonical()
+    encoded = canonical_json_bytes(canonical).decode("utf-8")
+
+    assert canonical["capabilities"]["endpoint_sha256"] == hashlib.sha256(
+        b"https://example.com:443/v1"
+    ).hexdigest()
+    assert descriptor._endpoint == raw
+    for secret in ("user", "password", "api_key", "secret", "fragment"):
+        assert secret not in encoded
+
+
+@pytest.mark.parametrize("provider", ["openai", "ollama"])
+def test_http_backend_uses_captured_endpoint_after_env_drift(provider, monkeypatch):
+    monkeypatch.setenv("MEMORY_LLM_BASE_URL", "https://first.example/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    descriptor = llm_client.provider_candidates(provider, max_tokens=321)[0]
+    monkeypatch.setenv("MEMORY_LLM_BASE_URL", "https://second.example/v1")
+    monkeypatch.setitem(llm_client._PROBES, provider, lambda: True)
+    requests = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {"choices": [{"message": {"content": "answer"}}]}
+            ).encode("utf-8")
+
+    def urlopen(request, timeout):
+        requests.append(request)
+        return Response()
+
+    monkeypatch.setattr(llm_client.urllib.request, "urlopen", urlopen)
+
+    result = llm_client.call_candidate(descriptor, "prompt", "system")
+
+    assert result.text == "answer"
+    assert requests[0].full_url == "https://first.example/v1/chat/completions"
 
 
 def test_call_candidate_rejects_max_tokens_different_from_descriptor(monkeypatch):

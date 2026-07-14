@@ -186,6 +186,56 @@ def test_real_openai_and_ollama_descriptors_produce_distinct_keys(tmp_path, monk
     assert openai_key != ollama_key
 
 
+def test_same_provider_different_effective_endpoints_produce_distinct_keys(tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMORY_LLM_BASE_URL", "https://first.example/v1")
+    first = llm_client.provider_candidates("openai", max_tokens=321)[0]
+    monkeypatch.setenv("MEMORY_LLM_BASE_URL", "https://second.example/v1")
+    second = llm_client.provider_candidates("openai", max_tokens=321)[0]
+
+    def call(provider):
+        return _call(
+            provider=provider.provider,
+            model=provider.model,
+            capabilities=provider.capabilities,
+            inference_settings=provider.inference_settings,
+            structured_output="native",
+        )
+
+    cache = CompileCache(tmp_path)
+    first_key = cache.key(_action(draft_calls=(call(first),), critique_calls=()))
+    second_key = cache.key(_action(draft_calls=(call(second),), critique_calls=()))
+
+    assert first_key != second_key
+
+
+def test_endpoint_credentials_and_query_never_reach_canonical_or_cache_files(
+    tmp_path, monkeypatch
+):
+    raw = "https://user:password@private.example/v1?api_key=secret#fragment"
+    monkeypatch.setenv("MEMORY_LLM_BASE_URL", raw)
+    provider = llm_client.provider_candidates("openai", max_tokens=321)[0]
+    call = _call(
+        provider=provider.provider,
+        model=provider.model,
+        capabilities=provider.capabilities,
+        inference_settings=provider.inference_settings,
+        structured_output="native",
+    )
+    cache = CompileCache(tmp_path)
+    action = _action(draft_calls=(call,), critique_calls=())
+
+    path = cache.put(action, _plan())
+    serialized = (
+        canonical_json_bytes(provider.canonical())
+        + canonical_json_bytes(action.canonical())
+        + path.read_bytes()
+        + path.name.encode()
+    )
+
+    for secret in (b"user", b"password", b"api_key", b"secret", b"fragment"):
+        assert secret not in serialized
+
+
 def test_restored_preferred_provider_does_not_hit_fallback_cache(tmp_path):
     cache = CompileCache(tmp_path)
     fallback = _action(

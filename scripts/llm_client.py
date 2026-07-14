@@ -34,6 +34,7 @@ Design:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -42,9 +43,10 @@ import subprocess
 import sys
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 
@@ -65,6 +67,7 @@ class ProviderDescriptor:
     inference_settings: Mapping[str, object]
     candidate_index: int
     fallback_from: tuple[str, ...]
+    _endpoint: str | None = field(default=None, repr=False, compare=False)
 
     @property
     def identity(self) -> str:
@@ -105,7 +108,7 @@ def provider_candidates(
     candidates = _candidate_order(forced.lower().strip())
     descriptors = []
     for index, provider in enumerate(candidates):
-        model, capabilities, settings = _provider_configuration(provider, max_tokens)
+        model, capabilities, settings, endpoint = _provider_configuration(provider, max_tokens)
         descriptors.append(
             ProviderDescriptor(
                 provider=provider,
@@ -114,6 +117,7 @@ def provider_candidates(
                 inference_settings=MappingProxyType(dict(settings)),
                 candidate_index=index,
                 fallback_from=(),
+                _endpoint=endpoint,
             )
         )
     return descriptors
@@ -263,13 +267,13 @@ def _candidate_order(forced: str) -> list[str]:
 def _provider_configuration(
     provider: str,
     max_tokens: int,
-) -> tuple[str | None, Mapping[str, object], Mapping[str, object]]:
+) -> tuple[str | None, Mapping[str, object], Mapping[str, object], str | None]:
     native = provider in {"openai", "ollama"}
     capabilities: Mapping[str, object] = {
         "structured_output": "native" if native else "prompt",
     }
     if provider == "fake":
-        return "fake-v1", capabilities, {"max_tokens": max_tokens}
+        return "fake-v1", capabilities, {"max_tokens": max_tokens}, None
     if provider == "codex":
         return (
             os.environ.get("MEMORY_CODEX_MODEL") or None,
@@ -278,26 +282,55 @@ def _provider_configuration(
                 "max_tokens": max_tokens,
                 "reasoning": os.environ.get("MEMORY_CODEX_REASONING", "low"),
             },
+            None,
         )
     if provider == "claude":
         return (
             os.environ.get("MEMORY_CLAUDE_MODEL") or None,
             capabilities,
             {"max_tokens": max_tokens},
+            None,
         )
     if provider == "openai":
+        endpoint = os.environ.get("MEMORY_LLM_BASE_URL", "https://api.openai.com/v1")
+        capabilities = dict(capabilities)
+        capabilities["endpoint_sha256"] = _endpoint_identity(endpoint)
         return (
             os.environ.get("MEMORY_LLM_MODEL", "gpt-4o-mini"),
             capabilities,
             {"max_tokens": max_tokens, "temperature_milli": 200},
+            endpoint,
         )
     if provider == "ollama":
+        endpoint = os.environ.get("MEMORY_LLM_BASE_URL", "http://localhost:11434/v1")
+        capabilities = dict(capabilities)
+        capabilities["endpoint_sha256"] = _endpoint_identity(endpoint)
         return (
             os.environ.get("MEMORY_LLM_MODEL", "qwen3:0.6b"),
             capabilities,
             {"max_tokens": max_tokens, "temperature_milli": 200},
+            endpoint,
         )
-    return None, capabilities, {"max_tokens": max_tokens}
+    return None, capabilities, {"max_tokens": max_tokens}, None
+
+
+def _endpoint_identity(endpoint: str) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(endpoint)
+        scheme = parsed.scheme.casefold()
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("MEMORY_LLM_BASE_URL is not a valid HTTP endpoint") from exc
+    if scheme not in {"http", "https"} or not hostname:
+        raise ValueError("MEMORY_LLM_BASE_URL must use HTTP(S) with a hostname")
+    hostname = hostname.casefold()
+    if ":" in hostname:
+        hostname = f"[{hostname}]"
+    effective_port = port or (443 if scheme == "https" else 80)
+    path = parsed.path.rstrip("/")
+    normalized = f"{scheme}://{hostname}:{effective_port}{path}"
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -585,7 +618,9 @@ def _call_openai(
     api_key = os.environ.get("MEMORY_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if not api_key:
         return ""
-    base_url = os.environ.get("MEMORY_LLM_BASE_URL", "https://api.openai.com/v1")
+    if descriptor._endpoint is None:
+        raise ValueError("OpenAI endpoint was not resolved in the provider descriptor")
+    base_url = descriptor._endpoint
     model = descriptor.model
     max_tokens = int(descriptor.inference_settings["max_tokens"])
     temperature = int(descriptor.inference_settings["temperature_milli"]) / 1000
@@ -635,7 +670,9 @@ def _call_ollama(
     system_prompt: str,
     schema: Mapping[str, object] | None = None,
 ) -> str:
-    base_url = os.environ.get("MEMORY_LLM_BASE_URL", "http://localhost:11434/v1")
+    if descriptor._endpoint is None:
+        raise ValueError("Ollama endpoint was not resolved in the provider descriptor")
+    base_url = descriptor._endpoint
     model = descriptor.model
     max_tokens = int(descriptor.inference_settings["max_tokens"])
     temperature = int(descriptor.inference_settings["temperature_milli"]) / 1000
