@@ -453,10 +453,16 @@ def _validate_claim_schemas(pages: list[Path]) -> list[str]:
             frontmatter = FRONTMATTER_RE.match(text)
             type_match = TYPE_FIELD_RE.search(frontmatter.group(1)) if frontmatter else None
             page_type = type_match.group(1).strip().strip("\"'") if type_match else None
-            in_inbox = "inbox" in Path(page).parts
+            candidate_root = (ROOT / "knowledge" / "inbox" / "claims").resolve(
+                strict=False
+            )
+            resolved_page = Path(page).resolve(strict=True)
+            in_inbox = candidate_root in resolved_page.parents
             if page_type in INBOX_TYPES:
                 if not in_inbox:
-                    raise ValueError("claim-candidate is allowed only under knowledge/inbox")
+                    raise ValueError(
+                        "claim-candidate is allowed only under knowledge/inbox/claims"
+                    )
                 matches = CANDIDATE_JSON_RE.findall(text)
                 if len(matches) != 1:
                     raise ValueError("claim-candidate must embed exactly one JSON record")
@@ -480,6 +486,18 @@ def _validate_claim_schemas(pages: list[Path]) -> list[str]:
 
 
 check_claim_schemas = _validate_claim_schemas
+
+
+def _project_claim_pages(projects_root: Path) -> list[Path]:
+    """Return bounded-lint project documents that may carry claim ledgers."""
+    if not projects_root.exists():
+        return []
+    names = {"context.md", "journal.md", "state.md"}
+    return sorted(
+        page
+        for page in projects_root.rglob("*.md")
+        if page.is_file() and page.name in names
+    )
 
 
 def check_missing_sources_section(pages: list[Path]) -> list[str]:
@@ -729,6 +747,10 @@ def run_checks(args: argparse.Namespace) -> dict[str, list[str]]:
         state = load_state()
         findings["orphan_daily_logs"] = check_orphan_daily_logs(state)
         findings["stale_compiled"] = check_stale_compiled(state)
+        project_pages = _project_claim_pages(ROOT / "knowledge" / "projects")
+        findings["invalid_claim_schema"] += [
+            f"[projects] {x}" for x in check_claim_schemas(project_pages)
+        ]
 
     all_pages_for_contradictions: list[Path] = []
 

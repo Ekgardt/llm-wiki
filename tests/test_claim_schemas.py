@@ -65,7 +65,7 @@ def test_relation_schema_is_the_exact_closed_vocabulary() -> None:
     "value",
     [
         {"type": "string", "value": "ready"},
-        {"type": "number", "value": 2.5, "unit": "seconds"},
+        {"type": "number", "value": "2.5", "unit": "seconds"},
         {"type": "boolean", "value": True},
         {"type": "entity", "value": "service:a"},
         {"type": "date", "value": "2026-01-02"},
@@ -84,6 +84,18 @@ def test_ledger_rejects_unknown_fields_invalid_intervals_and_untyped_values() ->
     with pytest.raises(SchemaValidationError):
         validate_schema(ledger(invalid), SCHEMAS / "claim-ledger-v1.json")
 
+    for number in (2.5, "1e3", "01", "1.0", "NaN", "Infinity"):
+        invalid = claim()
+        invalid["value"] = {"type": "number", "value": number, "unit": "seconds"}
+        with pytest.raises(SchemaValidationError):
+            validate_schema(ledger(invalid), SCHEMAS / "claim-ledger-v1.json")
+        invalid = claim()
+        invalid["qualifiers"] = [
+            {"key": "latency", "value": {"type": "number", "value": number, "unit": "ms"}}
+        ]
+        with pytest.raises(SchemaValidationError):
+            validate_schema(ledger(invalid), SCHEMAS / "claim-ledger-v1.json")
+
     invalid = claim()
     invalid["value"] = {"value": "service:b"}
     with pytest.raises(SchemaValidationError):
@@ -96,11 +108,13 @@ def test_ledger_rejects_unknown_fields_invalid_intervals_and_untyped_values() ->
 
 
 def test_candidate_is_closed_quarantined_and_contains_one_claim() -> None:
+    candidate_claim = claim()
+    candidate_claim["lifecycle"] = "quarantined"
     candidate = {
         "schema_version": "claim-candidate/v1",
         "status": "quarantined",
         "reason": "ambiguous semantic conflict",
-        "claim": claim(),
+        "claim": candidate_claim,
         "source_page": "knowledge/notes/service-a.md",
         "created_at": "2026-01-02T03:04:05Z",
     }
@@ -118,6 +132,11 @@ def test_candidate_is_closed_quarantined_and_contains_one_claim() -> None:
     invalid["source_page"] = "knowledge/notes/../../secret.md"
     with pytest.raises(SchemaValidationError):
         validate_schema(invalid, SCHEMAS / "claim-candidate-v1.json")
+    for lifecycle in ("active", "inactive", "superseded"):
+        invalid = copy.deepcopy(candidate)
+        invalid["claim"]["lifecycle"] = lifecycle
+        with pytest.raises(SchemaValidationError):
+            validate_schema(invalid, SCHEMAS / "claim-candidate-v1.json")
 
 
 def test_claim_candidate_is_not_a_durable_okf_type() -> None:

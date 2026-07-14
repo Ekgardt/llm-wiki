@@ -2,15 +2,18 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
 import sqlite3
+import sys
+import threading
+import time
 import unicodedata
-from collections.abc import Mapping, Sequence
-from contextlib import closing
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from bounded_io import read_stable_bytes
@@ -21,6 +24,7 @@ from reliable_memory import (
     open_operational_db,
     sha256_bytes,
     validate_schema,
+    validate_state_root,
 )
 
 SCHEMA_DIR = Path(__file__).with_name("schemas")
@@ -29,6 +33,7 @@ CANDIDATE_SCHEMA = SCHEMA_DIR / "claim-candidate-v1.json"
 RELATION_SCHEMA = SCHEMA_DIR / "claim-relations-v1.json"
 MAX_CLAIM_PAGE_BYTES = 4 * 1024 * 1024
 MAX_CANDIDATES = 50
+CLAIM_INDEX_SCHEMA_VERSION = "claim-index/v1"
 RELATIONS = frozenset(
     {
         "equals",
@@ -65,6 +70,7 @@ _EXTRACTION_FIELDS = {
     "links",
     "extractor_version",
 }
+_RFC3339_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
 
 
 class EvidenceMismatch(ValueError):
@@ -144,6 +150,43 @@ def _canonical_time(value: object, *, nullable: bool, label: str) -> str | None:
     return canonical.replace(".000000Z", "Z")
 
 
+def _strict_rfc3339_utc(value: object, *, label: str) -> str:
+    if not isinstance(value, str) or _RFC3339_UTC_RE.fullmatch(value) is None:
+        raise ValueError(f"{label} must be a strict UTC RFC3339 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as exc:
+        raise ValueError(f"{label} is not a real RFC3339 date/time") from exc
+    if parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        raise ValueError(f"{label} must be UTC")
+    return value
+
+
+def _canonical_decimal(value: object) -> str:
+    if isinstance(value, bool) or isinstance(value, float) or not isinstance(
+        value, (str, int, Decimal)
+    ):
+        raise ValueError("number value must be a decimal string, integer, or Decimal")
+    if isinstance(value, str):
+        if value != value.strip() or not value:
+            raise ValueError("number value is invalid")
+        source = value
+    else:
+        source = str(value)
+    try:
+        number = Decimal(source)
+    except InvalidOperation as exc:
+        raise ValueError("number value is invalid") from exc
+    if not number.is_finite():
+        raise ValueError("number value must be finite")
+    result = format(number, "f")
+    if "." in result:
+        result = result.rstrip("0").rstrip(".")
+    if Decimal(result).is_zero():
+        return "0"
+    return result
+
+
 def _normalize_value(value: object) -> dict[str, object]:
     if not isinstance(value, Mapping) or not isinstance(value.get("type"), str):
         raise ValueError("claim value must be typed")
@@ -161,10 +204,8 @@ def _normalize_value(value: object) -> dict[str, object]:
             raise ValueError("boolean value is invalid")
         result = raw
     elif kind == "number":
-        if not isinstance(raw, (int, float)) or isinstance(raw, bool) or not math.isfinite(raw):
-            raise ValueError("number value is invalid")
         unit = _trim(value["unit"], label="number unit", fold=True)
-        return {"type": "number", "value": raw, "unit": unit}
+        return {"type": "number", "value": _canonical_decimal(raw), "unit": unit}
     elif kind == "date":
         result = _canonical_time(raw, nullable=False, label="date value")
         if "T" in str(result):
@@ -386,7 +427,14 @@ def validate_claim_record(record: object) -> None:
         evidence["text"].encode("utf-8")
     ) != evidence["sha256"]:
         raise ValueError("claim evidence literal hash does not match")
-    if record["observed_at"] != f"{ref.daily_id}T{ref.block_id}Z":
+    observed_at = _strict_rfc3339_utc(record["observed_at"], label="observed_at")
+    try:
+        datetime.strptime(ref.block_id, "%H:%M:%S")
+    except ValueError as exc:
+        raise ValueError("observed evidence block is not a valid HH:MM:SS timestamp") from exc
+    if re.fullmatch(r"\d{2}:\d{2}:\d{2}", ref.block_id) is None or observed_at != (
+        f"{ref.daily_id}T{ref.block_id}Z"
+    ):
         raise ValueError("claim observation does not match its evidence block")
 
 
@@ -463,28 +511,13 @@ class ClaimIndex:
             vault = sibling if (sibling / "knowledge").is_dir() else configured_vault
         self.vault = Path(vault).resolve(strict=True)
         self.path = self.state_root / "cache" / "claims.sqlite3"
+        self.lock_path = self.state_root / "cache" / "claims.rebuild.lock"
 
     def _connect(self) -> sqlite3.Connection:
         connection = open_operational_db(self.path, busy_ms=5000)
         try:
             _restrict_owner_only(self.path.parent, 0o700)
             _restrict_owner_only(self.path, 0o600)
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS claim (
-                    id TEXT NOT NULL,
-                    fingerprint TEXT NOT NULL,
-                    subject TEXT NOT NULL,
-                    relation TEXT NOT NULL,
-                    lifecycle TEXT NOT NULL,
-                    page TEXT NOT NULL,
-                    record_json BLOB NOT NULL,
-                    PRIMARY KEY (page, id)
-                );
-                CREATE INDEX IF NOT EXISTS claim_candidate_lookup
-                    ON claim(subject, relation, lifecycle, fingerprint);
-                """
-            )
             _verify_owner_only(self.path, 0o600)
             return connection
         except Exception:
@@ -501,7 +534,83 @@ class ClaimIndex:
             Path(page), MAX_CLAIM_PAGE_BYTES, label="claim index page"
         )
 
+    @staticmethod
+    def _schema_compatible(database: sqlite3.Connection) -> bool:
+        expected_claim = [
+            ("id", "TEXT", 1, None, 2),
+            ("fingerprint", "TEXT", 1, None, 0),
+            ("subject", "TEXT", 1, None, 0),
+            ("relation", "TEXT", 1, None, 0),
+            ("lifecycle", "TEXT", 1, None, 0),
+            ("page", "TEXT", 1, None, 1),
+            ("record_json", "BLOB", 1, None, 0),
+        ]
+        try:
+            claim_shape = [
+                tuple(row[index] for index in range(1, 6))
+                for row in database.execute("PRAGMA table_info(claim)")
+            ]
+            meta_shape = [
+                tuple(row[index] for index in range(1, 6))
+                for row in database.execute("PRAGMA table_info(claim_index_meta)")
+            ]
+            index_columns = [
+                row[2]
+                for row in database.execute(
+                    "PRAGMA index_info(claim_candidate_lookup)"
+                )
+            ]
+            versions = [
+                row[0]
+                for row in database.execute(
+                    "SELECT schema_version FROM claim_index_meta"
+                ).fetchall()
+            ]
+        except sqlite3.Error:
+            return False
+        return (
+            claim_shape == expected_claim
+            and meta_shape == [("schema_version", "TEXT", 1, None, 1)]
+            and index_columns == ["subject", "relation", "lifecycle", "fingerprint"]
+            and versions == [CLAIM_INDEX_SCHEMA_VERSION]
+        )
+
+    @staticmethod
+    def _replace_schema(database: sqlite3.Connection) -> None:
+        statements = (
+            "DROP INDEX IF EXISTS claim_candidate_lookup",
+            "DROP TABLE IF EXISTS claim",
+            "DROP TABLE IF EXISTS claim_index_meta",
+            """CREATE TABLE claim (
+                id TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                relation TEXT NOT NULL,
+                lifecycle TEXT NOT NULL,
+                page TEXT NOT NULL,
+                record_json BLOB NOT NULL,
+                PRIMARY KEY (page, id)
+            )""",
+            """CREATE INDEX claim_candidate_lookup
+                ON claim(subject, relation, lifecycle, fingerprint)""",
+            """CREATE TABLE claim_index_meta (
+                schema_version TEXT NOT NULL PRIMARY KEY
+            )""",
+        )
+        for statement in statements:
+            database.execute(statement)
+        database.execute(
+            "INSERT INTO claim_index_meta(schema_version) VALUES(?)",
+            (CLAIM_INDEX_SCHEMA_VERSION,),
+        )
+
     def rebuild(self, pages: Sequence[Path]) -> None:
+        validate_state_root(self.path.parent)
+        _restrict_owner_only(self.path.parent, 0o700)
+        with _exclusive_file_lock(self.lock_path):
+            self._rebuild_locked(pages)
+
+    def _rebuild_locked(self, pages: Sequence[Path]) -> None:
         rows: list[tuple[object, ...]] = []
         seen_pages: set[str] = set()
         for page in pages:
@@ -524,12 +633,22 @@ class ClaimIndex:
                         canonical_json_bytes(record),
                     )
                 )
-        with closing(self._connect()) as database, database:
-            database.execute("DELETE FROM claim")
-            database.executemany(
-                "INSERT INTO claim(id,fingerprint,subject,relation,lifecycle,page,record_json) VALUES(?,?,?,?,?,?,?)",
-                rows,
-            )
+        with closing(self._connect()) as database:
+            database.execute("BEGIN IMMEDIATE")
+            try:
+                if self._schema_compatible(database):
+                    database.execute("DELETE FROM claim")
+                else:
+                    self._replace_schema(database)
+                database.executemany(
+                    "INSERT INTO claim(id,fingerprint,subject,relation,lifecycle,page,record_json) VALUES(?,?,?,?,?,?,?)",
+                    rows,
+                )
+            except BaseException:
+                database.rollback()
+                raise
+            else:
+                database.commit()
 
     def candidates(
         self, claim: NormalizedClaim | None, *, limit: int = MAX_CANDIDATES
@@ -543,6 +662,8 @@ class ClaimIndex:
         if not self.path.exists():
             return []
         with closing(self._connect()) as database:
+            if not self._schema_compatible(database):
+                return []
             rows = database.execute(
                 """
                 SELECT page, record_json FROM claim
@@ -564,3 +685,61 @@ class ClaimIndex:
             IndexedClaim(row["page"], NormalizedClaim(json.loads(row["record_json"])))
             for row in rows
         ]
+
+
+@contextmanager
+def _exclusive_file_lock(path: Path, *, timeout: float = 10.0) -> Iterator[None]:
+    """Hold an OS-released cross-process lock for a complete index rebuild."""
+    path = Path(path)
+    flags = os.O_RDWR | getattr(os, "O_BINARY", 0)
+    created = False
+    try:
+        descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+        created = True
+    except FileExistsError:
+        descriptor = os.open(path, flags)
+    acquired = False
+    try:
+        if os.fstat(descriptor).st_size == 0:
+            os.write(descriptor, b"0")
+        if created:
+            _restrict_owner_only(path, 0o600)
+        else:
+            _verify_owner_only(path, 0o600)
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                if sys.platform == "win32":
+                    import msvcrt
+
+                    msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except OSError as exc:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"could not acquire claim rebuild lock: {path}") from exc
+                time.sleep(0.05)
+        token = f"{os.getpid()}:{threading.get_ident()}".encode()
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        os.write(descriptor, token)
+        os.ftruncate(descriptor, len(token))
+        yield
+    finally:
+        try:
+            if acquired:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                if sys.platform == "win32":
+                    import msvcrt
+
+                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)

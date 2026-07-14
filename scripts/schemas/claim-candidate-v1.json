@@ -21,7 +21,7 @@
         "relation": {"enum": ["equals", "has-state", "has-value", "member-of", "located-at", "starts-at", "ends-at", "uses", "depends-on"]},
         "value": {"oneOf": [
           {"type": "object", "required": ["type", "value"], "properties": {"type": {"const": "string"}, "value": {"type": "string", "maxLength": 16384}}, "additionalProperties": false},
-          {"type": "object", "required": ["type", "value", "unit"], "properties": {"type": {"const": "number"}, "value": {"type": "number"}, "unit": {"type": "string", "minLength": 1, "maxLength": 256}}, "additionalProperties": false},
+          {"type": "object", "required": ["type", "value", "unit"], "properties": {"type": {"const": "number"}, "value": {"type": "string", "pattern": "^(?!-0$)-?(?:0|[1-9]\\d*)(?:\\.\\d*[1-9])?$"}, "unit": {"type": "string", "minLength": 1, "maxLength": 256}}, "additionalProperties": false},
           {"type": "object", "required": ["type", "value"], "properties": {"type": {"const": "boolean"}, "value": {"type": "boolean"}}, "additionalProperties": false},
           {"type": "object", "required": ["type", "value"], "properties": {"type": {"const": "entity"}, "value": {"type": "string", "minLength": 1, "maxLength": 4096}}, "additionalProperties": false},
           {"type": "object", "required": ["type", "value"], "properties": {"type": {"const": "date"}, "value": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"}}, "additionalProperties": false},
@@ -29,7 +29,7 @@
         ]},
         "qualifiers": {"type": "array", "maxItems": 100, "items": {"type": "object", "required": ["key", "value"], "properties": {"key": {"type": "string", "minLength": 1, "maxLength": 256}, "value": {"oneOf": [
           {"type": "object", "required": ["type", "value"], "properties": {"type": {"const": "string"}, "value": {"type": "string", "maxLength": 16384}}, "additionalProperties": false},
-          {"type": "object", "required": ["type", "value", "unit"], "properties": {"type": {"const": "number"}, "value": {"type": "number"}, "unit": {"type": "string", "minLength": 1, "maxLength": 256}}, "additionalProperties": false},
+          {"type": "object", "required": ["type", "value", "unit"], "properties": {"type": {"const": "number"}, "value": {"type": "string", "pattern": "^(?!-0$)-?(?:0|[1-9]\\d*)(?:\\.\\d*[1-9])?$"}, "unit": {"type": "string", "minLength": 1, "maxLength": 256}}, "additionalProperties": false},
           {"type": "object", "required": ["type", "value"], "properties": {"type": {"const": "boolean"}, "value": {"type": "boolean"}}, "additionalProperties": false},
           {"type": "object", "required": ["type", "value"], "properties": {"type": {"const": "entity"}, "value": {"type": "string", "minLength": 1, "maxLength": 4096}}, "additionalProperties": false},
           {"type": "object", "required": ["type", "value"], "properties": {"type": {"const": "date"}, "value": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"}}, "additionalProperties": false},
@@ -37,7 +37,7 @@
         ]}}, "additionalProperties": false}},
         "validity": {"type": "object", "required": ["from", "to"], "properties": {"from": {"oneOf": [{"type": "null"}, {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}(?:T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z)?$"}]}, "to": {"oneOf": [{"type": "null"}, {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}(?:T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z)?$"}]}}, "additionalProperties": false},
         "observed_at": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"},
-        "lifecycle": {"enum": ["active", "superseded", "inactive", "quarantined"]},
+        "lifecycle": {"const": "quarantined"},
         "confidence": {"enum": ["high", "medium", "low"]},
         "authority": {"enum": ["user", "web", "ai-derived", "inferred"]},
         "evidence": {"type": "object", "required": ["reference", "sha256", "text"], "properties": {"reference": {"type": "string", "pattern": "^daily:\\d{4}-\\d{2}-\\d{2} sha256:[0-9a-f]{64} block:[A-Za-z0-9][A-Za-z0-9._:-]{0,199} bytes:(?:0|[1-9]\\d*)-(?:0|[1-9]\\d*)$"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "text": {"type": "string", "minLength": 1, "maxLength": 16384}}, "additionalProperties": false},
