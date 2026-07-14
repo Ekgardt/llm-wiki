@@ -48,6 +48,7 @@ from compile_cache import (  # noqa: E402
 from evidence_resolver import EvidenceRef, EvidenceResolver  # noqa: E402
 from llm_client import call_candidate, probe_candidate, provider_candidates  # noqa: E402
 from markdown_transaction import MarkdownChange, MarkdownCoordinator  # noqa: E402
+from memory_queue import MemoryQueue  # noqa: E402
 from memory_state import (  # noqa: E402
     ROOT,
     STATE_ROOT,
@@ -964,6 +965,7 @@ def apply_compile_plan(
             transaction, sequence = _transaction_authority(
                 coordinator, authoritative_operation_id
             )
+            _clear_compile_source_failures(inputs, coordinator.state_root)
             return CompileApplyResult(
                 transaction.id,
                 authoritative_operation_id,
@@ -1114,6 +1116,7 @@ def apply_compile_plan(
         )
         committed = coordinator.apply(transaction.id)
         committed, sequence = _transaction_authority(coordinator, operation_id)
+        _clear_compile_source_failures(inputs, coordinator.state_root)
         return CompileApplyResult(
             committed.id,
             operation_id,
@@ -2001,6 +2004,9 @@ def _run(args: argparse.Namespace) -> int:
         )
     except Exception as exc:  # noqa: BLE001 - provider/cache boundary is fail-closed
         error = f"{type(exc).__name__}: {exc}"
+        _record_compile_source_failures(
+            inputs, STATE_ROOT, error_code=type(exc).__name__
+        )
         print(f"compile_memory: FAILED — {error}")
         _mark_finished(args.trigger, "error", error)
         return 1
@@ -2023,6 +2029,9 @@ def _run(args: argparse.Namespace) -> int:
         )
     except Exception as exc:  # noqa: BLE001 - no diagnostic state is a commit receipt
         error = f"{type(exc).__name__}: {exc}"
+        _record_compile_source_failures(
+            inputs, STATE_ROOT, error_code=type(exc).__name__
+        )
         print(f"compile_memory: FAILED — transaction not committed: {error}")
         _mark_finished(args.trigger, "error", error)
         return 1
@@ -2047,6 +2056,25 @@ def _run(args: argparse.Namespace) -> int:
     _mark_finished(args.trigger, "ok")
     print("compile_memory: done.")
     return 0
+
+
+def _record_compile_source_failures(
+    inputs: CompileInputs, state_root: Path, *, error_code: str
+) -> None:
+    queue = MemoryQueue(state_root)
+    for source in inputs.dailies:
+        queue.record_source_failure(
+            source.logical_path,
+            source.sha256,
+            error_code=error_code[:200],
+            producer="compile",
+        )
+
+
+def _clear_compile_source_failures(inputs: CompileInputs, state_root: Path) -> None:
+    queue = MemoryQueue(state_root)
+    for source in inputs.dailies:
+        queue.clear_source_failure(source.logical_path, source.sha256)
 
 
 def merge_compile_diagnostics(

@@ -202,6 +202,7 @@ def validate_bag(
     *,
     coordinator: object | None = None,
     vault: Path | None = None,
+    allow_build_intent: bool = False,
 ) -> ValidatedBag:
     """Validate a complete, sealed BagIt daily package without following links."""
     path = Path(path)
@@ -215,9 +216,13 @@ def validate_bag(
             "manifest-sha256.txt",
             "tagmanifest-sha256.txt",
         }
+        if allow_build_intent:
+            expected.add("build-intent.json")
         if {
             item.name
-            for item in bounded_directory_entries(path, 6, label="archive bag")
+            for item in bounded_directory_entries(
+                path, len(expected), label="archive bag"
+            )
         } != expected:
             raise EvidenceResolutionError("archive bag members are not canonical")
         _regular_directory(path / "data", label="archive payload directory")

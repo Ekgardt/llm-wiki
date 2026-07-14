@@ -52,7 +52,7 @@ def test_failed_compile_does_not_mark_hash(state_snapshot, monkeypatch):
     notes = vault / "knowledge/notes"
     daily_dir.mkdir(parents=True)
     notes.mkdir(parents=True)
-    fake_daily = daily_dir / "__test_fake__.md"
+    fake_daily = daily_dir / "2026-01-01.md"
     fake_daily.write_text("snapshot", encoding="utf-8")
     agents = vault / "AGENTS.md"
     agents.write_text("contract", encoding="utf-8")
@@ -113,3 +113,14 @@ def test_failed_compile_does_not_mark_hash(state_snapshot, monkeypatch):
     assert log_after == "", (
         "knowledge/log.md changed on failed compile (expected no append)"
     )
+
+    from memory_queue import MemoryQueue
+    from reliable_memory import sha256_bytes
+
+    failure = MemoryQueue(compile_memory.STATE_ROOT).source_failure(
+        "knowledge/daily/2026-01-01.md",
+        sha256_bytes(b"snapshot"),
+    )
+    assert failure is not None
+    assert failure["producer"] == "compile"
+    assert failure["error_code"] == "RuntimeError"

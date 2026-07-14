@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import re
-import shutil
 import sqlite3
 import stat
 import sys
@@ -71,6 +71,10 @@ class ArchiveReceipt:
     source_sha256: str
     bag_path: Path
     state: str
+
+
+class ArchiveConflict(RuntimeError):
+    code = "archive_source_conflict"
 
 
 class DailyArchiver:
@@ -181,6 +185,9 @@ class DailyArchiver:
             receipt, digest, transaction_retention_days
         ):
             reasons.append("transaction_retention")
+        logical_path = f"knowledge/daily/{source.name}"
+        if MemoryQueue(self.state_root).source_failure(logical_path, digest) is not None:
+            reasons.append("source_failure")
         if not ignore_current_writer and self._writer_active():
             reasons.append("active_writer")
         if self._decision_references(source.stem, digest):
@@ -272,6 +279,7 @@ class DailyArchiver:
                 source, MAX_DAILY_BYTES, label="daily archive source"
             )
             source_digest = sha256_bytes(source_bytes)
+            self._recover_hidden_builds()
             reused = self._recover_daily(daily_id, source_digest)
             if reused is not None:
                 return reused
@@ -291,6 +299,10 @@ class DailyArchiver:
             queue = MemoryQueue(self.state_root)
             fence = queue.acquire_source_fence(daily_id, eligibility.source_sha256)
             try:
+                if queue.source_failure(
+                    f"knowledge/daily/{daily_id}.md", eligibility.source_sha256
+                ) is not None:
+                    raise ValueError("daily is not archive eligible: source_failure")
                 final_bag, publish_build = self._build_bag(
                     daily_id, content, eligibility, hot_days=hot_days
                 )
@@ -298,6 +310,7 @@ class DailyArchiver:
                 try:
                     self.killpoint("after_build")
                     self.killpoint("before_publish_rename")
+                    self._prepare_build_for_publish(publish_build)
                     publish_build.replace(final_bag)
                     published = True
                     fsync_directory(final_bag.parent)
@@ -321,6 +334,7 @@ class DailyArchiver:
 
     def _recover_daily(self, daily_id: str, digest: str) -> ArchiveReceipt | None:
         exact: list[Path] = []
+        conflicts: list[Path] = []
         for path in self._archive_paths(hidden=False):
             bag = validate_bag(path, coordinator=self.coordinator, vault=self.vault)
             if bag.manifest["logical_daily_id"] != daily_id:
@@ -329,6 +343,11 @@ class DailyArchiver:
                 exact.append(path)
             else:
                 self._quarantine(path, daily_id, str(bag.manifest["source_hash"]))
+                conflicts.append(path)
+        if conflicts:
+            raise ArchiveConflict(
+                f"published archive conflicts with flat source daily:{daily_id}"
+            )
         if not exact:
             return None
         keeper = exact[0]
@@ -356,6 +375,35 @@ class DailyArchiver:
         *,
         hot_days: int,
     ) -> tuple[Path, Path]:
+        month = self.archive_root / daily_id[:7]
+        before = (
+            {entry.name for entry in bounded_directory_entries(
+                month, MAX_ARCHIVE_ENTRIES, label="daily archive month"
+            )}
+            if month.exists()
+            else set()
+        )
+        try:
+            return self._build_bag_contents(
+                daily_id, content, eligibility, hot_days=hot_days
+            )
+        except BaseException:
+            if month.exists():
+                for entry in bounded_directory_entries(
+                    month, MAX_ARCHIVE_ENTRIES, label="daily archive month"
+                ):
+                    if entry.name not in before and ".building-" in entry.name:
+                        self._remove_build(entry)
+            raise
+
+    def _build_bag_contents(
+        self,
+        daily_id: str,
+        content: bytes,
+        eligibility: Eligibility,
+        *,
+        hot_days: int,
+    ) -> tuple[Path, Path]:
         now = self.clock().astimezone(timezone.utc)
         month = self.archive_root / daily_id[:7]
         self._ensure_archive_root()
@@ -373,6 +421,16 @@ class DailyArchiver:
         publish_build.mkdir()
         _harden_owner_only(publish_build, 0o700)
         fsync_directory(month)
+        intent = {
+            "created_at": now.isoformat().replace("+00:00", "Z"),
+            "final_bag_name": final_bag.name,
+            "logical_daily_id": daily_id,
+            "schema_version": "archive-build-intent/v1",
+            "source_hash": sha256_bytes(content),
+        }
+        (publish_build / "build-intent.json").write_bytes(
+            canonical_json_bytes(intent)
+        )
         data = publish_build / "data"
         data.mkdir()
         _set_owner_only(data, 0o700)
@@ -457,9 +515,118 @@ class DailyArchiver:
         fsync_directory(publish_build)
         self._seal(publish_build)
         validate_bag(
-            publish_build, coordinator=self.coordinator, vault=self.vault
+            publish_build,
+            coordinator=self.coordinator,
+            vault=self.vault,
+            allow_build_intent=True,
         )
         return final_bag, publish_build
+
+    def _read_build_intent(self, build: Path) -> dict[str, str]:
+        raw = read_stable_bytes(
+            build / "build-intent.json", MAX_POLICY_BYTES, label="archive build intent"
+        )
+        value = json.loads(raw.decode("utf-8", errors="strict"))
+        if canonical_json_bytes(value) != raw or not isinstance(value, dict):
+            raise ValueError("archive build intent is not canonical")
+        required = {
+            "created_at",
+            "final_bag_name",
+            "logical_daily_id",
+            "schema_version",
+            "source_hash",
+        }
+        if set(value) != required or value.get("schema_version") != "archive-build-intent/v1":
+            raise ValueError("archive build intent fields are invalid")
+        daily_id = str(value["logical_daily_id"])
+        digest = str(value["source_hash"])
+        final_name = str(value["final_bag_name"])
+        if (
+            DATE_RE.fullmatch(daily_id) is None
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            or re.fullmatch(rf"bag-[A-Za-z0-9-]+-{daily_id}-[0-9a-f]{{32}}", final_name)
+            is None
+        ):
+            raise ValueError("archive build intent identity is invalid")
+        return {key: str(value[key]) for key in required}
+
+    def _prepare_build_for_publish(self, build: Path) -> dict[str, str]:
+        intent = self._read_build_intent(build)
+        validate_bag(
+            build,
+            coordinator=self.coordinator,
+            vault=self.vault,
+            allow_build_intent=True,
+        )
+        if os.name == "nt":
+            _harden_owner_only(build, 0o700)
+            _harden_owner_only(build / "build-intent.json", 0o600)
+        else:
+            build.chmod(0o700)
+            (build / "build-intent.json").chmod(0o600)
+        (build / "build-intent.json").unlink()
+        fsync_directory(build)
+        self._set_archive_read_only(build)
+        validate_bag(build, coordinator=self.coordinator, vault=self.vault)
+        return intent
+
+    def _recover_hidden_builds(self) -> None:
+        for build in self._archive_paths(hidden=True):
+            try:
+                self._bounded_tree(build)
+            except (OSError, PermissionError, ValueError) as exc:
+                self._quarantine_hidden_build(build, "unsafe_hidden_build")
+                raise ArchiveConflict("unsafe hidden archive build") from exc
+            try:
+                intent = self._read_build_intent(build)
+                validate_bag(
+                    build,
+                    coordinator=self.coordinator,
+                    vault=self.vault,
+                    allow_build_intent=True,
+                )
+                final = build.parent / intent["final_bag_name"]
+                if final.exists():
+                    self._remove_build(build)
+                    continue
+                self._prepare_build_for_publish(build)
+                build.replace(final)
+                fsync_directory(final.parent)
+            except (OSError, TypeError, ValueError, EvidenceResolutionError):
+                self._remove_build(build)
+
+    def _quarantine_hidden_build(self, build: Path, reason: str) -> None:
+        root = self.state_root / "run/archive-quarantine"
+        builds = root / "builds"
+        if not root.exists():
+            root.mkdir(parents=True)
+            _harden_owner_only(root, 0o700)
+            fsync_directory(root.parent)
+        if not builds.exists():
+            builds.mkdir()
+            _harden_owner_only(builds, 0o700)
+            fsync_directory(root)
+        destination = builds / f"{build.name}-{uuid.uuid4().hex}"
+        try:
+            build.replace(destination)
+        except OSError as exc:
+            if exc.errno != errno.EXDEV:
+                raise
+            destination = build.parent / f".quarantined-build-{uuid.uuid4().hex}"
+            build.replace(destination)
+        fsync_directory(build.parent)
+        if destination.parent == builds:
+            fsync_directory(builds)
+        record = {
+            "original_path": build.relative_to(self.vault).as_posix(),
+            "quarantine_path": str(destination),
+            "reason": reason,
+        }
+        record_path = root / f"build-{sha256_bytes(canonical_json_bytes(record))}.json"
+        record_path.write_bytes(canonical_json_bytes(record))
+        _harden_owner_only(record_path, 0o600)
+        fsync_file(record_path)
+        fsync_directory(root)
 
     def _remove_flat(self, daily_id: str, digest: str) -> None:
         relative = f"knowledge/daily/{daily_id}.md"
@@ -476,8 +643,7 @@ class DailyArchiver:
             return recovered
         _regular_directory(self.archive_root, label="daily archive root")
         with self.coordinator.writer_gate(wait_seconds=ARCHIVE_WRITER_WAIT_SECONDS):
-            for hidden in self._archive_paths(hidden=True):
-                self._remove_build(hidden)
+            self._recover_hidden_builds()
             grouped: dict[tuple[str, str], list[Path]] = {}
             for path in self._archive_paths(hidden=False):
                 bag = validate_bag(
@@ -703,7 +869,12 @@ class DailyArchiver:
         if destination.exists():
             destination = bags / f"{bag.name}-{uuid.uuid4().hex}"
         original = bag.relative_to(self.vault).as_posix()
-        bag.replace(destination)
+        try:
+            bag.replace(destination)
+        except OSError as exc:
+            if exc.errno != errno.EXDEV:
+                raise
+            self._copy_bag_cross_volume(bag, destination)
         fsync_directory(bag.parent)
         fsync_directory(bags)
         record = {
@@ -718,6 +889,42 @@ class DailyArchiver:
         _harden_owner_only(path, 0o600)
         fsync_file(path)
         fsync_directory(target)
+
+    def _copy_bag_cross_volume(self, source: Path, destination: Path) -> None:
+        staging = destination.parent / f".{destination.name}.staging-{uuid.uuid4().hex}"
+        staging.mkdir()
+        _harden_owner_only(staging, 0o700)
+        fsync_directory(staging.parent)
+        try:
+            entries = self._bounded_tree(source)
+            directories = sorted(
+                (item for item in entries if item.is_dir()),
+                key=lambda item: len(item.parts),
+            )
+            for directory in directories:
+                target = staging / directory.relative_to(source)
+                target.mkdir()
+                _harden_owner_only(target, 0o700)
+                fsync_directory(target.parent)
+            for file in sorted(item for item in entries if item.is_file()):
+                relative = file.relative_to(source)
+                data = read_stable_bytes(file, MAX_DAILY_BYTES, label="archive quarantine copy")
+                target = staging / relative
+                target.write_bytes(data)
+                _harden_owner_only(target, 0o600)
+                fsync_file(target)
+            for directory in reversed(directories):
+                fsync_directory(staging / directory.relative_to(source))
+            fsync_directory(staging)
+            self._seal(staging)
+            validate_bag(staging, coordinator=self.coordinator, vault=self.vault)
+            staging.replace(destination)
+            fsync_directory(destination.parent)
+            self._remove_build(source)
+        except BaseException:
+            if staging.exists():
+                self._remove_build(staging)
+            raise
 
     @staticmethod
     def _seal(root: Path) -> None:
@@ -737,12 +944,20 @@ class DailyArchiver:
             for entry in bounded_directory_entries(
                 parent, MAX_ARCHIVE_ENTRIES, label="archive package directory"
             ):
+                info = entry.lstat()
+                if (
+                    entry.is_symlink()
+                    or getattr(info, "st_file_attributes", 0) & 0x400
+                ):
+                    raise PermissionError("archive package contains a symlink or reparse point")
                 found.append(entry)
                 if len(found) > MAX_ARCHIVE_ENTRIES:
                     raise ValueError("archive package exceeds the entry scan limit")
-                if entry.is_dir() and not entry.is_symlink():
+                if stat.S_ISDIR(info.st_mode):
                     _regular_directory(entry, label="archive package directory")
                     pending.append(entry)
+                elif not stat.S_ISREG(info.st_mode):
+                    raise PermissionError("archive package contains a special file")
         return found
 
     @staticmethod
@@ -781,15 +996,64 @@ class DailyArchiver:
         if not path.exists():
             return
         entries = DailyArchiver._bounded_tree(path)
+        if os.name == "posix":
+            DailyArchiver._remove_tree_descriptor_relative(path)
+            return
         if os.name == "nt":
             _harden_owner_only(path, 0o700)
             for item in sorted(entries, key=lambda value: len(value.parts)):
                 _harden_owner_only(item, 0o700 if item.is_dir() else 0o600)
-        else:
-            path.chmod(0o700)
-            for item in entries:
-                item.chmod(0o700 if item.is_dir() else 0o600)
-        shutil.rmtree(path)
+        for item in sorted(entries, key=lambda value: len(value.parts), reverse=True):
+            if item.is_dir():
+                item.rmdir()
+            else:
+                item.unlink()
+        path.rmdir()
+
+    @staticmethod
+    def _remove_tree_descriptor_relative(path: Path) -> None:
+        parent_fd = os.open(
+            path.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+
+        def remove_entry(directory_fd: int, name: str) -> None:
+            info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISLNK(info.st_mode):
+                raise PermissionError("refusing to remove linked archive build member")
+            if stat.S_ISDIR(info.st_mode):
+                child_fd = os.open(
+                    name,
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=directory_fd,
+                )
+                try:
+                    os.fchmod(child_fd, 0o700)
+                    names = os.listdir(child_fd)
+                    if len(names) > MAX_ARCHIVE_ENTRIES:
+                        raise ValueError("archive package exceeds the entry scan limit")
+                    for child in names:
+                        remove_entry(child_fd, child)
+                finally:
+                    os.close(child_fd)
+                os.rmdir(name, dir_fd=directory_fd)
+            elif stat.S_ISREG(info.st_mode):
+                os.chmod(
+                    name,
+                    0o600,
+                    dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+                os.unlink(name, dir_fd=directory_fd)
+            else:
+                raise PermissionError("refusing to remove special archive build member")
+
+        try:
+            remove_entry(parent_fd, path.name)
+        finally:
+            os.close(parent_fd)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

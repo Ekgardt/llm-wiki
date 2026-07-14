@@ -169,6 +169,35 @@ def test_compile_transaction_commits_page_index_log_and_receipt(vault):
     )
 
 
+def test_committed_compile_clears_durable_source_failure(vault):
+    root, state_root = vault
+    daily = _daily(root)
+    import compile_memory
+    from memory_queue import MemoryQueue
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    queue = MemoryQueue(state_root)
+    queue.record_source_failure(
+        inputs.dailies[0].logical_path,
+        inputs.dailies[0].sha256,
+        error_code="previous_failure",
+        producer="compile",
+    )
+
+    compile_memory.apply_compile_plan(
+        inputs,
+        {"schema_version": "compile-plan/v2", "operations": []},
+        action_key="f" * 64,
+        trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:00:00Z",
+    )
+
+    assert queue.source_failure(
+        inputs.dailies[0].logical_path, inputs.dailies[0].sha256
+    ) is None
+
+
 def test_append_after_snapshot_remains_pending_even_after_receipt(vault):
     root, state_root = vault
     daily = _daily(root)

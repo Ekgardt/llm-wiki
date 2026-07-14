@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shutil
@@ -181,6 +182,28 @@ def test_dead_queue_reference_pins_source(archive_vault) -> None:
 
     assert not result.eligible
     assert "queue_reference" in result.reasons
+
+
+def test_durable_source_failure_pins_archive_under_source_fence(archive_vault) -> None:
+    from memory_queue import MemoryQueue
+
+    root, state_root, daily = archive_vault
+    digest = sha256_bytes(daily.read_bytes())
+    queue = MemoryQueue(state_root)
+    queue.record_source_failure(
+        f"knowledge/daily/{daily.name}",
+        digest,
+        error_code="compile_failed",
+        producer="compile",
+    )
+
+    result = _archiver(root, state_root).eligible(daily, hot_days=90)
+    assert not result.eligible
+    assert "source_failure" in result.reasons
+
+    with pytest.raises(ValueError, match="source_failure"):
+        _archiver(root, state_root).archive(daily.stem)
+    assert daily.exists()
 
 
 def test_archive_publishes_complete_valid_bag_then_transactionally_removes_source(
@@ -409,6 +432,165 @@ def test_kill_before_atomic_publish_never_exposes_final_bag(
     assert not list((root / "knowledge/daily/archive").rglob("bag-*"))
 
 
+def test_hidden_build_has_canonical_intent_and_recovery_resumes_it(
+    archive_vault,
+) -> None:
+    from reliable_memory import canonical_json_bytes
+
+    root, state_root, daily = archive_vault
+    archiver = _archiver(root, state_root)
+    eligibility = archiver.eligible(daily, hot_days=90)
+    final, hidden = archiver._build_bag(
+        daily.stem, daily.read_bytes(), eligibility, hot_days=90
+    )
+    intent_path = hidden / "build-intent.json"
+    intent = json.loads(intent_path.read_bytes())
+    assert intent_path.read_bytes() == canonical_json_bytes(intent)
+    assert intent == {
+        "created_at": "2026-07-14T12:00:00Z",
+        "final_bag_name": final.name,
+        "logical_daily_id": daily.stem,
+        "schema_version": "archive-build-intent/v1",
+        "source_hash": sha256_bytes(daily.read_bytes()),
+    }
+
+    recovered = archiver.recover()
+
+    assert [item.state for item in recovered] == ["recovered"]
+    assert final.is_dir()
+    assert not hidden.exists()
+    assert not daily.exists()
+
+
+def test_build_failure_always_cleans_owned_hidden_directory(
+    archive_vault, monkeypatch
+) -> None:
+    import archive_daily
+
+    root, state_root, daily = archive_vault
+    monkeypatch.setattr(
+        archive_daily.DailyArchiver,
+        "_seal",
+        staticmethod(lambda path: (_ for _ in ()).throw(PermissionError("seal failed"))),
+    )
+
+    with pytest.raises(PermissionError, match="seal failed"):
+        _archiver(root, state_root).archive(daily.stem)
+
+    month = root / "knowledge/daily/archive/2026-01"
+    assert not [path for path in month.iterdir() if ".building-" in path.name]
+    assert daily.exists()
+
+
+def test_malicious_hidden_build_link_is_quarantined_without_touching_target(
+    archive_vault,
+) -> None:
+    from archive_daily import ArchiveConflict
+    from reliable_memory import canonical_json_bytes
+
+    root, state_root, daily = archive_vault
+    month = root / "knowledge/daily/archive/2026-01"
+    month.mkdir(parents=True)
+    hidden = month / ".bag-2026-01-01.building-malicious"
+    hidden.mkdir()
+    outside = root / "outside.txt"
+    outside.write_text("untouched", encoding="utf-8")
+    intent = {
+        "created_at": "2026-07-14T12:00:00Z",
+        "final_bag_name": "bag-malicious-2026-01-01",
+        "logical_daily_id": daily.stem,
+        "schema_version": "archive-build-intent/v1",
+        "source_hash": sha256_bytes(daily.read_bytes()),
+    }
+    (hidden / "build-intent.json").write_bytes(canonical_json_bytes(intent))
+    try:
+        os.symlink(outside, hidden / "payload-link")
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    with pytest.raises(ArchiveConflict):
+        _archiver(root, state_root).recover()
+
+    assert outside.read_text(encoding="utf-8") == "untouched"
+    assert not hidden.exists()
+    assert any(
+        path.name.startswith(hidden.name)
+        for path in (state_root / "run/archive-quarantine/builds").iterdir()
+    )
+
+
+def test_mocked_reparse_hidden_member_is_quarantined_without_acl_follow(
+    archive_vault, monkeypatch
+) -> None:
+    from archive_daily import ArchiveConflict
+    from reliable_memory import canonical_json_bytes
+
+    root, state_root, daily = archive_vault
+    month = root / "knowledge/daily/archive/2026-01"
+    month.mkdir(parents=True)
+    hidden = month / ".bag-2026-01-01.building-reparse"
+    hidden.mkdir()
+    intent = {
+        "created_at": "2026-07-14T12:00:00Z",
+        "final_bag_name": "bag-malicious-2026-01-01",
+        "logical_daily_id": daily.stem,
+        "schema_version": "archive-build-intent/v1",
+        "source_hash": sha256_bytes(daily.read_bytes()),
+    }
+    (hidden / "build-intent.json").write_bytes(canonical_json_bytes(intent))
+    suspect = hidden / "suspect"
+    suspect.write_bytes(b"do not follow")
+    original_lstat = Path.lstat
+
+    def reparse(path: Path):
+        info = original_lstat(path)
+        if path == suspect:
+            return SimpleNamespace(
+                st_mode=info.st_mode,
+                st_file_attributes=0x400,
+                st_size=info.st_size,
+            )
+        return info
+
+    monkeypatch.setattr(Path, "lstat", reparse)
+    with pytest.raises(ArchiveConflict):
+        _archiver(root, state_root).recover()
+    assert not hidden.exists()
+
+
+def test_cross_volume_quarantine_uses_verified_copy_then_removes_active_bag(
+    archive_vault, monkeypatch
+) -> None:
+    root, state_root, daily = archive_vault
+
+    def crash(point: str) -> None:
+        if point == "after_publish_rename":
+            raise RuntimeError("crash")
+
+    with pytest.raises(RuntimeError):
+        _archiver(root, state_root, killpoint=crash).archive(daily.stem)
+    bag = next(
+        path for path in (root / "knowledge/daily/archive").rglob("bag-*") if path.is_dir()
+    )
+    original_payload = (bag / f"data/{daily.name}").read_bytes()
+    daily.write_bytes(daily.read_bytes() + b"different\n")
+    original_replace = Path.replace
+
+    def cross_volume(path: Path, target: Path):
+        if path == bag and "archive-quarantine" in str(target):
+            raise OSError(errno.EXDEV, "cross-device link")
+        return original_replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", cross_volume)
+    recovered = _archiver(root, state_root).recover()
+
+    assert [item.state for item in recovered] == ["quarantined"]
+    assert not bag.exists()
+    copies = list((state_root / "run/archive-quarantine/bags").iterdir())
+    assert len(copies) == 1
+    assert (copies[0] / f"data/{daily.name}").read_bytes() == original_payload
+
+
 def test_windows_sharing_failure_keeps_source_and_releases_queue_fence(
     archive_vault, monkeypatch
 ) -> None:
@@ -468,6 +650,32 @@ def test_archive_starts_with_recovery_and_reuses_exact_published_bag(
     assert result.bag_path == original
     assert result.state == "recovered"
     assert len(_archiver(root, state_root)._archive_paths(hidden=False)) == 1
+
+
+def test_mismatched_existing_bag_raises_stable_conflict_and_preserves_both_payloads(
+    archive_vault,
+) -> None:
+    from archive_daily import ArchiveConflict
+
+    root, state_root, daily = archive_vault
+
+    def crash(point: str) -> None:
+        if point == "after_publish_rename":
+            raise RuntimeError("crash")
+
+    with pytest.raises(RuntimeError):
+        _archiver(root, state_root, killpoint=crash).archive(daily.stem)
+    original = daily.read_bytes()
+    daily.write_bytes(original + b"new source\n")
+
+    with pytest.raises(ArchiveConflict) as raised:
+        _archiver(root, state_root).archive(daily.stem)
+
+    assert raised.value.code == "archive_source_conflict"
+    assert daily.read_bytes() == original + b"new source\n"
+    quarantined = list((state_root / "run/archive-quarantine/bags").iterdir())
+    assert len(quarantined) == 1
+    assert (quarantined[0] / f"data/{daily.name}").read_bytes() == original
 
 
 def test_recovery_reduces_exact_duplicate_bags_to_one_active_copy(archive_vault) -> None:

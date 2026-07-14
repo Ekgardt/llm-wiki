@@ -157,6 +157,53 @@ def test_source_fence_requires_canonical_daily_and_digest(queue: MemoryQueue) ->
         queue.acquire_source_fence("2026-01-01", "A" * 64)
 
 
+def test_queue_failure_persists_and_success_clears_source_failure(
+    queue: MemoryQueue,
+) -> None:
+    logical_path = "knowledge/daily/2026-01-01.md"
+    digest = "c" * 64
+    failed_id = queue.enqueue(
+        "compile", 1, {"source_path": logical_path, "source_digest": digest}
+    )
+    failed = queue.claim("worker")
+    assert failed is not None and failed.id == failed_id
+    queue.fail(failed, QueueFailure("provider_failed", permanent=True))
+
+    record = queue.source_failure(logical_path, digest)
+    assert record == {
+        "logical_path": logical_path,
+        "source_digest": digest,
+        "error_code": "provider_failed",
+        "producer": "queue",
+    }
+
+    success_id = queue.enqueue(
+        "compile", 1, {"source_path": logical_path, "source_digest": digest}
+    )
+    success = queue.claim("worker")
+    assert success is not None and success.id == success_id
+    queue.publish_result(success, operation_id="compile-success", result=b"ok")
+    queue.acknowledge(success)
+    assert queue.source_failure(logical_path, digest) is None
+
+
+def test_cancelled_terminal_resolution_clears_source_failure(queue: MemoryQueue) -> None:
+    logical_path = "knowledge/daily/2026-01-01.md"
+    digest = "d" * 64
+    queue.record_source_failure(
+        logical_path,
+        digest,
+        error_code="blocked",
+        producer="queue",
+    )
+    task_id = queue.enqueue(
+        "compile", 1, {"source_path": logical_path, "source_digest": digest}
+    )
+
+    assert queue.cancel(task_id)
+    assert queue.source_failure(logical_path, digest) is None
+
+
 def test_enqueue_recursively_redacts_secret_keys_and_value_patterns(
     queue: MemoryQueue,
 ) -> None:
@@ -906,6 +953,30 @@ def test_startup_retires_legacy_ready_task_at_attempt_limit(
     assert task.state == "dead"
     assert task.error_code == "attempts_exhausted"
     assert task.attempt_history == ()
+
+
+def test_startup_retirement_persists_source_failure(
+    tmp_path: Path, clock: FakeClock
+) -> None:
+    logical_path = "knowledge/daily/2026-01-01.md"
+    digest = "e" * 64
+    queue = MemoryQueue(tmp_path, clock=clock, rng=random.Random(1))
+    task_id = queue.enqueue(
+        "compile", 1, {"source_path": logical_path, "source_digest": digest}
+    )
+    with sqlite3.connect(queue.db_path) as connection:
+        connection.execute(
+            "UPDATE tasks SET attempts=8, state='ready' WHERE id=?", (task_id,)
+        )
+
+    restarted = MemoryQueue(tmp_path, clock=clock, rng=random.Random(2))
+
+    assert restarted.source_failure(logical_path, digest) == {
+        "logical_path": logical_path,
+        "source_digest": digest,
+        "error_code": "attempts_exhausted",
+        "producer": "queue",
+    }
 
 
 def test_startup_repair_preserves_existing_attempt_history(

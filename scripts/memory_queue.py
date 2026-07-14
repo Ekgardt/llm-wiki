@@ -425,6 +425,14 @@ class MemoryQueue:
                 owner_pid INTEGER NOT NULL,
                 acquired_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS source_failures (
+                logical_path TEXT NOT NULL,
+                source_digest TEXT NOT NULL,
+                error_code TEXT NOT NULL,
+                producer TEXT NOT NULL CHECK (producer IN ('compile','queue')),
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (logical_path, source_digest)
+            );
             CREATE TABLE IF NOT EXISTS attempt_history (
                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                 task_id TEXT NOT NULL REFERENCES tasks(id),
@@ -479,8 +487,8 @@ class MemoryQueue:
         finally:
             connection.execute("PRAGMA foreign_keys=ON")
 
-    @staticmethod
     def _retire_exhausted_ready(
+        self,
         connection: sqlite3.Connection, now: datetime, max_attempts: int
     ) -> None:
         rows = connection.execute(
@@ -498,6 +506,13 @@ class MemoryQueue:
                     row["id"],
                     max_attempts,
                 ),
+            )
+            self._record_payload_failure(
+                connection,
+                str(row["payload_json"]),
+                "attempts_exhausted",
+                "queue",
+                now,
             )
 
     def enqueue(
@@ -970,6 +985,13 @@ class MemoryQueue:
             row = self._require_lease(connection, lease, now)
             if failure.blocked_capability:
                 self._record_attempt(connection, row, now, "blocked", failure.error_code)
+                self._record_payload_failure(
+                    connection,
+                    str(row["payload_json"]),
+                    failure.error_code,
+                    "queue",
+                    now,
+                )
                 connection.execute(
                     """UPDATE tasks SET state='blocked', attempts=attempts-1, updated_at=?,
                            lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL,
@@ -1092,8 +1114,8 @@ class MemoryQueue:
             ),
         )
 
-    @staticmethod
     def _finish_lease(
+        self,
         connection: sqlite3.Connection,
         task_id: str,
         now: datetime,
@@ -1103,6 +1125,17 @@ class MemoryQueue:
         *,
         last_attempt_at: datetime | None = None,
     ) -> None:
+        row = connection.execute(
+            "SELECT payload_json FROM tasks WHERE id=?", (task_id,)
+        ).fetchone()
+        if row is not None:
+            payload_json = str(row["payload_json"])
+            if error_code is not None and state in {"ready", "dead"}:
+                self._record_payload_failure(
+                    connection, payload_json, error_code, "queue", now
+                )
+            elif state in {"succeeded", "cancelled"}:
+                self._clear_payload_failure(connection, payload_json)
         connection.execute(
             """UPDATE tasks SET state=?, updated_at=?, available_at=COALESCE(?, available_at),
                    last_attempt_at=COALESCE(?, last_attempt_at),
@@ -1142,6 +1175,7 @@ class MemoryQueue:
                 return False
             if row["state"] == "leased":
                 self._record_attempt(connection, row, now, "cancelled", "cancelled")
+            self._clear_payload_failure(connection, str(row["payload_json"]))
             connection.execute(
                 """UPDATE tasks SET state='cancelled', updated_at=?, lease_owner=NULL,
                        lease_token=NULL, lease_expires_at=NULL, lease_heartbeat_at=NULL,
@@ -1195,6 +1229,145 @@ class MemoryQueue:
             raise ValueError("daily_id must be a canonical date") from exc
         if not isinstance(source_digest, str) or re.fullmatch(r"[0-9a-f]{64}", source_digest) is None:
             raise ValueError("source_digest must be a lowercase SHA-256")
+
+    @staticmethod
+    def _validate_failure_identity(logical_path: str, source_digest: str) -> None:
+        if (
+            not isinstance(logical_path, str)
+            or re.fullmatch(r"knowledge/daily/\d{4}-\d{2}-\d{2}\.md", logical_path)
+            is None
+        ):
+            raise ValueError("logical_path must name a canonical daily source")
+        MemoryQueue._validate_source_identity(
+            Path(logical_path).stem, source_digest
+        )
+
+    @staticmethod
+    def _source_identity_from_payload(payload_json: str) -> tuple[str, str] | None:
+        try:
+            payload = json.loads(payload_json)
+        except json.JSONDecodeError:
+            return None
+        paths: list[str] = []
+        digests: list[str] = []
+        daily_ids: list[str] = []
+
+        def visit(value: object) -> None:
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    normalized = str(key).casefold()
+                    if isinstance(item, str):
+                        if normalized in {"source_path", "logical_path"}:
+                            paths.append(item)
+                        elif normalized in {"source_digest", "digest", "hash"}:
+                            digests.append(item)
+                        elif normalized == "daily_id":
+                            daily_ids.append(item)
+                    visit(item)
+            elif isinstance(value, list):
+                for item in value:
+                    visit(item)
+
+        visit(payload)
+        if not paths and daily_ids:
+            paths.append(f"knowledge/daily/{daily_ids[0]}.md")
+        if not paths or not digests:
+            return None
+        try:
+            MemoryQueue._validate_failure_identity(paths[0], digests[0])
+        except ValueError:
+            return None
+        return paths[0], digests[0]
+
+    @staticmethod
+    def _record_source_failure_row(
+        connection: sqlite3.Connection,
+        logical_path: str,
+        source_digest: str,
+        error_code: str,
+        producer: str,
+        now: datetime,
+    ) -> None:
+        connection.execute(
+            """INSERT INTO source_failures(
+                   logical_path, source_digest, error_code, producer, updated_at
+               ) VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(logical_path, source_digest) DO UPDATE SET
+                   error_code=excluded.error_code,
+                   producer=excluded.producer,
+                   updated_at=excluded.updated_at""",
+            (logical_path, source_digest, error_code, producer, _timestamp(now)),
+        )
+
+    def _record_payload_failure(
+        self,
+        connection: sqlite3.Connection,
+        payload_json: str,
+        error_code: str,
+        producer: str,
+        now: datetime,
+    ) -> None:
+        identity = self._source_identity_from_payload(payload_json)
+        if identity is not None:
+            self._record_source_failure_row(
+                connection, *identity, error_code, producer, now
+            )
+
+    def _clear_payload_failure(
+        self, connection: sqlite3.Connection, payload_json: str
+    ) -> None:
+        identity = self._source_identity_from_payload(payload_json)
+        if identity is not None:
+            connection.execute(
+                "DELETE FROM source_failures WHERE logical_path=? AND source_digest=?",
+                identity,
+            )
+
+    def record_source_failure(
+        self,
+        logical_path: str,
+        source_digest: str,
+        *,
+        error_code: str,
+        producer: str,
+    ) -> None:
+        self._validate_failure_identity(logical_path, source_digest)
+        if (
+            not isinstance(error_code, str)
+            or not 1 <= len(error_code) <= 200
+            or any(char in error_code for char in "\r\n")
+            or producer not in {"compile", "queue"}
+        ):
+            raise ValueError("source failure fields are invalid")
+        with self._connect() as connection, begin_immediate(connection):
+            self._record_source_failure_row(
+                connection,
+                logical_path,
+                source_digest,
+                error_code,
+                producer,
+                _as_utc(self._clock()),
+            )
+
+    def clear_source_failure(self, logical_path: str, source_digest: str) -> None:
+        self._validate_failure_identity(logical_path, source_digest)
+        with self._connect() as connection, begin_immediate(connection):
+            connection.execute(
+                "DELETE FROM source_failures WHERE logical_path=? AND source_digest=?",
+                (logical_path, source_digest),
+            )
+
+    def source_failure(
+        self, logical_path: str, source_digest: str
+    ) -> dict[str, str] | None:
+        self._validate_failure_identity(logical_path, source_digest)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT logical_path, source_digest, error_code, producer "
+                "FROM source_failures WHERE logical_path=? AND source_digest=?",
+                (logical_path, source_digest),
+            ).fetchone()
+        return None if row is None else {key: str(row[key]) for key in row.keys()}
 
     @staticmethod
     def _payload_references_source(
