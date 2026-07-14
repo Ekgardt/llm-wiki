@@ -45,6 +45,7 @@ from compile_cache import (  # noqa: E402
     CompileCallDescriptor,
     SourceDescriptor,
 )
+from evidence_resolver import EvidenceRef, EvidenceResolver  # noqa: E402
 from llm_client import call_candidate, probe_candidate, provider_candidates  # noqa: E402
 from markdown_transaction import MarkdownChange, MarkdownCoordinator  # noqa: E402
 from memory_state import (  # noqa: E402
@@ -795,13 +796,30 @@ def _validate_semantic_operation(
             if source is not None and marker_at >= 0
             else b""
         )
-        if quote_bytes not in block:
+        quote_offsets = [
+            match.start() for match in re.finditer(re.escape(quote_bytes), block)
+        ]
+        if len(quote_offsets) != 1:
             raise ValueError("compile evidence does not match the immutable snapshot")
+        quote_start = marker_at + quote_offsets[0]
+        reference = EvidenceRef(
+            date,
+            source.sha256,
+            timestamp,
+            quote_start,
+            quote_start + len(quote_bytes),
+        )
+        EvidenceResolver(ROOT).resolve_bytes(
+            reference,
+            source.content,
+            source_path=ROOT / source.logical_path,
+        )
         evidence_bindings.append(
             {
                 "source_path": source.logical_path,
                 "source_digest": source.sha256,
                 "quote_sha256": sha256_bytes(quote_bytes),
+                "reference": str(reference),
             }
         )
     normalized = json.loads(canonical_json_bytes(operation))
@@ -809,7 +827,9 @@ def _validate_semantic_operation(
     return normalized, evidence_bindings
 
 
-def _render_page(operation: dict[str, object], completed_at: str) -> bytes:
+def _render_page(
+    operation: dict[str, object], completed_at: str, evidence_refs: Sequence[str] = ()
+) -> bytes:
     category = str(operation["category"])
     title = str(operation["title"])
     summary = str(operation["summary"])
@@ -817,10 +837,12 @@ def _render_page(operation: dict[str, object], completed_at: str) -> bytes:
     evidence = operation["evidence"]
     assert isinstance(evidence, list)
     evidence_lines = []
-    for item in evidence:
+    if len(evidence_refs) != len(evidence):
+        raise ValueError("compiled evidence references do not match evidence entries")
+    for item, reference in zip(evidence, evidence_refs):
         assert isinstance(item, dict)
         evidence_lines.append(
-            f"- `knowledge/daily/{item['daily_date']}.md [{item['timestamp']}]` — {item.get('claim', '')}"
+            f"- `{reference}` — {item.get('claim', '')}"
         )
     related = operation.get("related") or []
     related_section = ""
@@ -967,7 +989,8 @@ def apply_compile_plan(
             expected = f"knowledge/notes/{semantic['slug']}.md"
             if path != expected:
                 raise ValueError("compile operation path does not match its slug")
-            page = _render_page(semantic, completed_at)
+            references = [binding["reference"] for binding in bindings]
+            page = _render_page(semantic, completed_at, references)
             target = _target_snapshot(inputs, path)
             if planned["kind"] == "replace":
                 if target is None:
@@ -977,8 +1000,8 @@ def apply_compile_plan(
                     f"\n\n## Update ({completed_at[:10]})\n{semantic['body_markdown']}\n\n"
                     "## Evidence\n"
                     + "\n".join(
-                        f"- `knowledge/daily/{item['daily_date']}.md [{item['timestamp']}]` — {item.get('claim', '')}"
-                        for item in semantic["evidence"]
+                        f"- `{reference}` — {item.get('claim', '')}"
+                        for item, reference in zip(semantic["evidence"], references)
                     )
                     + "\n"
                 ).encode("utf-8")
@@ -1010,7 +1033,11 @@ def apply_compile_plan(
                 }
             )
             evidence_bindings.extend(
-                {"operation_path": path, **binding} for binding in bindings
+                {
+                    "operation_path": path,
+                    **{key: value for key, value in binding.items() if key != "reference"},
+                }
+                for binding in bindings
             )
 
         from rebuild_memory_index import build_index_bytes

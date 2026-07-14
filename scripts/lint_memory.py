@@ -39,6 +39,11 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from evidence_resolver import (  # noqa: E402
+    EvidenceResolutionError,
+    EvidenceResolver,
+    extract_evidence_references,
+)
 from memory_state import REPORTS_DIR, ROOT, file_hash, load_state  # noqa: E402
 from okf_types import CANONICAL_TYPES as VALID_TYPES  # noqa: E402
 from okf_types import TYPE_ALIASES  # noqa: E402
@@ -144,6 +149,25 @@ def _resolve_link(target: str, search_roots: list[Path]) -> Path | None:
         for p in root.rglob(f"{t}.md"):
             return p
     return None
+
+
+def check_evidence_references(pages: list[Path]) -> list[str]:
+    """Resolve every canonical logical evidence reference and fail closed."""
+    resolver = EvidenceResolver(ROOT)
+    findings: list[str] = []
+    for page in pages:
+        try:
+            text = page.read_text(encoding="utf-8", errors="strict")
+            references = extract_evidence_references(text)
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            findings.append(f"{_rel(page)}: evidence scan failed: {exc}")
+            continue
+        for reference in references:
+            try:
+                resolver.resolve(reference)
+            except (EvidenceResolutionError, OSError, ValueError) as exc:
+                findings.append(f"{_rel(page)}: {reference}: {exc}")
+    return findings
 
 
 # ---------- individual checks ----------
@@ -628,6 +652,7 @@ def run_checks(args: argparse.Namespace) -> dict[str, list[str]]:
         "orphan_gaps",
         # Phase 6 temporal validity.
         "temporal_validity",
+        "invalid_evidence",
         "contradictions",
     )}
 
@@ -671,6 +696,9 @@ def run_checks(args: argparse.Namespace) -> dict[str, list[str]]:
         findings["invalid_supersede_chain"] += [f"[{label}] {x}" for x in check_invalid_supersede_chain(pages)]
         findings["orphan_gaps"] += [f"[{label}] {x}" for x in check_orphan_gaps(pages)]
         findings["temporal_validity"] += [f"[{label}] {x}" for x in check_temporal_validity(pages)]
+        findings["invalid_evidence"] += [
+            f"[{label}] {x}" for x in check_evidence_references(pages)
+        ]
         all_pages_for_contradictions += pages
 
     # OKF frontmatter conformance for skills/ and rules/ (AGENTS.md contract).

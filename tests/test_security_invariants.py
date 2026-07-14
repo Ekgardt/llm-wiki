@@ -109,6 +109,13 @@ class TestNoLLMBypass:
                         "use list args only"
                     )
 
+    def test_only_daily_archiver_has_directory_publication_exception(self):
+        offenders = set()
+        for path in SCRIPTS.glob("*.py"):
+            if "publish_build.replace(final_bag)" in path.read_text(encoding="utf-8"):
+                offenders.add(path.name)
+        assert offenders == {"archive_daily.py"}
+
 
 # ---------------------------------------------------------------------------
 # INVARIANT 3: Redaction before persistence

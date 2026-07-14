@@ -121,6 +121,63 @@ class TestCompileWithFakeProvider:
 
         assert not hasattr(compile_memory, "_critique_plan")
 
+    def test_compiled_page_uses_content_addressed_evidence_reference(
+        self, fake_vault, monkeypatch
+    ):
+        import compile_memory
+        from markdown_transaction import MarkdownCoordinator
+        from reliable_memory import canonical_json_bytes, sha256_bytes
+
+        daily = fake_vault / "knowledge/daily/2026-07-12.md"
+        agents = fake_vault / "AGENTS.md"
+        agents.write_text("contract\n", encoding="utf-8")
+        monkeypatch.setattr(compile_memory, "AGENTS", agents)
+        quote = b"We decided to use JWT for authentication instead of sessions."
+        operation = {
+            "action": "create",
+            "category": "decisions",
+            "slug": "jwt-reference",
+            "title": "JWT Reference",
+            "summary": "Use a stable evidence reference.",
+            "body_section": "Decision",
+            "body_markdown": "JWT was selected.",
+            "evidence": [{
+                "daily_date": "2026-07-12",
+                "timestamp": "14:30:00",
+                "quoted_text": quote.decode(),
+                "claim": "JWT was selected",
+            }],
+            "related": [],
+        }
+        inputs = compile_memory.snapshot_compile_inputs([daily])
+        plan = {
+            "schema_version": "compile-plan/v2",
+            "operations": [{
+                "kind": "create",
+                "path": "knowledge/notes/jwt-reference.md",
+                "content": canonical_json_bytes(operation).decode(),
+            }],
+        }
+        state_root = Path(os.environ["LLM_WIKI_STATE_ROOT"])
+        compile_memory.apply_compile_plan(
+            inputs,
+            plan,
+            action_key="d" * 64,
+            trigger="manual",
+            coordinator=MarkdownCoordinator(fake_vault, state_root),
+            completed_at="2026-07-14T00:00:00Z",
+        )
+
+        content = daily.read_bytes()
+        start = content.index(quote)
+        expected = (
+            f"daily:2026-07-12 sha256:{sha256_bytes(content)} "
+            f"block:14:30:00 bytes:{start}-{start + len(quote)}"
+        )
+        assert f"`{expected}`" in (
+            fake_vault / "knowledge/notes/jwt-reference.md"
+        ).read_text(encoding="utf-8")
+
     def test_empty_operations_compile(self, monkeypatch):
         """Compile with empty operations should succeed (no-op)."""
         fake_response = json.dumps({

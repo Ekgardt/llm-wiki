@@ -222,7 +222,32 @@ def _read_page(slug: str) -> dict:
     if not page_path.exists():
         return {"error": f"Page not found: {slug}"}
     content = page_path.read_text(encoding="utf-8")
-    return {"slug": slug, "path": str(page_path.relative_to(ROOT)), "content": content}
+    from evidence_resolver import (
+        EvidenceResolutionError,
+        EvidenceResolver,
+        extract_evidence_references,
+    )
+
+    evidence = []
+    resolver = EvidenceResolver(ROOT)
+    try:
+        for reference in extract_evidence_references(content):
+            resolved = resolver.resolve(reference)
+            evidence.append(
+                {
+                    "reference": str(reference),
+                    "sha256": resolved.sha256,
+                    "text": resolved.bytes.decode("utf-8", errors="strict"),
+                }
+            )
+    except (EvidenceResolutionError, OSError, UnicodeDecodeError, ValueError) as exc:
+        return {"error": f"Evidence resolution failed for {slug}: {exc}"}
+    return {
+        "slug": slug,
+        "path": str(page_path.relative_to(ROOT)),
+        "content": content,
+        "evidence": evidence,
+    }
 
 
 def _wiki_overview() -> dict:

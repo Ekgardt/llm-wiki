@@ -330,6 +330,56 @@ class TestHelperFunctions:
         assert result["content"] == "safe content"
         assert result["slug"] == "Проект notes"
 
+    def test_read_page_resolves_content_addressed_evidence(self, tmp_path, monkeypatch):
+        import memory_state
+        from mcp_server import _read_page
+        from reliable_memory import sha256_bytes
+
+        daily = tmp_path / "knowledge/daily/2026-01-01.md"
+        notes = tmp_path / "knowledge/notes"
+        daily.parent.mkdir(parents=True)
+        notes.mkdir(parents=True)
+        source = b"## [evt-1] event\nverified quote\n"
+        daily.write_bytes(source)
+        start = source.index(b"verified quote")
+        reference = (
+            f"daily:2026-01-01 sha256:{sha256_bytes(source)} "
+            f"block:evt-1 bytes:{start}-{start + len(b'verified quote')}"
+        )
+        (notes / "page.md").write_text(f"## Evidence\n- `{reference}`\n", encoding="utf-8")
+        monkeypatch.setattr(memory_state, "ROOT", tmp_path)
+
+        result = _read_page("page")
+
+        assert result["evidence"] == [{
+            "reference": reference,
+            "sha256": sha256_bytes(b"verified quote"),
+            "text": "verified quote",
+        }]
+
+    def test_read_page_fails_closed_when_evidence_hash_is_wrong(self, tmp_path, monkeypatch):
+        import memory_state
+        from mcp_server import _read_page
+
+        daily = tmp_path / "knowledge/daily/2026-01-01.md"
+        notes = tmp_path / "knowledge/notes"
+        daily.parent.mkdir(parents=True)
+        notes.mkdir(parents=True)
+        source = b"## [evt-1] event\nverified quote\n"
+        daily.write_bytes(source)
+        start = source.index(b"verified quote")
+        reference = (
+            f"daily:2026-01-01 sha256:{'0' * 64} "
+            f"block:evt-1 bytes:{start}-{start + len(b'verified quote')}"
+        )
+        (notes / "page.md").write_text(f"## Evidence\n- `{reference}`\n", encoding="utf-8")
+        monkeypatch.setattr(memory_state, "ROOT", tmp_path)
+
+        result = _read_page("page")
+
+        assert "error" in result
+        assert "evidence" in result["error"].lower()
+
     def test_search_vault_returns_list(self):
         from mcp_server import _search_vault
         results = _search_vault("test")
