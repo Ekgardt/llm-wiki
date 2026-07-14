@@ -46,6 +46,9 @@ import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import MappingProxyType
+
+from reliable_memory import canonical_json_bytes
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -67,6 +70,18 @@ class ProviderDescriptor:
     def identity(self) -> str:
         return f"{self.provider}:{self.model or '<implicit>'}"
 
+    def canonical(self) -> dict[str, object]:
+        """Return the descriptor in the restricted JSON value domain."""
+        value = {
+            "provider": self.provider,
+            "model": self.model,
+            "capabilities": dict(self.capabilities),
+            "inference_settings": dict(self.inference_settings),
+            "candidate_index": self.candidate_index,
+            "fallback_from": list(self.fallback_from),
+        }
+        return json.loads(canonical_json_bytes(value))
+
 
 @dataclass(frozen=True)
 class LLMResult:
@@ -79,18 +94,24 @@ class LLMResult:
     structured_output: str
 
 
-def provider_candidates(forced: str = "") -> list[ProviderDescriptor]:
+def provider_candidates(
+    forced: str = "",
+    *,
+    max_tokens: int = 2000,
+) -> list[ProviderDescriptor]:
     """Resolve ordered provider identities without probing or calling them."""
+    if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens <= 0:
+        raise ValueError("max_tokens must be a positive integer")
     candidates = _candidate_order(forced.lower().strip())
     descriptors = []
     for index, provider in enumerate(candidates):
-        model, capabilities, settings = _provider_configuration(provider)
+        model, capabilities, settings = _provider_configuration(provider, max_tokens)
         descriptors.append(
             ProviderDescriptor(
                 provider=provider,
                 model=model,
-                capabilities=capabilities,
-                inference_settings=settings,
+                capabilities=MappingProxyType(dict(capabilities)),
+                inference_settings=MappingProxyType(dict(settings)),
                 candidate_index=index,
                 fallback_from=(),
             )
@@ -114,11 +135,20 @@ def call_candidate(
     prompt: str,
     system_prompt: str,
     *,
-    max_tokens: int,
+    max_tokens: int | None = None,
     schema: Mapping[str, object] | None = None,
     available: bool | None = None,
 ) -> LLMResult:
     """Probe and call one resolved candidate, returning a stable outcome."""
+    effective_max_tokens = descriptor.inference_settings.get("max_tokens")
+    if (
+        not isinstance(effective_max_tokens, int)
+        or isinstance(effective_max_tokens, bool)
+        or effective_max_tokens <= 0
+    ):
+        raise ValueError("descriptor max_tokens must be a positive integer")
+    if max_tokens is not None and max_tokens != effective_max_tokens:
+        raise ValueError("max_tokens does not match the resolved provider descriptor")
     structured_output = (
         "native"
         if schema is not None
@@ -142,9 +172,9 @@ def call_candidate(
         )
     try:
         if structured_output == "native":
-            text = caller(prompt, call_system_prompt, max_tokens, schema)
+            text = caller(descriptor, prompt, call_system_prompt, schema)
         else:
-            text = caller(prompt, call_system_prompt, max_tokens)
+            text = caller(descriptor, prompt, call_system_prompt, None)
     except Exception as exc:  # noqa: BLE001 - providers must not crash callers
         print(
             f"llm_client: {descriptor.provider} backend failed: {type(exc).__name__}",
@@ -169,7 +199,7 @@ def call_llm(prompt: str, system_prompt: str = "", max_tokens: int = 2000) -> st
 
     forced = os.environ.get("MEMORY_LLM_PROVIDER", "").lower().strip()
     lineage: tuple[str, ...] = ()
-    for candidate in provider_candidates(forced):
+    for candidate in provider_candidates(forced, max_tokens=max_tokens):
         descriptor = replace(candidate, fallback_from=lineage)
         result = call_candidate(
             descriptor,
@@ -179,6 +209,8 @@ def call_llm(prompt: str, system_prompt: str = "", max_tokens: int = 2000) -> st
         )
         if result.text is not None:
             return result.text
+        if forced == "fake" and result.failure_class == "empty_response":
+            return ""
         failure = result.failure_class or "provider_error"
         lineage += (f"{descriptor.identity}:{failure}",)
 
@@ -230,34 +262,42 @@ def _candidate_order(forced: str) -> list[str]:
 
 def _provider_configuration(
     provider: str,
+    max_tokens: int,
 ) -> tuple[str | None, Mapping[str, object], Mapping[str, object]]:
     native = provider in {"openai", "ollama"}
     capabilities: Mapping[str, object] = {
         "structured_output": "native" if native else "prompt",
     }
     if provider == "fake":
-        return "fake-v1", capabilities, {}
+        return "fake-v1", capabilities, {"max_tokens": max_tokens}
     if provider == "codex":
         return (
             os.environ.get("MEMORY_CODEX_MODEL") or None,
             capabilities,
-            {"reasoning": os.environ.get("MEMORY_CODEX_REASONING", "low")},
+            {
+                "max_tokens": max_tokens,
+                "reasoning": os.environ.get("MEMORY_CODEX_REASONING", "low"),
+            },
         )
     if provider == "claude":
-        return os.environ.get("MEMORY_CLAUDE_MODEL") or None, capabilities, {}
+        return (
+            os.environ.get("MEMORY_CLAUDE_MODEL") or None,
+            capabilities,
+            {"max_tokens": max_tokens},
+        )
     if provider == "openai":
         return (
             os.environ.get("MEMORY_LLM_MODEL", "gpt-4o-mini"),
             capabilities,
-            {"temperature": 0.2},
+            {"max_tokens": max_tokens, "temperature_milli": 200},
         )
     if provider == "ollama":
         return (
             os.environ.get("MEMORY_LLM_MODEL", "qwen3:0.6b"),
             capabilities,
-            {"temperature": 0.2},
+            {"max_tokens": max_tokens, "temperature_milli": 200},
         )
-    return None, capabilities, {}
+    return None, capabilities, {"max_tokens": max_tokens}
 
 
 # ---------------------------------------------------------------------------
@@ -324,9 +364,9 @@ def _timeout_s() -> int:
 
 
 def _call_opencode(
+    descriptor: ProviderDescriptor,
     prompt: str,
     system_prompt: str,
-    max_tokens: int,
     schema: Mapping[str, object] | None = None,
 ) -> str:
     """Call OpenCode's HTTP API: create session → prompt → read → delete."""
@@ -416,14 +456,14 @@ def _find_codex_binary() -> str | None:
 
 
 def _call_codex(
+    descriptor: ProviderDescriptor,
     prompt: str,
     system_prompt: str,
-    max_tokens: int,
     schema: Mapping[str, object] | None = None,
 ) -> str:
     """Call `codex exec` and return the model's final message."""
-    reasoning = os.environ.get("MEMORY_CODEX_REASONING", "low")
-    model = os.environ.get("MEMORY_CODEX_MODEL")
+    reasoning = str(descriptor.inference_settings.get("reasoning", "low"))
+    model = descriptor.model
     codex_bin = _find_codex_binary()
     if not codex_bin:
         return ""
@@ -484,9 +524,9 @@ def _call_codex(
 
 
 def _call_claude(
+    descriptor: ProviderDescriptor,
     prompt: str,
     system_prompt: str,
-    max_tokens: int,
     schema: Mapping[str, object] | None = None,
 ) -> str:
     """Call `claude -p` (print mode, non-interactive) and return the response.
@@ -513,7 +553,7 @@ def _call_claude(
             "--output-format",
             "text",
         ]
-        model = os.environ.get("MEMORY_CLAUDE_MODEL")
+        model = descriptor.model
         if model:
             command.extend(["--model", model])
         result = subprocess.run(
@@ -537,16 +577,18 @@ def _call_claude(
 
 
 def _call_openai(
+    descriptor: ProviderDescriptor,
     prompt: str,
     system_prompt: str,
-    max_tokens: int,
     schema: Mapping[str, object] | None = None,
 ) -> str:
     api_key = os.environ.get("MEMORY_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if not api_key:
         return ""
     base_url = os.environ.get("MEMORY_LLM_BASE_URL", "https://api.openai.com/v1")
-    model = os.environ.get("MEMORY_LLM_MODEL", "gpt-4o-mini")
+    model = descriptor.model
+    max_tokens = int(descriptor.inference_settings["max_tokens"])
+    temperature = int(descriptor.inference_settings["temperature_milli"]) / 1000
     url = f"{base_url.rstrip('/')}/chat/completions"
     messages = []
     if system_prompt:
@@ -556,7 +598,7 @@ def _call_openai(
         "model": model,
         "messages": messages,
         "max_tokens": max_tokens,
-        "temperature": 0.2,
+        "temperature": temperature,
     }
     if schema is not None:
         payload["response_format"] = {
@@ -588,13 +630,15 @@ def _call_openai(
 
 
 def _call_ollama(
+    descriptor: ProviderDescriptor,
     prompt: str,
     system_prompt: str,
-    max_tokens: int,
     schema: Mapping[str, object] | None = None,
 ) -> str:
     base_url = os.environ.get("MEMORY_LLM_BASE_URL", "http://localhost:11434/v1")
-    model = os.environ.get("MEMORY_LLM_MODEL", "qwen3:0.6b")
+    model = descriptor.model
+    max_tokens = int(descriptor.inference_settings["max_tokens"])
+    temperature = int(descriptor.inference_settings["temperature_milli"]) / 1000
     url = f"{base_url.rstrip('/')}/chat/completions"
     messages = []
     if system_prompt:
@@ -604,7 +648,7 @@ def _call_ollama(
         "model": model,
         "messages": messages,
         "max_tokens": max_tokens,
-        "temperature": 0.2,
+        "temperature": temperature,
         "stream": False,
     }
     if schema is not None:
@@ -630,9 +674,9 @@ def _call_ollama(
 
 # Backend registry.
 def _call_fake(
+    descriptor: ProviderDescriptor,
     prompt: str,
     system_prompt: str,
-    max_tokens: int,
     schema: Mapping[str, object] | None = None,
 ) -> str:
     return os.environ.get(

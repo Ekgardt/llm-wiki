@@ -5,13 +5,17 @@ import json
 import os
 import re
 import stat
-import subprocess
 import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
+from markdown_transaction import (
+    _acl_output_text,
+    _run_acl_command,
+    _windows_acl_identity,
+)
 from reliable_memory import (
     _known_network_path,
     _windows_reparse_point,
@@ -21,6 +25,11 @@ from reliable_memory import (
 
 CACHE_SCHEMA_VERSION = 1
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_COMPILE_PLAN_SCHEMA_PATH = Path(__file__).resolve().parent / "schemas" / "compile-plan-v2.json"
+_COMPILE_PLAN_SCHEMA_BYTES = _COMPILE_PLAN_SCHEMA_PATH.read_bytes()
+_COMPILE_PLAN_SCHEMA = json.loads(_COMPILE_PLAN_SCHEMA_BYTES.decode("utf-8"))
+COMPILE_PLAN_SCHEMA_VERSION = _COMPILE_PLAN_SCHEMA["properties"]["schema_version"]["const"]
+COMPILE_PLAN_SCHEMA_HASH = sha256_bytes(canonical_json_bytes(_COMPILE_PLAN_SCHEMA))
 
 
 class PlanValidator(Protocol):
@@ -79,6 +88,7 @@ class CompileCallDescriptor:
 @dataclass(frozen=True)
 class CompileActionDescriptor:
     compiler_version: str
+    schema_version: str
     schema_hash: str
     normalization_version: str
     feature_flags: Mapping[str, object]
@@ -89,6 +99,8 @@ class CompileActionDescriptor:
     def canonical(self) -> dict[str, object]:
         if not isinstance(self.compiler_version, str) or not self.compiler_version:
             raise ValueError("compiler version is required")
+        if not isinstance(self.schema_version, str) or not self.schema_version:
+            raise ValueError("schema version is required")
         _validate_digest(self.schema_hash, "schema hash")
         if not isinstance(self.normalization_version, str) or not self.normalization_version:
             raise ValueError("normalization version is required")
@@ -104,6 +116,7 @@ class CompileActionDescriptor:
         source_manifest_hash = sha256_bytes(canonical_json_bytes(source_manifest))
         return {
             "compiler_version": self.compiler_version,
+            "schema_version": self.schema_version,
             "schema_hash": self.schema_hash,
             "normalization_version": self.normalization_version,
             "feature_flags": flags,
@@ -154,6 +167,7 @@ class CompileCache:
             key = self.key(action)
             if key is None:
                 return None
+            _validate_action_schema(action)
             self._validate_location(create=False)
             path = self.cache_dir / f"{key}.json"
             if not path.exists() or path.is_symlink() or not path.is_file():
@@ -198,6 +212,7 @@ class CompileCache:
         key = self.key(action)
         if key is None:
             raise ValueError("explicit model identity is required for persistent caching")
+        _validate_action_schema(action)
         _validate_normalized_plan(normalized_plan, validator)
         self._validate_location(create=True)
         payload = json.loads(canonical_json_bytes(normalized_plan))
@@ -266,7 +281,13 @@ def _validate_logical_path(value: str) -> None:
     if not isinstance(value, str) or not value or "\\" in value:
         raise ValueError("source logical path must be relative POSIX syntax")
     path = PurePosixPath(value)
-    if path.is_absolute() or ".." in path.parts or re.match(r"^[A-Za-z]:", value):
+    if (
+        not path.parts
+        or value == "."
+        or path.is_absolute()
+        or ".." in path.parts
+        or re.match(r"^[A-Za-z]:", value)
+    ):
         raise ValueError("source logical path must remain inside the vault")
 
 
@@ -283,12 +304,75 @@ def _validate_normalized_plan(
     plan: dict[str, object],
     validator: Callable[[dict[str, object]], bool | None] | None,
 ) -> None:
-    if not isinstance(plan, dict) or not isinstance(plan.get("operations"), list):
-        raise ValueError("expected a normalized compile plan with operations")
+    _validate_schema_value(plan, _COMPILE_PLAN_SCHEMA, "compile plan")
     if json.loads(canonical_json_bytes(plan)) != plan:
         raise ValueError("expected a normalized compile plan in the restricted JSON domain")
+    operations = plan["operations"]
+    assert isinstance(operations, list)
+    seen_paths: set[str] = set()
+    for index, operation in enumerate(operations):
+        assert isinstance(operation, dict)
+        path = operation["path"]
+        assert isinstance(path, str)
+        try:
+            _validate_logical_path(path)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"compile plan operation {index} has an unsafe path") from exc
+        if str(PurePosixPath(path)) != path or "\x00" in path:
+            raise ValueError(f"compile plan operation {index} path is not normalized")
+        if path in seen_paths:
+            raise ValueError("compile plan operation paths must be unique")
+        seen_paths.add(path)
     if validator is not None and validator(plan) is False:
         raise ValueError("expected a validated normalized compile plan")
+
+
+def _validate_action_schema(action: CompileActionDescriptor) -> None:
+    if (
+        action.schema_version != COMPILE_PLAN_SCHEMA_VERSION
+        or action.schema_hash != COMPILE_PLAN_SCHEMA_HASH
+    ):
+        raise ValueError("action does not identify the committed compile-plan-v2 schema")
+
+
+def _validate_schema_value(value: object, schema: Mapping[str, object], location: str) -> None:
+    expected_type = schema.get("type")
+    if expected_type == "object":
+        if not isinstance(value, dict):
+            raise ValueError(f"{location} must be an object")
+        required = schema.get("required", [])
+        assert isinstance(required, list)
+        missing = [name for name in required if name not in value]
+        if missing:
+            raise ValueError(f"{location} is missing required fields: {', '.join(missing)}")
+        properties = schema.get("properties", {})
+        assert isinstance(properties, dict)
+        if schema.get("additionalProperties") is False:
+            extras = set(value) - set(properties)
+            if extras:
+                raise ValueError(f"{location} has unsupported fields: {', '.join(sorted(extras))}")
+        for name, item in value.items():
+            child_schema = properties.get(name)
+            if isinstance(child_schema, dict):
+                _validate_schema_value(item, child_schema, f"{location}.{name}")
+    elif expected_type == "array":
+        if not isinstance(value, list):
+            raise ValueError(f"{location} must be an array")
+        items = schema.get("items")
+        if isinstance(items, dict):
+            for index, item in enumerate(value):
+                _validate_schema_value(item, items, f"{location}[{index}]")
+    elif expected_type == "string":
+        if not isinstance(value, str):
+            raise ValueError(f"{location} must be a string")
+        minimum = schema.get("minLength")
+        if isinstance(minimum, int) and len(value) < minimum:
+            raise ValueError(f"{location} is too short")
+    if "const" in schema and value != schema["const"]:
+        raise ValueError(f"{location} does not match the committed compile plan schema")
+    choices = schema.get("enum")
+    if isinstance(choices, list) and value not in choices:
+        raise ValueError(f"{location} is not an allowed value")
 
 
 def _restrict_owner_only(path: Path, mode: int) -> None:
@@ -298,24 +382,8 @@ def _restrict_owner_only(path: Path, mode: int) -> None:
         return
     if os.name != "nt":
         raise PermissionError("owner-only cache permissions are unsupported")
-    username = os.environ.get("USERNAME")
-    if not username:
-        raise PermissionError("owner-only cache permissions are unavailable")
-    permission = "(OI)(CI)F" if path.is_dir() else "F"
-    result = subprocess.run(
-        [
-            "icacls",
-            str(path),
-            "/inheritance:r",
-            "/grant:r",
-            f"{username}:{permission}",
-        ],
-        capture_output=True,
-        check=False,
-        timeout=5,
-    )
-    if result.returncode != 0:
-        raise PermissionError("owner-only cache permissions are unavailable")
+    _harden_cache_windows_acl(path)
+    _verify_owner_only(path, mode)
 
 
 def _verify_owner_only(path: Path, mode: int) -> None:
@@ -325,5 +393,71 @@ def _verify_owner_only(path: Path, mode: int) -> None:
     expected_type = stat.S_IFDIR if path.is_dir() else stat.S_IFREG
     if stat.S_IFMT(info.st_mode) != expected_type:
         raise PermissionError("cache path has an invalid type")
-    if os.name == "posix" and stat.S_IMODE(info.st_mode) != mode:
+    if not _is_owner_only(path, mode):
         raise PermissionError("cache path is not owner-only")
+
+
+def _is_owner_only(path: Path, mode: int) -> bool:
+    if os.name == "nt":
+        return _windows_acl_is_owner_only(path)
+    return os.name == "posix" and stat.S_IMODE(path.stat().st_mode) == mode
+
+
+def _windows_acl_is_owner_only(path: Path) -> bool:
+    try:
+        verified = _run_acl_command(["icacls", str(path)])
+    except Exception:  # noqa: BLE001 - ACL validation is fail-closed
+        return False
+    if verified.returncode != 0:
+        return False
+    identity = _windows_acl_identity()
+    acl_lines = [
+        line.strip()
+        for line in _acl_output_text(verified.stdout).splitlines()
+        if ":(" in line
+    ]
+    owner_lines = [
+        line
+        for line in acl_lines
+        if _acl_principal(path, line).casefold() == identity.casefold()
+    ]
+    return (
+        len(acl_lines) == 1
+        and len(owner_lines) == 1
+        and "(F)" in owner_lines[0]
+        and "(I)" not in owner_lines[0]
+    )
+
+
+def _acl_principal(path: Path, line: str) -> str:
+    principal = line.split(":(", 1)[0].strip()
+    path_text = str(path)
+    if principal.casefold().startswith(path_text.casefold()):
+        principal = principal[len(path_text) :].strip()
+    return principal
+
+
+def _harden_cache_windows_acl(path: Path) -> None:
+    identity = _windows_acl_identity()
+    permission = f"{identity}:(OI)(CI)(F)" if path.is_dir() else f"{identity}:(F)"
+    broad_sids = [
+        "*S-1-1-0",  # Everyone
+        "*S-1-3-0",  # Creator Owner
+        "*S-1-3-4",  # Owner Rights
+        "*S-1-5-18",  # Local System
+        "*S-1-5-32-544",  # Administrators
+        "*S-1-5-32-545",  # Users
+        "*S-1-15-2-1",  # All application packages
+        "*S-1-15-2-2",  # All restricted application packages
+    ]
+    commands = [
+        ["icacls", str(path), "/inheritance:r", "/grant:r", permission],
+        ["icacls", str(path), "/remove:g", *broad_sids],
+        ["icacls", str(path), "/remove:d", *broad_sids],
+    ]
+    try:
+        results = [_run_acl_command(command) for command in commands]
+    except Exception as exc:  # noqa: BLE001 - ACL enforcement is fail-closed
+        raise PermissionError("owner-only cache permissions are unavailable") from exc
+    if any(result.returncode != 0 for result in results) or not _windows_acl_is_owner_only(path):
+        raise PermissionError("owner-only cache ACL enforcement failed")

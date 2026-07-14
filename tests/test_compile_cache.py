@@ -5,14 +5,27 @@ import os
 import stat
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
+import compile_cache
+import llm_client
 import pytest
 from compile_cache import (
+    COMPILE_PLAN_SCHEMA_HASH,
+    COMPILE_PLAN_SCHEMA_VERSION,
     CompileActionDescriptor,
     CompileCache,
     CompileCallDescriptor,
     SourceDescriptor,
 )
+from reliable_memory import canonical_json_bytes, sha256_bytes
+
+
+def _plan(*operations) -> dict[str, object]:
+    return {
+        "schema_version": COMPILE_PLAN_SCHEMA_VERSION,
+        "operations": list(operations),
+    }
 
 
 def _call(**changes) -> CompileCallDescriptor:
@@ -21,7 +34,7 @@ def _call(**changes) -> CompileCallDescriptor:
         "provider": "codex",
         "model": "gpt-5",
         "capabilities": {"structured_output": False},
-        "inference_settings": {"reasoning": "low", "max_tokens": 2000},
+        "inference_settings": {"max_tokens": 2000, "reasoning": "low"},
         "structured_output": "prompt",
         "fallback_from": (),
     }
@@ -32,7 +45,8 @@ def _call(**changes) -> CompileCallDescriptor:
 def _action(**changes) -> CompileActionDescriptor:
     values = {
         "compiler_version": "2.0.0",
-        "schema_hash": "2" * 64,
+        "schema_version": COMPILE_PLAN_SCHEMA_VERSION,
+        "schema_hash": COMPILE_PLAN_SCHEMA_HASH,
         "normalization_version": "normalize-v2",
         "feature_flags": {"critique": True},
         "draft_calls": (_call(),),
@@ -53,6 +67,7 @@ def _action(**changes) -> CompileActionDescriptor:
     "changed",
     [
         lambda a: replace(a, compiler_version="2.0.1"),
+        lambda a: replace(a, schema_version="compile-plan/v3"),
         lambda a: replace(a, schema_hash="a" * 64),
         lambda a: replace(a, normalization_version="normalize-v3"),
         lambda a: replace(a, feature_flags={"critique": False}),
@@ -61,12 +76,22 @@ def _action(**changes) -> CompileActionDescriptor:
         lambda a: replace(a, draft_calls=(replace(a.draft_calls[0], model="opus-4"),)),
         lambda a: replace(a, draft_calls=(replace(a.draft_calls[0], capabilities={"structured_output": True}),)),
         lambda a: replace(a, draft_calls=(replace(a.draft_calls[0], inference_settings={"reasoning": "high"}),)),
+        lambda a: replace(
+            a,
+            draft_calls=(
+                replace(
+                    a.draft_calls[0],
+                    inference_settings={"max_tokens": 4096, "reasoning": "low"},
+                ),
+            ),
+        ),
         lambda a: replace(a, draft_calls=(replace(a.draft_calls[0], structured_output="native"),)),
         lambda a: replace(a, draft_calls=(replace(a.draft_calls[0], fallback_from=("openai:gpt-4o:provider_error",)),)),
         lambda a: replace(a, sources=(SourceDescriptor("knowledge/daily/2026-07-13.md", 21, "5" * 64),)),
     ],
     ids=[
         "compiler_version",
+        "schema_version",
         "schema_hash",
         "normalization_version",
         "feature_flags",
@@ -75,6 +100,7 @@ def _action(**changes) -> CompileActionDescriptor:
         "model",
         "capabilities",
         "inference_settings",
+        "max_tokens",
         "structured_output",
         "fallback_lineage",
         "source_manifest_hash",
@@ -98,6 +124,68 @@ def test_source_manifest_is_sorted_in_canonical_action(tmp_path):
     assert cache.key(action) is not None
 
 
+def test_stable_golden_action_key_uses_exact_canonical_descriptor(tmp_path):
+    action = _action(critique_calls=())
+    manifest = [source.canonical() for source in sorted(action.sources)]
+    expected = {
+        "compiler_version": "2.0.0",
+        "schema_version": COMPILE_PLAN_SCHEMA_VERSION,
+        "schema_hash": COMPILE_PLAN_SCHEMA_HASH,
+        "normalization_version": "normalize-v2",
+        "feature_flags": {"critique": True},
+        "draft_calls": [
+            {
+                "prompt_program_hash": "1" * 64,
+                "provider": "codex",
+                "model": "gpt-5",
+                "capabilities": {"structured_output": False},
+                "inference_settings": {"max_tokens": 2000, "reasoning": "low"},
+                "structured_output": "prompt",
+                "fallback_lineage": [],
+            }
+        ],
+        "critique_calls": [],
+        "source_manifest": manifest,
+        "source_manifest_hash": sha256_bytes(canonical_json_bytes(manifest)),
+    }
+
+    assert action.canonical() == expected
+    assert CompileCache(tmp_path).key(action) == sha256_bytes(canonical_json_bytes(expected))
+    assert CompileCache(tmp_path).key(action) == (
+        "7b90d06d855dd0fd0a41ba180b24a7e451e7f9e40e3d81e0e5b809d5a3154815"
+    )
+
+
+def test_schema_hash_is_canonical_and_independent_of_checkout_line_endings():
+    schema_path = Path(__file__).resolve().parent.parent / "scripts" / "schemas" / "compile-plan-v2.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+
+    assert COMPILE_PLAN_SCHEMA_HASH == sha256_bytes(canonical_json_bytes(schema))
+
+
+def test_real_openai_and_ollama_descriptors_produce_distinct_keys(tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMORY_LLM_MODEL", "resolved-model")
+    openai = llm_client.provider_candidates("openai", max_tokens=321)[0]
+    ollama = llm_client.provider_candidates("ollama", max_tokens=321)[0]
+
+    def call(provider):
+        return _call(
+            provider=provider.provider,
+            model=provider.model,
+            capabilities=provider.capabilities,
+            inference_settings=provider.inference_settings,
+            structured_output="native",
+        )
+
+    cache = CompileCache(tmp_path)
+    openai_key = cache.key(_action(draft_calls=(call(openai),), critique_calls=()))
+    ollama_key = cache.key(_action(draft_calls=(call(ollama),), critique_calls=()))
+
+    assert openai_key is not None
+    assert ollama_key is not None
+    assert openai_key != ollama_key
+
+
 def test_restored_preferred_provider_does_not_hit_fallback_cache(tmp_path):
     cache = CompileCache(tmp_path)
     fallback = _action(
@@ -110,10 +198,10 @@ def test_restored_preferred_provider_does_not_hit_fallback_cache(tmp_path):
         )
     )
     preferred = _action()
-    cache.put(fallback, {"operations": []})
+    cache.put(fallback, _plan())
 
     assert cache.get(preferred) is None
-    assert cache.get(fallback) == {"operations": []}
+    assert cache.get(fallback) == _plan()
 
 
 def test_unknown_model_disables_persistent_key_and_write(tmp_path):
@@ -122,14 +210,14 @@ def test_unknown_model_disables_persistent_key_and_write(tmp_path):
 
     assert cache.key(action) is None
     with pytest.raises(ValueError, match="model identity"):
-        cache.put(action, {"operations": []})
+        cache.put(action, _plan())
 
 
 def test_cache_filename_is_only_sha_and_payload_has_digest_and_schema(tmp_path):
     cache = CompileCache(tmp_path)
     action = _action()
 
-    path = cache.put(action, {"operations": []})
+    path = cache.put(action, _plan())
     record = json.loads(path.read_text(encoding="utf-8"))
 
     assert path.parent == tmp_path / "cache" / "compile"
@@ -141,25 +229,72 @@ def test_cache_filename_is_only_sha_and_payload_has_digest_and_schema(tmp_path):
 
 def test_owner_only_directory_and_file_where_permission_bits_are_supported(tmp_path):
     cache = CompileCache(tmp_path)
-    path = cache.put(_action(), {"operations": []})
+    path = cache.put(_action(), _plan())
 
     if os.name == "posix":
         assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+def test_broadened_windows_acl_is_not_owner_only(monkeypatch, tmp_path):
+    output = (
+        f"{tmp_path} DOMAIN\\user:(F)\r\n"
+        "             BUILTIN\\Users:(RX)\r\n"
+        "Successfully processed 1 files\r\n"
+    ).encode("ascii")
+    monkeypatch.setattr(compile_cache, "_windows_acl_identity", lambda: "DOMAIN\\user")
+    monkeypatch.setattr(
+        compile_cache,
+        "_run_acl_command",
+        lambda command: SimpleNamespace(returncode=0, stdout=output, stderr=b""),
+    )
+
+    assert compile_cache._windows_acl_is_owner_only(tmp_path) is False
+
+
+def test_similar_windows_acl_identity_is_not_treated_as_owner(monkeypatch, tmp_path):
+    output = f"{tmp_path} DOMAIN\\user-backup:(F)\r\n".encode("ascii")
+    monkeypatch.setattr(compile_cache, "_windows_acl_identity", lambda: "DOMAIN\\user")
+    monkeypatch.setattr(
+        compile_cache,
+        "_run_acl_command",
+        lambda command: SimpleNamespace(returncode=0, stdout=output, stderr=b""),
+    )
+
+    assert compile_cache._windows_acl_is_owner_only(tmp_path) is False
+
+
+def test_broadened_acl_cache_hit_fails_closed(tmp_path, monkeypatch):
+    cache = CompileCache(tmp_path)
+    action = _action()
+    cache.put(action, _plan())
+    monkeypatch.setattr(compile_cache, "_is_owner_only", lambda path, mode: False)
+
+    assert cache.get(action) is None
+
+
+def test_remote_state_root_rejects_write_and_hit(tmp_path, monkeypatch):
+    cache = CompileCache(tmp_path)
+    action = _action()
+    monkeypatch.setattr(compile_cache, "_known_network_path", lambda path: True)
+
+    with pytest.raises(PermissionError, match="local state root"):
+        cache.put(action, _plan())
+    assert cache.get(action) is None
+
+
 def test_empty_successful_plan_is_cached_and_validator_runs_on_every_hit(tmp_path):
     cache = CompileCache(tmp_path)
     action = _action()
     calls = []
-    cache.put(action, {"operations": []})
+    cache.put(action, _plan())
 
     def validator(plan):
         calls.append(plan)
         return True
 
-    assert cache.get(action, validator) == {"operations": []}
-    assert cache.get(action, validator) == {"operations": []}
+    assert cache.get(action, validator) == _plan()
+    assert cache.get(action, validator) == _plan()
     assert len(calls) == 2
 
 
@@ -171,28 +306,30 @@ def test_failure_classes_are_not_cacheable(tmp_path, failure):
     cache = CompileCache(tmp_path)
 
     with pytest.raises(ValueError, match="successful"):
-        cache.put(_action(), {"operations": []}, failure_class=failure)
+        cache.put(_action(), _plan(), failure_class=failure)
     assert list((tmp_path / "cache" / "compile").glob("*.json")) == []
 
 
 def test_digest_tamper_and_validator_rejection_fail_closed(tmp_path):
     cache = CompileCache(tmp_path)
     action = _action()
-    path = cache.put(action, {"operations": []})
+    path = cache.put(action, _plan())
     record = json.loads(path.read_text(encoding="utf-8"))
-    record["payload"] = {"operations": [{"action": "create"}]}
-    path.write_text(json.dumps(record), encoding="utf-8")
+    record["payload"] = _plan(
+        {"kind": "create", "path": "knowledge/notes/tampered.md", "content": "x"}
+    )
+    path.write_bytes(canonical_json_bytes(record))
 
     assert cache.get(action) is None
 
-    cache.put(action, {"operations": []})
+    cache.put(action, _plan())
     assert cache.get(action, lambda plan: False) is None
 
 
 def test_validator_exception_on_hit_fails_closed(tmp_path):
     cache = CompileCache(tmp_path)
     action = _action()
-    cache.put(action, {"operations": []})
+    cache.put(action, _plan())
 
     def broken_validator(plan):
         raise RuntimeError("schema implementation failed")
@@ -204,7 +341,57 @@ def test_non_normalized_plan_is_rejected(tmp_path):
     cache = CompileCache(tmp_path)
 
     with pytest.raises(ValueError, match="normalized compile plan"):
-        cache.put(_action(), {"operations": []}, validator=lambda plan: False)
+        cache.put(_action(), _plan(), validator=lambda plan: False)
+
+
+@pytest.mark.parametrize(
+    "plan",
+    [
+        {"operations": []},
+        _plan({"kind": "create", "path": "knowledge/notes/a.md"}),
+        _plan(
+            {
+                "kind": "create",
+                "path": "knowledge/notes/a.md",
+                "content": "x",
+                "unexpected": True,
+            }
+        ),
+    ],
+)
+def test_put_rejects_plan_that_violates_committed_schema(tmp_path, plan):
+    with pytest.raises(ValueError, match="compile plan"):
+        CompileCache(tmp_path).put(_action(), plan)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [".", "../outside.md", "/absolute.md", "knowledge\\notes\\a.md"],
+)
+def test_put_rejects_unsafe_operation_path(tmp_path, path):
+    plan = _plan({"kind": "create", "path": path, "content": "x"})
+
+    with pytest.raises(ValueError, match="path"):
+        CompileCache(tmp_path).put(_action(), plan)
+
+
+def test_get_rejects_schema_invalid_payload_even_with_recomputed_digest(tmp_path):
+    cache = CompileCache(tmp_path)
+    action = _action()
+    path = cache.put(action, _plan())
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["payload"] = _plan({"kind": "create", "path": "knowledge/notes/a.md"})
+    record["payload_digest"] = sha256_bytes(canonical_json_bytes(record["payload"]))
+    path.write_bytes(canonical_json_bytes(record))
+
+    assert cache.get(action) is None
+
+
+def test_cache_rejects_action_for_uncommitted_schema(tmp_path):
+    action = replace(_action(), schema_version="compile-plan/v3", schema_hash="a" * 64)
+
+    with pytest.raises(ValueError, match="committed compile-plan"):
+        CompileCache(tmp_path).put(action, _plan())
 
 
 def test_absolute_and_parent_source_paths_are_rejected():
@@ -225,4 +412,4 @@ def test_symlinked_cache_directory_fails_closed(tmp_path):
         pytest.skip("directory symlinks are unavailable")
 
     with pytest.raises(PermissionError, match="cache"):
-        CompileCache(tmp_path).put(_action(), {"operations": []})
+        CompileCache(tmp_path).put(_action(), _plan())
