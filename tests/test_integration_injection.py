@@ -44,6 +44,203 @@ def test_opencode_plugin_is_lifecycle_only():
     assert "project" not in plugin
 
 
+def test_normalization_preserves_only_available_checkpoint_signals():
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    from integration_adapter import normalize_event
+
+    supplied = normalize_event(
+        "opencode",
+        "post_tool_use",
+        {
+            "sessionId": "session-1",
+            "directory": "C:/project",
+            "tool": "edit",
+            "input": {"filePath": "src/app.py"},
+            "event_id": "host-1",
+            "dirty": True,
+            "changed": True,
+            "public_contract_changed": True,
+            "token_percent": 70,
+            "compaction_confirmed": True,
+        },
+    )
+    unavailable = normalize_event(
+        "codex",
+        "session_end",
+        {"session_id": "session-2", "cwd": "C:/project", "reason": "done"},
+    )
+
+    assert supplied.payload["dirty"] is True
+    assert supplied.payload["changed"] is True
+    assert supplied.payload["public_contract_changed"] is True
+    assert supplied.payload["token_percent"] == 70
+    assert supplied.payload["compaction_confirmed"] is True
+    assert "token_percent" not in unavailable.payload
+    assert "compaction_confirmed" not in unavailable.payload
+
+
+def test_host_tool_call_id_separates_repeated_mutations():
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    from integration_adapter import normalize_event
+
+    raw = {
+        "session_id": "session-1",
+        "cwd": "C:/project",
+        "tool_name": "Edit",
+        "tool_input": {"file_path": "src/app.py"},
+    }
+    first = normalize_event("claude", "post_tool_use", {**raw, "tool_use_id": "tool-1"})
+    second = normalize_event("claude", "post_tool_use", {**raw, "tool_use_id": "tool-2"})
+
+    assert first.source_event_id == "tool-1"
+    assert first.event_id != second.event_id
+
+
+def test_adapter_observes_same_envelope_once_before_delegate(monkeypatch):
+    import io
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import integration_adapter
+
+    calls = []
+    monkeypatch.setattr(
+        integration_adapter,
+        "_observe_project_checkpoint",
+        lambda envelope: calls.append(("observe", envelope)),
+    )
+    monkeypatch.setattr(
+        integration_adapter,
+        "_run_delegate",
+        lambda *args, **kwargs: calls.append(("delegate", args[1])) or None,
+    )
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(json.dumps({"session_id": "s1", "cwd": "C:/project", "reason": "done"})),
+    )
+
+    assert integration_adapter.main(
+        ["--source", "claude", "--event", "session_end", "--delegate", "session_end_capture.py"]
+    ) == 0
+    assert [name for name, _ in calls] == ["observe", "delegate"]
+    assert calls[1][1]["event_id"] == calls[0][1].event_id
+
+
+def test_adapter_observes_before_direct_ingestion(monkeypatch):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import integration_adapter
+
+    envelope = integration_adapter.normalize_event(
+        "codex", "session_end", {"session_id": "s1", "cwd": "C:/project"}
+    )
+    calls = []
+    monkeypatch.setattr(
+        integration_adapter,
+        "_observe_project_checkpoint",
+        lambda observed: calls.append(("observe", observed.event_id)),
+    )
+    monkeypatch.setattr(
+        integration_adapter,
+        "_record_activity",
+        lambda *args: calls.append(("ingest", args[0].event_id)) or True,
+    )
+    monkeypatch.setattr(integration_adapter, "_project_context", lambda event: ("demo", ROOT))
+
+    integration_adapter.ingest_event(envelope)
+    assert calls == [("observe", envelope.event_id), ("ingest", envelope.event_id)]
+
+
+def test_session_start_recovers_transactions_then_project_before_handoff(
+    monkeypatch, tmp_path, capsys
+):
+    import io
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import session_start_project_state
+
+    vault = tmp_path / "vault"
+    project = tmp_path / "project"
+    (vault / "knowledge/projects/demo").mkdir(parents=True)
+    (vault / "knowledge/projects/demo/journal.md").write_text("journal", encoding="utf-8")
+    project.mkdir()
+    calls = []
+
+    class Coordinator:
+        def recover(self):
+            calls.append("transactions")
+
+    class Store:
+        def __init__(self, vault_root, state_root):
+            self.coordinator = Coordinator()
+
+        def recover(self, slug):
+            calls.append(("project", slug))
+
+        def projection(self, slug):
+            calls.append(("projection", slug))
+            return object()
+
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+    monkeypatch.setattr(session_start_project_state, "_compute_slug", lambda *args: "demo")
+    monkeypatch.setattr(session_start_project_state, "ProjectStore", Store, raising=False)
+    monkeypatch.setattr(
+        session_start_project_state,
+        "build_handoff",
+        lambda projection, max_chars: calls.append(("handoff", max_chars)) or "bounded handoff",
+        raising=False,
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO("{}"))
+
+    assert session_start_project_state.main() == 0
+    output = json.loads(capsys.readouterr().out)
+    assert calls == [
+        "transactions",
+        ("project", "demo"),
+        ("projection", "demo"),
+        ("handoff", 2400),
+    ]
+    assert output["hookSpecificOutput"]["additionalContext"] == "bounded handoff"
+
+
+def test_claude_hooks_cover_compaction_failure_stop_and_end_signals():
+    settings = json.loads(
+        (ROOT / "integrations" / "claude-code" / "settings.json").read_text(encoding="utf-8")
+    )
+    hooks = settings["hooks"]
+    assert {"SessionStart", "PreCompact", "PostToolUse", "PostToolUseFailure", "Stop", "SessionEnd"} <= set(hooks)
+    stop_command = hooks["Stop"][0]["hooks"][0]["command"]
+    failure_command = hooks["PostToolUseFailure"][0]["hooks"][0]["command"]
+    assert "--checkpoint-type stop" in stop_command
+    assert "--checkpoint-type significant_failure" in failure_command
+
+
+def test_codex_wrapper_recovers_project_state_before_launch():
+    wrapper = (ROOT / "scripts" / "codex-memory-wrapper.ps1").read_text(encoding="utf-8")
+    recovery = wrapper.index("codex_memory.py project-state")
+    launch = wrapper.index("& $REAL_CODEX @fwdArgs")
+    assert recovery < launch
+
+
 def test_opencode_host_directory_maps_directly_to_worktree_or_null():
     import sys
 
@@ -192,6 +389,82 @@ def test_opencode_node_harness_times_out_stalled_capture(tmp_path):
     observed = json.loads(result.stdout)
     assert observed["elapsed"] < 500
     assert observed["killed"] is True
+
+
+def test_opencode_forwards_known_mutation_and_dirty_idle_without_fake_progress_signals(tmp_path):
+    plugin_url = (ROOT / "scripts" / "llm-wiki-memory-opencode.js").resolve().as_uri()
+    root = str(tmp_path / "vault")
+    script = textwrap.dedent(
+        f"""
+        process.env.LLM_WIKI_ROOT = {json.dumps(root)};
+        const payloads = [];
+        globalThis.Bun = {{ spawn() {{
+          let finish;
+          const exited = new Promise((resolve) => {{ finish = resolve; }});
+          return {{
+            stdin: {{
+              write(value) {{ payloads.push(JSON.parse(value)); }},
+              end() {{ finish(0); }},
+            }},
+            stdout: new ReadableStream({{ start(controller) {{ controller.close(); }} }}),
+            exited,
+            kill() {{ finish(143); }},
+          }};
+        }} }};
+        const {{ LlmWikiMemoryPlugin }} = await import({json.dumps(plugin_url)} + "?harness=signals");
+        const hooks = await LlmWikiMemoryPlugin({{ client: {{}}, directory: "/project" }});
+        await hooks["tool.execute.after"]({{
+          sessionId: "session-1", tool: "edit", input: {{ filePath: "src/app.py" }}
+        }});
+        await hooks["session.idle"]({{ sessionId: "session-1" }});
+        console.log(JSON.stringify(payloads));
+        """
+    )
+
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    tool, idle = json.loads(result.stdout)
+    assert tool["changed"] is True
+    assert tool["dirty"] is True
+    assert idle["dirty"] is True
+    for payload in (tool, idle):
+        assert "token_percent" not in payload
+        assert "compaction_confirmed" not in payload
+
+
+def test_codex_project_state_observes_session_start_before_recovery(monkeypatch, tmp_path):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import codex_memory
+
+    calls = []
+    monkeypatch.setattr(
+        codex_memory,
+        "_observe_project_checkpoint",
+        lambda envelope: calls.append(("observe", envelope.event_type)),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        codex_memory,
+        "_run_script",
+        lambda *args: calls.append(("recover", args[0]))
+        or subprocess.CompletedProcess([], 0, '{"hookSpecificOutput":{"additionalContext":""}}', ""),
+    )
+    monkeypatch.setattr(codex_memory, "_state_path", lambda path: ("demo", tmp_path / "state.md"))
+    args = type("Args", (), {"cwd": str(tmp_path), "json": True})()
+
+    assert codex_memory.command_project_state(args) == 0
+    assert calls == [("observe", "session_start"), ("recover", "session_start_project_state.py")]
 
 
 def test_opencode_vault_guard_uses_resolved_path_boundary():

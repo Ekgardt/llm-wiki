@@ -219,6 +219,9 @@ def main() -> int:
                 if isinstance(hook.get("parent_event_id"), str)
                 else None
             ),
+            source_event_id=(
+                hook.get("event_id") if isinstance(hook.get("event_id"), str) else None
+            ),
         )
 
         if _rate_limited(slug, tool_name, envelope.payload["target"]):

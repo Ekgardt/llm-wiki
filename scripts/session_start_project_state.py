@@ -47,6 +47,8 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
+from project_journal import ProjectStore, build_handoff
+
 # Force utf-8 on stdout (Windows cp1252 mojibakes Cyrillic otherwise).
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -406,6 +408,18 @@ def main() -> int:
         project_dir = _resolve_project_dir()
         slug = _compute_slug(project_dir, projects_dir)
         state_path = projects_dir / slug / "state.md"
+
+        # Recover transaction state before journal reservations, then inject only
+        # the bounded operational projection when this project has a journal.
+        journal_path = projects_dir / slug / "journal.md"
+        if journal_path.is_file():
+            state_root = _resolve_state_root()
+            if state_root is None:
+                return _emit_empty()
+            store = ProjectStore(vault, state_root)
+            store.coordinator.recover()
+            store.recover(slug)
+            return _emit(build_handoff(store.projection(slug), max_chars=MAX_CONTEXT_CHARS))
 
         # 3. Ensure state.md exists — creation gated on project markers.
         is_new = False

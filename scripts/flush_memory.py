@@ -116,6 +116,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--session-id", default="unknown")
     p.add_argument("--transcript", default="")
     p.add_argument("--trigger", default="")
+    p.add_argument("--source-event-id", default="")
+    p.add_argument("--checkpoint-reason", default="")
     p.add_argument("--ephemeral-transcript", action="store_true")
     return p.parse_args()
 

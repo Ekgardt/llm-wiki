@@ -147,6 +147,28 @@ def test_precompact_ephemeral_transcript_propagates_and_cleans_failed_spawn(
     assert json.loads(capsys.readouterr().out) == {"flush_started": False}
 
 
+def test_capture_wrappers_forward_checkpoint_event_identity(monkeypatch, capsys):
+    import precompact_capture
+    import session_end_capture
+
+    for module in (precompact_capture, session_end_capture):
+        spawned = []
+        monkeypatch.setattr(module, "spawn_detached", lambda args: spawned.append(args) or 1234)
+        assert _run_capture_with_stdin(
+            module.__name__,
+            {
+                "session_id": "session-1",
+                "transcript_path": "session.jsonl",
+                "event_id": "event-1",
+                "checkpoint_reason": "session_end",
+            },
+        ) == 0
+        assert "--source-event-id" in spawned[0]
+        assert spawned[0][spawned[0].index("--source-event-id") + 1] == "event-1"
+        assert "--checkpoint-reason" in spawned[0]
+        capsys.readouterr()
+
+
 def test_prompt_capture_exits_zero_on_empty_stdin():
     """No stdin → no crash, exit 0."""
     rc = _run_capture_with_stdin("user_prompt_capture", "")

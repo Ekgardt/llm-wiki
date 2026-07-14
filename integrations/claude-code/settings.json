@@ -102,6 +102,30 @@
           }
         ]
       }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event post_tool_use --checkpoint-type significant_failure --delegate post_tool_capture.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event session_end --checkpoint-type stop",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }

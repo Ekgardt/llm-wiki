@@ -80,6 +80,9 @@ function codex {
         try {
             $contextFile = Join-Path $env:LLM_WIKI_STATE_ROOT "cache\session-context.md"
             & uv run python "$env:LLM_WIKI_ROOT\scripts\session_start_context.py" --output-file $contextFile 2>$null | Out-Null
+            # codex_memory.py project-state recovers journals before context injection.
+            & uv run python "$env:LLM_WIKI_ROOT\scripts\codex_memory.py" project-state --cwd $cwdBefore 2>$null |
+                Add-Content -LiteralPath $contextFile -Encoding utf8
         } catch {}
 
         # Invoke the real codex binary with all forwarded args.

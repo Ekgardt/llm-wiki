@@ -8,7 +8,7 @@ import re
 import secrets
 import stat
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -106,6 +106,280 @@ class CheckpointReceipt:
     idempotency_key: str
     transaction_id: str | None
     duplicate: bool = False
+
+
+@dataclass(frozen=True)
+class CheckpointDecision:
+    reason: str
+    forced: bool = False
+
+
+@dataclass
+class ProjectProjection:
+    project: str
+    goal: dict[str, str] = field(default_factory=dict)
+    phase: dict[str, str] = field(default_factory=dict)
+    current_task: dict[str, str] = field(default_factory=dict)
+    next_actions: dict[str, str] = field(default_factory=dict)
+    decisions: dict[str, str] = field(default_factory=dict)
+    blockers: dict[str, str] = field(default_factory=dict)
+    changed_files: dict[str, str] = field(default_factory=dict)
+    commands: dict[str, str] = field(default_factory=dict)
+    verification: dict[str, str] = field(default_factory=dict)
+    last_applied_sequence: int = 0
+
+
+class CheckpointReducer:
+    """Reduce observed lifecycle signals into deterministic checkpoint decisions."""
+
+    _BYPASS_TYPES = frozenset(
+        {
+            "pre_compact",
+            "compaction_confirmed",
+            "token_usage",
+            "decision",
+            "task_completed",
+            "task_cancelled",
+            "significant_failure",
+            "ownership_transferred",
+            "session_end",
+        }
+    )
+    _SIGNIFICANT_TYPES = frozenset(
+        {
+            "decision",
+            "correction",
+            "blocker_opened",
+            "blocker_closed",
+            "task_completed",
+            "task_cancelled",
+            "ownership_transferred",
+            "significant_failure",
+            "failed_command",
+            "mutation",
+            "file_changed",
+            "public_contract_changed",
+            "test_result_changed",
+        }
+    )
+    _REASONS = {
+        "decision": "decision",
+        "correction": "correction",
+        "blocker_opened": "blocker_change",
+        "blocker_closed": "blocker_change",
+        "task_completed": "task_completed",
+        "task_cancelled": "task_cancelled",
+        "ownership_transferred": "ownership_transfer",
+        "significant_failure": "significant_failure",
+        "failed_command": "significant_failure",
+        "public_contract_changed": "public_contract_change",
+        "test_result_changed": "test_result_change",
+    }
+
+    def __init__(
+        self,
+        *,
+        host_progress_signals: bool = False,
+        significant_count: int = 0,
+        token_threshold: int = 60,
+        dirty_since: datetime | None = None,
+        dirty_thresholds: Sequence[int] = (),
+        last_checkpoint_at: datetime | None = None,
+        observed_event_ids: Sequence[str] = (),
+    ):
+        self.host_progress_signals = bool(host_progress_signals)
+        self.significant_count = max(0, int(significant_count))
+        self.token_threshold = max(60, int(token_threshold))
+        self.dirty_since = dirty_since
+        self.dirty_thresholds = {int(value) for value in dirty_thresholds}
+        self.last_checkpoint_at = last_checkpoint_at
+        self.observed_event_ids = dict.fromkeys(str(value) for value in observed_event_ids)
+
+    def observe(
+        self,
+        event: Mapping[str, object],
+        *,
+        now: datetime | None = None,
+    ) -> CheckpointDecision | None:
+        if not isinstance(event, Mapping):
+            raise TypeError("checkpoint observation must be a mapping")
+        current_time = now or _utc_now()
+        if current_time.tzinfo is None or current_time.utcoffset() is None:
+            raise ValueError("checkpoint observation time must be timezone-aware")
+        current_time = current_time.astimezone(timezone.utc)
+        event_id = event.get("event_id")
+        if isinstance(event_id, str) and event_id:
+            if event_id in self.observed_event_ids:
+                return None
+            self.observed_event_ids[event_id] = None
+            while len(self.observed_event_ids) > 256:
+                self.observed_event_ids.pop(next(iter(self.observed_event_ids)))
+
+        event_type = str(event.get("type") or "")
+        dirty = event.get("dirty")
+        if dirty is True and self.dirty_since is None:
+            self.dirty_since = current_time
+        elif dirty is False:
+            self.dirty_since = None
+            self.dirty_thresholds.clear()
+        dirty_active = dirty is True or dirty is None and self.dirty_since is not None
+
+        significant = event_type in self._SIGNIFICANT_TYPES
+        if event_type in {"mutation", "file_changed"}:
+            significant = event.get("changed") is True or event.get("significant") is True
+        if significant:
+            self.significant_count += 1
+
+        reason: str | None = None
+        forced = False
+        pending_dirty_threshold: int | None = None
+        if event_type == "session_start":
+            reason = "session_start_recovery"
+        elif event_type == "pre_compact":
+            self.host_progress_signals = True
+            reason = "before_compaction"
+        elif event_type == "compaction_confirmed":
+            self.host_progress_signals = True
+            reason = "after_compaction"
+        elif event_type == "token_usage":
+            self.host_progress_signals = True
+            percent = event.get("percent")
+            if isinstance(percent, (int, float)) and not isinstance(percent, bool):
+                bounded = min(int(percent), 80)
+                if bounded >= self.token_threshold:
+                    threshold = 80 if bounded >= 80 else self.token_threshold
+                    reason = f"token_{threshold}"
+                    self.token_threshold = threshold + 10
+                    if threshold == 80:
+                        reason = "token_forced_80"
+                        forced = True
+        elif event_type == "session_end" and dirty_active:
+            reason = "session_end"
+        elif event_type == "stop" and dirty_active:
+            reason = "dirty_stop"
+        elif event_type == "session_idle" and dirty_active:
+            reason = "dirty_idle"
+        elif event_type == "file_changed" and event.get("significant") is True:
+            reason = "file_change"
+        else:
+            reason = self._REASONS.get(event_type)
+
+        if reason is None and self.dirty_since is not None:
+            elapsed = current_time - self.dirty_since
+            for minutes in (30, 10):
+                if elapsed >= timedelta(minutes=minutes) and minutes not in self.dirty_thresholds:
+                    pending_dirty_threshold = minutes
+                    reason = f"dirty_{minutes}_minutes"
+                    break
+
+        if (
+            reason is None
+            and significant
+            and not self.host_progress_signals
+            and self.significant_count % 20 == 0
+        ):
+            reason = f"significant_event_{self.significant_count}"
+        if reason is None:
+            return None
+
+        bypass = event_type in self._BYPASS_TYPES
+        if (
+            not bypass
+            and self.last_checkpoint_at is not None
+            and current_time - self.last_checkpoint_at < timedelta(seconds=30)
+        ):
+            return None
+        if pending_dirty_threshold is not None:
+            self.dirty_thresholds.add(pending_dirty_threshold)
+        self.last_checkpoint_at = current_time
+        return CheckpointDecision(reason, forced)
+
+    def to_state(self) -> dict[str, object]:
+        return {
+            "host_progress_signals": self.host_progress_signals,
+            "significant_count": self.significant_count,
+            "token_threshold": self.token_threshold,
+            "dirty_since": _timestamp(self.dirty_since) if self.dirty_since else None,
+            "dirty_thresholds": sorted(self.dirty_thresholds),
+            "last_checkpoint_at": (
+                _timestamp(self.last_checkpoint_at) if self.last_checkpoint_at else None
+            ),
+            "observed_event_ids": list(self.observed_event_ids),
+        }
+
+    @classmethod
+    def from_state(cls, state: Mapping[str, object] | None) -> CheckpointReducer:
+        value = state if isinstance(state, Mapping) else {}
+        dirty_since = value.get("dirty_since")
+        last_checkpoint_at = value.get("last_checkpoint_at")
+        thresholds = value.get("dirty_thresholds")
+        event_ids = value.get("observed_event_ids")
+        return cls(
+            host_progress_signals=value.get("host_progress_signals") is True,
+            significant_count=int(value.get("significant_count") or 0),
+            token_threshold=int(value.get("token_threshold") or 60),
+            dirty_since=(
+                _parse_timestamp(dirty_since) if isinstance(dirty_since, str) else None
+            ),
+            dirty_thresholds=(
+                [int(item) for item in thresholds]
+                if isinstance(thresholds, list)
+                else ()
+            ),
+            last_checkpoint_at=(
+                _parse_timestamp(last_checkpoint_at)
+                if isinstance(last_checkpoint_at, str)
+                else None
+            ),
+            observed_event_ids=(
+                [str(item) for item in event_ids]
+                if isinstance(event_ids, list)
+                else ()
+            ),
+        )
+
+
+def build_handoff(
+    project: ProjectProjection,
+    *,
+    max_actions: int = 3,
+    max_chars: int = 2400,
+) -> str:
+    """Render the bounded operational subset used for SessionStart handoff."""
+    if not isinstance(project, ProjectProjection):
+        raise TypeError("project must be a ProjectProjection")
+    if max_actions < 0 or max_chars < 1:
+        raise ValueError("handoff bounds must be positive")
+    max_actions = min(max_actions, 3)
+
+    lines = [f"# Project handoff: {project.project}"]
+
+    def add_section(title: str, values: Sequence[tuple[str, str]]) -> None:
+        if not values:
+            return
+        lines.extend(("", f"## {title}"))
+        lines.extend(f"- `{item_id}`: {value}" for item_id, value in values)
+
+    add_section("Active goal", list(project.goal.items())[-1:])
+    add_section("Active task", list(project.current_task.items())[-1:])
+    add_section("Next actions", list(project.next_actions.items())[-max_actions:])
+    add_section("Blockers", list(project.blockers.items()))
+    add_section("Recent decisions", list(project.decisions.items())[-5:])
+    identifiers = "\n".join(
+        (
+            "## MCP identifiers",
+            f"- `project:{project.project}`",
+            f"- `sequence:{project.last_applied_sequence}`",
+        )
+    )
+    body = "\n".join(lines).rstrip()
+    text = body + "\n\n" + identifiers + "\n"
+    if len(text) <= max_chars:
+        return text
+    suffix = "\n... (handoff truncated)\n\n" + identifiers + "\n"
+    if len(suffix) >= max_chars:
+        return suffix[-max_chars:]
+    return body[: max_chars - len(suffix)].rstrip() + suffix
 
 
 def _utc_now() -> datetime:
@@ -552,11 +826,15 @@ class ProjectStore:
             )
         }
         project = "project"
+        project_root = ""
         last_sequence = 0
         for event in ordered:
             if not _validated:
                 validate_schema(event, _SCHEMA)
             project = str(event["project"])
+            provenance = event["provenance"]
+            assert isinstance(provenance, Mapping)
+            project_root = str(provenance["worktree"])
             sequence = int(event["sequence"])
             if sequence <= last_sequence:
                 raise ValueError("project journal sequences must increase strictly")
@@ -586,6 +864,9 @@ class ProjectStore:
             "",
             "> Generated from `journal.md`. Do not edit this file directly.",
             "",
+            "## Source",
+            f"- Project root: `{project_root}`",
+            "",
         ]
         for title, name in (
             ("Goal", "goal"),
@@ -608,6 +889,27 @@ class ProjectStore:
                 lines.append("- None")
             lines.append("")
         return ("\n".join(lines).rstrip() + "\n").encode("utf-8")
+
+    def projection(self, slug: str) -> ProjectProjection:
+        """Reduce the current bounded journal into an in-memory projection."""
+        records = self._journal_events(slug, self._read_journal_bytes(slug))
+        active = ProjectProjection(project=slug)
+        for event in records:
+            active.project = str(event["project"])
+            active.last_applied_sequence = int(event["sequence"])
+            delta = event["delta"]
+            assert isinstance(delta, Mapping)
+            for name in ("goal", "phase", "current_task"):
+                operation = delta[name]
+                assert isinstance(operation, Mapping)
+                self._reduce(getattr(active, name), operation)
+            for name in _MAX_LIST_ITEMS:
+                operations = delta[name]
+                assert isinstance(operations, list)
+                for operation in operations:
+                    assert isinstance(operation, Mapping)
+                    self._reduce(getattr(active, name), operation)
+        return active
 
     @staticmethod
     def _reduce(target: dict[str, str], operation: Mapping[str, object]) -> None:

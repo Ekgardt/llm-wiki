@@ -14,6 +14,7 @@ const CAPTURE_TIMEOUT_MS = Math.min(Math.max(configuredTimeout || 5000, 10), 100
 
 export const LlmWikiMemoryPlugin = async ({ client, directory }) => {
   const sessionContexts = new Map();
+  const dirtySessions = new Set();
   const comparablePath = (value) => {
     if (typeof value !== "string" || !value) return null;
     const resolved = path.resolve(value);
@@ -134,12 +135,26 @@ export const LlmWikiMemoryPlugin = async ({ client, directory }) => {
     },
 
     "tool.execute.after": async (input) => {
-      await forwardLifecycle("post_tool_use", input);
+      const id = sessionId(input);
+      const tool = typeof input?.tool === "string" ? input.tool.toLowerCase() : "";
+      const changed = ["edit", "write", "multi_edit", "multiedit", "notebook_edit", "notebookedit"].includes(tool);
+      if (id && changed) dirtySessions.add(id);
+      await forwardLifecycle("post_tool_use", {
+        ...(input || {}),
+        ...(changed ? { changed: true, dirty: true } : {}),
+      });
     },
 
     "session.idle": async (input) => {
+      const id = sessionId(input);
       const transcriptText = await collectTranscript(input);
-      await forwardLifecycle("session_end", { ...(input || {}), transcript_text: transcriptText });
+      await forwardLifecycle("session_end", {
+        ...(input || {}),
+        checkpoint_type: "session_idle",
+        dirty: Boolean(id && dirtySessions.has(id)),
+        transcript_text: transcriptText,
+      });
+      if (id) dirtySessions.delete(id);
     },
 
     "experimental.session.compacting": async (input) => {

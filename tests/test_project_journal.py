@@ -113,6 +113,23 @@ def journal_records(store: ProjectStore, slug: str = "demo") -> list[dict[str, o
     return [json.loads(line) for line in text.removeprefix(JOURNAL_HEADER).splitlines()]
 
 
+def test_generated_projection_preserves_project_slug_ownership(
+    project_store: ProjectStore, vault: Path, tmp_path: Path
+):
+    from session_start_project_state import _compute_slug
+
+    project_dir = tmp_path / "demo"
+    project_dir.mkdir()
+    event = checkpoint_event()
+    event["provenance"]["worktree"] = str(project_dir)
+
+    project_store.checkpoint("demo", event, "agent-a")
+
+    state = vault / "knowledge/projects/demo/state.md"
+    assert f"- Project root: `{project_dir}`" in state.read_text(encoding="utf-8")
+    assert _compute_slug(project_dir, vault / "knowledge/projects") == "demo"
+
+
 def _parse_test_timestamp(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 

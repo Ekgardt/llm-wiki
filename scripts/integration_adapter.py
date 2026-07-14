@@ -15,7 +15,8 @@ from typing import Any
 
 from event_envelope import EventEnvelope, build_event_envelope
 from maybe_compile import spawn_compile_if_idle
-from memory_state import ROOT, STATE_ROOT, spawn_detached
+from memory_state import ROOT, STATE_ROOT, spawn_detached, update_state
+from project_journal import CheckpointReducer, ProjectStore
 from secret_redact import redact_secrets
 from session_start_context import build_context as build_session_start_context
 from session_start_project_state import _compute_slug
@@ -28,6 +29,28 @@ TRANSIENT_CREATE_ATTEMPTS = 10
 SOURCES = frozenset({"claude", "opencode", "codex"})
 EVENTS = frozenset(
     {"session_start", "session_end", "pre_compact", "user_prompt", "post_tool_use"}
+)
+CHECKPOINT_SIGNAL_FIELDS = frozenset(
+    {
+        "checkpoint_type",
+        "dirty",
+        "changed",
+        "significant",
+        "decision",
+        "correction",
+        "blocker_opened",
+        "blocker_closed",
+        "task_completed",
+        "task_cancelled",
+        "ownership_transferred",
+        "significant_failure",
+        "public_contract_changed",
+        "test_result_changed",
+        "token_percent",
+        "compaction_confirmed",
+        "project_delta",
+        "branch",
+    }
 )
 DELEGATES = frozenset(
     {
@@ -110,7 +133,9 @@ def normalize_event(
 
     if event == "session_start":
         payload: dict[str, Any] = {
-            "reason": _first_string(raw.get("reason"), raw.get("trigger"))
+            "reason": _first_string(
+                raw.get("reason"), raw.get("trigger"), raw.get("source")
+            )
         }
     elif event in {"session_end", "pre_compact"}:
         payload = {
@@ -131,6 +156,19 @@ def normalize_event(
     else:
         payload = _tool_payload(source, raw)
 
+    for name in CHECKPOINT_SIGNAL_FIELDS:
+        if name in raw:
+            payload[name] = raw[name]
+    if event == "post_tool_use":
+        if payload["tool_name"] in {"Edit", "Write", "MultiEdit", "NotebookEdit"}:
+            payload.setdefault("changed", True)
+            payload.setdefault("dirty", True)
+        if payload.get("checkpoint_type") == "significant_failure":
+            payload["significant_failure"] = True
+    payload["host_progress_signals"] = source in {"claude", "opencode"}
+    if event == "session_start" and payload.get("reason") == "compact":
+        payload["compaction_confirmed"] = True
+
     source_time = occurred_at or _parse_timestamp(raw.get("timestamp"))
     return build_event_envelope(
         event_type=event,
@@ -146,7 +184,13 @@ def normalize_event(
         severity=_safe_string(_string(raw.get("severity"))),
         parent_event_id=_safe_string(_string(raw.get("parent_event_id"))),
         source_event_id=_safe_string(
-            _first_string(raw.get("event_id"), raw.get("eventId"))
+            _first_string(
+                raw.get("event_id"),
+                raw.get("eventId"),
+                raw.get("tool_use_id"),
+                raw.get("toolCallID"),
+                raw.get("callID"),
+            )
         ),
         redact=redact_secrets,
     )
@@ -202,6 +246,7 @@ def _canonical_capture_payload(envelope: EventEnvelope) -> dict[str, Any]:
         "agent": envelope.agent,
         "severity": envelope.severity,
         "parent_event_id": envelope.parent_event_id,
+        "event_id": envelope.event_id,
     }
     if envelope.event_type == "post_tool_use":
         common.update(
@@ -221,7 +266,126 @@ def _canonical_capture_payload(envelope: EventEnvelope) -> dict[str, Any]:
         )
         if envelope.event_type == "pre_compact":
             common["trigger"] = payload.get("reason")
+    for name in CHECKPOINT_SIGNAL_FIELDS | {"host_progress_signals"}:
+        if name in payload:
+            common[name] = payload[name]
     return common
+
+
+def _checkpoint_observation(envelope: EventEnvelope) -> dict[str, object]:
+    payload = envelope.payload
+    event_type = str(payload.get("checkpoint_type") or envelope.event_type)
+    if payload.get("compaction_confirmed") is True:
+        event_type = "compaction_confirmed"
+    elif isinstance(payload.get("token_percent"), (int, float)):
+        event_type = "token_usage"
+    else:
+        for signal in (
+            "decision",
+            "correction",
+            "blocker_opened",
+            "blocker_closed",
+            "task_completed",
+            "task_cancelled",
+            "ownership_transferred",
+            "significant_failure",
+            "public_contract_changed",
+            "test_result_changed",
+        ):
+            if payload.get(signal) is True:
+                event_type = signal
+                break
+    if envelope.event_type == "post_tool_use" and event_type == "post_tool_use":
+        if envelope.severity in {"error", "fatal"}:
+            event_type = "significant_failure"
+        elif payload.get("changed") is True:
+            event_type = "mutation"
+    observation: dict[str, object] = {
+        "type": event_type,
+        "event_id": envelope.event_id,
+    }
+    for name in ("dirty", "changed", "significant"):
+        if name in payload:
+            observation[name] = payload[name]
+    if event_type == "token_usage":
+        observation["percent"] = payload["token_percent"]
+    return observation
+
+
+def _empty_delta() -> dict[str, object]:
+    close = {"id": "checkpoint-none", "action": "close", "value": ""}
+    return {
+        "goal": dict(close),
+        "phase": dict(close),
+        "current_task": dict(close),
+        "next_actions": [],
+        "decisions": [],
+        "blockers": [],
+        "changed_files": [],
+        "commands": [],
+        "verification": [],
+    }
+
+
+def _checkpoint_event(
+    envelope: EventEnvelope,
+    slug: str,
+    reason: str,
+) -> dict[str, object]:
+    raw_delta = envelope.to_dict()["payload"].get("project_delta")
+    delta = dict(raw_delta) if isinstance(raw_delta, Mapping) else _empty_delta()
+    return {
+        "schema_version": "project-checkpoint/v1",
+        "occurrence_id": envelope.event_id,
+        "idempotency_key": f"{envelope.event_id}:{reason}",
+        "provenance": {
+            "agent": envelope.agent or "unknown",
+            "session": envelope.session or "unknown",
+            "worktree": envelope.worktree or "unknown",
+            "branch": str(envelope.payload.get("branch") or "unknown"),
+            "source_event": envelope.source_event_id or envelope.event_id,
+        },
+        "trigger": str(_checkpoint_observation(envelope)["type"]),
+        "reason": reason,
+        "delta": delta,
+        "evidence_event_ids": [envelope.event_id],
+    }
+
+
+def _observe_project_checkpoint(envelope: EventEnvelope) -> None:
+    """Observe one envelope once and persist any resulting project checkpoint."""
+    slug, project_dir = _project_context(envelope)
+    if not slug or project_dir is None:
+        return
+    observation = _checkpoint_observation(envelope)
+    decision_box: list[object] = []
+    session_key = envelope.session or "unknown"
+    state_key = f"{slug}:{session_key}"
+
+    def mutate(state: dict[str, Any]) -> None:
+        reducers = state.setdefault("project_checkpoint_reducers", {})
+        reducer_state = reducers.get(state_key)
+        reducer = CheckpointReducer.from_state(
+            reducer_state if isinstance(reducer_state, Mapping) else None
+        )
+        if not reducer_state:
+            reducer.host_progress_signals = (
+                envelope.payload.get("host_progress_signals") is True
+            )
+        decision_box.append(reducer.observe(observation, now=envelope.occurred_at))
+        reducers[state_key] = reducer.to_state()
+        if len(reducers) > 128:
+            reducers.pop(next(iter(reducers)))
+
+    update_state(mutate, lock_timeout=0.5)
+    decision = decision_box[0] if decision_box else None
+    if decision is None or getattr(decision, "reason", None) == "session_start_recovery":
+        return
+    ProjectStore(ROOT, STATE_ROOT).checkpoint(
+        slug,
+        _checkpoint_event(envelope, slug, decision.reason),
+        f"lifecycle:{envelope.event_id[:16]}",
+    )
 
 
 def _project_context(envelope: EventEnvelope) -> tuple[str | None, Path | None]:
@@ -565,6 +729,7 @@ def ingest_event(
     trigger: str | None = None,
 ) -> dict[str, Any]:
     """Apply shared lifecycle persistence policy to a normalized envelope."""
+    _observe_project_checkpoint(envelope)
     payload = _canonical_capture_payload(envelope)
     slug, project_dir = _project_context(envelope)
     result: dict[str, Any] = {
@@ -653,6 +818,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--source")
     parser.add_argument("--event")
     parser.add_argument("--delegate")
+    parser.add_argument("--checkpoint-type")
     parser.add_argument("--maintenance", action="store_true")
     return parser
 
@@ -668,8 +834,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         raw = json.loads(sys.stdin.read() or "{}")
         if not isinstance(raw, dict):
             raise ValueError("invalid integration event")
+        if args.checkpoint_type:
+            raw["checkpoint_type"] = args.checkpoint_type
         envelope = normalize_event(args.source, args.event, raw)
         if args.delegate:
+            _observe_project_checkpoint(envelope)
             _run_delegate(
                 args.delegate,
                 _canonical_capture_payload(envelope),

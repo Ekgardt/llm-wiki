@@ -42,6 +42,8 @@ def main() -> int:
     session_id = payload.get("session_id", "unknown")
     trigger = payload.get("trigger", "")
     ephemeral = payload.get("ephemeral_transcript") is True
+    event_id = payload.get("event_id", "")
+    checkpoint_reason = payload.get("checkpoint_reason", "")
 
     args = [
         sys.executable,
@@ -50,6 +52,8 @@ def main() -> int:
         "--session-id", str(session_id),
         "--transcript", str(transcript_path),
         "--trigger", str(trigger),
+        "--source-event-id", str(event_id),
+        "--checkpoint-reason", str(checkpoint_reason),
     ]
     if ephemeral:
         args.append("--ephemeral-transcript")

@@ -36,7 +36,11 @@ SCRIPT_TIMEOUT_SECONDS = 10
 
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from integration_adapter import ingest_event, normalize_event  # noqa: E402
+from integration_adapter import (  # noqa: E402
+    _observe_project_checkpoint,
+    ingest_event,
+    normalize_event,
+)
 from secret_redact import redact_secrets  # noqa: E402
 from session_start_project_state import _compute_slug  # type: ignore  # noqa: E402
 
@@ -128,6 +132,15 @@ def _state_path(project_dir: Path) -> tuple[str, Path]:
 
 def command_project_state(args: argparse.Namespace) -> int:
     project_dir = _project_dir(args.cwd)
+    envelope = normalize_event(
+        "codex",
+        "session_start",
+        {"cwd": str(project_dir), "reason": "codex-session-start"},
+    )
+    try:
+        _observe_project_checkpoint(envelope)
+    except Exception:  # noqa: BLE001
+        pass
     result = _run_script("session_start_project_state.py", project_dir)
     if result.returncode != 0:
         print(result.stderr.strip() or result.stdout.strip(), file=sys.stderr)

@@ -26,6 +26,39 @@ _REQUIRED_PAYLOAD_FIELDS = {
     "user_prompt": {"prompt": str},
     "post_tool_use": {"tool_name": str, "target": str},
 }
+_BOOLEAN_CHECKPOINT_SIGNALS = frozenset(
+    {
+        "dirty",
+        "changed",
+        "significant",
+        "decision",
+        "correction",
+        "blocker_opened",
+        "blocker_closed",
+        "task_completed",
+        "task_cancelled",
+        "ownership_transferred",
+        "significant_failure",
+        "public_contract_changed",
+        "test_result_changed",
+        "compaction_confirmed",
+        "host_progress_signals",
+    }
+)
+
+
+def _validate_checkpoint_signals(payload: Mapping[str, Any]) -> None:
+    if any(name in payload and not isinstance(payload[name], bool) for name in _BOOLEAN_CHECKPOINT_SIGNALS):
+        raise ValueError("invalid checkpoint signal")
+    percent = payload.get("token_percent")
+    if "token_percent" in payload and (
+        not isinstance(percent, (int, float)) or isinstance(percent, bool) or not 0 <= percent <= 100
+    ):
+        raise ValueError("invalid checkpoint signal")
+    if "checkpoint_type" in payload and not isinstance(payload["checkpoint_type"], str):
+        raise ValueError("invalid checkpoint signal")
+    if "project_delta" in payload and not isinstance(payload["project_delta"], Mapping):
+        raise ValueError("invalid checkpoint signal")
 
 
 def _utc(value: datetime) -> datetime:
@@ -149,6 +182,7 @@ def build_event_envelope(
     required = _REQUIRED_PAYLOAD_FIELDS[event_type]
     if any(not isinstance(payload.get(name), expected) for name, expected in required.items()):
         raise ValueError("invalid event payload")
+    _validate_checkpoint_signals(payload)
     source_fields = (
         agent,
         session,
@@ -172,6 +206,7 @@ def build_event_envelope(
     ):
         raise ValueError("invalid event payload")
     payload_dict = dict(safe_payload)
+    _validate_checkpoint_signals(payload_dict)
     safe_source_fields = tuple(
         redact_value(value) if value is not None else None for value in source_fields
     )

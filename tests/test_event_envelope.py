@@ -254,3 +254,21 @@ def test_invalid_typed_payloads_are_rejected(event_type, payload):
             occurred_at=FIXED_TIME,
             captured_at=FIXED_TIME,
         )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"tool_name": "Edit", "target": "app.py", "dirty": "yes"},
+        {"tool_name": "Edit", "target": "app.py", "token_percent": "70"},
+        {"tool_name": "Edit", "target": "app.py", "compaction_confirmed": 1},
+    ],
+)
+def test_checkpoint_signal_types_are_validated(payload):
+    with pytest.raises(ValueError, match="checkpoint signal"):
+        build_event_envelope(
+            event_type="post_tool_use",
+            payload=payload,
+            occurred_at=FIXED_TIME,
+            captured_at=FIXED_TIME,
+        )
