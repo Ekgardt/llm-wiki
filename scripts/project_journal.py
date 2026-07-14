@@ -113,6 +113,10 @@ class CheckpointReceipt:
 class CheckpointDecision:
     reason: str
     forced: bool = False
+    maintenance: bool = False
+    checkpoint_at: datetime | None = None
+    dirty_threshold: int | None = None
+    next_token_threshold: int | None = None
 
 
 @dataclass
@@ -206,6 +210,7 @@ class CheckpointReducer:
         event: Mapping[str, object],
         *,
         now: datetime | None = None,
+        commit: bool = True,
     ) -> CheckpointDecision | None:
         if not isinstance(event, Mapping):
             raise TypeError("checkpoint observation must be a mapping")
@@ -295,12 +300,48 @@ class CheckpointReducer:
             and current_time - self.last_checkpoint_at < timedelta(seconds=30)
         ):
             return None
-        if pending_dirty_threshold is not None:
-            self.dirty_thresholds.add(pending_dirty_threshold)
-        if pending_token_threshold is not None:
-            self.token_threshold = pending_token_threshold + 10
-        self.last_checkpoint_at = current_time
-        return CheckpointDecision(reason, forced)
+        decision = CheckpointDecision(
+            reason,
+            forced,
+            maintenance=reason == "session_start_recovery",
+            checkpoint_at=current_time,
+            dirty_threshold=pending_dirty_threshold,
+            next_token_threshold=(
+                pending_token_threshold + 10
+                if pending_token_threshold is not None
+                else None
+            ),
+        )
+        if commit:
+            self.commit_observation(
+                decision,
+                outcome="maintenance" if decision.maintenance else "checkpoint",
+            )
+        return decision
+
+    def commit_observation(
+        self,
+        decision: CheckpointDecision | None,
+        *,
+        outcome: str,
+    ) -> None:
+        """Finalize reducer state after the observation's required action succeeds."""
+        expected = (
+            "no_checkpoint"
+            if decision is None
+            else "maintenance"
+            if decision.maintenance
+            else "checkpoint"
+        )
+        if outcome != expected:
+            raise ValueError(f"expected {expected} observation outcome")
+        if decision is None or decision.maintenance:
+            return
+        if decision.dirty_threshold is not None:
+            self.dirty_thresholds.add(decision.dirty_threshold)
+        if decision.next_token_threshold is not None:
+            self.token_threshold = decision.next_token_threshold
+        self.last_checkpoint_at = decision.checkpoint_at
 
     def to_state(self) -> dict[str, object]:
         return {

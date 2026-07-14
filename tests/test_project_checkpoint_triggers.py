@@ -136,6 +136,21 @@ def test_session_start_always_requests_recovery():
     assert decision.reason == "session_start_recovery"
 
 
+def test_session_start_maintenance_commit_preserves_last_real_checkpoint():
+    previous = NOW - timedelta(minutes=5)
+    reducer = CheckpointReducer(last_checkpoint_at=previous)
+
+    decision = reducer.observe(
+        {"type": "session_start", "event_id": "start-1"},
+        now=NOW,
+        commit=False,
+    )
+    reducer.commit_observation(decision, outcome="maintenance")
+
+    assert reducer.last_checkpoint_at == previous
+    assert reducer.to_state()["observed_event_ids"] == ["start-1"]
+
+
 def test_ordinary_triggers_are_debounced_for_30_seconds():
     reducer = CheckpointReducer(host_progress_signals=True)
     assert reducer.observe({"type": "correction"}, now=NOW).reason == "correction"

@@ -580,6 +580,83 @@ def test_reducer_commit_failure_releases_pending_claim_for_retry(monkeypatch):
     assert state["project_checkpoint_pending"]["demo"] == []
 
 
+def test_session_start_maintenance_does_not_debounce_or_drop_following_delta(monkeypatch):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import integration_adapter
+    from project_journal import CheckpointReducer
+
+    previous = integration_adapter.datetime.fromisoformat("2026-07-13T11:59:29+00:00")
+    session_start_at = integration_adapter.datetime.fromisoformat(
+        "2026-07-13T12:00:00+00:00"
+    )
+    ordinary_event_at = integration_adapter.datetime.fromisoformat(
+        "2026-07-13T12:00:01+00:00"
+    )
+    state = {
+        "project_checkpoint_reducers": {
+            "demo:s1": CheckpointReducer(last_checkpoint_at=previous).to_state()
+        }
+    }
+    checkpoints = []
+    delta = integration_adapter._empty_delta()
+    delta["current_task"] = {
+        "id": "task-1",
+        "action": "upsert",
+        "value": "Preserve this delta",
+    }
+
+    def update(mutator, **kwargs):
+        mutator(state)
+        return state
+
+    class Store:
+        def __init__(self, *args):
+            pass
+
+        def checkpoint(self, slug, event, owner, **kwargs):
+            checkpoints.append(event)
+
+    monkeypatch.setattr(integration_adapter, "update_state", update)
+    monkeypatch.setattr(integration_adapter, "ProjectStore", Store)
+    monkeypatch.setattr(integration_adapter, "_project_context", lambda event: ("demo", ROOT))
+    start = integration_adapter.normalize_event(
+        "claude",
+        "session_start",
+        {"session_id": "s1", "cwd": "C:/project", "event_id": "start-1"},
+        occurred_at=session_start_at,
+    )
+    ordinary = integration_adapter.normalize_event(
+        "claude",
+        "post_tool_use",
+        {
+            "session_id": "s1",
+            "cwd": "C:/project",
+            "event_id": "event-1",
+            "tool_name": "Read",
+            "tool_input": {"file_path": "src/app.py"},
+            "checkpoint_type": "correction",
+            "project_delta": delta,
+        },
+        occurred_at=ordinary_event_at,
+    )
+
+    integration_adapter._observe_project_checkpoint(start)
+    integration_adapter._observe_project_checkpoint(ordinary)
+
+    reducer_state = state["project_checkpoint_reducers"]["demo:s1"]
+    assert reducer_state["last_checkpoint_at"] == ordinary_event_at.isoformat().replace(
+        "+00:00", "Z"
+    )
+    assert state["project_checkpoint_pending"]["demo"] == []
+    assert len(checkpoints) == 1
+    assert checkpoints[0]["occurrence_id"] == ordinary.event_id
+    assert checkpoints[0]["delta"] == delta
+
+
 def test_session_start_recovers_transactions_then_project_before_handoff(
     monkeypatch, tmp_path, capsys
 ):

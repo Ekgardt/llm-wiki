@@ -434,7 +434,7 @@ def _drain_project_checkpoints(
 ) -> None:
     owner = f"{os.getpid()}:{secrets.token_hex(8)}"
     while True:
-        claimed: list[tuple[dict[str, object], dict[str, object], object]] = []
+        claimed: list[tuple[dict[str, object], CheckpointReducer, object]] = []
 
         def claim(state: dict[str, Any]) -> None:
             pending = state.get("project_checkpoint_pending")
@@ -463,16 +463,16 @@ def _drain_project_checkpoints(
             observation = item["observation"]
             assert isinstance(observation, Mapping)
             occurred_at = datetime.fromisoformat(str(item["occurred_at"]))
-            decision = reducer.observe(observation, now=occurred_at)
-            claimed.append((dict(item), reducer.to_state(), decision))
+            decision = reducer.observe(observation, now=occurred_at, commit=False)
+            claimed.append((dict(item), reducer, decision))
 
         update_state(claim, lock_timeout=0.5)
         if not claimed:
             return
-        item, reducer_state, decision = claimed[0]
+        item, reducer, decision = claimed[0]
         event_id = str(item["event_id"])
         try:
-            if decision is not None and decision.reason != "session_start_recovery":
+            if decision is not None and not decision.maintenance:
                 checkpoint = dict(item["checkpoint_event"])
                 checkpoint["idempotency_key"] = f"{event_id}:{decision.reason}"
                 checkpoint["reason"] = decision.reason
@@ -490,6 +490,17 @@ def _drain_project_checkpoints(
                         f"lifecycle:{event_id[:16]}",
                         writer_wait_seconds=writer_wait_seconds,
                     )
+            reducer.commit_observation(
+                decision,
+                outcome=(
+                    "no_checkpoint"
+                    if decision is None
+                    else "maintenance"
+                    if decision.maintenance
+                    else "checkpoint"
+                ),
+            )
+            reducer_state = reducer.to_state()
         except Exception:
             _release_pending_claim(queue_key, event_id, owner)
             raise
