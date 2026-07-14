@@ -223,6 +223,90 @@ def test_result_publication_is_stable_owner_only_and_no_clobber(
         assert stat.S_IMODE(result_path.stat().st_mode) == 0o600
 
 
+@pytest.mark.parametrize("branch", ["precheck", "link_race"])
+def test_publish_existing_same_digest_is_bounded_idempotent_without_read_bytes(
+    queue: MemoryQueue, monkeypatch: pytest.MonkeyPatch, branch: str
+) -> None:
+    task_id = queue.enqueue("query", 1, {})
+    lease = queue.claim("worker")
+    assert lease is not None
+    reference = queue.publish_result(lease, operation_id=task_id, result=b"same")
+    result_path = queue.state_root / reference
+    real_exists = Path.exists
+    if branch == "link_race":
+        monkeypatch.setattr(
+            Path,
+            "exists",
+            lambda path: False if path == result_path else real_exists(path),
+        )
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        lambda path: pytest.fail("publish_result must use bounded validator"),
+    )
+
+    assert queue.publish_result(lease, operation_id=task_id, result=b"same") == reference
+    assert queue.get(task_id).state == "leased"
+
+
+def test_publish_existing_mismatch_is_bounded_conflict_without_overwrite(
+    queue: MemoryQueue, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task_id = queue.enqueue("query", 1, {})
+    lease = queue.claim("worker")
+    assert lease is not None
+    reference = queue.publish_result(lease, operation_id=task_id, result=b"original")
+    result_path = queue.state_root / reference
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        lambda path: pytest.fail("publish_result must use bounded validator"),
+    )
+
+    with pytest.raises(ResultConflictError, match="different result bytes"):
+        queue.publish_result(lease, operation_id=task_id, result=b"different")
+    with result_path.open("rb") as handle:
+        assert handle.read() == b"original"
+    assert queue.get(task_id).state == "leased"
+
+
+@pytest.mark.parametrize("invalid", ["symlink", "oversize", "changed", "owner"])
+def test_publish_existing_invalid_metadata_dead_letters_without_overwrite(
+    queue: MemoryQueue,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid: str,
+) -> None:
+    import memory_queue
+
+    task_id = queue.enqueue("query", 1, {})
+    lease = queue.claim("worker")
+    assert lease is not None
+    reference = queue.publish_result(lease, operation_id=task_id, result=b"original")
+    result_path = queue.state_root / reference
+    if invalid == "symlink":
+        real_is_symlink = Path.is_symlink
+        monkeypatch.setattr(
+            Path,
+            "is_symlink",
+            lambda path: path == result_path or real_is_symlink(path),
+        )
+    elif invalid == "oversize":
+        monkeypatch.setattr(memory_queue, "_MAX_RESULT_BYTES", 1)
+    elif invalid == "changed":
+        monkeypatch.setattr(queue, "_validated_result_digest", lambda reference: None)
+    else:
+        monkeypatch.setattr(memory_queue, "_is_owner_only", lambda path: False)
+
+    incoming = b"x" if invalid == "oversize" else b"original"
+    with pytest.raises(ResultConflictError, match="result_corrupt"):
+        queue.publish_result(lease, operation_id=task_id, result=incoming)
+    task = queue.get(task_id)
+    assert task.state == "dead"
+    assert task.error_code == "result_corrupt"
+    with result_path.open("rb") as handle:
+        assert handle.read() == b"original"
+
+
 def test_expired_lease_with_published_result_reconciles_without_redelivery(
     queue: MemoryQueue, clock: FakeClock
 ) -> None:

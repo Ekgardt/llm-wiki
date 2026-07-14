@@ -653,33 +653,55 @@ class MemoryQueue:
                 handle.flush()
                 os.fsync(handle.fileno())
             now = _as_utc(self._clock())
+            publication_error: ResultConflictError | None = None
             with self._connect() as connection, begin_immediate(connection):
                 row = self._require_lease(connection, lease, now)
                 existing_operation = row["result_operation_id"]
-                existing_reference = row["result_reference"]
                 if existing_operation is not None and existing_operation != operation_id:
                     raise ResultConflictError("lease already published a different operation")
-                if target.exists():
-                    if sha256_bytes(target.read_bytes()) != digest:
-                        raise ResultConflictError("operation ID already has different result bytes")
-                else:
+                existing = target.exists() or target.is_symlink()
+                linked = False
+                if not existing:
                     try:
                         os.link(temporary, target)
                     except FileExistsError:
-                        if sha256_bytes(target.read_bytes()) != digest:
-                            raise ResultConflictError(
-                                "operation ID already has different result bytes"
-                            ) from None
-                    _harden_owner_only(target, 0o600)
-                    fsync_file(target)
-                fsync_directory(self.results_dir)
-                connection.execute(
-                    """UPDATE tasks SET result_reference=?, result_sha256=?,
-                           result_operation_id=?, updated_at=?
-                       WHERE id=?""",
-                    (relative, digest, operation_id, _timestamp(now), lease.id),
-                )
-                return str(existing_reference or relative)
+                        existing = True
+                    else:
+                        linked = True
+                if existing:
+                    existing_digest = self._validated_result_digest(relative)
+                    if existing_digest is None:
+                        self._record_attempt(
+                            connection, row, now, "failed", "result_corrupt"
+                        )
+                        self._finish_lease(
+                            connection,
+                            lease.id,
+                            now,
+                            "dead",
+                            "result_corrupt",
+                            None,
+                            last_attempt_at=now,
+                        )
+                        publication_error = ResultConflictError("result_corrupt")
+                    elif existing_digest != digest:
+                        publication_error = ResultConflictError(
+                            "operation ID already has different result bytes"
+                        )
+                if publication_error is None:
+                    if linked:
+                        _harden_owner_only(target, 0o600)
+                        fsync_file(target)
+                    fsync_directory(self.results_dir)
+                    connection.execute(
+                        """UPDATE tasks SET result_reference=?, result_sha256=?,
+                               result_operation_id=?, updated_at=?
+                           WHERE id=?""",
+                        (relative, digest, operation_id, _timestamp(now), lease.id),
+                    )
+            if publication_error is not None:
+                raise publication_error
+            return relative
         finally:
             if descriptor_open:
                 os.close(descriptor)
