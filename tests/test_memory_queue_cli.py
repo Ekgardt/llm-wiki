@@ -27,13 +27,22 @@ def _result_processor(task: dict) -> memory_queue.DeferredResult:
     return memory_queue.DeferredResult(b"x" * task["payload"]["size"])
 
 
+class _MaxJitterRng:
+    def getrandbits(self, bits: int) -> int:
+        return 1 << (bits - 1)
+
+    def uniform(self, low: float, high: float) -> float:
+        del low
+        return high
+
+
 def test_worker_defaults_are_bounded_and_process_twenty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     queue = MemoryQueue(tmp_path)
     for number in range(25):
         queue.enqueue("query", 1, {"number": number})
-    monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
+    monkeypatch.setattr(memory_queue, "_queue", lambda **kwargs: queue)
 
     summary = memory_queue.run_worker(
         lambda task: True, processor_runner=memory_queue._run_processor_inline
@@ -49,7 +58,7 @@ def test_worker_stops_at_elapsed_limit_without_claiming(
 ) -> None:
     queue = MemoryQueue(tmp_path)
     queue.enqueue("query", 1, {})
-    monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
+    monkeypatch.setattr(memory_queue, "_queue", lambda **kwargs: queue)
     times = iter((0.0, 601.0))
 
     summary = memory_queue.run_worker(
@@ -66,7 +75,7 @@ def test_worker_stops_after_two_idle_seconds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     queue = MemoryQueue(tmp_path)
-    monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
+    monkeypatch.setattr(memory_queue, "_queue", lambda **kwargs: queue)
     now = [0.0]
     sleeps: list[float] = []
 
@@ -89,7 +98,7 @@ def test_worker_times_out_handler_without_result_or_live_lease(
 ) -> None:
     queue = MemoryQueue(tmp_path)
     task_id = queue.enqueue("query", 1, {})
-    monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
+    monkeypatch.setattr(memory_queue, "_queue", lambda **kwargs: queue)
     now = [0.0]
 
     def runner(processor, task, timeout):
@@ -112,6 +121,56 @@ def test_worker_times_out_handler_without_result_or_live_lease(
     assert task.lease_token is None
     assert task.result_reference is None
     assert now[0] == 3
+
+
+def test_worker_policy_overrides_claim_heartbeat_attempts_and_backoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
+    intervals: list[float] = []
+
+    def heartbeat_wait(stop, interval: float) -> bool:
+        intervals.append(interval)
+        return stop.wait(1)
+
+    queue = MemoryQueue(
+        tmp_path,
+        clock=lambda: now,
+        heartbeat_wait=heartbeat_wait,
+    )
+    task_id = queue.enqueue("query", 1, {})
+    with queue._connect() as connection:
+        connection.execute("UPDATE tasks SET attempts=8 WHERE id=?", (task_id,))
+    queue._rng = _MaxJitterRng()
+    claimed_leases: list[int] = []
+    real_claim = queue.claim
+
+    def claim(owner: str, **kwargs):
+        claimed_leases.append(kwargs["lease_seconds"])
+        return real_claim(owner, **kwargs)
+
+    monkeypatch.setattr(queue, "claim", claim)
+    monkeypatch.setattr(memory_queue, "_queue", lambda **kwargs: queue)
+
+    summary = memory_queue.run_worker(
+        lambda task: False,
+        max_tasks=1,
+        idle_seconds=0,
+        lease_seconds=10,
+        heartbeat_seconds=3,
+        max_attempts=10,
+        retry_base_seconds=5,
+        retry_cap_seconds=7,
+        processor_runner=memory_queue._run_processor_inline,
+    )
+
+    task = queue.get(task_id)
+    assert summary.failed == 1
+    assert claimed_leases == [10]
+    assert intervals == [3]
+    assert task.state == "ready"
+    assert task.attempts == 9
+    assert (task.available_at - now).total_seconds() == 7
 
 
 def test_worker_child_process_is_terminated_at_deadline() -> None:
@@ -172,7 +231,7 @@ def test_idle_sleep_is_capped_by_worker_remaining_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     queue = MemoryQueue(tmp_path)
-    monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
+    monkeypatch.setattr(memory_queue, "_queue", lambda **kwargs: queue)
     now = [0.0]
     sleeps: list[float] = []
 
@@ -287,8 +346,73 @@ def test_cli_work_uses_operational_defaults(
         "max_tasks": 20,
         "max_seconds": 600,
         "idle_seconds": 2,
+        "lease_seconds": 120,
+        "heartbeat_seconds": 40,
+        "max_attempts": 8,
+        "retry_base_seconds": 30,
+        "retry_cap_seconds": 3600,
     }
     assert set(json.loads(capsys.readouterr().out)) == {"counts"}
+
+
+def test_cli_work_forwards_policy_overrides(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seen: dict[str, object] = {}
+
+    def worker(processor, **kwargs):
+        seen.update(kwargs)
+        return memory_queue.WorkerSummary(0, 0, 0, 0, 0)
+
+    monkeypatch.setattr(memory_queue, "run_worker", worker)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "memory_queue.py",
+            "work",
+            "--lease-seconds",
+            "30",
+            "--heartbeat-seconds",
+            "10",
+            "--max-attempts",
+            "12",
+            "--retry-base-seconds",
+            "4",
+            "--retry-cap-seconds",
+            "40",
+        ],
+    )
+
+    assert memory_queue._cli() == 0
+    assert seen["lease_seconds"] == 30
+    assert seen["heartbeat_seconds"] == 10
+    assert seen["max_attempts"] == 12
+    assert seen["retry_base_seconds"] == 4
+    assert seen["retry_cap_seconds"] == 40
+    assert set(json.loads(capsys.readouterr().out)) == {"counts"}
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"lease_seconds": 0}, "lease_seconds"),
+        ({"heartbeat_seconds": 0}, "heartbeat_seconds"),
+        ({"lease_seconds": 10, "heartbeat_seconds": 10}, "heartbeat"),
+        ({"max_attempts": 0}, "max_attempts"),
+        ({"max_attempts": 101}, "max_attempts"),
+        ({"retry_base_seconds": 0}, "retry_base_seconds"),
+        ({"retry_cap_seconds": 0}, "retry_cap_seconds"),
+        ({"retry_base_seconds": 11, "retry_cap_seconds": 10}, "retry_base"),
+    ],
+)
+def test_worker_rejects_invalid_policy_combinations(overrides, match) -> None:
+    with pytest.raises(ValueError, match=match):
+        memory_queue.run_worker(
+            lambda task: True,
+            processor_runner=memory_queue._run_processor_inline,
+            **overrides,
+        )
 
 
 def test_cli_rejects_removed_drain_command(monkeypatch: pytest.MonkeyPatch) -> None:

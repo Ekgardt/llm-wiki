@@ -216,7 +216,7 @@ def test_claim_honors_availability_and_uses_random_tokens(
 
 def test_claim_has_exact_public_signature() -> None:
     parameters = signature(MemoryQueue.claim).parameters
-    assert list(parameters) == ["self", "owner", "lease_seconds"]
+    assert list(parameters) == ["self", "owner", "lease_seconds", "max_attempts"]
     assert parameters["lease_seconds"].kind.name == "KEYWORD_ONLY"
     assert parameters["lease_seconds"].default == 120
 
@@ -904,6 +904,32 @@ def test_sqlite_uses_required_durability_settings(queue: MemoryQueue) -> None:
         assert connection.execute("PRAGMA journal_mode").fetchone()[0].lower() == "delete"
         assert connection.execute("PRAGMA synchronous").fetchone()[0] == 2
         assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+
+
+def test_schema_upgrades_legacy_eight_attempt_constraint(tmp_path: Path) -> None:
+    queue = MemoryQueue(tmp_path)
+    with sqlite3.connect(queue.db_path) as connection:
+        task_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'"
+        ).fetchone()[0]
+        connection.executescript(
+            """DROP TABLE attempt_history;
+               DROP TABLE tasks;"""
+        )
+        connection.execute(
+            task_sql.replace("attempts >= 0", "attempts BETWEEN 0 AND 8")
+        )
+
+    upgraded = MemoryQueue(tmp_path)
+    task_id = upgraded.enqueue("query", 1, {})
+    with sqlite3.connect(upgraded.db_path) as connection:
+        connection.execute("UPDATE tasks SET attempts=9 WHERE id=?", (task_id,))
+        schema = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'"
+        ).fetchone()[0]
+
+    assert "BETWEEN 0 AND 8" not in schema
+    assert upgraded.get(task_id).attempts == 9
 
 
 def test_module_facade_preserves_v1_shapes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -39,6 +39,7 @@ _PERMANENT_CODES = {"invalid_input", "unsupported_version"}
 _MAX_RETRY_AFTER_SECONDS = 7 * 24 * 60 * 60
 _MAX_RESULT_BYTES = 16 * 1024 * 1024
 _MAX_LEGACY_RECORD_BYTES = 16 * 1024 * 1024
+_MAX_RUNTIME_ATTEMPTS = 100
 _SECRET_KEYS = {
     "api_key",
     "apikey",
@@ -263,6 +264,46 @@ def _is_owner_only(path: Path) -> bool:
     return mode & 0o077 == 0 and mode & 0o600 == 0o600
 
 
+def _validate_retry_policy(
+    max_attempts: int, retry_base_seconds: int, retry_cap_seconds: int
+) -> None:
+    for name, value in (
+        ("max_attempts", max_attempts),
+        ("retry_base_seconds", retry_base_seconds),
+        ("retry_cap_seconds", retry_cap_seconds),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError(f"{name} must be an integer")
+    if not 1 <= max_attempts <= _MAX_RUNTIME_ATTEMPTS:
+        raise ValueError(
+            f"max_attempts must be between 1 and {_MAX_RUNTIME_ATTEMPTS}"
+        )
+    if retry_base_seconds <= 0:
+        raise ValueError("retry_base_seconds must be positive")
+    if retry_cap_seconds <= 0:
+        raise ValueError("retry_cap_seconds must be positive")
+    if retry_base_seconds > retry_cap_seconds:
+        raise ValueError("retry_base_seconds must not exceed retry_cap_seconds")
+
+
+def _validate_worker_policy(
+    lease_seconds: int,
+    heartbeat_seconds: int,
+    max_attempts: int,
+    retry_base_seconds: int,
+    retry_cap_seconds: int,
+) -> None:
+    _validate_retry_policy(max_attempts, retry_base_seconds, retry_cap_seconds)
+    for name, value in (
+        ("lease_seconds", lease_seconds),
+        ("heartbeat_seconds", heartbeat_seconds),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+    if heartbeat_seconds >= lease_seconds:
+        raise ValueError("heartbeat_seconds must be less than lease_seconds")
+
+
 class MemoryQueue:
     """Durable priority queue with lease-token fencing and at-least-once delivery."""
 
@@ -273,7 +314,11 @@ class MemoryQueue:
         clock: Callable[[], datetime] | None = None,
         rng: random.Random | random.SystemRandom | None = None,
         heartbeat_wait: Callable[[threading.Event, float], bool] | None = None,
+        max_attempts: int = DEFAULTS.queue_max_attempts,
+        retry_base_seconds: int = DEFAULTS.retry_base_seconds,
+        retry_cap_seconds: int = DEFAULTS.retry_cap_seconds,
     ) -> None:
+        _validate_retry_policy(max_attempts, retry_base_seconds, retry_cap_seconds)
         self.state_root = Path(state_root).resolve()
         self.run_dir = self.state_root / "run"
         self.db_path = self.run_dir / "queue.sqlite3"
@@ -283,6 +328,9 @@ class MemoryQueue:
         self._heartbeat_wait = heartbeat_wait or (
             lambda stop, interval: stop.wait(interval)
         )
+        self._max_attempts = max_attempts
+        self._retry_base_seconds = retry_base_seconds
+        self._retry_cap_seconds = retry_cap_seconds
         self._db_hardened = False
         self.run_dir.mkdir(parents=True, exist_ok=True)
         _harden_owner_only(self.run_dir, 0o700)
@@ -291,7 +339,9 @@ class MemoryQueue:
         with self._connect() as connection:
             self._create_schema(connection)
             with begin_immediate(connection):
-                self._retire_exhausted_ready(connection, _as_utc(self._clock()))
+                self._retire_exhausted_ready(
+                    connection, _as_utc(self._clock()), self._max_attempts
+                )
 
     def _connect(self) -> sqlite3.Connection:
         connection = open_operational_db(self.db_path, busy_ms=DEFAULTS.queue_busy_ms)
@@ -306,6 +356,7 @@ class MemoryQueue:
 
     @staticmethod
     def _create_schema(connection: sqlite3.Connection) -> None:
+        MemoryQueue._upgrade_legacy_attempt_constraint(connection)
         connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS tasks (
@@ -365,12 +416,38 @@ class MemoryQueue:
             )
 
     @staticmethod
+    def _upgrade_legacy_attempt_constraint(connection: sqlite3.Connection) -> None:
+        row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'"
+        ).fetchone()
+        if row is None or "attempts BETWEEN 0 AND 8" not in str(row["sql"]):
+            return
+        old_sql = str(row["sql"])
+        new_sql = re.sub(
+            r"^CREATE TABLE\s+tasks\b",
+            "CREATE TABLE tasks_unbounded",
+            old_sql,
+            count=1,
+            flags=re.IGNORECASE,
+        ).replace("attempts BETWEEN 0 AND 8", "attempts >= 0")
+        connection.commit()
+        connection.execute("PRAGMA foreign_keys=OFF")
+        try:
+            with begin_immediate(connection):
+                connection.execute(new_sql)
+                connection.execute("INSERT INTO tasks_unbounded SELECT * FROM tasks")
+                connection.execute("DROP TABLE tasks")
+                connection.execute("ALTER TABLE tasks_unbounded RENAME TO tasks")
+        finally:
+            connection.execute("PRAGMA foreign_keys=ON")
+
+    @staticmethod
     def _retire_exhausted_ready(
-        connection: sqlite3.Connection, now: datetime
+        connection: sqlite3.Connection, now: datetime, max_attempts: int
     ) -> None:
         rows = connection.execute(
             "SELECT * FROM tasks WHERE state='ready' AND attempts >= ?",
-            (DEFAULTS.queue_max_attempts,),
+            (max_attempts,),
         ).fetchall()
         for row in rows:
             connection.execute(
@@ -381,7 +458,7 @@ class MemoryQueue:
                     _timestamp(now),
                     _timestamp(now),
                     row["id"],
-                    DEFAULTS.queue_max_attempts,
+                    max_attempts,
                 ),
             )
 
@@ -446,19 +523,24 @@ class MemoryQueue:
         owner: str,
         *,
         lease_seconds: int = DEFAULTS.queue_lease_seconds,
+        max_attempts: int | None = None,
     ) -> QueueLease | None:
         if not owner:
             raise ValueError("owner must be non-empty")
         if lease_seconds <= 0:
             raise ValueError("lease must be positive")
+        attempt_limit = self._max_attempts if max_attempts is None else max_attempts
+        _validate_retry_policy(
+            attempt_limit, self._retry_base_seconds, self._retry_cap_seconds
+        )
         now = _as_utc(self._clock())
         with self._connect() as connection, begin_immediate(connection):
-            self._expire_leases(connection, now)
+            self._expire_leases(connection, now, attempt_limit)
             row = connection.execute(
                 """SELECT * FROM tasks
                    WHERE state = 'ready' AND attempts < ? AND available_at <= ?
                    ORDER BY priority DESC, available_at, created_at, rowid LIMIT 1""",
-                (DEFAULTS.queue_max_attempts, _timestamp(now)),
+                (attempt_limit, _timestamp(now)),
             ).fetchone()
             if row is None:
                 return None
@@ -477,7 +559,7 @@ class MemoryQueue:
                     _timestamp(now),
                     _timestamp(now),
                     row["id"],
-                    DEFAULTS.queue_max_attempts,
+                    attempt_limit,
                 ),
             ).rowcount
             if changed != 1:
@@ -538,7 +620,9 @@ class MemoryQueue:
             int(row["attempts"]),
         )
 
-    def _expire_leases(self, connection: sqlite3.Connection, now: datetime) -> int:
+    def _expire_leases(
+        self, connection: sqlite3.Connection, now: datetime, max_attempts: int
+    ) -> int:
         rows = connection.execute(
             "SELECT * FROM tasks WHERE state='leased' AND lease_expires_at <= ?",
             (_timestamp(now),),
@@ -564,7 +648,7 @@ class MemoryQueue:
                     last_attempt_at=now,
                 )
                 continue
-            exhausted = int(row["attempts"]) >= DEFAULTS.queue_max_attempts
+            exhausted = int(row["attempts"]) >= max_attempts
             error_code = "attempts_exhausted" if exhausted else "lease_expired"
             state = "dead" if exhausted else "ready"
             self._record_attempt(connection, row, now, "lease_expired", error_code)
@@ -793,9 +877,27 @@ class MemoryQueue:
                 )
         return self.get(lease.id)
 
-    def fail(self, lease: QueueLease, failure: QueueFailure) -> None:
+    def fail(
+        self,
+        lease: QueueLease,
+        failure: QueueFailure,
+        *,
+        max_attempts: int | None = None,
+        retry_base_seconds: int | None = None,
+        retry_cap_seconds: int | None = None,
+    ) -> None:
         if not failure.error_code:
             raise ValueError("error_code must be non-empty")
+        attempt_limit = self._max_attempts if max_attempts is None else max_attempts
+        retry_base = (
+            self._retry_base_seconds
+            if retry_base_seconds is None
+            else retry_base_seconds
+        )
+        retry_cap = (
+            self._retry_cap_seconds if retry_cap_seconds is None else retry_cap_seconds
+        )
+        _validate_retry_policy(attempt_limit, retry_base, retry_cap)
         now = _as_utc(self._clock())
         with self._connect() as connection, begin_immediate(connection):
             row = self._require_lease(connection, lease, now)
@@ -817,7 +919,7 @@ class MemoryQueue:
             dead = (
                 failure.permanent
                 or failure.error_code in _PERMANENT_CODES
-                or int(row["attempts"]) >= DEFAULTS.queue_max_attempts
+                or int(row["attempts"]) >= attempt_limit
             )
             self._record_attempt(connection, row, now, "failed", failure.error_code)
             if dead:
@@ -831,7 +933,11 @@ class MemoryQueue:
                     last_attempt_at=now,
                 )
                 return
-            delay = self._retry_delay(int(row["attempts"]))
+            delay = self._retry_delay(
+                int(row["attempts"]),
+                retry_base_seconds=retry_base,
+                retry_cap_seconds=retry_cap,
+            )
             retry_after = self._retry_after_seconds(failure.retry_after, now)
             if retry_after is not None:
                 delay = max(delay, retry_after)
@@ -845,10 +951,24 @@ class MemoryQueue:
                 last_attempt_at=now,
             )
 
-    def _retry_delay(self, attempts: int) -> float:
+    def _retry_delay(
+        self,
+        attempts: int,
+        *,
+        retry_base_seconds: int | None = None,
+        retry_cap_seconds: int | None = None,
+    ) -> float:
+        retry_base = (
+            self._retry_base_seconds
+            if retry_base_seconds is None
+            else retry_base_seconds
+        )
+        retry_cap = (
+            self._retry_cap_seconds if retry_cap_seconds is None else retry_cap_seconds
+        )
         jitter_cap = min(
-            DEFAULTS.retry_cap_seconds,
-            DEFAULTS.retry_base_seconds * (2 ** (attempts - 1)),
+            retry_cap,
+            retry_base * (2 ** (attempts - 1)),
         )
         return self._rng.uniform(0, jitter_cap)
 
@@ -1130,7 +1250,7 @@ class MemoryQueue:
     def recover_expired_leases(self) -> int:
         now = _as_utc(self._clock())
         with self._connect() as connection, begin_immediate(connection):
-            return self._expire_leases(connection, now)
+            return self._expire_leases(connection, now, self._max_attempts)
 
     def get(self, task_id: str) -> QueueTask:
         with self._connect() as connection:
@@ -1756,9 +1876,19 @@ def _queue_dir() -> Path:
     return path
 
 
-def _queue() -> MemoryQueue:
+def _queue(
+    *,
+    max_attempts: int = DEFAULTS.queue_max_attempts,
+    retry_base_seconds: int = DEFAULTS.retry_base_seconds,
+    retry_cap_seconds: int = DEFAULTS.retry_cap_seconds,
+) -> MemoryQueue:
     _ensure_sqlite_enabled()
-    return MemoryQueue(_state_root())
+    return MemoryQueue(
+        _state_root(),
+        max_attempts=max_attempts,
+        retry_base_seconds=retry_base_seconds,
+        retry_cap_seconds=retry_cap_seconds,
+    )
 
 
 def enqueue(task_type: str, payload: dict[str, Any]) -> str:
@@ -1867,9 +1997,18 @@ def retained_queue_state() -> bool:
 
 
 class _LeaseHeartbeat:
-    def __init__(self, queue: MemoryQueue, lease: QueueLease) -> None:
+    def __init__(
+        self,
+        queue: MemoryQueue,
+        lease: QueueLease,
+        *,
+        heartbeat_seconds: int = DEFAULTS.queue_heartbeat_seconds,
+        lease_seconds: int = DEFAULTS.queue_lease_seconds,
+    ) -> None:
         self._queue = queue
         self._lease = lease
+        self._heartbeat_seconds = heartbeat_seconds
+        self._lease_seconds = lease_seconds
         self._stop = threading.Event()
         self.error: Exception | None = None
         self._thread = threading.Thread(
@@ -1887,11 +2026,11 @@ class _LeaseHeartbeat:
 
     def _run(self) -> None:
         while not self._queue._heartbeat_wait(  # noqa: SLF001 - injected queue seam
-            self._stop, DEFAULTS.queue_heartbeat_seconds
+            self._stop, self._heartbeat_seconds
         ):
             try:
                 self._lease = self._queue.heartbeat(
-                    self._lease, lease_seconds=DEFAULTS.queue_lease_seconds
+                    self._lease, lease_seconds=self._lease_seconds
                 )
             except Exception as exc:  # noqa: BLE001 - completion must remain fenced
                 self.error = exc
@@ -2061,9 +2200,16 @@ def _work_one(
     owner: str,
     deadline: float,
     monotonic: Callable[[], float],
+    lease_seconds: int,
+    heartbeat_seconds: int,
+    max_attempts: int,
+    retry_base_seconds: int,
+    retry_cap_seconds: int,
 ) -> dict[str, int]:
     counts = {"ok": 0, "failed": 0, "dead": 0, "skipped": 0}
-    lease = queue.claim(owner)
+    lease = queue.claim(
+        owner, lease_seconds=lease_seconds, max_attempts=max_attempts
+    )
     if lease is None:
         return counts
     adopted = queue.adopt_published_result(lease, operation_id=lease.id)
@@ -2073,7 +2219,12 @@ def _work_one(
     if adopted == "corrupt":
         _count_terminal(counts, queue.get(lease.id))
         return counts
-    heartbeat = _LeaseHeartbeat(queue, lease)
+    heartbeat = _LeaseHeartbeat(
+        queue,
+        lease,
+        heartbeat_seconds=heartbeat_seconds,
+        lease_seconds=lease_seconds,
+    )
     heartbeat.start()
     timed_out = False
     outcome: bool | DeferredResult = False
@@ -2097,14 +2248,26 @@ def _work_one(
         return counts
     try:
         if timed_out:
-            queue.fail(lease, QueueFailure("worker_timeout", retry_after=60))
+            queue.fail(
+                lease,
+                QueueFailure("worker_timeout"),
+                max_attempts=max_attempts,
+                retry_base_seconds=retry_base_seconds,
+                retry_cap_seconds=retry_cap_seconds,
+            )
             _count_terminal(counts, queue.get(lease.id))
         elif bool(outcome):
             result = outcome.data if isinstance(outcome, DeferredResult) else b""
             queue.publish_result(lease, operation_id=lease.id, result=result)
             _count_terminal(counts, queue.acknowledge(lease))
         else:
-            queue.fail(lease, QueueFailure("processor_failed", retry_after=60))
+            queue.fail(
+                lease,
+                QueueFailure("processor_failed"),
+                max_attempts=max_attempts,
+                retry_base_seconds=retry_base_seconds,
+                retry_cap_seconds=retry_cap_seconds,
+            )
             _count_terminal(counts, queue.get(lease.id))
     except (LeaseFenceError, ResultConflictError):
         counts["failed"] += 1
@@ -2120,6 +2283,11 @@ def run_worker(
     max_tasks: int = DEFAULTS.worker_max_tasks,
     max_seconds: int = DEFAULTS.worker_max_seconds,
     idle_seconds: int = DEFAULTS.worker_idle_seconds,
+    lease_seconds: int = DEFAULTS.queue_lease_seconds,
+    heartbeat_seconds: int = DEFAULTS.queue_heartbeat_seconds,
+    max_attempts: int = DEFAULTS.queue_max_attempts,
+    retry_base_seconds: int = DEFAULTS.retry_base_seconds,
+    retry_cap_seconds: int = DEFAULTS.retry_cap_seconds,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     processor_runner: Callable[
@@ -2130,11 +2298,22 @@ def run_worker(
     """Run a short-lived worker bounded by tasks, wall time, and idle time."""
     if max_tasks < 0 or max_seconds < 0 or idle_seconds < 0:
         raise ValueError("worker limits must be non-negative")
+    _validate_worker_policy(
+        lease_seconds,
+        heartbeat_seconds,
+        max_attempts,
+        retry_base_seconds,
+        retry_cap_seconds,
+    )
     started = monotonic()
     idle_started: float | None = None
     totals = {"ok": 0, "failed": 0, "dead": 0, "skipped": 0}
     processed = 0
-    queue = _queue()
+    queue = _queue(
+        max_attempts=max_attempts,
+        retry_base_seconds=retry_base_seconds,
+        retry_cap_seconds=retry_cap_seconds,
+    )
     owner = f"worker-{os.getpid()}-{uuid.uuid4().hex}"
     deadline = started + max_seconds
     while processed < max_tasks:
@@ -2150,6 +2329,11 @@ def run_worker(
             owner=owner,
             deadline=deadline,
             monotonic=monotonic,
+            lease_seconds=lease_seconds,
+            heartbeat_seconds=heartbeat_seconds,
+            max_attempts=max_attempts,
+            retry_base_seconds=retry_base_seconds,
+            retry_cap_seconds=retry_cap_seconds,
         )
         handled = counts["ok"] + counts["failed"]
         for key in totals:
@@ -2321,11 +2505,26 @@ def _cli() -> int:
             print(json.dumps(_operator_status(), sort_keys=True))
             return 0
         if args.command == "work":
+            try:
+                _validate_worker_policy(
+                    args.lease_seconds,
+                    args.heartbeat_seconds,
+                    args.max_attempts,
+                    args.retry_base_seconds,
+                    args.retry_cap_seconds,
+                )
+            except ValueError as exc:
+                parser.error(str(exc))
             summary = run_worker(
                 _manual_processor,
                 max_tasks=args.max_tasks,
                 max_seconds=args.max_seconds,
                 idle_seconds=args.idle_seconds,
+                lease_seconds=args.lease_seconds,
+                heartbeat_seconds=args.heartbeat_seconds,
+                max_attempts=args.max_attempts,
+                retry_base_seconds=args.retry_base_seconds,
+                retry_cap_seconds=args.retry_cap_seconds,
             )
             counts = {
                 "dead": summary.dead,
