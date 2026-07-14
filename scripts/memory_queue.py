@@ -9,6 +9,7 @@ import os
 import random
 import re
 import sqlite3
+import stat
 import sys
 import threading
 import uuid
@@ -104,6 +105,7 @@ class QueueTask:
     error_code: str | None
     blocked_capability: str | None
     result_reference: str | None
+    result_sha256: str | None
     attempt_history: tuple[AttemptRecord, ...]
 
 
@@ -169,6 +171,41 @@ def _harden_owner_only(path: Path, mode: int) -> None:
         return
     if not _set_owner_only(path, mode):
         raise PermissionError(f"could not apply owner-only permissions to {path}")
+
+
+def _is_owner_only(path: Path) -> bool:
+    if os.name == "nt":
+        from markdown_transaction import (
+            _acl_output_text,
+            _run_acl_command,
+            _windows_acl_identity,
+        )
+
+        try:
+            verified = _run_acl_command(["icacls", str(path)])
+        except Exception:  # noqa: BLE001 - validation is fail-closed
+            return False
+        if verified.returncode != 0:
+            return False
+        identity = _windows_acl_identity()
+        acl_lines = [
+            line.strip()
+            for line in _acl_output_text(verified.stdout).splitlines()
+            if ":(" in line
+        ]
+        owner_lines = [
+            line for line in acl_lines if identity.casefold() in line.casefold()
+        ]
+        return (
+            len(owner_lines) == 1
+            and "(F)" in owner_lines[0]
+            and all(identity.casefold() in line.casefold() for line in acl_lines)
+        )
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except OSError:
+        return False
+    return mode & 0o077 == 0 and mode & 0o600 == 0o600
 
 
 class MemoryQueue:
@@ -238,6 +275,7 @@ class MemoryQueue:
                 error_code TEXT,
                 blocked_capability TEXT,
                 result_reference TEXT,
+                result_sha256 TEXT,
                 result_operation_id TEXT
             );
             CREATE INDEX IF NOT EXISTS queue_claim_order
@@ -263,6 +301,8 @@ class MemoryQueue:
         }
         if "last_attempt_at" not in columns:
             connection.execute("ALTER TABLE tasks ADD COLUMN last_attempt_at TEXT")
+        if "result_sha256" not in columns:
+            connection.execute("ALTER TABLE tasks ADD COLUMN result_sha256 TEXT")
 
     @staticmethod
     def _retire_exhausted_ready(
@@ -444,6 +484,26 @@ class MemoryQueue:
             (_timestamp(now),),
         ).fetchall()
         for row in rows:
+            if row["result_reference"] is not None or row["result_sha256"] is not None:
+                valid = self._stored_result_is_valid(row)
+                error_code = None if valid else "result_corrupt"
+                self._record_attempt(
+                    connection,
+                    row,
+                    now,
+                    "succeeded" if valid else "failed",
+                    error_code,
+                )
+                self._finish_lease(
+                    connection,
+                    row["id"],
+                    now,
+                    "succeeded" if valid else "dead",
+                    error_code,
+                    None,
+                    last_attempt_at=now,
+                )
+                continue
             exhausted = int(row["attempts"]) >= DEFAULTS.queue_max_attempts
             error_code = "attempts_exhausted" if exhausted else "lease_expired"
             state = "dead" if exhausted else "ready"
@@ -464,6 +524,63 @@ class MemoryQueue:
                 ),
             )
         return len(rows)
+
+    def _stored_result_is_valid(self, row: sqlite3.Row) -> bool:
+        reference = row["result_reference"]
+        digest = row["result_sha256"]
+        if not isinstance(reference, str) or not isinstance(digest, str):
+            return False
+        if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            return False
+        try:
+            path = (self.state_root / reference).resolve()
+            path.relative_to(self.results_dir.resolve())
+            return (
+                path.is_file()
+                and _is_owner_only(path)
+                and sha256_bytes(path.read_bytes()) == digest
+            )
+        except (OSError, ValueError):
+            return False
+
+    def adopt_published_result(
+        self, lease: QueueLease, *, operation_id: str
+    ) -> str | None:
+        """Adopt an owner-only stable result left before its DB reference committed."""
+        result_name = f"{sha256_bytes(operation_id.encode('utf-8'))}.result"
+        relative = f"run/queue-results/{result_name}"
+        target = self.results_dir / result_name
+        if not target.exists():
+            return None
+        now = _as_utc(self._clock())
+        with self._connect() as connection, begin_immediate(connection):
+            row = self._require_lease(connection, lease, now)
+            try:
+                valid = target.is_file() and _is_owner_only(target)
+                digest = sha256_bytes(target.read_bytes()) if valid else None
+            except OSError:
+                valid = False
+                digest = None
+            if not valid or digest is None:
+                self._record_attempt(
+                    connection, row, now, "failed", "result_corrupt"
+                )
+                self._finish_lease(
+                    connection,
+                    lease.id,
+                    now,
+                    "dead",
+                    "result_corrupt",
+                    None,
+                    last_attempt_at=now,
+                )
+                return "corrupt"
+            connection.execute(
+                """UPDATE tasks SET result_reference=?, result_sha256=?,
+                       result_operation_id=?, updated_at=? WHERE id=?""",
+                (relative, digest, operation_id, _timestamp(now), lease.id),
+            )
+            return "adopted"
 
     def heartbeat(
         self,
@@ -527,9 +644,10 @@ class MemoryQueue:
                     fsync_file(target)
                 fsync_directory(self.results_dir)
                 connection.execute(
-                    """UPDATE tasks SET result_reference=?, result_operation_id=?, updated_at=?
+                    """UPDATE tasks SET result_reference=?, result_sha256=?,
+                           result_operation_id=?, updated_at=?
                        WHERE id=?""",
-                    (relative, operation_id, _timestamp(now), lease.id),
+                    (relative, digest, operation_id, _timestamp(now), lease.id),
                 )
                 return str(existing_reference or relative)
         finally:
@@ -788,6 +906,7 @@ class MemoryQueue:
             error_code=row["error_code"],
             blocked_capability=row["blocked_capability"],
             result_reference=row["result_reference"],
+            result_sha256=row["result_sha256"],
             attempt_history=tuple(
                 AttemptRecord(
                     attempt=int(item["attempt"]),
@@ -921,6 +1040,14 @@ def drain_with(
         lease = queue.claim(owner)
         if lease is None:
             break
+        adopted = queue.adopt_published_result(lease, operation_id=lease.id)
+        if adopted == "adopted":
+            queue.acknowledge(lease)
+            counts["ok"] += 1
+            continue
+        if adopted == "corrupt":
+            counts["failed"] += 1
+            continue
         heartbeat = _LeaseHeartbeat(queue, lease)
         heartbeat.start()
         try:

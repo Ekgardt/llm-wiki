@@ -21,6 +21,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from memory_queue import (  # noqa: E402
+    DeferredResult,
     LeaseFenceError,
     MemoryQueue,
     QueueFailure,
@@ -217,8 +218,109 @@ def test_result_publication_is_stable_owner_only_and_no_clobber(
     with pytest.raises(ResultConflictError):
         queue.publish_result(lease, operation_id="stable-op", result=b"different")
     result_path = queue.state_root / reference
+    assert queue.get(lease.id).result_sha256 == sha256_bytes(b"answer")
     if sys.platform != "win32":
         assert stat.S_IMODE(result_path.stat().st_mode) == 0o600
+
+
+def test_expired_lease_with_published_result_reconciles_without_redelivery(
+    queue: MemoryQueue, clock: FakeClock
+) -> None:
+    task_id = queue.enqueue("query", 1, {"prompt": "nondeterministic"})
+    lease = queue.claim("crashed", lease_seconds=5)
+    assert lease is not None
+    reference = queue.publish_result(
+        lease, operation_id=task_id, result=b"first-and-only-result"
+    )
+    assert queue.get(task_id).state == "leased"  # Crash before acknowledge.
+    clock.advance(6)
+
+    assert queue.claim("replacement") is None
+    task = queue.get(task_id)
+    assert task.state == "succeeded"
+    assert task.result_reference == reference
+    assert task.result_sha256 == sha256_bytes(b"first-and-only-result")
+    assert len(task.attempt_history) == 1
+    assert task.attempt_history[0].outcome == "succeeded"
+
+
+def test_drain_does_not_rerun_handler_after_publish_before_ack_crash(
+    tmp_path: Path, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import memory_queue
+
+    queue = MemoryQueue(tmp_path, clock=clock, rng=random.Random(12))
+    monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
+    task_id = queue.enqueue("query", 1, {"prompt": "changes-every-time"})
+    lease = queue.claim("crashed", lease_seconds=5)
+    assert lease is not None
+    queue.publish_result(lease, operation_id=task_id, result=b"stable")
+    clock.advance(6)
+    calls: list[str] = []
+
+    counts = memory_queue.drain_with(
+        lambda task: calls.append(task["id"]) or DeferredResult(b"different"),
+        max_tasks=1,
+    )
+    assert counts == {"ok": 0, "failed": 0, "skipped": 0}
+    assert calls == []
+    assert queue.get(task_id).state == "succeeded"
+
+
+@pytest.mark.parametrize("corruption", ["missing", "mismatch"])
+def test_expired_published_result_corruption_goes_dead_without_overwrite(
+    queue: MemoryQueue, clock: FakeClock, corruption: str
+) -> None:
+    task_id = queue.enqueue("query", 1, {})
+    lease = queue.claim("crashed", lease_seconds=5)
+    assert lease is not None
+    reference = queue.publish_result(lease, operation_id=task_id, result=b"original")
+    result_path = queue.state_root / reference
+    if corruption == "missing":
+        result_path.unlink()
+    else:
+        result_path.write_bytes(b"tampered")
+    clock.advance(6)
+
+    assert queue.claim("replacement") is None
+    task = queue.get(task_id)
+    assert task.state == "dead"
+    assert task.error_code == "result_corrupt"
+    assert task.attempt_history[-1].error_code == "result_corrupt"
+    if corruption == "mismatch":
+        assert result_path.read_bytes() == b"tampered"
+
+
+def test_drain_adopts_orphaned_valid_result_before_handler(
+    tmp_path: Path, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import memory_queue
+
+    queue = MemoryQueue(tmp_path, clock=clock, rng=random.Random(13))
+    monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
+    task_id = queue.enqueue("query", 1, {})
+    lease = queue.claim("crashed", lease_seconds=5)
+    assert lease is not None
+    reference = queue.publish_result(lease, operation_id=task_id, result=b"orphaned")
+    with sqlite3.connect(queue.db_path) as connection:
+        connection.execute(
+            """UPDATE tasks SET result_reference=NULL, result_operation_id=NULL,
+                   result_sha256=NULL WHERE id=?""",
+            (task_id,),
+        )
+    clock.advance(6)
+    calls: list[str] = []
+
+    counts = memory_queue.drain_with(
+        lambda task: calls.append(task["id"]) or DeferredResult(b"new-output"),
+        max_tasks=1,
+    )
+    assert counts == {"ok": 1, "failed": 0, "skipped": 0}
+    assert calls == []
+    task = queue.get(task_id)
+    assert task.state == "succeeded"
+    assert task.result_reference == reference
+    assert task.result_sha256 == sha256_bytes(b"orphaned")
 
 
 def test_result_directory_is_fsynced_before_database_reference(
