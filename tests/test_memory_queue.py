@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import random
 import sqlite3
 import stat
@@ -257,6 +258,7 @@ def test_queue_hardens_directory_database_temp_and_result(
     assert lease is not None
     queue.publish_result(lease, operation_id=task_id, result=b"answer")
     paths = {path for path, _mode in protected}
+    assert queue.run_dir in paths
     assert queue.results_dir in paths
     assert queue.db_path in paths
     assert any(path.suffix == ".tmp" for path in paths)
@@ -276,6 +278,70 @@ def test_queue_acl_failure_is_fail_closed(
     )
     with pytest.raises(PermissionError, match="ACL denied"):
         MemoryQueue(tmp_path)
+
+
+def test_run_acl_is_hardened_before_first_sqlite_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import memory_queue
+
+    hardened: list[Path] = []
+    real_open = memory_queue.open_operational_db
+
+    def record_hardening(path: Path, mode: int) -> None:
+        del mode
+        hardened.append(Path(path))
+
+    def checked_open(path: Path, *, busy_ms: int) -> sqlite3.Connection:
+        assert tmp_path.resolve() / "run" in hardened
+        return real_open(path, busy_ms=busy_ms)
+
+    monkeypatch.setattr(memory_queue, "_harden_owner_only", record_hardening)
+    monkeypatch.setattr(memory_queue, "open_operational_db", checked_open)
+    queue = MemoryQueue(tmp_path)
+    assert queue.run_dir in hardened
+
+
+def test_run_acl_failure_prevents_sqlite_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import memory_queue
+
+    opened: list[Path] = []
+    real_open = memory_queue.open_operational_db
+
+    def deny_run(path: Path, mode: int) -> None:
+        del mode
+        if Path(path).name == "run":
+            raise PermissionError("Windows owner-only ACL denied")
+
+    monkeypatch.setattr(memory_queue, "_harden_owner_only", deny_run)
+
+    def record_open(path: Path, *, busy_ms: int) -> sqlite3.Connection:
+        opened.append(Path(path))
+        return real_open(path, busy_ms=busy_ms)
+
+    monkeypatch.setattr(memory_queue, "open_operational_db", record_open)
+    with pytest.raises(PermissionError, match="owner-only ACL denied"):
+        MemoryQueue(tmp_path)
+    assert opened == []
+
+
+def test_queue_uses_secure_rollback_journal_without_wal_files(queue: MemoryQueue) -> None:
+    task_id = queue.enqueue("query", 1, {})
+    journal = Path(f"{queue.db_path}-journal")
+    with queue._connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("UPDATE tasks SET priority=1 WHERE id=?", (task_id,))
+        assert journal.is_file()
+        assert not Path(f"{queue.db_path}-wal").exists()
+        assert not Path(f"{queue.db_path}-shm").exists()
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0].lower() == "delete"
+        if os.name == "posix":
+            assert stat.S_IMODE(queue.run_dir.stat().st_mode) == 0o700
+            assert stat.S_IMODE(queue.db_path.stat().st_mode) == 0o600
+            assert stat.S_IMODE(journal.stat().st_mode) & 0o077 == 0
+        connection.rollback()
 
 
 def test_acknowledge_requires_published_result(queue: MemoryQueue) -> None:
@@ -432,8 +498,33 @@ def test_startup_retires_legacy_ready_task_at_attempt_limit(
     task = restarted.get(task_id)
     assert task.state == "dead"
     assert task.error_code == "attempts_exhausted"
-    assert task.attempt_history[-1].attempt == 8
-    assert task.attempt_history[-1].error_code == "attempts_exhausted"
+    assert task.attempt_history == ()
+
+
+def test_startup_repair_preserves_existing_attempt_history(
+    tmp_path: Path, clock: FakeClock
+) -> None:
+    queue = MemoryQueue(tmp_path, clock=clock, rng=random.Random(8))
+    task_id = queue.enqueue("query", 1, {})
+    for attempt in range(8):
+        lease = queue.claim("worker")
+        assert lease is not None
+        queue.fail(lease, QueueFailure("temporary", retry_after=1))
+        if attempt < 7:
+            retry_at = queue.get(task_id).available_at
+            clock.advance((retry_at - clock()).total_seconds())
+    original = queue.get(task_id).attempt_history
+    assert len(original) == 8
+    with sqlite3.connect(queue.db_path) as connection:
+        connection.execute(
+            "UPDATE tasks SET state='ready', error_code=NULL WHERE id=?", (task_id,)
+        )
+
+    repaired = MemoryQueue(tmp_path, clock=clock, rng=random.Random(9)).get(task_id)
+    assert repaired.state == "dead"
+    assert repaired.error_code == "attempts_exhausted"
+    assert repaired.attempt_history == original
+    assert len(repaired.attempt_history) == 8
 
 
 def test_cancel_only_changes_nonterminal_tasks(queue: MemoryQueue) -> None:

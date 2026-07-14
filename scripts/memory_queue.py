@@ -10,6 +10,7 @@ import random
 import re
 import sqlite3
 import sys
+import threading
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -179,6 +180,7 @@ class MemoryQueue:
         *,
         clock: Callable[[], datetime] | None = None,
         rng: random.Random | random.SystemRandom | None = None,
+        heartbeat_wait: Callable[[threading.Event, float], bool] | None = None,
     ) -> None:
         self.state_root = Path(state_root).resolve()
         self.run_dir = self.state_root / "run"
@@ -186,8 +188,12 @@ class MemoryQueue:
         self.results_dir = self.run_dir / "queue-results"
         self._clock = clock or _utc_now
         self._rng = rng or random.SystemRandom()
+        self._heartbeat_wait = heartbeat_wait or (
+            lambda stop, interval: stop.wait(interval)
+        )
         self._db_hardened = False
         self.run_dir.mkdir(parents=True, exist_ok=True)
+        _harden_owner_only(self.run_dir, 0o700)
         self.results_dir.mkdir(parents=True, exist_ok=True)
         _harden_owner_only(self.results_dir, 0o700)
         with self._connect() as connection:
@@ -267,17 +273,6 @@ class MemoryQueue:
             (DEFAULTS.queue_max_attempts,),
         ).fetchall()
         for row in rows:
-            connection.execute(
-                """INSERT INTO attempt_history(
-                       task_id, attempt, started_at, finished_at, outcome, error_code
-                   ) VALUES (?, ?, ?, ?, 'failed', 'attempts_exhausted')""",
-                (
-                    row["id"],
-                    row["attempts"],
-                    row["last_attempt_at"] or row["updated_at"],
-                    _timestamp(now),
-                ),
-            )
             connection.execute(
                 """UPDATE tasks SET state='dead', error_code='attempts_exhausted',
                        updated_at=?, last_attempt_at=COALESCE(last_attempt_at, ?)
@@ -882,6 +877,39 @@ def recover_stale_leases(max_age_seconds: int = 600) -> int:
     return _queue().recover_expired_leases()
 
 
+class _LeaseHeartbeat:
+    def __init__(self, queue: MemoryQueue, lease: QueueLease) -> None:
+        self._queue = queue
+        self._lease = lease
+        self._stop = threading.Event()
+        self.error: Exception | None = None
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"memory-queue-heartbeat-{lease.id}",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join()
+
+    def _run(self) -> None:
+        while not self._queue._heartbeat_wait(  # noqa: SLF001 - injected queue seam
+            self._stop, DEFAULTS.queue_heartbeat_seconds
+        ):
+            try:
+                self._lease = self._queue.heartbeat(
+                    self._lease, lease_seconds=DEFAULTS.queue_lease_seconds
+                )
+            except Exception as exc:  # noqa: BLE001 - completion must remain fenced
+                self.error = exc
+                self._stop.set()
+                return
+
+
 def drain_with(
     processor: Callable[[dict], bool | DeferredResult], max_tasks: int = 10
 ) -> dict[str, int]:
@@ -893,21 +921,33 @@ def drain_with(
         lease = queue.claim(owner)
         if lease is None:
             break
+        heartbeat = _LeaseHeartbeat(queue, lease)
+        heartbeat.start()
         try:
-            outcome = processor(_compat_task(lease))
-            succeeded = bool(outcome)
-        except Exception as exc:  # noqa: BLE001
-            print(
-                f"memory_queue: processor raised {type(exc).__name__}: {exc}", file=sys.stderr
-            )
-            succeeded = False
-        if succeeded:
-            result = outcome.data if isinstance(outcome, DeferredResult) else b""
-            queue.publish_result(lease, operation_id=lease.id, result=result)
-            queue.acknowledge(lease)
-            counts["ok"] += 1
-        else:
-            queue.fail(lease, QueueFailure("processor_failed", retry_after=60))
+            try:
+                outcome = processor(_compat_task(lease))
+                succeeded = bool(outcome)
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"memory_queue: processor raised {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+                succeeded = False
+        finally:
+            heartbeat.stop()
+        if heartbeat.error is not None:
+            counts["failed"] += 1
+            continue
+        try:
+            if succeeded:
+                result = outcome.data if isinstance(outcome, DeferredResult) else b""
+                queue.publish_result(lease, operation_id=lease.id, result=result)
+                queue.acknowledge(lease)
+                counts["ok"] += 1
+            else:
+                queue.fail(lease, QueueFailure("processor_failed", retry_after=60))
+                counts["failed"] += 1
+        except LeaseFenceError:
             counts["failed"] += 1
     return counts
 
