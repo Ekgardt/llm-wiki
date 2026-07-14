@@ -375,6 +375,112 @@ def test_journal_read_rejects_file_change_during_read(
     assert changed.value.code == "changed"
 
 
+def test_projection_read_rejects_symlink(
+    vault: Path, state_root: Path, tmp_path: Path
+):
+    projection = vault / "knowledge/projects/demo/state.md"
+    outside = tmp_path / "outside.md"
+    outside.write_text("private", encoding="utf-8")
+    try:
+        projection.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unavailable: {exc}")
+
+    with pytest.raises(ProjectJournalReadError) as linked:
+        ProjectStore(vault, state_root).checkpoint(
+            "demo", checkpoint_event(), "agent-a"
+        )
+
+    assert linked.value.code == "unsafe_path"
+    assert outside.read_text(encoding="utf-8") == "private"
+
+
+def test_projection_read_rejects_non_regular_file(vault: Path, state_root: Path):
+    (vault / "knowledge/projects/demo/state.md").mkdir()
+
+    with pytest.raises(ProjectJournalReadError) as directory:
+        ProjectStore(vault, state_root).checkpoint(
+            "demo", checkpoint_event(), "agent-a"
+        )
+
+    assert directory.value.code == "not_regular"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="FIFO test requires POSIX")
+def test_projection_read_rejects_fifo_without_blocking(vault: Path, state_root: Path):
+    os.mkfifo(vault / "knowledge/projects/demo/state.md")
+
+    with pytest.raises(ProjectJournalReadError) as failure:
+        ProjectStore(vault, state_root).checkpoint(
+            "demo", checkpoint_event(), "agent-a"
+        )
+
+    assert failure.value.code == "not_regular"
+
+
+def test_projection_read_rejects_oversize_before_hash(
+    vault: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    projection = vault / "knowledge/projects/demo/state.md"
+    projection.write_bytes(b"x" * (project_journal.MAX_PROJECTION_BYTES + 1))
+    hashed: list[bytes] = []
+    sha256_bytes = project_journal.sha256_bytes
+
+    def track_hash(content: bytes) -> str:
+        hashed.append(content)
+        return sha256_bytes(content)
+
+    monkeypatch.setattr(project_journal, "sha256_bytes", track_hash)
+
+    with pytest.raises(ProjectJournalReadError) as oversized:
+        ProjectStore(vault, state_root).checkpoint(
+            "demo", checkpoint_event(), "agent-a"
+        )
+
+    assert oversized.value.code == "too_large"
+    assert projection.read_bytes() not in hashed
+
+
+def test_projection_read_rejects_file_change_during_read(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    projection = vault / "knowledge/projects/demo/state.md"
+    projection.write_bytes(b"old projection\n")
+    open_file = project_journal.os.open
+    fstat = project_journal.os.fstat
+    projection_descriptors: set[int] = set()
+    calls: dict[int, int] = {}
+
+    def track_open(path, flags, *args):
+        descriptor = open_file(path, flags, *args)
+        if Path(path) == projection:
+            projection_descriptors.add(descriptor)
+        return descriptor
+
+    def changed_after_read(descriptor: int):
+        metadata = fstat(descriptor)
+        if descriptor not in projection_descriptors:
+            return metadata
+        calls[descriptor] = calls.get(descriptor, 0) + 1
+        if calls[descriptor] == 2:
+            values = list(metadata)
+            values[6] += 1
+            return os.stat_result(values)
+        return metadata
+
+    monkeypatch.setattr(project_journal.os, "open", track_open)
+    monkeypatch.setattr(project_journal.os, "fstat", changed_after_read)
+
+    with pytest.raises(ProjectJournalReadError) as changed:
+        ProjectStore(vault, state_root).checkpoint(
+            "demo", checkpoint_event(), "agent-a"
+        )
+
+    assert changed.value.code == "changed"
+
+
 def test_absent_journal_under_missing_project_directory_is_valid(
     vault: Path, state_root: Path
 ):

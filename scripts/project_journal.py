@@ -40,6 +40,7 @@ _SCHEMA = Path(__file__).with_name("schemas") / "project-checkpoint-v1.json"
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _HEARTBEAT_SECONDS = 10
 MAX_JOURNAL_BYTES = 8 * 1024 * 1024
+MAX_PROJECTION_BYTES = 1024 * 1024
 MAX_JOURNAL_EVENTS = 1000
 _MAX_VALUE_CHARS = 240
 _MAX_LIST_ITEMS = {
@@ -75,7 +76,7 @@ class ProjectJournalRebuildRequired(RuntimeError):
 
 
 class ProjectJournalReadError(RuntimeError):
-    """A journal cannot be safely read as a bounded regular file."""
+    """A project file cannot be safely read as a bounded regular file."""
 
     def __init__(self, code: str, message: str):
         super().__init__(message)
@@ -404,18 +405,42 @@ class ProjectStore:
     def _read_journal_bytes(self, slug: str) -> bytes:
         slug = _require_slug(slug)
         path = self.vault / "knowledge" / "projects" / slug / "journal.md"
-        self._validate_journal_parent(path.parent)
+        return self._read_bounded_regular_file(
+            path,
+            max_bytes=MAX_JOURNAL_BYTES,
+            label="project journal",
+        ) or b""
+
+    def _read_projection_bytes(self, slug: str) -> bytes | None:
+        slug = _require_slug(slug)
+        path = self.vault / "knowledge" / "projects" / slug / "state.md"
+        return self._read_bounded_regular_file(
+            path,
+            max_bytes=MAX_PROJECTION_BYTES,
+            label="project projection",
+        )
+
+    def _read_bounded_regular_file(
+        self,
+        path: Path,
+        *,
+        max_bytes: int,
+        label: str,
+    ) -> bytes | None:
+        self._validate_file_parent(path.parent, label)
         try:
             before = os.lstat(path)
         except FileNotFoundError:
-            return b""
+            return None
         if stat.S_ISLNK(before.st_mode) or _is_reparse(before):
-            raise ProjectJournalReadError("unsafe_path", "project journal is a link")
+            raise ProjectJournalReadError("unsafe_path", f"{label} is a link")
         if not stat.S_ISREG(before.st_mode):
-            raise ProjectJournalReadError("not_regular", "project journal is not a regular file")
-        if before.st_size > MAX_JOURNAL_BYTES:
             raise ProjectJournalReadError(
-                "too_large", f"project journal exceeds {MAX_JOURNAL_BYTES} bytes"
+                "not_regular", f"{label} is not a regular file"
+            )
+        if before.st_size > max_bytes:
+            raise ProjectJournalReadError(
+                "too_large", f"{label} exceeds {max_bytes} bytes"
             )
         flags = (
             os.O_RDONLY
@@ -427,18 +452,18 @@ class ProjectStore:
             descriptor = os.open(path, flags)
         except (OSError, ValueError) as exc:
             raise ProjectJournalReadError(
-                "unsafe_path", "project journal cannot be opened safely"
+                "unsafe_path", f"{label} cannot be opened safely"
             ) from exc
         try:
             opened = os.fstat(descriptor)
             if not _same_identity(before, opened):
-                raise ProjectJournalReadError("changed", "project journal changed before open")
+                raise ProjectJournalReadError("changed", f"{label} changed before open")
             if not stat.S_ISREG(opened.st_mode):
                 raise ProjectJournalReadError(
-                    "not_regular", "project journal is not a regular file"
+                    "not_regular", f"{label} is not a regular file"
                 )
             chunks: list[bytes] = []
-            remaining = MAX_JOURNAL_BYTES + 1
+            remaining = max_bytes + 1
             while remaining:
                 chunk = os.read(descriptor, min(remaining, 1024 * 1024))
                 if not chunk:
@@ -449,22 +474,22 @@ class ProjectStore:
             after = os.fstat(descriptor)
             if not _same_snapshot(opened, after) or len(content) != after.st_size:
                 raise ProjectJournalReadError(
-                    "changed", "project journal changed while reading"
+                    "changed", f"{label} changed while reading"
                 )
-            if len(content) > MAX_JOURNAL_BYTES:
+            if len(content) > max_bytes:
                 raise ProjectJournalReadError(
-                    "too_large", f"project journal exceeds {MAX_JOURNAL_BYTES} bytes"
+                    "too_large", f"{label} exceeds {max_bytes} bytes"
                 )
             return content
         finally:
             os.close(descriptor)
 
-    def _validate_journal_parent(self, parent: Path) -> None:
+    def _validate_file_parent(self, parent: Path, label: str) -> None:
         try:
             relative = parent.relative_to(self.vault)
         except ValueError as exc:
             raise ProjectJournalReadError(
-                "unsafe_path", "journal parent escapes the vault"
+                "unsafe_path", f"{label} parent escapes the vault"
             ) from exc
         current = self.vault
         for part in relative.parts:
@@ -475,11 +500,11 @@ class ProjectStore:
                 return
             if stat.S_ISLNK(metadata.st_mode) or _is_reparse(metadata):
                 raise ProjectJournalReadError(
-                    "unsafe_path", "journal parent traverses a link"
+                    "unsafe_path", f"{label} parent traverses a link"
                 )
             if not stat.S_ISDIR(metadata.st_mode):
                 raise ProjectJournalReadError(
-                    "unsafe_path", "journal parent is not a directory"
+                    "unsafe_path", f"{label} parent is not a directory"
                 )
 
     def _ensure_project_directory(self, slug: str) -> None:
@@ -654,13 +679,13 @@ class ProjectStore:
         lease = self.heartbeat(lease)
         journal_path = f"knowledge/projects/{slug}/journal.md"
         state_path = f"knowledge/projects/{slug}/state.md"
-        current_state_path = self.vault / state_path
+        current_state = self._read_projection_bytes(slug)
         changes = [
             MarkdownChange.replace(journal_path, journal)
             if current_journal
             else MarkdownChange.create(journal_path, journal),
             MarkdownChange.replace(state_path, state)
-            if current_state_path.exists()
+            if current_state is not None
             else MarkdownChange.create(state_path, state),
         ]
         preconditions: dict[str, object] = {
@@ -671,8 +696,8 @@ class ProjectStore:
                 "expires_at": _timestamp(lease.expires_at),
             },
             journal_path: sha256_bytes(current_journal) if current_journal else ABSENT,
-            state_path: sha256_bytes(current_state_path.read_bytes())
-            if current_state_path.exists()
+            state_path: sha256_bytes(current_state)
+            if current_state is not None
             else ABSENT,
         }
         lease = self.heartbeat(lease)
