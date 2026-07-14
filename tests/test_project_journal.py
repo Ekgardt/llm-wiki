@@ -481,6 +481,75 @@ def test_projection_read_rejects_file_change_during_read(
     assert changed.value.code == "changed"
 
 
+@pytest.mark.parametrize(
+    ("name", "limit"),
+    [
+        ("journal.md", project_journal.MAX_JOURNAL_BYTES),
+        ("state.md", project_journal.MAX_PROJECTION_BYTES),
+    ],
+)
+def test_prepare_rejects_project_file_growth_without_new_artifact(
+    vault: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    limit: int,
+):
+    store = ProjectStore(vault, state_root)
+    store.checkpoint("demo", checkpoint_event(), "agent-a")
+    artifact_ids = {path.name for path in store.coordinator.transaction_root.iterdir()}
+    prepare = store.coordinator.prepare
+
+    def grow_before_prepare(*args, **kwargs):
+        (vault / "knowledge/projects/demo" / name).write_bytes(b"x" * (limit + 1))
+        return prepare(*args, **kwargs)
+
+    monkeypatch.setattr(store.coordinator, "prepare", grow_before_prepare)
+
+    with pytest.raises(ValueError, match=f"exceeds {limit} bytes"):
+        store.checkpoint(
+            "demo",
+            checkpoint_event("evt-2", "bounded:event-2"),
+            "agent-a",
+        )
+
+    assert {
+        path.name for path in store.coordinator.transaction_root.iterdir()
+    } == artifact_ids
+
+
+@pytest.mark.parametrize("name", ["journal.md", "state.md"])
+def test_prepare_rejects_project_file_replacement_without_new_artifact(
+    vault: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+):
+    store = ProjectStore(vault, state_root)
+    store.checkpoint("demo", checkpoint_event(), "agent-a")
+    artifact_ids = {path.name for path in store.coordinator.transaction_root.iterdir()}
+    prepare = store.coordinator.prepare
+
+    def replace_before_prepare(*args, **kwargs):
+        (vault / "knowledge/projects/demo" / name).write_bytes(
+            b"external replacement\n"
+        )
+        return prepare(*args, **kwargs)
+
+    monkeypatch.setattr(store.coordinator, "prepare", replace_before_prepare)
+
+    with pytest.raises(ValueError, match="precondition changed before prepare"):
+        store.checkpoint(
+            "demo",
+            checkpoint_event("evt-2", "replacement:event-2"),
+            "agent-a",
+        )
+
+    assert {
+        path.name for path in store.coordinator.transaction_root.iterdir()
+    } == artifact_ids
+
+
 def test_absent_journal_under_missing_project_directory_is_valid(
     vault: Path, state_root: Path
 ):

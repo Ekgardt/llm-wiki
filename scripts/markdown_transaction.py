@@ -62,18 +62,23 @@ class MarkdownChange:
     kind: ChangeKind
     path: str
     content: bytes | None
+    max_before_bytes: int | None = None
 
     @classmethod
-    def create(cls, path: str, content: bytes) -> MarkdownChange:
-        return cls("create", path, _require_bytes(content))
+    def create(
+        cls, path: str, content: bytes, *, max_before_bytes: int | None = None
+    ) -> MarkdownChange:
+        return cls("create", path, _require_bytes(content), max_before_bytes)
 
     @classmethod
-    def replace(cls, path: str, content: bytes) -> MarkdownChange:
-        return cls("replace", path, _require_bytes(content))
+    def replace(
+        cls, path: str, content: bytes, *, max_before_bytes: int | None = None
+    ) -> MarkdownChange:
+        return cls("replace", path, _require_bytes(content), max_before_bytes)
 
     @classmethod
-    def delete(cls, path: str) -> MarkdownChange:
-        return cls("delete", path, None)
+    def delete(cls, path: str, *, max_before_bytes: int | None = None) -> MarkdownChange:
+        return cls("delete", path, None, max_before_bytes)
 
 
 @dataclass(frozen=True)
@@ -956,15 +961,22 @@ class MarkdownCoordinator:
         try:
             for position, change in enumerate(normalized):
                 target = self._target(change.path)
-                before, parent_identity = self._capture_target(target)
+                before, parent_identity = self._capture_target(
+                    target, max_before_bytes=change.max_before_bytes
+                )
                 if change.kind == "create" and before is not None:
                     raise FileExistsError(change.path)
                 if change.kind in {"replace", "delete"} and before is None:
                     raise FileNotFoundError(change.path)
                 after = change.content
+                before_hash = ABSENT if before is None else sha256_bytes(before)
+                expected_before = persisted_preconditions.get(change.path)
+                if expected_before is not None and expected_before != before_hash:
+                    raise ValueError(
+                        f"target precondition changed before prepare: {change.path}"
+                    )
                 before_description = self._stage_state(before_root, position, before)
                 after_description = self._stage_state(after_root, position, after)
-                before_hash = ABSENT if before is None else sha256_bytes(before)
                 after_hash = ABSENT if after is None else sha256_bytes(after)
                 operations.append(
                     MarkdownOperation(change.kind, change.path, before_hash, after_hash)
@@ -2094,6 +2106,12 @@ class MarkdownCoordinator:
                 raise ValueError("delete content must be absent")
         elif not isinstance(change.content, bytes):
             raise TypeError("create and replace content must be bytes")
+        if change.max_before_bytes is not None and (
+            isinstance(change.max_before_bytes, bool)
+            or not isinstance(change.max_before_bytes, int)
+            or change.max_before_bytes < 0
+        ):
+            raise ValueError("max_before_bytes must be a non-negative integer or None")
         self._target(change.path)
         return change
 
@@ -2239,11 +2257,13 @@ class MarkdownCoordinator:
             raise RuntimeError(f"parent identity is not a stable directory: {parent}")
         return metadata.st_dev, metadata.st_ino
 
-    def _capture_target(self, target: Path) -> tuple[bytes | None, tuple[int, int]]:
+    def _capture_target(
+        self, target: Path, *, max_before_bytes: int | None = None
+    ) -> tuple[bytes | None, tuple[int, int]]:
         if not _use_posix_dir_fd():
             with self._hold_windows_parent(target.parent):
                 before = self._parent_identity(target.parent)
-                content = self._read_target(target)
+                content = self._read_bounded_target(target, max_before_bytes)
                 if self._parent_identity(target.parent) != before:
                     raise RuntimeError(f"parent identity changed while reading {target}")
                 return content, before
@@ -2252,12 +2272,144 @@ class MarkdownCoordinator:
         try:
             metadata = os.fstat(descriptor)
             identity = (metadata.st_dev, metadata.st_ino)
-            content = self._read_from_parent(descriptor, target.name)
+            content = self._read_bounded_from_parent(
+                descriptor, target.name, max_before_bytes
+            )
             if self._parent_identity(target.parent) != identity:
                 raise RuntimeError(f"parent identity changed while reading {target}")
             return content, identity
         finally:
             os.close(descriptor)
+
+    def _read_bounded_target(self, target: Path, max_bytes: int | None) -> bytes | None:
+        try:
+            before = os.lstat(target)
+        except FileNotFoundError:
+            return None
+        self._validate_capture_metadata(before, target, max_bytes)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        try:
+            descriptor = os.open(target, flags)
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"transaction target cannot be opened safely: {target}") from exc
+        try:
+            content, after = self._read_stable_descriptor(
+                descriptor, before, target, max_bytes
+            )
+            try:
+                current = os.lstat(target)
+            except FileNotFoundError as exc:
+                raise ValueError(f"transaction target changed while reading: {target}") from exc
+            if not self._same_capture_snapshot(after, current):
+                raise ValueError(f"transaction target changed while reading: {target}")
+            return content
+        finally:
+            os.close(descriptor)
+
+    def _read_bounded_from_parent(
+        self, parent_descriptor: int, name: str, max_bytes: int | None
+    ) -> bytes | None:
+        try:
+            before = os.stat(
+                name, dir_fd=parent_descriptor, follow_symlinks=False
+            )
+        except FileNotFoundError:
+            return None
+        self._validate_capture_metadata(before, Path(name), max_bytes)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        try:
+            descriptor = os.open(name, flags, dir_fd=parent_descriptor)
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"transaction target cannot be opened safely: {name}") from exc
+        try:
+            content, after = self._read_stable_descriptor(
+                descriptor, before, Path(name), max_bytes
+            )
+            try:
+                current = os.stat(
+                    name, dir_fd=parent_descriptor, follow_symlinks=False
+                )
+            except FileNotFoundError as exc:
+                raise ValueError(f"transaction target changed while reading: {name}") from exc
+            if not self._same_capture_snapshot(after, current):
+                raise ValueError(f"transaction target changed while reading: {name}")
+            return content
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    def _validate_capture_metadata(
+        metadata: os.stat_result, target: Path, max_bytes: int | None
+    ) -> None:
+        attributes = getattr(metadata, "st_file_attributes", 0)
+        is_reparse = bool(
+            attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        )
+        if stat.S_ISLNK(metadata.st_mode) or is_reparse:
+            raise ValueError(f"transaction target is a link: {target}")
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"transaction target is not a regular file: {target}")
+        if max_bytes is not None and metadata.st_size > max_bytes:
+            raise ValueError(f"transaction target exceeds {max_bytes} bytes: {target}")
+
+    def _read_stable_descriptor(
+        self,
+        descriptor: int,
+        before: os.stat_result,
+        target: Path,
+        max_bytes: int | None,
+    ) -> tuple[bytes, os.stat_result]:
+        opened = os.fstat(descriptor)
+        if not self._same_capture_identity(before, opened):
+            raise ValueError(f"transaction target changed before open: {target}")
+        self._validate_capture_metadata(opened, target, max_bytes)
+        if max_bytes is None:
+            with os.fdopen(os.dup(descriptor), "rb") as handle:
+                content = handle.read()
+        else:
+            chunks: list[bytes] = []
+            remaining = max_bytes + 1
+            while remaining:
+                chunk = os.read(descriptor, min(remaining, 1024 * 1024))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            content = b"".join(chunks)
+        after = os.fstat(descriptor)
+        if not self._same_capture_snapshot(opened, after) or len(content) != after.st_size:
+            raise ValueError(f"transaction target changed while reading: {target}")
+        if max_bytes is not None and len(content) > max_bytes:
+            raise ValueError(f"transaction target exceeds {max_bytes} bytes: {target}")
+        return content, after
+
+    @staticmethod
+    def _same_capture_identity(left: os.stat_result, right: os.stat_result) -> bool:
+        return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+    @classmethod
+    def _same_capture_snapshot(cls, left: os.stat_result, right: os.stat_result) -> bool:
+        return cls._same_capture_identity(left, right) and (
+            left.st_mode,
+            left.st_size,
+            left.st_mtime_ns,
+            left.st_ctime_ns,
+        ) == (
+            right.st_mode,
+            right.st_size,
+            right.st_mtime_ns,
+            right.st_ctime_ns,
+        )
 
     @contextlib.contextmanager
     def _stable_parent(self, row: sqlite3.Row) -> Iterator[tuple[Path, int | None]]:

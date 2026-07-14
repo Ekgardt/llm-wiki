@@ -109,6 +109,65 @@ def test_prepare_captures_before_images_and_fsyncs_every_artifact(
         assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in synced)
 
 
+def test_prepare_rejects_oversized_before_image_without_artifact(
+    vault: Path, state_root: Path
+):
+    target = vault / "knowledge/notes/page.md"
+    target.write_bytes(b"12345")
+    coordinator = MarkdownCoordinator(vault, state_root)
+
+    with pytest.raises(ValueError, match="exceeds 4 bytes"):
+        coordinator.prepare(
+            [
+                MarkdownChange.replace(
+                    "knowledge/notes/page.md",
+                    b"after",
+                    max_before_bytes=4,
+                )
+            ],
+            operation_id="bounded-before",
+        )
+
+    assert list(coordinator.transaction_root.iterdir()) == []
+    with coordinator._connect() as database:
+        assert database.execute('SELECT * FROM "transaction"').fetchall() == []
+
+
+def test_prepare_rejects_target_replaced_between_lstat_and_open(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    target = vault / "knowledge/notes/page.md"
+    target.write_bytes(b"before")
+    replacement = target.with_name("replacement.tmp")
+    real_open = markdown_transaction.os.open
+    replaced = False
+
+    def replace_before_open(path, flags, *args, **kwargs):
+        nonlocal replaced
+        if Path(path).name == target.name and not replaced:
+            replacement.write_bytes(b"external")
+            os.replace(replacement, target)
+            replaced = True
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(markdown_transaction.os, "open", replace_before_open)
+    coordinator = MarkdownCoordinator(vault, state_root)
+
+    with pytest.raises(ValueError, match="changed before open"):
+        coordinator.prepare(
+            [
+                MarkdownChange.replace(
+                    "knowledge/notes/page.md",
+                    b"after",
+                    max_before_bytes=16,
+                )
+            ],
+            operation_id="replaced-before-open",
+        )
+
+    assert list(coordinator.transaction_root.iterdir()) == []
+
+
 def test_artifacts_are_created_owner_only_without_an_umask_window(
     vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ):

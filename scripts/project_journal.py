@@ -681,12 +681,20 @@ class ProjectStore:
         state_path = f"knowledge/projects/{slug}/state.md"
         current_state = self._read_projection_bytes(slug)
         changes = [
-            MarkdownChange.replace(journal_path, journal)
+            MarkdownChange.replace(
+                journal_path, journal, max_before_bytes=MAX_JOURNAL_BYTES
+            )
             if current_journal
-            else MarkdownChange.create(journal_path, journal),
-            MarkdownChange.replace(state_path, state)
+            else MarkdownChange.create(
+                journal_path, journal, max_before_bytes=MAX_JOURNAL_BYTES
+            ),
+            MarkdownChange.replace(
+                state_path, state, max_before_bytes=MAX_PROJECTION_BYTES
+            )
             if current_state is not None
-            else MarkdownChange.create(state_path, state),
+            else MarkdownChange.create(
+                state_path, state, max_before_bytes=MAX_PROJECTION_BYTES
+            ),
         ]
         preconditions: dict[str, object] = {
             "project_lease": {
