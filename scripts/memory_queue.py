@@ -710,7 +710,7 @@ class MemoryQueue:
             except OSError:
                 pass
 
-    def acknowledge(self, lease: QueueLease) -> None:
+    def acknowledge(self, lease: QueueLease) -> QueueTask:
         now = _as_utc(self._clock())
         with self._connect() as connection, begin_immediate(connection):
             row = self._require_lease(connection, lease, now)
@@ -732,6 +732,7 @@ class MemoryQueue:
                 self._finish_lease(
                     connection, lease.id, now, "succeeded", None, None
                 )
+        return self.get(lease.id)
 
     def fail(self, lease: QueueLease, failure: QueueFailure) -> None:
         if not failure.error_code:
@@ -1099,7 +1100,7 @@ def drain_with(
     processor: Callable[[dict], bool | DeferredResult], max_tasks: int = 10
 ) -> dict[str, int]:
     """Run handlers outside transactions and fence completion with a result marker."""
-    counts = {"ok": 0, "failed": 0, "skipped": 0}
+    counts = {"ok": 0, "failed": 0, "dead": 0, "skipped": 0}
     queue = _queue()
     owner = f"compat-{os.getpid()}-{uuid.uuid4().hex}"
     for _ in range(max_tasks):
@@ -1108,11 +1109,10 @@ def drain_with(
             break
         adopted = queue.adopt_published_result(lease, operation_id=lease.id)
         if adopted == "adopted":
-            queue.acknowledge(lease)
-            counts["ok"] += 1
+            _count_terminal(counts, queue.acknowledge(lease))
             continue
         if adopted == "corrupt":
-            counts["failed"] += 1
+            _count_terminal(counts, queue.get(lease.id))
             continue
         heartbeat = _LeaseHeartbeat(queue, lease)
         heartbeat.start()
@@ -1135,14 +1135,25 @@ def drain_with(
             if succeeded:
                 result = outcome.data if isinstance(outcome, DeferredResult) else b""
                 queue.publish_result(lease, operation_id=lease.id, result=result)
-                queue.acknowledge(lease)
-                counts["ok"] += 1
+                _count_terminal(counts, queue.acknowledge(lease))
             else:
                 queue.fail(lease, QueueFailure("processor_failed", retry_after=60))
-                counts["failed"] += 1
-        except LeaseFenceError:
+                _count_terminal(counts, queue.get(lease.id))
+        except (LeaseFenceError, ResultConflictError):
             counts["failed"] += 1
+            task = queue.get(lease.id)
+            if task.state == "dead":
+                counts["dead"] += 1
     return counts
+
+
+def _count_terminal(counts: dict[str, int], task: QueueTask) -> None:
+    if task.state == "succeeded":
+        counts["ok"] += 1
+        return
+    counts["failed"] += 1
+    if task.state == "dead":
+        counts["dead"] += 1
 
 
 def status() -> dict[str, Any]:
@@ -1244,7 +1255,7 @@ def _cli() -> int:
     if args.command == "drain":
         counts = drain_with(_manual_processor, max_tasks=20)
         print(f"drain complete: {counts}")
-        return 0
+        return 1 if counts["failed"] or counts["dead"] else 0
     print("dead tasks are retained; export-first purge is introduced in Task 7")
     return 0
 

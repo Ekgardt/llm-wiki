@@ -202,7 +202,9 @@ def test_heartbeat_result_and_acknowledge_are_fenced(
             action()
 
     reference = queue.publish_result(current, operation_id=task_id, result=b"new")
-    queue.acknowledge(current)
+    terminal = queue.acknowledge(current)
+    assert terminal.state == "succeeded"
+    assert terminal.error_code is None
     assert queue.get(task_id).state == "succeeded"
     assert (queue.state_root / reference).read_bytes() == b"new"
 
@@ -346,7 +348,7 @@ def test_drain_does_not_rerun_handler_after_publish_before_ack_crash(
         lambda task: calls.append(task["id"]) or DeferredResult(b"different"),
         max_tasks=1,
     )
-    assert counts == {"ok": 0, "failed": 0, "skipped": 0}
+    assert counts == {"ok": 0, "failed": 0, "dead": 0, "skipped": 0}
     assert calls == []
     assert queue.get(task_id).state == "succeeded"
 
@@ -399,7 +401,7 @@ def test_drain_adopts_orphaned_valid_result_before_handler(
         lambda task: calls.append(task["id"]) or DeferredResult(b"new-output"),
         max_tasks=1,
     )
-    assert counts == {"ok": 1, "failed": 0, "skipped": 0}
+    assert counts == {"ok": 1, "failed": 0, "dead": 0, "skipped": 0}
     assert calls == []
     task = queue.get(task_id)
     assert task.state == "succeeded"
@@ -430,7 +432,9 @@ def test_acknowledge_rejects_result_mutated_after_publish(
     else:
         result_path.write_bytes(b"corrupt")
 
-    queue.acknowledge(lease)
+    terminal = queue.acknowledge(lease)
+    assert terminal.state == "dead"
+    assert terminal.error_code == "result_corrupt"
     task = queue.get(task_id)
     assert task.state == "dead"
     assert task.error_code == "result_corrupt"
@@ -516,7 +520,7 @@ def test_orphan_adoption_rejects_invalid_full_metadata_before_handler(
     counts = memory_queue.drain_with(
         lambda task: calls.append(task["id"]) or DeferredResult(b"new"), max_tasks=1
     )
-    assert counts == {"ok": 0, "failed": 1, "skipped": 0}
+    assert counts == {"ok": 0, "failed": 1, "dead": 1, "skipped": 0}
     assert calls == []
     assert queue.get(task_id).state == "dead"
     assert queue.get(task_id).error_code == "result_corrupt"
@@ -649,7 +653,9 @@ def test_acknowledge_without_published_result_goes_dead(queue: MemoryQueue) -> N
     queue.enqueue("query", 1, {})
     lease = queue.claim("worker")
     assert lease is not None
-    queue.acknowledge(lease)
+    terminal = queue.acknowledge(lease)
+    assert terminal.state == "dead"
+    assert terminal.error_code == "result_corrupt"
     assert queue.get(lease.id).state == "dead"
     assert queue.get(lease.id).error_code == "result_corrupt"
 
@@ -890,6 +896,7 @@ def test_module_facade_preserves_v1_shapes(tmp_path: Path, monkeypatch: pytest.M
     assert memory_queue.drain_with(processor, max_tasks=1) == {
         "ok": 1,
         "failed": 0,
+        "dead": 0,
         "skipped": 0,
     }
     assert in_transaction == [False]
@@ -897,6 +904,41 @@ def test_module_facade_preserves_v1_shapes(tmp_path: Path, monkeypatch: pytest.M
     snapshot = memory_queue.status()
     assert snapshot["pending_total"] == 0
     assert snapshot["queue_dir"].endswith("run")
+
+
+def test_drain_counts_corrupt_acknowledgement_as_failed_and_dead(
+    tmp_path: Path, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import memory_queue
+
+    queue = MemoryQueue(tmp_path, clock=clock, rng=random.Random(15))
+    monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
+    task_id = queue.enqueue("query", 1, {})
+    real_acknowledge = queue.acknowledge
+
+    def corrupt_then_acknowledge(lease):
+        task = queue.get(lease.id)
+        (queue.state_root / task.result_reference).write_bytes(b"corrupt")
+        return real_acknowledge(lease)
+
+    monkeypatch.setattr(queue, "acknowledge", corrupt_then_acknowledge)
+    counts = memory_queue.drain_with(lambda task: True, max_tasks=1)
+    assert counts == {"ok": 0, "failed": 1, "dead": 1, "skipped": 0}
+    assert queue.get(task_id).state == "dead"
+
+
+def test_cli_drain_returns_nonzero_for_failed_or_dead_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import memory_queue
+
+    monkeypatch.setattr(sys, "argv", ["memory_queue.py", "drain"])
+    monkeypatch.setattr(
+        memory_queue,
+        "drain_with",
+        lambda processor, max_tasks: {"ok": 0, "failed": 1, "dead": 1, "skipped": 0},
+    )
+    assert memory_queue._cli() == 1
 
 
 def test_compat_processor_receives_preclaim_metadata(

@@ -112,7 +112,7 @@ def test_drain_heartbeats_long_handler_past_270_seconds(
         lambda task: completed.wait(2),
         max_tasks=1,
     )
-    assert counts == {"ok": 1, "failed": 0, "skipped": 0}
+    assert counts == {"ok": 1, "failed": 0, "dead": 0, "skipped": 0}
     assert heartbeat_calls == [120] * 7
     assert waits[:7] == [40] * 7
     assert queue.get(task_id).state == "succeeded"
@@ -160,7 +160,7 @@ def test_drain_reports_failure_when_heartbeat_loses_fence(
         lambda task: fence_lost.wait(2),
         max_tasks=1,
     )
-    assert counts == {"ok": 0, "failed": 1, "skipped": 0}
+    assert counts == {"ok": 0, "failed": 1, "dead": 0, "skipped": 0}
     task = primary.get(task_id)
     assert replacement[0] is not None
     assert task.state == "leased"
