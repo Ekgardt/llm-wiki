@@ -43,6 +43,52 @@ def _grandchild_processor(task: dict) -> bool:
     return True
 
 
+def _exiting_grandchild_processor(task: dict) -> bool:
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    Path(task["payload"]["pid_path"]).write_text(str(child.pid), encoding="ascii")
+    return True
+
+
+def _malformed_grandchild_processor(task: dict) -> str:
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    Path(task["payload"]["pid_path"]).write_text(str(child.pid), encoding="ascii")
+    return "malformed"
+
+
+def _crashing_grandchild_processor(task: dict) -> bool:
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    Path(task["payload"]["pid_path"]).write_text(str(child.pid), encoding="ascii")
+    raise RuntimeError("processor crash")
+
+
+def _kill_test_process(pid: int) -> None:
+    if not memory_queue._pid_is_alive(pid):
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            check=False,
+            capture_output=True,
+        )
+    else:
+        os.kill(pid, signal.SIGKILL)
+
+
 class _MaxJitterRng:
     def getrandbits(self, bits: int) -> int:
         return 1 << (bits - 1)
@@ -240,15 +286,64 @@ def test_worker_timeout_kills_spawned_grandchild_tree(tmp_path: Path) -> None:
     try:
         assert not memory_queue._pid_is_alive(pid)
     finally:
-        if memory_queue._pid_is_alive(pid):
-            if os.name == "nt":
-                subprocess.run(
-                    ["taskkill", "/PID", str(pid), "/T", "/F"],
-                    check=False,
-                    capture_output=True,
-                )
-            else:
-                os.kill(pid, signal.SIGKILL)
+        _kill_test_process(pid)
+
+
+def test_worker_cleans_grandchild_before_returning_normal_result(tmp_path: Path) -> None:
+    pid_path = tmp_path / "normal-grandchild.pid"
+
+    try:
+        result = memory_queue._run_processor_child(
+            _exiting_grandchild_processor,
+            {"payload": {"pid_path": str(pid_path)}},
+            10,
+        )
+        pid = int(pid_path.read_text(encoding="ascii"))
+        assert result is True
+        assert not memory_queue._pid_is_alive(pid)
+    finally:
+        if pid_path.exists():
+            _kill_test_process(int(pid_path.read_text(encoding="ascii")))
+
+
+def test_worker_cleans_grandchild_before_reporting_malformed_result(
+    tmp_path: Path,
+) -> None:
+    pid_path = tmp_path / "malformed-grandchild.pid"
+
+    try:
+        with pytest.raises(memory_queue.QueueOperationError) as raised:
+            memory_queue._run_processor_child(
+                _malformed_grandchild_processor,
+                {"payload": {"pid_path": str(pid_path)}},
+                10,
+            )
+        pid = int(pid_path.read_text(encoding="ascii"))
+        assert raised.value.code == "processor_result_malformed"
+        assert not memory_queue._pid_is_alive(pid)
+    finally:
+        if pid_path.exists():
+            _kill_test_process(int(pid_path.read_text(encoding="ascii")))
+
+
+def test_worker_cleans_grandchild_before_reporting_processor_crash(
+    tmp_path: Path,
+) -> None:
+    pid_path = tmp_path / "crash-grandchild.pid"
+
+    try:
+        with pytest.raises(memory_queue.QueueOperationError) as raised:
+            memory_queue._run_processor_child(
+                _crashing_grandchild_processor,
+                {"payload": {"pid_path": str(pid_path)}},
+                10,
+            )
+        pid = int(pid_path.read_text(encoding="ascii"))
+        assert raised.value.code == "processor_exception"
+        assert not memory_queue._pid_is_alive(pid)
+    finally:
+        if pid_path.exists():
+            _kill_test_process(int(pid_path.read_text(encoding="ascii")))
 
 
 def test_worker_child_drains_one_megabyte_result_before_join() -> None:

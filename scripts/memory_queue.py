@@ -2274,16 +2274,22 @@ def _processor_child_entry(
     try:
         if os.name != "nt":
             os.setsid()
-        outcome = processor(task)
-        if isinstance(outcome, DeferredResult):
-            sender.send_bytes(b"D" + outcome.data)
-        else:
-            sender.send_bytes(b"T" if bool(outcome) else b"F")
-    except Exception:  # noqa: BLE001 - parent receives a stable code only
         try:
-            sender.send_bytes(b"E")
-        except (BrokenPipeError, EOFError, OSError):
-            pass
+            outcome = processor(task)
+            if isinstance(outcome, DeferredResult):
+                frame = b"D" + outcome.data
+            elif isinstance(outcome, bool):
+                frame = b"T" if outcome else b"F"
+            else:
+                frame = b"?"
+        except Exception:  # noqa: BLE001 - parent receives a stable code only
+            frame = b"E"
+        sender.send_bytes(b"R")
+        if not sender.poll(5) or sender.recv_bytes(1) != b"A":
+            return
+        sender.send_bytes(frame)
+    except Exception:  # noqa: BLE001 - parent receives a stable code only
+        pass
     finally:
         sender.close()
 
@@ -2402,17 +2408,30 @@ def _cleanup_confirmed(
     return platform_name == "nt" or not _process_group_alive(process.pid)
 
 
+_DISCOVER_DESCENDANTS = object()
+
+
 def _terminate_processor_child(
     process: multiprocessing.Process,
     *,
     platform_name: str | None = None,
     cleanup_timeout: float = 1.0,
-) -> None:
+    tracked_descendants: set[int] | None | object = _DISCOVER_DESCENDANTS,
+) -> set[int]:
     platform_name = platform_name or os.name
     direct_was_alive = process.is_alive()
-    if not direct_was_alive and platform_name == "nt":
+    discover_descendants = tracked_descendants is _DISCOVER_DESCENDANTS
+    if not direct_was_alive and platform_name == "nt" and discover_descendants:
         raise QueueOperationError("process_cleanup_failed")
-    descendants = _tracked_descendant_pids(process.pid, platform_name)
+    descendants = (
+        _tracked_descendant_pids(process.pid, platform_name)
+        if discover_descendants
+        else tracked_descendants
+    )
+    if descendants is not None and _cleanup_confirmed(
+        process, descendants, platform_name=platform_name
+    ):
+        return descendants
     tree_verified = False
     if platform_name == "nt":
         try:
@@ -2427,6 +2446,21 @@ def _terminate_processor_child(
             tree_verified = result.returncode == 0
         except (OSError, subprocess.SubprocessError):
             tree_verified = False
+        if descendants is not None:
+            for pid in descendants:
+                if not _pid_is_alive(pid):
+                    continue
+                try:
+                    subprocess.run(
+                        ["taskkill", "/PID", str(pid), "/T", "/F"],
+                        check=False,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=2,
+                    )
+                except (OSError, subprocess.SubprocessError):
+                    pass
     else:
         try:
             _kill_process_group(process.pid, signal.SIGTERM)
@@ -2464,6 +2498,7 @@ def _terminate_processor_child(
         )
     if not cleanup_verified or (platform_name != "nt" and not tree_verified):
         raise QueueOperationError("process_cleanup_failed")
+    return descendants
 
 
 def _decode_processor_frame(frame: bytes) -> bool | DeferredResult:
@@ -2492,19 +2527,38 @@ def _run_processor_child(
     if timeout <= 0:
         raise TimeoutError
     context = multiprocessing.get_context("spawn")
-    receiver, sender = context.Pipe(duplex=False)
+    receiver, sender = context.Pipe(duplex=True)
     process = context.Process(
         target=_processor_child_entry,
         args=(sender, processor, task),
         daemon=False,
     )
     deadline = time.monotonic() + timeout
+    tracked_descendants: set[int] | None = None
+    started = False
     try:
         process.start()
+        started = True
         sender.close()
         remaining = deadline - time.monotonic()
         if remaining <= 0 or not receiver.poll(remaining):
-            _terminate_processor_child(process)
+            tracked_descendants = _terminate_processor_child(process)
+            raise TimeoutError
+        try:
+            ready = receiver.recv_bytes(1)
+        except OSError:
+            raise QueueOperationError("processor_result_malformed") from None
+        except EOFError:
+            raise QueueOperationError("processor_result_malformed") from None
+        if ready != b"R":
+            raise QueueOperationError("processor_result_malformed")
+        tracked_descendants = _tracked_descendant_pids(process.pid, os.name)
+        receiver.send_bytes(b"A")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not receiver.poll(remaining):
+            tracked_descendants = _terminate_processor_child(
+                process, tracked_descendants=tracked_descendants
+            )
             raise TimeoutError
         try:
             frame = receiver.recv_bytes(_MAX_RESULT_BYTES + 1)
@@ -2512,27 +2566,33 @@ def _run_processor_child(
             receiver.close()
             process.join(0.5)
             if process.is_alive():
-                _terminate_processor_child(process)
+                tracked_descendants = _terminate_processor_child(
+                    process, tracked_descendants=tracked_descendants
+                )
             raise QueueOperationError("processor_result_oversize") from None
         except EOFError:
-            if process.is_alive():
-                _terminate_processor_child(process)
             raise QueueOperationError("processor_result_malformed") from None
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            _terminate_processor_child(process)
+            tracked_descendants = _terminate_processor_child(
+                process, tracked_descendants=tracked_descendants
+            )
             raise TimeoutError
         process.join(remaining)
         if process.is_alive():
-            _terminate_processor_child(process)
+            tracked_descendants = _terminate_processor_child(
+                process, tracked_descendants=tracked_descendants
+            )
             raise TimeoutError
         if process.exitcode != 0:
             raise QueueOperationError("processor_child_failed")
         return _decode_processor_frame(frame)
     finally:
         receiver.close()
-        if process.is_alive():
-            _terminate_processor_child(process)
+        if started:
+            _terminate_processor_child(
+                process, tracked_descendants=tracked_descendants
+            )
 
 
 def _work_one(
