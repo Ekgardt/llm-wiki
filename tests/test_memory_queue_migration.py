@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import subprocess
 import sys
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -86,7 +89,7 @@ def test_migration_imports_json_and_dead_processing_before_marker(
     assert first.payload["password"] == "[REDACTED]"
 
 
-def test_live_processing_owner_aborts_without_marker_or_database(
+def test_live_processing_owner_aborts_without_marker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write_legacy(
@@ -105,7 +108,7 @@ def test_live_processing_owner_aborts_without_marker_or_database(
 
     assert raised.value.code == "legacy_owner_live"
     assert not (tmp_path / "run" / "queue-migrated-v2").exists()
-    assert not (tmp_path / "run" / "queue.sqlite3").exists()
+    assert (tmp_path / "run" / "queue.sqlite3").is_file()
 
 
 def test_concurrent_migration_has_one_exclusive_owner(
@@ -142,6 +145,137 @@ def test_concurrent_migration_has_one_exclusive_owner(
     assert sum(isinstance(item, memory_queue.MigrationReceipt) for item in outcomes) == 1
     busy = [item for item in outcomes if isinstance(item, MigrationBusy)]
     assert len(busy) == 1 and busy[0].code == "migration_busy"
+
+
+def test_sqlite_owner_takeover_is_epoch_fenced_and_release_is_token_fenced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
+    first = memory_queue._acquire_queue_owner(
+        tmp_path, "migration", "migration_busy", now=now, ttl_seconds=10
+    )
+    monkeypatch.setattr(memory_queue, "_pid_is_alive", lambda pid: False)
+    second = memory_queue._acquire_queue_owner(
+        tmp_path,
+        "migration",
+        "migration_busy",
+        now=now + timedelta(seconds=1),
+        ttl_seconds=10,
+    )
+
+    assert second.epoch == first.epoch + 1
+    with pytest.raises(memory_queue.QueueOperationError) as raised:
+        memory_queue._heartbeat_queue_owner(first, now=now + timedelta(seconds=2))
+    assert raised.value.code == "migration_fence_lost"
+    assert memory_queue._release_queue_owner(first) is False
+    assert memory_queue._release_queue_owner(second) is True
+    assert not list((tmp_path / "run").glob("queue-*.lock"))
+
+
+def test_migration_fence_loss_aborts_before_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_legacy(tmp_path, "legacy.json", _legacy_task())
+    real_scan = memory_queue._scan_legacy_records
+
+    def steal_after_scan(path: Path):
+        records = real_scan(path)
+        with sqlite3.connect(tmp_path / "run" / "queue.sqlite3") as connection:
+            connection.execute(
+                """UPDATE queue_ownership
+                   SET token='replacement', epoch=epoch+1,
+                       expires_at='2099-01-01T00:00:00+00:00'
+                   WHERE role='migration'"""
+            )
+        return records
+
+    monkeypatch.setattr(memory_queue, "_scan_legacy_records", steal_after_scan)
+
+    with pytest.raises(memory_queue.QueueOperationError) as raised:
+        memory_queue.migrate_legacy_queue(tmp_path)
+
+    assert raised.value.code == "migration_fence_lost"
+    assert not (tmp_path / "run" / "queue-migrated-v2").exists()
+
+
+def test_two_subprocess_contenders_over_stale_owner_run_exactly_one_migration(
+    tmp_path: Path,
+) -> None:
+    _write_legacy(tmp_path, "legacy.json", _legacy_task())
+    stale = memory_queue._acquire_queue_owner(
+        tmp_path,
+        "migration",
+        "migration_busy",
+        now=datetime(2020, 1, 1, tzinfo=timezone.utc),
+        ttl_seconds=1,
+    )
+    with sqlite3.connect(tmp_path / "run" / "queue.sqlite3") as connection:
+        connection.execute(
+            "UPDATE queue_ownership SET pid=999999999 WHERE role='migration'"
+        )
+    start = tmp_path / "start"
+    release = tmp_path / "release"
+    entered = tmp_path / "entered"
+    script = r"""
+import json, sys, time
+from pathlib import Path
+import memory_queue as mq
+root, start, release, entered = map(Path, sys.argv[1:])
+real_scan = mq._scan_legacy_records
+def paused(path):
+    entered.write_text(str(mq.os.getpid()), encoding="ascii")
+    deadline = time.monotonic() + 10
+    while not release.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return real_scan(path)
+mq._scan_legacy_records = paused
+while not start.exists():
+    time.sleep(0.01)
+try:
+    receipt = mq.migrate_legacy_queue(root)
+    print(json.dumps({"state": "migrated", "imported": receipt.imported}))
+except mq.MigrationBusy as exc:
+    print(json.dumps({"state": "busy", "code": exc.code}))
+"""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(SCRIPTS_DIR)
+    processes = [
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                script,
+                str(tmp_path),
+                str(start),
+                str(release),
+                str(entered),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        for _ in range(2)
+    ]
+    start.write_text("go", encoding="ascii")
+    deadline = time.monotonic() + 10
+    while not entered.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert entered.exists()
+    while not any(process.poll() is not None for process in processes) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert sum(process.poll() is not None for process in processes) == 1
+    release.write_text("go", encoding="ascii")
+    outputs = []
+    for process in processes:
+        stdout, stderr = process.communicate(timeout=15)
+        assert process.returncode == 0, stderr
+        outputs.append(json.loads(stdout))
+
+    assert sum(item["state"] == "migrated" for item in outputs) == 1
+    assert sum(item["state"] == "busy" for item in outputs) == 1
+    assert not list((tmp_path / "run").glob("queue-*.lock"))
+    assert stale.epoch >= 1
 
 
 def test_late_upgraded_legacy_write_cannot_recreate_queue_during_migration(

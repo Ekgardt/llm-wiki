@@ -155,6 +155,17 @@ class MigrationReceipt:
 
 
 @dataclass(frozen=True)
+class QueueOwnerLease:
+    state_root: Path
+    role: str
+    token: str
+    pid: int
+    epoch: int
+    expires_at: datetime
+    ttl_seconds: int
+
+
+@dataclass(frozen=True)
 class WorkerSummary:
     processed: int
     succeeded: int
@@ -1226,67 +1237,180 @@ def _migration_paths(state_root: Path) -> tuple[Path, Path, Path, Path]:
     return (
         run_dir,
         run_dir / "queue",
-        run_dir / "queue-migration.lock",
+        run_dir / "queue.sqlite3",
         run_dir / "queue-migrated-v2",
     )
 
 
 def _legacy_write_allowed(state_root: Path) -> bool:
-    _run_dir, legacy_dir, lock, marker = _migration_paths(state_root)
+    _run_dir, legacy_dir, _db_path, marker = _migration_paths(state_root)
     if marker.exists():
         if legacy_dir.exists():
             _post_marker_legacy_conflict(state_root)
         raise LegacyBackendDisabled("legacy_backend_disabled")
-    if lock.exists():
+    if _queue_owner_is_active(state_root, "migration"):
         raise LegacyBackendDisabled("legacy_migration_quiesced")
     return True
 
 
-def _legacy_owner_path(state_root: Path) -> Path:
-    return Path(state_root).resolve() / "run" / "queue-owner.lock"
-
-
-def _acquire_migration_lock(lock: Path) -> str:
-    return _acquire_owner_file(lock, "migration_busy")
-
-
-def _acquire_owner_file(lock: Path, busy_code: str) -> str:
-    owner = f"{os.getpid()}:{uuid.uuid4().hex}"
-    lock.parent.mkdir(parents=True, exist_ok=True)
-    _harden_owner_only(lock.parent, 0o700)
-    for _ in range(2):
-        try:
-            descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            try:
-                existing = lock.read_text(encoding="ascii").split(":", 1)[0]
-                pid = int(existing)
-            except (OSError, ValueError):
-                raise MigrationBusy(busy_code) from None
-            if _pid_is_alive(pid):
-                raise MigrationBusy(busy_code)
-            try:
-                lock.unlink()
-            except OSError:
-                raise MigrationBusy(busy_code) from None
-            continue
-        with os.fdopen(descriptor, "w", encoding="ascii") as handle:
-            handle.write(owner)
-            handle.flush()
-            os.fsync(handle.fileno())
-        _harden_owner_only(lock, 0o600)
-        fsync_directory(lock.parent)
-        return owner
-    raise MigrationBusy(busy_code)
-
-
-def _release_migration_lock(lock: Path, owner: str) -> None:
+def _open_queue_ownership_db(state_root: Path) -> sqlite3.Connection:
+    run_dir, _legacy_dir, db_path, _marker = _migration_paths(state_root)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    _harden_owner_only(run_dir, 0o700)
+    connection = open_operational_db(db_path, busy_ms=DEFAULTS.queue_busy_ms)
     try:
-        if lock.read_text(encoding="ascii") == owner:
-            lock.unlink()
-            fsync_directory(lock.parent)
-    except OSError:
-        pass
+        _harden_owner_only(db_path, 0o600)
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS queue_ownership (
+                   role TEXT PRIMARY KEY,
+                   token TEXT,
+                   pid INTEGER,
+                   heartbeat_at TEXT,
+                   expires_at TEXT,
+                   epoch INTEGER NOT NULL CHECK (epoch >= 0)
+               )"""
+        )
+        connection.commit()
+    except Exception:
+        connection.close()
+        raise
+    return connection
+
+
+def _acquire_queue_owner(
+    state_root: Path,
+    role: str,
+    busy_code: str,
+    *,
+    now: datetime | None = None,
+    ttl_seconds: int = DEFAULTS.queue_lease_seconds,
+) -> QueueOwnerLease:
+    if not role or ttl_seconds <= 0:
+        raise ValueError("owner role and ttl must be valid")
+    acquired_at = _as_utc(now or _utc_now())
+    token = uuid.uuid4().hex
+    pid = os.getpid()
+    expires_at = acquired_at + timedelta(seconds=ttl_seconds)
+    with _open_queue_ownership_db(state_root) as connection, begin_immediate(connection):
+        row = connection.execute(
+            "SELECT * FROM queue_ownership WHERE role=?", (role,)
+        ).fetchone()
+        epoch = 1
+        if row is not None:
+            epoch = int(row["epoch"]) + 1
+            existing_token = row["token"]
+            if existing_token is not None:
+                existing_expiry = _parse_timestamp(row["expires_at"])
+                existing_pid = row["pid"]
+                expired = existing_expiry is None or existing_expiry <= acquired_at
+                dead = not isinstance(existing_pid, int) or not _pid_is_alive(existing_pid)
+                if not expired and not dead:
+                    raise MigrationBusy(busy_code)
+            connection.execute(
+                """UPDATE queue_ownership
+                   SET token=?, pid=?, heartbeat_at=?, expires_at=?, epoch=?
+                   WHERE role=?""",
+                (
+                    token,
+                    pid,
+                    _timestamp(acquired_at),
+                    _timestamp(expires_at),
+                    epoch,
+                    role,
+                ),
+            )
+        else:
+            connection.execute(
+                """INSERT INTO queue_ownership(
+                       role, token, pid, heartbeat_at, expires_at, epoch
+                   ) VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    role,
+                    token,
+                    pid,
+                    _timestamp(acquired_at),
+                    _timestamp(expires_at),
+                    epoch,
+                ),
+            )
+    return QueueOwnerLease(
+        Path(state_root).resolve(), role, token, pid, epoch, expires_at, ttl_seconds
+    )
+
+
+def _require_queue_owner(
+    connection: sqlite3.Connection,
+    lease: QueueOwnerLease,
+    now: datetime,
+    *,
+    heartbeat: bool,
+) -> datetime:
+    row = connection.execute(
+        "SELECT * FROM queue_ownership WHERE role=?", (lease.role,)
+    ).fetchone()
+    expiry = _parse_timestamp(row["expires_at"]) if row is not None else None
+    if (
+        row is None
+        or row["token"] != lease.token
+        or int(row["epoch"]) != lease.epoch
+        or expiry is None
+        or expiry <= now
+    ):
+        code = "migration_fence_lost" if lease.role == "migration" else "legacy_owner_fence_lost"
+        raise QueueOperationError(code)
+    if heartbeat:
+        expiry = now + timedelta(seconds=lease.ttl_seconds)
+        connection.execute(
+            """UPDATE queue_ownership SET heartbeat_at=?, expires_at=?
+               WHERE role=? AND token=? AND epoch=?""",
+            (
+                _timestamp(now),
+                _timestamp(expiry),
+                lease.role,
+                lease.token,
+                lease.epoch,
+            ),
+        )
+    return expiry
+
+
+def _heartbeat_queue_owner(
+    lease: QueueOwnerLease, *, now: datetime | None = None
+) -> QueueOwnerLease:
+    heartbeat_at = _as_utc(now or _utc_now())
+    with _open_queue_ownership_db(lease.state_root) as connection, begin_immediate(connection):
+        expires_at = _require_queue_owner(
+            connection, lease, heartbeat_at, heartbeat=True
+        )
+    return replace(lease, expires_at=expires_at)
+
+
+def _release_queue_owner(lease: QueueOwnerLease) -> bool:
+    with _open_queue_ownership_db(lease.state_root) as connection, begin_immediate(connection):
+        changed = connection.execute(
+            """UPDATE queue_ownership
+               SET token=NULL, pid=NULL, heartbeat_at=NULL, expires_at=NULL
+               WHERE role=? AND token=? AND epoch=?""",
+            (lease.role, lease.token, lease.epoch),
+        ).rowcount
+    return changed == 1
+
+
+def _queue_owner_is_active(state_root: Path, role: str) -> bool:
+    now = _utc_now()
+    with _open_queue_ownership_db(state_root) as connection:
+        row = connection.execute(
+            "SELECT token, pid, expires_at FROM queue_ownership WHERE role=?", (role,)
+        ).fetchone()
+    if row is None or row["token"] is None:
+        return False
+    expiry = _parse_timestamp(row["expires_at"])
+    return (
+        expiry is not None
+        and expiry > now
+        and isinstance(row["pid"], int)
+        and _pid_is_alive(row["pid"])
+    )
 
 
 def _read_bounded_regular_nofollow(path: Path) -> bytes:
@@ -1476,11 +1600,10 @@ def _quarantine_legacy_directory(run_dir: Path, legacy_dir: Path, *, code: str) 
 
 
 def _post_marker_legacy_conflict(state_root: Path) -> None:
-    run_dir, legacy_dir, _lock, marker = _migration_paths(state_root)
+    run_dir, legacy_dir, _db_path, marker = _migration_paths(state_root)
     if not marker.exists() or not legacy_dir.exists():
         return
-    owner_path = _legacy_owner_path(state_root)
-    owner = _acquire_owner_file(owner_path, "legacy_owner_busy")
+    owner = _acquire_queue_owner(state_root, "legacy", "legacy_owner_busy")
     try:
         if legacy_dir.exists():
             _quarantine_legacy_directory(
@@ -1488,7 +1611,7 @@ def _post_marker_legacy_conflict(state_root: Path) -> None:
             )
             raise LegacyBackendDisabled("legacy_backend_conflict")
     finally:
-        _release_migration_lock(owner_path, owner)
+        _release_queue_owner(owner)
 
 
 def _legacy_enqueue_file(
@@ -1496,8 +1619,7 @@ def _legacy_enqueue_file(
 ) -> str:
     root = Path(state_root or _state_root()).resolve()
     _legacy_write_allowed(root)
-    owner_path = _legacy_owner_path(root)
-    owner = _acquire_owner_file(owner_path, "legacy_owner_busy")
+    owner = _acquire_queue_owner(root, "legacy", "legacy_owner_busy")
     try:
         _legacy_write_allowed(root)
         task_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
@@ -1517,7 +1639,7 @@ def _legacy_enqueue_file(
         )
         return task_id
     finally:
-        _release_migration_lock(owner_path, owner)
+        _release_queue_owner(owner)
 
 
 def _write_durable_file(path: Path, data: bytes) -> None:
@@ -1541,20 +1663,32 @@ def _write_durable_file(path: Path, data: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _commit_migration_marker(
+    lease: QueueOwnerLease, marker: Path, run_dir: Path
+) -> QueueOwnerLease:
+    now = _utc_now()
+    with _open_queue_ownership_db(lease.state_root) as connection, begin_immediate(connection):
+        expires_at = _require_queue_owner(connection, lease, now, heartbeat=True)
+        _write_durable_file(marker, canonical_json_bytes({"version": 2}))
+        fsync_directory(run_dir)
+    return replace(lease, expires_at=expires_at)
+
+
 def migrate_legacy_queue(state_root: Path) -> MigrationReceipt:
-    run_dir, legacy_dir, lock, marker = _migration_paths(state_root)
+    run_dir, legacy_dir, _db_path, marker = _migration_paths(state_root)
     if marker.exists():
         _post_marker_legacy_conflict(state_root)
         return MigrationReceipt(0, 0, (), ())
-    owner = _acquire_migration_lock(lock)
-    legacy_owner_path = _legacy_owner_path(state_root)
-    legacy_owner: str | None = None
+    owner = _acquire_queue_owner(state_root, "migration", "migration_busy")
+    legacy_owner: QueueOwnerLease | None = None
     try:
         if marker.exists():
             _post_marker_legacy_conflict(state_root)
             return MigrationReceipt(0, 0, (), ())
-        legacy_owner = _acquire_owner_file(legacy_owner_path, "legacy_owner_busy")
+        legacy_owner = _acquire_queue_owner(state_root, "legacy", "legacy_owner_busy")
+        owner = _heartbeat_queue_owner(owner)
         _prove_no_live_processing(legacy_dir)
+        owner = _heartbeat_queue_owner(owner)
         migration_inputs = sorted(run_dir.glob("queue-migration-*"))
         if migration_inputs and legacy_dir.exists():
             raise MigrationBusy("legacy_migration_conflict")
@@ -1568,11 +1702,13 @@ def migrate_legacy_queue(state_root: Path) -> MigrationReceipt:
             fsync_directory(run_dir)
         else:
             migration_input = None
+        owner = _heartbeat_queue_owner(owner)
         valid, malformed = (
             _scan_legacy_records(migration_input)
             if migration_input is not None
             else ([], [])
         )
+        owner = _heartbeat_queue_owner(owner)
         queue = MemoryQueue(Path(state_root)) if valid else None
         imported: list[str] = []
         for source, record in valid:
@@ -1580,27 +1716,28 @@ def migrate_legacy_queue(state_root: Path) -> MigrationReceipt:
                 raise AssertionError
             imported.append(_import_legacy_record(queue, record, source))
             source.unlink()
+            owner = _heartbeat_queue_owner(owner)
         for source, raw in malformed:
             _quarantine_legacy_record(run_dir, source, raw)
             source.unlink(missing_ok=True)
+            owner = _heartbeat_queue_owner(owner)
         if migration_input is not None:
             fsync_directory(migration_input)
             migration_input.rmdir()
             fsync_directory(run_dir)
+        owner = _heartbeat_queue_owner(owner)
         if legacy_dir.exists():
             _quarantine_legacy_directory(
                 run_dir, legacy_dir, code="legacy_backend_conflict"
             )
             raise LegacyBackendDisabled("legacy_backend_conflict")
-        marker_record = {"version": 2}
-        _write_durable_file(marker, canonical_json_bytes(marker_record))
-        fsync_directory(run_dir)
+        owner = _commit_migration_marker(owner, marker, run_dir)
         codes = ("legacy_invalid",) if malformed else ()
         return MigrationReceipt(len(imported), len(malformed), tuple(imported), codes)
     finally:
         if legacy_owner is not None:
-            _release_migration_lock(legacy_owner_path, legacy_owner)
-        _release_migration_lock(lock, owner)
+            _release_queue_owner(legacy_owner)
+        _release_queue_owner(owner)
 
 
 def _ensure_sqlite_enabled() -> None:
