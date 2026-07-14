@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -132,6 +133,7 @@ class ProjectProjection:
     changed_files: dict[str, str] = field(default_factory=dict)
     commands: dict[str, str] = field(default_factory=dict)
     verification: dict[str, str] = field(default_factory=dict)
+    legacy_context: str = ""
     last_applied_sequence: int = 0
 
 
@@ -523,6 +525,23 @@ def _require_slug(slug: str) -> str:
     return slug
 
 
+def _bootstrap_event_identity(slug: str, content: str) -> tuple[str, str, str]:
+    normalized = unicodedata.normalize("NFC", slug)
+    digest = hashlib.sha256(f"{normalized}\0{content}".encode()).hexdigest()
+    return (
+        f"bootstrap-state:{digest}",
+        f"bootstrap-state:v2:{digest}",
+        digest,
+    )
+
+
+def _bootstrap_operation_id(stable_hash: str, kind: str, index: int, value: str) -> str:
+    digest = hashlib.sha256(
+        f"{stable_hash}\0{kind}\0{index}\0{value}".encode()
+    ).hexdigest()[:24]
+    return f"bootstrap-{kind}-{digest}"
+
+
 def _require_owner(owner: str) -> str:
     if not isinstance(owner, str) or not owner.strip():
         raise ValueError("project lease owner must be a non-empty string")
@@ -687,7 +706,7 @@ class ProjectStore:
         _require_owner(owner)
         normalized_event = self.coordinator.normalize_project_checkpoint(slug, event)
         self.recover(slug, writer_wait_seconds=writer_wait_seconds)
-        if normalized_event["occurrence_id"] != f"bootstrap-state:{slug}":
+        if normalized_event.get("trigger") != "legacy_state_bootstrap":
             bootstrap = self._legacy_bootstrap_event(slug, normalized_event)
             if bootstrap is not None:
                 self.checkpoint(
@@ -729,11 +748,18 @@ class ProjectStore:
         if state is None:
             return None
         text = state.decode("utf-8", errors="replace")
+        occurrence_id, idempotency_key, stable_hash = _bootstrap_event_identity(
+            slug, text
+        )
         provenance = event.get("provenance")
         if not isinstance(provenance, Mapping):
             return None
         worktree = provenance.get("worktree")
-        owned = re.search(r"^- Project root:\s*`([^`]+)`", text, re.MULTILINE)
+        owned = re.search(
+            r"^(?:-\s*)?(?:Source:\s*)?Project root:\s*`?([^`\r\n]+?)`?\s*$",
+            text,
+            re.MULTILINE | re.IGNORECASE,
+        )
         if not owned or not isinstance(worktree, str):
             return None
         try:
@@ -743,84 +769,143 @@ class ProjectStore:
             if owned.group(1) != worktree:
                 return None
 
-        def section(title: str) -> list[str]:
-            match = re.search(
-                rf"^## {re.escape(title)}\s*$\n(.*?)(?=^## |\Z)",
-                text,
-                re.MULTILINE | re.DOTALL,
-            )
-            if not match:
-                return []
+        def values(body: str) -> list[str]:
             values = []
-            for line in match.group(1).splitlines():
+            for line in body.splitlines():
                 value = re.sub(r"^-\s*(?:`[^`]+`:\s*)?", "", line).strip()
-                if value and value.lower() != "none":
-                    values.append(value)
+                if (
+                    value
+                    and value.lower() != "none"
+                    and not (value.startswith("<") and value.endswith(">"))
+                ):
+                    values.append(value[:4096])
             return values
 
-        goal = section("Goal")
-        phase = section("Phase")
-        task = section("Current task")
-        next_actions = section("Next actions")
-        decisions = section("Recent decisions")
-        blockers = section("Open blockers")
-        if not any((goal, phase, task, next_actions, decisions, blockers)):
+        sections: dict[str, list[str]] = {}
+        matches = list(re.finditer(r"^##\s+(.+?)\s*$", text, re.MULTILINE))
+        for index, match in enumerate(matches):
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+            sections[match.group(1).strip().casefold()] = values(text[match.end() : end])
+
+        def combined(*titles: str) -> list[str]:
+            return [
+                value
+                for title in titles
+                for value in sections.get(title.casefold(), [])
+            ]
+
+        goal = combined("Goal", "Project goal")
+        phase = combined("Phase", "Current phase")
+        task = combined("Current task", "Current work")
+        next_actions = combined("Next actions", "Next steps")
+        decisions = combined("Recent decisions", "Decisions")
+        blockers = combined("Open blockers", "Blockers", "Open threads")
+        changed_files = combined("Changed files", "Files changed")
+        commands = combined("Commands", "Commands run")
+        verification = combined("Verification", "Test results")
+
+        mapped_titles = {
+            "goal",
+            "project goal",
+            "phase",
+            "current phase",
+            "current task",
+            "current work",
+            "next actions",
+            "next steps",
+            "recent decisions",
+            "decisions",
+            "open blockers",
+            "blockers",
+            "open threads",
+            "changed files",
+            "files changed",
+            "commands",
+            "commands run",
+            "verification",
+            "test results",
+        }
+        legacy_parts: list[str] = []
+        summary = re.search(r"^One-sentence summary:\s*(.+)$", text, re.MULTILINE)
+        if summary and not summary.group(1).strip().startswith("<"):
+            legacy_parts.append(f"Summary: {summary.group(1).strip()}")
+        for title, section_values in sections.items():
+            if title in mapped_titles:
+                continue
+            if title == "source":
+                section_values = [
+                    value
+                    for value in section_values
+                    if not re.match(r"Project root:", value, re.IGNORECASE)
+                ]
+            if section_values:
+                legacy_parts.append(
+                    f"{title.title()}:\n" + "\n".join(f"- {value}" for value in section_values)
+                )
+        legacy_context = "\n\n".join(legacy_parts)[:16384]
+        if not any(
+            (
+                goal,
+                phase,
+                task,
+                next_actions,
+                decisions,
+                blockers,
+                changed_files,
+                commands,
+                verification,
+                legacy_context,
+            )
+        ):
             return None
         close = {"id": "checkpoint-none", "action": "close", "value": ""}
+
+        def scalar(name: str, items: list[str]) -> dict[str, str]:
+            if not items:
+                return dict(close)
+            value = items[-1]
+            return {
+                "id": _bootstrap_operation_id(stable_hash, name, 1, value),
+                "action": "upsert",
+                "value": value,
+            }
+
+        def operations(name: str, items: list[str], limit: int) -> list[dict[str, str]]:
+            return [
+                {
+                    "id": _bootstrap_operation_id(stable_hash, name, index, value),
+                    "action": "upsert",
+                    "value": value,
+                }
+                for index, value in enumerate(items[:limit], 1)
+            ]
+
         delta: dict[str, object] = {
-            "goal": (
-                {"id": "bootstrap-goal", "action": "upsert", "value": goal[-1]}
-                if goal
-                else dict(close)
-            ),
+            "goal": scalar("goal", goal),
             "goal_operations": [],
-            "phase": (
-                {"id": "bootstrap-phase", "action": "upsert", "value": phase[-1]}
-                if phase
-                else dict(close)
-            ),
+            "phase": scalar("phase", phase),
             "phase_operations": [],
-            "current_task": (
-                {"id": "bootstrap-task", "action": "upsert", "value": task[-1]}
-                if task
-                else dict(close)
-            ),
+            "current_task": scalar("task", task),
             "current_task_operations": [],
-            "next_actions": [
-                {"id": f"bootstrap-next-{index}", "action": "upsert", "value": value}
-                for index, value in enumerate(next_actions[:10], 1)
-            ],
-            "decisions": [
-                {
-                    "id": f"bootstrap-decision-{index}",
-                    "action": "upsert",
-                    "value": value,
-                }
-                for index, value in enumerate(decisions[:100], 1)
-            ],
-            "blockers": [
-                {
-                    "id": f"bootstrap-blocker-{index}",
-                    "action": "upsert",
-                    "value": value,
-                }
-                for index, value in enumerate(blockers[:100], 1)
-            ],
-            "changed_files": [],
-            "commands": [],
-            "verification": [],
+            "next_actions": operations("next", next_actions, 10),
+            "decisions": operations("decision", decisions, 100),
+            "blockers": operations("blocker", blockers, 100),
+            "changed_files": operations("file", changed_files, 100),
+            "commands": operations("command", commands, 100),
+            "verification": operations("verify", verification, 100),
+            "legacy_context": legacy_context,
         }
         seed_provenance = dict(provenance)
-        seed_provenance["source_event"] = "bootstrap-state"
+        seed_provenance["source_event"] = f"bootstrap-state:{stable_hash}"
         return {
             "schema_version": "project-checkpoint/v1",
-            "occurrence_id": f"bootstrap-state:{slug}",
-            "idempotency_key": f"bootstrap-state:v1:{slug}",
+            "occurrence_id": occurrence_id,
+            "idempotency_key": idempotency_key,
             "provenance": seed_provenance,
             "trigger": "legacy_state_bootstrap",
             "reason": "bootstrap_legacy_state",
             "delta": delta,
-            "evidence_event_ids": ["bootstrap-state"],
+            "evidence_event_ids": [f"bootstrap-state:{stable_hash}"],
         }
 
     def recover(
@@ -1077,6 +1162,7 @@ class ProjectStore:
         }
         project = "project"
         project_root = ""
+        legacy_context = ""
         last_sequence = 0
         for event in ordered:
             if not _validated:
@@ -1091,6 +1177,9 @@ class ProjectStore:
             last_sequence = sequence
             delta = event["delta"]
             assert isinstance(delta, Mapping)
+            context = delta.get("legacy_context")
+            if isinstance(context, str) and context:
+                legacy_context = context
             for name in ("goal", "phase", "current_task"):
                 operation = delta[name]
                 assert isinstance(operation, Mapping)
@@ -1149,6 +1238,9 @@ class ProjectStore:
             else:
                 lines.append("- None")
             lines.append("")
+        lines.append("## Legacy context")
+        lines.append(legacy_context or "- None")
+        lines.append("")
         return ("\n".join(lines).rstrip() + "\n").encode("utf-8")
 
     def projection(self, slug: str) -> ProjectProjection:
@@ -1160,6 +1252,9 @@ class ProjectStore:
             active.last_applied_sequence = int(event["sequence"])
             delta = event["delta"]
             assert isinstance(delta, Mapping)
+            context = delta.get("legacy_context")
+            if isinstance(context, str) and context:
+                active.legacy_context = context
             for name in ("goal", "phase", "current_task"):
                 operation = delta[name]
                 assert isinstance(operation, Mapping)

@@ -907,6 +907,95 @@ def test_owned_legacy_state_is_bootstrapped_before_first_empty_checkpoint(
         assert value in rendered
 
 
+@pytest.mark.parametrize(
+    ("fixture_name", "expected"),
+    [
+        (
+            "project-state-current.md",
+            [
+                "Preserve current goal",
+                "Preserve current phase",
+                "Preserve current task",
+                "Preserve current next action",
+                "Preserve current decision",
+                "Preserve current blocker",
+                "Preserve changed file",
+                "Preserve command",
+                "Preserve verification",
+            ],
+        ),
+        (
+            "project-state-older.md",
+            [
+                "Preserve older summary",
+                "Preserve older handoff",
+                "Preserve older stopping point",
+                "Preserve older decision",
+                "Preserve older open thread",
+                "Preserve Older Link",
+                "https://example.test/demo.git",
+                "Preserve older editorial context",
+            ],
+        ),
+    ],
+)
+def test_shipped_legacy_state_fixtures_preserve_every_nonempty_section(
+    project_store: ProjectStore,
+    vault: Path,
+    tmp_path: Path,
+    fixture_name: str,
+    expected: list[str],
+):
+    project_root = tmp_path / "legacy-fixture-project"
+    project_root.mkdir()
+    fixture = Path(__file__).parent / "fixtures" / fixture_name
+    source = fixture.read_text(encoding="utf-8").replace(
+        "{PROJECT_ROOT}", str(project_root)
+    )
+    state_path = vault / "knowledge/projects/demo/state.md"
+    state_path.write_text(source, encoding="utf-8")
+    event = checkpoint_event(
+        "session-end-fixture",
+        "session-end-fixture",
+        delta={
+            "goal": {"id": "checkpoint-none", "action": "close", "value": ""},
+            "phase": {"id": "checkpoint-none", "action": "close", "value": ""},
+            "current_task": {"id": "checkpoint-none", "action": "close", "value": ""},
+            "next_actions": [],
+            "decisions": [],
+            "blockers": [],
+            "changed_files": [],
+            "commands": [],
+            "verification": [],
+        },
+    )
+    event["provenance"]["worktree"] = str(project_root)
+
+    project_store.checkpoint("demo", event, "agent-a")
+
+    rendered = state_path.read_text(encoding="utf-8")
+    for value in expected:
+        assert value in rendered
+
+
+def test_bootstrap_identity_hashes_256_character_unicode_slug():
+    from project_journal import _bootstrap_event_identity
+
+    slug = "я" * 256
+    occurrence_id, idempotency_key, stable_hash = _bootstrap_event_identity(
+        slug, "meaningful legacy content"
+    )
+
+    assert slug not in occurrence_id
+    assert slug not in idempotency_key
+    assert len(occurrence_id) <= 256
+    assert len(idempotency_key) <= 256
+    assert len(stable_hash) == 64
+    assert (occurrence_id, idempotency_key, stable_hash) == _bootstrap_event_identity(
+        slug, "meaningful legacy content"
+    )
+
+
 def test_idempotency_key_deduplicates_a_new_occurrence(project_store: ProjectStore):
     first = project_store.checkpoint("demo", checkpoint_event(), "agent-a")
     duplicate = project_store.checkpoint(

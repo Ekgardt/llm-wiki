@@ -38,7 +38,8 @@
         "blockers": {"type": "array", "maxItems": 100, "items": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 256}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string", "maxLength": 4096}}, "additionalProperties": false}},
         "changed_files": {"type": "array", "maxItems": 100, "items": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 256}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string", "maxLength": 4096}}, "additionalProperties": false}},
         "commands": {"type": "array", "maxItems": 100, "items": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 256}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string", "maxLength": 4096}}, "additionalProperties": false}},
-        "verification": {"type": "array", "maxItems": 100, "items": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 256}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string", "maxLength": 4096}}, "additionalProperties": false}}
+        "verification": {"type": "array", "maxItems": 100, "items": {"type": "object", "required": ["id", "action", "value"], "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 256}, "action": {"enum": ["upsert", "close"]}, "value": {"type": "string", "maxLength": 4096}}, "additionalProperties": false}},
+        "legacy_context": {"type": "string", "maxLength": 16384}
       },
       "additionalProperties": false
     },

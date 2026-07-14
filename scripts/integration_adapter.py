@@ -171,7 +171,7 @@ def _canonical_project_delta(value: object) -> dict[str, object]:
         "verification",
     )
     operation_names = tuple(f"{name}_operations" for name in scalar_names)
-    if set(value) - set(scalar_names + list_names + operation_names):
+    if set(value) - set(scalar_names + list_names + operation_names + ("legacy_context",)):
         raise ValueError("invalid project delta")
     canonical = _empty_delta()
     for name in scalar_names:
@@ -184,6 +184,11 @@ def _canonical_project_delta(value: object) -> dict[str, object]:
         if not isinstance(operations, list) or len(operations) > 10_000:
             raise ValueError("invalid project delta")
         canonical[name] = [_canonical_delta_operation(item) for item in operations]
+    if "legacy_context" in value:
+        legacy_context = value["legacy_context"]
+        if not isinstance(legacy_context, str) or len(legacy_context) > 16384:
+            raise ValueError("invalid project delta")
+        canonical["legacy_context"] = legacy_context
     return canonical
 
 
@@ -424,6 +429,7 @@ def _empty_delta() -> dict[str, object]:
         "changed_files": [],
         "commands": [],
         "verification": [],
+        "legacy_context": "",
     }
 
 
@@ -495,6 +501,8 @@ def _split_project_delta(delta: Mapping[str, object]) -> list[dict[str, object]]
     chunks: list[dict[str, object]] = []
     for index in range(chunk_count):
         chunk = _empty_delta()
+        if index == 0 and isinstance(delta.get("legacy_context"), str):
+            chunk["legacy_context"] = delta["legacy_context"]
         for name, operations in scalar_operations.items():
             selected = operations[index * 100 : (index + 1) * 100]
             if selected:
@@ -654,6 +662,7 @@ def _merge_pending_checkpoints(
         )
     }
     evidence: list[str] = []
+    legacy_context: list[str] = []
     for item in items:
         event_id = str(item["event_id"])
         if event_id not in evidence:
@@ -664,6 +673,9 @@ def _merge_pending_checkpoints(
         assert isinstance(checkpoint, Mapping)
         delta = checkpoint["delta"]
         assert isinstance(delta, Mapping)
+        context = delta.get("legacy_context")
+        if isinstance(context, str) and context and context not in legacy_context:
+            legacy_context.append(context)
         for name, operations in scalar_operations.items():
             operations.extend(_scalar_delta_operations(delta, name))
         for name, operations in list_operations.items():
@@ -682,6 +694,8 @@ def _merge_pending_checkpoints(
             merged_delta[f"{name}_operations"] = operations
     for name, operations in list_operations.items():
         merged_delta[name] = list(operations.values())
+    if legacy_context:
+        merged_delta["legacy_context"] = "\n\n".join(legacy_context)[:16384]
 
     checkpoint = dict(items[-1]["checkpoint_event"])
     event_id = str(items[-1]["event_id"])
