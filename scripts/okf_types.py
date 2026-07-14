@@ -31,6 +31,10 @@ CANONICAL_TYPES: frozenset[str] = frozenset({
     "bootstrap-context",
 })
 
+# Quarantined staging documents only. These are deliberately not durable OKF
+# page types and must never be accepted under knowledge/notes/.
+INBOX_TYPES: frozenset[str] = frozenset({"claim-candidate"})
+
 NEVER_ARCHIVE_TYPES: frozenset[str] = frozenset({
     "skill",
     "rule",

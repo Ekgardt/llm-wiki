@@ -1,0 +1,5 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/claim-relations-v1.json",
+  "enum": ["equals", "has-state", "has-value", "member-of", "located-at", "starts-at", "ends-at", "uses", "depends-on"]
+}

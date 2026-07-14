@@ -32,6 +32,7 @@ Writes a report to `$LLM_WIKI_STATE_ROOT/logs/lint-YYYY-MM-DD.md`
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
 import sys
@@ -40,6 +41,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import read_stable_bytes  # noqa: E402
+from claims import (  # noqa: E402
+    CANDIDATE_SCHEMA,
+    MAX_CLAIM_PAGE_BYTES,
+    parse_claim_ledger,
+    validate_claim_record,
+)
 from evidence_resolver import (  # noqa: E402
     EvidenceResolutionError,
     EvidenceResolver,
@@ -47,7 +54,11 @@ from evidence_resolver import (  # noqa: E402
 )
 from memory_state import REPORTS_DIR, ROOT, STATE_ROOT, file_hash, load_state  # noqa: E402
 from okf_types import CANONICAL_TYPES as VALID_TYPES  # noqa: E402
-from okf_types import TYPE_ALIASES  # noqa: E402
+from okf_types import (
+    INBOX_TYPES,  # noqa: E402
+    TYPE_ALIASES,  # noqa: E402
+)
+from reliable_memory import canonical_json_bytes, validate_schema  # noqa: E402
 from vault_editorial import (  # noqa: E402
     BACKLINK_EXEMPT_NAMES,
     BROKEN_LINK_SKIP_NAMES,
@@ -342,6 +353,7 @@ TYPE_FIELD_RE = re.compile(r"^type:\s*(.+?)\s*$", re.MULTILINE)
 SUPERSEDED_BY_RE = re.compile(r"^superseded_by:\s*\[?\[?([^\]\n]+?)\]?\]?\s*$", re.MULTILINE)
 SOURCES_FIELD_RE = re.compile(r"^sources:", re.MULTILINE)
 SOURCE_SECTION_RE = re.compile(r"^##\s*(?:Source|Evidence|Provenance)", re.MULTILINE)
+CANDIDATE_JSON_RE = re.compile(r"(?ms)```json[ \t]*\r?\n([^\r\n]+)\r?\n```")
 
 
 # Page types where claims need provenance. Skill / rule / project-state
@@ -427,6 +439,47 @@ def check_invalid_type_value(pages: list[Path]) -> list[str]:
         if type_val and type_val not in VALID_TYPES:
             out.append(f"{_rel(md)} (type: {type_val!r} — not in canonical set)")
     return out
+
+
+def _validate_claim_schemas(pages: list[Path]) -> list[str]:
+    """Validate canonical claim ledgers and quarantined inbox candidates."""
+    findings: list[str] = []
+    for page in pages:
+        try:
+            raw = read_stable_bytes(
+                page, MAX_CLAIM_PAGE_BYTES, label="lint claim page"
+            )
+            text = raw.decode("utf-8", errors="strict")
+            frontmatter = FRONTMATTER_RE.match(text)
+            type_match = TYPE_FIELD_RE.search(frontmatter.group(1)) if frontmatter else None
+            page_type = type_match.group(1).strip().strip("\"'") if type_match else None
+            in_inbox = "inbox" in Path(page).parts
+            if page_type in INBOX_TYPES:
+                if not in_inbox:
+                    raise ValueError("claim-candidate is allowed only under knowledge/inbox")
+                matches = CANDIDATE_JSON_RE.findall(text)
+                if len(matches) != 1:
+                    raise ValueError("claim-candidate must embed exactly one JSON record")
+                encoded = matches[0].encode("utf-8")
+                candidate = json.loads(encoded)
+                if canonical_json_bytes(candidate) != encoded:
+                    raise ValueError("claim-candidate record is not restricted canonical JSON")
+                validate_schema(candidate, CANDIDATE_SCHEMA)
+                validate_claim_record(candidate["claim"])
+            else:
+                ledger = parse_claim_ledger(raw)
+                if ledger is None and b"## Claims" in raw:
+                    raise ValueError("Claims heading is malformed")
+        except (OSError, UnicodeDecodeError, ValueError, TypeError, KeyError) as exc:
+            try:
+                label = _rel(page)
+            except ValueError:
+                label = Path(page).as_posix()
+            findings.append(f"{label}: {exc}")
+    return findings
+
+
+check_claim_schemas = _validate_claim_schemas
 
 
 def check_missing_sources_section(pages: list[Path]) -> list[str]:
@@ -657,6 +710,7 @@ def run_checks(args: argparse.Namespace) -> dict[str, list[str]]:
         # Phase 6 temporal validity.
         "temporal_validity",
         "invalid_evidence",
+        "invalid_claim_schema",
         "contradictions",
     )}
 
@@ -703,6 +757,9 @@ def run_checks(args: argparse.Namespace) -> dict[str, list[str]]:
         findings["invalid_evidence"] += [
             f"[{label}] {x}" for x in check_evidence_references(pages)
         ]
+        findings["invalid_claim_schema"] += [
+            f"[{label}] {x}" for x in check_claim_schemas(pages)
+        ]
         all_pages_for_contradictions += pages
 
     # OKF frontmatter conformance for skills/ and rules/ (AGENTS.md contract).
@@ -722,6 +779,10 @@ def run_checks(args: argparse.Namespace) -> dict[str, list[str]]:
             findings["missing_required_type"] += [
                 f"[{extra_label}] {x}" for x in check_missing_required_type(extra_pages)
             ]
+        inbox_candidates = _iter_tree_md(ROOT / "knowledge" / "inbox")
+        findings["invalid_claim_schema"] += [
+            f"[inbox] {x}" for x in check_claim_schemas(inbox_candidates)
+        ]
 
     if args.contradictions and not args.structural_only:
         findings["contradictions"] = check_contradictions(all_pages_for_contradictions)
