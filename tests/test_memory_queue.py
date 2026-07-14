@@ -54,6 +54,17 @@ class ReverseIdRng:
         return high
 
 
+class CustomSequence:
+    def __init__(self, *items: object) -> None:
+        self.items = items
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __getitem__(self, index: int) -> object:
+        return self.items[index]
+
+
 @pytest.fixture
 def clock() -> FakeClock:
     return FakeClock()
@@ -119,6 +130,35 @@ def test_enqueue_recursively_redacts_secret_keys_and_value_patterns(
         "password": "[REDACTED]",
         "safe": "ok",
     }
+
+
+def test_enqueue_converts_nested_tuples_to_redacted_json_arrays(
+    queue: MemoryQueue,
+) -> None:
+    task_id = queue.enqueue(
+        "query",
+        1,
+        {
+            "items": (
+                {"password": "plain"},
+                ("ok", {"api_key": "plain", "safe": "token=secret-value"}),
+            )
+        },
+    )
+    assert queue.get(task_id).payload == {
+        "items": [
+            {"password": "[REDACTED]"},
+            ["ok", {"api_key": "[REDACTED]", "safe": "token=[REDACTED]"}],
+        ]
+    }
+
+
+@pytest.mark.parametrize("unsupported", [{"value"}, CustomSequence("value")])
+def test_enqueue_rejects_unsupported_collections(
+    queue: MemoryQueue, unsupported: object
+) -> None:
+    with pytest.raises(TypeError, match="canonical JSON does not permit"):
+        queue.enqueue("query", 1, {"items": unsupported})
 
 
 def test_enqueue_validates_priority_and_deduplicates(queue: MemoryQueue) -> None:

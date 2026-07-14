@@ -154,7 +154,7 @@ def _is_secret_key(key: str) -> bool:
 def _redact_payload(value: object) -> object:
     if isinstance(value, str):
         return redact_secrets(value)
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return [_redact_payload(item) for item in value]
     if isinstance(value, dict):
         return {
