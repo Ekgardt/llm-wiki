@@ -38,7 +38,7 @@ TRANSIENT_CREATE_ATTEMPTS = 10
 PENDING_CLAIM_SECONDS = 30.0
 SOURCES = frozenset({"claude", "opencode", "codex"})
 EVENTS = frozenset(
-    {"session_start", "session_end", "pre_compact", "user_prompt", "post_tool_use"}
+    {"session_start", "session_end", "pre_compact", "stop", "user_prompt", "post_tool_use"}
 )
 OCCURRENCE_EVENTS = EVENTS - {"user_prompt"}
 CHECKPOINT_SIGNAL_FIELDS = frozenset(
@@ -159,6 +159,8 @@ def normalize_event(
                 raw.get("reason"), raw.get("trigger"), raw.get("source")
             )
         }
+    elif event == "stop":
+        payload = {"reason": _first_string(raw.get("reason"), raw.get("trigger"))}
     elif event in {"session_end", "pre_compact"}:
         payload = {
             "reason": _first_string(raw.get("reason"), raw.get("trigger")),
@@ -365,6 +367,7 @@ def _empty_delta() -> dict[str, object]:
         "goal": dict(close),
         "phase": dict(close),
         "current_task": dict(close),
+        "current_task_operations": [],
         "next_actions": [],
         "decisions": [],
         "blockers": [],
@@ -435,15 +438,78 @@ def _has_pending_delta(item: Mapping[str, object]) -> bool:
     if not isinstance(checkpoint, Mapping):
         return False
     delta = checkpoint.get("delta")
-    return isinstance(delta, Mapping) and dict(delta) != _empty_delta()
+    if not isinstance(delta, Mapping):
+        return False
+    normalized = dict(delta)
+    normalized.setdefault("current_task_operations", [])
+    return normalized != _empty_delta()
+
+
+def _task_delta_operations(delta: Mapping[str, object]) -> list[dict[str, object]]:
+    supplied = delta.get("current_task_operations")
+    if isinstance(supplied, list) and supplied:
+        return [dict(item) for item in supplied if isinstance(item, Mapping)]
+    operation = delta["current_task"]
+    assert isinstance(operation, Mapping)
+    if operation.get("id") == "checkpoint-none" and operation.get("action") == "close":
+        return []
+    return [dict(operation)]
+
+
+def _bounded_pending_batch_count(items: Sequence[Mapping[str, object]]) -> int:
+    list_limits = {"next_actions": 10}
+    list_ids = {
+        name: set()
+        for name in (
+            "next_actions",
+            "decisions",
+            "blockers",
+            "changed_files",
+            "commands",
+            "verification",
+        )
+    }
+    evidence: set[str] = set()
+    task_count = 0
+    accepted = 0
+    for item in items:
+        next_evidence = evidence | {str(item["event_id"])}
+        next_task_count = task_count
+        next_list_ids = {name: set(values) for name, values in list_ids.items()}
+        if _has_pending_delta(item):
+            checkpoint = item["checkpoint_event"]
+            assert isinstance(checkpoint, Mapping)
+            delta = checkpoint["delta"]
+            assert isinstance(delta, Mapping)
+            next_task_count += len(_task_delta_operations(delta))
+            for name, ids in next_list_ids.items():
+                operations = delta[name]
+                assert isinstance(operations, list)
+                ids.update(
+                    str(operation["id"])
+                    for operation in operations
+                    if isinstance(operation, Mapping)
+                )
+        if (
+            len(next_evidence) > 100
+            or next_task_count > 100
+            or any(len(ids) > list_limits.get(name, 100) for name, ids in next_list_ids.items())
+        ):
+            break
+        evidence = next_evidence
+        task_count = next_task_count
+        list_ids = next_list_ids
+        accepted += 1
+    return max(1, accepted)
 
 
 def _merge_pending_checkpoints(
     items: Sequence[Mapping[str, object]], decision: CheckpointDecision
 ) -> dict[str, object]:
-    scalar_operations: dict[str, dict[str, dict[str, object]]] = {
-        name: {} for name in ("goal", "phase", "current_task")
+    scalar_operations: dict[str, list[dict[str, object]]] = {
+        name: [] for name in ("goal", "phase")
     }
+    task_operations: list[dict[str, object]] = []
     list_operations: dict[str, dict[str, dict[str, object]]] = {
         name: {}
         for name in (
@@ -469,9 +535,12 @@ def _merge_pending_checkpoints(
         for name, operations in scalar_operations.items():
             operation = delta[name]
             assert isinstance(operation, Mapping)
-            item_id = str(operation["id"])
-            operations.pop(item_id, None)
-            operations[item_id] = dict(operation)
+            if not (
+                operation.get("id") == "checkpoint-none"
+                and operation.get("action") == "close"
+            ):
+                operations.append(dict(operation))
+        task_operations.extend(_task_delta_operations(delta))
         for name, operations in list_operations.items():
             values = delta[name]
             assert isinstance(values, list)
@@ -483,14 +552,13 @@ def _merge_pending_checkpoints(
 
     merged_delta = _empty_delta()
     for name, operations in scalar_operations.items():
-        active = [item for item in operations.values() if item.get("action") == "upsert"]
-        if active:
-            merged_delta[name] = active[-1]
-        elif operations:
-            merged_delta[name] = next(reversed(operations.values()))
-    limits = {"next_actions": 10}
+        if operations:
+            merged_delta[name] = operations[-1]
+    if task_operations:
+        merged_delta["current_task"] = task_operations[-1]
+        merged_delta["current_task_operations"] = task_operations
     for name, operations in list_operations.items():
-        merged_delta[name] = list(operations.values())[-limits.get(name, 100) :]
+        merged_delta[name] = list(operations.values())
 
     checkpoint = dict(items[-1]["checkpoint_event"])
     event_id = str(items[-1]["event_id"])
@@ -586,7 +654,39 @@ def _drain_project_checkpoints(
                 _release_pending_claims(queue_key, owner)
                 return
 
-        flush_count = checkpoint_index + 1 if checkpoint_index is not None else len(items)
+        target_count = checkpoint_index + 1 if checkpoint_index is not None else len(items)
+        flush_count = target_count
+        if checkpoint_decision is not None:
+            flush_count = min(
+                target_count, _bounded_pending_batch_count(items[:target_count])
+            )
+            if flush_count < target_count:
+                selected_time = datetime.fromisoformat(
+                    str(items[flush_count - 1]["occurred_at"])
+                )
+                checkpoint_decision = CheckpointDecision(
+                    "batch_flush", checkpoint_at=selected_time
+                )
+                reducers = {}
+                decisions = []
+                for item in items[:flush_count]:
+                    state_key = str(item["state_key"])
+                    if state_key not in reducers:
+                        reducer_state = reducer_states.get(state_key)
+                        reducers[state_key] = CheckpointReducer.from_state(
+                            reducer_state
+                            if isinstance(reducer_state, Mapping)
+                            else None
+                        )
+                    observation = item["observation"]
+                    assert isinstance(observation, Mapping)
+                    decisions.append(
+                        reducers[state_key].observe(
+                            observation,
+                            now=datetime.fromisoformat(str(item["occurred_at"])),
+                            commit=False,
+                        )
+                    )
         selected = items[:flush_count]
         selected_decisions = decisions[:flush_count]
         if checkpoint_decision is not None and len(selected_decisions) < flush_count:

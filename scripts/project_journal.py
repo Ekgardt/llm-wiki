@@ -982,6 +982,11 @@ class ProjectStore:
                 operation = delta[name]
                 assert isinstance(operation, Mapping)
                 self._reduce(active[name], operation)
+            task_operations = delta.get("current_task_operations", [])
+            assert isinstance(task_operations, list)
+            for operation in task_operations:
+                assert isinstance(operation, Mapping)
+                self._reduce(active["current_task"], operation)
             for name in _MAX_LIST_ITEMS:
                 operations = delta[name]
                 assert isinstance(operations, list)
@@ -1040,6 +1045,11 @@ class ProjectStore:
                 operation = delta[name]
                 assert isinstance(operation, Mapping)
                 self._reduce(getattr(active, name), operation)
+            task_operations = delta.get("current_task_operations", [])
+            assert isinstance(task_operations, list)
+            for operation in task_operations:
+                assert isinstance(operation, Mapping)
+                self._reduce(active.current_task, operation)
             for name in _MAX_LIST_ITEMS:
                 operations = delta[name]
                 assert isinstance(operations, list)

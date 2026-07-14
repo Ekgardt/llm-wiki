@@ -11,7 +11,7 @@ from typing import Any
 
 SCHEMA_VERSION = "1.0"
 ALLOWED_EVENT_TYPES = frozenset(
-    {"session_start", "session_end", "pre_compact", "user_prompt", "post_tool_use"}
+    {"session_start", "session_end", "pre_compact", "stop", "user_prompt", "post_tool_use"}
 )
 _REQUIRED_PAYLOAD_FIELDS = {
     "session_start": {"reason": (str, type(None))},
@@ -23,6 +23,7 @@ _REQUIRED_PAYLOAD_FIELDS = {
         "reason": (str, type(None)),
         "transcript_path": (str, type(None)),
     },
+    "stop": {"reason": (str, type(None))},
     "user_prompt": {"prompt": str},
     "post_tool_use": {"tool_name": str, "target": str},
 }

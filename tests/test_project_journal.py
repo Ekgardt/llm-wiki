@@ -795,6 +795,36 @@ def test_checkpoint_is_append_only_idempotent_and_projects_state(
     assert "Use fenced Markdown transactions" in state
 
 
+def test_current_task_transition_list_replays_close_open_close_without_resurrection(
+    project_store: ProjectStore,
+):
+    project_store.checkpoint("demo", checkpoint_event(), "agent-a")
+    transition = checkpoint_event(
+        "evt-2",
+        "task-transition",
+        delta={
+            "current_task": {
+                "id": "task-2",
+                "action": "close",
+                "value": "New task complete",
+            },
+            "current_task_operations": [
+                {"id": "task-1", "action": "close", "value": "Old task complete"},
+                {"id": "task-2", "action": "upsert", "value": "New task"},
+                {"id": "task-2", "action": "close", "value": "New task complete"},
+            ],
+        },
+    )
+
+    project_store.checkpoint("demo", transition, "agent-a")
+
+    assert project_store.projection("demo").current_task == {}
+    state = (project_store.vault / "knowledge/projects/demo/state.md").read_text(
+        encoding="utf-8"
+    )
+    assert "## Current task\n- None" in state
+
+
 def test_idempotency_key_deduplicates_a_new_occurrence(project_store: ProjectStore):
     first = project_store.checkpoint("demo", checkpoint_event(), "agent-a")
     duplicate = project_store.checkpoint(

@@ -121,7 +121,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event session_end --checkpoint-type stop",
+            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/integration_adapter.py --source claude --event stop",
             "timeout": 10
           }
         ]

@@ -392,6 +392,44 @@ def test_direct_ingestion_continues_when_checkpoint_observation_fails(monkeypatc
     assert result["heartbeat_recorded"] is True
 
 
+def test_claude_stop_is_dirty_checkpoint_only_and_never_dispatches_session_end(monkeypatch):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import integration_adapter
+
+    calls = []
+    monkeypatch.setattr(
+        integration_adapter,
+        "_observe_project_checkpoint",
+        lambda envelope: calls.append(("observe", envelope.event_type)),
+    )
+    monkeypatch.setattr(
+        integration_adapter,
+        "_run_delegate",
+        lambda name, *args, **kwargs: calls.append(("delegate", name)),
+    )
+    envelope = integration_adapter.normalize_event(
+        "claude",
+        "stop",
+        {"session_id": "s1", "cwd": "C:/project", "dirty": True},
+    )
+
+    result = integration_adapter.ingest_event(envelope)
+
+    assert envelope.event_type == "stop"
+    assert integration_adapter._checkpoint_observation(envelope) == {
+        "type": "stop",
+        "event_id": envelope.event_id,
+        "dirty": True,
+    }
+    assert calls == [("observe", "stop")]
+    assert result["daily_log_written"] is False
+    assert result["flush_spawned"] is False
+
+
 def test_failed_checkpoint_does_not_persist_event_dedupe_and_retry_succeeds(monkeypatch):
     import sys
 
@@ -655,7 +693,10 @@ def test_session_start_maintenance_does_not_debounce_or_drop_following_delta(mon
     assert state["project_checkpoint_pending"]["demo"] == []
     assert len(checkpoints) == 1
     assert checkpoints[0]["occurrence_id"] == ordinary.event_id
-    assert checkpoints[0]["delta"] == delta
+    assert checkpoints[0]["delta"]["current_task"] == delta["current_task"]
+    assert checkpoints[0]["delta"]["current_task_operations"] == [
+        delta["current_task"]
+    ]
 
 
 def test_debounced_deltas_flush_in_order_on_later_observation_exactly_once(monkeypatch):
@@ -859,6 +900,100 @@ def test_bypass_event_immediately_flushes_debounced_delta_once_after_restart(mon
     state = json.loads(json.dumps(state))
     integration_adapter._observe_project_checkpoint(decision)
     assert len(checkpoints) == 1
+
+
+def test_bypass_flush_batches_205_pending_events_across_failure_and_restart(monkeypatch):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import integration_adapter
+    from project_journal import CheckpointReducer
+
+    started = integration_adapter.datetime.fromisoformat("2026-07-13T12:00:00+00:00")
+    state = {
+        "project_checkpoint_reducers": {
+            "demo:s1": CheckpointReducer(last_checkpoint_at=started).to_state()
+        },
+        "project_checkpoint_pending": {"demo": []},
+    }
+    attempts = 0
+    checkpoints = []
+    event_ids = []
+
+    def update(mutator, **kwargs):
+        mutator(state)
+        return state
+
+    class Store:
+        def __init__(self, *args):
+            pass
+
+        def checkpoint(self, slug, event, owner, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 2:
+                raise RuntimeError("second batch interrupted")
+            checkpoints.append(event)
+
+    monkeypatch.setattr(integration_adapter, "update_state", update)
+    monkeypatch.setattr(integration_adapter, "ProjectStore", Store)
+    for index in range(205):
+        delta = integration_adapter._empty_delta()
+        delta["current_task"] = {
+            "id": f"task-{index}",
+            "action": "upsert",
+            "value": f"Task {index}",
+        }
+        delta["decisions"] = [
+            {
+                "id": f"decision-{index}",
+                "action": "upsert",
+                "value": f"Decision {index}",
+            }
+        ]
+        envelope = integration_adapter.normalize_event(
+            "claude",
+            "post_tool_use",
+            {
+                "session_id": "s1",
+                "cwd": "C:/project",
+                "event_id": f"event-{index}",
+                "tool_name": "Read",
+                "tool_input": {"file_path": "src/app.py"},
+                "checkpoint_type": "decision" if index == 204 else "correction",
+                "project_delta": delta,
+            },
+            occurred_at=started + timedelta(seconds=2 if index == 204 else 1),
+        )
+        event_ids.append(envelope.event_id)
+        state["project_checkpoint_pending"]["demo"].append(
+            integration_adapter._pending_checkpoint(envelope, "demo", "demo:s1")
+        )
+
+    with pytest.raises(RuntimeError, match="second batch interrupted"):
+        integration_adapter._drain_project_checkpoints("demo", "demo")
+    assert len(checkpoints) == 1
+    assert len(checkpoints[0]["evidence_event_ids"]) == 100
+    assert len(state["project_checkpoint_pending"]["demo"]) == 105
+
+    state = json.loads(json.dumps(state))
+    integration_adapter._drain_project_checkpoints("demo", "demo")
+
+    assert [len(item["evidence_event_ids"]) for item in checkpoints] == [100, 100, 5]
+    assert [len(item["delta"]["current_task_operations"]) for item in checkpoints] == [
+        100,
+        100,
+        5,
+    ]
+    assert all(len(item["delta"]["decisions"]) <= 100 for item in checkpoints)
+    assert [event_id for item in checkpoints for event_id in item["evidence_event_ids"]] == event_ids
+    assert state["project_checkpoint_pending"]["demo"] == []
+
+    state = json.loads(json.dumps(state))
+    integration_adapter._drain_project_checkpoints("demo", "demo")
+    assert len(checkpoints) == 3
 
 
 def test_session_start_recovers_transactions_then_project_before_handoff(
@@ -1221,7 +1356,9 @@ def test_claude_hooks_cover_compaction_failure_stop_and_end_signals():
     assert {"SessionStart", "PreCompact", "PostToolUse", "PostToolUseFailure", "Stop", "SessionEnd"} <= set(hooks)
     stop_command = hooks["Stop"][0]["hooks"][0]["command"]
     failure_command = hooks["PostToolUseFailure"][0]["hooks"][0]["command"]
-    assert "--checkpoint-type stop" in stop_command
+    assert "--event stop" in stop_command
+    assert "--event session_end" not in stop_command
+    assert "--delegate" not in stop_command
     assert "--checkpoint-type significant_failure" in failure_command
 
 
