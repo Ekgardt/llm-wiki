@@ -52,6 +52,31 @@ class _MaxJitterRng:
         return high
 
 
+class _FakeProcess:
+    def __init__(self, *, stubborn: bool = False) -> None:
+        self.pid = 4242
+        self.alive = True
+        self.stubborn = stubborn
+        self.terminated = 0
+        self.killed = 0
+
+    def is_alive(self) -> bool:
+        return self.alive
+
+    def join(self, timeout=None) -> None:
+        del timeout
+
+    def terminate(self) -> None:
+        self.terminated += 1
+        if not self.stubborn:
+            self.alive = False
+
+    def kill(self) -> None:
+        self.killed += 1
+        if not self.stubborn:
+            self.alive = False
+
+
 def test_worker_defaults_are_bounded_and_process_twenty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -461,13 +486,97 @@ def test_worker_rejects_invalid_policy_combinations(overrides, match) -> None:
         )
 
 
-def test_cli_rejects_removed_drain_command(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "argv", ["memory_queue.py", "drain"])
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["memory_queue.py", "drain", "C:/secret/arbitrary-path"],
+        ["memory_queue.py", "work", "--max-tasks", "secret-not-an-int"],
+        ["memory_queue.py"],
+    ],
+)
+def test_cli_parse_failures_are_redacted_canonical_invalid_arguments(
+    argv: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(sys, "argv", argv)
 
-    with pytest.raises(SystemExit) as raised:
-        memory_queue._cli()
+    assert memory_queue._cli() == 2
+    captured = capsys.readouterr()
+    assert captured.out == '{"code":"invalid_arguments","ok":false}\n'
+    assert captured.err == ""
+    assert "secret" not in captured.out
 
-    assert raised.value.code == 2
+
+def test_windows_tree_cleanup_failure_falls_back_and_reports_unverified_descendants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = _FakeProcess()
+    monkeypatch.setattr(
+        memory_queue.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 1),
+    )
+
+    with pytest.raises(memory_queue.QueueOperationError) as raised:
+        memory_queue._terminate_processor_child(process, platform_name="nt")
+
+    assert raised.value.code == "process_cleanup_failed"
+    assert process.terminated == 1
+    assert not process.is_alive()
+
+
+def test_windows_tree_cleanup_verifies_direct_child_liveness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = _FakeProcess(stubborn=True)
+    monkeypatch.setattr(
+        memory_queue.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0),
+    )
+
+    with pytest.raises(memory_queue.QueueOperationError) as raised:
+        memory_queue._terminate_processor_child(process, platform_name="nt")
+
+    assert raised.value.code == "process_cleanup_failed"
+    assert process.terminated == 1
+    assert process.killed == 1
+
+
+def test_posix_group_race_uses_direct_fallback_and_reports_unverified_descendants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = _FakeProcess()
+    monkeypatch.setattr(
+        memory_queue,
+        "_kill_process_group",
+        lambda *args: (_ for _ in ()).throw(ProcessLookupError()),
+    )
+
+    with pytest.raises(memory_queue.QueueOperationError) as raised:
+        memory_queue._terminate_processor_child(process, platform_name="posix")
+
+    assert raised.value.code == "process_cleanup_failed"
+    assert process.terminated == 1
+    assert not process.is_alive()
+
+
+def test_posix_group_cleanup_waits_and_verifies_process_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = _FakeProcess()
+
+    def kill_group(pid: int, sig: int) -> None:
+        assert pid == process.pid
+        if sig == signal.SIGTERM:
+            process.alive = False
+
+    monkeypatch.setattr(memory_queue, "_kill_process_group", kill_group)
+
+    memory_queue._terminate_processor_child(process, platform_name="posix")
+
+    assert not process.is_alive()
 
 
 @pytest.mark.parametrize(

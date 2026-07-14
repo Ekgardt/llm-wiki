@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import email.utils
 import json
 import math
@@ -85,6 +86,22 @@ class MigrationBusy(QueueOperationError):
 
 class LegacyBackendDisabled(QueueOperationError):
     """Raised when a legacy writer is used after migration started."""
+
+
+class _InvalidArguments(Exception):
+    pass
+
+
+class _RedactedArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        del message
+        raise _InvalidArguments
+
+    def exit(self, status: int = 0, message: str | None = None) -> None:
+        if status:
+            del message
+            raise _InvalidArguments
+        super().exit(status, message)
 
 
 @dataclass(frozen=True)
@@ -2271,12 +2288,20 @@ def _processor_child_entry(
         sender.close()
 
 
-def _terminate_processor_child(process: multiprocessing.Process) -> None:
+def _kill_process_group(pid: int, sig: int) -> None:
+    os.killpg(pid, sig)
+
+
+def _terminate_processor_child(
+    process: multiprocessing.Process, *, platform_name: str | None = None
+) -> None:
     if not process.is_alive():
         return
-    if os.name == "nt":
+    platform_name = platform_name or os.name
+    tree_verified = False
+    if platform_name == "nt":
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["taskkill", "/PID", str(process.pid), "/T", "/F"],
                 check=False,
                 stdin=subprocess.DEVNULL,
@@ -2284,23 +2309,37 @@ def _terminate_processor_child(process: multiprocessing.Process) -> None:
                 stderr=subprocess.DEVNULL,
                 timeout=2,
             )
+            tree_verified = result.returncode == 0
         except (OSError, subprocess.SubprocessError):
-            process.terminate()
+            tree_verified = False
     else:
         try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+            _kill_process_group(process.pid, signal.SIGTERM)
+            tree_verified = True
+        except OSError:
+            tree_verified = False
     process.join(0.2)
     if process.is_alive():
-        if os.name != "nt":
+        if platform_name != "nt" and tree_verified:
             try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        else:
-            process.kill()
+                _kill_process_group(process.pid, signal.SIGKILL)
+            except OSError:
+                tree_verified = False
+            process.join(0.2)
+    if process.is_alive():
+        try:
+            process.terminate()
+        except (OSError, ValueError):
+            pass
         process.join(0.2)
+    if process.is_alive():
+        try:
+            process.kill()
+        except (OSError, ValueError):
+            pass
+        process.join(0.2)
+    if process.is_alive() or not tree_verified:
+        raise QueueOperationError("process_cleanup_failed")
 
 
 def _decode_processor_frame(frame: bytes) -> bool | DeferredResult:
@@ -2346,7 +2385,10 @@ def _run_processor_child(
         try:
             frame = receiver.recv_bytes(_MAX_RESULT_BYTES + 1)
         except OSError:
-            _terminate_processor_child(process)
+            receiver.close()
+            process.join(0.5)
+            if process.is_alive():
+                _terminate_processor_child(process)
             raise QueueOperationError("processor_result_oversize") from None
         except EOFError:
             _terminate_processor_child(process)
@@ -2686,10 +2728,14 @@ def _emit_cli_error(error: BaseException) -> int:
     return 2
 
 
-def _cli() -> int:
-    import argparse
+def _emit_invalid_arguments() -> int:
+    payload = canonical_json_bytes({"ok": False, "code": "invalid_arguments"})
+    print(payload.decode("utf-8"))
+    return 2
 
-    parser = argparse.ArgumentParser()
+
+def _cli() -> int:
+    parser = _RedactedArgumentParser()
     parser.add_argument(
         "command",
         choices=["list", "status", "work", "cancel", "redrive", "migrate", "purge"],
@@ -2711,8 +2757,8 @@ def _cli() -> int:
     )
     parser.add_argument("--terminal-before")
     parser.add_argument("--export", type=Path)
-    args = parser.parse_args()
     try:
+        args = parser.parse_args()
         if args.command == "list":
             records = [
                 {"id": task.id, "state": task.state} for task in _queue().list_tasks()
@@ -2799,6 +2845,8 @@ def _cli() -> int:
                 )
             )
             return 0
+    except _InvalidArguments:
+        return _emit_invalid_arguments()
     except Exception as exc:  # noqa: BLE001 - CLI is a redacted trust boundary
         return _emit_cli_error(exc)
     return 2
