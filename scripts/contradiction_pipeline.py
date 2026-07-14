@@ -9,6 +9,7 @@ import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from types import MappingProxyType, SimpleNamespace
 
 from bounded_io import read_stable_bytes
 from claims import (
@@ -21,7 +22,12 @@ from claims import (
     is_substantive,
     validate_claim_record,
 )
-from llm_client import call_candidate, probe_candidate, provider_candidates
+from llm_client import (
+    ProviderDescriptor,
+    call_candidate,
+    probe_candidate,
+    provider_candidates,
+)
 from markdown_transaction import MarkdownChange, MarkdownCoordinator
 from reliable_memory import canonical_json_bytes, sha256_bytes, validate_schema
 
@@ -99,6 +105,13 @@ class BenchmarkMetrics:
     quarantine_risk: float
     false_supersession: float
     quarantine_coverage: float
+    semantic_primary_calls: int
+    semantic_critique_calls: int
+    semantic_fallback_probes: int
+    semantic_evaluators_independent: bool
+    semantic_benchmark_gate: bool
+    quarantine_candidates: int
+    quarantine_notes_published: int
 
     def canonical(self) -> dict[str, object]:
         return asdict(self)
@@ -223,6 +236,9 @@ class ContradictionPipeline:
         coordinator: MarkdownCoordinator | None = None,
         source_page: str = "knowledge/notes/unknown.md",
         secondary_search: Callable[[str, int], Sequence[Mapping[str, object]]] | None = None,
+        provider_descriptors: Sequence[object] | None = None,
+        provider_probe: Callable[[object], bool] | None = None,
+        provider_call: Callable[..., object] | None = None,
     ):
         self.claim_pipeline = claim_pipeline
         self.claim_index = claim_index
@@ -235,6 +251,11 @@ class ContradictionPipeline:
             self.secondary_search = lambda query, limit: default_secondary_search(
                 self.vault, query, limit
             )
+        self.provider_descriptors = (
+            None if provider_descriptors is None else tuple(provider_descriptors)
+        )
+        self.provider_probe = provider_probe or probe_candidate
+        self.provider_call = provider_call or call_candidate
 
     def assess_raw(
         self,
@@ -417,8 +438,10 @@ class ContradictionPipeline:
     def _evaluate_with_providers(
         self, claim: NormalizedClaim, existing: IndexedClaim
     ) -> tuple[tuple[Evaluation, ...], tuple[dict[str, object], ...]]:
-        descriptors = provider_candidates(
-            os.environ.get("MEMORY_LLM_PROVIDER", ""), max_tokens=800
+        descriptors = self.provider_descriptors or tuple(
+            provider_candidates(
+                os.environ.get("MEMORY_LLM_PROVIDER", ""), max_tokens=800
+            )
         )
         first, first_descriptor, first_lineage = self._provider_stage(
             "primary", descriptors, claim, existing, prior_label=None
@@ -459,12 +482,12 @@ class ContradictionPipeline:
         ) + "Do not propose or perform lifecycle mutations."
         for descriptor in descriptors:
             canonical = descriptor.canonical()
-            if not probe_candidate(descriptor):
+            if not self.provider_probe(descriptor):
                 lineage.append(
                     {"descriptor": canonical, "stage": f"{stage}.probe", "failure": "unavailable"}
                 )
                 continue
-            result = call_candidate(
+            result = self.provider_call(
                 descriptor,
                 prompt,
                 system,
@@ -653,18 +676,42 @@ class ContradictionPipeline:
 
 
 def _mark_page_superseded(content: bytes, source_page: str) -> bytes:
-    text = content.decode("utf-8", errors="strict")
-    if not text.startswith("---\n") or "\n---\n" not in text[4:]:
+    if content.startswith(b"---\r\n"):
+        newline = b"\r\n"
+    elif content.startswith(b"---\n"):
+        newline = b"\n"
+    else:
         raise ValueError("lifecycle target has no canonical frontmatter")
-    frontmatter, body = text[4:].split("\n---\n", 1)
+    delimiter = newline + b"---" + newline
+    end = content.find(delimiter, 3 + len(newline))
+    if end < 0 or end > 64 * 1024:
+        raise ValueError("lifecycle target has no bounded canonical frontmatter")
+    frontmatter = content[3 + len(newline) : end].decode("utf-8", errors="strict")
+    mixed = (
+        "\n" in frontmatter.replace("\r\n", "")
+        if newline == b"\r\n"
+        else "\r" in frontmatter
+    )
+    if mixed:
+        raise ValueError("lifecycle target frontmatter has mixed line endings")
+    body = content[end + len(delimiter) :]
+    separator = newline.decode("ascii")
     lines = [
         line
-        for line in frontmatter.splitlines()
+        for line in frontmatter.split(separator)
         if not line.startswith(("status:", "superseded_by:"))
     ]
     slug = Path(source_page).stem
     lines.extend(("status: superseded", f"superseded_by: [[{slug}]]"))
-    return ("---\n" + "\n".join(lines) + "\n---\n" + body).encode("utf-8")
+    rebuilt = (
+        b"---"
+        + newline
+        + separator.join(lines).encode("utf-8")
+        + newline
+        + b"---"
+        + newline
+    )
+    return rebuilt + body
 
 
 def default_secondary_search(
@@ -735,8 +782,49 @@ def run_frozen_benchmark(corpus: Mapping[str, object]) -> BenchmarkMetrics:
 
         index = ClaimIndex(state_root, vault=vault)
         index.rebuild()
+        descriptors = tuple(
+            ProviderDescriptor(
+                provider=name,
+                model=f"{name}-model",
+                capabilities=MappingProxyType(
+                    {"structured_output": "native", "max_tokens_enforced": True}
+                ),
+                inference_settings=MappingProxyType({"max_tokens": 800}),
+                candidate_index=position,
+                fallback_from=(),
+            )
+            for position, name in enumerate(
+                ("benchmark-unavailable", "benchmark-primary", "benchmark-critique")
+            )
+        )
+        semantic_calls = {"primary": [], "critique": []}
+        semantic_fallback_probes = 0
+
+        def benchmark_probe(descriptor: object) -> bool:
+            nonlocal semantic_fallback_probes
+            if descriptor.provider == "benchmark-unavailable":
+                semantic_fallback_probes += 1
+            return descriptor.provider != "benchmark-unavailable"
+
+        def benchmark_call(
+            descriptor: object,
+            prompt: str,
+            system: str,
+            **_kwargs: object,
+        ) -> object:
+            stage = "critique" if system.startswith("Blindly critique") else "primary"
+            semantic_calls[stage].append(descriptor.identity)
+            return SimpleNamespace(
+                text='{"label":"compatible","confidence":"high","supported":true}',
+                failure_class=None,
+            )
+
         assessment_pipeline = ContradictionPipeline(
-            claim_index=index, evaluators=(), vault=vault
+            claim_index=index,
+            vault=vault,
+            provider_descriptors=descriptors,
+            provider_probe=benchmark_probe,
+            provider_call=benchmark_call,
         )
         predicted_classes = []
         gold_classes = []
@@ -744,10 +832,14 @@ def run_frozen_benchmark(corpus: Mapping[str, object]) -> BenchmarkMetrics:
         gold_lifecycle = []
         provenance = 0
         retrieved = retrievable = 0
-        negative = false_superseded = published = published_errors = 0
+        negative = false_superseded = 0
+        assessed: list[tuple[Mapping[str, object], NormalizedClaim, ClaimAssessment]] = []
         for case in cases:
             new = extracted[str(case["id"])]
-            result = assessment_pipeline.assess(new, commit=False)
+            result = assessment_pipeline.assess(
+                new, benchmark_gate=False, commit=False
+            )
+            assessed.append((case, new, result))
             predicted_classes.append(result.contradiction_class)
             gold_classes.append(case["expected_class"])
             predicted_lifecycle.append(result.recommendation)
@@ -777,13 +869,69 @@ def run_frozen_benchmark(corpus: Mapping[str, object]) -> BenchmarkMetrics:
             if case["negative_control"]:
                 negative += 1
                 false_superseded += int(result.recommendation == "supersede")
-            is_quarantined = result.recommendation == "quarantine"
-            if not is_quarantined:
+        coordinator = MarkdownCoordinator(vault, state_root)
+        publication_changes: list[MarkdownChange] = []
+        candidate_paths: list[str] = []
+        proposed_paths: list[str] = []
+        for case, new, result in assessed:
+            proposed = f"knowledge/notes/proposed-{case['id']}.md"
+            proposed_paths.append(proposed)
+            if result.recommendation == "quarantine":
+                candidate_pipeline = ContradictionPipeline(
+                    vault=vault, source_page=proposed, evaluators=()
+                )
+                changes, _preconditions, paths = candidate_pipeline.plan_changes(
+                    (result,)
+                )
+                publication_changes.extend(changes)
+                candidate_paths.extend(paths)
+            else:
+                ledger = {
+                    "schema_version": "claim-ledger/v1",
+                    "claims": [new.record],
+                }
+                publication_changes.append(
+                    MarkdownChange.create(
+                        proposed,
+                        b"---\ntype: concept\n---\n# Proposed\n\n## Claims\n```json\n"
+                        + canonical_json_bytes(ledger)
+                        + b"\n```\n",
+                        max_before_bytes=MAX_CLAIM_PAGE_BYTES,
+                    )
+                )
+        with coordinator.writer_gate():
+            if candidate_paths:
+                ContradictionPipeline(
+                    vault=vault, coordinator=coordinator
+                ).ensure_candidate_parent()
+            transaction = coordinator.prepare(
+                sorted(publication_changes, key=lambda item: item.path),
+                operation_id="benchmark-publication:"
+                + sha256_bytes(canonical_json_bytes(proposed_paths)),
+                preconditions={item.path: "absent" for item in publication_changes},
+            )
+            coordinator.apply(transaction.id)
+        index.rebuild()
+        published_errors = 0
+        published = 0
+        quarantine_notes_published = 0
+        for index_position, (case, new, result) in enumerate(assessed):
+            proposed_exists = (vault / proposed_paths[index_position]).exists()
+            if proposed_exists:
                 published += 1
                 published_errors += int(
-                    predicted_classes[-1] != gold_classes[-1]
-                    or predicted_lifecycle[-1] != gold_lifecycle[-1]
+                    result.contradiction_class != case["expected_class"]
+                    or result.recommendation != case["expected_lifecycle"]
                 )
+            if result.recommendation == "quarantine":
+                quarantine_notes_published += int(proposed_exists)
+                if proposed_exists:
+                    raise ValueError("quarantined benchmark claim was published")
+                if any(
+                    item.page == proposed_paths[index_position]
+                    for item in index.candidates(new)
+                ):
+                    raise ValueError("quarantined benchmark claim entered active retrieval")
         total = len(cases)
         extraction_precision = true_positive / len(extracted) if extracted else 0
         extraction_recall = true_positive / total
@@ -802,6 +950,17 @@ def run_frozen_benchmark(corpus: Mapping[str, object]) -> BenchmarkMetrics:
             published_errors / published if published else 0,
             false_superseded / negative if negative else 0,
             published / total,
+            len(semantic_calls["primary"]),
+            len(semantic_calls["critique"]),
+            semantic_fallback_probes,
+            bool(semantic_calls["primary"])
+            and bool(semantic_calls["critique"])
+            and set(semantic_calls["primary"]).isdisjoint(
+                semantic_calls["critique"]
+            ),
+            False,
+            len([path for path in candidate_paths if (vault / path).is_file()]),
+            quarantine_notes_published,
         )
 
 

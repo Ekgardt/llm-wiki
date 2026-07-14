@@ -40,6 +40,7 @@ from bounded_io import read_stable_bytes  # noqa: E402
 from claims import (  # noqa: E402
     LEDGER_SCHEMA,
     ClaimIndex,
+    IndexedClaim,
     NormalizedClaim,
     validate_claim_record,
 )
@@ -873,6 +874,9 @@ def _validate_semantic_operation(
     claims = operation.get("claims", [])
     if not isinstance(claims, list) or len(claims) > 100:
         raise ValueError("compile operation claims must be a bounded array")
+    claim_ids = [str(record.get("id", "")) for record in claims if isinstance(record, Mapping)]
+    if len(claim_ids) != len(claims) or len(claim_ids) != len(set(claim_ids)):
+        raise ValueError("compile operation contains a duplicate claim id")
     for record in claims:
         validate_claim_record(record)
         assert isinstance(record, Mapping)
@@ -956,6 +960,9 @@ def _with_claim_ledger(page: bytes, records: Sequence[Mapping[str, object]]) -> 
     if match is None:
         return page.rstrip() + b"\n\n## Claims\n```json\n" + encoded + b"\n```\n"
     existing = json.loads(match[2])
+    existing_ids = [str(item["id"]) for item in existing["claims"]]
+    if len(existing_ids) != len(set(existing_ids)):
+        raise ValueError("target ledger contains a duplicate claim id")
     by_id = {str(item["id"]): item for item in existing["claims"]}
     for record in ledger["claims"]:
         if str(record["id"]) in by_id:
@@ -1042,10 +1049,9 @@ def apply_compile_plan(
     operation_id = "compile:" + sha256_bytes(
         canonical_json_bytes({"action_key": action_key, "source_digests": source_digests})
     )
-    (DAILY_DIR / "receipts").mkdir(parents=True, exist_ok=True)
-
     claim_index: ClaimIndex | None = None
     claim_groups: list[tuple[ContradictionPipeline, tuple[object, ...]]] = []
+    batch_candidates: list[IndexedClaim] = []
     planned_operations = plan.get("operations")
     assert isinstance(planned_operations, list)
     if any(
@@ -1072,11 +1078,27 @@ def apply_compile_plan(
                     ROOT, query, limit
                 ),
             )
-            assessments = tuple(
-                pipeline.assess(NormalizedClaim(record), commit=False)
-                for record in claims
-            )
+            assessments_list = []
+            for record in claims:
+                normalized = NormalizedClaim(record)
+                indexed = claim_index.candidates(normalized)
+                candidates = tuple(indexed) + tuple(batch_candidates)
+                assessment = pipeline.assess(
+                    normalized,
+                    candidates=candidates if candidates else None,
+                    commit=False,
+                )
+                assessments_list.append(assessment)
+                batch_candidates.append(
+                    IndexedClaim(str(planned["path"]), normalized, ledger_backed=False)
+                )
+            assessments = tuple(assessments_list)
             claim_groups.append((pipeline, assessments))
+    batch_quarantine = any(
+        assessment.recommendation == "quarantine"
+        for _pipeline, assessments in claim_groups
+        for assessment in assessments
+    )
 
     with coordinator.writer_gate():
         coordinator.recover()
@@ -1101,6 +1123,55 @@ def apply_compile_plan(
                 sequence,
                 transaction.updated_at,
                 authoritative_action_key,
+            )
+
+        if batch_quarantine:
+            quarantine_changes: list[MarkdownChange] = []
+            quarantine_paths: list[str] = []
+            for pipeline, assessments in claim_groups:
+                forced = tuple(
+                    replace(
+                        assessment,
+                        recommendation="quarantine",
+                        lifecycle_mutations=(),
+                        candidate_path=None,
+                    )
+                    for assessment in assessments
+                )
+                policy_changes, _policy_preconditions, candidate_paths = (
+                    pipeline.plan_changes(forced)
+                )
+                quarantine_changes.extend(policy_changes)
+                quarantine_paths.extend(candidate_paths)
+            if not quarantine_changes:
+                raise ValueError("quarantined compile batch produced no candidates")
+            claim_groups[0][0].ensure_candidate_parent()
+            quarantine_operation_id = "compile-quarantine:" + sha256_bytes(
+                canonical_json_bytes(
+                    {
+                        "action_key": action_key,
+                        "source_digests": source_digests,
+                        "candidate_paths": sorted(quarantine_paths),
+                    }
+                )
+            )
+            transaction = coordinator.prepare(
+                sorted(quarantine_changes, key=lambda item: item.path),
+                operation_id=quarantine_operation_id,
+                preconditions={path: "absent" for path in quarantine_paths},
+            )
+            committed = coordinator.apply(transaction.id)
+            committed, sequence = _transaction_authority(
+                coordinator, quarantine_operation_id
+            )
+            return CompileApplyResult(
+                committed.id,
+                quarantine_operation_id,
+                committed.state,
+                tuple(sorted(quarantine_paths)),
+                sequence,
+                committed.updated_at,
+                action_key,
             )
 
         pending: dict[str, bytes | None] = {}
@@ -1261,6 +1332,7 @@ def apply_compile_plan(
             )
         )
         for digest in source_digests:
+            (DAILY_DIR / "receipts").mkdir(parents=True, exist_ok=True)
             relative = f"knowledge/daily/receipts/{digest}.md"
             receipt_bytes = _receipt_bytes(
                 digest,
@@ -1288,7 +1360,14 @@ def apply_compile_plan(
         committed = coordinator.apply(transaction.id)
         committed, sequence = _transaction_authority(coordinator, operation_id)
         if claim_index is not None:
-            claim_index.rebuild()
+            try:
+                claim_index.rebuild()
+            except Exception:
+                for suffix in ("", "-journal", "-wal", "-shm"):
+                    try:
+                        Path(f"{claim_index.path}{suffix}").unlink(missing_ok=True)
+                    except OSError:
+                        pass
         _clear_compile_source_failures(inputs, coordinator.state_root)
         return CompileApplyResult(
             committed.id,

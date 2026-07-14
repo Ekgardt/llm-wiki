@@ -37,6 +37,13 @@ def test_frozen_benchmark_meets_every_exact_gate():
     assert metrics.quarantine_risk == 0
     assert metrics.false_supersession <= 0.01
     assert 0 <= metrics.quarantine_coverage <= 1
+    assert metrics.semantic_primary_calls == 40
+    assert metrics.semantic_critique_calls == 40
+    assert metrics.semantic_fallback_probes == 80
+    assert metrics.semantic_evaluators_independent is True
+    assert metrics.semantic_benchmark_gate is False
+    assert metrics.quarantine_candidates == 80
+    assert metrics.quarantine_notes_published == 0
 
 
 def test_benchmark_executes_real_extraction_resolver_and_claim_index(monkeypatch):

@@ -514,7 +514,7 @@ def test_claim_index_failed_publication_rolls_back_previous_snapshot(
         encoding="utf-8",
     )
 
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(ValueError, match="duplicate claim id"):
         index.rebuild(lambda: [page])
 
     assert len(index.candidates(normalized)) == 1

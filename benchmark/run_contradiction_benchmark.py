@@ -126,7 +126,7 @@ def build_corpus() -> dict[str, object]:
             elif category == "quarantine":
                 old_semantic = _semantic(case_id, "blue", relation="depends-on")
                 new_semantic = _semantic(case_id, "blue", relation="uses")
-                expected_class, expected_lifecycle = "unresolved", "quarantine"
+                expected_class, expected_lifecycle = "compatible", "quarantine"
             hour, minute = divmod(ordinal, 60)
             block_id = f"{hour:02d}:{minute:02d}:00"
             old_text = f"old {case_id}: {old_semantic['relation']} {old_semantic['value']['value']}"

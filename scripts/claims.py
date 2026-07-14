@@ -495,6 +495,9 @@ def parse_claim_ledger(content: bytes) -> dict[str, object] | None:
     if canonical_json_bytes(ledger) != raw:
         raise ValueError("Claims ledger is not restricted canonical JSON")
     validate_schema(ledger, LEDGER_SCHEMA)
+    claim_ids = [str(record["id"]) for record in ledger["claims"]]
+    if len(claim_ids) != len(set(claim_ids)):
+        raise ValueError("claim ledger contains a duplicate claim id")
     for record in ledger["claims"]:
         validate_claim_record(record)
     return ledger

@@ -490,6 +490,38 @@ def test_superseding_last_substantive_claim_updates_page_and_rebuilds_index(tmp_
     assert index.candidates(claim("red")) == []
 
 
+def test_final_substantive_claim_supersession_preserves_crlf_frontmatter(tmp_path):
+    from contradiction_pipeline import ContradictionPipeline
+    from markdown_transaction import MarkdownCoordinator
+
+    vault = tmp_path / "vault"
+    state = tmp_path / "state"
+    (vault / "knowledge/inbox/claims").mkdir(parents=True)
+    (vault / "knowledge/notes").mkdir()
+    state.mkdir()
+    old = indexed("blue", authority="web")
+    page = vault / old.page
+    page.write_bytes(
+        b"---\r\ntype: concept\r\nstatus: active\r\n---\r\n# Existing\r\n\r\n"
+        b"## Claims\r\n```json\r\n"
+        + canonical_json_bytes({"schema_version": "claim-ledger/v1", "claims": [old.claim.record]})
+        + b"\r\n```\r\n"
+    )
+    pipeline = ContradictionPipeline(
+        vault=vault,
+        coordinator=MarkdownCoordinator(vault, state),
+        source_page="knowledge/notes/replacement.md",
+        evaluators=(),
+    )
+
+    pipeline.assess(claim("red"), candidates=[old])
+
+    content = page.read_bytes()
+    assert b"status: superseded\r\n" in content
+    assert b"superseded_by: [[replacement]]\r\n" in content
+    assert b"\n" not in content.replace(b"\r\n", b"")
+
+
 def test_lifecycle_write_uses_bounded_cas_and_rejects_concurrent_edit(tmp_path, monkeypatch):
     from contradiction_pipeline import ContradictionPipeline
     from markdown_transaction import MarkdownCoordinator, TransactionFailure

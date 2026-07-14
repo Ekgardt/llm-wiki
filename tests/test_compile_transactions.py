@@ -43,6 +43,7 @@ def _daily(root: Path) -> Path:
         b"## [10:00:00] session-end | manual\r\n"
         b"A durable exact-byte observation.\r\n"
         b"The prior state is blue.\r\n"
+        b"A second durable exact-byte observation.\r\n"
     )
     return path
 
@@ -203,7 +204,7 @@ def test_compile_transaction_commits_page_index_log_and_receipt(vault):
     )
 
 
-def test_compile_claims_are_verified_assessed_and_committed_in_one_transaction(vault):
+def test_quarantined_compile_publishes_only_idempotent_candidates_and_stays_pending(vault):
     root, state_root = vault
     daily = _daily(root)
     import compile_memory
@@ -253,20 +254,159 @@ def test_compile_claims_are_verified_assessed_and_committed_in_one_transaction(v
         completed_at="2026-07-14T12:00:00Z",
     )
 
-    page = (root / "knowledge/notes/exact-byte-pattern.md").read_text(encoding="utf-8")
-    assert "## Claims\n```json" in page
-    assert '"lifecycle":"quarantined"' in page
+    page = root / "knowledge/notes/exact-byte-pattern.md"
+    receipt = root / f"knowledge/daily/receipts/{inputs.dailies[0].sha256}.md"
+    assert not page.exists()
+    assert not receipt.exists()
+    assert b"exact-byte-pattern" not in (root / "knowledge/index.md").read_bytes()
+    assert b"Use an immutable snapshot" not in (root / "knowledge/log.md").read_bytes()
+    import search_memory
+
+    original_knowledge = search_memory.KNOWLEDGE_DIR
+    search_memory.KNOWLEDGE_DIR = root / "knowledge/notes"
+    try:
+        assert page not in search_memory._collect_pages()
+    finally:
+        search_memory.KNOWLEDGE_DIR = original_knowledge
     candidates = list((root / "knowledge/inbox/claims").glob("*.md"))
     assert len(candidates) == 1
     transaction = coordinator._record_for_operation_id(result.operation_id)
     assert transaction is not None
-    assert {item.path for item in transaction.operations}.issuperset(
-        {"knowledge/notes/exact-byte-pattern.md", candidates[0].relative_to(root).as_posix()}
-    )
+    assert result.operation_id.startswith("compile-quarantine:")
+    assert {item.path for item in transaction.operations} == {
+        candidates[0].relative_to(root).as_posix()
+    }
     assert all(
         item.page != "knowledge/notes/exact-byte-pattern.md"
         for item in index.candidates(NormalizedClaim(new))
     )
+    selected = compile_memory.select_dailies(
+        Namespace(file=None, all=False), {}, coordinator=coordinator
+    )
+    assert selected == [daily]
+
+    retried = compile_memory.apply_compile_plan(
+        inputs,
+        plan,
+        action_key="9" * 64,
+        trigger="manual",
+        coordinator=coordinator,
+        completed_at="2026-07-14T12:00:00Z",
+    )
+    assert retried.transaction_id == result.transaction_id
+    assert len(list((root / "knowledge/inbox/claims").glob("*.md"))) == 1
+
+
+def test_compile_batch_claims_compare_incrementally_and_mutual_conflict_quarantines(vault):
+    root, state_root = vault
+    daily = _daily(root)
+    import compile_memory
+
+    first = _claim_record(
+        root, claim_id="first", value="red",
+        text="A durable exact-byte observation.", authority="user",
+    )
+    second = _claim_record(
+        root, claim_id="second", value="green",
+        text="A second durable exact-byte observation.", authority="user",
+    )
+    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation["claims"] = [first, second]
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    plan = {
+        "schema_version": "compile-plan/v2",
+        "operations": [{
+            "kind": "create", "path": "knowledge/notes/exact-byte-pattern.md",
+            "content": canonical_json_bytes(operation).decode(),
+        }],
+    }
+
+    compile_memory.apply_compile_plan(
+        inputs, plan, action_key="8" * 64, trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:00:00Z",
+    )
+
+    assert not (root / "knowledge/notes/exact-byte-pattern.md").exists()
+    assert len(list((root / "knowledge/inbox/claims").glob("*.md"))) == 2
+
+
+def test_duplicate_claim_ids_are_rejected_before_any_transaction(vault):
+    root, state_root = vault
+    daily = _daily(root)
+    import compile_memory
+
+    duplicate = _claim_record(
+        root, claim_id="duplicate", value="red",
+        text="A durable exact-byte observation.", authority="user",
+    )
+    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation["claims"] = [duplicate, duplicate]
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    plan = {
+        "schema_version": "compile-plan/v2",
+        "operations": [{
+            "kind": "create", "path": "knowledge/notes/exact-byte-pattern.md",
+            "content": canonical_json_bytes(operation).decode(),
+        }],
+    }
+    coordinator = MarkdownCoordinator(root, state_root)
+
+    with pytest.raises(ValueError, match="duplicate claim id"):
+        compile_memory.apply_compile_plan(
+            inputs, plan, action_key="7" * 64, trigger="manual",
+            coordinator=coordinator, completed_at="2026-07-14T12:00:00Z",
+        )
+
+    assert not (root / "knowledge/notes/exact-byte-pattern.md").exists()
+    with coordinator._connect() as database:
+        assert database.execute('SELECT COUNT(*) FROM "transaction"').fetchone()[0] == 0
+
+
+def test_postcommit_claim_index_rebuild_failure_invalidates_without_failing_commit(
+    vault, monkeypatch
+):
+    root, state_root = vault
+    daily = _daily(root)
+    import compile_memory
+    from claims import ClaimIndex
+
+    new = _claim_record(
+        root, claim_id="new", value="red",
+        text="A durable exact-byte observation.", authority="user",
+    )
+    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation["claims"] = [new]
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    plan = {
+        "schema_version": "compile-plan/v2",
+        "operations": [{
+            "kind": "create", "path": "knowledge/notes/exact-byte-pattern.md",
+            "content": canonical_json_bytes(operation).decode(),
+        }],
+    }
+    original_rebuild = ClaimIndex.rebuild
+    calls = 0
+
+    def fail_after_commit(self, sources=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return original_rebuild(self, sources)
+        raise OSError("derived cache failure")
+
+    monkeypatch.setattr(ClaimIndex, "rebuild", fail_after_commit)
+    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args: [])
+
+    result = compile_memory.apply_compile_plan(
+        inputs, plan, action_key="6" * 64, trigger="manual",
+        coordinator=MarkdownCoordinator(root, state_root),
+        completed_at="2026-07-14T12:00:00Z",
+    )
+
+    assert result.state == "committed"
+    assert (root / "knowledge/notes/exact-byte-pattern.md").is_file()
+    assert not (state_root / "cache/claims.sqlite3").exists()
 
 
 def test_committed_compile_clears_durable_source_failure(vault):
