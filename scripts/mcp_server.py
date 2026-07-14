@@ -575,7 +575,59 @@ def _quality_for(
             "partial": True,
             "warnings": [str(data["error"])],
         }
-    if name in {"recall", "get_decisions", "check_contradiction"}:
+    if name == "check_contradiction":
+        if isinstance(data, list):
+            if not data:
+                return {
+                    "coverage": 0.1,
+                    "confidence": 0.3,
+                    "fallback": True,
+                    "partial": True,
+                    "warnings": [
+                        "Search returned no results; retrieval coverage is unknown."
+                    ],
+                }
+            fused = any(
+                isinstance(result, dict)
+                and any(key in result for key in ("fused_score", "vector_score"))
+                for result in data
+            )
+            quality = (
+                {"coverage": 0.9, "confidence": 0.8}
+                if fused
+                else {
+                    "coverage": 0.6,
+                    "confidence": 0.6,
+                    "fallback": True,
+                    "partial": True,
+                    "warnings": ["Only BM25 retrieval evidence is available."],
+                }
+            )
+            return _degrade_quality(
+                quality,
+                "Contradiction candidates are unverified.",
+                coverage=0.6,
+                confidence=0.45,
+            )
+        validity = data.get("validity", {}) if isinstance(data, dict) else {}
+        evidence = data.get("evidence", []) if isinstance(data, dict) else []
+        if isinstance(validity, dict) and validity.get("status") == "verified":
+            return {
+                "coverage": 0.9 if evidence else 0.7,
+                "confidence": 0.9,
+                "partial": False,
+                "warnings": [],
+            }
+        return {
+            "coverage": 0.5 if evidence else 0.2,
+            "confidence": 0.35,
+            "fallback": True,
+            "partial": True,
+            "warnings": [
+                "Claim evidence is unsupported; recommendations are quarantined."
+            ],
+        }
+    if name in {"recall", "get_decisions"}:
         results = data.get("results", []) if name == "recall" else data
         if not isinstance(results, list) or not results:
             quality = {
@@ -601,13 +653,6 @@ def _quality_for(
                 }
             else:
                 quality = {"coverage": 0.9, "confidence": 0.8}
-        if name == "check_contradiction":
-            quality = _degrade_quality(
-                quality,
-                "Contradiction candidates are unverified.",
-                coverage=0.6,
-                confidence=0.45,
-            )
         if limit_clamped:
             quality = _degrade_quality(
                 quality,

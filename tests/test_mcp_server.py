@@ -204,6 +204,36 @@ class TestHelperFunctions:
             "recommendations",
         }
 
+    def test_real_string_assessment_retrieves_claim_index_and_reports_unsupported_evidence(
+        self, tmp_path, monkeypatch
+    ):
+        import contradiction_pipeline
+        import mcp_server
+        import memory_state
+
+        vault = tmp_path / "vault"
+        state = tmp_path / "state"
+        (vault / "knowledge/notes").mkdir(parents=True)
+        state.mkdir()
+        monkeypatch.setattr(memory_state, "ROOT", vault)
+        monkeypatch.setattr(memory_state, "STATE_ROOT", state)
+        monkeypatch.setattr(
+            contradiction_pipeline,
+            "default_secondary_search",
+            lambda root, query, limit: [
+                {"path": "knowledge/notes/context.md", "title": "Context", "snippet": "project state blue"}
+            ],
+        )
+
+        result = mcp_server._assess_contradiction_text("project has-state red")
+
+        assert result["validity"]["status"] == "unsupported-evidence"
+        assert result["recommendations"] == ["quarantine"]
+        assert result["evidence"][0]["retrieval_only"] is True
+        quality = mcp_server._quality_for("check_contradiction", result)
+        assert quality["partial"] is True
+        assert any("unsupported" in item.lower() for item in quality["warnings"])
+
     def test_vault_status_returns_dict(self):
         from mcp_server import _vault_status
         result = _vault_status()

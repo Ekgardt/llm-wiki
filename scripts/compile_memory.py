@@ -37,6 +37,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import read_stable_bytes  # noqa: E402
+from claims import (  # noqa: E402
+    LEDGER_SCHEMA,
+    ClaimIndex,
+    NormalizedClaim,
+    validate_claim_record,
+)
 from compile_cache import (  # noqa: E402
     COMPILE_PLAN_SCHEMA_HASH,
     COMPILE_PLAN_SCHEMA_VERSION,
@@ -45,7 +51,10 @@ from compile_cache import (  # noqa: E402
     CompileCallDescriptor,
     SourceDescriptor,
 )
-from contradiction_pipeline import ContradictionPipeline  # noqa: E402
+from contradiction_pipeline import (  # noqa: E402
+    ContradictionPipeline,
+    default_secondary_search,
+)
 from evidence_resolver import EvidenceRef, EvidenceResolver  # noqa: E402
 from llm_client import call_candidate, probe_candidate, provider_candidates  # noqa: E402
 from markdown_transaction import MarkdownChange, MarkdownCoordinator  # noqa: E402
@@ -88,6 +97,9 @@ MAX_AFTER_IMAGE_BYTES = 4 * 1024 * 1024
 MAX_RECEIPT_BYTES = 1024 * 1024
 MAX_LOG_BYTES = 4 * 1024 * 1024
 MAX_INDEX_BYTES = 4 * 1024 * 1024
+CLAIM_RECORD_SCHEMA = json.loads(LEDGER_SCHEMA.read_text(encoding="utf-8"))[
+    "properties"
+]["claims"]["items"]
 ALLOWED_CATEGORIES = frozenset(
     {"concepts", "decisions", "patterns", "debugging", "qa"}
 )
@@ -130,7 +142,8 @@ RAW_PLAN_SCHEMA = {
                             "additionalProperties": False
                         }
                     },
-                    "related": {"type": "array", "maxItems": MAX_RELATED, "items": {"type": "string", "maxLength": 200, "pattern": "^\\[\\[[^\\r\\n]+\\]\\]$"}}
+                    "related": {"type": "array", "maxItems": MAX_RELATED, "items": {"type": "string", "maxLength": 200, "pattern": "^\\[\\[[^\\r\\n]+\\]\\]$"}},
+                    "claims": {"type": "array", "maxItems": 100, "items": CLAIM_RECORD_SCHEMA},
                 },
                 "additionalProperties": False
             }
@@ -719,7 +732,7 @@ def _validate_semantic_operation(
         "evidence",
         "related",
     }
-    allowed = required
+    allowed = required | {"claims"}
     if not required.issubset(operation):
         raise ValueError("compile operation is missing semantic fields")
     if set(operation) - allowed:
@@ -857,6 +870,31 @@ def _validate_semantic_operation(
                 "reference": str(reference),
             }
         )
+    claims = operation.get("claims", [])
+    if not isinstance(claims, list) or len(claims) > 100:
+        raise ValueError("compile operation claims must be a bounded array")
+    for record in claims:
+        validate_claim_record(record)
+        assert isinstance(record, Mapping)
+        if record.get("lifecycle") != "active":
+            raise ValueError("compile input claims must be active")
+        claim_evidence = record["evidence"]
+        assert isinstance(claim_evidence, Mapping)
+        reference = EvidenceRef.parse(claim_evidence["reference"])
+        source = _daily_for_evidence(inputs, reference.daily_id)
+        if source is None or source.sha256 != reference.source_sha256:
+            raise ValueError("compile claim evidence source is absent from the snapshot")
+        resolved = EvidenceResolver(ROOT).resolve_bytes(
+            reference,
+            source.content,
+            source_path=ROOT / source.logical_path,
+        )
+        if (
+            resolved.sha256 != claim_evidence["sha256"]
+            or resolved.bytes.decode("utf-8", errors="strict")
+            != claim_evidence["text"]
+        ):
+            raise ValueError("compile claim literal evidence does not match")
     normalized = json.loads(canonical_json_bytes(operation))
     assert isinstance(normalized, dict)
     return normalized, evidence_bindings
@@ -901,6 +939,32 @@ def _render_page(
         + "\n"
     )
     return text.encode("utf-8")
+
+
+def _with_claim_ledger(page: bytes, records: Sequence[Mapping[str, object]]) -> bytes:
+    if not records:
+        return page
+    ledger = {
+        "schema_version": "claim-ledger/v1",
+        "claims": [json.loads(canonical_json_bytes(item)) for item in records],
+    }
+    encoded = canonical_json_bytes(ledger)
+    marker = re.compile(
+        rb"(?ms)(^## Claims[ \t]*\r?\n```json[ \t]*\r?\n)([^\r\n]+)(\r?\n```[ \t]*(?=\r?\n(?:## |\Z)|\Z))"
+    )
+    match = marker.search(page)
+    if match is None:
+        return page.rstrip() + b"\n\n## Claims\n```json\n" + encoded + b"\n```\n"
+    existing = json.loads(match[2])
+    by_id = {str(item["id"]): item for item in existing["claims"]}
+    for record in ledger["claims"]:
+        if str(record["id"]) in by_id:
+            raise ValueError("compile claim id already exists in target ledger")
+        by_id[str(record["id"])] = record
+    merged = canonical_json_bytes(
+        {"schema_version": "claim-ledger/v1", "claims": list(by_id.values())}
+    )
+    return page[: match.start(2)] + merged + page[match.end(2) :]
 
 
 def _append_log_bytes(content: bytes, entry: str) -> bytes:
@@ -980,6 +1044,40 @@ def apply_compile_plan(
     )
     (DAILY_DIR / "receipts").mkdir(parents=True, exist_ok=True)
 
+    claim_index: ClaimIndex | None = None
+    claim_groups: list[tuple[ContradictionPipeline, tuple[object, ...]]] = []
+    planned_operations = plan.get("operations")
+    assert isinstance(planned_operations, list)
+    if any(
+        isinstance(item, dict)
+        and isinstance(json.loads(str(item["content"])).get("claims"), list)
+        and json.loads(str(item["content"])).get("claims")
+        for item in planned_operations
+    ):
+        claim_index = ClaimIndex(coordinator.state_root, vault=ROOT)
+        claim_index.rebuild()
+        for planned in planned_operations:
+            assert isinstance(planned, dict)
+            semantic = json.loads(str(planned["content"]))
+            claims = semantic.get("claims", [])
+            if not claims:
+                continue
+            pipeline = ContradictionPipeline(
+                claim_index=claim_index,
+                evaluators=() if os.environ.get("MEMORY_LLM_PROVIDER") == "fake" else None,
+                vault=ROOT,
+                coordinator=coordinator,
+                source_page=str(planned["path"]),
+                secondary_search=lambda query, limit: default_secondary_search(
+                    ROOT, query, limit
+                ),
+            )
+            assessments = tuple(
+                pipeline.assess(NormalizedClaim(record), commit=False)
+                for record in claims
+            )
+            claim_groups.append((pipeline, assessments))
+
     with coordinator.writer_gate():
         coordinator.recover()
         existing = [read_compile_receipt(digest, coordinator) for digest in source_digests]
@@ -1027,6 +1125,27 @@ def apply_compile_plan(
                 raise ValueError("compile operation path does not match its slug")
             references = [binding["reference"] for binding in bindings]
             page = _render_page(semantic, completed_at, references)
+            assessments = next(
+                (
+                    group
+                    for pipeline, group in claim_groups
+                    if pipeline.source_page == path
+                ),
+                (),
+            )
+            recommendation_by_id = {
+                str(item.claim.record["id"]): item.recommendation
+                for item in assessments
+            }
+            rendered_claims = [
+                {
+                    **record,
+                    "lifecycle": "quarantined"
+                    if recommendation_by_id.get(str(record["id"])) == "quarantine"
+                    else record["lifecycle"],
+                }
+                for record in semantic.get("claims", [])
+            ]
             target = _target_snapshot(inputs, path)
             if planned["kind"] == "replace":
                 if target is None:
@@ -1042,6 +1161,7 @@ def apply_compile_plan(
                     + "\n"
                 ).encode("utf-8")
                 page = existing_page + update
+                page = _with_claim_ledger(page, rendered_claims)
                 changes.append(
                     MarkdownChange.replace(
                         path, page, max_before_bytes=MAX_AFTER_IMAGE_BYTES
@@ -1051,6 +1171,7 @@ def apply_compile_plan(
             else:
                 if target is not None:
                     raise ValueError("create target existed in snapshot")
+                page = _with_claim_ledger(page, rendered_claims)
                 changes.append(
                     MarkdownChange.create(
                         path, page, max_before_bytes=MAX_AFTER_IMAGE_BYTES
@@ -1075,6 +1196,27 @@ def apply_compile_plan(
                 }
                 for binding in bindings
             )
+
+        candidate_needed = False
+        for pipeline, assessments in claim_groups:
+            policy_changes, policy_preconditions, candidate_paths = pipeline.plan_changes(
+                assessments
+            )
+            candidate_needed = candidate_needed or bool(candidate_paths)
+            for change in policy_changes:
+                if change.path in {item.path for item in changes}:
+                    raise ValueError(
+                        "compile claim lifecycle overlaps a compile operation target"
+                    )
+                changes.append(change)
+                preconditions[change.path] = policy_preconditions.get(
+                    change.path, "absent"
+                )
+                if change.path.startswith("knowledge/notes/") and change.content is not None:
+                    pending[change.path] = change.content
+                touched.append(change.path)
+        if candidate_needed:
+            claim_groups[0][0].ensure_candidate_parent()
 
         from rebuild_memory_index import build_index_bytes
 
@@ -1145,6 +1287,8 @@ def apply_compile_plan(
         )
         committed = coordinator.apply(transaction.id)
         committed, sequence = _transaction_authority(coordinator, operation_id)
+        if claim_index is not None:
+            claim_index.rebuild()
         _clear_compile_source_failures(inputs, coordinator.state_root)
         return CompileApplyResult(
             committed.id,

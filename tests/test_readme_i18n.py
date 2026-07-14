@@ -98,9 +98,9 @@ def test_all_readmes_mention_current_version():
     current = m.group(1)
     required = ("MCP", "12", "doctor", "envelope", "resource", "integration_adapter.py")
     critical_markers = {
-            "README.md": ("12 task-shaped", "1575 tests collected", "Current 112", "optional Obsidian viewer"),
-            "README.ru.md": ("12 task-shaped", "1575 тестов", "Текущие 112", "Obsidian как опциональный viewer"),
-            "README.zh-CN.md": ("12 个 task-shaped", "1575 个测试", "当前 112", "Obsidian 为可选 viewer"),
+            "README.md": ("12 task-shaped", "1587 tests collected", "Current 112", "optional Obsidian viewer"),
+            "README.ru.md": ("12 task-shaped", "1587 тестов", "Текущие 112", "Obsidian как опциональный viewer"),
+            "README.zh-CN.md": ("12 个 task-shaped", "1587 个测试", "当前 112", "Obsidian 为可选 viewer"),
     }
     for p, text in _readmes():
         assert current in text, (

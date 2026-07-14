@@ -18,7 +18,7 @@ def vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
     root = tmp_path / "vault"
     state_root = tmp_path / "state"
     state_root.mkdir()
-    for relative in ("knowledge/daily/receipts", "knowledge/notes"):
+    for relative in ("knowledge/daily/receipts", "knowledge/notes", "knowledge/projects"):
         (root / relative).mkdir(parents=True)
     (root / "knowledge/index.md").write_bytes(b"# Old index\n")
     (root / "knowledge/log.md").write_bytes(b"# Session Memory Log\n")
@@ -42,6 +42,7 @@ def _daily(root: Path) -> Path:
     path.write_bytes(
         b"## [10:00:00] session-end | manual\r\n"
         b"A durable exact-byte observation.\r\n"
+        b"The prior state is blue.\r\n"
     )
     return path
 
@@ -74,6 +75,39 @@ def _semantic_plan() -> dict[str, object]:
                 "content": canonical_json_bytes(operation).decode("utf-8"),
             }
         ],
+    }
+
+
+def _claim_record(root: Path, *, claim_id: str, value: str, text: str, authority: str) -> dict[str, object]:
+    daily = (root / "knowledge/daily/2026-07-14.md").read_bytes()
+    start = daily.index(text.encode())
+    semantic = {
+        "subject": "project",
+        "relation": "has-state",
+        "value": {"type": "string", "value": value},
+        "qualifiers": [],
+        "validity": {"from": "2026-07-14", "to": None},
+    }
+    return {
+        "schema_version": "claim/v1",
+        "id": claim_id,
+        "fingerprint": sha256_bytes(canonical_json_bytes(semantic)),
+        "text": text,
+        **semantic,
+        "observed_at": "2026-07-14T10:00:00Z",
+        "lifecycle": "active",
+        "confidence": "high",
+        "authority": authority,
+        "evidence": {
+            "reference": (
+                f"daily:2026-07-14 sha256:{sha256_bytes(daily)} "
+                f"block:10:00:00 bytes:{start}-{start + len(text.encode())}"
+            ),
+            "sha256": sha256_bytes(text.encode()),
+            "text": text,
+        },
+        "links": [],
+        "extractor_version": "test/v1",
     }
 
 
@@ -166,6 +200,72 @@ def test_compile_transaction_commits_page_index_log_and_receipt(vault):
     validate_schema(
         record,
         Path(compile_memory.__file__).with_name("schemas") / "compile-receipt-v2.json",
+    )
+
+
+def test_compile_claims_are_verified_assessed_and_committed_in_one_transaction(vault):
+    root, state_root = vault
+    daily = _daily(root)
+    import compile_memory
+    from claims import ClaimIndex, NormalizedClaim
+
+    old = _claim_record(
+        root,
+        claim_id="old",
+        value="blue",
+        text="The prior state is blue.",
+        authority="user",
+    )
+    existing = root / "knowledge/notes/existing.md"
+    existing.write_bytes(
+        b"---\ntype: concept\n---\n# Existing\n\n## Claims\n```json\n"
+        + canonical_json_bytes({"schema_version": "claim-ledger/v1", "claims": [old]})
+        + b"\n```\n"
+    )
+    new = _claim_record(
+        root,
+        claim_id="new",
+        value="red",
+        text="A durable exact-byte observation.",
+        authority="inferred",
+    )
+    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation["claims"] = [new]
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    plan = {
+        "schema_version": "compile-plan/v2",
+        "operations": [{
+            "kind": "create",
+            "path": "knowledge/notes/exact-byte-pattern.md",
+            "content": canonical_json_bytes(operation).decode(),
+        }],
+    }
+    index = ClaimIndex(state_root, vault=root)
+    index.rebuild()
+    coordinator = MarkdownCoordinator(root, state_root)
+
+    result = compile_memory.apply_compile_plan(
+        inputs,
+        plan,
+        action_key="9" * 64,
+        trigger="manual",
+        coordinator=coordinator,
+        completed_at="2026-07-14T12:00:00Z",
+    )
+
+    page = (root / "knowledge/notes/exact-byte-pattern.md").read_text(encoding="utf-8")
+    assert "## Claims\n```json" in page
+    assert '"lifecycle":"quarantined"' in page
+    candidates = list((root / "knowledge/inbox/claims").glob("*.md"))
+    assert len(candidates) == 1
+    transaction = coordinator._record_for_operation_id(result.operation_id)
+    assert transaction is not None
+    assert {item.path for item in transaction.operations}.issuperset(
+        {"knowledge/notes/exact-byte-pattern.md", candidates[0].relative_to(root).as_posix()}
+    )
+    assert all(
+        item.page != "knowledge/notes/exact-byte-pattern.md"
+        for item in index.candidates(NormalizedClaim(new))
     )
 
 

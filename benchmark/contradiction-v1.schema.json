@@ -2,12 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://llm-wiki.local/schemas/contradiction-v1.json",
   "type": "object",
-  "required": ["version", "provider", "categories", "relation_metadata", "cases"],
+  "required": ["version", "provider", "categories", "relation_metadata", "source", "cases"],
   "properties": {
     "version": {"const": "contradiction-v1"},
     "provider": {"const": "fake"},
     "categories": {"type": "array", "minItems": 6, "maxItems": 6, "items": {"enum": ["equality", "interval", "functional-relation", "authority-lifecycle", "keep-both-refine", "quarantine"]}},
     "relation_metadata": {"type": "object", "required": ["functional", "non_functional"], "properties": {"functional": {"type": "array", "items": {"type": "string"}}, "non_functional": {"type": "array", "items": {"type": "string"}}}, "additionalProperties": false},
+    "source": {"type": "string", "minLength": 1},
     "cases": {"type": "array", "minItems": 240, "items": {"$ref": "#/$defs/case"}}
   },
   "additionalProperties": false,
@@ -15,6 +16,26 @@
     "typed_value": {"type": "object", "required": ["type", "value"], "properties": {"type": {"enum": ["string", "entity", "boolean", "date", "timestamp"]}, "value": {}}, "additionalProperties": false},
     "interval": {"type": "object", "required": ["from", "to"], "properties": {"from": {"type": ["string", "null"]}, "to": {"type": ["string", "null"]}}, "additionalProperties": false},
     "evidence": {"type": "object", "required": ["reference", "sha256", "text"], "properties": {"reference": {"type": "string"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "text": {"type": "string"}}, "additionalProperties": false},
+    "semantic": {
+      "type": "object",
+      "required": ["subject", "relation", "value", "qualifiers", "validity"],
+      "properties": {
+        "subject": {"type": "string"}, "relation": {"enum": ["equals", "has-state", "has-value", "member-of", "located-at", "starts-at", "ends-at", "uses", "depends-on"]},
+        "value": {"$ref": "#/$defs/typed_value"}, "qualifiers": {"type": "array", "maxItems": 0}, "validity": {"$ref": "#/$defs/interval"}
+      },
+      "additionalProperties": false
+    },
+    "extraction": {
+      "type": "object",
+      "required": ["id", "text", "subject", "relation", "value", "qualifiers", "validity", "lifecycle", "confidence", "authority", "evidence", "links", "extractor_version"],
+      "properties": {
+        "id": {"type": "string"}, "text": {"type": "string"}, "subject": {"type": "string"}, "relation": {"enum": ["equals", "has-state", "has-value", "member-of", "located-at", "starts-at", "ends-at", "uses", "depends-on"]},
+        "value": {"$ref": "#/$defs/typed_value"}, "qualifiers": {"type": "array", "maxItems": 0}, "validity": {"$ref": "#/$defs/interval"},
+        "lifecycle": {"const": "active"}, "confidence": {"enum": ["high", "medium", "low"]}, "authority": {"enum": ["user", "web", "ai-derived", "inferred"]},
+        "evidence": {"$ref": "#/$defs/evidence"}, "links": {"type": "array", "maxItems": 0}, "extractor_version": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
     "claim": {
       "type": "object",
       "required": ["schema_version", "id", "fingerprint", "text", "subject", "relation", "value", "qualifiers", "validity", "observed_at", "lifecycle", "confidence", "authority", "evidence", "links", "extractor_version"],
@@ -27,14 +48,13 @@
       },
       "additionalProperties": false
     },
-    "literal_evidence": {"type": "object", "required": ["new", "existing"], "properties": {"new": {"type": "string"}, "existing": {"type": "string"}}, "additionalProperties": false},
     "case": {
       "type": "object",
-      "required": ["id", "category", "new_claim", "existing_claim", "existing_page", "literal_evidence", "retrievable", "expected_class", "expected_lifecycle", "expected_provenance_valid", "negative_control"],
+      "required": ["id", "category", "block_id", "new_extraction", "expected_new_claim", "existing_claim", "existing_page", "retrievable", "expected_class", "expected_lifecycle", "expected_provenance_valid", "negative_control"],
       "properties": {
-        "id": {"type": "string", "pattern": "^[a-z0-9-]+$"}, "category": {"enum": ["equality", "interval", "functional-relation", "authority-lifecycle", "keep-both-refine", "quarantine"]},
-        "new_claim": {"$ref": "#/$defs/claim"}, "existing_claim": {"$ref": "#/$defs/claim"}, "existing_page": {"type": "string", "pattern": "^knowledge/notes/[a-z0-9-]+\\.md$"},
-        "literal_evidence": {"$ref": "#/$defs/literal_evidence"}, "retrievable": {"type": "boolean"}, "expected_class": {"enum": ["equivalent", "temporal-distinct", "contradiction", "compatible", "refinement", "unresolved"]},
+        "id": {"type": "string", "pattern": "^[a-z0-9-]+$"}, "category": {"enum": ["equality", "interval", "functional-relation", "authority-lifecycle", "keep-both-refine", "quarantine"]}, "block_id": {"type": "string", "pattern": "^\\d{2}:\\d{2}:\\d{2}$"},
+        "new_extraction": {"$ref": "#/$defs/extraction"}, "expected_new_claim": {"$ref": "#/$defs/claim"}, "existing_claim": {"$ref": "#/$defs/claim"}, "existing_page": {"type": "string", "pattern": "^knowledge/notes/[a-z0-9-]+\\.md$"},
+        "retrievable": {"type": "boolean"}, "expected_class": {"enum": ["equivalent", "temporal-distinct", "contradiction", "compatible", "refinement", "unresolved"]},
         "expected_lifecycle": {"enum": ["refine", "supersede", "keep-both", "quarantine"]}, "expected_provenance_valid": {"type": "boolean"}, "negative_control": {"type": "boolean"}
       },
       "additionalProperties": false
