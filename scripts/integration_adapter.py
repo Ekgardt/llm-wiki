@@ -8,6 +8,7 @@ import secrets
 import stat
 import subprocess
 import sys
+import time
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -26,7 +27,10 @@ DELEGATE_TIMEOUT_SECONDS = 10
 MAINTENANCE_DRAIN_TIMEOUT_SECONDS = 600
 MAX_TRANSCRIPT_TEXT_CHARS = 8000
 MAX_CHECKPOINT_ERROR_CHARS = 500
+SESSION_START_RECOVERY_SECONDS = 0.25
+MAX_PROJECT_HANDOFF_CHARS = 2400
 TRANSIENT_CREATE_ATTEMPTS = 10
+PENDING_CLAIM_SECONDS = 30.0
 SOURCES = frozenset({"claude", "opencode", "codex"})
 EVENTS = frozenset(
     {"session_start", "session_end", "pre_compact", "user_prompt", "post_tool_use"}
@@ -355,55 +359,153 @@ def _checkpoint_event(
     }
 
 
-def _observe_project_checkpoint(envelope: EventEnvelope) -> None:
-    """Observe one envelope once and persist any resulting project checkpoint."""
+def _pending_checkpoint(
+    envelope: EventEnvelope, slug: str, state_key: str
+) -> dict[str, object]:
+    return {
+        "event_id": envelope.event_id,
+        "state_key": state_key,
+        "occurred_at": envelope.occurred_at.isoformat(),
+        "observation": _checkpoint_observation(envelope),
+        "checkpoint_event": _checkpoint_event(envelope, slug, "pending"),
+    }
+
+
+def _release_pending_claim(queue_key: str, event_id: str, owner: str) -> None:
+    def release(state: dict[str, Any]) -> None:
+        pending = state.get("project_checkpoint_pending")
+        if not isinstance(pending, dict):
+            return
+        queue = pending.get(queue_key)
+        if not isinstance(queue, list) or not queue:
+            return
+        item = queue[0]
+        if item.get("event_id") == event_id and item.get("claim_owner") == owner:
+            item.pop("claim_owner", None)
+            item.pop("claim_until", None)
+
+    update_state(release, lock_timeout=0.5)
+
+
+def _drain_project_checkpoints(
+    slug: str,
+    queue_key: str,
+    *,
+    writer_wait_seconds: float | None = None,
+) -> None:
+    owner = f"{os.getpid()}:{secrets.token_hex(8)}"
+    while True:
+        claimed: list[tuple[dict[str, object], dict[str, object], object]] = []
+
+        def claim(state: dict[str, Any]) -> None:
+            pending = state.get("project_checkpoint_pending")
+            if not isinstance(pending, dict):
+                return
+            queue = pending.get(queue_key)
+            if not isinstance(queue, list) or not queue:
+                return
+            item = queue[0]
+            now = time.time()
+            claim_until = item.get("claim_until")
+            if (
+                item.get("claim_owner") not in {None, owner}
+                and isinstance(claim_until, (int, float))
+                and claim_until > now
+            ):
+                return
+            item["claim_owner"] = owner
+            item["claim_until"] = now + PENDING_CLAIM_SECONDS
+            state_key = str(item["state_key"])
+            reducers = state.get("project_checkpoint_reducers")
+            reducer_state = reducers.get(state_key) if isinstance(reducers, dict) else None
+            reducer = CheckpointReducer.from_state(
+                reducer_state if isinstance(reducer_state, Mapping) else None
+            )
+            observation = item["observation"]
+            assert isinstance(observation, Mapping)
+            occurred_at = datetime.fromisoformat(str(item["occurred_at"]))
+            decision = reducer.observe(observation, now=occurred_at)
+            claimed.append((dict(item), reducer.to_state(), decision))
+
+        update_state(claim, lock_timeout=0.5)
+        if not claimed:
+            return
+        item, reducer_state, decision = claimed[0]
+        event_id = str(item["event_id"])
+        try:
+            if decision is not None and decision.reason != "session_start_recovery":
+                checkpoint = dict(item["checkpoint_event"])
+                checkpoint["idempotency_key"] = f"{event_id}:{decision.reason}"
+                checkpoint["reason"] = decision.reason
+                store = ProjectStore(ROOT, STATE_ROOT)
+                if writer_wait_seconds is None:
+                    store.checkpoint(
+                        slug,
+                        checkpoint,
+                        f"lifecycle:{event_id[:16]}",
+                    )
+                else:
+                    store.checkpoint(
+                        slug,
+                        checkpoint,
+                        f"lifecycle:{event_id[:16]}",
+                        writer_wait_seconds=writer_wait_seconds,
+                    )
+        except Exception:
+            _release_pending_claim(queue_key, event_id, owner)
+            raise
+
+        def commit(state: dict[str, Any]) -> None:
+            pending = state.setdefault("project_checkpoint_pending", {})
+            queue = pending.setdefault(queue_key, [])
+            if not queue:
+                return
+            head = queue[0]
+            if head.get("event_id") != event_id or head.get("claim_owner") != owner:
+                raise RuntimeError("project checkpoint pending claim changed")
+            state_key = str(head["state_key"])
+            reducers = state.setdefault("project_checkpoint_reducers", {})
+            reducers[state_key] = reducer_state
+            queue.pop(0)
+            if len(reducers) > 128:
+                reducers.pop(next(iter(reducers)))
+
+        try:
+            update_state(commit, lock_timeout=0.5)
+        except Exception:
+            _release_pending_claim(queue_key, event_id, owner)
+            raise
+
+
+def _observe_project_checkpoint(
+    envelope: EventEnvelope,
+    *,
+    writer_wait_seconds: float | None = None,
+) -> None:
+    """Durably enqueue one envelope and drain its project's ordered queue."""
     slug, project_dir = _project_context(envelope)
     if not slug or project_dir is None:
         return
-    observation = _checkpoint_observation(envelope)
-    decision_box: list[object] = []
     session_key = envelope.session or "unknown"
     state_key = f"{slug}:{session_key}"
+    pending_event = _pending_checkpoint(envelope, slug, state_key)
 
-    def mutate(state: dict[str, Any]) -> None:
-        existing = state.get("project_checkpoint_reducers")
-        reducers = existing if isinstance(existing, dict) else {}
-        reducer_state = reducers.get(state_key)
-        reducer = CheckpointReducer.from_state(
-            reducer_state if isinstance(reducer_state, Mapping) else None
-        )
-        decision = reducer.observe(observation, now=envelope.occurred_at)
-        decision_box.append(decision)
-        if decision is not None and decision.reason != "session_start_recovery":
+    def enqueue(state: dict[str, Any]) -> None:
+        reducers = state.get("project_checkpoint_reducers")
+        reducer_state = reducers.get(state_key) if isinstance(reducers, dict) else None
+        if isinstance(reducer_state, Mapping) and envelope.event_id in set(
+            reducer_state.get("observed_event_ids", [])
+        ):
             return
-        persisted = state.setdefault("project_checkpoint_reducers", {})
-        persisted[state_key] = reducer.to_state()
-        reducers = persisted
-        if len(reducers) > 128:
-            reducers.pop(next(iter(reducers)))
+        pending = state.setdefault("project_checkpoint_pending", {})
+        queue = pending.setdefault(slug, [])
+        if not any(item.get("event_id") == envelope.event_id for item in queue):
+            queue.append(pending_event)
 
-    update_state(mutate, lock_timeout=0.5)
-    decision = decision_box[0] if decision_box else None
-    if decision is None or getattr(decision, "reason", None) == "session_start_recovery":
-        return
-    ProjectStore(ROOT, STATE_ROOT).checkpoint(
-        slug,
-        _checkpoint_event(envelope, slug, decision.reason),
-        f"lifecycle:{envelope.event_id[:16]}",
+    update_state(enqueue, lock_timeout=0.5)
+    _drain_project_checkpoints(
+        slug, slug, writer_wait_seconds=writer_wait_seconds
     )
-
-    def commit(state: dict[str, Any]) -> None:
-        reducers = state.setdefault("project_checkpoint_reducers", {})
-        reducer_state = reducers.get(state_key)
-        reducer = CheckpointReducer.from_state(
-            reducer_state if isinstance(reducer_state, Mapping) else None
-        )
-        reducer.observe(observation, now=envelope.occurred_at)
-        reducers[state_key] = reducer.to_state()
-        if len(reducers) > 128:
-            reducers.pop(next(iter(reducers)))
-
-    update_state(commit, lock_timeout=0.5)
 
 
 def _bounded_checkpoint_error(error: BaseException) -> str:
@@ -426,7 +528,12 @@ def _log_checkpoint_error(error: BaseException) -> None:
 
 def _observe_checkpoint_fail_open(envelope: EventEnvelope) -> None:
     try:
-        _observe_project_checkpoint(envelope)
+        if envelope.event_type == "session_start":
+            _observe_project_checkpoint(
+                envelope, writer_wait_seconds=SESSION_START_RECOVERY_SECONDS
+            )
+        else:
+            _observe_project_checkpoint(envelope)
     except Exception as exc:  # noqa: BLE001
         _log_checkpoint_error(exc)
 
@@ -770,9 +877,26 @@ def _recover_project_handoff(slug: str | None, project_dir: Path | None) -> str:
         return ""
     try:
         store = ProjectStore(ROOT, STATE_ROOT)
-        store.coordinator.recover()
-        store.recover(slug)
-        return build_handoff(store.projection(slug), max_chars=2400)
+        store.recover(slug, writer_wait_seconds=SESSION_START_RECOVERY_SECONDS)
+        return build_handoff(
+            store.projection(slug), max_chars=MAX_PROJECT_HANDOFF_CHARS
+        )
+    except TimeoutError:
+        warning = (
+            "## Recovery status\n"
+            "- Degraded: project recovery deferred due to writer contention.\n"
+            f"- MCP recovery ID: `recovery:project:{slug}`\n"
+        )
+        try:
+            projection = store.projection(slug)
+            handoff = build_handoff(
+                projection,
+                max_chars=MAX_PROJECT_HANDOFF_CHARS - len(warning) - 2,
+            )
+            return _append_context(handoff, warning)
+        except Exception as exc:  # noqa: BLE001
+            _log_checkpoint_error(exc)
+            return warning
     except Exception as exc:  # noqa: BLE001
         _log_checkpoint_error(exc)
         return ""

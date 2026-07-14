@@ -17,6 +17,9 @@ import json
 import re
 import subprocess
 import textwrap
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -339,6 +342,151 @@ def test_failed_checkpoint_does_not_persist_event_dedupe_and_retry_succeeds(monk
     assert len(attempts) == 2
 
 
+def test_concurrent_distinct_events_are_each_journaled_exactly_once(monkeypatch, tmp_path):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import integration_adapter
+    from project_journal import JOURNAL_HEADER, ProjectStore
+
+    vault = tmp_path / "vault"
+    state_root = tmp_path / "state"
+    project_dir = tmp_path / "project"
+    (vault / "knowledge/projects/demo").mkdir(parents=True)
+    project_dir.mkdir()
+    runtime_state = {}
+    state_lock = threading.Lock()
+
+    def update(mutator, **kwargs):
+        with state_lock:
+            mutator(runtime_state)
+            return runtime_state
+
+    monkeypatch.setattr(integration_adapter, "ROOT", vault)
+    monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
+    monkeypatch.setattr(integration_adapter, "update_state", update)
+    monkeypatch.setattr(
+        integration_adapter, "_project_context", lambda event: ("demo", project_dir)
+    )
+    events = [
+        integration_adapter.normalize_event(
+            "codex",
+            "session_end",
+            {
+                "session_id": "session-1",
+                "cwd": str(project_dir),
+                "event_id": f"event-{index}",
+            },
+        )
+        for index in range(2)
+    ]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(integration_adapter._observe_project_checkpoint, events))
+
+    journal = ProjectStore(vault, state_root).read_journal("demo")
+    records = [
+        json.loads(line)
+        for line in journal.removeprefix(JOURNAL_HEADER).splitlines()
+        if line
+    ]
+    assert sorted(record["occurrence_id"] for record in records) == sorted(
+        event.event_id for event in events
+    )
+    assert len(records) == 2
+
+
+def test_project_lease_busy_event_remains_pending_until_next_observation(monkeypatch):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import integration_adapter
+    from project_journal import ProjectLeaseBusy
+
+    state = {}
+    attempts = []
+
+    def update(mutator, **kwargs):
+        mutator(state)
+        return state
+
+    class Store:
+        def __init__(self, *args):
+            pass
+
+        def checkpoint(self, slug, event, owner):
+            attempts.append(event["occurrence_id"])
+            if len(attempts) == 1:
+                raise ProjectLeaseBusy("busy")
+
+    monkeypatch.setattr(integration_adapter, "update_state", update)
+    monkeypatch.setattr(integration_adapter, "ProjectStore", Store)
+    monkeypatch.setattr(integration_adapter, "_project_context", lambda event: ("demo", ROOT))
+    first = integration_adapter.normalize_event(
+        "codex", "session_end", {"session_id": "s1", "cwd": "C:/p", "event_id": "one"}
+    )
+    second = integration_adapter.normalize_event(
+        "codex", "session_end", {"session_id": "s1", "cwd": "C:/p", "event_id": "two"}
+    )
+
+    with pytest.raises(ProjectLeaseBusy):
+        integration_adapter._observe_project_checkpoint(first)
+    pending = state["project_checkpoint_pending"]["demo"]
+    assert [item["event_id"] for item in pending] == [first.event_id]
+
+    integration_adapter._observe_project_checkpoint(second)
+    assert attempts == [first.event_id, first.event_id, second.event_id]
+    assert state["project_checkpoint_pending"]["demo"] == []
+
+
+def test_reducer_commit_failure_releases_pending_claim_for_retry(monkeypatch):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import integration_adapter
+
+    state = {}
+    updates = 0
+    checkpoints = []
+
+    def update(mutator, **kwargs):
+        nonlocal updates
+        updates += 1
+        if updates == 3:
+            raise TimeoutError("commit state busy")
+        mutator(state)
+        return state
+
+    class Store:
+        def __init__(self, *args):
+            pass
+
+        def checkpoint(self, slug, event, owner):
+            checkpoints.append(event["occurrence_id"])
+
+    monkeypatch.setattr(integration_adapter, "update_state", update)
+    monkeypatch.setattr(integration_adapter, "ProjectStore", Store)
+    monkeypatch.setattr(integration_adapter, "_project_context", lambda event: ("demo", ROOT))
+    event = integration_adapter.normalize_event(
+        "codex", "session_end", {"session_id": "s1", "cwd": "C:/p", "event_id": "one"}
+    )
+
+    with pytest.raises(TimeoutError, match="commit state busy"):
+        integration_adapter._observe_project_checkpoint(event)
+    pending = state["project_checkpoint_pending"]["demo"][0]
+    assert "claim_owner" not in pending
+
+    integration_adapter._observe_project_checkpoint(event)
+    assert checkpoints == [event.event_id, event.event_id]
+    assert state["project_checkpoint_pending"]["demo"] == []
+
+
 def test_session_start_recovers_transactions_then_project_before_handoff(
     monkeypatch, tmp_path, capsys
 ):
@@ -469,7 +617,8 @@ def test_opencode_session_start_appends_recovered_bounded_project_handoff(monkey
         def __init__(self, vault_root, state_root):
             self.coordinator = Coordinator()
 
-        def recover(self, slug):
+        def recover(self, slug, **kwargs):
+            self.coordinator.recover()
             calls.append(("project", slug))
 
         def projection(self, slug):
@@ -552,6 +701,60 @@ def test_opencode_session_start_project_recovery_is_fail_open(monkeypatch):
 
     assert result["context"] == "# General memory\n"
     assert errors == ["recovery unavailable"]
+
+
+def test_opencode_session_start_writer_contention_is_bounded_and_degraded(
+    monkeypatch, tmp_path
+):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import integration_adapter
+    from project_journal import ProjectStore
+
+    vault = tmp_path / "vault"
+    state_root = tmp_path / "state"
+    project_dir = tmp_path / "project"
+    (vault / "knowledge/projects/demo").mkdir(parents=True)
+    project_dir.mkdir()
+    store = ProjectStore(vault, state_root)
+    held = threading.Event()
+
+    def hold_writer():
+        with store.coordinator.writer_gate():
+            held.set()
+            time.sleep(1)
+
+    monkeypatch.setattr(integration_adapter, "ROOT", vault)
+    monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
+    monkeypatch.setattr(integration_adapter, "_observe_checkpoint_fail_open", lambda event: None)
+    monkeypatch.setattr(
+        integration_adapter, "_project_context", lambda event: ("demo", project_dir)
+    )
+    monkeypatch.setattr(integration_adapter, "_record_activity", lambda *args: True)
+    monkeypatch.setattr(integration_adapter, "spawn_detached", lambda args: None)
+    monkeypatch.setattr(
+        integration_adapter, "build_session_start_context", lambda: "# General memory\n"
+    )
+    envelope = integration_adapter.normalize_event(
+        "opencode", "session_start", {"directory": str(project_dir)}
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        holder = pool.submit(hold_writer)
+        assert held.wait(2)
+        started = time.perf_counter()
+        result = integration_adapter.ingest_event(envelope)
+        elapsed = time.perf_counter() - started
+        holder.result(timeout=5)
+
+    assert elapsed < 0.75
+    assert "# General memory" in result["context"]
+    assert "Degraded" in result["context"]
+    assert "project:demo" in result["context"]
+    assert "recovery:project:demo" in result["context"]
 
 
 def test_claude_hooks_cover_compaction_failure_stop_and_end_signals():

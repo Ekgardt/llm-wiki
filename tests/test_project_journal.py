@@ -5,6 +5,7 @@ import os
 import sqlite3
 import threading
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -226,10 +227,65 @@ def test_same_owner_cannot_alias_active_lease_and_exact_token_can_renew(
     assert renewed.expires_at == now + timedelta(seconds=30)
 
 
-@pytest.mark.parametrize("slug", ["../demo", "Demo", "demo/name", "", "demo_1"])
+@pytest.mark.parametrize(
+    "slug",
+    [
+        "../demo",
+        "Demo",
+        "demo/name",
+        "demo\\name",
+        "",
+        ".",
+        "..",
+        "con",
+        "COM1.txt",
+        "demo.",
+        "demo ",
+        "demo\x00name",
+        unicodedata.normalize("NFD", "café"),
+    ],
+)
 def test_slug_safety_is_preserved(project_store: ProjectStore, slug: str):
     with pytest.raises(ValueError):
         project_store.acquire_lease(slug, "agent-a")
+
+
+@pytest.mark.parametrize("existing_state", [False, True])
+def test_cyrillic_computed_slug_supports_new_and_existing_project_state(
+    vault: Path,
+    state_root: Path,
+    tmp_path: Path,
+    existing_state: bool,
+):
+    from session_start_project_state import _compute_slug
+
+    project_dir = tmp_path / "Тесты"
+    project_dir.mkdir()
+    projects = vault / "knowledge/projects"
+    slug = _compute_slug(project_dir, projects)
+    assert slug == "тесты"
+    if existing_state:
+        target = projects / slug
+        target.mkdir()
+        (target / "state.md").write_text(
+            f"# {slug}\n- Project root: `{project_dir}`\n", encoding="utf-8"
+        )
+        assert _compute_slug(project_dir, projects) == slug
+
+    event = checkpoint_event(f"evt-{existing_state}", f"unicode:{existing_state}")
+    event["provenance"]["worktree"] = str(project_dir)
+    receipt = ProjectStore(vault, state_root).checkpoint(slug, event, "agent-a")
+
+    assert receipt.project == slug
+    assert (projects / slug / "journal.md").is_file()
+
+
+def test_project_slug_rejects_existing_case_alias(vault: Path, state_root: Path):
+    alias = vault / "knowledge/projects/CASEALIAS"
+    alias.mkdir()
+
+    with pytest.raises(ValueError, match="alias"):
+        ProjectStore(vault, state_root).acquire_lease("casealias", "agent-a")
 
 
 @pytest.mark.parametrize(

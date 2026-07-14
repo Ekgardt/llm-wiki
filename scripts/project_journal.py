@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import secrets
 import stat
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -37,7 +37,6 @@ schema_version: project-checkpoint/v1
 """
 
 _SCHEMA = Path(__file__).with_name("schemas") / "project-checkpoint-v1.json"
-_SLUG = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _HEARTBEAT_SECONDS = 10
 MAX_JOURNAL_BYTES = 8 * 1024 * 1024
 MAX_PROJECTION_BYTES = 1024 * 1024
@@ -421,8 +420,28 @@ def _same_snapshot(left: os.stat_result, right: os.stat_result) -> bool:
 
 
 def _require_slug(slug: str) -> str:
-    if not isinstance(slug, str) or _SLUG.fullmatch(slug) is None:
-        raise ValueError("project slug must match ^[a-z0-9][a-z0-9-]*$")
+    if not isinstance(slug, str) or not slug or len(slug) > 256:
+        raise ValueError("project slug must be a non-empty string up to 256 characters")
+    if unicodedata.normalize("NFC", slug) != slug:
+        raise ValueError("project slug must use NFC Unicode normalization")
+    if slug != slug.lower():
+        raise ValueError("project slug must be lowercase to prevent case aliases")
+    if slug in {".", ".."} or "/" in slug or "\\" in slug:
+        raise ValueError("project slug must be one safe path component")
+    if slug.endswith((" ", ".")):
+        raise ValueError("project slug cannot end in a dot or space")
+    if any(
+        character in '<>:"|?*'
+        or character.isspace()
+        or unicodedata.category(character).startswith("C")
+        for character in slug
+    ):
+        raise ValueError("project slug contains a non-portable character")
+    reserved = {"con", "prn", "aux", "nul"} | {
+        f"{prefix}{number}" for prefix in ("com", "lpt") for number in range(1, 10)
+    }
+    if slug.rstrip(" .").split(".", 1)[0].casefold() in reserved:
+        raise ValueError("project slug uses a reserved Windows name")
     return slug
 
 
@@ -458,6 +477,24 @@ class ProjectStore:
         self.state_root = self.coordinator.state_root
         self._clock = clock
 
+    def _project_directory(self, slug: str) -> Path:
+        slug = _require_slug(slug)
+        projects = self.vault / "knowledge" / "projects"
+        target = projects / slug
+        try:
+            target.relative_to(projects)
+        except ValueError as exc:
+            raise ValueError("project slug escapes the projects directory") from exc
+        if projects.is_dir():
+            key = unicodedata.normalize("NFC", slug).casefold()
+            for entry in projects.iterdir():
+                if (
+                    unicodedata.normalize("NFC", entry.name).casefold() == key
+                    and entry.name != slug
+                ):
+                    raise ValueError("project slug collides with an existing case alias")
+        return target
+
     def acquire_lease(
         self,
         slug: str,
@@ -468,6 +505,7 @@ class ProjectStore:
         now: datetime | None = None,
     ) -> ProjectLease:
         slug = _require_slug(slug)
+        self._project_directory(slug)
         owner = _require_owner(owner)
         if not isinstance(ttl, int) or isinstance(ttl, bool) or ttl <= _HEARTBEAT_SECONDS:
             raise ValueError("project lease ttl must be an integer greater than 10 seconds")
@@ -564,18 +602,24 @@ class ProjectStore:
         slug: str,
         event: Mapping[str, object],
         owner: str,
+        *,
+        writer_wait_seconds: float | None = None,
     ) -> CheckpointReceipt:
         slug = _require_slug(slug)
         _require_owner(owner)
         normalized_event = self.coordinator.normalize_project_checkpoint(slug, event)
-        self.recover(slug)
+        self.recover(slug, writer_wait_seconds=writer_wait_seconds)
         lease = self.acquire_lease(slug, owner)
         try:
             reserved, duplicate = self._reserve(slug, normalized_event, lease)
             if duplicate and reserved.state == "committed":
                 return self._receipt(reserved, duplicate=True)
             try:
-                return self._project_reserved(reserved, lease)
+                if writer_wait_seconds is None:
+                    return self._project_reserved(reserved, lease)
+                return self._project_reserved(
+                    reserved, lease, writer_wait_seconds=writer_wait_seconds
+                )
             except ProjectJournalRebuildRequired:
                 self._set_checkpoint_state(slug, reserved.sequence, "quarantined")
                 raise
@@ -589,9 +633,15 @@ class ProjectStore:
         finally:
             self._release(lease)
 
-    def recover(self, slug: str | None = None) -> list[CheckpointReceipt]:
+    def recover(
+        self,
+        slug: str | None = None,
+        *,
+        writer_wait_seconds: float | None = None,
+    ) -> list[CheckpointReceipt]:
         if slug is not None:
             _require_slug(slug)
+            self._project_directory(slug)
         with self.coordinator._connect() as database:
             query = "SELECT project, sequence FROM project_checkpoints WHERE state != 'committed'"
             parameters: tuple[object, ...] = ()
@@ -600,7 +650,14 @@ class ProjectStore:
                 parameters = (slug,)
             candidates = {(row["project"], row["sequence"]) for row in database.execute(query, parameters)}
 
-        records = {record.id: record for record in self.coordinator.recover()}
+        transaction_records = (
+            self.coordinator.recover()
+            if writer_wait_seconds is None
+            else self.coordinator.recover(
+                writer_wait_seconds=writer_wait_seconds
+            )
+        )
+        records = {record.id: record for record in transaction_records}
         recovered: list[CheckpointReceipt] = []
         replay: list[ProjectCheckpointReservation] = []
         with self.coordinator._connect() as database, begin_immediate(database):
@@ -656,7 +713,11 @@ class ProjectStore:
             except ProjectLeaseBusy:
                 continue
             try:
-                recovered.append(self._project_reserved(row, lease))
+                recovered.append(
+                    self._project_reserved(
+                        row, lease, writer_wait_seconds=writer_wait_seconds
+                    )
+                )
             except ProjectPendingPriorError:
                 continue
             except TransactionFailure as exc:
@@ -678,8 +739,7 @@ class ProjectStore:
             raise ValueError("project journal must be UTF-8") from exc
 
     def _read_journal_bytes(self, slug: str) -> bytes:
-        slug = _require_slug(slug)
-        path = self.vault / "knowledge" / "projects" / slug / "journal.md"
+        path = self._project_directory(slug) / "journal.md"
         return self._read_bounded_regular_file(
             path,
             max_bytes=MAX_JOURNAL_BYTES,
@@ -687,8 +747,7 @@ class ProjectStore:
         ) or b""
 
     def _read_projection_bytes(self, slug: str) -> bytes | None:
-        slug = _require_slug(slug)
-        path = self.vault / "knowledge" / "projects" / slug / "state.md"
+        path = self._project_directory(slug) / "state.md"
         return self._read_bounded_regular_file(
             path,
             max_bytes=MAX_PROJECTION_BYTES,
@@ -783,7 +842,7 @@ class ProjectStore:
                 )
 
     def _ensure_project_directory(self, slug: str) -> None:
-        target = self.vault / "knowledge" / "projects" / _require_slug(slug)
+        target = self._project_directory(slug)
         relative = target.relative_to(self.vault)
         current = self.vault
         for part in relative.parts:
@@ -943,7 +1002,11 @@ class ProjectStore:
         return reservation, reservation.duplicate
 
     def _project_reserved(
-        self, row: ProjectCheckpointReservation, lease: ProjectLease
+        self,
+        row: ProjectCheckpointReservation,
+        lease: ProjectLease,
+        *,
+        writer_wait_seconds: float | None = None,
     ) -> CheckpointReceipt:
         slug = row.project
         sequence = row.sequence
@@ -1045,7 +1108,13 @@ class ProjectStore:
                 "expires_at": _timestamp(lease.expires_at),
             },
         )
-        committed = self.coordinator.apply(transaction.id)
+        committed = (
+            self.coordinator.apply(transaction.id)
+            if writer_wait_seconds is None
+            else self.coordinator.apply(
+                transaction.id, writer_wait_seconds=writer_wait_seconds
+            )
+        )
         if committed.state != "committed":
             raise RuntimeError("project checkpoint transaction did not commit")
         refreshed = ProjectCheckpointReservation(

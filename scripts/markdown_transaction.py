@@ -1203,8 +1203,13 @@ class MarkdownCoordinator:
                 database, str(reservation["project"]), int(reservation["sequence"])
             )
 
-    def apply(self, transaction_id: str) -> TransactionRecord:
-        with self.writer_gate():
+    def apply(
+        self,
+        transaction_id: str,
+        *,
+        writer_wait_seconds: float | None = None,
+    ) -> TransactionRecord:
+        with self.writer_gate(wait_seconds=writer_wait_seconds):
             try:
                 return self._apply_locked(transaction_id)
             except TransactionFailure as exc:
@@ -1404,10 +1409,12 @@ class MarkdownCoordinator:
             self._apply_operation(inverse, {"after": before_state})
             self._require_operation_state(inverse, row["before_hash"], "restored state")
 
-    def recover(self) -> list[TransactionRecord]:
+    def recover(
+        self, *, writer_wait_seconds: float | None = None
+    ) -> list[TransactionRecord]:
         """Converge every incomplete transaction without overwriting unknown bytes."""
         recovered: list[TransactionRecord] = []
-        with self.writer_gate():
+        with self.writer_gate(wait_seconds=writer_wait_seconds):
             with self._connect() as database:
                 rows = [
                     (row["id"], row["state"], row["owner_pid"])
@@ -1968,7 +1975,7 @@ class MarkdownCoordinator:
             )
 
     @contextlib.contextmanager
-    def writer_gate(self) -> Iterator[None]:
+    def writer_gate(self, *, wait_seconds: float | None = None) -> Iterator[None]:
         depth = getattr(self._local, "gate_depth", 0)
         if depth:
             self._local.gate_depth = depth + 1
@@ -1978,8 +1985,15 @@ class MarkdownCoordinator:
                 self._local.gate_depth -= 1
             return
 
+        if wait_seconds is not None and (
+            isinstance(wait_seconds, bool) or not isinstance(wait_seconds, (int, float))
+            or wait_seconds < 0
+        ):
+            raise ValueError("writer gate wait_seconds must be non-negative or None")
         owner_token = uuid.uuid4().hex
-        deadline = time.monotonic() + _WRITER_WAIT_SECONDS
+        deadline = time.monotonic() + (
+            _WRITER_WAIT_SECONDS if wait_seconds is None else wait_seconds
+        )
         fencing_epoch = 0
         while True:
             acquired = False

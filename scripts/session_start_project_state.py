@@ -44,6 +44,7 @@ import os
 import re
 import sys
 import traceback
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
@@ -153,7 +154,7 @@ def _emit_empty() -> int:
 
 def _sanitize(text: str) -> str:
     """Lowercase + replace unsafe chars + strip hyphens. Preserve non-ASCII."""
-    s = text.lower()
+    s = unicodedata.normalize("NFC", text).lower()
     s = SLUG_UNSAFE_RE.sub("-", s)
     s = s.strip("-")
     if not s or s in {".", ".."}:
