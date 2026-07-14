@@ -43,11 +43,117 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ProviderDescriptor:
+    """Resolved identity and behavior of one provider attempt."""
+
+    provider: str
+    model: str | None
+    capabilities: Mapping[str, object]
+    inference_settings: Mapping[str, object]
+    candidate_index: int
+    fallback_from: tuple[str, ...]
+
+    @property
+    def identity(self) -> str:
+        return f"{self.provider}:{self.model or '<implicit>'}"
+
+
+@dataclass(frozen=True)
+class LLMResult:
+    """Outcome of exactly one provider candidate call."""
+
+    descriptor: ProviderDescriptor
+    text: str | None
+    available: bool
+    failure_class: str | None
+    structured_output: str
+
+
+def provider_candidates(forced: str = "") -> list[ProviderDescriptor]:
+    """Resolve ordered provider identities without probing or calling them."""
+    candidates = _candidate_order(forced.lower().strip())
+    descriptors = []
+    for index, provider in enumerate(candidates):
+        model, capabilities, settings = _provider_configuration(provider)
+        descriptors.append(
+            ProviderDescriptor(
+                provider=provider,
+                model=model,
+                capabilities=capabilities,
+                inference_settings=settings,
+                candidate_index=index,
+                fallback_from=(),
+            )
+        )
+    return descriptors
+
+
+def probe_candidate(descriptor: ProviderDescriptor) -> bool:
+    """Check one candidate without invoking its model backend."""
+    probe = _PROBES.get(descriptor.provider)
+    if probe is None:
+        return False
+    try:
+        return bool(probe())
+    except Exception:  # noqa: BLE001 - provider probes are an isolation boundary
+        return False
+
+
+def call_candidate(
+    descriptor: ProviderDescriptor,
+    prompt: str,
+    system_prompt: str,
+    *,
+    max_tokens: int,
+    schema: Mapping[str, object] | None = None,
+    available: bool | None = None,
+) -> LLMResult:
+    """Probe and call one resolved candidate, returning a stable outcome."""
+    structured_output = (
+        "native"
+        if schema is not None
+        and descriptor.capabilities.get("structured_output") == "native"
+        else "prompt"
+    )
+    caller = _BACKENDS.get(descriptor.provider)
+    if caller is None:
+        return LLMResult(descriptor, None, False, "unsupported", structured_output)
+    if available is None:
+        available = probe_candidate(descriptor)
+    if not available:
+        return LLMResult(descriptor, None, False, "unavailable", structured_output)
+
+    call_system_prompt = system_prompt
+    if schema is not None and structured_output == "prompt":
+        schema_json = json.dumps(schema, sort_keys=True, separators=(",", ":"))
+        instruction = f"Output only JSON matching this schema: {schema_json}"
+        call_system_prompt = (
+            f"{system_prompt}\n\n{instruction}" if system_prompt else instruction
+        )
+    try:
+        if structured_output == "native":
+            text = caller(prompt, call_system_prompt, max_tokens, schema)
+        else:
+            text = caller(prompt, call_system_prompt, max_tokens)
+    except Exception as exc:  # noqa: BLE001 - providers must not crash callers
+        print(
+            f"llm_client: {descriptor.provider} backend failed: {type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return LLMResult(descriptor, None, True, "provider_error", structured_output)
+    if not text or not text.strip():
+        return LLMResult(descriptor, None, True, "empty_response", structured_output)
+    return LLMResult(descriptor, text.strip(), True, None, structured_output)
 
 def call_llm(prompt: str, system_prompt: str = "", max_tokens: int = 2000) -> str | None:
     """Synchronous LLM call. Returns response text, "" on soft failure,
@@ -62,29 +168,19 @@ def call_llm(prompt: str, system_prompt: str = "", max_tokens: int = 2000) -> st
         return ""
 
     forced = os.environ.get("MEMORY_LLM_PROVIDER", "").lower().strip()
-    # Test/e2e backend: return canned response without network or CLI.
-    if forced == "fake":
-        return os.environ.get(
-            "MEMORY_LLM_FAKE_RESPONSE",
-            '{"operations": [], "audit": {"verified": 0, "dedup": 0, "stubs": 0, "contradictions": 0, "rejected": 0}}\nCOMPILE_AUDIT: verified 0 evidence citations; 0 dedup checks performed; 0 stubs skipped; 0 contradictions handled; 0 pages rejected as below-threshold',
-        ).strip()
-
-    candidates = _candidate_order(forced)
-
-    for name in candidates:
-        try:
-            probe = _PROBES.get(name)
-            if probe and not probe():
-                continue
-            caller = _BACKENDS.get(name)
-            if not caller:
-                continue
-            result = caller(prompt, system_prompt, max_tokens)
-            if result and result.strip():
-                return result.strip()
-        except Exception as e:  # noqa: BLE001
-            print(f"llm_client: {name} backend failed: {type(e).__name__}: {e}", file=sys.stderr)
-            continue
+    lineage: tuple[str, ...] = ()
+    for candidate in provider_candidates(forced):
+        descriptor = replace(candidate, fallback_from=lineage)
+        result = call_candidate(
+            descriptor,
+            prompt,
+            system_prompt,
+            max_tokens=max_tokens,
+        )
+        if result.text is not None:
+            return result.text
+        failure = result.failure_class or "provider_error"
+        lineage += (f"{descriptor.identity}:{failure}",)
 
     # No backend available — return None. Callers handle this gracefully
     # (compile skips, flush treats as FLUSH_OK, query returns error string).
@@ -125,9 +221,43 @@ def _candidate_order(forced: str) -> list[str]:
     or unknown, the full default order is used (auto-detection).
     """
     defaults = ["opencode", "codex", "claude", "openai", "ollama"]
+    if forced == "fake":
+        return ["fake"]
     if forced and forced in defaults:
         return [forced]
     return defaults
+
+
+def _provider_configuration(
+    provider: str,
+) -> tuple[str | None, Mapping[str, object], Mapping[str, object]]:
+    native = provider in {"openai", "ollama"}
+    capabilities: Mapping[str, object] = {
+        "structured_output": "native" if native else "prompt",
+    }
+    if provider == "fake":
+        return "fake-v1", capabilities, {}
+    if provider == "codex":
+        return (
+            os.environ.get("MEMORY_CODEX_MODEL") or None,
+            capabilities,
+            {"reasoning": os.environ.get("MEMORY_CODEX_REASONING", "low")},
+        )
+    if provider == "claude":
+        return os.environ.get("MEMORY_CLAUDE_MODEL") or None, capabilities, {}
+    if provider == "openai":
+        return (
+            os.environ.get("MEMORY_LLM_MODEL", "gpt-4o-mini"),
+            capabilities,
+            {"temperature": 0.2},
+        )
+    if provider == "ollama":
+        return (
+            os.environ.get("MEMORY_LLM_MODEL", "qwen3:0.6b"),
+            capabilities,
+            {"temperature": 0.2},
+        )
+    return None, capabilities, {}
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +300,12 @@ def _probe_ollama() -> bool:
         return False
 
 
+def _probe_fake() -> bool:
+    return True
+
+
 _PROBES = {
+    "fake": _probe_fake,
     "opencode": _probe_opencode,
     "codex": _probe_codex,
     "claude": _probe_claude,
@@ -188,7 +323,12 @@ def _timeout_s() -> int:
 # ---------------------------------------------------------------------------
 
 
-def _call_opencode(prompt: str, system_prompt: str, max_tokens: int) -> str:
+def _call_opencode(
+    prompt: str,
+    system_prompt: str,
+    max_tokens: int,
+    schema: Mapping[str, object] | None = None,
+) -> str:
     """Call OpenCode's HTTP API: create session → prompt → read → delete."""
     port = int(os.environ.get("OPENCODE_PORT", "4096"))
     base = f"http://127.0.0.1:{port}"
@@ -275,7 +415,12 @@ def _find_codex_binary() -> str | None:
     return None
 
 
-def _call_codex(prompt: str, system_prompt: str, max_tokens: int) -> str:
+def _call_codex(
+    prompt: str,
+    system_prompt: str,
+    max_tokens: int,
+    schema: Mapping[str, object] | None = None,
+) -> str:
     """Call `codex exec` and return the model's final message."""
     reasoning = os.environ.get("MEMORY_CODEX_REASONING", "low")
     model = os.environ.get("MEMORY_CODEX_MODEL")
@@ -338,7 +483,12 @@ def _call_codex(prompt: str, system_prompt: str, max_tokens: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _call_claude(prompt: str, system_prompt: str, max_tokens: int) -> str:
+def _call_claude(
+    prompt: str,
+    system_prompt: str,
+    max_tokens: int,
+    schema: Mapping[str, object] | None = None,
+) -> str:
     """Call `claude -p` (print mode, non-interactive) and return the response.
 
     Claude Code's `-p` flag runs a one-shot prompt and exits. Pair with
@@ -357,12 +507,17 @@ def _call_claude(prompt: str, system_prompt: str, max_tokens: int) -> str:
         combined = f"<system>{system_prompt}</system>\n\n{prompt}"
 
     try:
+        command = [
+            claude_bin,
+            "-p",  # print mode (non-interactive)
+            "--output-format",
+            "text",
+        ]
+        model = os.environ.get("MEMORY_CLAUDE_MODEL")
+        if model:
+            command.extend(["--model", model])
         result = subprocess.run(
-            [
-                claude_bin,
-                "-p",  # print mode (non-interactive)
-                "--output-format", "text",
-            ],
+            command,
             input=combined,
             capture_output=True,
             timeout=_timeout_s(),
@@ -381,7 +536,12 @@ def _call_claude(prompt: str, system_prompt: str, max_tokens: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _call_openai(prompt: str, system_prompt: str, max_tokens: int) -> str:
+def _call_openai(
+    prompt: str,
+    system_prompt: str,
+    max_tokens: int,
+    schema: Mapping[str, object] | None = None,
+) -> str:
     api_key = os.environ.get("MEMORY_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if not api_key:
         return ""
@@ -392,14 +552,22 @@ def _call_openai(prompt: str, system_prompt: str, max_tokens: int) -> str:
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
-    body = json.dumps(
-        {
-            "model": model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": 0.2,
+    payload: dict[str, object] = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": 0.2,
+    }
+    if schema is not None:
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "memory_response",
+                "strict": True,
+                "schema": schema,
+            },
         }
-    ).encode("utf-8")
+    body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=body,
@@ -419,7 +587,12 @@ def _call_openai(prompt: str, system_prompt: str, max_tokens: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _call_ollama(prompt: str, system_prompt: str, max_tokens: int) -> str:
+def _call_ollama(
+    prompt: str,
+    system_prompt: str,
+    max_tokens: int,
+    schema: Mapping[str, object] | None = None,
+) -> str:
     base_url = os.environ.get("MEMORY_LLM_BASE_URL", "http://localhost:11434/v1")
     model = os.environ.get("MEMORY_LLM_MODEL", "qwen3:0.6b")
     url = f"{base_url.rstrip('/')}/chat/completions"
@@ -427,15 +600,23 @@ def _call_ollama(prompt: str, system_prompt: str, max_tokens: int) -> str:
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
-    body = json.dumps(
-        {
-            "model": model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": 0.2,
-            "stream": False,
+    payload: dict[str, object] = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": 0.2,
+        "stream": False,
+    }
+    if schema is not None:
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "memory_response",
+                "strict": True,
+                "schema": schema,
+            },
         }
-    ).encode("utf-8")
+    body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=body,
@@ -448,7 +629,23 @@ def _call_ollama(prompt: str, system_prompt: str, max_tokens: int) -> str:
 
 
 # Backend registry.
+def _call_fake(
+    prompt: str,
+    system_prompt: str,
+    max_tokens: int,
+    schema: Mapping[str, object] | None = None,
+) -> str:
+    return os.environ.get(
+        "MEMORY_LLM_FAKE_RESPONSE",
+        '{"operations": [], "audit": {"verified": 0, "dedup": 0, "stubs": 0, '
+        '"contradictions": 0, "rejected": 0}}\nCOMPILE_AUDIT: verified 0 evidence '
+        "citations; 0 dedup checks performed; 0 stubs skipped; 0 contradictions handled; "
+        "0 pages rejected as below-threshold",
+    ).strip()
+
+
 _BACKENDS = {
+    "fake": _call_fake,
     "opencode": _call_opencode,
     "codex": _call_codex,
     "claude": _call_claude,
@@ -491,4 +688,3 @@ def _cli() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(_cli())
-
