@@ -61,10 +61,10 @@ def test_expired_lease_is_delivered_again_and_old_worker_is_fenced(tmp_path: Pat
     clock = LockedClock()
     queue = MemoryQueue(tmp_path, clock=clock, rng=random.Random(1))
     task_id = queue.enqueue("query", 1, {})
-    first = queue.claim("first", lease=5)
+    first = queue.claim("first", lease_seconds=5)
     assert first is not None
     clock.advance(6)
-    second = queue.claim("second", lease=5)
+    second = queue.claim("second", lease_seconds=5)
     assert second is not None and second.id == task_id
     assert second.token != first.token
     assert queue.get(task_id).attempts == 2

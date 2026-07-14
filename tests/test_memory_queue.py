@@ -8,6 +8,7 @@ import sqlite3
 import stat
 import sys
 from datetime import datetime, timedelta, timezone
+from inspect import signature
 from pathlib import Path
 
 import pytest
@@ -135,16 +136,23 @@ def test_claim_honors_availability_and_uses_random_tokens(
     assert second.token != first.token
 
 
+def test_claim_has_exact_public_signature() -> None:
+    parameters = signature(MemoryQueue.claim).parameters
+    assert list(parameters) == ["self", "owner", "lease_seconds"]
+    assert parameters["lease_seconds"].kind.name == "KEYWORD_ONLY"
+    assert parameters["lease_seconds"].default == 120
+
+
 def test_heartbeat_result_and_acknowledge_are_fenced(
     queue: MemoryQueue, clock: FakeClock
 ) -> None:
     task_id = queue.enqueue("query", 1, {"prompt": "x"})
-    old = queue.claim("old", lease=120)
+    old = queue.claim("old", lease_seconds=120)
     assert old is not None
     renewed = queue.heartbeat(old, lease_seconds=180)
     assert renewed.expires_at == clock() + timedelta(seconds=180)
     clock.advance(181)
-    current = queue.claim("new", lease=120)
+    current = queue.claim("new", lease_seconds=120)
     assert current is not None
 
     for action in (
@@ -238,6 +246,13 @@ def test_retry_without_retry_after_uses_seeded_full_jitter(
     assert 0 <= delay <= 30
 
 
+def test_seeded_full_jitter_reaches_3600_second_cap(
+    tmp_path: Path, clock: FakeClock
+) -> None:
+    queue = MemoryQueue(tmp_path, clock=clock, rng=ReverseIdRng())
+    assert queue._retry_delay(8) == 3600
+
+
 def test_eighth_failure_is_dead_and_history_is_immutable(
     queue: MemoryQueue, clock: FakeClock
 ) -> None:
@@ -255,6 +270,40 @@ def test_eighth_failure_is_dead_and_history_is_immutable(
     assert queue.get(task_id).state == "dead"
     assert queue.get(task_id).attempts == 8
     assert len(queue.get(task_id).attempt_history) == 8
+
+
+def test_attempt_history_rejects_database_updates_and_deletes(queue: MemoryQueue) -> None:
+    task_id = queue.enqueue("query", 1, {})
+    lease = queue.claim("worker")
+    assert lease is not None
+    queue.fail(lease, QueueFailure("temporary"))
+
+    for statement in (
+        "UPDATE attempt_history SET error_code='changed' WHERE task_id=?",
+        "DELETE FROM attempt_history WHERE task_id=?",
+    ):
+        with sqlite3.connect(queue.db_path) as connection:
+            with pytest.raises(sqlite3.IntegrityError, match="attempt history is immutable"):
+                connection.execute(statement, (task_id,))
+
+
+def test_eighth_expired_lease_goes_dead_without_ninth_claim(
+    queue: MemoryQueue, clock: FakeClock
+) -> None:
+    task_id = queue.enqueue("query", 1, {})
+    for attempt in range(1, 9):
+        lease = queue.claim("worker", lease_seconds=1)
+        assert lease is not None and lease.attempt == attempt
+        clock.advance(2)
+
+    assert queue.claim("worker", lease_seconds=1) is None
+    task = queue.get(task_id)
+    assert task.state == "dead"
+    assert task.attempts == 8
+    assert task.error_code == "attempts_exhausted"
+    assert len(task.attempt_history) == 8
+    assert task.attempt_history[-1].outcome == "lease_expired"
+    assert task.attempt_history[-1].error_code == "attempts_exhausted"
 
 
 def test_cancel_only_changes_nonterminal_tasks(queue: MemoryQueue) -> None:
@@ -298,11 +347,21 @@ def test_module_facade_preserves_v1_shapes(tmp_path: Path, monkeypatch: pytest.M
     assert pending[0]["type"] == "query"
     assert pending[0]["handler_version"] == 1
 
+    queue = memory_queue._queue()
+    real_connect = queue._connect
+    claim_connections: list[sqlite3.Connection] = []
+
+    def tracked_connect() -> sqlite3.Connection:
+        connection = real_connect()
+        claim_connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(queue, "_connect", tracked_connect)
+    monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
     in_transaction: list[bool] = []
 
     def processor(task: dict[str, object]) -> bool:
-        with sqlite3.connect(tmp_path / "run" / "queue.sqlite3") as connection:
-            in_transaction.append(connection.in_transaction)
+        in_transaction.append(claim_connections[-1].in_transaction)
         return True
 
     assert memory_queue.drain_with(processor, max_tasks=1) == {
@@ -315,6 +374,32 @@ def test_module_facade_preserves_v1_shapes(tmp_path: Path, monkeypatch: pytest.M
     snapshot = memory_queue.status()
     assert snapshot["pending_total"] == 0
     assert snapshot["queue_dir"].endswith("run")
+
+
+def test_compat_processor_receives_preclaim_metadata(
+    tmp_path: Path, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import memory_queue
+
+    queue = MemoryQueue(tmp_path, clock=clock, rng=random.Random(2))
+    monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
+    task_id = queue.enqueue("query", 1, {"prompt": "hello"})
+    enqueued_at = queue.get(task_id).created_at.isoformat(timespec="seconds")
+    first = queue.claim("first")
+    assert first is not None
+    clock.advance(7)
+    failure_at = clock().isoformat(timespec="seconds")
+    queue.fail(first, QueueFailure("temporary", retry_after=0))
+    retry_at = queue.get(task_id).available_at
+    clock.advance((retry_at - clock()).total_seconds())
+
+    seen: list[dict[str, object]] = []
+    assert memory_queue.drain_with(lambda task: seen.append(task) or True, max_tasks=1)[
+        "ok"
+    ] == 1
+    assert seen[0]["enqueued_at"] == enqueued_at
+    assert seen[0]["last_attempt_at"] == failure_at
+    assert seen[0]["attempts"] == 1
 
 
 def test_manual_flush_handler_is_preserved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -70,6 +70,7 @@ class QueueTask:
     updated_at: datetime
     available_at: datetime
     attempts: int
+    last_attempt_at: datetime | None
     lease_owner: str | None
     lease_token: str | None
     lease_expires_at: datetime | None
@@ -91,6 +92,9 @@ class QueueLease:
     token: str
     expires_at: datetime
     attempt: int
+    created_at: datetime
+    last_attempt_at: datetime | None
+    prior_attempts: int
 
 
 def _utc_now() -> datetime:
@@ -163,6 +167,7 @@ class MemoryQueue:
                 updated_at TEXT NOT NULL,
                 available_at TEXT NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts BETWEEN 0 AND 8),
+                last_attempt_at TEXT,
                 lease_owner TEXT,
                 lease_token TEXT,
                 lease_expires_at TEXT,
@@ -190,6 +195,12 @@ class MemoryQueue:
                 BEFORE DELETE ON attempt_history BEGIN SELECT RAISE(ABORT, 'attempt history is immutable'); END;
             """
         )
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(tasks)").fetchall()
+        }
+        if "last_attempt_at" not in columns:
+            connection.execute("ALTER TABLE tasks ADD COLUMN last_attempt_at TEXT")
 
     def enqueue(
         self,
@@ -251,32 +262,30 @@ class MemoryQueue:
         self,
         owner: str,
         *,
-        lease: int = DEFAULTS.queue_lease_seconds,
-        lease_seconds: int | None = None,
+        lease_seconds: int = DEFAULTS.queue_lease_seconds,
     ) -> QueueLease | None:
         if not owner:
             raise ValueError("owner must be non-empty")
-        duration = lease_seconds if lease_seconds is not None else lease
-        if duration <= 0:
+        if lease_seconds <= 0:
             raise ValueError("lease must be positive")
         now = _as_utc(self._clock())
         with self._connect() as connection, begin_immediate(connection):
             self._expire_leases(connection, now)
             row = connection.execute(
                 """SELECT * FROM tasks
-                   WHERE state = 'ready' AND available_at <= ?
+                   WHERE state = 'ready' AND attempts < ? AND available_at <= ?
                    ORDER BY priority DESC, available_at, created_at, rowid LIMIT 1""",
-                (_timestamp(now),),
+                (DEFAULTS.queue_max_attempts, _timestamp(now)),
             ).fetchone()
             if row is None:
                 return None
             token = f"{self._rng.getrandbits(256):064x}"
-            expires = now + timedelta(seconds=duration)
+            expires = now + timedelta(seconds=lease_seconds)
             changed = connection.execute(
                 """UPDATE tasks SET state='leased', attempts=attempts+1,
                        lease_owner=?, lease_token=?, lease_expires_at=?, lease_heartbeat_at=?,
                        attempt_started_at=?, updated_at=?, error_code=NULL, blocked_capability=NULL
-                   WHERE id=? AND state='ready'""",
+                   WHERE id=? AND state='ready' AND attempts < ?""",
                 (
                     owner,
                     token,
@@ -285,6 +294,7 @@ class MemoryQueue:
                     _timestamp(now),
                     _timestamp(now),
                     row["id"],
+                    DEFAULTS.queue_max_attempts,
                 ),
             ).rowcount
             if changed != 1:
@@ -300,6 +310,9 @@ class MemoryQueue:
             token=token,
             expires_at=expires,
             attempt=attempt,
+            created_at=_parse_timestamp(row["created_at"]),  # type: ignore[arg-type]
+            last_attempt_at=_parse_timestamp(row["last_attempt_at"]),
+            prior_attempts=int(row["attempts"]),
         )
 
     def _claim_task(self, task_id: str, owner: str) -> QueueLease | None:
@@ -337,6 +350,9 @@ class MemoryQueue:
             token,
             expires,
             int(row["attempts"]) + 1,
+            _parse_timestamp(row["created_at"]),
+            _parse_timestamp(row["last_attempt_at"]),
+            int(row["attempts"]),
         )
 
     def _expire_leases(self, connection: sqlite3.Connection, now: datetime) -> int:
@@ -345,13 +361,24 @@ class MemoryQueue:
             (_timestamp(now),),
         ).fetchall()
         for row in rows:
-            self._record_attempt(connection, row, now, "lease_expired", "lease_expired")
+            exhausted = int(row["attempts"]) >= DEFAULTS.queue_max_attempts
+            error_code = "attempts_exhausted" if exhausted else "lease_expired"
+            state = "dead" if exhausted else "ready"
+            self._record_attempt(connection, row, now, "lease_expired", error_code)
             connection.execute(
-                """UPDATE tasks SET state='ready', available_at=?, updated_at=?,
+                """UPDATE tasks SET state=?, available_at=?, updated_at=?, last_attempt_at=?,
                        lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL,
-                       lease_heartbeat_at=NULL, attempt_started_at=NULL, error_code='lease_expired'
+                       lease_heartbeat_at=NULL, attempt_started_at=NULL, error_code=?
                    WHERE id=? AND state='leased' AND lease_token=?""",
-                (_timestamp(now), _timestamp(now), row["id"], row["lease_token"]),
+                (
+                    state,
+                    _timestamp(now),
+                    _timestamp(now),
+                    _timestamp(now),
+                    error_code,
+                    row["id"],
+                    row["lease_token"],
+                ),
             )
         return len(rows)
 
@@ -463,14 +490,16 @@ class MemoryQueue:
             self._record_attempt(connection, row, now, "failed", failure.error_code)
             if dead:
                 self._finish_lease(
-                    connection, lease.id, now, "dead", failure.error_code, None
+                    connection,
+                    lease.id,
+                    now,
+                    "dead",
+                    failure.error_code,
+                    None,
+                    last_attempt_at=now,
                 )
                 return
-            jitter_cap = min(
-                DEFAULTS.retry_cap_seconds,
-                DEFAULTS.retry_base_seconds * (2 ** (int(row["attempts"]) - 1)),
-            )
-            delay = self._rng.uniform(0, jitter_cap)
+            delay = self._retry_delay(int(row["attempts"]))
             retry_after = self._retry_after_seconds(failure.retry_after, now)
             if retry_after is not None:
                 delay = max(delay, retry_after)
@@ -481,7 +510,15 @@ class MemoryQueue:
                 "ready",
                 failure.error_code,
                 now + timedelta(seconds=delay),
+                last_attempt_at=now,
             )
+
+    def _retry_delay(self, attempts: int) -> float:
+        jitter_cap = min(
+            DEFAULTS.retry_cap_seconds,
+            DEFAULTS.retry_base_seconds * (2 ** (attempts - 1)),
+        )
+        return self._rng.uniform(0, jitter_cap)
 
     @staticmethod
     def _retry_after_seconds(
@@ -532,9 +569,12 @@ class MemoryQueue:
         state: str,
         error_code: str | None,
         available_at: datetime | None,
+        *,
+        last_attempt_at: datetime | None = None,
     ) -> None:
         connection.execute(
             """UPDATE tasks SET state=?, updated_at=?, available_at=COALESCE(?, available_at),
+                   last_attempt_at=COALESCE(?, last_attempt_at),
                    lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL,
                    lease_heartbeat_at=NULL, attempt_started_at=NULL, error_code=?,
                    blocked_capability=NULL WHERE id=?""",
@@ -542,6 +582,7 @@ class MemoryQueue:
                 state,
                 _timestamp(now),
                 _timestamp(available_at) if available_at else None,
+                _timestamp(last_attempt_at) if last_attempt_at else None,
                 error_code,
                 task_id,
             ),
@@ -639,6 +680,7 @@ class MemoryQueue:
             updated_at=_parse_timestamp(row["updated_at"]),  # type: ignore[arg-type]
             available_at=_parse_timestamp(row["available_at"]),  # type: ignore[arg-type]
             attempts=int(row["attempts"]),
+            last_attempt_at=_parse_timestamp(row["last_attempt_at"]),
             lease_owner=row["lease_owner"],
             lease_token=row["lease_token"],
             lease_expires_at=_parse_timestamp(row["lease_expires_at"]),
@@ -688,15 +730,18 @@ def enqueue(task_type: str, payload: dict[str, Any]) -> str:
 
 
 def _compat_task(task: QueueTask | QueueLease) -> dict[str, Any]:
-    created = task.created_at if isinstance(task, QueueTask) else None
-    attempts = task.attempts if isinstance(task, QueueTask) else task.attempt
+    created = task.created_at
+    last_attempt = task.last_attempt_at
+    attempts = task.attempts if isinstance(task, QueueTask) else task.prior_attempts
     return {
         "id": task.id,
         "type": task.kind,
         "handler_version": task.handler_version,
-        "enqueued_at": created.isoformat(timespec="seconds") if created else None,
+        "enqueued_at": created.isoformat(timespec="seconds"),
         "attempts": attempts,
-        "last_attempt_at": None,
+        "last_attempt_at": (
+            last_attempt.isoformat(timespec="seconds") if last_attempt else None
+        ),
         "payload": task.payload,
     }
 
