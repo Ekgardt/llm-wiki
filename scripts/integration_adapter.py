@@ -1295,7 +1295,7 @@ def _recover_project_handoff(slug: str | None, project_dir: Path | None) -> str:
         return ""
     try:
         store = ProjectStore(ROOT, STATE_ROOT)
-        return recover_project_handoff(store, slug).context
+        return recover_project_handoff(store, slug, project_root=project_dir).context
     except Exception as exc:  # noqa: BLE001
         _log_checkpoint_error(exc)
         return ""

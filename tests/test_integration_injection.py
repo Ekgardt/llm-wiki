@@ -14,6 +14,7 @@ If any of these are removed, CI catches it.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import textwrap
@@ -1233,6 +1234,92 @@ def test_opencode_session_start_appends_recovered_bounded_project_handoff(monkey
     assert "# General memory" in result["context"]
     assert "project:demo" in result["context"]
     assert "sequence:7" in result["context"]
+
+
+def test_opencode_node_injects_shared_bounded_legacy_handoff_for_unicode_slug(
+    monkeypatch, tmp_path
+):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import integration_adapter
+    from project_journal import ProjectStore, recover_project_handoff
+
+    vault = tmp_path / "vault"
+    state_root = tmp_path / "state"
+    project = tmp_path / "проект"
+    slug = "проект"
+    project.mkdir()
+    project_state = vault / "knowledge/projects" / slug
+    project_state.mkdir(parents=True)
+    fixture = ROOT / "tests/fixtures/project-state-older.md"
+    (project_state / "state.md").write_text(
+        fixture.read_text(encoding="utf-8").replace("{PROJECT_ROOT}", str(project)),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(integration_adapter, "ROOT", vault)
+    monkeypatch.setattr(integration_adapter, "STATE_ROOT", state_root)
+    monkeypatch.setattr(integration_adapter, "_observe_checkpoint_fail_open", lambda event: None)
+    monkeypatch.setattr(integration_adapter, "_record_activity", lambda *args: True)
+    monkeypatch.setattr(integration_adapter, "spawn_detached", lambda args: None)
+    monkeypatch.setattr(integration_adapter, "build_session_start_context", lambda: "")
+    envelope = integration_adapter.normalize_event(
+        "opencode",
+        "session_start",
+        {"sessionId": "unicode-session", "directory": str(project)},
+    )
+
+    started = time.perf_counter()
+    result = integration_adapter.ingest_event(envelope)
+    elapsed = time.perf_counter() - started
+    shared = recover_project_handoff(
+        ProjectStore(vault, state_root), slug, project_root=project
+    )
+
+    assert elapsed < 0.25
+    assert result["context"] == shared.context
+    assert len(result["context"]) <= 2400
+    assert "Preserve older handoff" in result["context"]
+    assert "Preserve older open thread" in result["context"]
+    assert f"project:{slug}" in result["context"]
+    assert not (project_state / "journal.md").exists()
+
+    plugin_url = (ROOT / "scripts/llm-wiki-memory-opencode.js").resolve().as_uri()
+    script = textwrap.dedent(
+        f"""
+        globalThis.Bun = {{ spawn() {{
+          return {{
+            stdin: {{ write() {{}}, end() {{}} }},
+            stdout: new Blob([{json.dumps(json.dumps({'context': result['context']}))}]).stream(),
+            exited: Promise.resolve(0),
+            kill() {{}},
+          }};
+        }} }};
+        const {{ LlmWikiMemoryPlugin }} = await import({json.dumps(plugin_url)});
+        const hooks = await LlmWikiMemoryPlugin({{ client: {{}}, directory: {json.dumps(str(project))} }});
+        await hooks["session.created"]({{ sessionInfo: {{ id: "unicode-session" }} }});
+        const output = {{ system: [] }};
+        await hooks["experimental.chat.system.transform"](
+          {{ sessionInfo: {{ id: "unicode-session" }} }}, output
+        );
+        console.log(JSON.stringify(output.system));
+        """
+    )
+    env = os.environ.copy()
+    env["LLM_WIKI_ROOT"] = str(vault)
+    node = subprocess.run(
+        ["node", "--input-type=module", "--eval", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+        timeout=5,
+    )
+    assert node.returncode == 0, node.stderr
+    assert json.loads(node.stdout) == [result["context"]]
 
 
 def test_opencode_session_start_project_recovery_is_fail_open(monkeypatch):

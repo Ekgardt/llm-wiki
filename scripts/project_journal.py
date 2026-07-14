@@ -141,6 +141,7 @@ class ProjectProjection:
 class ProjectHandoffResult:
     context: str
     degraded: bool = False
+    legacy: bool = False
 
 
 class CheckpointReducer:
@@ -417,6 +418,8 @@ def build_handoff(
     add_section("Next actions", list(project.next_actions.items())[-max_actions:])
     add_section("Blockers", list(project.blockers.items()))
     add_section("Recent decisions", list(project.decisions.items())[-5:])
+    if project.legacy_context:
+        lines.extend(("", "## Legacy context", project.legacy_context))
     identifiers = "\n".join(
         (
             "## MCP identifiers",
@@ -440,6 +443,7 @@ def recover_project_handoff(
     *,
     writer_wait_seconds: float = SESSION_START_RECOVERY_SECONDS,
     max_chars: int = MAX_PROJECT_HANDOFF_CHARS,
+    project_root: Path | str | None = None,
 ) -> ProjectHandoffResult:
     """Recover briefly, then render the last committed bounded project handoff."""
     degraded = False
@@ -448,8 +452,16 @@ def recover_project_handoff(
     except TimeoutError:
         degraded = True
     projection = store.projection(slug)
+    legacy = False
+    if project_root is not None and projection.last_applied_sequence == 0:
+        candidate = store.legacy_projection(slug, project_root)
+        if candidate is not None:
+            projection = candidate
+            legacy = True
     if not degraded:
-        return ProjectHandoffResult(build_handoff(projection, max_chars=max_chars))
+        return ProjectHandoffResult(
+            build_handoff(projection, max_chars=max_chars), legacy=legacy
+        )
     warning = (
         "## Recovery status\n"
         "- Degraded: project recovery deferred due to writer contention.\n"
@@ -459,7 +471,11 @@ def recover_project_handoff(
         projection,
         max_chars=max_chars - len(warning) - 2,
     )
-    return ProjectHandoffResult(handoff.rstrip() + "\n\n" + warning, degraded=True)
+    return ProjectHandoffResult(
+        handoff.rstrip() + "\n\n" + warning,
+        degraded=True,
+        legacy=legacy,
+    )
 
 
 def _utc_now() -> datetime:
@@ -540,6 +556,15 @@ def _bootstrap_operation_id(stable_hash: str, kind: str, index: int, value: str)
         f"{stable_hash}\0{kind}\0{index}\0{value}".encode()
     ).hexdigest()[:24]
     return f"bootstrap-{kind}-{digest}"
+
+
+def legacy_state_project_root(content: str) -> str | None:
+    match = re.search(
+        r"^(?:-\s*)?(?:Source:\s*)?Project root:\s*`?([^`\r\n]+?)`?\s*$",
+        content,
+        re.MULTILINE | re.IGNORECASE,
+    )
+    return match.group(1).strip() if match else None
 
 
 def _require_owner(owner: str) -> str:
@@ -755,18 +780,14 @@ class ProjectStore:
         if not isinstance(provenance, Mapping):
             return None
         worktree = provenance.get("worktree")
-        owned = re.search(
-            r"^(?:-\s*)?(?:Source:\s*)?Project root:\s*`?([^`\r\n]+?)`?\s*$",
-            text,
-            re.MULTILINE | re.IGNORECASE,
-        )
-        if not owned or not isinstance(worktree, str):
+        owned_root = legacy_state_project_root(text)
+        if owned_root is None or not isinstance(worktree, str):
             return None
         try:
-            if Path(owned.group(1)).resolve() != Path(worktree).resolve():
+            if Path(owned_root).resolve() != Path(worktree).resolve():
                 return None
         except (OSError, ValueError):
-            if owned.group(1) != worktree:
+            if owned_root != worktree:
                 return None
 
         def values(body: str) -> list[str]:
@@ -907,6 +928,47 @@ class ProjectStore:
             "delta": delta,
             "evidence_event_ids": [f"bootstrap-state:{stable_hash}"],
         }
+
+    def legacy_projection(
+        self, slug: str, project_root: Path | str
+    ) -> ProjectProjection | None:
+        """Parse an owned pre-journal state without mutating it."""
+        event = self._legacy_bootstrap_event(
+            slug,
+            {
+                "provenance": {
+                    "agent": "legacy-state",
+                    "session": "legacy-state",
+                    "worktree": str(project_root),
+                    "branch": "unknown",
+                    "source_event": "legacy-state",
+                }
+            },
+        )
+        if event is None:
+            return None
+        delta = event["delta"]
+        assert isinstance(delta, Mapping)
+        projection = ProjectProjection(project=slug)
+        for name in ("goal", "phase", "current_task"):
+            operation = delta[name]
+            assert isinstance(operation, Mapping)
+            self._reduce(getattr(projection, name), operation)
+            scalar_operations = delta.get(f"{name}_operations", [])
+            assert isinstance(scalar_operations, list)
+            for scalar_operation in scalar_operations:
+                assert isinstance(scalar_operation, Mapping)
+                self._reduce(getattr(projection, name), scalar_operation)
+        for name in _MAX_LIST_ITEMS:
+            operations = delta[name]
+            assert isinstance(operations, list)
+            for operation in operations:
+                assert isinstance(operation, Mapping)
+                self._reduce(getattr(projection, name), operation)
+        context = delta.get("legacy_context")
+        if isinstance(context, str):
+            projection.legacy_context = context
+        return projection
 
     def recover(
         self,

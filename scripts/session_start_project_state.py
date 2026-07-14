@@ -48,7 +48,11 @@ import unicodedata
 from datetime import datetime
 from pathlib import Path
 
-from project_journal import ProjectStore, recover_project_handoff
+from project_journal import (
+    ProjectStore,
+    legacy_state_project_root,
+    recover_project_handoff,
+)
 
 # Force utf-8 on stdout (Windows cp1252 mojibakes Cyrillic otherwise).
 if hasattr(sys.stdout, "reconfigure"):
@@ -68,13 +72,6 @@ MAX_SLUG_CANDIDATES = 4
 # How many hex chars from the project-dir hash to append when all other
 # disambiguation strategies fail. 6 = 16.7M possibilities, plenty.
 PATH_HASH_SUFFIX_LEN = 6
-
-# Regex matching a `Source:` line in state.md that records the project
-# root. Used to detect slug collisions (existing state.md pointing at
-# a different project dir).
-STATE_SOURCE_LINE_RE = re.compile(
-    r"^- Project root:\s*`([^`]+)`", re.MULTILINE
-)
 
 # Project markers — presence of ANY of these signals "this folder is a real
 # project", gating auto-creation of state.md. Without a marker, the hook
@@ -244,13 +241,12 @@ def _slug_owns_dir(slug: str, project_dir: Path, projects_dir: Path) -> bool:
         body = state_path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return False  # unreadable → treat as collision, disambiguate away
-    m = STATE_SOURCE_LINE_RE.search(body)
-    if not m:
+    recorded = legacy_state_project_root(body)
+    if recorded is None:
         # STRICT: state.md without `- Project root:` is ambiguous. We
         # cannot prove it belongs to `project_dir`, so treat as taken
         # and move on. Caller will try parent-of-parent, git remote, etc.
         return False
-    recorded = m.group(1).strip()
     # Normalize both sides for a fair comparison. Windows paths use
     # backslashes in state.md; resolve() + as_posix() for comparison.
     try:
@@ -418,8 +414,13 @@ def main() -> int:
         if state_root is None:
             return _emit_empty()
         store = ProjectStore(vault, state_root)
-        handoff = recover_project_handoff(store, slug, max_chars=MAX_CONTEXT_CHARS)
-        if journal_path.is_file() or handoff.degraded:
+        handoff = recover_project_handoff(
+            store,
+            slug,
+            max_chars=MAX_CONTEXT_CHARS,
+            project_root=project_dir,
+        )
+        if journal_path.is_file() or handoff.degraded or handoff.legacy:
             return _emit(handoff.context)
 
         # 3. Ensure state.md exists — creation gated on project markers.
