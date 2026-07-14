@@ -871,7 +871,7 @@ def test_codex_normalization_failure_is_host_safe_and_secret_free(monkeypatch, t
     secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
     monkeypatch.setattr(
         codex_memory,
-        "normalize_event",
+        "normalize_occurrence_event",
         lambda *args, **kwargs: (_ for _ in ()).throw(ValueError(secret)),
     )
 

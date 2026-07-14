@@ -19,6 +19,7 @@ import subprocess
 import textwrap
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -176,6 +177,98 @@ def test_adapter_observes_same_envelope_once_before_delegate(monkeypatch):
     ) == 0
     assert [name for name, _ in calls] == ["observe", "delegate"]
     assert calls[1][1]["event_id"] == calls[0][1].event_id
+    assert calls[1][1]["occurrence_id"] == calls[0][1].payload["occurrence_id"]
+
+
+@pytest.mark.parametrize(
+    ("event_type", "raw", "reason"),
+    [
+        ("pre_compact", {"reason": "auto"}, "before_compaction"),
+        ("session_start", {"source": "compact"}, "after_compaction"),
+    ],
+)
+def test_repeated_unidentified_lifecycle_occurrences_checkpoint_separately(
+    monkeypatch, event_type, raw, reason
+):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import integration_adapter
+
+    state = {}
+    checkpoints = []
+
+    def update(mutator, **kwargs):
+        mutator(state)
+        return state
+
+    class Store:
+        def __init__(self, *args):
+            pass
+
+        def checkpoint(self, slug, event, owner, **kwargs):
+            checkpoints.append(event)
+
+    monkeypatch.setattr(integration_adapter, "update_state", update)
+    monkeypatch.setattr(integration_adapter, "ProjectStore", Store)
+    monkeypatch.setattr(integration_adapter, "_project_context", lambda event: ("demo", ROOT))
+    event_raw = {"session_id": "s1", "cwd": "C:/project", **raw}
+
+    first = integration_adapter.normalize_occurrence_event("claude", event_type, event_raw)
+    second = integration_adapter.normalize_occurrence_event("claude", event_type, event_raw)
+    integration_adapter._observe_project_checkpoint(first)
+    integration_adapter._observe_project_checkpoint(second)
+
+    assert first.event_id != second.event_id
+    assert first.source_event_id == first.payload["occurrence_id"]
+    assert second.source_event_id == second.payload["occurrence_id"]
+    uuid.UUID(first.payload["occurrence_id"])
+    uuid.UUID(second.payload["occurrence_id"])
+    assert [checkpoint["reason"] for checkpoint in checkpoints] == [reason, reason]
+    assert [checkpoint["occurrence_id"] for checkpoint in checkpoints] == [
+        first.event_id,
+        second.event_id,
+    ]
+
+
+def test_same_normalized_occurrence_is_checkpointed_once(monkeypatch):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import integration_adapter
+
+    state = {}
+    checkpoints = []
+
+    def update(mutator, **kwargs):
+        mutator(state)
+        return state
+
+    class Store:
+        def __init__(self, *args):
+            pass
+
+        def checkpoint(self, slug, event, owner, **kwargs):
+            checkpoints.append(event)
+
+    monkeypatch.setattr(integration_adapter, "update_state", update)
+    monkeypatch.setattr(integration_adapter, "ProjectStore", Store)
+    monkeypatch.setattr(integration_adapter, "_project_context", lambda event: ("demo", ROOT))
+    envelope = integration_adapter.normalize_occurrence_event(
+        "claude",
+        "pre_compact",
+        {"session_id": "s1", "cwd": "C:/project", "reason": "auto"},
+    )
+
+    integration_adapter._observe_project_checkpoint(envelope)
+    integration_adapter._observe_project_checkpoint(envelope)
+
+    assert len(checkpoints) == 1
+    assert checkpoints[0]["occurrence_id"] == envelope.event_id
 
 
 def test_delegate_runs_when_checkpoint_observation_fails(monkeypatch, capsys):

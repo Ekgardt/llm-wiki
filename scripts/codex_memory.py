@@ -39,7 +39,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 from integration_adapter import (  # noqa: E402
     _observe_checkpoint_fail_open,
     ingest_event,
-    normalize_event,
+    normalize_occurrence_event,
 )
 from secret_redact import redact_secrets  # noqa: E402
 from session_start_project_state import _compute_slug  # type: ignore  # noqa: E402
@@ -132,7 +132,7 @@ def _state_path(project_dir: Path) -> tuple[str, Path]:
 
 def command_project_state(args: argparse.Namespace) -> int:
     project_dir = _project_dir(args.cwd)
-    envelope = normalize_event(
+    envelope = normalize_occurrence_event(
         "codex",
         "session_start",
         {"cwd": str(project_dir), "reason": "codex-session-start"},
@@ -208,7 +208,7 @@ def command_lookup_tier(args: argparse.Namespace) -> int:
 def command_daily_log(args: argparse.Namespace) -> int:
     """Normalize a Codex lifecycle event and present shared ingest results."""
     try:
-        envelope = normalize_event(
+        envelope = normalize_occurrence_event(
             "codex",
             "session_end",
             {

@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 import time
+import uuid
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +39,7 @@ SOURCES = frozenset({"claude", "opencode", "codex"})
 EVENTS = frozenset(
     {"session_start", "session_end", "pre_compact", "user_prompt", "post_tool_use"}
 )
+OCCURRENCE_EVENTS = EVENTS - {"user_prompt"}
 CHECKPOINT_SIGNAL_FIELDS = frozenset(
     {
         "checkpoint_type",
@@ -84,6 +86,17 @@ def _first_string(*values: Any) -> str | None:
 
 def _safe_string(value: str | None) -> str | None:
     return redact_secrets(value) if value is not None else None
+
+
+def _source_event_id(raw: Mapping[str, Any]) -> str | None:
+    return _first_string(
+        raw.get("occurrence_id"),
+        raw.get("event_id"),
+        raw.get("eventId"),
+        raw.get("tool_use_id"),
+        raw.get("toolCallID"),
+        raw.get("callID"),
+    )
 
 
 def _session(source: str, raw: Mapping[str, Any]) -> str | None:
@@ -167,6 +180,8 @@ def normalize_event(
     for name in CHECKPOINT_SIGNAL_FIELDS:
         if name in raw:
             payload[name] = raw[name]
+    if event in OCCURRENCE_EVENTS and isinstance(raw.get("occurrence_id"), str):
+        payload["occurrence_id"] = raw["occurrence_id"]
     if event == "post_tool_use":
         if payload["tool_name"] in {"Edit", "Write", "MultiEdit", "NotebookEdit"}:
             payload.setdefault("changed", True)
@@ -191,16 +206,35 @@ def normalize_event(
         ),
         severity=_safe_string(_string(raw.get("severity"))),
         parent_event_id=_safe_string(_string(raw.get("parent_event_id"))),
-        source_event_id=_safe_string(
-            _first_string(
-                raw.get("event_id"),
-                raw.get("eventId"),
-                raw.get("tool_use_id"),
-                raw.get("toolCallID"),
-                raw.get("callID"),
-            )
-        ),
+        source_event_id=_safe_string(_source_event_id(raw)),
         redact=redact_secrets,
+    )
+
+
+def normalize_occurrence_event(
+    source: str,
+    event: str,
+    raw: Mapping[str, Any],
+    *,
+    occurred_at: datetime | None = None,
+    captured_at: datetime | None = None,
+) -> EventEnvelope:
+    """Assign missing occurrence identity once at the outer adapter boundary."""
+    normalized_raw = raw
+    if (
+        event in OCCURRENCE_EVENTS
+        and occurred_at is None
+        and raw.get("timestamp") is None
+        and _source_event_id(raw) is None
+    ):
+        normalized_raw = dict(raw)
+        normalized_raw["occurrence_id"] = str(uuid.uuid4())
+    return normalize_event(
+        source,
+        event,
+        normalized_raw,
+        occurred_at=occurred_at,
+        captured_at=captured_at,
     )
 
 
@@ -256,6 +290,8 @@ def _canonical_capture_payload(envelope: EventEnvelope) -> dict[str, Any]:
         "parent_event_id": envelope.parent_event_id,
         "event_id": envelope.event_id,
     }
+    if "occurrence_id" in payload:
+        common["occurrence_id"] = payload["occurrence_id"]
     if envelope.event_type == "post_tool_use":
         common.update(
             {
@@ -1011,7 +1047,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise ValueError("invalid integration event")
         if args.checkpoint_type:
             raw["checkpoint_type"] = args.checkpoint_type
-        envelope = normalize_event(args.source, args.event, raw)
+        envelope = normalize_occurrence_event(args.source, args.event, raw)
         if args.delegate:
             _observe_checkpoint_fail_open(envelope)
             _run_delegate(
