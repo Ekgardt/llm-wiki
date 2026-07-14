@@ -9,8 +9,11 @@ import multiprocessing
 import os
 import random
 import re
+import shutil
+import signal
 import sqlite3
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -38,8 +41,10 @@ _TERMINAL_STATES = ("succeeded", "dead", "cancelled")
 _PERMANENT_CODES = {"invalid_input", "unsupported_version"}
 _MAX_RETRY_AFTER_SECONDS = 7 * 24 * 60 * 60
 _MAX_RESULT_BYTES = 16 * 1024 * 1024
+_MAX_EXPORT_METADATA_BYTES = 64 * 1024 * 1024
 _MAX_LEGACY_RECORD_BYTES = 16 * 1024 * 1024
 _MAX_RUNTIME_ATTEMPTS = 100
+_MAX_MARKER_BYTES = 64
 _SECRET_KEYS = {
     "api_key",
     "apikey",
@@ -719,6 +724,22 @@ class MemoryQueue:
         except (OSError, ValueError):
             return None
 
+    def _read_result_for_export(self, reference: str, digest: str) -> bytes:
+        try:
+            path = self.state_root / reference
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(self.results_dir.resolve())
+            if path.parent.resolve() != self.results_dir.resolve():
+                raise QueueOperationError("result_verification_failed")
+            data = _read_stable_owner_file(path, _MAX_RESULT_BYTES)
+            if sha256_bytes(data) != digest:
+                raise QueueOperationError("result_verification_failed")
+            return data
+        except QueueOperationError:
+            raise
+        except (OSError, ValueError):
+            raise QueueOperationError("result_verification_failed") from None
+
     def adopt_published_result(
         self, lease: QueueLease, *, operation_id: str
     ) -> str | None:
@@ -1139,7 +1160,7 @@ class MemoryQueue:
             days=DEFAULTS.queue_result_retention_days
         )
         cutoff = min(requested_cutoff, retention_cutoff)
-        export = Path(export_path).resolve()
+        export = Path(export_path).absolute()
         if export.exists():
             raise QueueOperationError("export_exists")
         with self._connect() as connection:
@@ -1162,49 +1183,68 @@ class MemoryQueue:
             for row in rows
         ]
         records_bytes = canonical_json_bytes(records)
-        export.parent.mkdir(parents=True, exist_ok=True)
-        export.mkdir()
-        _harden_owner_only(export, 0o700)
-        results_export = export / "results"
-        results_export.mkdir()
-        _harden_owner_only(results_export, 0o700)
-        result_manifest: list[dict[str, str]] = []
-        for row in rows:
-            reference = row["result_reference"]
-            digest = row["result_sha256"]
-            if reference is None:
-                continue
-            if not isinstance(digest, str) or self._validated_result_digest(reference) != digest:
-                raise QueueOperationError("result_verification_failed")
-            source = self.state_root / str(reference)
-            target = results_export / f"{row['id']}.result"
-            _write_durable_file(target, source.read_bytes())
-            result_manifest.append({"id": str(row["id"]), "sha256": digest})
-        records_path = export / "records.json"
-        _write_durable_file(records_path, records_bytes)
-        manifest = {
-            "records_sha256": sha256_bytes(records_bytes),
-            "results": result_manifest,
-            "task_ids": list(task_ids),
-        }
-        manifest_path = export / "manifest.json"
-        _write_durable_file(manifest_path, canonical_json_bytes(manifest))
-        fsync_directory(results_export)
-        fsync_directory(export)
-        fsync_directory(export.parent)
-        if sha256_bytes(records_path.read_bytes()) != manifest["records_sha256"]:
-            raise QueueOperationError("export_verification_failed")
-        for item in result_manifest:
-            exported = results_export / f"{item['id']}.result"
-            if sha256_bytes(exported.read_bytes()) != item["sha256"]:
-                raise QueueOperationError("export_verification_failed")
-        if canonical_json_bytes(json.loads(manifest_path.read_bytes())) != manifest_path.read_bytes():
-            raise QueueOperationError("export_verification_failed")
-        if not all(
-            _is_owner_only(path)
-            for path in (export, results_export, records_path, manifest_path)
+        parent = export.parent
+        if not parent.exists():
+            parent.mkdir(parents=True)
+            _harden_owner_only(parent, 0o700)
+        if (
+            parent.is_symlink()
+            or not parent.is_dir()
+            or not _is_owner_only(parent)
         ):
-            raise QueueOperationError("export_permissions_invalid")
+            raise QueueOperationError("export_parent_permissions_invalid")
+        _cleanup_export_staging(parent, export.name)
+        staging = parent / f".{export.name}.staging-{uuid.uuid4().hex}"
+        staging.mkdir()
+        _harden_owner_only(staging, 0o700)
+        try:
+            results_export = staging / "results"
+            results_export.mkdir()
+            _harden_owner_only(results_export, 0o700)
+            result_manifest: list[dict[str, str]] = []
+            for row in rows:
+                reference = row["result_reference"]
+                digest = row["result_sha256"]
+                if reference is None:
+                    continue
+                if not isinstance(digest, str):
+                    raise QueueOperationError("result_verification_failed")
+                result = self._read_result_for_export(str(reference), digest)
+                target = results_export / f"{row['id']}.result"
+                _write_durable_file(target, result)
+                result_manifest.append({"id": str(row["id"]), "sha256": digest})
+            records_path = staging / "records.json"
+            _write_durable_file(records_path, records_bytes)
+            manifest = {
+                "records_sha256": sha256_bytes(records_bytes),
+                "results": result_manifest,
+                "task_ids": list(task_ids),
+            }
+            manifest_path = staging / "manifest.json"
+            manifest_bytes = canonical_json_bytes(manifest)
+            _write_durable_file(manifest_path, manifest_bytes)
+            fsync_directory(results_export)
+            fsync_directory(staging)
+            if (
+                _read_stable_owner_file(records_path, _MAX_EXPORT_METADATA_BYTES)
+                != records_bytes
+            ):
+                raise QueueOperationError("export_verification_failed")
+            for item in result_manifest:
+                exported = results_export / f"{item['id']}.result"
+                data = _read_stable_owner_file(exported, _MAX_RESULT_BYTES)
+                if sha256_bytes(data) != item["sha256"]:
+                    raise QueueOperationError("export_verification_failed")
+            if (
+                _read_stable_owner_file(manifest_path, _MAX_EXPORT_METADATA_BYTES)
+                != manifest_bytes
+            ):
+                raise QueueOperationError("export_verification_failed")
+            staging.replace(export)
+            fsync_directory(parent)
+        except Exception:
+            _remove_export_staging(staging)
+            raise
         if task_ids:
             placeholders = ",".join("?" for _ in task_ids)
             with self._connect() as connection, begin_immediate(connection):
@@ -1362,9 +1402,14 @@ def _migration_paths(state_root: Path) -> tuple[Path, Path, Path, Path]:
     )
 
 
+def _path_present(path: Path) -> bool:
+    return path.exists() or path.is_symlink()
+
+
 def _legacy_write_allowed(state_root: Path) -> bool:
     _run_dir, legacy_dir, _db_path, marker = _migration_paths(state_root)
-    if marker.exists():
+    if _path_present(marker):
+        _validate_migration_marker(marker)
         if legacy_dir.exists():
             _post_marker_legacy_conflict(state_root)
         raise LegacyBackendDisabled("legacy_backend_disabled")
@@ -1420,11 +1465,9 @@ def _acquire_queue_owner(
             epoch = int(row["epoch"]) + 1
             existing_token = row["token"]
             if existing_token is not None:
-                existing_expiry = _parse_timestamp(row["expires_at"])
                 existing_pid = row["pid"]
-                expired = existing_expiry is None or existing_expiry <= acquired_at
                 dead = not isinstance(existing_pid, int) or not _pid_is_alive(existing_pid)
-                if not expired and not dead:
+                if not dead:
                     raise MigrationBusy(busy_code)
             connection.execute(
                 """UPDATE queue_ownership
@@ -1474,7 +1517,8 @@ def _require_queue_owner(
         or row["token"] != lease.token
         or int(row["epoch"]) != lease.epoch
         or expiry is None
-        or expiry <= now
+        or row["pid"] != lease.pid
+        or not _pid_is_alive(lease.pid)
     ):
         code = "migration_fence_lost" if lease.role == "migration" else "legacy_owner_fence_lost"
         raise QueueOperationError(code)
@@ -1517,20 +1561,58 @@ def _release_queue_owner(lease: QueueOwnerLease) -> bool:
 
 
 def _queue_owner_is_active(state_root: Path, role: str) -> bool:
-    now = _utc_now()
     with _open_queue_ownership_db(state_root) as connection:
         row = connection.execute(
             "SELECT token, pid, expires_at FROM queue_ownership WHERE role=?", (role,)
         ).fetchone()
     if row is None or row["token"] is None:
         return False
-    expiry = _parse_timestamp(row["expires_at"])
     return (
-        expiry is not None
-        and expiry > now
-        and isinstance(row["pid"], int)
+        isinstance(row["pid"], int)
         and _pid_is_alive(row["pid"])
     )
+
+
+def _validate_migration_marker(marker: Path) -> None:
+    expected = canonical_json_bytes({"version": 2})
+    try:
+        metadata = marker.lstat()
+        if (
+            marker.is_symlink()
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size > _MAX_MARKER_BYTES
+            or not _is_owner_only(marker)
+        ):
+            raise QueueOperationError("migration_marker_invalid")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(marker, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if (metadata.st_dev, metadata.st_ino) != (opened.st_dev, opened.st_ino):
+                raise QueueOperationError("migration_marker_invalid")
+            with os.fdopen(descriptor, "rb", closefd=False) as handle:
+                raw = handle.read(_MAX_MARKER_BYTES + 1)
+            after = os.fstat(descriptor)
+            if (
+                opened.st_dev,
+                opened.st_ino,
+                opened.st_size,
+                opened.st_mtime_ns,
+            ) != (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+            ):
+                raise QueueOperationError("migration_marker_invalid")
+        finally:
+            os.close(descriptor)
+        if raw != expected:
+            raise QueueOperationError("migration_marker_invalid")
+    except QueueOperationError:
+        raise
+    except (OSError, ValueError):
+        raise QueueOperationError("migration_marker_invalid") from None
 
 
 def _read_bounded_regular_nofollow(path: Path) -> bytes:
@@ -1721,7 +1803,7 @@ def _quarantine_legacy_directory(run_dir: Path, legacy_dir: Path, *, code: str) 
 
 def _post_marker_legacy_conflict(state_root: Path) -> None:
     run_dir, legacy_dir, _db_path, marker = _migration_paths(state_root)
-    if not marker.exists() or not legacy_dir.exists():
+    if not _path_present(marker) or not legacy_dir.exists():
         return
     owner = _acquire_queue_owner(state_root, "legacy", "legacy_owner_busy")
     try:
@@ -1740,6 +1822,7 @@ def _legacy_enqueue_file(
     root = Path(state_root or _state_root()).resolve()
     _legacy_write_allowed(root)
     owner = _acquire_queue_owner(root, "legacy", "legacy_owner_busy")
+    target: Path | None = None
     try:
         _legacy_write_allowed(root)
         task_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
@@ -1754,9 +1837,23 @@ def _legacy_enqueue_file(
         queue_dir = root / "run" / "queue"
         queue_dir.mkdir(parents=True, exist_ok=True)
         _harden_owner_only(queue_dir, 0o700)
-        _write_durable_file(
-            queue_dir / f"{task_id}.json", canonical_json_bytes(record)
-        )
+        target = queue_dir / f"{task_id}.json"
+        owner = _heartbeat_queue_owner(owner)
+        marker = _migration_paths(root)[3]
+        if _path_present(marker):
+            _validate_migration_marker(marker)
+            raise LegacyBackendDisabled("legacy_marker_race")
+        _write_durable_file(target, canonical_json_bytes(record))
+        try:
+            owner = _heartbeat_queue_owner(owner)
+            marker = _migration_paths(root)[3]
+            if _path_present(marker):
+                _validate_migration_marker(marker)
+                raise LegacyBackendDisabled("legacy_marker_race")
+        except Exception:
+            target.unlink(missing_ok=True)
+            fsync_directory(queue_dir)
+            raise
         return task_id
     finally:
         _release_queue_owner(owner)
@@ -1783,26 +1880,82 @@ def _write_durable_file(path: Path, data: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _read_stable_owner_file(path: Path, max_bytes: int) -> bytes:
+    metadata = path.lstat()
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_size > max_bytes
+        or not _is_owner_only(path)
+    ):
+        raise QueueOperationError("export_verification_failed")
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(descriptor)
+        if (metadata.st_dev, metadata.st_ino) != (opened.st_dev, opened.st_ino):
+            raise QueueOperationError("export_verification_failed")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            data = handle.read(max_bytes + 1)
+        after = os.fstat(descriptor)
+        if len(data) > max_bytes or (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            raise QueueOperationError("export_verification_failed")
+        return data
+    finally:
+        os.close(descriptor)
+
+
+def _remove_export_staging(staging: Path) -> None:
+    if not staging.exists():
+        return
+    if staging.is_symlink() or not staging.is_dir() or not _is_owner_only(staging):
+        raise QueueOperationError("export_staging_invalid")
+    shutil.rmtree(staging)
+    fsync_directory(staging.parent)
+
+
+def _cleanup_export_staging(parent: Path, export_name: str) -> None:
+    for staging in parent.glob(f".{export_name}.staging-*"):
+        _remove_export_staging(staging)
+
+
 def _commit_migration_marker(
     lease: QueueOwnerLease, marker: Path, run_dir: Path
 ) -> QueueOwnerLease:
     now = _utc_now()
     with _open_queue_ownership_db(lease.state_root) as connection, begin_immediate(connection):
         expires_at = _require_queue_owner(connection, lease, now, heartbeat=True)
-        _write_durable_file(marker, canonical_json_bytes({"version": 2}))
+        try:
+            _write_durable_file(marker, canonical_json_bytes({"version": 2}))
+        except QueueOperationError:
+            if _path_present(marker):
+                _validate_migration_marker(marker)
+            raise
+        _validate_migration_marker(marker)
         fsync_directory(run_dir)
     return replace(lease, expires_at=expires_at)
 
 
 def migrate_legacy_queue(state_root: Path) -> MigrationReceipt:
     run_dir, legacy_dir, _db_path, marker = _migration_paths(state_root)
-    if marker.exists():
+    if _path_present(marker):
+        _validate_migration_marker(marker)
         _post_marker_legacy_conflict(state_root)
         return MigrationReceipt(0, 0, (), ())
     owner = _acquire_queue_owner(state_root, "migration", "migration_busy")
     legacy_owner: QueueOwnerLease | None = None
     try:
-        if marker.exists():
+        if _path_present(marker):
+            _validate_migration_marker(marker)
             _post_marker_legacy_conflict(state_root)
             return MigrationReceipt(0, 0, (), ())
         legacy_owner = _acquire_queue_owner(state_root, "legacy", "legacy_owner_busy")
@@ -1863,9 +2016,10 @@ def migrate_legacy_queue(state_root: Path) -> MigrationReceipt:
 def _ensure_sqlite_enabled() -> None:
     state_root = _state_root()
     marker = _migration_paths(state_root)[3]
-    if not marker.exists():
+    if not _path_present(marker):
         migrate_legacy_queue(state_root)
     else:
+        _validate_migration_marker(marker)
         _post_marker_legacy_conflict(state_root)
 
 
@@ -2101,6 +2255,8 @@ def _processor_child_entry(
     task: dict[str, Any],
 ) -> None:
     try:
+        if os.name != "nt":
+            os.setsid()
         outcome = processor(task)
         if isinstance(outcome, DeferredResult):
             sender.send_bytes(b"D" + outcome.data)
@@ -2118,10 +2274,32 @@ def _processor_child_entry(
 def _terminate_processor_child(process: multiprocessing.Process) -> None:
     if not process.is_alive():
         return
-    process.terminate()
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            )
+        except (OSError, subprocess.SubprocessError):
+            process.terminate()
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
     process.join(0.2)
     if process.is_alive():
-        process.kill()
+        if os.name != "nt":
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        else:
+            process.kill()
         process.join(0.2)
 
 
@@ -2468,6 +2646,46 @@ def _manual_processor(task: dict[str, Any]) -> bool | DeferredResult:
     return False
 
 
+def _cli_error_code(error: BaseException) -> str:
+    if isinstance(error, QueueOperationError):
+        code = error.code
+        if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code):
+            return code
+        return "internal_error"
+    if isinstance(error, KeyError):
+        return "task_not_found"
+    if isinstance(error, PermissionError):
+        return "permission_denied"
+    if isinstance(error, sqlite3.Error):
+        return "sqlite_error"
+    if isinstance(error, (UnicodeError, json.JSONDecodeError)):
+        return "decode_error"
+    if isinstance(
+        error,
+        (
+            subprocess.SubprocessError,
+            multiprocessing.ProcessError,
+            BrokenPipeError,
+            EOFError,
+            ChildProcessError,
+        ),
+    ):
+        return "process_error"
+    if isinstance(error, TimeoutError):
+        return "worker_timeout"
+    if isinstance(error, OSError):
+        return "os_error"
+    if isinstance(error, (TypeError, ValueError)):
+        return "invalid_input"
+    return "internal_error"
+
+
+def _emit_cli_error(error: BaseException) -> int:
+    payload = canonical_json_bytes({"codes": [_cli_error_code(error)]})
+    print(payload.decode("utf-8"))
+    return 2
+
+
 def _cli() -> int:
     import argparse
 
@@ -2581,10 +2799,8 @@ def _cli() -> int:
                 )
             )
             return 0
-    except (QueueOperationError, KeyError) as exc:
-        code = exc.code if isinstance(exc, QueueOperationError) else "task_not_found"
-        print(json.dumps({"codes": [code]}, sort_keys=True))
-        return 2
+    except Exception as exc:  # noqa: BLE001 - CLI is a redacted trust boundary
+        return _emit_cli_error(exc)
     return 2
 
 

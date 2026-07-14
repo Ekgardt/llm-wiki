@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
+import sqlite3
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -25,6 +29,18 @@ def _sleep_processor(task: dict) -> bool:
 
 def _result_processor(task: dict) -> memory_queue.DeferredResult:
     return memory_queue.DeferredResult(b"x" * task["payload"]["size"])
+
+
+def _grandchild_processor(task: dict) -> bool:
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    Path(task["payload"]["pid_path"]).write_text(str(child.pid), encoding="ascii")
+    time.sleep(30)
+    return True
 
 
 class _MaxJitterRng:
@@ -186,6 +202,33 @@ def test_worker_child_process_is_terminated_at_deadline() -> None:
     assert time.monotonic() - started < 2
 
 
+def test_worker_timeout_kills_spawned_grandchild_tree(tmp_path: Path) -> None:
+    pid_path = tmp_path / "grandchild.pid"
+    with pytest.raises(TimeoutError):
+        memory_queue._run_processor_child(
+            _grandchild_processor,
+            {"payload": {"pid_path": str(pid_path)}},
+            1,
+        )
+    assert pid_path.exists()
+    pid = int(pid_path.read_text(encoding="ascii"))
+    deadline = time.monotonic() + 5
+    while memory_queue._pid_is_alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    try:
+        assert not memory_queue._pid_is_alive(pid)
+    finally:
+        if memory_queue._pid_is_alive(pid):
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    check=False,
+                    capture_output=True,
+                )
+            else:
+                os.kill(pid, signal.SIGKILL)
+
+
 def test_worker_child_drains_one_megabyte_result_before_join() -> None:
     result = memory_queue._run_processor_child(
         _result_processor,
@@ -312,7 +355,10 @@ def test_cli_cancel_redrive_migrate_and_purge(
     assert redriven["state"] == "ready"
 
     before = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
-    export = tmp_path / "export"
+    export_parent = tmp_path / "exports"
+    export_parent.mkdir()
+    memory_queue._harden_owner_only(export_parent, 0o700)
+    export = export_parent / "export"
     monkeypatch.setattr(
         sys,
         "argv",
@@ -422,3 +468,48 @@ def test_cli_rejects_removed_drain_command(monkeypatch: pytest.MonkeyPatch) -> N
         memory_queue._cli()
 
     assert raised.value.code == 2
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (PermissionError("C:/secret/path"), "permission_denied"),
+        (OSError("C:/secret/path"), "os_error"),
+        (sqlite3.DatabaseError("C:/secret/db"), "sqlite_error"),
+        (UnicodeDecodeError("utf-8", b"x", 0, 1, "secret"), "decode_error"),
+        (subprocess.SubprocessError("secret command"), "process_error"),
+    ],
+)
+def test_cli_expected_failures_emit_only_bounded_canonical_code(
+    error: Exception,
+    code: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["memory_queue.py", "status"])
+    monkeypatch.setattr(
+        memory_queue, "_operator_status", lambda: (_ for _ in ()).throw(error)
+    )
+
+    assert memory_queue._cli() == 2
+    captured = capsys.readouterr()
+    assert captured.out == f'{{"codes":["{code}"]}}\n'
+    assert captured.err == ""
+    assert len(captured.out) < 128
+    assert "secret" not in captured.out
+
+
+def test_cli_unexpected_failure_emits_generic_internal_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["memory_queue.py", "status"])
+    monkeypatch.setattr(
+        memory_queue,
+        "_operator_status",
+        lambda: (_ for _ in ()).throw(RuntimeError("C:/secret/payload")),
+    )
+
+    assert memory_queue._cli() == 2
+    captured = capsys.readouterr()
+    assert captured.out == '{"codes":["internal_error"]}\n'
+    assert captured.err == ""

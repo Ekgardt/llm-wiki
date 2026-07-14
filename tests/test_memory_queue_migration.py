@@ -59,7 +59,7 @@ def test_migration_imports_json_and_dead_processing_before_marker(
             lease_acquired_at="2026-07-03T14:00:00+00:00",
         ),
     )
-    monkeypatch.setattr(memory_queue, "_pid_is_alive", lambda pid: False)
+    monkeypatch.setattr(memory_queue, "_pid_is_alive", lambda pid: pid == os.getpid())
     observed_marker: list[bool] = []
     real_import = memory_queue._import_legacy_record
 
@@ -101,7 +101,9 @@ def test_live_processing_owner_aborts_without_marker(
             lease_acquired_at=datetime.now(timezone.utc).isoformat(),
         ),
     )
-    monkeypatch.setattr(memory_queue, "_pid_is_alive", lambda pid: pid == 42)
+    monkeypatch.setattr(
+        memory_queue, "_pid_is_alive", lambda pid: pid in (42, os.getpid())
+    )
 
     with pytest.raises(MigrationBusy) as raised:
         memory_queue.migrate_legacy_queue(tmp_path)
@@ -170,6 +172,28 @@ def test_sqlite_owner_takeover_is_epoch_fenced_and_release_is_token_fenced(
     assert memory_queue._release_queue_owner(first) is False
     assert memory_queue._release_queue_owner(second) is True
     assert not list((tmp_path / "run").glob("queue-*.lock"))
+
+
+def test_expired_owner_cannot_be_stolen_while_pid_is_alive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
+    owner = memory_queue._acquire_queue_owner(
+        tmp_path, "migration", "migration_busy", now=now, ttl_seconds=1
+    )
+    monkeypatch.setattr(memory_queue, "_pid_is_alive", lambda pid: pid == owner.pid)
+
+    with pytest.raises(MigrationBusy) as raised:
+        memory_queue._acquire_queue_owner(
+            tmp_path,
+            "migration",
+            "migration_busy",
+            now=now + timedelta(seconds=2),
+            ttl_seconds=1,
+        )
+
+    assert raised.value.code == "migration_busy"
+    assert memory_queue._release_queue_owner(owner) is True
 
 
 def test_migration_fence_loss_aborts_before_marker(
@@ -447,6 +471,73 @@ def test_marker_prevents_any_legacy_backend_write(
     assert raised.value.code == "legacy_backend_disabled"
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"not-json",
+        b'{"version":1}',
+        b'{"version":2,"extra":true}',
+        b'{ "version": 2 }',
+    ],
+)
+def test_invalid_migration_marker_is_stable_conflict_not_success(
+    tmp_path: Path, raw: bytes
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    memory_queue._harden_owner_only(run_dir, 0o700)
+    marker = run_dir / "queue-migrated-v2"
+    marker.write_bytes(raw)
+    memory_queue._harden_owner_only(marker, 0o600)
+    _write_legacy(tmp_path, "legacy.json", _legacy_task())
+
+    with pytest.raises(memory_queue.QueueOperationError) as raised:
+        memory_queue.migrate_legacy_queue(tmp_path)
+
+    assert raised.value.code == "migration_marker_invalid"
+    assert (tmp_path / "run" / "queue" / "legacy.json").exists()
+
+
+def test_marker_must_be_regular_owner_only_and_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    memory_queue.migrate_legacy_queue(tmp_path)
+    marker = tmp_path / "run" / "queue-migrated-v2"
+    monkeypatch.setattr(
+        memory_queue,
+        "_is_owner_only",
+        lambda path: False if Path(path) == marker else True,
+    )
+
+    with pytest.raises(memory_queue.QueueOperationError) as raised:
+        memory_queue.migrate_legacy_queue(tmp_path)
+
+    assert raised.value.code == "migration_marker_invalid"
+
+
+def test_legacy_enqueue_retracts_file_if_marker_wins_publication_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_write = memory_queue._write_durable_file
+    published: list[Path] = []
+
+    def marker_wins(path: Path, data: bytes) -> None:
+        if path.parent.name == "queue" and path.suffix == ".json":
+            marker = tmp_path / "run" / "queue-migrated-v2"
+            real_write(marker, canonical_json_bytes({"version": 2}))
+            published.append(path)
+        real_write(path, data)
+
+    monkeypatch.setattr(memory_queue, "_write_durable_file", marker_wins)
+
+    with pytest.raises(memory_queue.LegacyBackendDisabled) as raised:
+        memory_queue._legacy_enqueue_file("query", {"prompt": "late"}, tmp_path)
+
+    assert raised.value.code == "legacy_marker_race"
+    assert len(published) == 1
+    assert not published[0].exists()
+
+
 def test_redrive_links_new_task_without_changing_dead_history(tmp_path: Path) -> None:
     queue = MemoryQueue(tmp_path)
     original = queue.enqueue("query", 1, {"prompt": "again"})
@@ -519,6 +610,68 @@ def test_purge_requires_cutoff_and_export_then_verifies_before_deleting(
         queue.get(task_id)
 
 
+def test_purge_build_failure_cleans_staging_and_retry_is_atomic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    queue = MemoryQueue(tmp_path, clock=lambda: now)
+    task_id = queue.enqueue("query", 1, {})
+    lease = queue.claim("worker")
+    assert lease is not None
+    queue.publish_result(lease, operation_id=task_id, result=b"answer")
+    queue.acknowledge(lease)
+    with sqlite3.connect(queue.db_path) as connection:
+        connection.execute(
+            "UPDATE tasks SET updated_at=? WHERE id=?",
+            ((now - timedelta(days=31)).isoformat(timespec="microseconds"), task_id),
+        )
+    export = tmp_path / "exports" / "purge"
+    real_write = memory_queue._write_durable_file
+    failed = False
+
+    def fail_manifest(path: Path, data: bytes) -> None:
+        nonlocal failed
+        if path.name == "manifest.json" and not failed:
+            failed = True
+            raise OSError("secret path must not escape")
+        real_write(path, data)
+
+    monkeypatch.setattr(memory_queue, "_write_durable_file", fail_manifest)
+    with pytest.raises(OSError):
+        queue.purge(terminal_before=now - timedelta(days=30), export_path=export)
+
+    assert not export.exists()
+    assert not list(export.parent.glob(".purge.staging-*"))
+    monkeypatch.setattr(memory_queue, "_write_durable_file", real_write)
+    receipt = queue.purge(
+        terminal_before=now - timedelta(days=30), export_path=export
+    )
+    assert receipt.task_ids == (task_id,)
+    assert export.is_dir()
+    assert not list(export.parent.glob(".purge.staging-*"))
+
+
+def test_purge_rejects_unsafe_existing_export_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue = MemoryQueue(tmp_path)
+    parent = tmp_path / "exports"
+    parent.mkdir()
+    monkeypatch.setattr(
+        memory_queue,
+        "_is_owner_only",
+        lambda path: False if Path(path) == parent else True,
+    )
+
+    with pytest.raises(memory_queue.QueueOperationError) as raised:
+        queue.purge(
+            terminal_before=datetime.now(timezone.utc),
+            export_path=parent / "purge",
+        )
+
+    assert raised.value.code == "export_parent_permissions_invalid"
+
+
 def test_default_retention_excludes_recent_terminal_and_all_dead(tmp_path: Path) -> None:
     now = datetime(2026, 7, 14, tzinfo=timezone.utc)
     queue = MemoryQueue(tmp_path, clock=lambda: now)
@@ -532,9 +685,12 @@ def test_default_retention_excludes_recent_terminal_and_all_dead(tmp_path: Path)
     assert lease is not None
     queue.fail(lease, QueueFailure("invalid_input", permanent=True))
 
+    export_parent = tmp_path / "exports"
+    export_parent.mkdir()
+    memory_queue._harden_owner_only(export_parent, 0o700)
     receipt = queue.purge(
         terminal_before=now + timedelta(days=1),
-        export_path=tmp_path / "export",
+        export_path=export_parent / "export",
     )
 
     assert receipt.purged == 0
