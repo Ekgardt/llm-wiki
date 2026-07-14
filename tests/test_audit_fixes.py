@@ -120,7 +120,12 @@ def test_memory_queue_work_query_without_output_path(tmp_path, monkeypatch):
         Path(out).write_text(result, encoding="utf-8")
         return True
 
-    summary = memory_queue.run_worker(processor, max_tasks=5, idle_seconds=0)
+    summary = memory_queue.run_worker(
+        processor,
+        max_tasks=5,
+        idle_seconds=0,
+        processor_runner=memory_queue._run_processor_inline,
+    )
     assert summary.succeeded >= 1, f"expected at least 1 ok, got {summary}"
 
 

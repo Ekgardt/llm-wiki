@@ -967,16 +967,16 @@ def test_drain_counts_corrupt_acknowledgement_as_failed_and_dead(
     assert queue.get(task_id).state == "dead"
 
 
-def test_cli_drain_returns_nonzero_for_failed_or_dead_work(
+def test_cli_work_returns_nonzero_for_failed_or_dead_work(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import memory_queue
 
-    monkeypatch.setattr(sys, "argv", ["memory_queue.py", "drain"])
+    monkeypatch.setattr(sys, "argv", ["memory_queue.py", "work"])
     monkeypatch.setattr(
         memory_queue,
-        "drain_with",
-        lambda processor, max_tasks: {"ok": 0, "failed": 1, "dead": 1, "skipped": 0},
+        "run_worker",
+        lambda processor, **kwargs: memory_queue.WorkerSummary(1, 0, 1, 1, 0),
     )
     assert memory_queue._cli() == 1
 

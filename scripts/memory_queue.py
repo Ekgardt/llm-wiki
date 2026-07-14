@@ -5,6 +5,7 @@ from __future__ import annotations
 import email.utils
 import json
 import math
+import multiprocessing
 import os
 import random
 import re
@@ -37,6 +38,7 @@ _TERMINAL_STATES = ("succeeded", "dead", "cancelled")
 _PERMANENT_CODES = {"invalid_input", "unsupported_version"}
 _MAX_RETRY_AFTER_SECONDS = 7 * 24 * 60 * 60
 _MAX_RESULT_BYTES = 16 * 1024 * 1024
+_MAX_LEGACY_RECORD_BYTES = 16 * 1024 * 1024
 _SECRET_KEYS = {
     "api_key",
     "apikey",
@@ -951,20 +953,34 @@ class MemoryQueue:
             return True
 
     def redrive(self, task_id: str) -> str:
-        original = self.get(task_id)
-        if original.state != "dead":
-            raise QueueOperationError("redrive_requires_dead")
-        replacement = self.enqueue(
-            original.kind,
-            original.handler_version,
-            original.payload,
-            priority=original.priority,
-        )
         now = _as_utc(self._clock())
         with self._connect() as connection, begin_immediate(connection):
+            row = connection.execute(
+                "SELECT * FROM tasks WHERE id=?", (task_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            if row["state"] != "dead":
+                raise QueueOperationError("redrive_requires_dead")
+            payload_bytes = str(row["payload_json"]).encode("utf-8")
+            replacement = uuid.UUID(int=self._rng.getrandbits(128)).hex
             connection.execute(
-                "UPDATE tasks SET redrive_of=?, updated_at=? WHERE id=?",
-                (task_id, _timestamp(now), replacement),
+                """INSERT INTO tasks(
+                       id, kind, handler_version, payload_json, input_hash, state,
+                       priority, created_at, updated_at, available_at, redrive_of
+                   ) VALUES (?, ?, ?, ?, ?, 'ready', ?, ?, ?, ?, ?)""",
+                (
+                    replacement,
+                    row["kind"],
+                    row["handler_version"],
+                    payload_bytes.decode("utf-8"),
+                    sha256_bytes(payload_bytes),
+                    row["priority"],
+                    _timestamp(now),
+                    _timestamp(now),
+                    _timestamp(now),
+                    task_id,
+                ),
             )
         return replacement
 
@@ -972,6 +988,12 @@ class MemoryQueue:
         with self._connect() as connection:
             task = connection.execute("SELECT 1 FROM tasks LIMIT 1").fetchone()
         if task is not None:
+            return True
+        quarantine = self.run_dir / "queue-quarantine"
+        try:
+            if quarantine.exists() and any(quarantine.iterdir()):
+                return True
+        except OSError:
             return True
         try:
             return any(self.results_dir.iterdir())
@@ -1210,15 +1232,25 @@ def _migration_paths(state_root: Path) -> tuple[Path, Path, Path, Path]:
 
 
 def _legacy_write_allowed(state_root: Path) -> bool:
-    _run_dir, _legacy_dir, lock, marker = _migration_paths(state_root)
+    _run_dir, legacy_dir, lock, marker = _migration_paths(state_root)
     if marker.exists():
+        if legacy_dir.exists():
+            _post_marker_legacy_conflict(state_root)
         raise LegacyBackendDisabled("legacy_backend_disabled")
     if lock.exists():
         raise LegacyBackendDisabled("legacy_migration_quiesced")
     return True
 
 
+def _legacy_owner_path(state_root: Path) -> Path:
+    return Path(state_root).resolve() / "run" / "queue-owner.lock"
+
+
 def _acquire_migration_lock(lock: Path) -> str:
+    return _acquire_owner_file(lock, "migration_busy")
+
+
+def _acquire_owner_file(lock: Path, busy_code: str) -> str:
     owner = f"{os.getpid()}:{uuid.uuid4().hex}"
     lock.parent.mkdir(parents=True, exist_ok=True)
     _harden_owner_only(lock.parent, 0o700)
@@ -1230,13 +1262,13 @@ def _acquire_migration_lock(lock: Path) -> str:
                 existing = lock.read_text(encoding="ascii").split(":", 1)[0]
                 pid = int(existing)
             except (OSError, ValueError):
-                raise MigrationBusy("migration_busy") from None
+                raise MigrationBusy(busy_code) from None
             if _pid_is_alive(pid):
-                raise MigrationBusy("migration_busy")
+                raise MigrationBusy(busy_code)
             try:
                 lock.unlink()
             except OSError:
-                raise MigrationBusy("migration_busy") from None
+                raise MigrationBusy(busy_code) from None
             continue
         with os.fdopen(descriptor, "w", encoding="ascii") as handle:
             handle.write(owner)
@@ -1245,7 +1277,7 @@ def _acquire_migration_lock(lock: Path) -> str:
         _harden_owner_only(lock, 0o600)
         fsync_directory(lock.parent)
         return owner
-    raise MigrationBusy("migration_busy")
+    raise MigrationBusy(busy_code)
 
 
 def _release_migration_lock(lock: Path, owner: str) -> None:
@@ -1257,6 +1289,58 @@ def _release_migration_lock(lock: Path, owner: str) -> None:
         pass
 
 
+def _read_bounded_regular_nofollow(path: Path) -> bytes:
+    metadata = path.lstat()
+    if not stat.S_ISREG(metadata.st_mode) or path.is_symlink():
+        raise QueueOperationError("legacy_source_unsafe")
+    if metadata.st_size > _MAX_LEGACY_RECORD_BYTES:
+        raise QueueOperationError("legacy_record_too_large")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_size > _MAX_LEGACY_RECORD_BYTES:
+            raise QueueOperationError("legacy_source_unsafe")
+        if (metadata.st_dev, metadata.st_ino) != (opened.st_dev, opened.st_ino):
+            raise QueueOperationError("legacy_source_changed")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            raw = handle.read(_MAX_LEGACY_RECORD_BYTES + 1)
+        if len(raw) > _MAX_LEGACY_RECORD_BYTES:
+            raise QueueOperationError("legacy_record_too_large")
+        after = os.fstat(descriptor)
+        if (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            raise QueueOperationError("legacy_source_changed")
+        return raw
+    finally:
+        os.close(descriptor)
+
+
+def _prove_no_live_processing(legacy_dir: Path) -> None:
+    if not legacy_dir.exists():
+        return
+    for path in legacy_dir.glob("*.processing"):
+        raw = _read_bounded_regular_nofollow(path)
+        try:
+            record = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise MigrationBusy("legacy_owner_unverifiable") from None
+        pid = record.get("lease_pid") if isinstance(record, dict) else None
+        if not isinstance(pid, int) or pid <= 0:
+            raise MigrationBusy("legacy_owner_unverifiable")
+        if _pid_is_alive(pid):
+            raise MigrationBusy("legacy_owner_live")
+
+
 def _scan_legacy_records(
     legacy_dir: Path,
 ) -> tuple[list[tuple[Path, dict[str, object]]], list[tuple[Path, bytes]]]:
@@ -1266,11 +1350,10 @@ def _scan_legacy_records(
         return valid, malformed
     paths = sorted((*legacy_dir.glob("*.json"), *legacy_dir.glob("*.processing")))
     for path in paths:
-        raw = b""
         try:
-            raw = path.read_bytes()
+            raw = _read_bounded_regular_nofollow(path)
             record = json.loads(raw)
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        except (UnicodeDecodeError, json.JSONDecodeError):
             malformed.append((path, raw))
             continue
         if path.suffix == ".processing":
@@ -1358,18 +1441,83 @@ def _import_legacy_record(queue: MemoryQueue, record: dict[str, object], source:
     return str(record["id"])
 
 
-def _quarantine_legacy_record(run_dir: Path, source: Path, raw: bytes) -> None:
+def _quarantine_legacy_record(
+    run_dir: Path, source: Path, raw: bytes, *, code: str = "legacy_invalid"
+) -> None:
     quarantine = run_dir / "queue-quarantine"
     quarantine.mkdir(parents=True, exist_ok=True)
     _harden_owner_only(quarantine, 0o700)
     digest = sha256_bytes(raw)
+    raw_name = f"{digest}.raw"
+    _write_durable_file(quarantine / raw_name, raw)
     record = {
-        "code": "legacy_invalid",
+        "code": code,
+        "raw_name": raw_name,
         "source_name": source.name,
         "source_sha256": digest,
     }
-    _write_durable_file(quarantine / f"{digest}.json", canonical_json_bytes(record))
+    source_digest = sha256_bytes(source.name.encode("utf-8"))[:16]
+    _write_durable_file(
+        quarantine / f"{digest}-{source_digest}.json", canonical_json_bytes(record)
+    )
     fsync_directory(quarantine)
+
+
+def _quarantine_legacy_directory(run_dir: Path, legacy_dir: Path, *, code: str) -> int:
+    quarantined = 0
+    for source in sorted(legacy_dir.iterdir()):
+        raw = _read_bounded_regular_nofollow(source)
+        _quarantine_legacy_record(run_dir, source, raw, code=code)
+        source.unlink()
+        quarantined += 1
+    legacy_dir.rmdir()
+    fsync_directory(run_dir)
+    return quarantined
+
+
+def _post_marker_legacy_conflict(state_root: Path) -> None:
+    run_dir, legacy_dir, _lock, marker = _migration_paths(state_root)
+    if not marker.exists() or not legacy_dir.exists():
+        return
+    owner_path = _legacy_owner_path(state_root)
+    owner = _acquire_owner_file(owner_path, "legacy_owner_busy")
+    try:
+        if legacy_dir.exists():
+            _quarantine_legacy_directory(
+                run_dir, legacy_dir, code="legacy_backend_conflict"
+            )
+            raise LegacyBackendDisabled("legacy_backend_conflict")
+    finally:
+        _release_migration_lock(owner_path, owner)
+
+
+def _legacy_enqueue_file(
+    task_type: str, payload: dict[str, Any], state_root: Path | None = None
+) -> str:
+    root = Path(state_root or _state_root()).resolve()
+    _legacy_write_allowed(root)
+    owner_path = _legacy_owner_path(root)
+    owner = _acquire_owner_file(owner_path, "legacy_owner_busy")
+    try:
+        _legacy_write_allowed(root)
+        task_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+        record = {
+            "attempts": 0,
+            "enqueued_at": _timestamp(_utc_now()),
+            "id": task_id,
+            "last_attempt_at": None,
+            "payload": payload,
+            "type": task_type,
+        }
+        queue_dir = root / "run" / "queue"
+        queue_dir.mkdir(parents=True, exist_ok=True)
+        _harden_owner_only(queue_dir, 0o700)
+        _write_durable_file(
+            queue_dir / f"{task_id}.json", canonical_json_bytes(record)
+        )
+        return task_id
+    finally:
+        _release_migration_lock(owner_path, owner)
 
 
 def _write_durable_file(path: Path, data: bytes) -> None:
@@ -1396,12 +1544,35 @@ def _write_durable_file(path: Path, data: bytes) -> None:
 def migrate_legacy_queue(state_root: Path) -> MigrationReceipt:
     run_dir, legacy_dir, lock, marker = _migration_paths(state_root)
     if marker.exists():
+        _post_marker_legacy_conflict(state_root)
         return MigrationReceipt(0, 0, (), ())
     owner = _acquire_migration_lock(lock)
+    legacy_owner_path = _legacy_owner_path(state_root)
+    legacy_owner: str | None = None
     try:
         if marker.exists():
+            _post_marker_legacy_conflict(state_root)
             return MigrationReceipt(0, 0, (), ())
-        valid, malformed = _scan_legacy_records(legacy_dir)
+        legacy_owner = _acquire_owner_file(legacy_owner_path, "legacy_owner_busy")
+        _prove_no_live_processing(legacy_dir)
+        migration_inputs = sorted(run_dir.glob("queue-migration-*"))
+        if migration_inputs and legacy_dir.exists():
+            raise MigrationBusy("legacy_migration_conflict")
+        if len(migration_inputs) > 1:
+            raise MigrationBusy("legacy_migration_conflict")
+        if migration_inputs:
+            migration_input = migration_inputs[0]
+        elif legacy_dir.exists():
+            migration_input = run_dir / f"queue-migration-{uuid.uuid4().hex}"
+            legacy_dir.replace(migration_input)
+            fsync_directory(run_dir)
+        else:
+            migration_input = None
+        valid, malformed = (
+            _scan_legacy_records(migration_input)
+            if migration_input is not None
+            else ([], [])
+        )
         queue = MemoryQueue(Path(state_root)) if valid else None
         imported: list[str] = []
         for source, record in valid:
@@ -1412,14 +1583,23 @@ def migrate_legacy_queue(state_root: Path) -> MigrationReceipt:
         for source, raw in malformed:
             _quarantine_legacy_record(run_dir, source, raw)
             source.unlink(missing_ok=True)
+        if migration_input is not None:
+            fsync_directory(migration_input)
+            migration_input.rmdir()
+            fsync_directory(run_dir)
         if legacy_dir.exists():
-            fsync_directory(legacy_dir)
+            _quarantine_legacy_directory(
+                run_dir, legacy_dir, code="legacy_backend_conflict"
+            )
+            raise LegacyBackendDisabled("legacy_backend_conflict")
         marker_record = {"version": 2}
         _write_durable_file(marker, canonical_json_bytes(marker_record))
         fsync_directory(run_dir)
         codes = ("legacy_invalid",) if malformed else ()
         return MigrationReceipt(len(imported), len(malformed), tuple(imported), codes)
     finally:
+        if legacy_owner is not None:
+            _release_migration_lock(legacy_owner_path, legacy_owner)
         _release_migration_lock(lock, owner)
 
 
@@ -1428,6 +1608,8 @@ def _ensure_sqlite_enabled() -> None:
     marker = _migration_paths(state_root)[3]
     if not marker.exists():
         migrate_legacy_queue(state_root)
+    else:
+        _post_marker_legacy_conflict(state_root)
 
 
 def _queue_dir() -> Path:
@@ -1628,6 +1810,139 @@ def drain_with(
     return counts
 
 
+def _run_processor_inline(
+    processor: Callable[[dict], bool | DeferredResult],
+    task: dict[str, Any],
+    timeout: float,
+) -> bool | DeferredResult:
+    del timeout
+    return processor(task)
+
+
+def _processor_child_entry(
+    sender: Any,
+    processor: Callable[[dict], bool | DeferredResult],
+    task: dict[str, Any],
+) -> None:
+    try:
+        outcome = processor(task)
+        if isinstance(outcome, DeferredResult):
+            sender.send(("deferred", outcome.data))
+        else:
+            sender.send(("value", bool(outcome)))
+    except Exception:  # noqa: BLE001 - parent receives a stable code only
+        try:
+            sender.send(("error", None))
+        except (BrokenPipeError, EOFError, OSError):
+            pass
+    finally:
+        sender.close()
+
+
+def _run_processor_child(
+    processor: Callable[[dict], bool | DeferredResult],
+    task: dict[str, Any],
+    timeout: float,
+) -> bool | DeferredResult:
+    if timeout <= 0:
+        raise TimeoutError
+    context = multiprocessing.get_context("spawn")
+    receiver, sender = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_processor_child_entry,
+        args=(sender, processor, task),
+        daemon=False,
+    )
+    try:
+        process.start()
+        sender.close()
+        process.join(timeout)
+        if process.is_alive():
+            process.terminate()
+            process.join(1)
+            if process.is_alive():
+                process.kill()
+                process.join()
+            raise TimeoutError
+        if not receiver.poll():
+            raise QueueOperationError("processor_child_failed")
+        kind, value = receiver.recv()
+        if kind == "deferred":
+            return DeferredResult(value)
+        if kind == "value":
+            return bool(value)
+        raise QueueOperationError("processor_exception")
+    finally:
+        receiver.close()
+        if process.is_alive():
+            process.kill()
+            process.join()
+
+
+def _work_one(
+    queue: MemoryQueue,
+    processor: Callable[[dict], bool | DeferredResult],
+    processor_runner: Callable[
+        [Callable[[dict], bool | DeferredResult], dict[str, Any], float],
+        bool | DeferredResult,
+    ],
+    *,
+    owner: str,
+    deadline: float,
+    monotonic: Callable[[], float],
+) -> dict[str, int]:
+    counts = {"ok": 0, "failed": 0, "dead": 0, "skipped": 0}
+    lease = queue.claim(owner)
+    if lease is None:
+        return counts
+    adopted = queue.adopt_published_result(lease, operation_id=lease.id)
+    if adopted == "adopted":
+        _count_terminal(counts, queue.acknowledge(lease))
+        return counts
+    if adopted == "corrupt":
+        _count_terminal(counts, queue.get(lease.id))
+        return counts
+    heartbeat = _LeaseHeartbeat(queue, lease)
+    heartbeat.start()
+    timed_out = False
+    outcome: bool | DeferredResult = False
+    try:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            timed_out = True
+        else:
+            try:
+                outcome = processor_runner(processor, _compat_task(lease), remaining)
+            except TimeoutError:
+                timed_out = True
+            except Exception:  # noqa: BLE001 - queue exposes stable codes only
+                outcome = False
+        if monotonic() >= deadline:
+            timed_out = True
+    finally:
+        heartbeat.stop()
+    if heartbeat.error is not None:
+        counts["failed"] += 1
+        return counts
+    try:
+        if timed_out:
+            queue.fail(lease, QueueFailure("worker_timeout", retry_after=60))
+            _count_terminal(counts, queue.get(lease.id))
+        elif bool(outcome):
+            result = outcome.data if isinstance(outcome, DeferredResult) else b""
+            queue.publish_result(lease, operation_id=lease.id, result=result)
+            _count_terminal(counts, queue.acknowledge(lease))
+        else:
+            queue.fail(lease, QueueFailure("processor_failed", retry_after=60))
+            _count_terminal(counts, queue.get(lease.id))
+    except (LeaseFenceError, ResultConflictError):
+        counts["failed"] += 1
+        task = queue.get(lease.id)
+        if task.state == "dead":
+            counts["dead"] += 1
+    return counts
+
+
 def run_worker(
     processor: Callable[[dict], bool | DeferredResult],
     *,
@@ -1636,6 +1951,10 @@ def run_worker(
     idle_seconds: int = DEFAULTS.worker_idle_seconds,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
+    processor_runner: Callable[
+        [Callable[[dict], bool | DeferredResult], dict[str, Any], float],
+        bool | DeferredResult,
+    ] = _run_processor_child,
 ) -> WorkerSummary:
     """Run a short-lived worker bounded by tasks, wall time, and idle time."""
     if max_tasks < 0 or max_seconds < 0 or idle_seconds < 0:
@@ -1644,13 +1963,23 @@ def run_worker(
     idle_started: float | None = None
     totals = {"ok": 0, "failed": 0, "dead": 0, "skipped": 0}
     processed = 0
+    queue = _queue()
+    owner = f"worker-{os.getpid()}-{uuid.uuid4().hex}"
+    deadline = started + max_seconds
     while processed < max_tasks:
         now = monotonic()
-        if now - started >= max_seconds:
+        if now >= deadline:
             break
         if idle_started is not None and now - idle_started >= idle_seconds:
             break
-        counts = drain_with(processor, max_tasks=1)
+        counts = _work_one(
+            queue,
+            processor,
+            processor_runner,
+            owner=owner,
+            deadline=deadline,
+            monotonic=monotonic,
+        )
         handled = counts["ok"] + counts["failed"]
         for key in totals:
             totals[key] += counts[key]
@@ -1662,8 +1991,11 @@ def run_worker(
             break
         if idle_started is None:
             idle_started = now
-        remaining = idle_seconds - (now - idle_started)
-        sleep(min(1.0, remaining))
+        idle_remaining = idle_seconds - (now - idle_started)
+        budget_remaining = deadline - monotonic()
+        if budget_remaining <= 0:
+            break
+        sleep(min(1.0, idle_remaining, budget_remaining))
     return WorkerSummary(
         processed,
         totals["ok"],
@@ -1787,7 +2119,7 @@ def _cli() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "command",
-        choices=["list", "status", "work", "cancel", "redrive", "migrate", "purge", "drain"],
+        choices=["list", "status", "work", "cancel", "redrive", "migrate", "purge"],
     )
     parser.add_argument("task_id", nargs="?")
     parser.add_argument("--max-tasks", type=int, default=DEFAULTS.worker_max_tasks)
@@ -1817,10 +2149,6 @@ def _cli() -> int:
         if args.command == "status":
             print(json.dumps(_operator_status(), sort_keys=True))
             return 0
-        if args.command == "drain":
-            counts = drain_with(_manual_processor, max_tasks=args.max_tasks)
-            print(json.dumps({"counts": counts}, sort_keys=True))
-            return 1 if counts["failed"] or counts["dead"] else 0
         if args.command == "work":
             summary = run_worker(
                 _manual_processor,

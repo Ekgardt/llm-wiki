@@ -335,23 +335,23 @@ def test_claude_context_delegate_preserves_stdout(monkeypatch, capsys, tmp_path)
     pending_daily = tmp_path / "knowledge" / "daily" / "2026-07-13.md"
     order = []
 
-    def drain(*args, **kwargs):
-        assert args[0][-1] == "drain"
+    def work(*args, **kwargs):
+        assert args[0][-1] == "work"
         assert kwargs["timeout"] == integration_adapter.MAINTENANCE_DRAIN_TIMEOUT_SECONDS
         pending_daily.parent.mkdir(parents=True)
         pending_daily.write_text("pending", encoding="utf-8")
-        order.append("drain")
+        order.append("work")
         return subprocess.CompletedProcess(args[0], 1, "secret stdout", "secret stderr")
 
-    def compile_after_drain():
+    def compile_after_work():
         assert pending_daily.exists()
         order.append("compile")
         return True, "spawned"
 
-    monkeypatch.setattr(integration_adapter.subprocess, "run", drain)
-    monkeypatch.setattr(integration_adapter, "spawn_compile_if_idle", compile_after_drain)
+    monkeypatch.setattr(integration_adapter.subprocess, "run", work)
+    monkeypatch.setattr(integration_adapter, "spawn_compile_if_idle", compile_after_work)
     assert integration_adapter.main(["--maintenance"]) == 0
-    assert order == ["drain", "compile"]
+    assert order == ["work", "compile"]
     assert capsys.readouterr() == ("", "")
 
     secret = "sk-abcdefghijklmnopqrstuvwxyz012345"

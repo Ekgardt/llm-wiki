@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -17,6 +18,11 @@ import memory_queue  # noqa: E402
 from memory_queue import MemoryQueue  # noqa: E402
 
 
+def _sleep_processor(task: dict) -> bool:
+    time.sleep(task["payload"]["seconds"])
+    return True
+
+
 def test_worker_defaults_are_bounded_and_process_twenty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -25,7 +31,9 @@ def test_worker_defaults_are_bounded_and_process_twenty(
         queue.enqueue("query", 1, {"number": number})
     monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
 
-    summary = memory_queue.run_worker(lambda task: True)
+    summary = memory_queue.run_worker(
+        lambda task: True, processor_runner=memory_queue._run_processor_inline
+    )
 
     assert summary.processed == 20
     assert summary.succeeded == 20
@@ -40,7 +48,11 @@ def test_worker_stops_at_elapsed_limit_without_claiming(
     monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
     times = iter((0.0, 601.0))
 
-    summary = memory_queue.run_worker(lambda task: True, monotonic=lambda: next(times))
+    summary = memory_queue.run_worker(
+        lambda task: True,
+        monotonic=lambda: next(times),
+        processor_runner=memory_queue._run_processor_inline,
+    )
 
     assert summary.processed == 0
     assert queue.list_tasks(states=("ready",))[0].state == "ready"
@@ -51,16 +63,88 @@ def test_worker_stops_after_two_idle_seconds(
 ) -> None:
     queue = MemoryQueue(tmp_path)
     monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
+    now = [0.0]
     sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += seconds
 
     summary = memory_queue.run_worker(
         lambda task: True,
-        sleep=lambda seconds: sleeps.append(seconds),
-        monotonic=iter((0.0, 0.0, 1.0, 2.0)).__next__,
+        sleep=sleep,
+        monotonic=lambda: now[0],
     )
 
     assert summary.processed == 0
-    assert sum(sleeps) == 2
+    assert sleeps == [1.0, 1.0]
+
+
+def test_worker_times_out_handler_without_result_or_live_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue = MemoryQueue(tmp_path)
+    task_id = queue.enqueue("query", 1, {})
+    monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
+    now = [0.0]
+
+    def runner(processor, task, timeout):
+        del processor, task
+        now[0] += timeout
+        return memory_queue.DeferredResult(b"late-result")
+
+    summary = memory_queue.run_worker(
+        lambda task: True,
+        max_seconds=3,
+        idle_seconds=0,
+        monotonic=lambda: now[0],
+        processor_runner=runner,
+    )
+
+    task = queue.get(task_id)
+    assert summary.failed == 1
+    assert task.state == "ready"
+    assert task.error_code == "worker_timeout"
+    assert task.lease_token is None
+    assert task.result_reference is None
+    assert now[0] == 3
+
+
+def test_worker_child_process_is_terminated_at_deadline() -> None:
+    started = time.monotonic()
+
+    with pytest.raises(TimeoutError):
+        memory_queue._run_processor_child(
+            _sleep_processor,
+            {"payload": {"seconds": 5}},
+            0.2,
+        )
+
+    assert time.monotonic() - started < 2
+
+
+def test_idle_sleep_is_capped_by_worker_remaining_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue = MemoryQueue(tmp_path)
+    monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
+    now = [0.0]
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    memory_queue.run_worker(
+        lambda task: True,
+        max_seconds=0.25,
+        idle_seconds=2,
+        monotonic=lambda: now[0],
+        sleep=sleep,
+        processor_runner=memory_queue._run_processor_inline,
+    )
+
+    assert sleeps == [0.25]
 
 
 def test_cli_list_outputs_only_operator_fields(
@@ -160,3 +244,12 @@ def test_cli_work_uses_operational_defaults(
         "idle_seconds": 2,
     }
     assert set(json.loads(capsys.readouterr().out)) == {"counts"}
+
+
+def test_cli_rejects_removed_drain_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["memory_queue.py", "drain"])
+
+    with pytest.raises(SystemExit) as raised:
+        memory_queue._cli()
+
+    assert raised.value.code == 2
