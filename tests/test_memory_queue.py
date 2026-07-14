@@ -157,6 +157,46 @@ def test_source_fence_requires_canonical_daily_and_digest(queue: MemoryQueue) ->
         queue.acquire_source_fence("2026-01-01", "A" * 64)
 
 
+def test_source_finalization_rejects_expired_fence(queue: MemoryQueue) -> None:
+    daily_id = "2026-01-01"
+    digest = "9" * 64
+    fence = queue.acquire_source_fence(daily_id, digest)
+    with sqlite3.connect(queue.db_path) as connection:
+        connection.execute(
+            "UPDATE source_fences SET acquired_at=? WHERE token=?",
+            ("2000-01-01T00:00:00+00:00", fence.token),
+        )
+
+    with pytest.raises(QueueOperationError, match="source_fence_lost"):
+        with queue.source_finalization(fence):
+            pytest.fail("expired fence must not finalize")
+
+
+def test_source_finalization_rejects_task_injected_after_fence(
+    queue: MemoryQueue,
+) -> None:
+    daily_id = "2026-01-01"
+    digest = "8" * 64
+    fence = queue.acquire_source_fence(daily_id, digest)
+    payload = canonical_json_bytes(
+        {"daily_id": daily_id, "source_digest": digest}
+    ).decode()
+    now = "2026-07-14T12:00:00.000000+00:00"
+    with sqlite3.connect(queue.db_path) as connection:
+        connection.execute(
+            """INSERT INTO tasks(
+                   id, kind, handler_version, payload_json, input_hash, state,
+                   priority, created_at, updated_at, available_at
+               ) VALUES ('injected-finalization', 'compile', 1, ?, ?, 'ready',
+                         0, ?, ?, ?)""",
+            (payload, sha256_bytes(payload.encode()), now, now, now),
+        )
+
+    with pytest.raises(QueueOperationError, match="source_referenced"):
+        with queue.source_finalization(fence):
+            pytest.fail("referenced source must not finalize")
+
+
 def test_queue_failure_persists_and_success_clears_source_failure(
     queue: MemoryQueue,
 ) -> None:

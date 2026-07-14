@@ -6,6 +6,7 @@ import os
 import shutil
 import sqlite3
 import stat
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -808,6 +809,142 @@ def test_failure_created_after_publish_prevents_recovery_source_delete(
 
     assert daily.exists()
     assert bag.exists()
+
+
+def test_failure_winning_finalization_race_preserves_flat_source(
+    archive_vault, monkeypatch
+) -> None:
+    from memory_queue import MemoryQueue
+
+    root, state_root, daily = archive_vault
+    digest = sha256_bytes(daily.read_bytes())
+    archive_at_revalidate = threading.Event()
+    continue_archive = threading.Event()
+    failure_holds_lock = threading.Event()
+    continue_failure = threading.Event()
+    archive_done = threading.Event()
+    errors: list[BaseException] = []
+    original_record = MemoryQueue._record_source_failure_row
+
+    def pause_record(*args) -> None:
+        failure_holds_lock.set()
+        assert continue_failure.wait(5)
+        original_record(*args)
+
+    monkeypatch.setattr(
+        MemoryQueue, "_record_source_failure_row", staticmethod(pause_record)
+    )
+
+    def killpoint(point: str) -> None:
+        if point == "after_revalidate":
+            archive_at_revalidate.set()
+            assert continue_archive.wait(5)
+
+    def archive() -> None:
+        try:
+            _archiver(root, state_root, killpoint=killpoint).archive(daily.stem)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            archive_done.set()
+
+    archive_thread = threading.Thread(target=archive)
+    archive_thread.start()
+    assert archive_at_revalidate.wait(10)
+
+    failure_thread = threading.Thread(
+        target=lambda: MemoryQueue(state_root).record_source_failure(
+            f"knowledge/daily/{daily.name}",
+            digest,
+            error_code="race_failure_wins",
+            producer="compile",
+        )
+    )
+    failure_thread.start()
+    assert failure_holds_lock.wait(5)
+    continue_archive.set()
+    archive_completed_while_failure_locked = archive_done.wait(0.25)
+    continue_failure.set()
+    archive_thread.join(10)
+    failure_thread.join(10)
+
+    assert not archive_thread.is_alive() and not failure_thread.is_alive()
+    assert not archive_completed_while_failure_locked
+    assert len(errors) == 1 and "source_failure" in str(errors[0])
+    assert daily.exists()
+
+
+def test_archive_winning_finalization_race_deletes_before_failure_records(
+    archive_vault, monkeypatch
+) -> None:
+    from memory_queue import MemoryQueue
+
+    root, state_root, daily = archive_vault
+    digest = sha256_bytes(daily.read_bytes())
+    archiver = _archiver(root, state_root)
+    deletion_started = threading.Event()
+    continue_deletion = threading.Event()
+    failure_started = threading.Event()
+    failure_connected = threading.Event()
+    failure_done = threading.Event()
+    errors: list[BaseException] = []
+    original_apply = archiver.coordinator.apply
+    original_connect = MemoryQueue._connect
+
+    def pause_delete(transaction_id: str):
+        record = archiver.coordinator._record(transaction_id)
+        if record is not None and record.operation_id.startswith("archive-remove:"):
+            deletion_started.set()
+            assert continue_deletion.wait(5)
+        return original_apply(transaction_id)
+
+    monkeypatch.setattr(archiver.coordinator, "apply", pause_delete)
+
+    def observe_failure_connection(queue: MemoryQueue):
+        connection = original_connect(queue)
+        if threading.current_thread().name == "archive-failure-writer":
+            failure_connected.set()
+        return connection
+
+    monkeypatch.setattr(MemoryQueue, "_connect", observe_failure_connection)
+
+    def archive() -> None:
+        try:
+            archiver.archive(daily.stem)
+        except BaseException as exc:
+            errors.append(exc)
+
+    def record_failure() -> None:
+        failure_started.set()
+        MemoryQueue(state_root).record_source_failure(
+            f"knowledge/daily/{daily.name}",
+            digest,
+            error_code="archive_won_race",
+            producer="compile",
+        )
+        failure_done.set()
+
+    archive_thread = threading.Thread(target=archive)
+    archive_thread.start()
+    assert deletion_started.wait(10)
+    failure_thread = threading.Thread(
+        target=record_failure, name="archive-failure-writer"
+    )
+    failure_thread.start()
+    assert failure_started.wait(5)
+    assert failure_connected.wait(5)
+    failure_completed_while_delete_paused = failure_done.wait(0.25)
+    continue_deletion.set()
+    archive_thread.join(10)
+    failure_thread.join(10)
+
+    assert not archive_thread.is_alive() and not failure_thread.is_alive()
+    assert not failure_completed_while_delete_paused
+    assert errors == []
+    assert not daily.exists()
+    assert MemoryQueue(state_root).source_failure(
+        f"knowledge/daily/{daily.name}", digest
+    ) is not None
 
 
 def test_mismatched_existing_bag_raises_stable_conflict_and_preserves_both_payloads(

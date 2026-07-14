@@ -38,7 +38,7 @@ from markdown_transaction import (  # noqa: E402
     _run_acl_command,
     _windows_acl_identity,
 )
-from memory_queue import MemoryQueue, QueueOperationError  # noqa: E402
+from memory_queue import MemoryQueue, QueueOperationError, SourceFence  # noqa: E402
 from memory_state import ROOT, STATE_ROOT  # noqa: E402
 from reliable_memory import (  # noqa: E402
     _set_owner_only,
@@ -119,6 +119,7 @@ class DailyArchiver:
         hot_days: int,
         transaction_retention_days: int,
         ignore_current_writer: bool,
+        skip_queue_database_checks: bool = False,
     ) -> Eligibility:
         if (
             not isinstance(hot_days, int)
@@ -173,7 +174,9 @@ class DailyArchiver:
         except (OSError, ValueError, EvidenceResolutionError):
             reasons.append("unresolved_evidence")
 
-        blocking_tasks = self._queue_references(source.stem, digest)
+        blocking_tasks = (
+            () if skip_queue_database_checks else self._queue_references(source.stem, digest)
+        )
         if blocking_tasks:
             reasons.append("queue_reference")
         if self._legacy_queue_references(source.stem, digest):
@@ -187,7 +190,10 @@ class DailyArchiver:
         ):
             reasons.append("transaction_retention")
         logical_path = f"knowledge/daily/{source.name}"
-        if MemoryQueue(self.state_root).source_failure(logical_path, digest) is not None:
+        if (
+            not skip_queue_database_checks
+            and MemoryQueue(self.state_root).source_failure(logical_path, digest) is not None
+        ):
             reasons.append("source_failure")
         if not ignore_current_writer and self._writer_active():
             reasons.append("active_writer")
@@ -327,7 +333,12 @@ class DailyArchiver:
                     if validated.manifest["source_hash"] != eligibility.source_sha256:
                         raise RuntimeError("published archive failed source revalidation")
                     self.killpoint("after_revalidate")
-                    self._remove_flat(daily_id, eligibility.source_sha256)
+                    self._remove_flat_under_finalization(
+                        queue,
+                        fence,
+                        hot_days=hot_days,
+                        transaction_retention_days=transaction_retention_days,
+                    )
                     self.killpoint("after_source_delete")
                 except BaseException:
                     if not published:
@@ -690,22 +701,45 @@ class DailyArchiver:
         queue = MemoryQueue(self.state_root)
         fence = queue.acquire_source_fence(daily_id, digest)
         try:
-            source = self.daily_root / f"{daily_id}.md"
-            eligibility = self._eligible(
-                source,
+            self._remove_flat_under_finalization(
+                queue,
+                fence,
                 hot_days=hot_days,
                 transaction_retention_days=transaction_retention_days,
-                ignore_current_writer=True,
             )
-            if eligibility.source_sha256 != digest:
-                raise RuntimeError("daily source changed before recovery removal")
-            if not eligibility.eligible:
-                raise ValueError(
-                    "daily is not archive eligible: " + ", ".join(eligibility.reasons)
-                )
-            self._remove_flat(daily_id, digest)
         finally:
             queue.release_source_fence(fence.token)
+
+    def _remove_flat_under_finalization(
+        self,
+        queue: MemoryQueue,
+        fence: SourceFence,
+        *,
+        hot_days: int,
+        transaction_retention_days: int,
+    ) -> None:
+        try:
+            with queue.source_finalization(fence):
+                source = self.daily_root / f"{fence.daily_id}.md"
+                eligibility = self._eligible(
+                    source,
+                    hot_days=hot_days,
+                    transaction_retention_days=transaction_retention_days,
+                    ignore_current_writer=True,
+                    skip_queue_database_checks=True,
+                )
+                if eligibility.source_sha256 != fence.source_digest:
+                    raise RuntimeError("daily source changed before recovery removal")
+                if not eligibility.eligible:
+                    raise ValueError(
+                        "daily is not archive eligible: "
+                        + ", ".join(eligibility.reasons)
+                    )
+                self._remove_flat(fence.daily_id, fence.source_digest)
+        except QueueOperationError as exc:
+            if exc.code in {"source_failure", "source_referenced"}:
+                raise ValueError(f"daily is not archive eligible: {exc.code}") from exc
+            raise
 
     def recover(
         self,

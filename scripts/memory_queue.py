@@ -20,6 +20,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -195,6 +196,7 @@ class SourceFence:
     token: str
     owner_pid: int
     acquired_at: datetime
+    expires_at: datetime
 
 
 @dataclass(frozen=True)
@@ -1376,9 +1378,17 @@ class MemoryQueue:
         return daily_id in payload_json or source_digest in payload_json
 
     def _delete_stale_source_fences(self, connection: sqlite3.Connection) -> None:
-        rows = connection.execute("SELECT token, owner_pid FROM source_fences").fetchall()
+        now = _as_utc(self._clock())
+        rows = connection.execute(
+            "SELECT token, owner_pid, acquired_at FROM source_fences"
+        ).fetchall()
         for row in rows:
-            if not _pid_is_alive(int(row["owner_pid"])):
+            acquired_at = _parse_timestamp(str(row["acquired_at"]))
+            expired = (
+                acquired_at is None
+                or acquired_at + timedelta(seconds=DEFAULTS.queue_lease_seconds) <= now
+            )
+            if expired or not _pid_is_alive(int(row["owner_pid"])):
                 connection.execute(
                     "DELETE FROM source_fences WHERE token=?", (row["token"],)
                 )
@@ -1423,6 +1433,7 @@ class MemoryQueue:
         self._validate_source_identity(daily_id, source_digest)
         token = f"{self._rng.getrandbits(256):064x}"
         acquired = _as_utc(self._clock())
+        expires = acquired + timedelta(seconds=DEFAULTS.queue_lease_seconds)
         with self._connect() as connection, begin_immediate(connection):
             self._delete_stale_source_fences(connection)
             for row in connection.execute(
@@ -1442,7 +1453,49 @@ class MemoryQueue:
                 )
             except sqlite3.IntegrityError as exc:
                 raise QueueOperationError("source_fenced") from exc
-        return SourceFence(daily_id, source_digest, token, os.getpid(), acquired)
+        return SourceFence(
+            daily_id, source_digest, token, os.getpid(), acquired, expires
+        )
+
+    @contextmanager
+    def source_finalization(self, fence: SourceFence):
+        if not isinstance(fence, SourceFence):
+            raise TypeError("source finalization requires a SourceFence")
+        with self._connect() as connection, begin_immediate(connection):
+            self._delete_stale_source_fences(connection)
+            row = connection.execute(
+                "SELECT daily_id, source_digest, token, owner_pid, acquired_at "
+                "FROM source_fences WHERE token=?",
+                (fence.token,),
+            ).fetchone()
+            now = _as_utc(self._clock())
+            if (
+                row is None
+                or str(row["daily_id"]) != fence.daily_id
+                or str(row["source_digest"]) != fence.source_digest
+                or str(row["token"]) != fence.token
+                or int(row["owner_pid"]) != os.getpid()
+                or fence.owner_pid != os.getpid()
+                or str(row["acquired_at"]) != _timestamp(fence.acquired_at)
+                or now >= fence.expires_at
+            ):
+                raise QueueOperationError("source_fence_lost")
+            logical_path = f"knowledge/daily/{fence.daily_id}.md"
+            if connection.execute(
+                "SELECT 1 FROM source_failures "
+                "WHERE logical_path=? AND source_digest=?",
+                (logical_path, fence.source_digest),
+            ).fetchone() is not None:
+                raise QueueOperationError("source_failure")
+            for task in connection.execute(
+                "SELECT payload_json FROM tasks "
+                "WHERE state IN ('ready','leased','blocked','dead')"
+            ):
+                if self._payload_references_source(
+                    str(task["payload_json"]), fence.daily_id, fence.source_digest
+                ):
+                    raise QueueOperationError("source_referenced")
+            yield
 
     def release_source_fence(self, token: str) -> None:
         if not isinstance(token, str) or re.fullmatch(r"[0-9a-f]{64}", token) is None:
