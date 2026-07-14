@@ -237,9 +237,6 @@ def test_worker_timeout_kills_spawned_grandchild_tree(tmp_path: Path) -> None:
         )
     assert pid_path.exists()
     pid = int(pid_path.read_text(encoding="ascii"))
-    deadline = time.monotonic() + 5
-    while memory_queue._pid_is_alive(pid) and time.monotonic() < deadline:
-        time.sleep(0.05)
     try:
         assert not memory_queue._pid_is_alive(pid)
     finally:
@@ -517,6 +514,7 @@ def test_windows_tree_cleanup_failure_falls_back_and_reports_unverified_descenda
         "run",
         lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 1),
     )
+    monkeypatch.setattr(memory_queue, "_tracked_descendant_pids", lambda *args: None)
 
     with pytest.raises(memory_queue.QueueOperationError) as raised:
         memory_queue._terminate_processor_child(process, platform_name="nt")
@@ -535,6 +533,7 @@ def test_windows_tree_cleanup_verifies_direct_child_liveness(
         "run",
         lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0),
     )
+    monkeypatch.setattr(memory_queue, "_tracked_descendant_pids", lambda *args: set())
 
     with pytest.raises(memory_queue.QueueOperationError) as raised:
         memory_queue._terminate_processor_child(process, platform_name="nt")
@@ -553,6 +552,7 @@ def test_posix_group_race_uses_direct_fallback_and_reports_unverified_descendant
         "_kill_process_group",
         lambda *args: (_ for _ in ()).throw(ProcessLookupError()),
     )
+    monkeypatch.setattr(memory_queue, "_tracked_descendant_pids", lambda *args: set())
 
     with pytest.raises(memory_queue.QueueOperationError) as raised:
         memory_queue._terminate_processor_child(process, platform_name="posix")
@@ -573,10 +573,143 @@ def test_posix_group_cleanup_waits_and_verifies_process_exit(
             process.alive = False
 
     monkeypatch.setattr(memory_queue, "_kill_process_group", kill_group)
+    monkeypatch.setattr(memory_queue, "_tracked_descendant_pids", lambda *args: set())
+    monkeypatch.setattr(memory_queue, "_process_group_alive", lambda pid: False)
 
     memory_queue._terminate_processor_child(process, platform_name="posix")
 
     assert not process.is_alive()
+
+
+def test_cleanup_fails_when_tracked_descendant_remains_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = _FakeProcess()
+    descendant = 7777
+    monkeypatch.setattr(
+        memory_queue.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0),
+    )
+    monkeypatch.setattr(
+        memory_queue, "_tracked_descendant_pids", lambda *args: {descendant}
+    )
+    monkeypatch.setattr(
+        memory_queue, "_pid_is_alive", lambda pid: pid == descendant
+    )
+
+    with pytest.raises(memory_queue.QueueOperationError) as raised:
+        memory_queue._terminate_processor_child(
+            process, platform_name="nt", cleanup_timeout=0.01
+        )
+
+    assert raised.value.code == "process_cleanup_failed"
+
+
+def test_cleanup_waits_until_tracked_descendant_is_confirmed_dead(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = _FakeProcess()
+    descendant = 8888
+    checks = iter((True, True, False))
+    monkeypatch.setattr(
+        memory_queue.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0),
+    )
+    monkeypatch.setattr(
+        memory_queue, "_tracked_descendant_pids", lambda *args: {descendant}
+    )
+    monkeypatch.setattr(
+        memory_queue,
+        "_pid_is_alive",
+        lambda pid: next(checks) if pid == descendant else False,
+    )
+
+    memory_queue._terminate_processor_child(
+        process, platform_name="nt", cleanup_timeout=1
+    )
+
+    assert not process.is_alive()
+
+
+def test_cleanup_fails_closed_when_windows_child_exits_before_tracking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = _FakeProcess()
+    process.alive = False
+    monkeypatch.setattr(memory_queue, "_tracked_descendant_pids", lambda *args: set())
+
+    with pytest.raises(memory_queue.QueueOperationError) as raised:
+        memory_queue._terminate_processor_child(process, platform_name="nt")
+
+    assert raised.value.code == "process_cleanup_failed"
+
+
+def test_cleanup_failure_blocks_task_and_stops_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue = MemoryQueue(tmp_path)
+    first = queue.enqueue("query", 1, {"n": 1})
+    second = queue.enqueue("query", 1, {"n": 2})
+    monkeypatch.setattr(memory_queue, "_queue", lambda **kwargs: queue)
+
+    def cleanup_failure(processor, task, timeout):
+        del processor, task, timeout
+        raise memory_queue.QueueOperationError("process_cleanup_failed")
+
+    summary = memory_queue.run_worker(
+        lambda task: True,
+        max_tasks=2,
+        idle_seconds=0,
+        processor_runner=cleanup_failure,
+    )
+
+    blocked = queue.get(first)
+    untouched = queue.get(second)
+    assert summary.failed == 1
+    assert blocked.state == "blocked"
+    assert blocked.error_code == "process_cleanup_failed"
+    assert blocked.blocked_capability == "process_cleanup"
+    assert untouched.state == "ready"
+
+
+def test_cleanup_failure_is_blocked_even_when_heartbeat_reports_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    queue = MemoryQueue(tmp_path)
+    task_id = queue.enqueue("query", 1, {})
+    monkeypatch.setattr(memory_queue, "_queue", lambda **kwargs: queue)
+
+    class FailedHeartbeat:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+            self.error = RuntimeError("heartbeat failed")
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(memory_queue, "_LeaseHeartbeat", FailedHeartbeat)
+
+    def cleanup_failure(processor, task, timeout):
+        del processor, task, timeout
+        raise memory_queue.QueueOperationError("process_cleanup_failed")
+
+    summary = memory_queue.run_worker(
+        lambda task: True,
+        max_tasks=2,
+        idle_seconds=0,
+        processor_runner=cleanup_failure,
+    )
+
+    task = queue.get(task_id)
+    assert summary.failed == 1
+    assert task.state == "blocked"
+    assert task.error_code == "process_cleanup_failed"
+    assert task.blocked_capability == "process_cleanup"
 
 
 @pytest.mark.parametrize(

@@ -2292,12 +2292,127 @@ def _kill_process_group(pid: int, sig: int) -> None:
     os.killpg(pid, sig)
 
 
+def _process_snapshot_posix() -> list[tuple[int, int, int, str]] | None:
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return None
+    rows: list[tuple[int, int, int, str]] = []
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / "stat").read_text(encoding="ascii")
+            fields = raw[raw.rfind(")") + 2 :].split()
+            rows.append((int(entry.name), int(fields[1]), int(fields[2]), fields[0]))
+        except (OSError, ValueError, IndexError):
+            continue
+    return rows
+
+
+def _tracked_descendant_pids(root_pid: int, platform_name: str) -> set[int] | None:
+    if platform_name == "nt":
+        try:
+            result = subprocess.run(
+                ["wmic", "process", "get", "ParentProcessId,ProcessId", "/format:csv"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if result.returncode != 0:
+                raise OSError
+            pairs = []
+            for line in result.stdout.splitlines():
+                fields = [field.strip() for field in line.split(",")]
+                if len(fields) >= 3 and fields[-1].isdigit() and fields[-2].isdigit():
+                    pairs.append((int(fields[-1]), int(fields[-2])))
+        except (OSError, ValueError, subprocess.SubprocessError):
+            command = (
+                "Get-CimInstance Win32_Process | "
+                "Select-Object ProcessId,ParentProcessId | ConvertTo-Json -Compress"
+            )
+            try:
+                result = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", command],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if result.returncode != 0:
+                    return None
+                decoded = json.loads(result.stdout or "[]")
+                items = decoded if isinstance(decoded, list) else [decoded]
+                pairs = [
+                    (int(item["ProcessId"]), int(item["ParentProcessId"]))
+                    for item in items
+                    if isinstance(item, dict)
+                ]
+            except (
+                OSError,
+                ValueError,
+                KeyError,
+                json.JSONDecodeError,
+                subprocess.SubprocessError,
+            ):
+                return None
+    else:
+        snapshot = _process_snapshot_posix()
+        if snapshot is None:
+            return set()
+        pairs = [(pid, ppid) for pid, ppid, _pgrp, _state in snapshot]
+    descendants: set[int] = set()
+    frontier = {root_pid}
+    while frontier:
+        children = {pid for pid, ppid in pairs if ppid in frontier and pid not in descendants}
+        descendants.update(children)
+        frontier = children
+    return descendants
+
+
+def _process_group_alive(group_id: int) -> bool:
+    snapshot = _process_snapshot_posix()
+    if snapshot is not None:
+        return any(pgrp == group_id and state != "Z" for _pid, _ppid, pgrp, state in snapshot)
+    try:
+        _kill_process_group(group_id, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _cleanup_confirmed(
+    process: multiprocessing.Process,
+    descendants: set[int],
+    *,
+    platform_name: str,
+) -> bool:
+    snapshot = _process_snapshot_posix() if platform_name != "nt" else None
+    if snapshot is None:
+        descendant_alive = any(_pid_is_alive(pid) for pid in descendants)
+    else:
+        states = {pid: state for pid, _ppid, _pgrp, state in snapshot}
+        descendant_alive = any(
+            pid in states and states[pid] != "Z" for pid in descendants
+        )
+    if process.is_alive() or descendant_alive:
+        return False
+    return platform_name == "nt" or not _process_group_alive(process.pid)
+
+
 def _terminate_processor_child(
-    process: multiprocessing.Process, *, platform_name: str | None = None
+    process: multiprocessing.Process,
+    *,
+    platform_name: str | None = None,
+    cleanup_timeout: float = 1.0,
 ) -> None:
-    if not process.is_alive():
-        return
     platform_name = platform_name or os.name
+    direct_was_alive = process.is_alive()
+    if not direct_was_alive and platform_name == "nt":
+        raise QueueOperationError("process_cleanup_failed")
+    descendants = _tracked_descendant_pids(process.pid, platform_name)
     tree_verified = False
     if platform_name == "nt":
         try:
@@ -2338,7 +2453,16 @@ def _terminate_processor_child(
         except (OSError, ValueError):
             pass
         process.join(0.2)
-    if process.is_alive() or not tree_verified:
+    deadline = time.monotonic() + max(0.0, cleanup_timeout)
+    cleanup_verified = descendants is not None and _cleanup_confirmed(
+        process, descendants, platform_name=platform_name
+    )
+    while not cleanup_verified and descendants is not None and time.monotonic() < deadline:
+        time.sleep(0.02)
+        cleanup_verified = _cleanup_confirmed(
+            process, descendants, platform_name=platform_name
+        )
+    if not cleanup_verified or (platform_name != "nt" and not tree_verified):
         raise QueueOperationError("process_cleanup_failed")
 
 
@@ -2391,7 +2515,8 @@ def _run_processor_child(
                 _terminate_processor_child(process)
             raise QueueOperationError("processor_result_oversize") from None
         except EOFError:
-            _terminate_processor_child(process)
+            if process.is_alive():
+                _terminate_processor_child(process)
             raise QueueOperationError("processor_result_malformed") from None
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -2406,7 +2531,8 @@ def _run_processor_child(
         return _decode_processor_frame(frame)
     finally:
         receiver.close()
-        _terminate_processor_child(process)
+        if process.is_alive():
+            _terminate_processor_child(process)
 
 
 def _work_one(
@@ -2426,7 +2552,7 @@ def _work_one(
     retry_base_seconds: int,
     retry_cap_seconds: int,
 ) -> dict[str, int]:
-    counts = {"ok": 0, "failed": 0, "dead": 0, "skipped": 0}
+    counts = {"ok": 0, "failed": 0, "dead": 0, "skipped": 0, "halted": 0}
     lease = queue.claim(
         owner, lease_seconds=lease_seconds, max_attempts=max_attempts
     )
@@ -2447,6 +2573,7 @@ def _work_one(
     )
     heartbeat.start()
     timed_out = False
+    cleanup_failed = False
     outcome: bool | DeferredResult = False
     try:
         remaining = deadline - monotonic()
@@ -2457,17 +2584,35 @@ def _work_one(
                 outcome = processor_runner(processor, _compat_task(lease), remaining)
             except TimeoutError:
                 timed_out = True
+            except QueueOperationError as exc:
+                if exc.code == "process_cleanup_failed":
+                    cleanup_failed = True
+                else:
+                    outcome = False
             except Exception:  # noqa: BLE001 - queue exposes stable codes only
                 outcome = False
         if monotonic() >= deadline:
             timed_out = True
     finally:
         heartbeat.stop()
-    if heartbeat.error is not None:
+    if heartbeat.error is not None and not cleanup_failed:
         counts["failed"] += 1
         return counts
     try:
-        if timed_out:
+        if cleanup_failed:
+            counts["halted"] = 1
+            queue.fail(
+                lease,
+                QueueFailure(
+                    "process_cleanup_failed",
+                    blocked_capability="process_cleanup",
+                ),
+                max_attempts=max_attempts,
+                retry_base_seconds=retry_base_seconds,
+                retry_cap_seconds=retry_cap_seconds,
+            )
+            _count_terminal(counts, queue.get(lease.id))
+        elif timed_out:
             queue.fail(
                 lease,
                 QueueFailure("worker_timeout"),
@@ -2561,6 +2706,8 @@ def run_worker(
         if handled:
             processed += handled
             idle_started = None
+            if counts.get("halted"):
+                break
             continue
         if idle_seconds == 0:
             break
