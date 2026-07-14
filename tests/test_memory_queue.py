@@ -8,6 +8,7 @@ import os
 import random
 import sqlite3
 import stat
+import subprocess
 import sys
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
@@ -1137,3 +1138,82 @@ def test_manual_query_result_is_published_by_queue_fence(
     task = queue.get(task_id)
     assert task.state == "succeeded"
     assert (queue.state_root / task.result_reference).read_bytes() == b"answer"
+
+
+def test_deferred_compile_runs_synchronously_and_uses_exit_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import maybe_compile
+    import memory_queue
+
+    script = tmp_path / "scripts" / "compile_memory.py"
+    script.parent.mkdir()
+    script.write_text("raise SystemExit(0)\n", encoding="ascii")
+    calls: list[tuple[list[str], Path]] = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs["cwd"]))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+    monkeypatch.setattr(memory_queue.subprocess, "run", run)
+    monkeypatch.setattr(
+        maybe_compile,
+        "spawn_compile_if_idle",
+        lambda **kwargs: pytest.fail("queue compile must not detach"),
+    )
+
+    assert memory_queue._manual_processor(
+        {"id": "compile-id", "type": "compile", "payload": {}}
+    ) is True
+    assert calls == [
+        ([sys.executable, str(script), "--trigger", "auto"], tmp_path.resolve())
+    ]
+
+
+def test_deferred_compile_failure_retries_then_dies(
+    tmp_path: Path, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import memory_queue
+
+    queue = MemoryQueue(tmp_path, clock=clock, rng=random.Random(1))
+    task_id = queue.enqueue("compile", 1, {})
+    calls: list[list[str]] = []
+
+    def failed_run(command, **kwargs):
+        del kwargs
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 1)
+
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+    monkeypatch.setattr(memory_queue, "_queue", lambda **kwargs: queue)
+    monkeypatch.setattr(memory_queue.subprocess, "run", failed_run)
+
+    first = memory_queue.run_worker(
+        memory_queue._manual_processor,
+        max_tasks=1,
+        idle_seconds=0,
+        max_attempts=2,
+        retry_base_seconds=1,
+        retry_cap_seconds=1,
+        processor_runner=memory_queue._run_processor_inline,
+    )
+    retry = queue.get(task_id)
+    assert first.failed == 1
+    assert retry.state == "ready"
+    clock.advance((retry.available_at - clock()).total_seconds())
+
+    second = memory_queue.run_worker(
+        memory_queue._manual_processor,
+        max_tasks=1,
+        idle_seconds=0,
+        max_attempts=2,
+        retry_base_seconds=1,
+        retry_cap_seconds=1,
+        processor_runner=memory_queue._run_processor_inline,
+    )
+    dead = queue.get(task_id)
+    assert second.failed == 1
+    assert dead.state == "dead"
+    assert dead.error_code == "processor_failed"
+    assert len(calls) == 2

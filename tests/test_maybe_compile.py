@@ -35,8 +35,7 @@ def fake_env(tmp_path, monkeypatch):
 
     # Force re-import so module-level path reads pick up the env.
     for mod in ("maybe_compile", "memory_state"):
-        if mod in sys.modules:
-            del sys.modules[mod]
+        monkeypatch.delitem(sys.modules, mod, raising=False)
     import maybe_compile
 
     monkeypatch.setattr(maybe_compile, "ROOT", fake_root)

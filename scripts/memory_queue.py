@@ -2888,10 +2888,22 @@ def _manual_processor(task: dict[str, Any]) -> bool | DeferredResult:
             locked_append_once(daily_path, block, str(task["id"]))
         return True
     if task_type == "compile":
-        from maybe_compile import spawn_compile_if_idle
-
-        spawned, reason = spawn_compile_if_idle(force=bool(payload.get("force")))
-        return spawned or "no pending" in reason
+        root = Path(os.environ.get("LLM_WIKI_ROOT", ".")).resolve()
+        command = [
+            sys.executable,
+            str(root / "scripts" / "compile_memory.py"),
+            "--trigger",
+            "auto",
+        ]
+        completed = subprocess.run(
+            command,
+            cwd=root,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return completed.returncode == 0
     return False
 
 

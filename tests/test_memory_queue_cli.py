@@ -346,6 +346,76 @@ def test_worker_cleans_grandchild_before_reporting_processor_crash(
             _kill_test_process(int(pid_path.read_text(encoding="ascii")))
 
 
+def test_deferred_compile_completes_before_queue_ack(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = tmp_path / "scripts" / "compile_memory.py"
+    pid_path = tmp_path / "compiler.pid"
+    done_path = tmp_path / "compiler.done"
+    script.parent.mkdir()
+    script.write_text(
+        "import os, time\n"
+        "from pathlib import Path\n"
+        "Path(os.environ['TEST_COMPILE_PID']).write_text(str(os.getpid()), encoding='ascii')\n"
+        "time.sleep(0.2)\n"
+        "Path(os.environ['TEST_COMPILE_DONE']).write_text('done', encoding='ascii')\n",
+        encoding="ascii",
+    )
+    queue = MemoryQueue(tmp_path)
+    task_id = queue.enqueue("compile", 1, {})
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+    monkeypatch.setenv("TEST_COMPILE_PID", str(pid_path))
+    monkeypatch.setenv("TEST_COMPILE_DONE", str(done_path))
+    monkeypatch.setattr(memory_queue, "_queue", lambda **kwargs: queue)
+
+    summary = memory_queue.run_worker(
+        memory_queue._manual_processor,
+        max_tasks=1,
+        max_seconds=10,
+        idle_seconds=0,
+    )
+
+    compiler_pid = int(pid_path.read_text(encoding="ascii"))
+    assert summary.succeeded == 1
+    assert queue.get(task_id).state == "succeeded"
+    assert done_path.read_text(encoding="ascii") == "done"
+    assert not memory_queue._pid_is_alive(compiler_pid)
+
+
+def test_deferred_compile_timeout_kills_compiler_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = tmp_path / "scripts" / "compile_memory.py"
+    pid_path = tmp_path / "timed-out-compiler.pid"
+    script.parent.mkdir()
+    script.write_text(
+        "import os, time\n"
+        "from pathlib import Path\n"
+        "Path(os.environ['TEST_COMPILE_PID']).write_text(str(os.getpid()), encoding='ascii')\n"
+        "time.sleep(30)\n",
+        encoding="ascii",
+    )
+    queue = MemoryQueue(tmp_path)
+    task_id = queue.enqueue("compile", 1, {})
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+    monkeypatch.setenv("TEST_COMPILE_PID", str(pid_path))
+    monkeypatch.setattr(memory_queue, "_queue", lambda **kwargs: queue)
+
+    summary = memory_queue.run_worker(
+        memory_queue._manual_processor,
+        max_tasks=1,
+        max_seconds=1,
+        idle_seconds=0,
+    )
+
+    compiler_pid = int(pid_path.read_text(encoding="ascii"))
+    task = queue.get(task_id)
+    assert summary.failed == 1
+    assert task.state == "ready"
+    assert task.error_code == "worker_timeout"
+    assert not memory_queue._pid_is_alive(compiler_pid)
+
+
 def test_worker_child_drains_one_megabyte_result_before_join() -> None:
     result = memory_queue._run_processor_child(
         _result_processor,
