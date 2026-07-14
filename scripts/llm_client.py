@@ -68,10 +68,15 @@ class ProviderDescriptor:
     candidate_index: int
     fallback_from: tuple[str, ...]
     _endpoint: str | None = field(default=None, repr=False, compare=False)
+    _resolution_failure: str | None = field(default=None, repr=False, compare=False)
 
     @property
     def identity(self) -> str:
         return f"{self.provider}:{self.model or '<implicit>'}"
+
+    @property
+    def resolution_failure(self) -> str | None:
+        return self._resolution_failure
 
     def canonical(self) -> dict[str, object]:
         """Return the descriptor in the restricted JSON value domain."""
@@ -108,7 +113,23 @@ def provider_candidates(
     candidates = _candidate_order(forced.lower().strip())
     descriptors = []
     for index, provider in enumerate(candidates):
-        model, capabilities, settings, endpoint = _provider_configuration(provider, max_tokens)
+        try:
+            model, capabilities, settings, endpoint = _provider_configuration(
+                provider, max_tokens
+            )
+        except ValueError:
+            descriptors.append(
+                ProviderDescriptor(
+                    provider=provider,
+                    model=None,
+                    capabilities=MappingProxyType({}),
+                    inference_settings=MappingProxyType({}),
+                    candidate_index=index,
+                    fallback_from=(),
+                    _resolution_failure="invalid_configuration",
+                )
+            )
+            continue
         descriptors.append(
             ProviderDescriptor(
                 provider=provider,
@@ -125,6 +146,8 @@ def provider_candidates(
 
 def probe_candidate(descriptor: ProviderDescriptor) -> bool:
     """Check one candidate without invoking its model backend."""
+    if descriptor.resolution_failure is not None:
+        return False
     probe = _PROBES.get(descriptor.provider)
     if probe is None:
         return False
@@ -144,6 +167,14 @@ def call_candidate(
     available: bool | None = None,
 ) -> LLMResult:
     """Probe and call one resolved candidate, returning a stable outcome."""
+    if descriptor.resolution_failure is not None:
+        return LLMResult(
+            descriptor,
+            None,
+            False,
+            descriptor.resolution_failure,
+            "prompt",
+        )
     effective_max_tokens = descriptor.inference_settings.get("max_tokens")
     max_tokens_enforced = descriptor.capabilities.get("max_tokens_enforced")
     if max_tokens_enforced is True:

@@ -198,8 +198,64 @@ def test_http_endpoint_identity_is_normalized_hashed_and_secret_safe(monkeypatch
 def test_http_endpoint_rejects_ambiguous_or_secret_bearing_url(endpoint, monkeypatch):
     monkeypatch.setenv("MEMORY_LLM_BASE_URL", endpoint)
 
-    with pytest.raises(ValueError, match="must not contain"):
-        llm_client.provider_candidates("openai", max_tokens=321)
+    candidate = llm_client.provider_candidates("openai", max_tokens=321)[0]
+
+    assert candidate.resolution_failure == "invalid_configuration"
+    result = llm_client.call_candidate(candidate, "prompt", "system", max_tokens=321)
+    assert result.failure_class == "invalid_configuration"
+    assert result.available is False
+
+
+def test_healthy_opencode_is_not_blocked_by_invalid_lower_http_candidates(monkeypatch):
+    secret = "do-not-log-this-secret"
+    monkeypatch.delenv("MEMORY_LLM_PROVIDER", raising=False)
+    monkeypatch.setenv("MEMORY_LLM_BASE_URL", f"https://example.com/v1?token={secret}")
+    monkeypatch.setitem(llm_client._PROBES, "opencode", lambda descriptor: True)
+    monkeypatch.setitem(llm_client._BACKENDS, "opencode", lambda *args: "answer")
+
+    assert llm_client.call_llm("prompt") == "answer"
+
+
+@pytest.mark.parametrize("provider", ["openai", "ollama"])
+def test_forced_invalid_http_provider_returns_none_without_secret_log(
+    provider, monkeypatch, capsys
+):
+    secret = "do-not-log-this-secret"
+    monkeypatch.setenv("MEMORY_LLM_PROVIDER", provider)
+    monkeypatch.setenv("MEMORY_LLM_BASE_URL", f"https://example.com/v1?token={secret}")
+
+    assert llm_client.call_llm("prompt") is None
+    assert secret not in capsys.readouterr().err
+
+
+def test_invalid_candidate_failure_is_added_to_later_fallback_lineage(monkeypatch):
+    original = llm_client._provider_configuration
+    seen = []
+
+    def configuration(provider, max_tokens):
+        if provider == "codex":
+            raise ValueError("invalid codex configuration")
+        return original(provider, max_tokens)
+
+    def call(descriptor, *args, **kwargs):
+        seen.append(descriptor)
+        if descriptor.resolution_failure:
+            return llm_client.LLMResult(
+                descriptor, None, False, descriptor.resolution_failure, "prompt"
+            )
+        if descriptor.provider == "opencode":
+            return llm_client.LLMResult(descriptor, None, False, "unavailable", "prompt")
+        return llm_client.LLMResult(descriptor, "answer", True, None, "prompt")
+
+    monkeypatch.delenv("MEMORY_LLM_PROVIDER", raising=False)
+    monkeypatch.setattr(llm_client, "_provider_configuration", configuration)
+    monkeypatch.setattr(llm_client, "call_candidate", call)
+
+    assert llm_client.call_llm("prompt") == "answer"
+    assert seen[2].fallback_from == (
+        f"{seen[0].identity}:unavailable",
+        f"{seen[1].identity}:invalid_configuration",
+    )
 
 
 @pytest.mark.parametrize("provider", ["codex", "claude"])

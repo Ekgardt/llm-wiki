@@ -216,8 +216,8 @@ def test_rejected_endpoint_credentials_never_create_cache_files(tmp_path, monkey
     raw = "https://user:password@private.example/v1?api_key=secret#fragment"
     monkeypatch.setenv("MEMORY_LLM_BASE_URL", raw)
 
-    with pytest.raises(ValueError, match="must not contain"):
-        llm_client.provider_candidates("openai", max_tokens=321)
+    candidate = llm_client.provider_candidates("openai", max_tokens=321)[0]
+    assert candidate.resolution_failure == "invalid_configuration"
     assert not (tmp_path / "cache" / "compile").exists()
 
 
