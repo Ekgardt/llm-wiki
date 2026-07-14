@@ -263,6 +263,69 @@ def test_claim_index_rebuilds_derived_delete_full_database_and_bounds_candidates
     assert index.candidates(normalized) == []
 
 
+def test_claim_index_excludes_unresolved_active_evidence_with_stable_diagnostic(
+    pipeline, tmp_path: Path
+) -> None:
+    from claims import ClaimIndex
+    from contradiction_pipeline import ContradictionPipeline
+
+    normalized = pipeline.normalize(
+        pipeline.verify_literal(
+            pipeline.extract(pipeline.split_blocks(source_bytes())[0], raw_claim())[0]
+        )
+    )
+    page = tmp_path / "knowledge/notes/stale.md"
+    page.parent.mkdir(parents=True)
+    page.write_bytes(ledger_page(normalized.record))
+    daily = tmp_path / "knowledge/daily/2026-01-02.md"
+    daily.write_bytes(source_bytes() + b"changed\n")
+    index = ClaimIndex(tmp_path / "state", vault=tmp_path)
+
+    index.rebuild(lambda: [page])
+
+    assert index.candidates(normalized) == []
+    assert index.diagnostics() == [
+        {
+            "page": "knowledge/notes/stale.md",
+            "claim_id": normalized.record["id"],
+            "code": "evidence_unresolved",
+        }
+    ]
+    result = ContradictionPipeline(claim_index=index, evaluators=()).assess(
+        normalized, commit=False
+    )
+    assert result.recommendation != "supersede"
+
+
+def test_claim_index_excludes_ambiguous_active_evidence_with_stable_diagnostic(
+    pipeline, tmp_path: Path, monkeypatch
+) -> None:
+    from claims import ClaimIndex
+    from evidence_resolver import EvidenceResolutionError
+
+    normalized = pipeline.normalize(
+        pipeline.verify_literal(
+            pipeline.extract(pipeline.split_blocks(source_bytes())[0], raw_claim())[0]
+        )
+    )
+    page = tmp_path / "knowledge/notes/ambiguous.md"
+    page.parent.mkdir(parents=True)
+    page.write_bytes(ledger_page(normalized.record))
+    index = ClaimIndex(tmp_path / "state", vault=tmp_path)
+    monkeypatch.setattr(
+        index.resolver,
+        "resolve",
+        lambda reference: (_ for _ in ()).throw(
+            EvidenceResolutionError("ambiguous evidence authority")
+        ),
+    )
+
+    index.rebuild(lambda: [page])
+
+    assert index.candidates(normalized) == []
+    assert index.diagnostics()[0]["code"] == "evidence_ambiguous"
+
+
 def test_claim_index_rejects_escape_symlink_oversize_and_unbounded_limit(
     pipeline, tmp_path: Path
 ) -> None:

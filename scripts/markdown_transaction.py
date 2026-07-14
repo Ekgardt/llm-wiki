@@ -24,6 +24,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
+from claim_tree_manifest import (
+    snapshot_claim_tree,
+    validate_claim_tree_manifest,
+)
 from reliable_memory import (
     DEFAULTS,
     _set_owner_only,
@@ -2177,6 +2181,9 @@ class MarkdownCoordinator:
             raise TypeError("preconditions must be a mapping")
         result: dict[str, object] = {}
         for path, expected in preconditions.items():
+            if path == "claim_tree_manifest":
+                result[path] = validate_claim_tree_manifest(expected)
+                continue
             if path == "project_lease":
                 if not isinstance(expected, Mapping):
                     raise TypeError("project_lease precondition must be a mapping")
@@ -2516,6 +2523,18 @@ class MarkdownCoordinator:
         database: sqlite3.Connection | None = None,
     ) -> None:
         for path, expected in preconditions.items():
+            if path == "claim_tree_manifest":
+                assert isinstance(expected, Mapping)
+                current_manifest = snapshot_claim_tree(self.vault)
+                if not self._claim_tree_matches(
+                    expected, current_manifest, operation_states
+                ):
+                    raise TransactionFailure(
+                        "persisted claim tree manifest precondition failed",
+                        "precondition_failed",
+                        "quarantined",
+                    )
+                continue
             if path == "project_lease":
                 assert isinstance(expected, Mapping)
                 if database is not None:
@@ -2539,6 +2558,33 @@ class MarkdownCoordinator:
                 "precondition_failed",
                 "quarantined",
             )
+
+    @staticmethod
+    def _claim_tree_matches(
+        expected: Mapping[str, object],
+        current: Mapping[str, object],
+        operation_states: Mapping[str, tuple[str, str]],
+    ) -> bool:
+        expected_entries = {
+            str(item["path"]): str(item["sha256"])
+            for item in expected["entries"]
+        }
+        current_entries = {
+            str(item["path"]): str(item["sha256"])
+            for item in current["entries"]
+        }
+        all_paths = set(expected_entries) | set(current_entries)
+        for path in all_paths:
+            before = expected_entries.get(path, ABSENT)
+            now = current_entries.get(path, ABSENT)
+            operation = operation_states.get(path)
+            if operation is None:
+                if now != before:
+                    return False
+                continue
+            if before != operation[0] or now not in operation:
+                return False
+        return True
 
     @staticmethod
     def _check_project_lease(

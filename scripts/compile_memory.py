@@ -37,6 +37,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import read_stable_bytes  # noqa: E402
+from claim_tree_manifest import snapshot_claim_tree  # noqa: E402
 from claims import (  # noqa: E402
     LEDGER_SCHEMA,
     ClaimIndex,
@@ -1050,6 +1051,7 @@ def apply_compile_plan(
         canonical_json_bytes({"action_key": action_key, "source_digests": source_digests})
     )
     claim_index: ClaimIndex | None = None
+    claim_tree_manifest: dict[str, object] | None = None
     claim_groups: list[tuple[ContradictionPipeline, tuple[object, ...]]] = []
     batch_candidates: list[IndexedClaim] = []
     planned_operations = plan.get("operations")
@@ -1060,8 +1062,11 @@ def apply_compile_plan(
         and json.loads(str(item["content"])).get("claims")
         for item in planned_operations
     ):
+        claim_tree_manifest = snapshot_claim_tree(ROOT)
         claim_index = ClaimIndex(coordinator.state_root, vault=ROOT)
-        claim_index.rebuild()
+        claim_index.rebuild(
+            lambda: [ROOT / item["path"] for item in claim_tree_manifest["entries"]]
+        )
         for planned in planned_operations:
             assert isinstance(planned, dict)
             semantic = json.loads(str(planned["content"]))
@@ -1158,7 +1163,10 @@ def apply_compile_plan(
             transaction = coordinator.prepare(
                 sorted(quarantine_changes, key=lambda item: item.path),
                 operation_id=quarantine_operation_id,
-                preconditions={path: "absent" for path in quarantine_paths},
+                preconditions={
+                    **{path: "absent" for path in quarantine_paths},
+                    "claim_tree_manifest": claim_tree_manifest,
+                },
             )
             committed = coordinator.apply(transaction.id)
             committed, sequence = _transaction_authority(
@@ -1179,9 +1187,11 @@ def apply_compile_plan(
         touched: list[str] = []
         receipt_operations: list[dict[str, str]] = []
         evidence_bindings: list[dict[str, str]] = []
-        preconditions: dict[str, str] = {
+        preconditions: dict[str, object] = {
             item.logical_path: item.sha256 for item in inputs.targets
         }
+        if claim_tree_manifest is not None:
+            preconditions["claim_tree_manifest"] = claim_tree_manifest
         operations = plan.get("operations")
         assert isinstance(operations, list)
         for planned in operations:

@@ -36,7 +36,7 @@ MAX_CANDIDATES = 50
 MAX_DECIMAL_CHARS = 128
 MAX_DECIMAL_DIGITS = 128
 MAX_DECIMAL_EXPONENT = 128
-CLAIM_INDEX_SCHEMA_VERSION = "claim-index/v1"
+CLAIM_INDEX_SCHEMA_VERSION = "claim-index/v2"
 RELATIONS = frozenset(
     {
         "equals",
@@ -551,6 +551,7 @@ class ClaimIndex:
         self.vault = Path(vault).resolve(strict=True)
         self.path = self.state_root / "cache" / "claims.sqlite3"
         self.lock_path = self.state_root / "cache" / "claims.rebuild.lock"
+        self.resolver = EvidenceResolver(self.vault, state_root=self.state_root)
 
     def _connect(self) -> sqlite3.Connection:
         connection = open_operational_db(self.path, busy_ms=5000)
@@ -593,6 +594,12 @@ class ClaimIndex:
                 tuple(row[index] for index in range(1, 6))
                 for row in database.execute("PRAGMA table_info(claim_index_meta)")
             ]
+            diagnostic_shape = [
+                tuple(row[index] for index in range(1, 6))
+                for row in database.execute(
+                    "PRAGMA table_info(claim_index_diagnostic)"
+                )
+            ]
             index_columns = [
                 row[2]
                 for row in database.execute(
@@ -610,6 +617,12 @@ class ClaimIndex:
         return (
             claim_shape == expected_claim
             and meta_shape == [("schema_version", "TEXT", 1, None, 1)]
+            and diagnostic_shape
+            == [
+                ("page", "TEXT", 1, None, 1),
+                ("claim_id", "TEXT", 1, None, 2),
+                ("code", "TEXT", 1, None, 0),
+            ]
             and index_columns == ["subject", "relation", "lifecycle", "fingerprint"]
             and versions == [CLAIM_INDEX_SCHEMA_VERSION]
         )
@@ -620,6 +633,7 @@ class ClaimIndex:
             "DROP INDEX IF EXISTS claim_candidate_lookup",
             "DROP TABLE IF EXISTS claim",
             "DROP TABLE IF EXISTS claim_index_meta",
+            "DROP TABLE IF EXISTS claim_index_diagnostic",
             """CREATE TABLE claim (
                 id TEXT NOT NULL,
                 fingerprint TEXT NOT NULL,
@@ -634,6 +648,12 @@ class ClaimIndex:
                 ON claim(subject, relation, lifecycle, fingerprint)""",
             """CREATE TABLE claim_index_meta (
                 schema_version TEXT NOT NULL PRIMARY KEY
+            )""",
+            """CREATE TABLE claim_index_diagnostic (
+                page TEXT NOT NULL,
+                claim_id TEXT NOT NULL,
+                code TEXT NOT NULL,
+                PRIMARY KEY (page, claim_id)
             )""",
         )
         for statement in statements:
@@ -693,6 +713,7 @@ class ClaimIndex:
 
     def _rebuild_locked(self, pages: Sequence[Path]) -> None:
         rows: list[tuple[object, ...]] = []
+        diagnostics: list[tuple[str, str, str]] = []
         seen_pages: set[str] = set()
         for page in pages:
             relative, content = self._page_bytes(Path(page))
@@ -703,6 +724,34 @@ class ClaimIndex:
             if ledger is None:
                 continue
             for record in ledger["claims"]:
+                if record["lifecycle"] == "active":
+                    evidence = record["evidence"]
+                    try:
+                        resolved = self.resolver.resolve(evidence["reference"])
+                    except (EvidenceResolutionError, OSError, TypeError, ValueError) as exc:
+                        code = (
+                            "evidence_ambiguous"
+                            if "ambiguous" in str(exc).casefold()
+                            else "evidence_unresolved"
+                        )
+                        diagnostics.append((relative, str(record["id"]), code))
+                        continue
+                    try:
+                        literal = resolved.bytes.decode("utf-8", errors="strict")
+                    except UnicodeDecodeError:
+                        diagnostics.append(
+                            (relative, str(record["id"]), "evidence_literal_mismatch")
+                        )
+                        continue
+                    if (
+                        resolved.sha256 != evidence["sha256"]
+                        or literal != evidence["text"]
+                        or literal != record["text"]
+                    ):
+                        diagnostics.append(
+                            (relative, str(record["id"]), "evidence_literal_mismatch")
+                        )
+                        continue
                 rows.append(
                     (
                         record["id"],
@@ -719,17 +768,34 @@ class ClaimIndex:
             try:
                 if self._schema_compatible(database):
                     database.execute("DELETE FROM claim")
+                    database.execute("DELETE FROM claim_index_diagnostic")
                 else:
                     self._replace_schema(database)
                 database.executemany(
                     "INSERT INTO claim(id,fingerprint,subject,relation,lifecycle,page,record_json) VALUES(?,?,?,?,?,?,?)",
                     rows,
                 )
+                database.executemany(
+                    "INSERT INTO claim_index_diagnostic(page,claim_id,code) VALUES(?,?,?)",
+                    sorted(diagnostics),
+                )
             except BaseException:
                 database.rollback()
                 raise
             else:
                 database.commit()
+
+    def diagnostics(self) -> list[dict[str, str]]:
+        if not self.path.exists():
+            return []
+        with closing(self._connect()) as database:
+            if not self._schema_compatible(database):
+                return []
+            rows = database.execute(
+                "SELECT page, claim_id, code FROM claim_index_diagnostic "
+                "ORDER BY page, claim_id"
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def candidates(
         self, claim: NormalizedClaim | None, *, limit: int = MAX_CANDIDATES

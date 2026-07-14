@@ -409,6 +409,64 @@ def test_postcommit_claim_index_rebuild_failure_invalidates_without_failing_comm
     assert not (state_root / "cache/claims.sqlite3").exists()
 
 
+def test_new_claim_page_inserted_after_assessment_fails_tree_manifest_precondition(
+    vault, monkeypatch
+):
+    root, state_root = vault
+    daily = _daily(root)
+    import compile_memory
+    from markdown_transaction import TransactionFailure
+
+    new = _claim_record(
+        root, claim_id="new", value="red",
+        text="A durable exact-byte observation.", authority="user",
+    )
+    phantom = _claim_record(
+        root, claim_id="phantom", value="green",
+        text="A second durable exact-byte observation.", authority="user",
+    )
+    operation = json.loads(str(_semantic_plan()["operations"][0]["content"]))
+    operation["claims"] = [new]
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    plan = {
+        "schema_version": "compile-plan/v2",
+        "operations": [{
+            "kind": "create", "path": "knowledge/notes/exact-byte-pattern.md",
+            "content": canonical_json_bytes(operation).decode(),
+        }],
+    }
+    coordinator = MarkdownCoordinator(root, state_root)
+    original_apply = coordinator.apply
+
+    def insert_phantom_then_apply(transaction_id, **kwargs):
+        (root / "knowledge/notes/phantom.md").write_bytes(
+            b"---\ntype: concept\n---\n# Phantom\n\n## Claims\n```json\n"
+            + canonical_json_bytes(
+                {"schema_version": "claim-ledger/v1", "claims": [phantom]}
+            )
+            + b"\n```\n"
+        )
+        return original_apply(transaction_id, **kwargs)
+
+    monkeypatch.setattr(coordinator, "apply", insert_phantom_then_apply)
+    monkeypatch.setattr(compile_memory, "default_secondary_search", lambda *args: [])
+
+    with pytest.raises(TransactionFailure, match="claim tree manifest"):
+        compile_memory.apply_compile_plan(
+            inputs, plan, action_key="5" * 64, trigger="manual",
+            coordinator=coordinator, completed_at="2026-07-14T12:00:00Z",
+        )
+
+    assert not (root / "knowledge/notes/exact-byte-pattern.md").exists()
+    assert not list((root / "knowledge/daily/receipts").glob("*.md"))
+    with coordinator._connect() as database:
+        row = database.execute(
+            'SELECT preconditions_json FROM "transaction" ORDER BY rowid DESC LIMIT 1'
+        ).fetchone()
+    assert row is not None
+    assert "claim_tree_manifest" in json.loads(row["preconditions_json"])
+
+
 def test_committed_compile_clears_durable_source_failure(vault):
     root, state_root = vault
     daily = _daily(root)

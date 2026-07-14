@@ -12,6 +12,7 @@ from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 
 from bounded_io import read_stable_bytes
+from claim_tree_manifest import snapshot_claim_tree
 from claims import (
     CANDIDATE_SCHEMA,
     MAX_CLAIM_PAGE_BYTES,
@@ -290,6 +291,11 @@ class ContradictionPipeline:
     ) -> ClaimAssessment:
         if not isinstance(claim, NormalizedClaim):
             raise TypeError("claim must be normalized")
+        claim_tree_manifest = (
+            snapshot_claim_tree(self.vault)
+            if commit and self.coordinator is not None and self.vault is not None
+            else None
+        )
         if candidates is None:
             if self.claim_index is None:
                 candidates = ()
@@ -387,7 +393,9 @@ class ContradictionPipeline:
         if commit and self.coordinator is not None and (
             decision.recommendation == "quarantine" or decision.mutations
         ):
-            candidate_path = self._commit(claim, decision)
+            candidate_path = self._commit(
+                claim, decision, claim_tree_manifest=claim_tree_manifest
+            )
         evidence = tuple(
             {
                 "page": item.page,
@@ -539,7 +547,11 @@ class ContradictionPipeline:
         return None, None, lineage
 
     def _commit(
-        self, claim: NormalizedClaim, decision: LifecycleDecision
+        self,
+        claim: NormalizedClaim,
+        decision: LifecycleDecision,
+        *,
+        claim_tree_manifest: Mapping[str, object] | None = None,
     ) -> str | None:
         if self.vault is None or self.coordinator is None:
             raise ValueError("candidate writes require a vault and coordinator")
@@ -553,6 +565,8 @@ class ContradictionPipeline:
             None,
         )
         changes, preconditions, candidate_paths = self.plan_changes((assessment,))
+        if claim_tree_manifest is not None:
+            preconditions["claim_tree_manifest"] = dict(claim_tree_manifest)
         path = candidate_paths[0] if candidate_paths else None
         candidate_identity = path or "none"
         operation_id = "contradiction:" + sha256_bytes(
