@@ -35,6 +35,7 @@ _STATES = ("ready", "leased", "blocked", "succeeded", "dead", "cancelled")
 _TERMINAL_STATES = ("succeeded", "dead", "cancelled")
 _PERMANENT_CODES = {"invalid_input", "unsupported_version"}
 _MAX_RETRY_AFTER_SECONDS = 7 * 24 * 60 * 60
+_MAX_RESULT_BYTES = 16 * 1024 * 1024
 _SECRET_KEYS = {
     "api_key",
     "apikey",
@@ -532,16 +533,48 @@ class MemoryQueue:
             return False
         if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
             return False
+        return self._validated_result_digest(reference) == digest
+
+    def _validated_result_digest(self, reference: str) -> str | None:
         try:
-            path = (self.state_root / reference).resolve()
-            path.relative_to(self.results_dir.resolve())
-            return (
-                path.is_file()
-                and _is_owner_only(path)
-                and sha256_bytes(path.read_bytes()) == digest
-            )
+            path = self.state_root / reference
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(self.results_dir.resolve())
+            if path.parent.resolve() != self.results_dir.resolve() or path.is_symlink():
+                return None
+            metadata = path.lstat()
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > _MAX_RESULT_BYTES:
+                return None
+            if not _is_owner_only(path):
+                return None
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(path, flags)
+            try:
+                opened = os.fstat(descriptor)
+                if not stat.S_ISREG(opened.st_mode) or opened.st_size > _MAX_RESULT_BYTES:
+                    return None
+                with os.fdopen(descriptor, "rb", closefd=False) as handle:
+                    data = handle.read(_MAX_RESULT_BYTES + 1)
+                if len(data) > _MAX_RESULT_BYTES:
+                    return None
+                after = os.fstat(descriptor)
+                if (
+                    opened.st_dev,
+                    opened.st_ino,
+                    opened.st_size,
+                    opened.st_mtime_ns,
+                ) != (
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_size,
+                    after.st_mtime_ns,
+                ):
+                    return None
+                return sha256_bytes(data)
+            finally:
+                os.close(descriptor)
         except (OSError, ValueError):
-            return False
+            return None
 
     def adopt_published_result(
         self, lease: QueueLease, *, operation_id: str
@@ -550,18 +583,13 @@ class MemoryQueue:
         result_name = f"{sha256_bytes(operation_id.encode('utf-8'))}.result"
         relative = f"run/queue-results/{result_name}"
         target = self.results_dir / result_name
-        if not target.exists():
+        if not target.exists() and not target.is_symlink():
             return None
         now = _as_utc(self._clock())
         with self._connect() as connection, begin_immediate(connection):
             row = self._require_lease(connection, lease, now)
-            try:
-                valid = target.is_file() and _is_owner_only(target)
-                digest = sha256_bytes(target.read_bytes()) if valid else None
-            except OSError:
-                valid = False
-                digest = None
-            if not valid or digest is None:
+            digest = self._validated_result_digest(relative)
+            if digest is None:
                 self._record_attempt(
                     connection, row, now, "failed", "result_corrupt"
                 )
@@ -607,6 +635,8 @@ class MemoryQueue:
             raise ValueError("operation_id must be non-empty")
         if not isinstance(result, bytes):
             raise TypeError("result must be bytes")
+        if len(result) > _MAX_RESULT_BYTES:
+            raise ValueError("result exceeds maximum queue result size")
         digest = sha256_bytes(result)
         result_name = f"{sha256_bytes(operation_id.encode('utf-8'))}.result"
         relative = f"run/queue-results/{result_name}"
@@ -662,10 +692,24 @@ class MemoryQueue:
         now = _as_utc(self._clock())
         with self._connect() as connection, begin_immediate(connection):
             row = self._require_lease(connection, lease, now)
-            if row["result_reference"] is None:
-                raise ValueError("a result must be published before acknowledgement")
-            self._record_attempt(connection, row, now, "succeeded", None)
-            self._finish_lease(connection, lease.id, now, "succeeded", None, None)
+            if not self._stored_result_is_valid(row):
+                self._record_attempt(
+                    connection, row, now, "failed", "result_corrupt"
+                )
+                self._finish_lease(
+                    connection,
+                    lease.id,
+                    now,
+                    "dead",
+                    "result_corrupt",
+                    None,
+                    last_attempt_at=now,
+                )
+            else:
+                self._record_attempt(connection, row, now, "succeeded", None)
+                self._finish_lease(
+                    connection, lease.id, now, "succeeded", None, None
+                )
 
     def fail(self, lease: QueueLease, failure: QueueFailure) -> None:
         if not failure.error_code:

@@ -323,6 +323,121 @@ def test_drain_adopts_orphaned_valid_result_before_handler(
     assert task.result_sha256 == sha256_bytes(b"orphaned")
 
 
+@pytest.mark.parametrize("mutation", ["delete", "chmod", "corrupt"])
+def test_acknowledge_rejects_result_mutated_after_publish(
+    queue: MemoryQueue,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    import memory_queue
+
+    task_id = queue.enqueue("query", 1, {})
+    lease = queue.claim("worker")
+    assert lease is not None
+    reference = queue.publish_result(lease, operation_id=task_id, result=b"original")
+    result_path = queue.state_root / reference
+    if mutation == "delete":
+        result_path.unlink()
+    elif mutation == "chmod":
+        if os.name == "posix":
+            result_path.chmod(0o644)
+        else:
+            monkeypatch.setattr(memory_queue, "_is_owner_only", lambda path: False)
+    else:
+        result_path.write_bytes(b"corrupt")
+
+    queue.acknowledge(lease)
+    task = queue.get(task_id)
+    assert task.state == "dead"
+    assert task.error_code == "result_corrupt"
+    assert task.attempt_history[-1].outcome == "failed"
+    assert task.attempt_history[-1].error_code == "result_corrupt"
+
+
+def test_acknowledge_rejects_result_reference_outside_results_dir(
+    queue: MemoryQueue,
+) -> None:
+    task_id = queue.enqueue("query", 1, {})
+    lease = queue.claim("worker")
+    assert lease is not None
+    queue.publish_result(lease, operation_id=task_id, result=b"original")
+    with sqlite3.connect(queue.db_path) as connection:
+        connection.execute(
+            "UPDATE tasks SET result_reference='run/outside.result' WHERE id=?",
+            (task_id,),
+        )
+
+    queue.acknowledge(lease)
+    assert queue.get(task_id).state == "dead"
+    assert queue.get(task_id).error_code == "result_corrupt"
+
+
+def test_acknowledge_rejects_symlink_result(
+    queue: MemoryQueue, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task_id = queue.enqueue("query", 1, {})
+    lease = queue.claim("worker")
+    assert lease is not None
+    reference = queue.publish_result(lease, operation_id=task_id, result=b"original")
+    result_path = queue.state_root / reference
+    real_is_symlink = Path.is_symlink
+    monkeypatch.setattr(
+        Path,
+        "is_symlink",
+        lambda path: path == result_path or real_is_symlink(path),
+    )
+
+    queue.acknowledge(lease)
+    assert queue.get(task_id).state == "dead"
+    assert queue.get(task_id).error_code == "result_corrupt"
+
+
+def test_acknowledge_rejects_result_over_size_bound(
+    queue: MemoryQueue, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import memory_queue
+
+    task_id = queue.enqueue("query", 1, {})
+    lease = queue.claim("worker")
+    assert lease is not None
+    queue.publish_result(lease, operation_id=task_id, result=b"two bytes")
+    monkeypatch.setattr(memory_queue, "_MAX_RESULT_BYTES", 1, raising=False)
+
+    queue.acknowledge(lease)
+    assert queue.get(task_id).state == "dead"
+    assert queue.get(task_id).error_code == "result_corrupt"
+
+
+def test_orphan_adoption_rejects_invalid_full_metadata_before_handler(
+    tmp_path: Path, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import memory_queue
+
+    queue = MemoryQueue(tmp_path, clock=clock, rng=random.Random(14))
+    monkeypatch.setattr(memory_queue, "_queue", lambda: queue)
+    task_id = queue.enqueue("query", 1, {})
+    lease = queue.claim("crashed", lease_seconds=5)
+    assert lease is not None
+    queue.publish_result(lease, operation_id=task_id, result=b"too-large")
+    with sqlite3.connect(queue.db_path) as connection:
+        connection.execute(
+            """UPDATE tasks SET result_reference=NULL, result_operation_id=NULL,
+                   result_sha256=NULL WHERE id=?""",
+            (task_id,),
+        )
+    monkeypatch.setattr(memory_queue, "_MAX_RESULT_BYTES", 1, raising=False)
+    clock.advance(6)
+    calls: list[str] = []
+
+    counts = memory_queue.drain_with(
+        lambda task: calls.append(task["id"]) or DeferredResult(b"new"), max_tasks=1
+    )
+    assert counts == {"ok": 0, "failed": 1, "skipped": 0}
+    assert calls == []
+    assert queue.get(task_id).state == "dead"
+    assert queue.get(task_id).error_code == "result_corrupt"
+
+
 def test_result_directory_is_fsynced_before_database_reference(
     queue: MemoryQueue, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -446,12 +561,13 @@ def test_queue_uses_secure_rollback_journal_without_wal_files(queue: MemoryQueue
         connection.rollback()
 
 
-def test_acknowledge_requires_published_result(queue: MemoryQueue) -> None:
+def test_acknowledge_without_published_result_goes_dead(queue: MemoryQueue) -> None:
     queue.enqueue("query", 1, {})
     lease = queue.claim("worker")
     assert lease is not None
-    with pytest.raises(ValueError, match="result"):
-        queue.acknowledge(lease)
+    queue.acknowledge(lease)
+    assert queue.get(lease.id).state == "dead"
+    assert queue.get(lease.id).error_code == "result_corrupt"
 
 
 def test_dependency_block_does_not_consume_attempt(queue: MemoryQueue) -> None:
