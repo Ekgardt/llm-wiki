@@ -142,6 +142,18 @@ class TransactionFailure(RuntimeError):
         self.state = state
 
 
+class TransactionDriftError(RuntimeError):
+    """A committed operation no longer matches its persisted after-state."""
+
+    def __init__(self, transaction_id: str, paths: Sequence[str]):
+        self.transaction_id = transaction_id
+        self.paths = tuple(paths)
+        super().__init__(
+            "committed transaction target drift detected; use a new operation_id: "
+            + ", ".join(paths)
+        )
+
+
 class ProjectPendingPriorError(TransactionFailure):
     """A project checkpoint is blocked by an unapplied lower sequence."""
 
@@ -244,6 +256,7 @@ def mutate_knowledge(
         if desired != persisted:
             raise ValueError("operation_id is already bound to a different request")
         if existing.state == "committed":
+            _verify_committed_targets(coordinator, existing)
             return existing
         raise RuntimeError(
             f"duplicate mutation ended in noncommitted state {existing.state}"
@@ -296,6 +309,7 @@ def mutate_knowledge(
             raise RuntimeError(
                 f"duplicate mutation ended in noncommitted state {record.state}"
             )
+        _verify_committed_targets(coordinator, record)
         return record
     settled = _settle_operation(coordinator, operation_id)
     if settled is None:
@@ -325,6 +339,19 @@ def _settle_operation(
         if time.monotonic() >= deadline:
             raise TimeoutError("timed out waiting for duplicate transaction preparation")
         time.sleep(0.01)
+
+
+def _verify_committed_targets(
+    coordinator: MarkdownCoordinator, record: TransactionRecord
+) -> None:
+    with coordinator.writer_gate():
+        drifted = [
+            operation.path
+            for operation in record.operations
+            if coordinator._current_hash(operation.path) != operation.after_hash
+        ]
+    if drifted:
+        raise TransactionDriftError(record.id, drifted)
 
 
 def _append_request_matches(

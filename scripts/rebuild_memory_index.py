@@ -14,11 +14,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import read_stable_bytes  # noqa: E402
 from claim_tree_manifest import snapshot_claim_tree_with_content  # noqa: E402
 from markdown_transaction import (  # noqa: E402
+    ABSENT,
+    TransactionDriftError,
     TransactionFailure,
     mutate_knowledge,
     stable_operation_id,
 )
 from memory_state import ROOT  # noqa: E402
+from reliable_memory import sha256_bytes  # noqa: E402
 
 memory = ROOT / "knowledge"
 knowledge = memory / "notes"
@@ -227,6 +230,7 @@ def collect_pages() -> dict[str, list[Path]]:
 
 
 def main() -> int:
+    repair_lineage = ""
     for _ in range(MAX_REBUILD_ATTEMPTS):
         manifest, tree = snapshot_claim_tree_with_content(ROOT)
         notes = {
@@ -237,14 +241,36 @@ def main() -> int:
         content = build_index_bytes(ROOT, base=notes)
         generation = str(manifest["absence_generation"])
         try:
+            before_bytes = read_stable_bytes(
+                out, MAX_INDEX_BYTES, label="knowledge index before-state"
+            )
+            before_hash = sha256_bytes(before_bytes)
+        except FileNotFoundError:
+            before_bytes = None
+            before_hash = ABSENT
+        if before_bytes == content:
+            return 0
+        try:
             mutate_knowledge(
-                stable_operation_id("rebuild-index", generation, content),
+                stable_operation_id(
+                    "rebuild-index",
+                    f"{generation}:{before_hash}:{repair_lineage}",
+                    content,
+                ),
                 {out: content},
-                preconditions={"claim_tree_manifest": manifest},
+                preconditions={
+                    "claim_tree_manifest": manifest,
+                    out.relative_to(ROOT).as_posix(): before_hash,
+                },
             )
             return 0
+        except TransactionDriftError as exc:
+            repair_lineage = exc.transaction_id
         except TransactionFailure as exc:
             if exc.code != "precondition_failed":
+                raise
+        except ValueError as exc:
+            if "caller precondition does not match target" not in str(exc):
                 raise
     raise RuntimeError("knowledge index rebuild did not converge")
 

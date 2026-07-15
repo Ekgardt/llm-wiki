@@ -858,6 +858,43 @@ def test_rebuild_index_retries_tree_race_with_fresh_snapshot(
         assert "old summary" not in index
 
 
+@pytest.mark.parametrize("drift", ["delete", "modify"])
+def test_rebuild_index_repairs_committed_index_drift_with_new_transaction(
+    tmp_path, monkeypatch, drift
+):
+    import markdown_transaction
+    import rebuild_memory_index
+
+    vault, state = _vault(tmp_path)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
+    page = vault / "knowledge/notes/page.md"
+    page.write_text(
+        "---\ntype: concept\n---\n# Page\n\n"
+        "One-sentence summary: durable summary\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(rebuild_memory_index, "ROOT", vault)
+    monkeypatch.setattr(rebuild_memory_index, "out", vault / "knowledge/index.md")
+    assert rebuild_memory_index.main() == 0
+    expected = rebuild_memory_index.out.read_bytes()
+    if drift == "delete":
+        rebuild_memory_index.out.unlink()
+    else:
+        rebuild_memory_index.out.write_bytes(b"corrupt index\n")
+
+    assert rebuild_memory_index.main() == 0
+    assert rebuild_memory_index.out.read_bytes() == expected
+    coordinator = markdown_transaction.MarkdownCoordinator(vault, state)
+    with coordinator._connect() as database:
+        rows = database.execute(
+            'SELECT operation_id FROM "transaction" '
+            'WHERE operation_id LIKE "rebuild-index:%" ORDER BY created_at'
+        ).fetchall()
+    assert len(rows) == 2
+    assert rows[0]["operation_id"] != rows[1]["operation_id"]
+
+
 def test_append_retries_a_cas_conflict_without_overwriting_winner(tmp_path, monkeypatch):
     import markdown_transaction
 
@@ -1025,6 +1062,31 @@ def test_mutate_replays_identical_committed_create_replace_delete(
     second = markdown_transaction.mutate_knowledge("replay:event", {path: desired})
     assert second.id == first.id
     assert path.read_bytes() == desired if desired is not None else not path.exists()
+
+
+@pytest.mark.parametrize("drift", ["delete", "modify"])
+def test_mutate_committed_replay_reports_target_drift(
+    tmp_path, monkeypatch, drift
+):
+    import markdown_transaction
+
+    vault, state = _vault(tmp_path)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
+    path = vault / "knowledge/notes/page.md"
+    markdown_transaction.mutate_knowledge("replay:drift", {path: b"expected"})
+    if drift == "delete":
+        path.unlink()
+    else:
+        path.write_bytes(b"user-modified")
+
+    with pytest.raises(RuntimeError, match=r"drift.*new operation_id"):
+        markdown_transaction.mutate_knowledge("replay:drift", {path: b"expected"})
+
+    if drift == "delete":
+        assert not path.exists()
+    else:
+        assert path.read_bytes() == b"user-modified"
 
 
 @pytest.mark.parametrize("api", ["append", "mutation"])
