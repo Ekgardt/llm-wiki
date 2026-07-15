@@ -35,6 +35,7 @@ The alternative — inventing a new shape per subsystem — produces vaults wher
 Promoted 2026-04-13 to [[knowledge/notes/pipeline-mirroring|Pipeline Mirroring]] (`knowledge/notes/`) as a named vault convention. This memory page stays as the imperative pattern with the "apply when" heuristic; the wiki page is the public-facing definition.
 
 ## Related
+- [[knowledge/notes/agent-native-mcp-foundation]] — applies this pattern by sharing one MCP contract while keeping host adapters thin.
 - [[knowledge/notes/pipeline-mirroring|Pipeline Mirroring]] — wiki concept counterpart.
 - [[knowledge/notes/pipeline-mirroring]] — noun-form memory concept.
 - [[Karpathy LLM Wiki Workflow]]

@@ -20,11 +20,14 @@ Obsidian provides rendered Markdown, wikilink navigation, and graph visualizatio
 ## Practical role in this vault
 The `.obsidian/` directory (when present — gitignored, local-only) lets Obsidian treat the repo as one vault, so all knowledge zones are browsable from one sidebar. Ingestion remains tool-neutral and file-based.
 
+Obsidian is outside the agent integration boundary. The project does not bundle a Web Clipper, plugin, or write automation for it. Agents read and act through MCP, while lifecycle adapters capture host events. This keeps Obsidian optional and prevents viewer-specific state from becoming a knowledge dependency.
+
 For how Obsidian fits into the broader pipeline, see [[Karpathy LLM Wiki Workflow]] and [[LLM Knowledge Base]].
 
 ## Source
 - [[Karpathy X Thread - April 2026]] (durable wiki record)
 - `knowledge/raw/articles/…` (captured originals)
+- `docs/STRUCTURE.md` and `docs/ARCHITECTURE.md` (current optional-viewer and MCP integration boundary)
 
 ## Related
 - [[LLM Knowledge Base]]
