@@ -181,7 +181,7 @@ def append_log(entry: str) -> None:
             stable_operation_id("knowledge-log-header", "log", header), LOG, header
         )
     block = (entry if entry.endswith("\n") else entry + "\n").encode("utf-8")
-    append_knowledge(stable_operation_id("query-log", "file-back", block), LOG, block)
+    append_knowledge(None, LOG, block)
 
 
 def main() -> int:

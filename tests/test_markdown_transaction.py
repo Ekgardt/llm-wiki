@@ -230,7 +230,7 @@ def test_prepare_enforces_exact_absent_semantics(
         "knowledge/projects/demo/state.md",
         "knowledge/inbox/claims/claim.md",
         "knowledge/inbox/source.md",
-        "knowledge/feedback/item.md",
+        "knowledge/feedback/abcdef123456.json",
         "knowledge/index.md",
         "knowledge/log.md",
     ],
@@ -252,6 +252,7 @@ def test_all_approved_markdown_targets_are_allowed(vault: Path, state_root: Path
     "path",
     [
         "knowledge/raw/source.md",
+        "knowledge/feedback/item.md",
         "knowledge/claims/claim.md",
         "knowledge/other.md",
         "cache/item.md",

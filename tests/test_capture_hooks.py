@@ -270,8 +270,9 @@ def test_prompt_capture_redacts_and_builds_envelope_before_append(monkeypatch, t
         calls.append(("build", kwargs))
         return build_event_envelope(**kwargs)
 
-    def observed_append(slug, session_id, preview):
-        calls.append(("append", {"slug": slug, "session": session_id, "preview": preview}))
+    def observed_append(slug, session_id, preview, operation_id=None):
+        calls.append(("append", {"slug": slug, "session": session_id, "preview": preview,
+                                 "operation_id": operation_id}))
 
     monkeypatch.setattr(user_prompt_capture, "ROOT", fake_root)
     monkeypatch.setattr(user_prompt_capture, "_compute_slug_from_cwd", lambda cwd: "test-slug")
@@ -294,6 +295,7 @@ def test_prompt_capture_redacts_and_builds_envelope_before_append(monkeypatch, t
     assert calls[0][1]["event_type"] == "user_prompt"
     assert secret not in calls[0][1]["payload"]["prompt"]
     assert secret not in calls[1][1]["preview"]
+    assert calls[1][1]["operation_id"].startswith("user-prompt:")
 
 
 def test_prompt_capture_rejection_has_no_side_effects(monkeypatch, tmp_path):
@@ -611,8 +613,9 @@ def test_tool_capture_redacts_and_builds_envelope_before_append(monkeypatch, tmp
         calls.append(("build", kwargs))
         return build_event_envelope(**kwargs)
 
-    def observed_append(slug, session_id, tool, target):
-        calls.append(("append", {"slug": slug, "session": session_id, "tool": tool, "target": target}))
+    def observed_append(slug, session_id, tool, target, operation_id=None):
+        calls.append(("append", {"slug": slug, "session": session_id, "tool": tool,
+                                 "target": target, "operation_id": operation_id}))
 
     monkeypatch.setattr(post_tool_capture, "ROOT", fake_root)
     monkeypatch.setattr(post_tool_capture, "_compute_slug_from_cwd", lambda cwd: "test-slug")
@@ -636,6 +639,7 @@ def test_tool_capture_redacts_and_builds_envelope_before_append(monkeypatch, tmp
     assert calls[0][1]["event_type"] == "post_tool_use"
     assert secret not in calls[0][1]["payload"]["target"]
     assert secret not in calls[1][1]["target"]
+    assert calls[1][1]["operation_id"].startswith("post-tool:")
 
 
 def test_tool_capture_bash_filters_short_commands(monkeypatch, tmp_path):

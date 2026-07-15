@@ -193,9 +193,11 @@ def _is_user_home(project_dir: Path) -> bool:
         return False
 
 
-def _append_entry(daily_path: Path, entry: str) -> None:
+def _append_entry(
+    daily_path: Path, entry: str, operation_id: str | None = None
+) -> None:
     """Append entry to daily log via canonical locked writer."""
-    locked_append(daily_path, entry)
+    locked_append(daily_path, entry, operation_id=operation_id)
 
 
 def main() -> int:
@@ -243,7 +245,13 @@ def main() -> int:
         # Mandatory redaction boundary: strip secrets before the entry lands
         # in the durable daily log (mirrors post_tool_capture.py:66-72).
         entry = redact_secrets(entry)
-        _append_entry(today_file, entry)
+        source_event_id = payload.get("event_id") or payload.get("source_event_id")
+        operation_id = (
+            f"session-end:{source_event_id}"
+            if isinstance(source_event_id, str) and source_event_id
+            else None
+        )
+        _append_entry(today_file, entry, operation_id=operation_id)
         return 0
 
     except Exception:  # noqa: BLE001

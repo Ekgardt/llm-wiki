@@ -50,7 +50,9 @@ def main() -> int:
         # escaping past the truncation boundary.
         safe_target = redact_secrets(target)[:100]
         line = f"- `[{ts}] tool | {session_id} | {slug} | {tool}` {safe_target}"
-        append_daily(slug, session_id, line)
+        event_id = payload.get("eventId") or payload.get("operationId")
+        operation_id = f"tool-breadcrumb:{event_id}" if isinstance(event_id, str) and event_id else None
+        append_daily(slug, session_id, line, operation_id=operation_id)
     except OSError as e:
         print(f"tool_breadcrumb_append: write failed: {type(e).__name__}: {e}", file=sys.stderr)
     return 0

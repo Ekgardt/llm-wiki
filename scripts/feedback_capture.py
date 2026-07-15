@@ -37,6 +37,22 @@ from secret_redact import redact_secrets  # noqa: E402
 
 FEEDBACK_DIR = ROOT / "knowledge" / "feedback"
 
+
+def _redact_feedback(value):
+    """Recursively redact every string in feedback content and metadata."""
+    if isinstance(value, str):
+        return redact_secrets(value)
+    if isinstance(value, dict):
+        return {
+            redact_secrets(str(key)): _redact_feedback(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_feedback(item) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_feedback(item) for item in value]
+    return value
+
 # Patterns that indicate a user correction or preference
 CORRECTION_PATTERNS = [
     (re.compile(r"\b(no|not|actually|instead|wait|stop)\b", re.IGNORECASE), "correction"),
@@ -114,6 +130,7 @@ def capture_from_text(
         "captured_at": datetime.now().isoformat(timespec="seconds"),
         "status": "candidate",
     }
+    candidate = _redact_feedback(candidate)
 
     # Write to feedback dir
     out = FEEDBACK_DIR / f"{candidate_id}.json"
@@ -181,6 +198,7 @@ def promote_candidate(candidate_id: str, category: str = "patterns") -> str | No
         candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
+    candidate = _redact_feedback(candidate)
 
     # Create knowledge page (containment-checked, flat layout)
     notes_root = (ROOT / "knowledge" / "notes").resolve()

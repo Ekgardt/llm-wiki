@@ -104,7 +104,9 @@ def _daily_lock(timeout: float = 10.0, poll: float = 0.05):
             pass
 
 
-def locked_append(daily_path: Path, text: str) -> None:
+def locked_append(
+    daily_path: Path, text: str, operation_id: str | None = None
+) -> None:
     """Append text to a daily-log file under the shared cross-process lock.
 
     This is the lowest-level locked writer. Higher-level functions like
@@ -119,9 +121,7 @@ def locked_append(daily_path: Path, text: str) -> None:
             stable_operation_id("daily-header", daily_path.name, header), daily_path, header
         )
     block = (text if text.endswith("\n") else text + "\n").encode("utf-8")
-    append_knowledge(
-        stable_operation_id("daily-append", daily_path.name, block), daily_path, block
-    )
+    append_knowledge(operation_id, daily_path, block)
 
 
 def locked_append_once(daily_path: Path, text: str, operation_id: str) -> bool:
@@ -144,7 +144,12 @@ def locked_append_once(daily_path: Path, text: str, operation_id: str) -> bool:
     return True
 
 
-def append_daily(slug: str, session_id: str, block: str) -> Path:
+def append_daily(
+    slug: str,
+    session_id: str,
+    block: str,
+    operation_id: str | None = None,
+) -> Path:
     """Append a pre-built block to today's daily log (unified locked writer).
 
     This is the SINGLE entry point all daily-log writers must use. It
@@ -167,7 +172,7 @@ def append_daily(slug: str, session_id: str, block: str) -> Path:
     day = datetime.now().strftime("%Y-%m-%d")
     path = daily_dir / f"{day}.md"
     text = "\n" + block if not block.startswith("\n") else block
-    locked_append(path, text)
+    locked_append(path, text, operation_id=operation_id)
     return path
 
 
@@ -187,7 +192,14 @@ def main() -> int:
     block = redact_secrets(block)
 
     try:
-        append_daily(payload.get("slug", ""), payload.get("sessionId", ""), block)
+        event_id = payload.get("eventId") or payload.get("operationId")
+        operation_id = f"daily-event:{event_id}" if isinstance(event_id, str) and event_id else None
+        append_daily(
+            payload.get("slug", ""),
+            payload.get("sessionId", ""),
+            block,
+            operation_id=operation_id,
+        )
     except OSError as e:
         print(f"daily_log_append: write failed: {type(e).__name__}: {e}", file=sys.stderr)
     return 0

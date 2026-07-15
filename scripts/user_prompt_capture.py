@@ -248,7 +248,9 @@ def _write_advisory_output(advisory: str) -> None:
     }, ensure_ascii=False))
 
 
-def _append_prompt_tag(slug: str, session_id: str, preview: str) -> None:
+def _append_prompt_tag(
+    slug: str, session_id: str, preview: str, operation_id: str | None = None
+) -> None:
     """Append a one-line breadcrumb to today's daily log."""
     try:
         from daily_log_append import append_daily
@@ -259,7 +261,7 @@ def _append_prompt_tag(slug: str, session_id: str, preview: str) -> None:
             f"- `[{ts}] prompt | {session_id[:8]} | {slug}` "
             f"{safe}"
         )
-        append_daily(slug, session_id, block)
+        append_daily(slug, session_id, block, operation_id=operation_id)
     except Exception:  # noqa: BLE001
         pass  # never fail the hook on disk-write
 
@@ -314,7 +316,12 @@ def main() -> int:
         if not _claim_prompt_dedupe(slug, prompt_hash):
             return 0
 
-        _append_prompt_tag(slug, session_id, envelope.payload["prompt"])
+        _append_prompt_tag(
+            slug,
+            session_id,
+            envelope.payload["prompt"],
+            operation_id=f"user-prompt:{envelope.event_id}",
+        )
     except Exception:  # noqa: BLE001
         # Last-resort: never break the user's session over a logging hook.
         pass

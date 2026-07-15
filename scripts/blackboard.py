@@ -43,7 +43,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from markdown_transaction import append_knowledge, stable_operation_id  # noqa: E402
+from markdown_transaction import append_knowledge  # noqa: E402
 from memory_state import ROOT  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
@@ -69,10 +69,11 @@ def _bb_dir(project: str) -> Path:
     return d
 
 
-def _append_jsonl(path: Path, record: dict) -> None:
+def _append_jsonl(
+    path: Path, record: dict, operation_id: str | None = None
+) -> None:
     block = (redact_secrets(json.dumps(record, ensure_ascii=False)) + "\n").encode("utf-8")
-    event_id = str(record.get("id") or hashlib.sha256(block).hexdigest())
-    append_knowledge(stable_operation_id("blackboard", event_id, block), path, block)
+    append_knowledge(operation_id, path, block)
 
 
 def _read_jsonl(path: Path) -> list[dict]:

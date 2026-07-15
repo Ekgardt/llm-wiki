@@ -1349,8 +1349,8 @@ def apply_compile_plan(
             )
         )
         for digest in source_digests:
-            (DAILY_DIR / "receipts").mkdir(parents=True, exist_ok=True)
             relative = f"knowledge/daily/receipts/{digest}.md"
+            coordinator.ensure_target_parent(relative)
             receipt_bytes = _receipt_bytes(
                 digest,
                 source_digests,

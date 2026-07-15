@@ -166,14 +166,20 @@ def _record_dedupe(slug: str, tool: str, target: str) -> None:
         pass
 
 
-def _append_tool_tag(slug: str, session_id: str, tool: str, target: str) -> None:
+def _append_tool_tag(
+    slug: str,
+    session_id: str,
+    tool: str,
+    target: str,
+    operation_id: str | None = None,
+) -> None:
     try:
         from daily_log_append import append_daily
 
         ts = datetime.now().strftime("%H:%M:%S")
         preview = redact_secrets(target)[:MAX_TARGET_PREVIEW] if target else ""
         block = f"- `[{ts}] tool | {session_id[:8]} | {slug} | {tool}` {preview}"
-        append_daily(slug, session_id, block)
+        append_daily(slug, session_id, block, operation_id=operation_id)
     except Exception:  # noqa: BLE001
         pass
 
@@ -227,7 +233,13 @@ def main() -> int:
         if _rate_limited(slug, tool_name, envelope.payload["target"]):
             return 0
 
-        _append_tool_tag(slug, session_id, tool_name, envelope.payload["target"])
+        _append_tool_tag(
+            slug,
+            session_id,
+            tool_name,
+            envelope.payload["target"],
+            operation_id=f"post-tool:{envelope.event_id}",
+        )
         _record_dedupe(slug, tool_name, envelope.payload["target"])
     except Exception:  # noqa: BLE001
         pass

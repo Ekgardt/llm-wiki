@@ -9,6 +9,7 @@ import ctypes
 import getpass
 import json
 import os
+import re
 import sqlite3
 import stat
 import subprocess
@@ -61,6 +62,15 @@ _PROJECT_CHECKPOINT_SCHEMA = (
 _WRITER_LEASE_SECONDS = 2.0
 _WRITER_HEARTBEAT_SECONDS = 0.5
 _WRITER_WAIT_SECONDS = DEFAULTS.markdown_busy_ms / 1_000
+MAX_KNOWLEDGE_TARGET_BYTES = 64 * 1024 * 1024
+MAX_KNOWLEDGE_PATH_BYTES = 512
+MAX_KNOWLEDGE_COMPONENT_BYTES = 128
+MAX_KNOWLEDGE_DEPTH = 12
+_FEEDBACK_JSON_RE = re.compile(r"knowledge/feedback/[0-9a-f]{6,64}\.json")
+_BLACKBOARD_JSONL_RE = re.compile(
+    r"knowledge/projects/[A-Za-z0-9._-]+/\.blackboard/"
+    r"(?:tasks|completed|signals|conflicts)\.jsonl"
+)
 
 
 @dataclass(frozen=True)
@@ -218,9 +228,25 @@ def mutate_knowledge(
         _relative_target(coordinator, Path(path)): content
         for path, content in changes.items()
     }
+    for content in relative_changes.values():
+        if content is not None and len(_require_bytes(content)) > MAX_KNOWLEDGE_TARGET_BYTES:
+            raise ValueError("knowledge target size exceeds limit")
+    coordinator.recover()
+    existing = coordinator._record_for_operation_id(operation_id)
+    if existing is not None and existing.state == "committed":
+        desired = {
+            path: ABSENT if content is None else sha256_bytes(content)
+            for path, content in relative_changes.items()
+        }
+        persisted = {operation.path: operation.after_hash for operation in existing.operations}
+        if desired != persisted:
+            raise ValueError("operation_id is already bound to a different request")
+        return existing
     with coordinator.writer_gate():
         captured = {
-            relative: coordinator._read_target(coordinator._target(relative))
+            relative: coordinator._read_bounded_target(
+                coordinator._target(relative), MAX_KNOWLEDGE_TARGET_BYTES
+            )
             for relative in relative_changes
         }
     expected = dict(preconditions or {})
@@ -249,11 +275,49 @@ def mutate_knowledge(
     return coordinator.apply(record.id)
 
 
-def append_knowledge(operation_id: str, path: Path, block: bytes) -> TransactionRecord:
+def _committed_append_matches(
+    coordinator: MarkdownCoordinator,
+    record: TransactionRecord,
+    relative: str,
+    block: bytes,
+) -> bool:
+    if len(record.operations) != 1 or record.operations[0].path != relative:
+        return False
+    plan = coordinator._load_verified_plan(record)
+    operation = plan["operations"][0]
+    after = operation["after"]
+    if not isinstance(after, dict):
+        return False
+    content = (coordinator.transaction_root / record.id / after["artifact"]).read_bytes()
+    if not content.endswith(block):
+        return False
+    prefix = content[: len(content) - len(block)] if block else content
+    expected_before = record.operations[0].before_hash
+    actual_before = (
+        ABSENT
+        if record.operations[0].kind == "create"
+        else sha256_bytes(prefix)
+    )
+    return actual_before == expected_before
+
+
+def append_knowledge(
+    operation_id: str | Path | None = None,
+    path: Path | bytes | None = None,
+    block: bytes | None = None,
+) -> TransactionRecord:
     """CAS-append Markdown or project JSONL bytes, retrying concurrent winners."""
-    if not operation_id:
-        raise ValueError("operation_id must be non-empty")
+    if block is None and isinstance(operation_id, Path) and isinstance(path, bytes):
+        operation_id, path, block = None, operation_id, path
+    if not isinstance(path, Path):
+        raise TypeError("knowledge append path must be a Path")
     block = _require_bytes(block)
+    if len(block) > MAX_KNOWLEDGE_TARGET_BYTES:
+        raise ValueError("knowledge append block size exceeds limit")
+    if operation_id is None:
+        operation_id = f"append:{uuid.uuid4().hex}"
+    elif not operation_id:
+        raise ValueError("operation_id must be non-empty")
     coordinator = _default_coordinator()
     relative = _relative_target(coordinator, Path(path))
     coordinator.recover()
@@ -262,18 +326,28 @@ def append_knowledge(operation_id: str, path: Path, block: bytes) -> Transaction
         candidate_id = operation_id if attempt == 0 else f"{operation_id}:cas:{attempt}"
         existing = coordinator._record_for_operation_id(candidate_id)
         if existing is not None and existing.state == "committed":
-            return existing
+            if _committed_append_matches(coordinator, existing, relative, block):
+                return existing
+            raise ValueError("operation_id is already bound to a different request")
         if existing is not None:
             attempt += 1
             continue
         with coordinator.writer_gate():
-            before = coordinator._read_target(coordinator._target(relative))
+            before = coordinator._read_bounded_target(
+                coordinator._target(relative), MAX_KNOWLEDGE_TARGET_BYTES
+            )
+        if len(before or b"") + len(block) > MAX_KNOWLEDGE_TARGET_BYTES:
+            raise ValueError("prospective knowledge target size exceeds limit")
         content = (before or b"") + block
         expected = ABSENT if before is None else sha256_bytes(before)
         change = (
-            MarkdownChange.create(relative, content)
+            MarkdownChange.create(
+                relative, content, max_before_bytes=MAX_KNOWLEDGE_TARGET_BYTES
+            )
             if before is None
-            else MarkdownChange.replace(relative, content)
+            else MarkdownChange.replace(
+                relative, content, max_before_bytes=MAX_KNOWLEDGE_TARGET_BYTES
+            )
         )
         try:
             record = coordinator.prepare(
@@ -2279,6 +2353,8 @@ class MarkdownCoordinator:
         relative = restricted_relative_path(
             value, (*_ALLOWED_DIRECTORIES, *_ALLOWED_FILES)
         )
+        if len(relative.parts) > MAX_KNOWLEDGE_DEPTH:
+            raise ValueError("target path depth exceeds limit")
         current = self.vault
         for part in relative.parts[:-1]:
             current = current / part
@@ -2309,6 +2385,8 @@ class MarkdownCoordinator:
                 raise ValueError("delete content must be absent")
         elif not isinstance(change.content, bytes):
             raise TypeError("create and replace content must be bytes")
+        elif len(change.content) > MAX_KNOWLEDGE_TARGET_BYTES:
+            raise ValueError("transaction target size exceeds limit")
         if change.max_before_bytes is not None and (
             isinstance(change.max_before_bytes, bool)
             or not isinstance(change.max_before_bytes, int)
@@ -2316,6 +2394,13 @@ class MarkdownCoordinator:
         ):
             raise ValueError("max_before_bytes must be a non-negative integer or None")
         self._target(change.path)
+        if change.max_before_bytes is None:
+            return MarkdownChange(
+                change.kind,
+                change.path,
+                change.content,
+                MAX_KNOWLEDGE_TARGET_BYTES,
+            )
         return change
 
     def _target(self, value: str) -> Path:
@@ -2324,6 +2409,15 @@ class MarkdownCoordinator:
         )
         if unicodedata.normalize("NFC", value) != value:
             raise ValueError("path must use NFC Unicode normalization")
+        if len(value.encode("utf-8")) > MAX_KNOWLEDGE_PATH_BYTES:
+            raise ValueError("target path exceeds length limit")
+        if len(relative.parts) > MAX_KNOWLEDGE_DEPTH:
+            raise ValueError("target path depth exceeds limit")
+        if any(
+            len(part.encode("utf-8")) > MAX_KNOWLEDGE_COMPONENT_BYTES
+            for part in relative.parts
+        ):
+            raise ValueError("target path component exceeds length limit")
         reserved = {"con", "prn", "aux", "nul"} | {
             f"{prefix}{number}" for prefix in ("com", "lpt") for number in range(1, 10)
         }
@@ -2339,8 +2433,18 @@ class MarkdownCoordinator:
             normalized.startswith(f"{root}/") for root in _ALLOWED_DIRECTORIES
         ):
             raise ValueError("path is outside every allowed Markdown root")
-        if relative.suffix.casefold() not in {".md", ".json", ".jsonl"}:
-            raise ValueError("transaction targets must be Markdown or covered JSON files")
+        suffix = relative.suffix.casefold()
+        if suffix == ".md":
+            if normalized.startswith("knowledge/feedback/"):
+                raise ValueError("feedback candidates must use JSON")
+        elif suffix == ".json":
+            if _FEEDBACK_JSON_RE.fullmatch(normalized) is None:
+                raise ValueError("JSON targets must be feedback candidates")
+        elif suffix == ".jsonl":
+            if _BLACKBOARD_JSONL_RE.fullmatch(normalized) is None:
+                raise ValueError("JSONL targets must be project blackboard streams")
+        else:
+            raise ValueError("transaction targets must use an approved file type")
         target = self.vault.joinpath(*relative.parts)
         current = self.vault
         for part in relative.parts:

@@ -299,11 +299,11 @@ non-blank line MUST be the tier token.
     return text.strip()
 
 
-def append_daily(day: str, block: str) -> Path:
+def append_daily(day: str, block: str, operation_id: str | None = None) -> Path:
     from daily_log_append import locked_append
 
     out = DAILY_DIR / f"{day}.md"
-    locked_append(out, block)
+    locked_append(out, block, operation_id=operation_id)
     return out
 
 
@@ -455,7 +455,10 @@ def _run_flush(args: argparse.Namespace) -> int:
     def _mutate(state: dict) -> None:
         if should_skip(state, args.session_id, args.event):
             return
-        daily_path = append_daily(day, block)
+        operation_id = (
+            f"flush:{args.source_event_id}" if args.source_event_id else None
+        )
+        daily_path = append_daily(day, block, operation_id=operation_id)
         record_flush(state, args.session_id, args.event)
         state.setdefault("flush_tier_counts", {})
         state["flush_tier_counts"][tier] = int(state["flush_tier_counts"].get(tier, 0)) + 1
