@@ -26,6 +26,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   plugins, and wrappers normalize host events that MCP cannot observe.
 - **Automatic health** — SessionStart injects only degraded/error findings;
   healthy checks remain quiet and repairs require explicit opt-in.
+- **Fenced recovery hardening** — fail-closed runtime deletion checks, bounded
+  no-follow SessionStart recovery, background maintenance heartbeats, shared
+  deadlines, safe operational SQLite opens, and protocol-visible MCP failures.
 - **Local retrieval architecture** — SQLite FTS5 BM25 with optional local
   vectors/LanceDB, graph neighbors, and reranking. Removed active QMD wiring.
 - **Obsidian viewer-only integration** — removed the bundled ingestion template;
@@ -41,7 +44,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - **SessionStart impact advisory** — stale wiki pages from code changes.
 - **MCP config in install scripts** — Claude Code + OpenCode auto-config.
 - **Optional extras** — `hybrid`, `code-graph`, `mcp-server`, `reranker`, `full`.
-- **1597 tests**.
+- **1635 tests**.
 
 ## [3.4.0] — 2026-07-11
 

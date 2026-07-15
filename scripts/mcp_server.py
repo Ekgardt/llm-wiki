@@ -34,6 +34,7 @@ Tools (task-shaped, not entity-shaped — see repowise design):
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path, PureWindowsPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -430,9 +431,19 @@ def _operator_result(
     states: list[str] | None = None,
     codes: list[str] | None = None,
     counts: dict[str, int] | None = None,
+    overall_status: str | None = None,
 ) -> dict:
+    state_values = set(states or [])
+    overall_status = overall_status or (
+        "error"
+        if "error" in state_values
+        else "degraded"
+        if "degraded" in state_values
+        else "ok"
+    )
     return {
         "action": action,
+        "overall_status": overall_status,
         "ids": (ids or [])[:100],
         "counts": counts or {"items": len(ids or [])},
         "states": sorted(set(states or [])),
@@ -457,7 +468,9 @@ def _doctor(
         "transaction-undo",
     }
     if action in mutations and repair is not True:
-        return _operator_result(action, states=["error"], codes=["repair_required"])
+        return _operator_result(
+            action, states=["error"], codes=["repair_required"], overall_status="error"
+        )
     try:
         if action == "status":
             from doctor import run_doctor
@@ -472,17 +485,19 @@ def _doctor(
                 states=[str(report["overall_status"])],
                 codes=codes,
                 counts={key: int(value) for key, value in report["counts"].items()},
+                overall_status=str(report["overall_status"]),
             )
         if action in {"queue-inspect", "queue-dead-list"}:
-            import sqlite3
+            from reliable_memory import open_readonly_operational_db
 
             path = STATE_ROOT / "run" / "queue.sqlite3"
             if not path.is_file():
                 return _operator_result(action, codes=["queue_missing"])
-            connection = sqlite3.connect(
-                f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=0
+            connection = open_readonly_operational_db(
+                path,
+                STATE_ROOT,
+                max_bytes=256 * 1024 * 1024,
             )
-            connection.row_factory = sqlite3.Row
             try:
                 if action == "queue-inspect":
                     row = connection.execute(
@@ -528,7 +543,10 @@ def _doctor(
 
             coordinator = MarkdownCoordinator(ROOT, STATE_ROOT)
             if action == "transaction-recover":
-                records = coordinator.recover()[:limit]
+                records = coordinator.recover(
+                    max_transactions=limit,
+                    deadline=time.monotonic() + 5.0,
+                )
             else:
                 prepared = coordinator.undo(str(target_id))
                 records = [coordinator.apply(prepared.id)]
@@ -564,8 +582,12 @@ def _doctor(
             "TimeoutError": "owner_busy",
             "MigrationBusy": "owner_busy",
         }.get(type(error).__name__, "operation_failed")
-        return _operator_result(action, states=["error"], codes=[code])
-    return _operator_result(action, states=["error"], codes=["unknown_action"])
+        return _operator_result(
+            action, states=["error"], codes=[code], overall_status="error"
+        )
+    return _operator_result(
+        action, states=["error"], codes=["unknown_action"], overall_status="error"
+    )
 
 
 def _validated_code_directory(directory: str) -> tuple[Path | None, str | None]:
@@ -867,6 +889,28 @@ def _quality_for(
         overall = data.get("overall_status") if isinstance(data, dict) else None
         if overall == "ok":
             return {"coverage": 0.9, "confidence": 0.85}
+        if overall == "error":
+            codes = data.get("codes", []) if isinstance(data, dict) else []
+            return {
+                "coverage": 0.2,
+                "confidence": 0.3,
+                "partial": True,
+                "warnings": [
+                    "Doctor operator failed"
+                    + (f": {', '.join(str(code) for code in codes[:3])}" if codes else ".")
+                ],
+            }
+        if overall == "degraded":
+            codes = data.get("codes", []) if isinstance(data, dict) else []
+            return {
+                "coverage": 0.7,
+                "confidence": 0.7,
+                "partial": True,
+                "warnings": [
+                    "Doctor status is degraded"
+                    + (f": {', '.join(str(code) for code in codes[:3])}" if codes else ".")
+                ],
+            }
         from doctor import degraded_summary
 
         warning = degraded_summary(data) or "Doctor health is unknown."
@@ -1090,7 +1134,11 @@ def _format_tool_result(result: str):
                 for check in data.get("checks", [])
             )
         )
-        is_error = isinstance(data, dict) and ("error" in data or repair_failed)
+        is_error = isinstance(data, dict) and (
+            "error" in data
+            or data.get("overall_status") == "error"
+            or repair_failed
+        )
         return CallToolResult(
             content=text_content,
             structuredContent=structured,

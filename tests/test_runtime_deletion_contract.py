@@ -115,3 +115,113 @@ def test_installers_and_doctor_never_remove_run_source_contract():
     ]
     forbidden = ("rm -rf $STATE_ROOT/run", "Remove-Item $STATE_ROOT\\run", "rmtree(state_root / \"run\")")
     assert all(token not in source for source in sources for token in forbidden)
+
+
+def test_deletion_blocks_every_legacy_and_retained_queue_artifact(tmp_path):
+    import doctor
+
+    state_root = tmp_path / "state"
+    run = state_root / "run"
+    legacy = run / "queue"
+    results = run / "queue-results"
+    quarantine = run / "queue-quarantine"
+    for directory in (legacy, results, quarantine):
+        directory.mkdir(parents=True, exist_ok=True)
+    (legacy / "pending.json").write_text("{}", encoding="utf-8")
+    (legacy / "leased.processing").write_text("broken", encoding="utf-8")
+    (results / "retained.tmp").write_text("result", encoding="utf-8")
+    (quarantine / "bad.json").write_text("{}", encoding="utf-8")
+
+    result = doctor._run_deletion_check(
+        state_root, datetime.now(timezone.utc), deadline=float("inf")
+    )
+
+    assert {item["code"] for item in result["blockers"]} >= {
+        "legacy_queue_retained",
+        "legacy_queue_malformed",
+        "queue_result_retained",
+        "queue_quarantine_retained",
+    }
+
+
+def test_deletion_blocks_source_state_and_any_partial_database_error(
+    tmp_path, monkeypatch
+):
+    import doctor
+
+    state_root = tmp_path / "state"
+    path = state_root / "run/queue.sqlite3"
+    path.parent.mkdir(parents=True)
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE tasks(id TEXT PRIMARY KEY,state TEXT);
+            INSERT INTO tasks VALUES('task','ready');
+            CREATE TABLE source_fences(daily_id TEXT);
+            INSERT INTO source_fences VALUES('2026-01-01');
+            CREATE TABLE source_failures(logical_path TEXT);
+            INSERT INTO source_failures VALUES('knowledge/daily/2026-01-01.md');
+            """
+        )
+    real = doctor._readonly_database
+
+    class BrokenAfterRows:
+        def __enter__(self):
+            self.database = real(path, state_root, max_bytes=doctor.MAX_OPERATIONAL_DB_BYTES)
+            return self
+
+        def __exit__(self, *args):
+            self.database.close()
+
+        def execute(self, sql, parameters=()):
+            if "source_failures" in sql:
+                raise sqlite3.DatabaseError("corrupt tail")
+            return self.database.execute(sql, parameters)
+
+    monkeypatch.setattr(doctor, "_readonly_database", lambda *args, **kwargs: BrokenAfterRows())
+
+    queue = doctor._queue_v2_check(
+        state_root, datetime.now(timezone.utc), float("inf")
+    )
+    deletion = doctor._run_deletion_check(
+        state_root,
+        datetime.now(timezone.utc),
+        deadline=float("inf"),
+        collected={"queue": queue},
+    )
+
+    assert queue["details"]["read_error"] is True
+    assert "queue_state_unreadable" in {
+        item["code"] for item in deletion["blockers"]
+    }
+
+
+def test_deletion_reuses_collected_checks_without_rescanning(tmp_path, monkeypatch):
+    import doctor
+
+    transaction = {
+        "id": "transactions",
+        "status": "ok",
+        "details": {"deletion_codes": []},
+    }
+    queue = {"id": "queue", "status": "ok", "details": {"deletion_codes": []}}
+    archive = {"id": "archives", "status": "ok", "details": {"deletion_codes": []}}
+    monkeypatch.setattr(
+        doctor,
+        "_transaction_check",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("rescanned")),
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_queue_check",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("rescanned")),
+    )
+
+    result = doctor._run_deletion_check(
+        tmp_path,
+        datetime.now(timezone.utc),
+        deadline=float("inf"),
+        collected={"transactions": transaction, "queue": queue, "archives": archive},
+    )
+
+    assert result == {"allowed": True, "blockers": []}

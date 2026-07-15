@@ -1415,86 +1415,120 @@ class MarkdownCoordinator:
             self._require_operation_state(inverse, row["before_hash"], "restored state")
 
     def recover(
-        self, *, writer_wait_seconds: float | None = None
+        self,
+        *,
+        writer_wait_seconds: float | None = None,
+        max_transactions: int | None = None,
+        deadline: float = float("inf"),
+        cancelled: Callable[[], bool] | None = None,
     ) -> list[TransactionRecord]:
         """Converge every incomplete transaction without overwriting unknown bytes."""
+        if max_transactions is not None and (
+            isinstance(max_transactions, bool)
+            or not isinstance(max_transactions, int)
+            or max_transactions < 0
+        ):
+            raise ValueError("max_transactions must be a non-negative integer or None")
+        if max_transactions == 0 or self._recovery_stopped(deadline, cancelled):
+            return []
         recovered: list[TransactionRecord] = []
         with self.writer_gate(wait_seconds=writer_wait_seconds):
+            if self._recovery_stopped(deadline, cancelled):
+                return []
+            query = (
+                'SELECT id, state, owner_pid FROM "transaction" '
+                "WHERE state IN ('preparing', 'prepared', 'applying') "
+                "ORDER BY created_at, id"
+            )
+            parameters: tuple[object, ...] = ()
+            if max_transactions is not None:
+                query += " LIMIT ?"
+                parameters = (max_transactions,)
             with self._connect() as database:
                 rows = [
                     (row["id"], row["state"], row["owner_pid"])
-                    for row in database.execute(
-                        'SELECT id, state, owner_pid FROM "transaction" '
-                        "WHERE state IN ('preparing', 'prepared', 'applying') "
-                        "ORDER BY created_at, id"
-                    )
+                    for row in database.execute(query, parameters)
                 ]
-            for transaction_id, selected_state, owner_pid in rows:
-                if (
-                    selected_state == "preparing"
-                    and owner_pid is not None
-                    and _pid_alive(owner_pid)
-                ):
-                    continue
-                record = self._record(transaction_id)
-                if record.state == "preparing":
-                    promotion = self._promote_preparing(record)
-                    if promotion == "invalid":
-                        self._set_transaction_state(transaction_id, "discarded")
-                        self._remove_artifacts(self.transaction_root / transaction_id)
-                        recovered.append(self._record(transaction_id))
-                        continue
-                    if promotion == "quarantined":
-                        recovered.append(self._record(transaction_id))
+            self._local.recovery_deadline = deadline
+            self._local.recovery_cancelled = cancelled
+            try:
+                for transaction_id, selected_state, owner_pid in rows:
+                    if self._recovery_stopped(deadline, cancelled):
+                        break
+                    if (
+                        selected_state == "preparing"
+                        and owner_pid is not None
+                        and _pid_alive(owner_pid)
+                    ):
                         continue
                     record = self._record(transaction_id)
-                try:
-                    recovered.append(self._apply_locked(transaction_id))
-                except TransactionFailure as exc:
-                    if exc.code == "precondition_failed":
-                        self._rollback_for_quarantine(transaction_id, exc.code)
-                    else:
-                        self._set_transaction_state(
-                            transaction_id, exc.state, error_code=exc.code
-                        )
-                    recovered.append(self._record(transaction_id))
-                except (FileNotFoundError, RuntimeError, ValueError) as exc:
-                    message = str(exc)
-                    if _is_target_boundary_error(exc):
-                        self._set_transaction_state(
-                            transaction_id,
-                            "quarantined",
-                            error_code="parent_identity_changed",
-                        )
+                    if record.state == "preparing":
+                        promotion = self._promote_preparing(record)
+                        if promotion == "invalid":
+                            self._set_transaction_state(transaction_id, "discarded")
+                            self._remove_artifacts(self.transaction_root / transaction_id)
+                            recovered.append(self._record(transaction_id))
+                            continue
+                        if promotion == "quarantined":
+                            recovered.append(self._record(transaction_id))
+                            continue
+                        record = self._record(transaction_id)
+                    try:
+                        recovered.append(self._apply_locked(transaction_id))
+                    except TransactionFailure as exc:
+                        if exc.code == "precondition_failed":
+                            self._rollback_for_quarantine(transaction_id, exc.code)
+                        else:
+                            self._set_transaction_state(
+                                transaction_id, exc.state, error_code=exc.code
+                            )
                         recovered.append(self._record(transaction_id))
-                    elif "after-image is corrupt" in message or "plan hash mismatch" in message:
-                        recovered.append(self._recover_corrupt_after_image(transaction_id))
-                    elif "before state mismatch" in message:
-                        rows = self._operation_rows(transaction_id)
-                        create_conflict = any(
-                            row["kind"] == "create"
-                            and self._operation_hash(row) != row["before_hash"]
-                            for row in rows
-                        )
-                        code = (
-                            "before_hash_mismatch"
-                            if create_conflict
-                            else "unknown_target_bytes"
-                        )
-                        self._set_transaction_state(
-                            transaction_id, "conflicted", error_code=code
-                        )
-                        recovered.append(self._record(transaction_id))
-                    elif "after state mismatch" in message:
-                        self._set_transaction_state(
-                            transaction_id,
-                            "conflicted",
-                            error_code="unknown_target_bytes",
-                        )
-                        recovered.append(self._record(transaction_id))
-                    else:
-                        raise
+                    except (FileNotFoundError, RuntimeError, ValueError) as exc:
+                        message = str(exc)
+                        if _is_target_boundary_error(exc):
+                            self._set_transaction_state(
+                                transaction_id,
+                                "quarantined",
+                                error_code="parent_identity_changed",
+                            )
+                            recovered.append(self._record(transaction_id))
+                        elif "after-image is corrupt" in message or "plan hash mismatch" in message:
+                            recovered.append(self._recover_corrupt_after_image(transaction_id))
+                        elif "before state mismatch" in message:
+                            operation_rows = self._operation_rows(transaction_id)
+                            create_conflict = any(
+                                row["kind"] == "create"
+                                and self._operation_hash(row) != row["before_hash"]
+                                for row in operation_rows
+                            )
+                            code = (
+                                "before_hash_mismatch"
+                                if create_conflict
+                                else "unknown_target_bytes"
+                            )
+                            self._set_transaction_state(
+                                transaction_id, "conflicted", error_code=code
+                            )
+                            recovered.append(self._record(transaction_id))
+                        elif "after state mismatch" in message:
+                            self._set_transaction_state(
+                                transaction_id,
+                                "conflicted",
+                                error_code="unknown_target_bytes",
+                            )
+                            recovered.append(self._record(transaction_id))
+                        else:
+                            raise
+            finally:
+                self._local.recovery_deadline = None
+                self._local.recovery_cancelled = None
         return recovered
+
+    @staticmethod
+    def _recovery_stopped(
+        deadline: float, cancelled: Callable[[], bool] | None
+    ) -> bool:
+        return time.monotonic() >= deadline or bool(cancelled and cancelled())
 
     def _promote_preparing(self, record: TransactionRecord) -> str:
         artifact_root = self.transaction_root / record.id
@@ -2896,6 +2930,10 @@ class MarkdownCoordinator:
 
     def _before_target_mutation(self, target: Path) -> None:
         """Failure-injection boundary after parent binding and before mutation."""
+        deadline = getattr(self._local, "recovery_deadline", None)
+        cancelled = getattr(self._local, "recovery_cancelled", None)
+        if deadline is not None and self._recovery_stopped(deadline, cancelled):
+            raise TimeoutError("transaction recovery deadline or cancellation reached")
 
     def _write_new_file_at(self, parent_descriptor: int, name: str, content: bytes) -> None:
         flags = (

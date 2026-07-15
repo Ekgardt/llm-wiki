@@ -331,7 +331,7 @@ def test_repair_creates_runtime_and_is_idempotent(tmp_path, monkeypatch):
     state_root = tmp_path / "new-state"
     rebuilt = []
 
-    def rebuild(root, state):
+    def rebuild(root, state, **kwargs):
         rebuilt.append(state)
         _create_index(state / "cache" / "index.sqlite")
 
@@ -371,6 +371,53 @@ def test_maintenance_owner_is_exclusive_heartbeated_released_and_fenced(tmp_path
     second_coordinator, second_lease = second
     assert second_lease["epoch"] == lease["epoch"] + 1
     doctor._release_maintenance_owner(second_coordinator, second_lease)
+
+
+def test_live_pid_prevents_expired_maintenance_owner_reclaim(tmp_path, monkeypatch):
+    import doctor
+
+    root, state_root, _ = _build_root(tmp_path)
+    now = datetime.now(timezone.utc)
+    first = doctor._acquire_maintenance_owner(root, state_root, now)
+    assert first is not None
+    coordinator, lease = first
+    with coordinator._connect() as database:
+        database.execute(
+            "UPDATE maintenance_owners SET expires_at=? WHERE owner_name='doctor'",
+            ((now - timedelta(minutes=1)).isoformat(),),
+        )
+        database.commit()
+    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: pid == os.getpid())
+
+    assert doctor._acquire_maintenance_owner(root, state_root, now) is None
+    doctor._release_maintenance_owner(coordinator, lease)
+
+
+def test_maintenance_heartbeat_runs_during_long_operation(tmp_path, monkeypatch):
+    import doctor
+
+    root, state_root, _ = _build_root(tmp_path)
+    acquired = doctor._acquire_maintenance_owner(
+        root, state_root, datetime.now(timezone.utc)
+    )
+    assert acquired is not None
+    coordinator, lease = acquired
+    beats = []
+    real = doctor._heartbeat_maintenance_owner
+
+    def heartbeat(*args, **kwargs):
+        beats.append(time.monotonic())
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(doctor, "MAINTENANCE_HEARTBEAT_SECONDS", 0.01)
+    monkeypatch.setattr(doctor, "_heartbeat_maintenance_owner", heartbeat)
+
+    with doctor._MaintenanceHeartbeat(
+        coordinator, lease, deadline=time.monotonic() + 1
+    ) as guard:
+        guard.run(lambda: time.sleep(0.05))
+
+    assert len(beats) >= 2
 
 
 def test_ownerless_stale_lease_is_degraded_and_not_repaired(tmp_path):
@@ -529,7 +576,7 @@ def test_failed_index_repair_is_attributed_only_to_index(tmp_path, monkeypatch):
     monkeypatch.setattr(
         doctor,
         "_rebuild_index",
-        lambda root, state: (_ for _ in ()).throw(RuntimeError("failed")),
+        lambda root, state, **kwargs: (_ for _ in ()).throw(RuntimeError("failed")),
     )
 
     report = doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
@@ -549,7 +596,7 @@ def test_index_repair_that_produces_no_index_is_reported_as_index_error(
     import doctor
 
     root, state_root, home = _build_root(tmp_path)
-    monkeypatch.setattr(doctor, "_rebuild_index", lambda root, state: None)
+    monkeypatch.setattr(doctor, "_rebuild_index", lambda root, state, **kwargs: None)
 
     report = doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
     index = _check(report, "index")
@@ -704,7 +751,7 @@ def test_repair_does_not_touch_knowledge_config_network_or_subprocess(
     def reject_external(*args, **kwargs):
         raise AssertionError("repair attempted an external operation")
 
-    def local_rebuild(root_path, state_path):
+    def local_rebuild(root_path, state_path, **kwargs):
         _create_index(state_path / "cache" / "index.sqlite")
 
     monkeypatch.setattr(doctor, "_rebuild_index", local_rebuild)
@@ -938,7 +985,7 @@ def test_dead_index_rebuild_lock_is_reclaimed(tmp_path, monkeypatch):
     monkeypatch.setattr(
         doctor,
         "_rebuild_index",
-        lambda root, state: _create_index(state / "cache" / "index.sqlite"),
+        lambda root, state, **kwargs: _create_index(state / "cache" / "index.sqlite"),
     )
 
     report = doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)

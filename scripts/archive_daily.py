@@ -9,6 +9,7 @@ import re
 import sqlite3
 import stat
 import sys
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -669,8 +670,21 @@ class DailyArchiver:
         validate_bag(build, coordinator=self.coordinator, vault=self.vault)
         return intent
 
-    def _recover_hidden_builds(self) -> None:
+    @staticmethod
+    def _recovery_stopped(
+        deadline: float, cancelled: Callable[[], bool] | None
+    ) -> bool:
+        return time.monotonic() >= deadline or bool(cancelled and cancelled())
+
+    def _recover_hidden_builds(
+        self,
+        *,
+        deadline: float = float("inf"),
+        cancelled: Callable[[], bool] | None = None,
+    ) -> None:
         for build in self._archive_paths(hidden=True):
+            if self._recovery_stopped(deadline, cancelled):
+                raise TimeoutError("archive recovery cancelled or deadline reached")
             try:
                 self._bounded_tree(build)
             except (OSError, PermissionError, ValueError) as exc:
@@ -813,15 +827,19 @@ class DailyArchiver:
         *,
         hot_days: int = DEFAULT_HOT_DAYS,
         transaction_retention_days: int = DEFAULT_TRANSACTION_RETENTION_DAYS,
+        deadline: float = float("inf"),
+        cancelled: Callable[[], bool] | None = None,
     ) -> list[ArchiveReceipt]:
         recovered: list[ArchiveReceipt] = []
         if not self.archive_root.exists():
             return recovered
         _regular_directory(self.archive_root, label="daily archive root")
         with self.coordinator.writer_gate(wait_seconds=ARCHIVE_WRITER_WAIT_SECONDS):
-            self._recover_hidden_builds()
+            self._recover_hidden_builds(deadline=deadline, cancelled=cancelled)
             grouped: dict[tuple[str, str], list[Path]] = {}
             for path in self._archive_paths(hidden=False):
+                if self._recovery_stopped(deadline, cancelled):
+                    raise TimeoutError("archive recovery cancelled or deadline reached")
                 bag = validate_bag(
                     path, coordinator=self.coordinator, vault=self.vault
                 )
@@ -829,6 +847,8 @@ class DailyArchiver:
                 digest = str(bag.manifest["source_hash"])
                 grouped.setdefault((daily_id, digest), []).append(path)
             for (daily_id, digest), paths in sorted(grouped.items()):
+                if self._recovery_stopped(deadline, cancelled):
+                    raise TimeoutError("archive recovery cancelled or deadline reached")
                 flat = self.daily_root / f"{daily_id}.md"
                 if not flat.exists():
                     continue
@@ -855,13 +875,20 @@ class DailyArchiver:
                         recovered.extend(
                             (ArchiveReceipt(daily_id, digest, path, "quarantined"),)
                         )
-            self.rebuild_index()
+            self.rebuild_index(deadline=deadline, cancelled=cancelled)
         return recovered
 
-    def rebuild_index(self) -> Path:
+    def rebuild_index(
+        self,
+        *,
+        deadline: float = float("inf"),
+        cancelled: Callable[[], bool] | None = None,
+    ) -> Path:
         self._ensure_archive_root()
         bags = []
         for path in self._archive_paths(hidden=False):
+            if self._recovery_stopped(deadline, cancelled):
+                raise TimeoutError("archive index rebuild cancelled or deadline reached")
             bag = validate_bag(path, coordinator=self.coordinator, vault=self.vault)
             bags.append(
                 {

@@ -666,12 +666,17 @@ class ClaimIndex:
     def rebuild(
         self,
         sources: Sequence[Path] | Callable[[], Sequence[Path]] | None = None,
+        *,
+        deadline: float = float("inf"),
+        cancelled: Callable[[], bool] | None = None,
     ) -> None:
+        if time.monotonic() >= deadline or bool(cancelled and cancelled()):
+            raise TimeoutError("claim rebuild cancelled or deadline reached")
         validate_state_root(self.path.parent)
         _restrict_owner_only(self.path.parent, 0o700)
         with _exclusive_file_lock(self.lock_path):
             pages = self._rebuild_pages(sources)
-            self._rebuild_locked(pages)
+            self._rebuild_locked(pages, deadline=deadline, cancelled=cancelled)
 
     def _rebuild_pages(
         self,
@@ -711,11 +716,19 @@ class ClaimIndex:
             raise TypeError("claim rebuild provider must return Path values")
         return sorted(pages)
 
-    def _rebuild_locked(self, pages: Sequence[Path]) -> None:
+    def _rebuild_locked(
+        self,
+        pages: Sequence[Path],
+        *,
+        deadline: float = float("inf"),
+        cancelled: Callable[[], bool] | None = None,
+    ) -> None:
         rows: list[tuple[object, ...]] = []
         diagnostics: list[tuple[str, str, str]] = []
         seen_pages: set[str] = set()
         for page in pages:
+            if time.monotonic() >= deadline or bool(cancelled and cancelled()):
+                raise TimeoutError("claim rebuild cancelled or deadline reached")
             relative, content = self._page_bytes(Path(page))
             if relative in seen_pages:
                 raise ValueError("claim index page list contains duplicates")
@@ -764,6 +777,8 @@ class ClaimIndex:
                     )
                 )
         with closing(self._connect()) as database:
+            if time.monotonic() >= deadline or bool(cancelled and cancelled()):
+                raise TimeoutError("claim rebuild cancelled or deadline reached")
             database.execute("BEGIN IMMEDIATE")
             try:
                 if self._schema_compatible(database):

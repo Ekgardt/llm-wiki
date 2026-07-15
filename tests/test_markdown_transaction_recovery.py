@@ -1237,6 +1237,49 @@ def test_concurrent_recovery_is_safe(vault: Path, state_root: Path):
     assert (vault / "knowledge/notes/new.md").read_bytes() == b"new"
 
 
+def test_recovery_honors_transaction_limit_and_deadline(vault: Path, state_root: Path):
+    coordinator = MarkdownCoordinator(vault, state_root)
+    transactions = [
+        coordinator.prepare(
+            [MarkdownChange.create(f"knowledge/notes/{number}.md", b"new")],
+            operation_id=f"bounded-recovery-{number}",
+        )
+        for number in range(2)
+    ]
+
+    expired = coordinator.recover(max_transactions=1, deadline=time.monotonic() - 1)
+    recovered = coordinator.recover(max_transactions=1, deadline=time.monotonic() + 5)
+
+    assert expired == []
+    assert len(recovered) == 1
+    assert recovered[0].id in {item.id for item in transactions}
+
+
+def test_recovery_honors_cancellation_before_next_transaction(
+    vault: Path, state_root: Path
+):
+    coordinator = MarkdownCoordinator(vault, state_root)
+    for number in range(2):
+        coordinator.prepare(
+            [MarkdownChange.create(f"knowledge/notes/cancel-{number}.md", b"new")],
+            operation_id=f"cancel-recovery-{number}",
+        )
+    checks = 0
+
+    def cancelled() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks > 2
+
+    recovered = coordinator.recover(
+        max_transactions=2,
+        deadline=time.monotonic() + 5,
+        cancelled=cancelled,
+    )
+
+    assert len(recovered) <= 1
+
+
 def test_two_subprocesses_recover_the_same_transaction_safely(
     vault: Path, state_root: Path, tmp_path: Path
 ):

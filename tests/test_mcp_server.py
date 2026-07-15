@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -996,6 +997,58 @@ class TestHandleToolCall:
         assert envelope["confidence"] < 1
         assert envelope["warnings"]
 
+    def test_doctor_operator_failure_is_protocol_error_with_error_quality(
+        self, monkeypatch
+    ):
+        import mcp_server
+
+        monkeypatch.setattr(
+            mcp_server,
+            "_doctor",
+            lambda **kwargs: {
+                "action": kwargs["action"],
+                "overall_status": "error",
+                "ids": [],
+                "counts": {"items": 0},
+                "states": ["error"],
+                "codes": ["operation_failed"],
+            },
+        )
+
+        envelope = json.loads(
+            self._run("doctor", {"action": "transaction-recover", "repair": True})
+        )
+
+        assert envelope["data"]["overall_status"] == "error"
+        assert envelope["partial"] is True
+        assert envelope["confidence"] < 0.5
+
+    def test_transaction_recover_passes_limit_and_deadline_not_post_slice(
+        self, monkeypatch
+    ):
+        received = []
+
+        class Coordinator:
+            def __init__(self, *args):
+                pass
+
+            def recover(self, **kwargs):
+                received.append(kwargs)
+                return []
+
+        monkeypatch.setattr("markdown_transaction.MarkdownCoordinator", Coordinator)
+
+        envelope = json.loads(
+            self._run(
+                "doctor",
+                {"action": "transaction-recover", "repair": True, "limit": 7},
+            )
+        )
+
+        assert envelope["data"]["overall_status"] == "ok"
+        assert received[0]["max_transactions"] == 7
+        assert received[0]["deadline"] > time.monotonic()
+
 
 class TestResources:
     def test_resource_definitions_degrade_when_sdk_support_is_unavailable(self, monkeypatch):
@@ -1193,7 +1246,7 @@ class TestCallbackCompatibility:
                         }
                     ],
                 },
-                False,
+                True,
             ),
         ],
     )
@@ -1253,6 +1306,26 @@ class TestCallbackCompatibility:
         assert result.content[0].text == text
         assert result.structuredContent == json.loads(text)
         assert result.isError is True
+
+    def test_call_tool_result_marks_operator_overall_error(self, monkeypatch):
+        import mcp_server
+
+        class FakeTextContent:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+
+        class FakeCallToolResult:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+
+        monkeypatch.setattr(mcp_server, "TextContent", FakeTextContent)
+        monkeypatch.setattr(mcp_server, "CallToolResult", FakeCallToolResult)
+        monkeypatch.setattr(mcp_server, "MCP_CALL_TOOL_RESULT_AVAILABLE", True)
+        text = json.dumps(
+            {"data": {"overall_status": "error", "codes": ["operation_failed"]}}
+        )
+
+        assert mcp_server._format_tool_result(text).isError is True
 
     def test_call_tool_result_marks_success_as_non_error(self, monkeypatch):
         import mcp_server

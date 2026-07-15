@@ -21,6 +21,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -39,6 +40,7 @@ from memory_state import (  # noqa: E402
     spawn_detached,
     update_state,
 )
+from reliable_memory import validate_runtime_file  # noqa: E402
 
 MEMORY_INDEX = ROOT / "knowledge" / "index.md"
 MEMORY_LOG = ROOT / "knowledge" / "log.md"
@@ -57,6 +59,8 @@ DAILY_EXCERPT_LINES = 6
 DAILY_LINE_MAX = 160
 HOOK_STATE_LOCK_TIMEOUT = 0.1
 RECOVERY_LIMIT_SECONDS = 0.1
+RECOVERY_MAX_TRANSACTIONS = 4
+MAX_TRANSACTION_DATABASE_BYTES = 64 * 1024 * 1024
 
 
 def _claim_nightly_catchup(today: str | None = None, now: str | None = None) -> bool:
@@ -551,14 +555,26 @@ def health_block() -> str:
 
 def _recover_transactions() -> None:
     """Best-effort bounded recovery before any session context is read."""
+    deadline = time.monotonic() + RECOVERY_LIMIT_SECONDS
     database = STATE_ROOT / "run" / "markdown-transactions.sqlite3"
-    if not database.is_file():
+    try:
+        validate_runtime_file(
+            database,
+            STATE_ROOT,
+            max_bytes=MAX_TRANSACTION_DATABASE_BYTES,
+            owner_only=True,
+        )
+    except (OSError, PermissionError, ValueError):
+        return
+    if time.monotonic() >= deadline:
         return
     try:
         from markdown_transaction import MarkdownCoordinator
 
         MarkdownCoordinator(ROOT, STATE_ROOT).recover(
-            writer_wait_seconds=RECOVERY_LIMIT_SECONDS
+            writer_wait_seconds=0,
+            max_transactions=RECOVERY_MAX_TRANSACTIONS,
+            deadline=deadline,
         )
     except Exception:  # noqa: BLE001 - SessionStart must remain available
         pass

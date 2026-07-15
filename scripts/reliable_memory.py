@@ -298,8 +298,31 @@ def open_operational_db(path: Path, *, busy_ms: int) -> sqlite3.Connection:
         raise ValueError("busy_ms must be non-negative")
     path = Path(path)
     validate_state_root(path.parent)
+    expected: os.stat_result | None = None
+    try:
+        descriptor = os.open(
+            path,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+    except FileExistsError:
+        expected = validate_runtime_file(
+            path,
+            path.parent,
+            max_bytes=1 << 50,
+        )
+    else:
+        os.close(descriptor)
+        expected = path.stat(follow_symlinks=False)
     connection = sqlite3.connect(path, timeout=busy_ms / 1_000)
     try:
+        current = path.stat(follow_symlinks=False)
+        if expected is None or not os.path.samestat(expected, current):
+            raise PermissionError("operational database identity changed while opening")
         connection.row_factory = sqlite3.Row
         connection.execute(f"PRAGMA busy_timeout={busy_ms:d}")
         mode = connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
@@ -312,6 +335,108 @@ def open_operational_db(path: Path, *, busy_ms: int) -> sqlite3.Connection:
     except Exception:
         connection.close()
         raise
+
+
+def validate_runtime_file(
+    path: Path,
+    state_root: Path,
+    *,
+    max_bytes: int,
+    owner_only: bool = False,
+) -> os.stat_result:
+    """Validate one bounded regular runtime file without following links."""
+    if max_bytes < 0:
+        raise ValueError("max_bytes must be non-negative")
+    path = Path(path)
+    root = Path(state_root).resolve(strict=True)
+    try:
+        path.parent.resolve(strict=True).relative_to(root)
+        metadata = path.lstat()
+    except (OSError, ValueError) as exc:
+        raise PermissionError("runtime file is outside the configured state root") from exc
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or _windows_reparse_point(path)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_size > max_bytes
+    ):
+        raise PermissionError("runtime file must be a bounded regular file")
+    if owner_only:
+        if os.name == "nt":
+            from memory_queue import _is_owner_only
+
+            if not _is_owner_only(path):
+                raise PermissionError("runtime file must be owner-only")
+        else:
+            mode = stat.S_IMODE(metadata.st_mode)
+            if mode & 0o077 or mode & 0o600 != 0o600:
+                raise PermissionError("runtime file must be owner-only")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(metadata, opened):
+            raise PermissionError("runtime file identity changed during validation")
+    finally:
+        os.close(descriptor)
+    return metadata
+
+
+def open_readonly_operational_db(
+    path: Path,
+    state_root: Path,
+    *,
+    max_bytes: int,
+    owner_only: bool = False,
+) -> sqlite3.Connection:
+    """Open a validated runtime SQLite database read-only and fail on path races."""
+    expected = validate_runtime_file(
+        path, state_root, max_bytes=max_bytes, owner_only=owner_only
+    )
+    database = sqlite3.connect(
+        f"{Path(path).resolve(strict=True).as_uri()}?mode=ro", uri=True, timeout=0
+    )
+    try:
+        current = Path(path).stat(follow_symlinks=False)
+        if not os.path.samestat(expected, current):
+            raise PermissionError("runtime database identity changed while opening")
+        database.row_factory = sqlite3.Row
+        database.execute("PRAGMA query_only=ON")
+        return database
+    except Exception:
+        database.close()
+        raise
+
+
+def read_runtime_bytes(
+    path: Path,
+    state_root: Path,
+    *,
+    max_bytes: int,
+    owner_only: bool = False,
+) -> bytes:
+    """Read stable bounded runtime bytes through a no-follow descriptor."""
+    expected = validate_runtime_file(
+        path, state_root, max_bytes=max_bytes, owner_only=owner_only
+    )
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not os.path.samestat(expected, opened):
+            raise PermissionError("runtime file identity changed before read")
+        data = os.read(descriptor, max_bytes + 1)
+        after = os.fstat(descriptor)
+        if (
+            not os.path.samestat(opened, after)
+            or (opened.st_size, opened.st_mtime_ns)
+            != (after.st_size, after.st_mtime_ns)
+            or len(data) > max_bytes
+        ):
+            raise PermissionError("runtime file changed during bounded read")
+        return data
+    finally:
+        os.close(descriptor)
 
 
 @contextlib.contextmanager

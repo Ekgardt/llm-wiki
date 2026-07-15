@@ -2426,7 +2426,17 @@ def _commit_migration_marker(
     return replace(lease, expires_at=expires_at)
 
 
-def migrate_legacy_queue(state_root: Path) -> MigrationReceipt:
+def migrate_legacy_queue(
+    state_root: Path,
+    *,
+    deadline: float = float("inf"),
+    cancelled: Callable[[], bool] | None = None,
+) -> MigrationReceipt:
+    def require_active() -> None:
+        if time.monotonic() >= deadline or bool(cancelled and cancelled()):
+            raise TimeoutError("queue migration cancelled or deadline reached")
+
+    require_active()
     run_dir, legacy_dir, _db_path, marker = _migration_paths(state_root)
     if _path_present(marker):
         _validate_migration_marker(marker)
@@ -2435,14 +2445,17 @@ def migrate_legacy_queue(state_root: Path) -> MigrationReceipt:
     owner = _acquire_queue_owner(state_root, "migration", "migration_busy")
     legacy_owner: QueueOwnerLease | None = None
     try:
+        require_active()
         if _path_present(marker):
             _validate_migration_marker(marker)
             _post_marker_legacy_conflict(state_root)
             return MigrationReceipt(0, 0, (), ())
         legacy_owner = _acquire_queue_owner(state_root, "legacy", "legacy_owner_busy")
         owner = _heartbeat_queue_owner(owner)
+        require_active()
         _prove_no_live_processing(legacy_dir)
         owner = _heartbeat_queue_owner(owner)
+        require_active()
         migration_inputs = sorted(run_dir.glob("queue-migration-*"))
         if migration_inputs and legacy_dir.exists():
             raise MigrationBusy("legacy_migration_conflict")
@@ -2457,6 +2470,7 @@ def migrate_legacy_queue(state_root: Path) -> MigrationReceipt:
         else:
             migration_input = None
         owner = _heartbeat_queue_owner(owner)
+        require_active()
         valid, malformed = (
             _scan_legacy_records(migration_input)
             if migration_input is not None
@@ -2466,12 +2480,14 @@ def migrate_legacy_queue(state_root: Path) -> MigrationReceipt:
         queue = MemoryQueue(Path(state_root)) if valid else None
         imported: list[str] = []
         for source, record in valid:
+            require_active()
             if queue is None:  # pragma: no cover - guarded by valid
                 raise AssertionError
             imported.append(_import_legacy_record(queue, record, source))
             source.unlink()
             owner = _heartbeat_queue_owner(owner)
         for source, raw in malformed:
+            require_active()
             _quarantine_legacy_record(run_dir, source, raw)
             source.unlink(missing_ok=True)
             owner = _heartbeat_queue_owner(owner)
@@ -3242,6 +3258,7 @@ def run_worker(
         [Callable[[dict], bool | DeferredResult], dict[str, Any], float],
         bool | DeferredResult,
     ] = _run_processor_child,
+    cancelled: Callable[[], bool] | None = None,
 ) -> WorkerSummary:
     """Run a short-lived worker bounded by tasks, wall time, and idle time."""
     if max_tasks < 0 or max_seconds < 0 or idle_seconds < 0:
@@ -3265,6 +3282,8 @@ def run_worker(
     owner = f"worker-{os.getpid()}-{uuid.uuid4().hex}"
     deadline = started + max_seconds
     while processed < max_tasks:
+        if cancelled and cancelled():
+            break
         now = monotonic()
         if now >= deadline:
             break

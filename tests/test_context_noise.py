@@ -300,6 +300,68 @@ def test_session_start_recovers_transactions_before_health_context(monkeypatch):
     assert events == ["recover", "context"]
 
 
+def test_session_start_recovery_rejects_symlinked_database(tmp_path, monkeypatch):
+    import session_start_context
+
+    root = tmp_path / "vault"
+    state_root = tmp_path / "state"
+    (root / "knowledge/notes").mkdir(parents=True)
+    run = state_root / "run"
+    run.mkdir(parents=True)
+    external = tmp_path / "outside.sqlite3"
+    external.write_bytes(b"outside")
+    try:
+        (run / "markdown-transactions.sqlite3").symlink_to(external)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    called = []
+    monkeypatch.setattr(session_start_context, "ROOT", root)
+    monkeypatch.setattr(session_start_context, "STATE_ROOT", state_root)
+    monkeypatch.setattr(
+        "markdown_transaction.MarkdownCoordinator.recover",
+        lambda *args, **kwargs: called.append(kwargs),
+    )
+
+    session_start_context._recover_transactions()
+
+    assert called == []
+
+
+def test_session_start_recovery_passes_hard_limit_and_deadline(tmp_path, monkeypatch):
+    import session_start_context
+
+    root = tmp_path / "vault"
+    state_root = tmp_path / "state"
+    (root / "knowledge/notes").mkdir(parents=True)
+    run = state_root / "run"
+    run.mkdir(parents=True)
+    database = run / "markdown-transactions.sqlite3"
+    database.write_bytes(b"safe")
+    received = []
+    monkeypatch.setattr(session_start_context, "ROOT", root)
+    monkeypatch.setattr(session_start_context, "STATE_ROOT", state_root)
+    monkeypatch.setattr(
+        session_start_context,
+        "validate_runtime_file",
+        lambda *args, **kwargs: True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "markdown_transaction.MarkdownCoordinator.__init__",
+        lambda self, *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "markdown_transaction.MarkdownCoordinator.recover",
+        lambda self, **kwargs: received.append(kwargs),
+    )
+
+    started = time.monotonic()
+    session_start_context._recover_transactions()
+
+    assert received[0]["max_transactions"] > 0
+    assert started < received[0]["deadline"] <= started + 0.1
+
+
 def test_session_start_health_latency_is_bounded_with_large_unsafe_queue(
     tmp_path, monkeypatch
 ):
