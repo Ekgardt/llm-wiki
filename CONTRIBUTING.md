@@ -60,6 +60,11 @@ The principles below summarize the non-negotiable invariants.
    (`cache/logs/run/`, incl. `cache/cognee/`) inside the vault but gitignored. Never put
    runtime outside the vault. Enforced by `tests/test_structure.py`.
 
+8. **Reliable local mutation.** Markdown remains authoritative. Operational SQLite
+   uses rollback-journal and `synchronous=FULL` on a local filesystem; no WAL on the
+   current runtime. Automatic writers use the transaction API, queue handlers must
+   tolerate at-least-once delivery, and `run/` deletion must honor doctor blockers.
+
 ## Test discipline
 
 - Every new script gets at least one test file
@@ -67,7 +72,7 @@ The principles below summarize the non-negotiable invariants.
 - Concurrency-sensitive code (`maybe_compile.py`, `memory_queue.py`) needs explicit race-condition tests
 - Tests must be hermetic — no dependency on a real LLM, real network, or pre-existing state beyond what conftest.py bootstraps
 - **Minimum coverage**: all scripts with ranking/scoring/archival logic MUST have dedicated tests. This includes: `search_memory.py`, `graph_neighbors.py`, `feedback_capture.py`, `archive_stale.py`, `build_guardrails.py`
-- **812 tests collected** — see `tests/` for patterns
+- **1787 tests collected** — see `tests/` for patterns
 
 ## Test commands
 
@@ -94,7 +99,8 @@ Before tagging a release or updating public marketing numbers:
     - version string (e.g. v3.4.0)
    - test count (must equal `pytest --collect-only` / live suite)
    - install URLs (`Ekgardt/llm-wiki`)
-   - architecture (three-zone / `knowledge/`)
+    - architecture (three-zone / `knowledge/`)
+    - reliable operations commands and contracts
    - benchmark headline numbers (MRR, latency) if changed
 3. **Run the i18n guard test** — `uv run pytest tests/test_readme_i18n.py -q` must pass.
 4. **CHANGELOG** — newest version at top (Keep a Changelog).

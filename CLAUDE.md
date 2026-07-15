@@ -89,6 +89,20 @@ transaction, a transaction inside the 30-day undo window, or any retained queue
 task or result, or while a project lease, writer, queue worker, or maintenance
 owner is live. Deleting eligible committed artifacts loses undo history.
 
+**Stage 2 operational contract:** Markdown remains authoritative; runtime SQLite
+is coordination/derived state, never a knowledge source. Operational databases use
+rollback-journal, `synchronous=FULL`, and no WAL on the current SQLite runtime. They
+require a local filesystem with correct locking. Network/cloud-synchronized runtime
+roots are unsupported; cloud detection is best-effort. External editors may briefly
+see a mixed tree, and hash/CAS guarantees apply only to cooperating transaction-API
+writers. Queue delivery is at least once. Archives keep 90 hot days and preserve
+logical evidence in immutable uncompressed BagIt packages. Claims with uncertain
+evidence or evaluator disagreement enter quarantine; automatic semantic supersession
+and eager backfill remain disabled. Do not delete `run/` while doctor reports a
+source failure, any 30-day undo artifact, retained work/result, or live owner. There
+is no automatic Git operation, persistent daemon, cloud service, remote queue/cache,
+exactly-once promise, or gzip archive tier.
+
 **Forbidden at vault root:** `wiki/`, `memory/`, `outputs/`, `state/`,
 `LLM-wiki-state/` (legacy sibling layout — removed). Runtime lives **inside**
 the vault under gitignored `cache/logs/run/`.
@@ -269,7 +283,7 @@ for tests/e2e.
 ## 7. Quick command reference
 
 ```bash
-uv run pytest -q                              # run the test suite (812 tests collected)
+uv run pytest -q                              # run the test suite (1787 tests collected)
 uv run ruff check scripts/ tests/             # Python static analysis
 uv run python scripts/lint_memory.py --scope all   # structural lint
 uv run python scripts/search_memory.py "query"     # hybrid search

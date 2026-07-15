@@ -10,6 +10,39 @@ One-sentence summary: Session memory captures what Claude Code and the human lea
 ## Compiled layer
 - `knowledge/notes/` stores durable pages for decisions, patterns, debugging notes, concepts, and Q&A.
 
+## Reliable write and evidence model
+- Markdown remains authoritative. Runtime SQLite is coordination and derived state,
+  never the knowledge source.
+- Every automatic Markdown mutation uses recoverable before/after-hash transactions.
+  Internal readers coordinate through the writer gate. External editors may briefly
+  see a mixed tree; CAS guarantees apply only to cooperating transaction writers.
+- Project `journal.md` is append-only and `state.md` is its deterministic projection.
+- Compile planning uses an immutable source snapshot. A source append during an LLM
+  call stays pending rather than being falsely covered by the receipt.
+- Evidence references use logical daily ID, content hash, block, and byte span. The
+  same fail-closed resolver reads either a flat daily source or a verified archive.
+- Daily archive keeps a 90-day hot set, moves eligible sources into immutable
+  uncompressed BagIt bags, and never archives source failures, uncompiled content,
+  decision evidence, or manual pins.
+- Atomic claim candidates that fail literal evidence or semantic agreement enter
+  quarantine. The contradiction benchmark gates semantic supersession; there is no
+  eager backfill or automatic semantic lifecycle mutation.
+
+## Operational boundaries
+- Operational SQLite uses rollback-journal, `synchronous=FULL`, and no WAL on the
+  current runtime. It requires a local filesystem; cloud-folder detection is
+  best-effort and cloud/network runtime roots are unsupported.
+- Queue delivery is at least once. Leases fence stale workers and operation IDs make
+  supported side effects idempotent; exactly-once external effects are not promised.
+- Default queue lease/heartbeat is 120/40 seconds, 8 attempts, retry base/cap
+  30/3600 seconds, and short-lived worker limits 20 tasks/600 seconds/2 idle seconds.
+  Transaction undo retention is 30 days. Runtime CLI flags provide explicit overrides.
+- `run/` deletion is blocked by nonterminal/conflicted/quarantined transactions,
+  source failure, the 30-day undo window, retained queue tasks/results, and any live
+  project lease, writer, queue worker, or maintenance owner.
+- There is no automatic Git operation, persistent daemon, cloud service, remote
+  queue/cache, SQLite knowledge source, gzip archive tier, or automatic purge.
+
 ## Rules
 - Not every chat detail deserves permanence.
 - Save durable decisions, lessons, repeatable commands, architectural constraints, and gotchas.

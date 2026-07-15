@@ -1,6 +1,6 @@
 # LLM Wiki
 
-[![Tests](https://img.shields.io/badge/tests-1784%20collected-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://img.shields.io/badge/tests-1787%20collected-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-4.0.0-blue.svg)](CHANGELOG.md)
@@ -101,7 +101,7 @@ LLM Wiki 为你使用的每一个 AI 编码智能体——OpenCode、Codex、Cla
 - **5 个 LLM 后端**（自动检测）：OpenCode → Codex → Claude CLI → OpenAI → Ollama
 - **跨平台**：Windows、macOS、Linux、WSL2
 - **本地且零 daemon**——安装基线包含 MCP 包；vector search 和 Cognee 仍为可选项
-- **1784 个回归测试**，CI 在 Ubuntu + Windows + macOS 上通过，Python 3.10 + 3.13
+- **1787 个回归测试**，CI 在 Ubuntu + Windows + macOS 上通过，Python 3.10 + 3.13
 - **Pre-commit 钩子**：ruff（静态分析）+ 结构 lint + gitleaks（密钥扫描）
 
 ---
@@ -134,7 +134,7 @@ irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 1. 检查前置条件（Python 3.10+、git）
 2. 如缺失则安装 `uv`（快速 Python 包管理器）
 3. 同步 locked 基线依赖（`uv sync --locked --extra mcp-server`）
-4. 运行测试套件（1784 个测试）
+4. 运行测试套件（1787 个测试）
 5. 设置 `LLM_WIKI_ROOT` 环境变量（用户级）
 6. 创建运行时目录（`cache/`、`logs/`、`run/`、`cache/cognee/`——gitignored）
 7. 注册计划维护（Unix 上 cron，Windows 上 Task Scheduler）
@@ -147,7 +147,7 @@ irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync --locked --extra mcp-server
-uv run pytest -q          # 收集 1784 个测试
+uv run pytest -q          # 收集 1787 个测试
 ```
 
 ### 验证可用
@@ -204,11 +204,33 @@ RUNTIME       cache/  logs/  run/  cache/cognee/   （gitignored，vault 内）
 
 - **CODE**——git 跟踪。流水线、测试、文档、技能、规则、集成。
 - **KNOWLEDGE**——git 跟踪（源码中仅公开示例）。完整用户数据位于已安装的 vault 中。Daily 日志和个人页面 gitignored。
-- **RUNTIME**——gitignored，按需重新生成。搜索索引、编译日志、state.json、任务队列。
+- **RUNTIME**——gitignored。搜索索引和日志可丢弃；`run/` 中的事务、队列状态和 undo 映像属于操作状态。
 
 完整设计原理（7 条公理、系统架构图、记忆分类法、搜索架构）见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
 规范结构参考（什么放在哪里、环境变量契约、禁止布局）见 [docs/STRUCTURE.md](docs/STRUCTURE.md)。
+
+---
+
+## 可靠记忆操作
+
+Markdown 仍是权威来源。Runtime SQLite 用于协调可恢复写入和排队工作，但不是知识来源。操作数据库使用 rollback-journal、`synchronous=FULL`，当前 SQLite runtime 不使用 WAL。State root 必须位于本地文件系统；网络路径会被拒绝，对云同步目录的检测为 best-effort。
+
+```bash
+uv run python scripts/doctor.py
+uv run python scripts/doctor.py --repair
+uv run python scripts/markdown_transaction.py recover
+uv run python scripts/markdown_transaction.py undo <transaction-id>
+uv run python scripts/markdown_transaction.py prune --retention-days 30
+uv run python scripts/memory_queue.py migrate
+uv run python scripts/memory_queue.py work --max-tasks 20 --max-seconds 600 --idle-seconds 2 --lease-seconds 120 --heartbeat-seconds 40 --max-attempts 8 --retry-base-seconds 30 --retry-cap-seconds 3600
+uv run python scripts/memory_queue.py redrive <task-id>
+uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --export <path>
+uv run python scripts/archive_daily.py --commit --hot-days 90
+uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contradiction-v1.json
+```
+
+队列采用至少一次投递，因此 handler 使用稳定 operation ID 保证幂等。归档把超过 90 天 hot window 且符合条件的 daily 日志移动到经过验证、未压缩的 BagIt 包，同时保留逻辑 evidence 解析。无法确定或 evaluator 有分歧的 claims 会进入 quarantine；在 frozen benchmark gate 达标之前，semantic supersession 保持禁用。恢复、保留和安全删除流程见 [docs/USER-GUIDE.md](docs/USER-GUIDE.md)。
 
 ---
 

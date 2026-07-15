@@ -148,6 +148,60 @@ For most teams and most use cases, **you should**. Those tools are mature, suppo
 - **No multi-user** — solo developer only.
 - **No per-prompt RAG** — compile-not-retrieve pattern; session-start + session-end injection suffices.
 
+## Reliable mutation architecture
+
+Markdown remains authoritative. SQLite stores coordination state, hashes, leases,
+receipts, queue metadata, and derived claim indexes; there is no SQLite knowledge source
+and no graph database as a source of truth. Automatic writes use four-phase
+recoverable transactions (`preparing`, `prepared`, `applying`, `committed`) with
+before/after images and compare-and-swap (CAS) checks. Internal readers take the
+writer gate for a coherent view. Because several fixed paths cannot be swapped as
+one portable filesystem operation, an external editor may briefly see a mixed tree.
+CAS guarantees apply to cooperating transaction-API writers; concurrent external
+edits are unsupported, best-effort detected, and quarantined rather than overwritten.
+
+The coordinator and queue use SQLite rollback-journal mode, `synchronous=FULL`,
+short `BEGIN IMMEDIATE` transactions, and bounded busy timeouts. There is no WAL
+on the current SQLite runtime. Runtime SQLite must be on a local filesystem with
+working locks. Known network paths and failed locking probes are rejected;
+cloud-synchronized folder detection is best-effort and cannot identify every
+product. A separate local `LLM_WIKI_STATE_ROOT` disk is supported because target
+replacement staging is created beside each Markdown target.
+
+Project `state.md` is a deterministic projection of append-only `journal.md`.
+Transactions persist project lease token and fencing epoch, preventing a stale
+projector from committing. Compilation snapshots exact source bytes, stores only
+validated plans in a content-addressed local cache, and emits completion receipts.
+Provider fallback has a distinct cache key; unknown provider/model identity disables
+persistent cache hits.
+
+Queue delivery is at least once, never exactly-once. Leases and acknowledgements are
+fenced; handlers use stable operation IDs for idempotent side effects. Legacy JSON
+tasks migrate once to the rollback-journal `run/queue.sqlite3`; malformed sources are
+quarantined, and migration aborts if a legacy owner cannot be excluded. Workers are
+short-lived and bounded, not a persistent daemon. Terminal purge is manual and
+export-first. A source failure, retained task/result, or live owner remains visible
+and blocks unsafe cleanup.
+
+Daily logs leave the 90-day hot set only after compile receipts, terminal operations,
+queue preflight, evidence spans, and pins validate. Archive publication is an atomic
+rename of a complete immutable BagIt directory. Bags remain uncompressed so evidence
+can be sliced directly; there is no gzip tier. Claims must pass literal evidence
+verification before contradiction evaluation. Uncertain or disputed candidates go
+to quarantine, and automatic semantic supersession remains disabled until the frozen
+benchmark demonstrates no more than 1% false supersession. There is no eager backfill
+of claim ledgers.
+
+The system performs no automatic Git staging, commit, branch, or remote operation.
+It adds no cloud service, remote queue/cache, or persistent daemon. Runtime databases
+coordinate local work only. Operational defaults are 10-second transaction and
+5-second queue busy timeouts; 30-day transaction/undo retention; 90-day archive hot
+retention; 30/10-second project lease/heartbeat; 30-second checkpoint debounce and
+20-event fallback; 120/40-second queue lease/heartbeat; 8 attempts with 30/3600-second
+retry base/cap; and worker limits of 20 tasks, 600 seconds, and 2 idle seconds.
+Explicit CLI flags override runtime retention and worker/queue policy; Stage 2 adds
+no environment variables.
+
 ## What v4.0 adds (optional, all behind `--extra` flags)
 
 - **LanceDB hybrid vectors** (`--extra hybrid`): HNSW vector search, embedded, zero-daemon.

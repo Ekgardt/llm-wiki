@@ -4,7 +4,7 @@ Small pytest-based suite covering the critical scenarios surfaced by four rounds
 
 ## Coverage
 
-The suite currently has **1784 tests**. Highlights:
+The suite currently has **1787 tests**. Highlights:
 
 | Test file | Guards against |
 |---|---|
@@ -37,6 +37,10 @@ The suite currently has **1784 tests**. Highlights:
 | `test_event_envelope.py` | Versioned lifecycle event envelope validation and redaction. |
 | `test_integration_injection.py` | Thin host adapters normalize events through `integration_adapter.py`. |
 | `test_doctor.py` | Local health checks, degraded-only summaries, time budgets, and safe idempotent repairs. |
+| `test_markdown_transaction.py` | Recoverable phases, hash/CAS conflicts, crash recovery, undo, retention, and writer-gate behavior. |
+| `test_memory_queue_cli.py` | Bounded workers, lease/retry overrides, redrive/purge contracts, and process cleanup. |
+| `test_archive_daily_bagit.py` | 90-day-hot BagIt publication, evidence/pin eligibility, duplicate recovery, and manifests. |
+| `test_claims.py` | Atomic evidence-backed claims, quarantine, and benchmark-gated lifecycle recommendations. |
 | `test_code_graph.py` | Code graph: lazy optional grammars and `.scm` extraction for 12 languages, scoped import captures, nine-language regex fallback, evidence-aware Python calls, rename-aware git co-change refinement, caller search, directory indexing. |
 | `test_memory_state_permissions.py` | Windows sharing violations retry while ACL permission failures fail fast. |
 | `test_scheduled_nightly.py` | Nightly catchup lease completion/failure state and retry release. |
@@ -64,7 +68,7 @@ pytest tests/
   - `MEMORY_LLM_PROVIDER` → `fake` (no live LLM calls)
   - a skeleton `state.json` if it doesn't exist yet
 
-No pre-configuration required. Current collection: 1784 tests.
+No pre-configuration required. Current collection: 1787 tests.
 
 All tests are self-contained and use `tmp_path` + state snapshots, so running them does not mutate the vault permanently. The compile-failure test briefly flips `state.json::last_compile_status` and restores it via fixture.
 

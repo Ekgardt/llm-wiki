@@ -1,6 +1,6 @@
 # LLM Wiki
 
-[![Tests](https://img.shields.io/badge/tests-1784%20collected-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://img.shields.io/badge/tests-1787%20collected-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-4.0.0-blue.svg)](CHANGELOG.md)
@@ -101,7 +101,7 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 - **5 LLM backends** (auto-detected): OpenCode → Codex → Claude CLI → OpenAI → Ollama
 - **Cross-platform**: Windows, macOS, Linux, WSL2
 - **Local and zero-daemon** — the installed baseline includes the MCP package; vector search and Cognee remain optional
-- **1784 regression tests**, CI green on Ubuntu + Windows + macOS, Python 3.10 + 3.13
+- **1787 regression tests**, CI green on Ubuntu + Windows + macOS, Python 3.10 + 3.13
 - **Pre-commit hooks**: ruff (static analysis) + structural lint + gitleaks (secret scanning)
 
 ---
@@ -134,7 +134,7 @@ The installer:
 1. Checks prerequisites (Python 3.10+, git)
 2. Installs `uv` (fast Python package manager) if missing
 3. Syncs locked baseline dependencies (`uv sync --locked --extra mcp-server`)
-4. Runs the test suite (1784 tests collected)
+4. Runs the test suite (1787 tests collected)
 5. Sets `LLM_WIKI_ROOT` environment variable (user scope)
 6. Creates runtime dirs (`cache/`, `logs/`, `run/`, `cache/cognee/` — gitignored)
 7. Registers scheduled maintenance (cron on Unix, Task Scheduler on Windows)
@@ -147,7 +147,7 @@ The installer:
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync --locked --extra mcp-server
-uv run pytest -q          # collects 1784 tests
+uv run pytest -q          # collects 1787 tests
 ```
 
 ### Verify it works
@@ -204,11 +204,33 @@ RUNTIME       cache/  logs/  run/  cache/cognee/   (gitignored, inside vault)
 
 - **CODE** — tracked in git. The pipeline, tests, docs, skills, rules, integrations.
 - **KNOWLEDGE** — tracked in git (public examples). Full user data lives in the installed vault. Daily logs and personal pages are gitignored.
-- **RUNTIME** — gitignored, regenerated on demand. Search indexes, compile logs, state.json, task queue.
+- **RUNTIME** — gitignored. Search indexes and logs are disposable; transactions, queue state, and undo images under `run/` are operational state.
 
 Full design rationale (7 axioms, system architecture diagram, memory taxonomy, search architecture) in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 For the canonical structure reference (what lives where, env contracts, forbidden layouts), see [docs/STRUCTURE.md](docs/STRUCTURE.md).
+
+---
+
+## Reliable memory operations
+
+Markdown remains authoritative. Runtime SQLite coordinates recoverable writes and queued work but is not a knowledge source. Operational databases use rollback-journal mode, `synchronous=FULL`, and no WAL on the current SQLite runtime. Keep the state root on a local filesystem; network paths are rejected and cloud-synchronized folder detection is best-effort.
+
+```bash
+uv run python scripts/doctor.py
+uv run python scripts/doctor.py --repair
+uv run python scripts/markdown_transaction.py recover
+uv run python scripts/markdown_transaction.py undo <transaction-id>
+uv run python scripts/markdown_transaction.py prune --retention-days 30
+uv run python scripts/memory_queue.py migrate
+uv run python scripts/memory_queue.py work --max-tasks 20 --max-seconds 600 --idle-seconds 2 --lease-seconds 120 --heartbeat-seconds 40 --max-attempts 8 --retry-base-seconds 30 --retry-cap-seconds 3600
+uv run python scripts/memory_queue.py redrive <task-id>
+uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --export <path>
+uv run python scripts/archive_daily.py --commit --hot-days 90
+uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contradiction-v1.json
+```
+
+Queue delivery is at least once, so handlers use stable operation IDs for idempotency. Archives move eligible daily logs older than the 90-day hot window into verified, uncompressed BagIt packages while preserving logical evidence resolution. Uncertain or evaluator-disputed claims are quarantined; semantic supersession stays disabled until the frozen benchmark gate is met. See [docs/USER-GUIDE.md](docs/USER-GUIDE.md) for recovery, retention, and deletion safety.
 
 ---
 

@@ -48,7 +48,7 @@ The installer detects your agents and wires them up automatically.
    git clone https://github.com/Ekgardt/llm-wiki.git
    cd llm-wiki
    uv sync --locked --extra mcp-server
-   uv run pytest -q          # verify: 812 tests collected should pass
+   uv run pytest -q          # verify: 1787 tests collected should pass
    ```
 
 2. **Set environment variables** (add to your shell profile):
@@ -63,7 +63,7 @@ The installer detects your agents and wires them up automatically.
 
 3. **Create runtime dirs** (gitignored, regenerated on demand):
    ```bash
-   mkdir -p cache logs run/queue cache/cognee
+   mkdir -p cache logs run cache/cognee
    ```
 
 4. **Wire up your agents** (see below).
@@ -118,7 +118,7 @@ SUNDAY 04:00 (scheduler)
 ```
 
 Nothing here requires your attention. If the LLM is offline, work is queued
-in `run/queue/` and drained at the next session.
+in `run/queue.sqlite3` and drained by a short-lived worker at the next session.
 
 ---
 
@@ -158,6 +158,81 @@ uv run python scripts/archive_stale.py --apply           # archive old pages by 
 uv run python scripts/lookup_mode.py                       # show direct/base/hybrid mode
 uv run python scripts/doctor.py                            # local health; --repair is explicit
 ```
+
+## Reliable operations
+
+Markdown remains authoritative; SQLite coordinates transactions, receipts,
+derived indexes, leases, and queued work. Keep `$LLM_WIKI_STATE_ROOT` on a local
+filesystem. Network filesystems are rejected. Cloud-folder detection is best-effort,
+so do not place live runtime SQLite files in a synchronized folder even if no warning
+appears. The current runtime uses rollback-journal, `synchronous=FULL`, and no WAL.
+
+### Health, recovery, undo, and retention
+
+```bash
+uv run python scripts/doctor.py
+uv run python scripts/doctor.py --repair
+uv run python scripts/markdown_transaction.py recover
+uv run python scripts/markdown_transaction.py undo <transaction-id>
+uv run python scripts/markdown_transaction.py prune --retention-days 30
+```
+
+Recovery rolls verified prepared/applying transactions forward and quarantines a
+target that matches neither its recorded before nor after hash. It never overwrites
+unknown bytes. Undo creates a new forward transaction and works only while every
+target still matches the original committed after-hash. Pruning removes expired
+transaction images; after the 30-day undo window, or after an explicit prune, that
+undo history is gone. External editors may briefly observe a mixed tree while a
+multi-file transaction applies. CAS safety is guaranteed only for cooperating
+transaction-API writers; concurrent external edits are unsupported and detected
+best-effort.
+
+### Queue migration and work
+
+```bash
+uv run python scripts/memory_queue.py migrate
+uv run python scripts/memory_queue.py work --max-tasks 20 --max-seconds 600 --idle-seconds 2 --lease-seconds 120 --heartbeat-seconds 40 --max-attempts 8 --retry-base-seconds 30 --retry-cap-seconds 3600
+uv run python scripts/memory_queue.py redrive <task-id>
+uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --export <path>
+```
+
+Run migration once to import legacy `run/queue/*.json` and `.processing` files.
+Migration aborts if it cannot exclude a live legacy owner and quarantines malformed
+source records. The queue is priority/FIFO and at least once, not exactly-once;
+handlers rely on stable operation IDs. Defaults are priority 0 in `-100..100`, a
+120-second lease with 40-second heartbeat, 8 attempts, 30/3600-second full-jitter
+retry base/cap, and worker bounds of 20 tasks, 600 seconds, or 2 idle seconds.
+`redrive` creates a linked new task without resetting dead history. `purge` requires
+a terminal cutoff and verified export path before deleting terminal rows/results.
+Dead tasks are retained indefinitely; succeeded/cancelled results default to 30 days.
+
+### Daily archive and claims
+
+```bash
+uv run python scripts/archive_daily.py --commit --hot-days 90
+uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contradiction-v1.json
+```
+
+The archive moves, never deletes, eligible daily logs older than the 90-day hot
+window. A source remains flat if its compile receipt, terminal operations, queue
+preflight, exact evidence, or pins do not validate. Published BagIt bags are immutable
+and uncompressed; logical evidence resolves from the flat file first and then a
+verified bag. There is no gzip archive tier. Claims with invalid evidence, evaluator
+disagreement, unsupported semantics, or low confidence enter
+`knowledge/inbox/claims/` quarantine. The frozen benchmark reports false
+supersession and provenance metrics; automatic semantic supersession and eager
+backfill remain disabled.
+
+### Safe runtime deletion
+
+`cache/` and `logs/` are disposable. Do not delete `run/` until `doctor` reports no
+nonterminal, conflicted, quarantined, or source failure transaction; no transaction
+inside the 30-day undo window; no retained queue task/result or legacy queue artifact;
+and no live project lease, writer, queue worker, or maintenance owner. Deleting an
+otherwise eligible `run/` loses undo history. Installers and repair commands never
+remove it automatically. The system also performs no automatic Git operation and
+provides no persistent daemon, cloud service, remote queue/cache, or SQLite knowledge
+source.
 
 ### Skills (agent-side workflows)
 
@@ -206,7 +281,7 @@ setup steps.
 
 ### "Nothing happens after install"
 - Verify env vars: `echo $LLM_WIKI_ROOT` / `echo $LLM_WIKI_STATE_ROOT`
-- Check runtime dirs exist: `cache/`, `logs/`, `run/`, `run/queue/`
+- Check runtime dirs exist: `cache/`, `logs/`, `run/`; `queue.sqlite3` is created on demand
 - Run `uv run python scripts/lookup_mode.py` — it shows vault state
 
 ### "Compile never runs"
@@ -226,8 +301,8 @@ setup steps.
 
 ### "Tests fail on fresh clone"
 - Run `uv sync --locked --extra mcp-server` first (the installed baseline includes MCP)
-- `uv run pytest -q` — should report 812 tests collected
-- If `< 812`, your checkout is stale; `git pull`
+- `uv run pytest -q` — should report 1787 tests collected
+- If `< 1787`, your checkout is stale; `git pull`
 
 ---
 
@@ -235,8 +310,8 @@ setup steps.
 
 | Path | Zone | Purpose |
 |------|------|---------|
-| `scripts/` | CODE | Pipeline + hooks + helpers (60 .py + 3 helpers) |
-| `tests/` | CODE | 42 test files, 812 tests collected |
+| `scripts/` | CODE | Pipeline + hooks + helpers |
+| `tests/` | CODE | 1787 tests collected |
 | `docs/` | CODE | This file + ARCHITECTURE + STRUCTURE + SETUP-COGNEE + EXPORTING |
 | `skills/` | CODE | 9 agent skills |
 | `rules/` | CODE | 3 file-handling policies |
@@ -244,13 +319,13 @@ setup steps.
 | `benchmark/` | CODE | Benchmark suite + report |
 | `knowledge/daily/` | KNOWLEDGE | Append-only session logs (private) |
 | `knowledge/notes/` | KNOWLEDGE | Durable OKF pages |
-| `knowledge/projects/<slug>/` | KNOWLEDGE | Per-project state.md |
+| `knowledge/projects/<slug>/` | KNOWLEDGE | Append-only journal.md + projected state.md |
 | `knowledge/raw/` | KNOWLEDGE | Immutable sources |
 | `knowledge/inbox/` | KNOWLEDGE | Unprocessed staging |
 | `knowledge/feedback/` | KNOWLEDGE | Correction candidates |
-| `cache/` | RUNTIME | FTS5 / vector / graph indexes (gitignored) |
+| `cache/` | RUNTIME | FTS5/vector/graph indexes, compile plans, derived claims index |
 | `logs/` | RUNTIME | Lint reports, compile logs (gitignored) |
-| `run/` | RUNTIME | state.json, compile.pid, queue/ (gitignored) |
+| `run/` | RUNTIME | transactions, receipts, queue database/results, leases, locks |
 | `cache/cognee/` | RUNTIME | Optional semantic graph (gitignored) |
 
 For the full canonical reference, see [STRUCTURE.md](STRUCTURE.md).

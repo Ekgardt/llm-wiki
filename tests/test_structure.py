@@ -174,3 +174,20 @@ def test_readmes_have_same_h2_section_count():
         f"README H2 section count drift: {counts}. "
         "All three must have the same number of top-level sections."
     )
+
+
+def test_docs_name_stage_two_runtime_artifacts():
+    structure = (ROOT / "docs" / "STRUCTURE.md").read_text(encoding="utf-8")
+    for value in (
+        "run/markdown-transactions.sqlite3",
+        "run/transactions/",
+        "run/queue.sqlite3",
+        "run/queue-results/",
+        "cache/compile/",
+        "cache/claims.sqlite3",
+        "scripts/schemas/",
+        "knowledge/daily/receipts/",
+        "knowledge/projects/<slug>/journal.md",
+        "knowledge/daily/archive/YYYY-MM/bag-",
+    ):
+        assert value in structure

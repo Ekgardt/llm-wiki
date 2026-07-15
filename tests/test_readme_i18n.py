@@ -100,19 +100,19 @@ def test_all_readmes_mention_current_version():
     critical_markers = {
         "README.md": (
             "12 task-shaped",
-                "1784 tests collected",
+            "1787 tests collected",
             "Current 112",
             "optional Obsidian viewer",
         ),
         "README.ru.md": (
             "12 task-shaped",
-                "1784 тестов",
+            "1787 тестов",
             "Текущие 112",
             "Obsidian как опциональный viewer",
         ),
         "README.zh-CN.md": (
             "12 个 task-shaped",
-                "1784 个测试",
+            "1787 个测试",
             "当前 112",
             "Obsidian 为可选 viewer",
         ),
@@ -131,3 +131,26 @@ def test_all_readmes_mention_current_version():
             assert marker in text, f"{p.name}: missing critical parity marker {marker!r}"
         assert "zero runtime dependencies" not in text.casefold()
         assert "stdlib-only" not in text.casefold()
+
+
+def test_all_readmes_share_reliable_memory_operator_commands():
+    commands = (
+        "uv run python scripts/doctor.py",
+        "uv run python scripts/doctor.py --repair",
+        "uv run python scripts/markdown_transaction.py recover",
+        "uv run python scripts/markdown_transaction.py undo <transaction-id>",
+        "uv run python scripts/markdown_transaction.py prune --retention-days 30",
+        "uv run python scripts/memory_queue.py migrate",
+        "uv run python scripts/memory_queue.py work --max-tasks 20 --max-seconds 600 "
+        "--idle-seconds 2 --lease-seconds 120 --heartbeat-seconds 40 "
+        "--max-attempts 8 --retry-base-seconds 30 --retry-cap-seconds 3600",
+        "uv run python scripts/memory_queue.py redrive <task-id>",
+        "uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> "
+        "--export <path>",
+        "uv run python scripts/archive_daily.py --commit --hot-days 90",
+        "uv run python benchmark/run_contradiction_benchmark.py --corpus "
+        "benchmark/contradiction-v1.json",
+    )
+    for path, text in _readmes():
+        for command in commands:
+            assert command in text, f"{path.name}: missing operator command {command!r}"

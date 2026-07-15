@@ -301,11 +301,66 @@ def test_architecture_no_recall_at_2():
     assert "legacy vectors.json" not in search_source
 
     contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
-    assert "812 tests collected" in contributing
+    assert "1787 tests collected" in contributing
 
     integrations = (ROOT / "integrations" / "README.md").read_text(encoding="utf-8")
     assert "installer baseline" in integrations.casefold()
     assert "manual dependency selection" in integrations.casefold()
+
+
+def test_stage_two_reliability_contract_is_documented():
+    docs = {
+        relative: (ROOT / relative).read_text(encoding="utf-8")
+        for relative in (
+            "docs/ARCHITECTURE.md",
+            "docs/USER-GUIDE.md",
+            "docs/operating-model.md",
+            "AGENTS.md",
+            "CLAUDE.md",
+        )
+    }
+    combined = "\n".join(docs.values()).casefold()
+    required = (
+        "markdown remains authoritative",
+        "rollback-journal",
+        "synchronous=full",
+        "no wal",
+        "local filesystem",
+        "best-effort",
+        "mixed tree",
+        "cooperating",
+        "cas",
+        "30-day undo",
+        "source failure",
+        "live project lease",
+        "automatic git",
+        "persistent daemon",
+        "cloud service",
+        "remote queue",
+        "exactly-once",
+        "gzip",
+        "eager backfill",
+        "semantic supersession",
+        "quarantine",
+    )
+    for marker in required:
+        assert marker in combined, f"Stage 2 docs missing contract marker {marker!r}"
+
+    architecture = docs["docs/ARCHITECTURE.md"].casefold()
+    assert "sqlite knowledge source" in architecture
+    assert "at least once" in architecture
+
+    guide = docs["docs/USER-GUIDE.md"]
+    for command in (
+        "markdown_transaction.py recover",
+        "markdown_transaction.py undo <transaction-id>",
+        "markdown_transaction.py prune --retention-days 30",
+        "memory_queue.py migrate",
+        "memory_queue.py redrive <task-id>",
+        "memory_queue.py purge --terminal-before <ISO-8601> --export <path>",
+        "archive_daily.py --commit --hot-days 90",
+    ):
+        assert command in guide
 
 
 # ─── 7. Skills' allowed-tools reference existing scripts ────────────

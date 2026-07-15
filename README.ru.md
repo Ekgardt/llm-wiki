@@ -1,6 +1,6 @@
 # LLM Wiki
 
-[![Tests](https://img.shields.io/badge/tests-1784%20collected-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://img.shields.io/badge/tests-1787%20collected-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-4.0.0-blue.svg)](CHANGELOG.md)
@@ -101,7 +101,7 @@ LLM Wiki даёт каждому AI-агенту, которым вы польз
 - **5 LLM-бэкендов** (авто-детекция): OpenCode → Codex → Claude CLI → OpenAI → Ollama
 - **Кросс-платформенность**: Windows, macOS, Linux, WSL2
 - **Локально и без daemon-процессов** — установленный baseline включает MCP-пакет; vector search и Cognee остаются опциональными
-- **1784 регрессионных тестов**, CI green на Ubuntu + Windows + macOS, Python 3.10 + 3.13
+- **1787 регрессионных тестов**, CI green на Ubuntu + Windows + macOS, Python 3.10 + 3.13
 - **Pre-commit хуки**: ruff (статический анализ) + структурный lint + gitleaks (сканирование секретов)
 
 ---
@@ -134,7 +134,7 @@ irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 1. Проверяет требования (Python 3.10+, git)
 2. Устанавливает `uv` (быстрый Python-менеджер пакетов), если отсутствует
 3. Синхронизирует locked baseline-зависимости (`uv sync --locked --extra mcp-server`)
-4. Запускает тестовый набор (1784 тестов)
+4. Запускает тестовый набор (1787 тестов)
 5. Устанавливает переменную окружения `LLM_WIKI_ROOT` (user scope)
 6. Создаёт runtime-директории (`cache/`, `logs/`, `run/`, `cache/cognee/` — gitignored)
 7. Регистрирует плановое обслуживание (cron на Unix, Task Scheduler на Windows)
@@ -147,7 +147,7 @@ irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync --locked --extra mcp-server
-uv run pytest -q          # собирает 1784 тестов
+uv run pytest -q          # собирает 1787 тестов
 ```
 
 ### Проверка работы
@@ -204,11 +204,33 @@ RUNTIME       cache/  logs/  run/  cache/cognee/   (gitignored, внутри vau
 
 - **CODE** — отслеживается в git. Пайплайн, тесты, документация, навыки, правила, интеграции.
 - **KNOWLEDGE** — отслеживается в git (публичные примеры). Полные пользовательские данные живут в установленном vault. Daily-логи и персональные страницы gitignored.
-- **RUNTIME** — gitignored, регенерируется по требованию. Search-индексы, логи компиляции, state.json, очередь задач.
+- **RUNTIME** — gitignored. Search-индексы и логи одноразовые; транзакции, состояние очереди и undo-образы в `run/` являются операционным состоянием.
 
 Полное обоснование дизайна (7 аксиом, диаграмма архитектуры, таксономия памяти, архитектура поиска) — в [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Канонический reference структуры (что где живёт, env-контракты, запрещённые layout'ы) — в [docs/STRUCTURE.md](docs/STRUCTURE.md).
+
+---
+
+## Надёжные операции с памятью
+
+Markdown остаётся авторитетным источником. Runtime SQLite координирует восстанавливаемые записи и очередь, но не является источником знаний. Операционные базы используют rollback-journal, `synchronous=FULL` и no WAL на текущей версии SQLite. State root должен находиться на локальной файловой системе; сетевые пути отклоняются, а обнаружение cloud-синхронизируемых папок выполняется best-effort.
+
+```bash
+uv run python scripts/doctor.py
+uv run python scripts/doctor.py --repair
+uv run python scripts/markdown_transaction.py recover
+uv run python scripts/markdown_transaction.py undo <transaction-id>
+uv run python scripts/markdown_transaction.py prune --retention-days 30
+uv run python scripts/memory_queue.py migrate
+uv run python scripts/memory_queue.py work --max-tasks 20 --max-seconds 600 --idle-seconds 2 --lease-seconds 120 --heartbeat-seconds 40 --max-attempts 8 --retry-base-seconds 30 --retry-cap-seconds 3600
+uv run python scripts/memory_queue.py redrive <task-id>
+uv run python scripts/memory_queue.py purge --terminal-before <ISO-8601> --export <path>
+uv run python scripts/archive_daily.py --commit --hot-days 90
+uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contradiction-v1.json
+```
+
+Доставка очереди выполняется как минимум один раз, поэтому handlers используют стабильные operation ID для идемпотентности. Архив переносит подходящие daily-логи старше 90-дневного hot window в проверенные несжатые BagIt-пакеты и сохраняет логическое разрешение evidence. Неуверенные или спорные для evaluators claims помещаются в quarantine; semantic supersession отключён до прохождения frozen benchmark gate. Процедуры recovery, retention и безопасного удаления описаны в [docs/USER-GUIDE.md](docs/USER-GUIDE.md).
 
 ---
 

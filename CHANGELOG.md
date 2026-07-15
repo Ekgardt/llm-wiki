@@ -4,6 +4,20 @@ All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Documented Stage 2 reliable memory operations: Markdown-authoritative recoverable
+  transactions and undo, fenced project journals, rollback-journal SQLite queue
+  migration/work/redrive/export-first purge, content-addressed compile receipts,
+  90-day-hot immutable BagIt archives, logical evidence, and quarantined claims.
+- Added operator commands and deletion safety for source failures, retained
+  transactions/tasks/results, the 30-day undo window, and live owners.
+- Recorded the local-filesystem requirement, current `synchronous=FULL`/no-WAL
+  policy, bounded defaults and CLI overrides, cooperating-writer CAS boundary, and
+  explicit non-goals. The suite now collects **1787 tests**.
+
 ## [4.0.0] — Unreleased
 
 ### v4.0: Unified Knowledge Intelligence
@@ -44,7 +58,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - **SessionStart impact advisory** — stale wiki pages from code changes.
 - **MCP config in install scripts** — Claude Code + OpenCode auto-config.
 - **Optional extras** — `hybrid`, `code-graph`, `mcp-server`, `reranker`, `full`.
-- **1784 tests**.
+- **1787 tests**.
 
 ## [3.4.0] — 2026-07-11
 
