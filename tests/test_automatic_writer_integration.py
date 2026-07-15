@@ -353,6 +353,136 @@ safe_mutate("id", {target: b"x"})
 
 
 @pytest.mark.parametrize(
+    "source",
+    [
+        '''
+p = Path("cache/x")
+if enabled:
+    p = Path("knowledge/notes/x.md")
+else:
+    p = Path("cache/y")
+p.write_text("x")
+''',
+        '''
+p = Path("cache/x")
+for candidate in candidates:
+    if candidate:
+        p = Path("knowledge/notes/x.md")
+p.write_text("x")
+''',
+        '''
+p = Path("cache/x")
+while pending:
+    p = Path("knowledge/notes/x.md")
+p.write_text("x")
+''',
+        '''
+p = Path("cache/x")
+try:
+    p = Path("knowledge/notes/x.md")
+except OSError:
+    p = Path("cache/y")
+finally:
+    p.write_text("x")
+''',
+        '''
+p = Path("cache/x")
+try:
+    p = Path("knowledge/notes/x.md")
+    risky()
+    p = Path("cache/y")
+except OSError:
+    pass
+finally:
+    p.write_text("x")
+''',
+        '''
+p = Path("cache/x")
+match kind:
+    case "note":
+        p = Path("knowledge/notes/x.md")
+    case _:
+        p = Path("cache/y")
+writer = lambda: p.write_text("x")
+[writer() for _ in range(1)]
+''',
+    ],
+)
+def test_python_scanner_preserves_covered_paths_across_control_flow(source):
+    from check_knowledge_writers import scan_source
+
+    findings = scan_source(Path("scripts/probe.py"), source)
+    assert [(item.api, item.approved) for item in findings] == [("write_text", False)]
+
+
+def test_python_scanner_analyzes_nested_helper_definitions():
+    from check_knowledge_writers import scan_source
+
+    source = '''
+def outer(destination):
+    def helper(path):
+        with path.open("w") as stream:
+            stream.write("x")
+    helper(destination)
+outer(Path("knowledge/notes/x.md"))
+'''
+    findings = scan_source(Path("scripts/probe.py"), source)
+    assert [(item.api, item.approved, item.function) for item in findings] == [
+        ("outer", False, "<module>")
+    ]
+
+
+def test_python_scanner_merges_function_aliases_across_branches():
+    from check_knowledge_writers import scan_source
+
+    source = '''
+def raw(path):
+    path.write_text("x")
+def harmless(path):
+    return path
+if enabled:
+    writer = raw
+else:
+    writer = harmless
+writer(Path("knowledge/notes/x.md"))
+'''
+    findings = scan_source(Path("scripts/probe.py"), source)
+    assert [(item.api, item.approved) for item in findings] == [("writer", False)]
+
+
+def test_python_scanner_drops_path_taint_after_exhaustive_safe_reassignment():
+    from check_knowledge_writers import scan_source
+
+    source = '''
+p = Path("knowledge/notes/x.md")
+if enabled:
+    p = Path("cache/x")
+else:
+    p = Path("logs/x")
+p.write_text("x")
+'''
+    assert scan_source(Path("scripts/probe.py"), source) == []
+
+
+def test_python_scanner_drops_alias_taint_after_exhaustive_safe_reassignment():
+    from check_knowledge_writers import scan_source
+
+    source = '''
+def raw(path):
+    path.write_text("x")
+def harmless(path):
+    return path
+writer = raw
+if enabled:
+    writer = harmless
+else:
+    writer = harmless
+writer(Path("knowledge/notes/x.md"))
+'''
+    assert scan_source(Path("scripts/probe.py"), source) == []
+
+
+@pytest.mark.parametrize(
     ("suffix", "source", "expected_api"),
     [
         (".js", 'const p = root + "/knowledge/notes/x.md";\nfs.writeFileSync(p, data);\n', "writeFileSync"),

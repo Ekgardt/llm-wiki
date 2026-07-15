@@ -103,7 +103,6 @@ def _python_bindings(
 
 def _python_write_calls(source: str) -> list[tuple[int, str, bool, str]]:
     tree = ast.parse(source)
-    canonical, path_aliases, aliases, canonical_modules = _python_bindings(tree)
     deleted_names = {
         target.id
         for statement in tree.body
@@ -112,80 +111,113 @@ def _python_write_calls(source: str) -> list[tuple[int, str, bool, str]]:
         if isinstance(target, ast.Name)
     }
     findings: list[tuple[int, str, bool, str]] = []
-    globals_: dict[str, str] = {"ROOT": "<root>"}
     summaries: dict[str, list[tuple[int, str, bool]]] = {}
+    Env = dict[str, set[str]]
 
-    def value(node: ast.AST | None, env: dict[str, str]) -> str:
+    def value(node: ast.AST | None, env: Env) -> set[str]:
         if node is None:
-            return ""
+            return set()
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return node.value.replace("\\", "/")
+            return {node.value.replace("\\", "/")}
         if isinstance(node, ast.Name):
-            return env.get(node.id, "")
+            return set(env.get(node.id, set()))
         if isinstance(node, ast.FormattedValue):
-            return "<value>"
+            return {"<value>"}
         if isinstance(node, ast.JoinedStr):
-            return "".join(value(item, env) for item in node.values)
+            result = {""}
+            for item in node.values:
+                parts = value(item, env) or {""}
+                result = {left + right for left in result for right in parts}
+            return result
         if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Div, ast.Add)):
             left, right = value(node.left, env), value(node.right, env)
-            return f"{left}/{right}" if left and right else left or right
+            if not left:
+                return right
+            if not right:
+                return left
+            separator = "/" if isinstance(node.op, ast.Div) else ""
+            return {f"{a}{separator}{b}" for a in left for b in right}
         if isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name) and node.func.id in path_aliases and node.args:
+            constructors = value(node.func, env)
+            if "<path-constructor>" in constructors and node.args:
                 return value(node.args[0], env)
-            if isinstance(node.func, ast.Attribute):
+            if "<coordinator-class>" in constructors:
+                return {"<coordinator-instance>"}
+            if isinstance(node.func, ast.Attribute) and node.func.attr in {
+                "absolute", "resolve", "with_name", "with_suffix",
+            }:
                 return value(node.func.value, env)
         if isinstance(node, ast.Attribute):
             base = value(node.value, env)
-            return f"{base}/{node.attr}" if base else env.get(node.attr, "")
-        return ""
+            if "<canonical-module>" in base and node.attr in _BOUNDARIES:
+                return {f"<canonical:{node.attr}>"}
+            return {f"{item}/{node.attr}" for item in base} or set(env.get(node.attr, set()))
+        return set()
 
-    def targets(call: ast.Call, env: dict[str, str]) -> tuple[list[str], bool, str]:
+    def call_bindings(call: ast.Call, env: Env) -> set[str]:
+        if isinstance(call.func, ast.Name):
+            return set(env.get(call.func.id, set())) or {f"<function:{call.func.id}>"}
+        if isinstance(call.func, ast.Attribute):
+            modules = value(call.func.value, env)
+            if "<canonical-module>" in modules and call.func.attr in _BOUNDARIES:
+                return {f"<canonical:{call.func.attr}>"}
+            if "<coordinator-instance>" in modules and call.func.attr == "ensure_target_parent":
+                return {"<canonical:ensure_target_parent>"}
+            return {f"<function:{call.func.attr}>"}
+        return set()
+
+    def targets(call: ast.Call, env: Env) -> tuple[list[str], bool, str]:
         name = _call_name(call)
-        resolved_name = aliases.get(name, name)
-        boundary = canonical.get(name) or canonical.get(resolved_name)
-        if (
-            boundary is None
-            and isinstance(call.func, ast.Attribute)
-            and isinstance(call.func.value, ast.Name)
-            and call.func.value.id in canonical_modules
-            and name in _BOUNDARIES
-        ):
-            boundary = name
-        summary = summaries.get(resolved_name)
-        if summary and boundary is None:
-            result = [
-                value(call.args[index], env)
-                for index, _, _ in summary
-                if len(call.args) > index
-            ]
-            return result, all(item[2] for item in summary), resolved_name
+        bindings = call_bindings(call, env)
+        boundaries = {
+            item.removeprefix("<canonical:").removesuffix(">")
+            for item in bindings
+            if item.startswith("<canonical:")
+        }
+        function_names = {
+            item.removeprefix("<function:").removesuffix(">")
+            for item in bindings
+            if item.startswith("<function:")
+        }
+        result: set[str] = set()
+        approved = True
+        summarized = False
+        for function_name in function_names:
+            summary = summaries.get(function_name)
+            if not summary:
+                continue
+            summarized = True
+            approved = approved and all(item[2] for item in summary)
+            for index, _, _ in summary:
+                if len(call.args) > index:
+                    result.update(value(call.args[index], env))
+        if summarized:
+            reported = next(iter(function_names)) if len(function_names) == 1 else name
+            return sorted(result), approved, reported
+        boundary = next(iter(boundaries), None)
         apparent_boundary = boundary or (name if name in _BOUNDARIES else None)
         if apparent_boundary:
             if apparent_boundary == "ensure_target_parent":
-                result = [value(call.args[0], env)] if call.args else []
+                result = value(call.args[0], env) if call.args else set()
             elif apparent_boundary == "mutate_knowledge" and len(call.args) > 1 and isinstance(call.args[1], ast.Dict):
-                result = [value(key, env) for key in call.args[1].keys]
+                result = {item for key in call.args[1].keys for item in value(key, env)}
             elif apparent_boundary == "append_knowledge" and len(call.args) == 2:
-                result = [value(call.args[0], env)]
+                result = value(call.args[0], env)
             else:
                 index = 1 if apparent_boundary == "append_knowledge" else 0
-                result = [value(call.args[index], env)] if len(call.args) > index else []
-            return result, boundary is not None, name
-        if summary:
-            result = [
-                value(call.args[index], env)
-                for index, _, _ in summary
-                if len(call.args) > index
-            ]
-            return result, all(item[2] for item in summary), resolved_name
+                result = value(call.args[index], env) if len(call.args) > index else set()
+            return sorted(result), boundary is not None, name
         if name == "open":
             if isinstance(call.func, ast.Attribute):
-                mode = value(call.args[0], env) if call.args else "r"
-                return ([value(call.func.value, env)] if any(flag in mode for flag in "wax+") else []), False, name
-            mode = value(call.args[1], env) if len(call.args) > 1 else "r"
-            return ([value(call.args[0], env)] if call.args and any(flag in mode for flag in "wax+") else []), False, name
+                modes = value(call.args[0], env) if call.args else {"r"}
+                result = value(call.func.value, env) if any(any(flag in mode for flag in "wax+") for mode in modes) else set()
+                return sorted(result), False, name
+            modes = value(call.args[1], env) if len(call.args) > 1 else {"r"}
+            result = value(call.args[0], env) if call.args and any(any(flag in mode for flag in "wax+") for mode in modes) else set()
+            return sorted(result), False, name
         if name in _PATH_METHODS:
-            return ([value(call.func.value, env)] if isinstance(call.func, ast.Attribute) else []), False, name
+            result = value(call.func.value, env) if isinstance(call.func, ast.Attribute) else set()
+            return sorted(result), False, name
         if name in _RENAME_METHODS:
             if (
                 isinstance(call.func, ast.Attribute)
@@ -194,101 +226,178 @@ def _python_write_calls(source: str) -> list[tuple[int, str, bool, str]]:
             ):
                 return [], False, name
             if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name) and call.func.value.id in {"os", "shutil"}:
-                return [value(item, env) for item in call.args[:2]], False, name
+                result = {value_ for item in call.args[:2] for value_ in value(item, env)}
+                return sorted(result), False, name
             if isinstance(call.func, ast.Attribute):
-                result = [value(call.func.value, env)]
+                result = value(call.func.value, env)
                 if call.args:
-                    result.append(value(call.args[0], env))
-                return result, False, name
+                    result.update(value(call.args[0], env))
+                return sorted(result), False, name
         if name == "atomic_write" and call.args:
-            return [value(call.args[0], env)], False, name
+            return sorted(value(call.args[0], env)), False, name
         return [], False, name
 
-    def process(statements: list[ast.stmt], inherited: dict[str, str], function: str = "") -> None:
-        env = dict(inherited)
+    def merge(*environments: Env) -> Env:
+        return {
+            name: set().union(*(env.get(name, set()) for env in environments))
+            for name in set().union(*(set(env) for env in environments))
+        }
+
+    def scan_expression(expression: ast.AST | None, env: Env, function: str) -> None:
+        if expression is None:
+            return
+        for call in (item for item in ast.walk(expression) if isinstance(item, ast.Call)):
+            record(call, env, function)
+
+    def record(call: ast.Call, env: Env, function: str) -> None:
+        name = _call_name(call)
+        resolved, binding_approved, reported_name = targets(call, env)
+        for target in resolved:
+            match = re.fullmatch(r"<param:(\d+)>", target)
+            if match and function:
+                item = (int(match.group(1)), reported_name, binding_approved)
+                if item not in summaries.setdefault(function, []):
+                    summaries[function].append(item)
+        archive_operation = function in _ARCHIVE_BUILD_FUNCTIONS and name in {
+            "write_bytes", "unlink", "replace", "rename", "move", "mkdir"
+        }
+        if archive_operation and not resolved and function in {"_recover_hidden_builds", "_publish_build"}:
+            resolved = [".bag-building"]
+        hidden = any(".bag" in item or ".building" in item for item in resolved)
+        archive_allowed = (hidden and name in {"write_bytes", "unlink", "mkdir"}) or (
+            function in {"_recover_hidden_builds", "_publish_build"}
+            and name in {"replace", "rename", "move"}
+        )
+        if not resolved or not (any(_covered(item) for item in resolved) or archive_operation and archive_allowed):
+            return
+        approved = binding_approved
+        if function in {"_apply_operation", "_apply_windows_operation"}:
+            approved = True
+        if archive_operation:
+            approved = archive_allowed
+        findings.append((call.lineno, reported_name, approved, function or "<module>"))
+
+    def assign(target: ast.AST, assigned: set[str], env: Env) -> None:
+        if isinstance(target, ast.Name):
+            env[target.id] = set(assigned)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for item in target.elts:
+                assign(item, set(), env)
+
+    def process(statements: list[ast.stmt], inherited: Env, function: str = "") -> Env:
+        env = {name: set(items) for name, items in inherited.items()}
         for statement in statements:
+            if isinstance(statement, ast.ImportFrom):
+                for item in statement.names:
+                    local = item.asname or item.name
+                    if statement.module in {"markdown_transaction", "scripts.markdown_transaction"} and item.name in _BOUNDARIES:
+                        env[local] = {f"<canonical:{item.name}>"}
+                    elif statement.module in {"markdown_transaction", "scripts.markdown_transaction"} and item.name == "MarkdownCoordinator":
+                        env[local] = {"<coordinator-class>"}
+                    elif statement.module == "daily_log_append" and item.name in {"locked_append", "locked_append_once", "append_daily"}:
+                        env[local] = {f"<canonical:{item.name}>"}
+                    elif statement.module == "pathlib" and item.name == "Path":
+                        env[local] = {"<path-constructor>"}
+                continue
+            if isinstance(statement, ast.Import):
+                for item in statement.names:
+                    if item.name in {"markdown_transaction", "scripts.markdown_transaction"}:
+                        env[item.asname or item.name] = {"<canonical-module>"}
+                continue
             if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                scan_expression(statement.value, env, function)
                 assigned = value(statement.value, env)
                 assigned_targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
                 for target in assigned_targets:
-                    if isinstance(target, ast.Name):
-                        env[target.id] = assigned
+                    assign(target, assigned, env)
+                continue
             if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 if statement.name in deleted_names:
+                    env.pop(statement.name, None)
                     continue
-                function_env = dict(env)
-                for argument in statement.args.args:
+                env[statement.name] = {f"<function:{statement.name}>"}
+                function_env = {name: set(items) for name, items in env.items()}
+                method_offset = int(bool(statement.args.args) and statement.args.args[0].arg in {"self", "cls"})
+                for index, argument in enumerate(statement.args.args):
+                    marker = f"<param:{index - method_offset}>"
+                    if "<coordinator-class>" in value(argument.annotation, env):
+                        function_env[argument.arg] = {"<coordinator-instance>"}
+                    else:
+                        function_env[argument.arg] = {
+                            ".bag-building" if statement.name in _ARCHIVE_BUILD_FUNCTIONS and argument.arg in {"build", "publish_build", "hidden_build"} else marker
+                        }
+                for argument in statement.args.kwonlyargs:
                     function_env[argument.arg] = (
-                        ".bag-building" if statement.name in _ARCHIVE_BUILD_FUNCTIONS
-                        and argument.arg in {"build", "publish_build", "hidden_build"}
-                        else ""
+                        {"<coordinator-instance>"}
+                        if "<coordinator-class>" in value(argument.annotation, env)
+                        else set()
                     )
                 process(statement.body, function_env, statement.name)
                 continue
             if isinstance(statement, ast.ClassDef):
                 process(statement.body, env, function)
                 continue
-            for call in (item for item in ast.walk(statement) if isinstance(item, ast.Call)):
-                name = _call_name(call)
-                resolved, binding_approved, reported_name = targets(call, env)
-                for target in resolved:
-                    match = re.fullmatch(r"<param:(\d+)>", target)
-                    if match and function:
-                        item = (int(match.group(1)), reported_name, binding_approved)
-                        if item not in summaries.setdefault(function, []):
-                            summaries[function].append(item)
-                archive_operation = (
-                    function in _ARCHIVE_BUILD_FUNCTIONS
-                    and name in {
-                        "write_bytes", "unlink", "replace", "rename", "move", "mkdir"
-                    }
-                )
-                hidden = any(".bag" in item or ".building" in item for item in resolved)
-                archive_allowed = (
-                    hidden and name in {"write_bytes", "unlink", "mkdir"}
-                ) or (
-                    function in {"_recover_hidden_builds", "_publish_build"}
-                    and name in {"replace", "rename", "move"}
-                )
-                if not resolved or not (
-                    any(_covered(item) for item in resolved)
-                    or archive_operation and archive_allowed
-                ):
-                    continue
-                approved = binding_approved
-                if function in {"_apply_operation", "_apply_windows_operation"}:
-                    approved = True
-                if archive_operation:
-                    approved = archive_allowed
-                findings.append((call.lineno, reported_name, approved, function or "<module>"))
+            if isinstance(statement, ast.If):
+                scan_expression(statement.test, env, function)
+                body = process(statement.body, env, function)
+                other = process(statement.orelse, env, function) if statement.orelse else env
+                env = merge(body, other)
+                continue
+            if isinstance(statement, (ast.For, ast.AsyncFor, ast.While)):
+                scan_expression(statement.iter if isinstance(statement, (ast.For, ast.AsyncFor)) else statement.test, env, function)
+                loop_env = {name: set(items) for name, items in env.items()}
+                if isinstance(statement, (ast.For, ast.AsyncFor)):
+                    assign(statement.target, set(), loop_env)
+                for _ in range(2):
+                    loop_env = merge(loop_env, process(statement.body, loop_env, function))
+                env = merge(env, loop_env)
+                if statement.orelse:
+                    env = merge(env, process(statement.orelse, env, function))
+                continue
+            if isinstance(statement, (ast.With, ast.AsyncWith)):
+                for item in statement.items:
+                    scan_expression(item.context_expr, env, function)
+                    if item.optional_vars:
+                        assign(item.optional_vars, value(item.context_expr, env), env)
+                env = process(statement.body, env, function)
+                continue
+            if isinstance(statement, (ast.Try, getattr(ast, "TryStar", ast.Try))):
+                normal = env
+                exception_states = [env]
+                for body_statement in statement.body:
+                    normal = process([body_statement], normal, function)
+                    exception_states.append(normal)
+                if statement.orelse:
+                    normal = process(statement.orelse, normal, function)
+                exceptional = merge(*exception_states)
+                alternatives = [normal, exceptional]
+                alternatives.extend(process(handler.body, exceptional, function) for handler in statement.handlers)
+                env = merge(*alternatives)
+                if statement.finalbody:
+                    env = process(statement.finalbody, env, function)
+                continue
+            if isinstance(statement, ast.Match):
+                scan_expression(statement.subject, env, function)
+                branches = [process(case.body, env, function) for case in statement.cases]
+                exhaustive = any(isinstance(case.pattern, ast.MatchAs) and case.pattern.pattern is None and case.pattern.name is None for case in statement.cases)
+                env = merge(*(branches if exhaustive else [env, *branches]))
+                continue
+            if isinstance(statement, ast.Delete):
+                for target in statement.targets:
+                    if isinstance(target, ast.Name):
+                        env.pop(target.id, None)
+                continue
+            for expression in ast.iter_child_nodes(statement):
+                if isinstance(expression, ast.expr):
+                    scan_expression(expression, env, function)
+        return env
 
-    for statement in tree.body:
-        if isinstance(statement, (ast.Assign, ast.AnnAssign)):
-            assigned = value(statement.value, globals_)
-            assigned_targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
-            for target in assigned_targets:
-                if isinstance(target, ast.Name):
-                    globals_[target.id] = assigned
-    # Bounded fixed point: direct parameter sinks first, then callers of summaries.
-    functions = [
-        node for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name not in deleted_names
-    ]
+    initial: Env = {"ROOT": {"<root>"}, "Path": {"<path-constructor>"}}
     for _ in range(4):
         before = repr(summaries)
-        for function_node in functions:
-            function_env = dict(globals_)
-            method_offset = int(
-                bool(function_node.args.args)
-                and function_node.args.args[0].arg in {"self", "cls"}
-            )
-            for index, argument in enumerate(function_node.args.args):
-                function_env[argument.arg] = f"<param:{index - method_offset}>"
-            process(function_node.body, function_env, function_node.name)
+        process(tree.body, initial)
         if repr(summaries) == before:
             break
-    process(tree.body, globals_)
     return list(dict.fromkeys(findings))
 
 
