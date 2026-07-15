@@ -175,6 +175,7 @@ def rebuild_index() -> bool:
 def append_log(entry: str) -> None:
     from markdown_transaction import append_knowledge
 
+    entry = redact_secrets(entry)
     header = b"# Session Memory Log\n\n"
     if not LOG.exists():
         append_knowledge(

@@ -34,6 +34,7 @@ class WriterFinding:
     line: int
     api: str
     approved: bool = False
+    function: str = "<module>"
 
     def __str__(self) -> str:
         status = "approved" if self.approved else "DIRECT COVERED WRITE"
@@ -52,8 +53,57 @@ def _covered(value: str) -> bool:
     return bool(_COVERED_RE.search(value.replace("\\", "/").replace("<root>/", "")))
 
 
-def _python_write_calls(source: str) -> list[tuple[int, str, bool]]:
+def _python_bindings(
+    tree: ast.Module,
+) -> tuple[dict[str, str], set[str], dict[str, str], set[str]]:
+    canonical: dict[str, str] = {}
+    path_aliases = {"Path"}
+    aliases: dict[str, str] = {}
+    canonical_modules: set[str] = set()
+    for statement in ast.walk(tree):
+        if isinstance(statement, ast.ImportFrom):
+            if statement.module in {"markdown_transaction", "scripts.markdown_transaction"}:
+                for item in statement.names:
+                    if item.name in _BOUNDARIES:
+                        canonical[item.asname or item.name] = item.name
+            if statement.module == "daily_log_append":
+                for item in statement.names:
+                    if item.name in {"locked_append", "locked_append_once", "append_daily"}:
+                        canonical[item.asname or item.name] = item.name
+            if statement.module == "pathlib":
+                for item in statement.names:
+                    if item.name == "Path":
+                        path_aliases.add(item.asname or item.name)
+        elif isinstance(statement, ast.Import):
+            for item in statement.names:
+                if item.name in {"markdown_transaction", "scripts.markdown_transaction"}:
+                    canonical_modules.add(item.asname or item.name)
+        elif isinstance(statement, ast.Assign) and isinstance(statement.value, ast.Name):
+            for target in statement.targets:
+                if isinstance(target, ast.Name):
+                    aliases[target.id] = statement.value.id
+                    if statement.value.id in canonical:
+                        canonical[target.id] = canonical[statement.value.id]
+        elif (
+            isinstance(statement, ast.Assign)
+            and isinstance(statement.value, ast.Attribute)
+            and isinstance(statement.value.value, ast.Name)
+            and statement.value.value.id in canonical_modules
+            and statement.value.attr in _BOUNDARIES
+        ):
+            for target in statement.targets:
+                if isinstance(target, ast.Name):
+                    aliases[target.id] = statement.value.attr
+                    canonical[target.id] = statement.value.attr
+    for statement in tree.body:
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            canonical.pop(statement.name, None)
+    return canonical, path_aliases, aliases, canonical_modules
+
+
+def _python_write_calls(source: str) -> list[tuple[int, str, bool, str]]:
     tree = ast.parse(source)
+    canonical, path_aliases, aliases, canonical_modules = _python_bindings(tree)
     deleted_names = {
         target.id
         for statement in tree.body
@@ -61,8 +111,9 @@ def _python_write_calls(source: str) -> list[tuple[int, str, bool]]:
         for target in statement.targets
         if isinstance(target, ast.Name)
     }
-    findings: list[tuple[int, str, bool]] = []
+    findings: list[tuple[int, str, bool, str]] = []
     globals_: dict[str, str] = {"ROOT": "<root>"}
+    summaries: dict[str, list[tuple[int, str, bool]]] = {}
 
     def value(node: ast.AST | None, env: dict[str, str]) -> str:
         if node is None:
@@ -79,7 +130,7 @@ def _python_write_calls(source: str) -> list[tuple[int, str, bool]]:
             left, right = value(node.left, env), value(node.right, env)
             return f"{left}/{right}" if left and right else left or right
         if isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name) and node.func.id == "Path" and node.args:
+            if isinstance(node.func, ast.Name) and node.func.id in path_aliases and node.args:
                 return value(node.args[0], env)
             if isinstance(node.func, ast.Attribute):
                 return value(node.func.value, env)
@@ -88,42 +139,70 @@ def _python_write_calls(source: str) -> list[tuple[int, str, bool]]:
             return f"{base}/{node.attr}" if base else env.get(node.attr, "")
         return ""
 
-    def targets(call: ast.Call, env: dict[str, str]) -> list[str]:
+    def targets(call: ast.Call, env: dict[str, str]) -> tuple[list[str], bool, str]:
         name = _call_name(call)
-        if name in _BOUNDARIES:
-            if name == "ensure_target_parent":
-                return [value(call.args[0], env)] if call.args else []
-            if name == "mutate_knowledge" and len(call.args) > 1 and isinstance(call.args[1], ast.Dict):
-                return [value(key, env) for key in call.args[1].keys]
-            if name == "append_knowledge" and len(call.args) == 2:
-                return [value(call.args[0], env)]
-            index = 1 if name == "append_knowledge" else 0
-            return [value(call.args[index], env)] if len(call.args) > index else []
+        resolved_name = aliases.get(name, name)
+        boundary = canonical.get(name) or canonical.get(resolved_name)
+        if (
+            boundary is None
+            and isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id in canonical_modules
+            and name in _BOUNDARIES
+        ):
+            boundary = name
+        summary = summaries.get(resolved_name)
+        if summary and boundary is None:
+            result = [
+                value(call.args[index], env)
+                for index, _, _ in summary
+                if len(call.args) > index
+            ]
+            return result, all(item[2] for item in summary), resolved_name
+        apparent_boundary = boundary or (name if name in _BOUNDARIES else None)
+        if apparent_boundary:
+            if apparent_boundary == "ensure_target_parent":
+                result = [value(call.args[0], env)] if call.args else []
+            elif apparent_boundary == "mutate_knowledge" and len(call.args) > 1 and isinstance(call.args[1], ast.Dict):
+                result = [value(key, env) for key in call.args[1].keys]
+            elif apparent_boundary == "append_knowledge" and len(call.args) == 2:
+                result = [value(call.args[0], env)]
+            else:
+                index = 1 if apparent_boundary == "append_knowledge" else 0
+                result = [value(call.args[index], env)] if len(call.args) > index else []
+            return result, boundary is not None, name
+        if summary:
+            result = [
+                value(call.args[index], env)
+                for index, _, _ in summary
+                if len(call.args) > index
+            ]
+            return result, all(item[2] for item in summary), resolved_name
         if name == "open":
             if isinstance(call.func, ast.Attribute):
                 mode = value(call.args[0], env) if call.args else "r"
-                return [value(call.func.value, env)] if any(flag in mode for flag in "wax+") else []
+                return ([value(call.func.value, env)] if any(flag in mode for flag in "wax+") else []), False, name
             mode = value(call.args[1], env) if len(call.args) > 1 else "r"
-            return [value(call.args[0], env)] if call.args and any(flag in mode for flag in "wax+") else []
+            return ([value(call.args[0], env)] if call.args and any(flag in mode for flag in "wax+") else []), False, name
         if name in _PATH_METHODS:
-            return [value(call.func.value, env)] if isinstance(call.func, ast.Attribute) else []
+            return ([value(call.func.value, env)] if isinstance(call.func, ast.Attribute) else []), False, name
         if name in _RENAME_METHODS:
             if (
                 isinstance(call.func, ast.Attribute)
                 and isinstance(call.func.value, ast.Name)
                 and call.func.value.id == "MarkdownChange"
             ):
-                return []
+                return [], False, name
             if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name) and call.func.value.id in {"os", "shutil"}:
-                return [value(item, env) for item in call.args[:2]]
+                return [value(item, env) for item in call.args[:2]], False, name
             if isinstance(call.func, ast.Attribute):
                 result = [value(call.func.value, env)]
                 if call.args:
                     result.append(value(call.args[0], env))
-                return result
+                return result, False, name
         if name == "atomic_write" and call.args:
-            return [value(call.args[0], env)]
-        return []
+            return [value(call.args[0], env)], False, name
+        return [], False, name
 
     def process(statements: list[ast.stmt], inherited: dict[str, str], function: str = "") -> None:
         env = dict(inherited)
@@ -151,7 +230,13 @@ def _python_write_calls(source: str) -> list[tuple[int, str, bool]]:
                 continue
             for call in (item for item in ast.walk(statement) if isinstance(item, ast.Call)):
                 name = _call_name(call)
-                resolved = targets(call, env)
+                resolved, binding_approved, reported_name = targets(call, env)
+                for target in resolved:
+                    match = re.fullmatch(r"<param:(\d+)>", target)
+                    if match and function:
+                        item = (int(match.group(1)), reported_name, binding_approved)
+                        if item not in summaries.setdefault(function, []):
+                            summaries[function].append(item)
                 archive_operation = (
                     function in _ARCHIVE_BUILD_FUNCTIONS
                     and name in {
@@ -170,12 +255,12 @@ def _python_write_calls(source: str) -> list[tuple[int, str, bool]]:
                     or archive_operation and archive_allowed
                 ):
                     continue
-                approved = name in _BOUNDARIES
+                approved = binding_approved
                 if function in {"_apply_operation", "_apply_windows_operation"}:
                     approved = True
                 if archive_operation:
                     approved = archive_allowed
-                findings.append((call.lineno, name, approved))
+                findings.append((call.lineno, reported_name, approved, function or "<module>"))
 
     for statement in tree.body:
         if isinstance(statement, (ast.Assign, ast.AnnAssign)):
@@ -184,8 +269,27 @@ def _python_write_calls(source: str) -> list[tuple[int, str, bool]]:
             for target in assigned_targets:
                 if isinstance(target, ast.Name):
                     globals_[target.id] = assigned
+    # Bounded fixed point: direct parameter sinks first, then callers of summaries.
+    functions = [
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name not in deleted_names
+    ]
+    for _ in range(4):
+        before = repr(summaries)
+        for function_node in functions:
+            function_env = dict(globals_)
+            method_offset = int(
+                bool(function_node.args.args)
+                and function_node.args.args[0].arg in {"self", "cls"}
+            )
+            for index, argument in enumerate(function_node.args.args):
+                function_env[argument.arg] = f"<param:{index - method_offset}>"
+            process(function_node.body, function_env, function_node.name)
+        if repr(summaries) == before:
+            break
     process(tree.body, globals_)
-    return findings
+    return list(dict.fromkeys(findings))
 
 
 def _strip_comment(line: str, marker: str) -> str:
@@ -219,20 +323,57 @@ def _expr_value(expression: str, variables: dict[str, str]) -> str:
     return "/".join(piece.strip("/\\") for piece in pieces if piece).replace("\\", "/")
 
 
+def _logical_statements(suffix: str, source: str) -> list[tuple[int, str]]:
+    statements: list[tuple[int, str]] = []
+    buffer: list[str] = []
+    start = 1
+    balance = 0
+    for line_number, raw in enumerate(source.splitlines(), 1):
+        if not buffer:
+            start = line_number
+        buffer.append(raw)
+        stripped = raw.rstrip()
+        if suffix == ".js":
+            cleaned = _strip_comment(raw, "//")
+            balance += sum(cleaned.count(char) for char in "({[")
+            balance -= sum(cleaned.count(char) for char in ")}]" )
+            complete = balance <= 0 and stripped.endswith(";")
+        elif suffix == ".ps1":
+            complete = not stripped.endswith("`")
+        else:
+            complete = not stripped.endswith("\\")
+        if complete:
+            text = "\n".join(buffer)
+            if suffix == ".ps1":
+                text = re.sub(r"`\s*\n", " ", text)
+            elif suffix == ".sh":
+                text = re.sub(r"\\\s*\n", " ", text)
+            statements.append((start, text))
+            buffer = []
+            balance = 0
+    if buffer:
+        statements.append((start, "\n".join(buffer)))
+    return statements
+
+
 def _non_python_calls(suffix: str, source: str) -> list[tuple[int, str, str]]:
     variables: dict[str, str] = {"root": "<root>"}
     findings: list[tuple[int, str, str]] = []
-    for line_number, raw in enumerate(source.splitlines(), 1):
+    for line_number, raw in _logical_statements(suffix, source):
         marker = "//" if suffix == ".js" else "#"
         line = _strip_comment(raw, marker).strip()
         if not line:
             continue
-        assignment = re.match(r"(?:const|let|var)?\s*\$?([A-Za-z_]\w*)\s*=\s*(.+?);?$", line)
+        assignment = re.match(
+            r"(?:const|let|var)?\s*\$?([A-Za-z_]\w*)\s*=\s*(.+?);?$",
+            line,
+            re.DOTALL,
+        )
         if assignment:
             variables[assignment.group(1)] = _expr_value(assignment.group(2), variables)
             continue
         if suffix == ".js":
-            match = re.search(r"(?:\w+\.)?(writeFileSync|writeFile|appendFileSync|appendFile|renameSync|rename|unlinkSync|unlink|rmSync|mkdirSync)\s*\((.*)\)", line)
+            match = re.search(r"(?:\w+\.)?(writeFileSync|writeFile|appendFileSync|appendFile|renameSync|rename|unlinkSync|unlink|rmSync|mkdirSync)\s*\((.*)\)", line, re.DOTALL)
             if not match:
                 continue
             args = [item.strip() for item in match.group(2).split(",")]
@@ -268,8 +409,8 @@ def scan_source(path: Path, source: str) -> list[WriterFinding]:
     suffix = path.suffix.casefold()
     if suffix == ".py":
         findings = [
-            WriterFinding(path, line, api, approved)
-            for line, api, approved in _python_write_calls(source)
+            WriterFinding(path, line, api, approved, function)
+            for line, api, approved, function in _python_write_calls(source)
         ]
         if path.name == "markdown_transaction.py":
             tree = ast.parse(source)
@@ -319,6 +460,37 @@ def discover_repository_writers(root: Path) -> list[WriterFinding]:
             continue
         findings.extend(scan_source(path.relative_to(root), source))
     return findings
+
+
+def discover_repository_entrypoints(
+    root: Path, *, files: set[str]
+) -> set[str]:
+    """Return Task writer functions that directly invoke a proven boundary."""
+    root = Path(root).resolve()
+    result: set[str] = set()
+    for path in _source_paths(root):
+        if path.name not in files or path.suffix.casefold() != ".py":
+            continue
+        source = path.read_text(encoding="utf-8", errors="strict")
+        tree = ast.parse(source)
+        canonical, _, aliases, canonical_modules = _python_bindings(tree)
+        for function in (
+            node for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ):
+            for call in (node for node in ast.walk(function) if isinstance(node, ast.Call)):
+                name = _call_name(call)
+                resolved = aliases.get(name, name)
+                module_call = (
+                    isinstance(call.func, ast.Attribute)
+                    and isinstance(call.func.value, ast.Name)
+                    and call.func.value.id in canonical_modules
+                    and name in _BOUNDARIES
+                )
+                if name in canonical or resolved in canonical or module_call:
+                    result.add(f"{path.relative_to(root).as_posix()}:{function.name}")
+                    break
+    return result
 
 
 def main() -> int:

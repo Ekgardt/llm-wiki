@@ -322,6 +322,7 @@ def append_knowledge(
     relative = _relative_target(coordinator, Path(path))
     coordinator.recover()
     attempt = 0
+    gate_timeouts = 0
     while attempt < 64:
         candidate_id = operation_id if attempt == 0 else f"{operation_id}:cas:{attempt}"
         existing = coordinator._record_for_operation_id(candidate_id)
@@ -332,10 +333,16 @@ def append_knowledge(
         if existing is not None:
             attempt += 1
             continue
-        with coordinator.writer_gate():
-            before = coordinator._read_bounded_target(
-                coordinator._target(relative), MAX_KNOWLEDGE_TARGET_BYTES
-            )
+        try:
+            with coordinator.writer_gate():
+                before = coordinator._read_bounded_target(
+                    coordinator._target(relative), MAX_KNOWLEDGE_TARGET_BYTES
+                )
+        except TimeoutError:
+            gate_timeouts += 1
+            if gate_timeouts >= 64:
+                raise
+            continue
         if len(before or b"") + len(block) > MAX_KNOWLEDGE_TARGET_BYTES:
             raise ValueError("prospective knowledge target size exceeds limit")
         content = (before or b"") + block
