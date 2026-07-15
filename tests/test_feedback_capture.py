@@ -86,7 +86,13 @@ def test_capture_from_text_saves_candidate(tmp_path, monkeypatch):
     """Valid correction saves a JSON candidate file."""
     import feedback_capture
 
-    monkeypatch.setattr(feedback_capture, "FEEDBACK_DIR", tmp_path)
+    vault = tmp_path / "vault"
+    feedback_dir = vault / "knowledge" / "feedback"
+    (vault / "knowledge" / "notes").mkdir(parents=True)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.setattr(feedback_capture, "ROOT", vault)
+    monkeypatch.setattr(feedback_capture, "FEEDBACK_DIR", feedback_dir)
     cid = feedback_capture.capture_from_text(
         "No, we should use JWT instead of sessions because stateless matters",
         session_id="test-session",
@@ -94,7 +100,7 @@ def test_capture_from_text_saves_candidate(tmp_path, monkeypatch):
         trigger="test",
     )
     assert cid is not None
-    candidate_file = tmp_path / f"{cid}.json"
+    candidate_file = feedback_dir / f"{cid}.json"
     assert candidate_file.exists()
     candidate = json.loads(candidate_file.read_text())
     assert candidate["type"] == "correction"
@@ -106,7 +112,13 @@ def test_capture_from_text_rejects_noise(tmp_path, monkeypatch):
     """Noise text returns None, no file saved."""
     import feedback_capture
 
-    monkeypatch.setattr(feedback_capture, "FEEDBACK_DIR", tmp_path)
+    vault = tmp_path / "vault"
+    feedback_dir = vault / "knowledge" / "feedback"
+    (vault / "knowledge" / "notes").mkdir(parents=True)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.setattr(feedback_capture, "ROOT", vault)
+    monkeypatch.setattr(feedback_capture, "FEEDBACK_DIR", feedback_dir)
     cid = feedback_capture.capture_from_text("ok cool thanks")
     assert cid is None
     assert len(list(tmp_path.glob("*.json"))) == 0
@@ -116,7 +128,13 @@ def test_list_candidates(tmp_path, monkeypatch):
     """list_candidates returns only candidates with matching status."""
     import feedback_capture
 
-    monkeypatch.setattr(feedback_capture, "FEEDBACK_DIR", tmp_path)
+    vault = tmp_path / "vault"
+    feedback_dir = vault / "knowledge" / "feedback"
+    (vault / "knowledge" / "notes").mkdir(parents=True)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.setattr(feedback_capture, "ROOT", vault)
+    monkeypatch.setattr(feedback_capture, "FEEDBACK_DIR", feedback_dir)
     feedback_capture.capture_from_text(
         "No, use JWT instead", session_id="s1", slug="p1", trigger="t"
     )
@@ -129,7 +147,12 @@ def test_promote_candidate_creates_knowledge_page(tmp_path, monkeypatch):
     import feedback_capture
 
     # Create a candidate first
-    monkeypatch.setattr(feedback_capture, "FEEDBACK_DIR", tmp_path / "feedback")
+    vault = tmp_path / "vault"
+    (vault / "knowledge" / "notes").mkdir(parents=True)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.setattr(feedback_capture, "ROOT", vault)
+    monkeypatch.setattr(feedback_capture, "FEEDBACK_DIR", vault / "knowledge" / "feedback")
     feedback_capture.FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
     cid = feedback_capture.capture_from_text(
         "No, use JWT instead of sessions because stateless",
@@ -137,16 +160,11 @@ def test_promote_candidate_creates_knowledge_page(tmp_path, monkeypatch):
     )
 
     # Promote it
-    knowledge_dir = tmp_path / "knowledge" / "patterns"
-    knowledge_dir.mkdir(parents=True, exist_ok=True)
-
-    monkeypatch.setattr(feedback_capture, "ROOT", tmp_path)
-
     result = feedback_capture.promote_candidate(cid, "patterns")
     assert result is not None
     assert result.endswith(".md")
 
     # Candidate status updated
-    candidate_file = tmp_path / "feedback" / f"{cid}.json"
+    candidate_file = vault / "knowledge" / "feedback" / f"{cid}.json"
     candidate = json.loads(candidate_file.read_text())
     assert candidate["status"] == "promoted"

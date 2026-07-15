@@ -31,7 +31,8 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT, atomic_write  # noqa: E402
+from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
+from memory_state import ROOT  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
 FEEDBACK_DIR = ROOT / "knowledge" / "feedback"
@@ -97,8 +98,6 @@ def capture_from_text(
     # the secret_redact pass that all capture hooks run).
     text = redact_secrets(text)
 
-    FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
-
     # Create candidate record
     candidate_id = hashlib.sha256(
         f"{text}{datetime.now().isoformat()}".encode()
@@ -118,9 +117,9 @@ def capture_from_text(
 
     # Write to feedback dir
     out = FEEDBACK_DIR / f"{candidate_id}.json"
-    atomic_write(
-        out,
-        json.dumps(candidate, indent=2, ensure_ascii=False),
+    encoded = json.dumps(candidate, indent=2, ensure_ascii=False).encode("utf-8")
+    mutate_knowledge(
+        stable_operation_id("feedback-capture", candidate_id, encoded), {out: encoded}
     )
     return candidate_id
 
@@ -186,7 +185,6 @@ def promote_candidate(candidate_id: str, category: str = "patterns") -> str | No
     # Create knowledge page (containment-checked, flat layout)
     notes_root = (ROOT / "knowledge" / "notes").resolve()
     knowledge_dir = notes_root  # flat layout
-    knowledge_dir.mkdir(parents=True, exist_ok=True)
     page_name = f"feedback-{candidate_id[:8]}.md"
     page_path = knowledge_dir / page_name
 
@@ -247,14 +245,14 @@ def promote_candidate(candidate_id: str, category: str = "patterns") -> str | No
         f"## Related\n"
         f"- [[knowledge/feedback/{candidate_id}.json]]\n"
     )
-    atomic_write(page_path, page_content)
-
     # Update candidate status
     candidate["status"] = "promoted"
     candidate["promoted_to"] = page_path.relative_to(ROOT).as_posix()
-    atomic_write(
-        candidate_file,
-        json.dumps(candidate, indent=2, ensure_ascii=False),
+    candidate_bytes = json.dumps(candidate, indent=2, ensure_ascii=False).encode("utf-8")
+    page_bytes = page_content.encode("utf-8")
+    mutate_knowledge(
+        stable_operation_id("feedback-promote", candidate_id, page_bytes + candidate_bytes),
+        {page_path: page_bytes, candidate_file: candidate_bytes},
     )
 
     return page_path.relative_to(ROOT).as_posix()

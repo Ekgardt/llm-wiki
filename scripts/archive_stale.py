@@ -25,6 +25,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
 from memory_state import ROOT  # noqa: E402
 from okf_types import NEVER_ARCHIVE_TYPES  # noqa: E402
 
@@ -150,7 +151,6 @@ def _archive_page(md: Path, apply: bool) -> str:
         elif "status:" not in content:
             content = f"---\nstatus: archived\n---\n\n{content}"
 
-        archive_path.parent.mkdir(parents=True, exist_ok=True)
         if archive_path.exists():
             # Collision: same-named page already archived. Append a suffix.
             stem = archive_path.stem
@@ -160,23 +160,16 @@ def _archive_page(md: Path, apply: bool) -> str:
             while archive_path.exists():
                 archive_path = parent / f"{stem}-{counter}{suffix}"
                 counter += 1
-        # Write-to-temp → atomic rename → unlink source. This order
-        # ensures the archive copy is fully written BEFORE the original
-        # is removed — no data-loss window if the write fails mid-stream.
-        tmp_path = archive_path.with_suffix(".md.tmp")
+        encoded = content.encode("utf-8")
         try:
-            tmp_path.write_text(content, encoding="utf-8")
-            tmp_path.replace(archive_path)
-        except OSError:
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
+            mutate_knowledge(
+                stable_operation_id(
+                    "archive-stale", md.relative_to(ROOT).as_posix(), encoded
+                ),
+                {archive_path: encoded, md: None},
+            )
+        except (OSError, RuntimeError, ValueError):
             return f"WRITE_ERROR: {archive_path}"
-        try:
-            md.unlink()
-        except OSError:
-            return f"UNLINK_ERROR: {md} (archived copy at {archive_path})"
         return f"ARCHIVED: {rel} → archive/{year}/{dest_subdir.as_posix()}/{md.name}"
     else:
         return f"WOULD ARCHIVE: {rel}"

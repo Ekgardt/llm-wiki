@@ -153,9 +153,14 @@ def test_archive_page_actually_moves_file(fake_file, tmp_path, monkeypatch):
     monkeypatch.setattr(archive_stale, "KNOWLEDGE", tmp_path / "knowledge" / "notes")
     archive_dir = tmp_path / "knowledge" / "notes" / "archive"
     monkeypatch.setattr(archive_stale, "ARCHIVE_ROOT", archive_dir)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "runtime"))
 
     # Create a stale debugging page (65 days old).
-    md = fake_file("stale-debug.md", "debugging", age_days=65)
+    fixture_page = fake_file("stale-debug.md", "debugging", age_days=65)
+    md = tmp_path / "knowledge" / "notes" / fixture_page.name
+    md.parent.mkdir(parents=True)
+    fixture_page.replace(md)
 
     result = archive_stale._archive_page(md, apply=True)
 

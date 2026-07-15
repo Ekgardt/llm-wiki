@@ -50,7 +50,8 @@ _ALLOWED_DIRECTORIES = (
     "knowledge/daily",
     "knowledge/notes",
     "knowledge/projects",
-    "knowledge/inbox/claims",
+    "knowledge/inbox",
+    "knowledge/feedback",
 )
 _ALLOWED_FILES = {"knowledge/index.md", "knowledge/log.md"}
 _SCHEMA = Path(__file__).with_name("schemas") / "markdown-transaction-v1.json"
@@ -174,6 +175,130 @@ def _require_bytes(content: bytes) -> bytes:
     if not isinstance(content, bytes):
         raise TypeError("Markdown content must be bytes")
     return content
+
+
+def stable_operation_id(kind: str, event_id: str, content: bytes) -> str:
+    """Return a deterministic operation ID bound to one redacted event payload."""
+    if not kind or not event_id:
+        raise ValueError("operation kind and event_id must be non-empty")
+    content = _require_bytes(content)
+    return f"{kind}:{event_id}:{sha256_bytes(content)}"
+
+
+def _default_coordinator() -> MarkdownCoordinator:
+    vault = Path(
+        os.environ.get("LLM_WIKI_ROOT", str(Path(__file__).resolve().parent.parent))
+    ).resolve(strict=True)
+    state_root = Path(os.environ.get("LLM_WIKI_STATE_ROOT", str(vault)))
+    return MarkdownCoordinator(vault, state_root)
+
+
+def _relative_target(coordinator: MarkdownCoordinator, path: Path) -> str:
+    absolute = Path(path).absolute()
+    try:
+        relative = absolute.relative_to(coordinator.vault).as_posix()
+    except ValueError as exc:
+        raise ValueError(f"knowledge target is outside the vault: {path}") from exc
+    coordinator.ensure_target_parent(relative)
+    return relative
+
+
+def mutate_knowledge(
+    operation_id: str,
+    changes: Mapping[Path, bytes | None],
+    *,
+    validators: Sequence[Validator] = (),
+    preconditions: Mapping[str, object] | None = None,
+) -> TransactionRecord:
+    """Apply one recoverable mutation with caller-independent before hashes."""
+    if not changes:
+        raise ValueError("a knowledge mutation requires at least one change")
+    coordinator = _default_coordinator()
+    relative_changes = {
+        _relative_target(coordinator, Path(path)): content
+        for path, content in changes.items()
+    }
+    with coordinator.writer_gate():
+        captured = {
+            relative: coordinator._read_target(coordinator._target(relative))
+            for relative in relative_changes
+        }
+    expected = dict(preconditions or {})
+    prepared: list[MarkdownChange] = []
+    for relative, content in relative_changes.items():
+        before = captured[relative]
+        captured_hash = ABSENT if before is None else sha256_bytes(before)
+        caller_expected = expected.get(relative)
+        if caller_expected is not None and caller_expected != captured_hash:
+            raise ValueError(f"caller precondition does not match target: {relative}")
+        expected[relative] = captured_hash
+        if content is None:
+            if before is None:
+                raise FileNotFoundError(relative)
+            prepared.append(MarkdownChange.delete(relative))
+        elif before is None:
+            prepared.append(MarkdownChange.create(relative, _require_bytes(content)))
+        else:
+            prepared.append(MarkdownChange.replace(relative, _require_bytes(content)))
+    record = coordinator.prepare(
+        prepared,
+        operation_id=operation_id,
+        validators=validators,
+        preconditions=expected,
+    )
+    return coordinator.apply(record.id)
+
+
+def append_knowledge(operation_id: str, path: Path, block: bytes) -> TransactionRecord:
+    """CAS-append Markdown or project JSONL bytes, retrying concurrent winners."""
+    if not operation_id:
+        raise ValueError("operation_id must be non-empty")
+    block = _require_bytes(block)
+    coordinator = _default_coordinator()
+    relative = _relative_target(coordinator, Path(path))
+    coordinator.recover()
+    attempt = 0
+    while attempt < 64:
+        candidate_id = operation_id if attempt == 0 else f"{operation_id}:cas:{attempt}"
+        existing = coordinator._record_for_operation_id(candidate_id)
+        if existing is not None and existing.state == "committed":
+            return existing
+        if existing is not None:
+            attempt += 1
+            continue
+        with coordinator.writer_gate():
+            before = coordinator._read_target(coordinator._target(relative))
+        content = (before or b"") + block
+        expected = ABSENT if before is None else sha256_bytes(before)
+        change = (
+            MarkdownChange.create(relative, content)
+            if before is None
+            else MarkdownChange.replace(relative, content)
+        )
+        try:
+            record = coordinator.prepare(
+                [change],
+                operation_id=candidate_id,
+                preconditions={relative: expected},
+            )
+            return coordinator.apply(record.id)
+        except (FileExistsError, FileNotFoundError, ValueError) as exc:
+            if not isinstance(exc, (FileExistsError, FileNotFoundError)) and (
+                "precondition changed" not in str(exc)
+            ):
+                raise
+        except TransactionFailure as exc:
+            if exc.code not in {
+                "before_hash_mismatch", "unknown_target_bytes", "precondition_failed"
+            }:
+                raise
+        except RuntimeError as exc:
+            if "transaction cannot be applied from state" not in str(exc):
+                raise
+        except TimeoutError:
+            pass
+        attempt += 1
+    raise TimeoutError("knowledge append did not converge after 64 CAS attempts")
 
 
 def _now() -> str:
@@ -2149,6 +2274,31 @@ class MarkdownCoordinator:
         with self.writer_gate():
             return {Path(path): self._read_target(self._target(Path(path).as_posix())) for path in paths}
 
+    def ensure_target_parent(self, value: str) -> Path:
+        """Create a covered target's parent without traversing unsafe directories."""
+        relative = restricted_relative_path(
+            value, (*_ALLOWED_DIRECTORIES, *_ALLOWED_FILES)
+        )
+        current = self.vault
+        for part in relative.parts[:-1]:
+            current = current / part
+            if current.exists():
+                if current.is_symlink() or _is_reparse_point(current):
+                    raise ValueError(f"target traverses an unsafe parent: {value}")
+                if not current.is_dir():
+                    raise ValueError(f"target parent is not a directory: {value}")
+                continue
+            try:
+                current.mkdir()
+            except FileExistsError:
+                pass
+            if current.is_symlink() or _is_reparse_point(current):
+                raise ValueError(f"created target parent is unsafe: {value}")
+            if not current.is_dir():
+                raise ValueError(f"created target parent is not a directory: {value}")
+            fsync_directory(current.parent)
+        return self._target(value)
+
     def _validate_change(self, change: MarkdownChange) -> MarkdownChange:
         if not isinstance(change, MarkdownChange):
             raise TypeError("changes must contain MarkdownChange values")
@@ -2189,8 +2339,8 @@ class MarkdownCoordinator:
             normalized.startswith(f"{root}/") for root in _ALLOWED_DIRECTORIES
         ):
             raise ValueError("path is outside every allowed Markdown root")
-        if relative.suffix.casefold() != ".md":
-            raise ValueError("transaction targets must be Markdown files")
+        if relative.suffix.casefold() not in {".md", ".json", ".jsonl"}:
+            raise ValueError("transaction targets must be Markdown or covered JSON files")
         target = self.vault.joinpath(*relative.parts)
         current = self.vault
         for part in relative.parts:

@@ -147,8 +147,11 @@ class TestFlushFrontmatter:
     def test_flush_adds_frontmatter_to_bare_page(self, tmp_path, monkeypatch):
         import access_tracking
 
-        notes_dir = tmp_path / "notes"
-        notes_dir.mkdir()
+        vault = tmp_path / "vault"
+        notes_dir = vault / "knowledge" / "notes"
+        notes_dir.mkdir(parents=True)
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+        monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
         page = notes_dir / "bare.md"
         page.write_text("# Bare Page\n\nBody.\n", encoding="utf-8")
 
@@ -167,8 +170,11 @@ class TestFlushFrontmatter:
     def test_flush_updates_existing_frontmatter(self, tmp_path, monkeypatch):
         import access_tracking
 
-        notes_dir = tmp_path / "notes"
-        notes_dir.mkdir()
+        vault = tmp_path / "vault"
+        notes_dir = vault / "knowledge" / "notes"
+        notes_dir.mkdir(parents=True)
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+        monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
         page = notes_dir / "fm.md"
         page.write_text(
             "---\ntype: concept\naccess_count: 5\nlast_accessed: 2026-01-01T00:00:00\n---\n\n# FM\n",

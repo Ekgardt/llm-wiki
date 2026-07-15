@@ -12,7 +12,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import read_stable_bytes  # noqa: E402
-from memory_state import ROOT, atomic_write  # noqa: E402
+from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
+from memory_state import ROOT  # noqa: E402
 
 memory = ROOT / "knowledge"
 knowledge = memory / "notes"
@@ -220,7 +221,8 @@ def collect_pages() -> dict[str, list[Path]]:
 
 
 def main() -> int:
-    atomic_write(out, build_index_bytes(ROOT).decode("utf-8"))
+    content = build_index_bytes(ROOT)
+    mutate_knowledge(stable_operation_id("rebuild-index", "index", content), {out: content})
     return 0
 
 

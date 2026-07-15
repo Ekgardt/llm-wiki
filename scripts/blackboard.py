@@ -43,7 +43,9 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from markdown_transaction import append_knowledge, stable_operation_id  # noqa: E402
 from memory_state import ROOT  # noqa: E402
+from secret_redact import redact_secrets  # noqa: E402
 
 PROJECTS_DIR = ROOT / "knowledge" / "projects"
 
@@ -64,13 +66,13 @@ def _bb_dir(project: str) -> Path:
         d.relative_to(PROJECTS_DIR.resolve())
     except ValueError as exc:
         raise ValueError(f"project path escapes projects dir: {project!r}") from exc
-    d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def _append_jsonl(path: Path, record: dict) -> None:
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    block = (redact_secrets(json.dumps(record, ensure_ascii=False)) + "\n").encode("utf-8")
+    event_id = str(record.get("id") or hashlib.sha256(block).hexdigest())
+    append_knowledge(stable_operation_id("blackboard", event_id, block), path, block)
 
 
 def _read_jsonl(path: Path) -> list[dict]:

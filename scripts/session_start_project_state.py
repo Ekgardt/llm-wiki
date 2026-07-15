@@ -48,11 +48,13 @@ import unicodedata
 from datetime import datetime
 from pathlib import Path
 
+from markdown_transaction import mutate_knowledge, stable_operation_id
 from project_journal import (
     ProjectStore,
     legacy_state_project_root,
     recover_project_handoff,
 )
+from secret_redact import redact_secrets
 
 # Force utf-8 on stdout (Windows cp1252 mojibakes Cyrillic otherwise).
 if hasattr(sys.stdout, "reconfigure"):
@@ -435,24 +437,13 @@ def main() -> int:
                 _safe_write_error(f"template missing: {template}")
                 return _emit_empty()
             try:
-                state_path.parent.mkdir(parents=True, exist_ok=True)
-                # Exclusive-create: O_CREAT|O_EXCL ensures only one
-                # session wins the race to create state.md. If another
-                # session already created it, FileExistsError is caught
-                # silently — their content is just as valid as ours.
-                content = _render_new_state(template, slug, project_dir)
-                try:
-                    fd = os.open(
-                        str(state_path),
-                        os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-                    )
-                    try:
-                        os.write(fd, content.encode("utf-8"))
-                    finally:
-                        os.close(fd)
-                    is_new = True
-                except FileExistsError:
-                    pass  # Another session created it — that's fine
+                content = redact_secrets(_render_new_state(template, slug, project_dir))
+                encoded = content.encode("utf-8")
+                mutate_knowledge(
+                    stable_operation_id("project-state", slug, encoded),
+                    {state_path: encoded},
+                )
+                is_new = True
 
                 # Bootstrap: auto-generate context from git + README.
                 # Only on first discovery — gives the new project immediate

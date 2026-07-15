@@ -25,7 +25,8 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT, STATE_ROOT, atomic_write  # noqa: E402
+from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
+from memory_state import ROOT, STATE_ROOT  # noqa: E402
 
 KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
 ACCESS_LOG_FILE = STATE_ROOT / "cache" / "access_log.jsonl"
@@ -67,7 +68,7 @@ def flush_access_to_frontmatter(slug: str | None = None) -> int:
     slugs = [slug] if slug else list(_batch.keys())
 
     for s in slugs:
-        count = _batch.pop(s, 0)
+        count = _batch.get(s, 0)
         if count <= 0:
             continue
 
@@ -116,7 +117,12 @@ def flush_access_to_frontmatter(slug: str | None = None) -> int:
                     f"---\naccess_count: {count}\nlast_accessed: {now}\n---\n\n{content}"
                 )
 
-            atomic_write(page_path, new_content)
+            encoded = new_content.encode("utf-8")
+            mutate_knowledge(
+                stable_operation_id("access", f"{s}:{now}", encoded),
+                {page_path: encoded},
+            )
+            _batch.pop(s, None)
             updated += 1
         except Exception:
             continue

@@ -113,6 +113,8 @@ class TestNoLLMBypass:
         rename_apis = {"rename", "replace", "move"}
         offenders = set()
         for path in SCRIPTS.glob("*.py"):
+            if path.name == "check_knowledge_writers.py":
+                continue  # Scanner patterns are data, not publication calls.
             source = path.read_text(encoding="utf-8")
             tree = ast.parse(source)
             archive_assignments = [

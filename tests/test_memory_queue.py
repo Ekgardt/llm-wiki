@@ -1262,6 +1262,9 @@ def test_deferred_flush_operation_is_appended_once_under_lock(
     import daily_log_append
 
     daily = tmp_path / "knowledge" / "daily" / "2026-07-14.md"
+    (tmp_path / "knowledge" / "notes").mkdir(parents=True)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "runtime"))
     monkeypatch.setattr(daily_log_append, "_daily_lock", nullcontext)
     assert daily_log_append.locked_append_once(daily, "\nbody\n", "stable-op") is True
     assert daily_log_append.locked_append_once(daily, "\nbody\n", "stable-op") is False

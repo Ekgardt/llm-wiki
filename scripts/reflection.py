@@ -25,7 +25,9 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT, atomic_write  # noqa: E402
+from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
+from memory_state import ROOT  # noqa: E402
+from secret_redact import redact_secrets  # noqa: E402
 
 KNOWLEDGE = ROOT / "knowledge" / "notes"
 SKIP_NAMES = {"index.md", "log.md", "README.md", "state.md", "context.md"}
@@ -145,7 +147,11 @@ Return ONLY the rewritten markdown — no commentary.
     history_body = body  # The original full body.
     new_content += f"{history_header}<details>\n<summary>Original page before reflection</summary>\n\n{history_body}\n\n</details>\n"
 
-    atomic_write(md, new_content)
+    encoded = redact_secrets(new_content).encode("utf-8")
+    mutate_knowledge(
+        stable_operation_id("reflection", md.relative_to(ROOT).as_posix(), encoded),
+        {md: encoded},
+    )
     return f"  {md.stem}: reflected ({len(updates)} updates integrated)."
 
 

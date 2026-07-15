@@ -33,6 +33,9 @@ def test_feedback_capture_stdin_json(tmp_path, monkeypatch):
 
     monkeypatch.setattr(feedback_capture, "ROOT", tmp_path)
     monkeypatch.setattr(feedback_capture, "FEEDBACK_DIR", tmp_path / "knowledge" / "feedback")
+    (tmp_path / "knowledge" / "notes").mkdir(parents=True)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "runtime"))
 
     payload = json.dumps(
         {
@@ -43,7 +46,6 @@ def test_feedback_capture_stdin_json(tmp_path, monkeypatch):
         }
     )
     env = dict(os.environ)
-    env["LLM_WIKI_ROOT"] = str(tmp_path)
     result = subprocess.run(
         [sys.executable, str(SCRIPTS / "feedback_capture.py")],
         input=payload,

@@ -4,7 +4,7 @@ Small pytest-based suite covering the critical scenarios surfaced by four rounds
 
 ## Coverage
 
-The suite currently has **1662 tests**. Highlights:
+The suite currently has **1670 tests**. Highlights:
 
 | Test file | Guards against |
 |---|---|
@@ -64,7 +64,7 @@ pytest tests/
   - `MEMORY_LLM_PROVIDER` → `fake` (no live LLM calls)
   - a skeleton `state.json` if it doesn't exist yet
 
-No pre-configuration required. Current collection: 1662 tests.
+No pre-configuration required. Current collection: 1670 tests.
 
 All tests are self-contained and use `tmp_path` + state snapshots, so running them does not mutate the vault permanently. The compile-failure test briefly flips `state.json::last_compile_status` and restores it via fixture.
 

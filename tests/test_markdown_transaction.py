@@ -28,6 +28,7 @@ def vault(tmp_path: Path) -> Path:
         "knowledge/projects/demo",
         "knowledge/inbox",
         "knowledge/inbox/claims",
+        "knowledge/feedback",
     ):
         (root / relative).mkdir(parents=True)
     (root / "knowledge/index.md").write_bytes(b"index-v1\n")
@@ -228,6 +229,8 @@ def test_prepare_enforces_exact_absent_semantics(
         "knowledge/notes/page.md",
         "knowledge/projects/demo/state.md",
         "knowledge/inbox/claims/claim.md",
+        "knowledge/inbox/source.md",
+        "knowledge/feedback/item.md",
         "knowledge/index.md",
         "knowledge/log.md",
     ],
@@ -249,8 +252,6 @@ def test_all_approved_markdown_targets_are_allowed(vault: Path, state_root: Path
     "path",
     [
         "knowledge/raw/source.md",
-        "knowledge/feedback/item.md",
-        "knowledge/inbox/source.md",
         "knowledge/claims/claim.md",
         "knowledge/other.md",
         "cache/item.md",

@@ -18,7 +18,8 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT, atomic_write  # noqa: E402
+from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
+from memory_state import ROOT  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
 MEMORY = ROOT / "knowledge"
@@ -115,7 +116,6 @@ Respond in this shape:
 def file_back(question: str, answer_text: str) -> Path:
     question = redact_secrets(question)
     answer_text = redact_secrets(answer_text)
-    QA_DIR.mkdir(parents=True, exist_ok=True)
     slug = slugify(question)
     out = QA_DIR / f"{slug}.md"
     today = datetime.now().strftime("%Y-%m-%d")
@@ -146,7 +146,8 @@ def file_back(question: str, answer_text: str) -> Path:
         f"## Related\n"
         f"-\n"
     )
-    atomic_write(out, page)
+    encoded = page.encode("utf-8")
+    mutate_knowledge(stable_operation_id("query-file-back", slug, encoded), {out: encoded})
     return out
 
 
@@ -172,11 +173,15 @@ def rebuild_index() -> bool:
 
 
 def append_log(entry: str) -> None:
-    from daily_log_append import locked_append
+    from markdown_transaction import append_knowledge
 
+    header = b"# Session Memory Log\n\n"
     if not LOG.exists():
-        atomic_write(LOG, "# Session Memory Log\n\n")
-    locked_append(LOG, entry)
+        append_knowledge(
+            stable_operation_id("knowledge-log-header", "log", header), LOG, header
+        )
+    block = (entry if entry.endswith("\n") else entry + "\n").encode("utf-8")
+    append_knowledge(stable_operation_id("query-log", "file-back", block), LOG, block)
 
 
 def main() -> int:

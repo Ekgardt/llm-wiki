@@ -806,18 +806,28 @@ def run_frozen_benchmark(corpus: Mapping[str, object]) -> BenchmarkMetrics:
         ):
             (vault / relative).mkdir(parents=True)
         state_root.mkdir()
+        coordinator = MarkdownCoordinator(vault, state_root)
         source = source_text.encode("utf-8")
-        (vault / "knowledge/daily/2026-01-01.md").write_bytes(source)
+        source_record = coordinator.prepare(
+            [MarkdownChange.create("knowledge/daily/2026-01-01.md", source)],
+            operation_id=f"benchmark-source:{sha256_bytes(source)}",
+        )
+        coordinator.apply(source_record.id)
         for case in cases:
             ledger = {
                 "schema_version": "claim-ledger/v1",
                 "claims": [case["existing_claim"]],
             }
-            (vault / case["existing_page"]).write_bytes(
+            page_bytes = (
                 b"---\ntype: concept\n---\n# Benchmark\n\n## Claims\n```json\n"
                 + canonical_json_bytes(ledger)
                 + b"\n```\n"
             )
+            page_record = coordinator.prepare(
+                [MarkdownChange.create(case["existing_page"], page_bytes)],
+                operation_id=f"benchmark-page:{sha256_bytes(page_bytes)}",
+            )
+            coordinator.apply(page_record.id)
 
         resolver = EvidenceResolver(vault, state_root=state_root)
         extraction_pipeline = ClaimPipeline(resolver)

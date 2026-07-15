@@ -28,6 +28,7 @@ if hasattr(sys.stdout, "reconfigure"):
     except (AttributeError, io.UnsupportedOperation):
         pass
 
+from markdown_transaction import append_knowledge, stable_operation_id  # noqa: E402
 from memory_state import STATE_ROOT, _is_pid_alive  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
@@ -111,15 +112,16 @@ def locked_append(daily_path: Path, text: str) -> None:
     ``session_end_project_tag``) both delegate here so that all daily-log
     writes share a single serialization point.
     """
-    daily_path.parent.mkdir(parents=True, exist_ok=True)
-    with _daily_lock():
-        if not daily_path.exists():
-            day = daily_path.stem
-            daily_path.write_text(f"# Daily Session Memory — {day}\n", encoding="utf-8")
-        with daily_path.open("a", encoding="utf-8") as f:
-            f.write(text)
-            if not text.endswith("\n"):
-                f.write("\n")
+    text = redact_secrets(text)
+    header = f"# Daily Session Memory — {daily_path.stem}\n".encode()
+    if not daily_path.exists():
+        append_knowledge(
+            stable_operation_id("daily-header", daily_path.name, header), daily_path, header
+        )
+    block = (text if text.endswith("\n") else text + "\n").encode("utf-8")
+    append_knowledge(
+        stable_operation_id("daily-append", daily_path.name, block), daily_path, block
+    )
 
 
 def locked_append_once(daily_path: Path, text: str, operation_id: str) -> bool:
@@ -128,21 +130,18 @@ def locked_append_once(daily_path: Path, text: str, operation_id: str) -> bool:
         raise ValueError("operation_id must be non-empty")
     marker_id = hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
     marker = f"<!-- llm-wiki-operation:{marker_id} -->"
-    daily_path.parent.mkdir(parents=True, exist_ok=True)
-    with _daily_lock():
-        if daily_path.exists() and marker in daily_path.read_text(encoding="utf-8"):
-            return False
-        with daily_path.open("a", encoding="utf-8") as handle:
-            header = (
-                f"# Daily Session Memory — {daily_path.stem}\n"
-                if daily_path.stat().st_size == 0
-                else ""
-            )
-            ending = "" if text.endswith("\n") else "\n"
-            handle.write(f"{header}\n{marker}\n{text}{ending}")
-            handle.flush()
-            os.fsync(handle.fileno())
-        return True
+    if daily_path.exists() and marker in daily_path.read_text(encoding="utf-8"):
+        return False
+    header = f"# Daily Session Memory — {daily_path.stem}\n".encode()
+    if not daily_path.exists():
+        append_knowledge(
+            stable_operation_id("daily-header", daily_path.name, header), daily_path, header
+        )
+    block = redact_secrets(
+        f"\n{marker}\n{text}{'' if text.endswith(chr(10)) else chr(10)}"
+    ).encode("utf-8")
+    append_knowledge(operation_id, daily_path, block)
+    return True
 
 
 def append_daily(slug: str, session_id: str, block: str) -> Path:

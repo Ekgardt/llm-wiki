@@ -36,7 +36,8 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT, atomic_write  # noqa: E402
+from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
+from memory_state import ROOT  # noqa: E402
 
 # Reserved OKF filenames — no frontmatter allowed at bundle level.
 RESERVED_NAMES = frozenset({"index.md", "log.md"})
@@ -287,7 +288,13 @@ def main() -> int:
     write_errors = 0
     for path, new_content in plan:
         try:
-            atomic_write(path, new_content)
+            encoded = new_content.encode("utf-8")
+            mutate_knowledge(
+                stable_operation_id(
+                    "okf-migrate", path.relative_to(ROOT).as_posix(), encoded
+                ),
+                {path: encoded},
+            )
             written += 1
         except OSError as e:
             print(f"  WRITE ERROR: {path} — {type(e).__name__}: {e}")
