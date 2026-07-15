@@ -28,16 +28,23 @@ import sqlite3
 import sys
 import tempfile
 import time
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT, STATE_ROOT, atomic_write  # noqa: E402
+from memory_state import ROOT, STATE_ROOT, _is_pid_alive, atomic_write  # noqa: E402
 
 INDEX_DIR = STATE_ROOT / "cache"
 INDEX_FILE = INDEX_DIR / "index.sqlite"
 INDEX_MANIFEST = INDEX_DIR / ".paths-manifest"
 VECTOR_NPY = INDEX_DIR / "vectors.npy"  # Binary numpy cache (memory-mapped, fast load)
 VECTOR_META = INDEX_DIR / "vectors_meta.json"  # Metadata without vectors (small JSON)
+
+_INDEX_SWAP_WAIT_SECONDS = 10.0
+_INDEX_SWAP_STALE_SECONDS = 30.0
+_INDEX_REPLACE_WAIT_SECONDS = 1.0
 
 KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
 # Legacy alias retained for tests and external callers. Post-three-zone
@@ -240,6 +247,106 @@ def _needs_rebuild(pages: list[Path]) -> bool:
     return False
 
 
+def _is_transient_windows_access_error(error: OSError) -> bool:
+    return sys.platform == "win32" and isinstance(error, PermissionError) and (
+        getattr(error, "winerror", None) in {5, 32, 33}
+        or error.errno == 13
+    )
+
+
+@contextmanager
+def _index_swap_lock(
+    timeout: float = _INDEX_SWAP_WAIT_SECONDS, poll: float = 0.01
+) -> Iterator[None]:
+    """Serialize live-index swaps across processes with crash recovery."""
+    lock_file = INDEX_FILE.with_suffix(INDEX_FILE.suffix + ".swap.lock")
+    token = uuid.uuid4().hex
+    payload = json.dumps({"pid": os.getpid(), "token": token}).encode("utf-8")
+    deadline = time.monotonic() + timeout
+
+    while True:
+        try:
+            descriptor = os.open(
+                str(lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+            )
+        except FileExistsError:
+            pass
+        except PermissionError as error:
+            if not _is_transient_windows_access_error(error):
+                raise
+        else:
+            try:
+                os.write(descriptor, payload)
+            except BaseException:
+                os.close(descriptor)
+                try:
+                    lock_file.unlink()
+                except OSError:
+                    pass
+                raise
+            else:
+                os.close(descriptor)
+            break
+
+        try:
+            age = time.time() - lock_file.stat().st_mtime
+        except OSError:
+            age = 0.0
+        if age >= _INDEX_SWAP_STALE_SECONDS:
+            try:
+                owner = json.loads(lock_file.read_text(encoding="utf-8"))
+                owner_pid = owner.get("pid")
+                owner_token = owner.get("token")
+                valid_owner = (
+                    isinstance(owner_pid, int)
+                    and isinstance(owner_token, str)
+                    and bool(owner_token)
+                )
+            except (OSError, json.JSONDecodeError, AttributeError):
+                valid_owner = False
+                owner_pid = 0
+            if not valid_owner or not _is_pid_alive(owner_pid):
+                try:
+                    lock_file.unlink()
+                    continue
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    pass
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"Could not acquire index swap lock: {lock_file}")
+        time.sleep(min(poll, remaining))
+
+    try:
+        yield
+    finally:
+        try:
+            owner = json.loads(lock_file.read_text(encoding="utf-8"))
+            if owner.get("token") == token:
+                lock_file.unlink()
+        except (OSError, json.JSONDecodeError, AttributeError):
+            pass
+
+
+def _replace_live_index(tmp_file: Path) -> None:
+    deadline = time.monotonic() + _INDEX_REPLACE_WAIT_SECONDS
+    attempt = 0
+    while True:
+        try:
+            os.replace(str(tmp_file), str(INDEX_FILE))
+            return
+        except PermissionError as error:
+            if not _is_transient_windows_access_error(error):
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            delay = min(0.01 * (2 ** min(attempt, 4)), 0.1, remaining)
+            time.sleep(delay)
+            attempt += 1
+
+
 def _build_index(pages: list[Path]) -> None:
     """Build the FTS5 index from scratch (atomically).
 
@@ -293,9 +400,21 @@ def _build_index(pages: list[Path]) -> None:
         conn.close()
         conn = None
 
-        # Atomic swap keeps the live index valid while concurrent builders work
-        # in independent temporary files in the same directory.
-        os.replace(str(tmp_file), str(INDEX_FILE))
+        # Builders do the expensive work independently, then briefly serialize
+        # the atomic live-index swap. Windows readers may transiently deny it.
+        with _index_swap_lock():
+            _replace_live_index(tmp_file)
+
+            # Keep the manifest paired with the winning index build.
+            try:
+                atomic_write(
+                    INDEX_MANIFEST,
+                    json.dumps(
+                        sorted(p.relative_to(ROOT).as_posix() for p in pages)
+                    ),
+                )
+            except OSError:
+                pass  # best-effort
     finally:
         if conn is not None:
             try:
@@ -306,18 +425,6 @@ def _build_index(pages: list[Path]) -> None:
             tmp_file.unlink()
         except FileNotFoundError:
             pass
-
-    # Write paths manifest so deletions are detected on the next check.
-    try:
-        atomic_write(
-            INDEX_MANIFEST,
-            json.dumps(
-                sorted(p.relative_to(ROOT).as_posix() for p in pages)
-            ),
-        )
-    except OSError:
-        pass  # best-effort
-
 
 def _authority_weight(path: str) -> float:
     """Read source_authority from page frontmatter; default 1.0."""

@@ -9,10 +9,15 @@ Locks in:
 """
 from __future__ import annotations
 
+import concurrent.futures
+import json
+import os
+import sqlite3
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -20,6 +25,21 @@ from unittest.mock import MagicMock, patch
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
+
+
+def _build_search_index_worker(root: str, builds: int) -> bool:
+    import search_memory
+
+    vault = Path(root)
+    index_dir = vault / "cache"
+    search_memory.ROOT = vault
+    search_memory.INDEX_DIR = index_dir
+    search_memory.INDEX_FILE = index_dir / "index.sqlite"
+    search_memory.INDEX_MANIFEST = index_dir / ".paths-manifest"
+    page = vault / "knowledge" / "notes" / "page.md"
+    for _ in range(builds):
+        search_memory._build_index([page])
+    return True
 
 
 def test_rrf_fuse_triple_weights():
@@ -218,3 +238,98 @@ def test_concurrent_index_builds_use_unique_temps_and_leave_valid_index(
         deadline=time.monotonic() + 1,
     )
     assert check["status"] == "ok"
+
+
+def test_index_swap_retries_transient_windows_access_denial(tmp_path, monkeypatch):
+    import search_memory
+
+    notes = tmp_path / "knowledge" / "notes"
+    notes.mkdir(parents=True)
+    page = notes / "page.md"
+    page.write_text("# Page\nBody", encoding="utf-8")
+    index_dir = tmp_path / "cache"
+    index = index_dir / "index.sqlite"
+    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
+    monkeypatch.setattr(search_memory, "INDEX_DIR", index_dir)
+    monkeypatch.setattr(search_memory, "INDEX_FILE", index)
+    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", index_dir / ".paths-manifest")
+    monkeypatch.setattr(search_memory.sys, "platform", "win32")
+    real_replace = search_memory.os.replace
+    attempts = 0
+
+    def transient_access_denial(source, destination):
+        nonlocal attempts
+        if Path(destination) == index:
+            attempts += 1
+            if attempts < 3:
+                error = PermissionError(13, "transient index access denial")
+                error.winerror = 5
+                raise error
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(search_memory.os, "replace", transient_access_denial)
+
+    search_memory._build_index([page])
+
+    assert attempts == 3
+    with closing(sqlite3.connect(index)) as database:
+        assert database.execute("SELECT COUNT(*) FROM pages").fetchone() == (1,)
+    assert not list(index_dir.glob(".index.sqlite.*.tmp"))
+
+
+def test_repeated_thread_and_process_index_builds_leave_valid_index(
+    tmp_path, monkeypatch
+):
+    import search_memory
+
+    notes = tmp_path / "knowledge" / "notes"
+    notes.mkdir(parents=True)
+    (notes / "page.md").write_text("# Page\nBody", encoding="utf-8")
+    index_dir = tmp_path / "cache"
+    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
+    monkeypatch.setattr(search_memory, "INDEX_DIR", index_dir)
+    monkeypatch.setattr(search_memory, "INDEX_FILE", index_dir / "index.sqlite")
+    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", index_dir / ".paths-manifest")
+
+    for executor_class in (
+        concurrent.futures.ThreadPoolExecutor,
+        concurrent.futures.ProcessPoolExecutor,
+    ):
+        with executor_class(max_workers=4) as executor:
+            futures = [
+                executor.submit(_build_search_index_worker, str(tmp_path), 4)
+                for _ in range(4)
+            ]
+            assert [future.result(timeout=30) for future in futures] == [True] * 4
+
+        with closing(sqlite3.connect(index_dir / "index.sqlite")) as database:
+            assert database.execute("SELECT COUNT(*) FROM pages").fetchone() == (1,)
+        assert not list(index_dir.glob(".index.sqlite.*.tmp"))
+
+
+def test_index_swap_recovers_aged_lock_owned_by_dead_pid(tmp_path, monkeypatch):
+    import search_memory
+
+    notes = tmp_path / "knowledge" / "notes"
+    notes.mkdir(parents=True)
+    page = notes / "page.md"
+    page.write_text("# Page\nBody", encoding="utf-8")
+    index_dir = tmp_path / "cache"
+    index_dir.mkdir()
+    index = index_dir / "index.sqlite"
+    lock = index.with_suffix(index.suffix + ".swap.lock")
+    lock.write_text(
+        json.dumps({"pid": 2_147_483_647, "token": "abandoned"}),
+        encoding="utf-8",
+    )
+    old = time.time() - 60
+    os.utime(lock, (old, old))
+    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
+    monkeypatch.setattr(search_memory, "INDEX_DIR", index_dir)
+    monkeypatch.setattr(search_memory, "INDEX_FILE", index)
+    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", index_dir / ".paths-manifest")
+
+    search_memory._build_index([page])
+
+    assert index.exists()
+    assert not lock.exists()
