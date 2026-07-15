@@ -6,6 +6,7 @@ import importlib
 import inspect
 import io
 import json
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -78,6 +79,14 @@ def _same_operation_worker(api: str, target: str, operation_id: str, content: by
     if api == "append":
         return markdown_transaction.append_knowledge(operation_id, path, content).state
     return markdown_transaction.mutate_knowledge(operation_id, {path: content}).state
+
+
+def _distinct_append_worker(target: str, index: int) -> str:
+    import markdown_transaction
+
+    return markdown_transaction.append_knowledge(
+        f"stress:{index}", Path(target), f"event-{index}\n".encode()
+    ).state
 
 
 def test_repository_scanner_finds_no_unapproved_covered_writers():
@@ -718,6 +727,70 @@ def test_concurrent_identical_operation_id_converges_once(
             (operation_id, f"{operation_id}:cas:%"),
         ).fetchone()[0]
     assert transaction_count == 1
+
+
+@pytest.mark.parametrize("executor_type", ["thread", "process"])
+def test_distinct_events_survive_repeated_writer_contention(
+    tmp_path, monkeypatch, executor_type
+):
+    vault, state = _vault(tmp_path)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
+    target = vault / "knowledge" / "daily" / "stress.md"
+    executor_class = (
+        concurrent.futures.ThreadPoolExecutor
+        if executor_type == "thread"
+        else concurrent.futures.ProcessPoolExecutor
+    )
+
+    with executor_class(max_workers=6) as executor:
+        futures = [
+            executor.submit(_distinct_append_worker, str(target), index) for index in range(18)
+        ]
+        assert [future.result(timeout=60) for future in futures] == ["committed"] * 18
+
+    content = target.read_text(encoding="utf-8")
+    assert sorted(content.splitlines()) == sorted(f"event-{index}" for index in range(18))
+
+
+@pytest.mark.parametrize("api", ["append", "mutate"])
+@pytest.mark.parametrize(
+    "contention",
+    [
+        sqlite3.OperationalError("database is busy"),
+        sqlite3.OperationalError("database is locked"),
+        PermissionError(32, "sharing violation"),
+    ],
+)
+def test_public_mutation_retries_initial_recovery_contention_without_dropping_event(
+    tmp_path, monkeypatch, api, contention
+):
+    import markdown_transaction
+
+    vault, state = _vault(tmp_path)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
+    monkeypatch.setattr(markdown_transaction, "_WRITER_WAIT_SECONDS", 0.5)
+    target = vault / "knowledge" / "notes" / f"{api}.md"
+    real_recover = markdown_transaction.MarkdownCoordinator.recover
+    attempts = 0
+
+    def contended_recover(self, *args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 2:
+            raise contention
+        return real_recover(self, *args, **kwargs)
+
+    monkeypatch.setattr(markdown_transaction.MarkdownCoordinator, "recover", contended_recover)
+    if api == "append":
+        record = markdown_transaction.append_knowledge("recover:append", target, b"event\n")
+    else:
+        record = markdown_transaction.mutate_knowledge("recover:mutate", {target: b"event\n"})
+
+    assert attempts >= 3
+    assert record.state == "committed"
+    assert target.read_bytes() == b"event\n"
 
 
 @pytest.mark.parametrize("entrypoint", ["feedback", "migration", "reflection"])

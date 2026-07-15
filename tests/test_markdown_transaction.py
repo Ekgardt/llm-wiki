@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import errno
 import inspect
 import os
@@ -631,6 +632,95 @@ def test_live_writer_heartbeat_renews_before_expiry(
         assert renewed[0] == first[0]
         assert renewed[1] > first[1]
         assert renewed[2] == first[2]
+
+
+@pytest.mark.parametrize(
+    "contention",
+    [
+        sqlite3.OperationalError("database is busy"),
+        sqlite3.OperationalError("database table is locked"),
+        PermissionError(32, "sharing violation"),
+    ],
+)
+def test_writer_heartbeat_retries_transient_contention_without_losing_fence(
+    vault: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    contention: BaseException,
+):
+    coordinator = MarkdownCoordinator(vault, state_root)
+    token = "heartbeat-owner"
+    now = markdown_transaction._now()
+    with coordinator._connect() as database:
+        database.execute(
+            "INSERT INTO writer_owners VALUES ('global', ?, ?, ?, ?, ?, ?, ?)",
+            (
+                token,
+                os.getpid(),
+                threading.get_ident(),
+                now,
+                now,
+                markdown_transaction._future_timestamp(1),
+                1,
+            ),
+        )
+        database.commit()
+
+    real_connect = coordinator._connect
+    connected = threading.Event()
+    attempts = 0
+
+    def contended_connect(**kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 2:
+            raise contention
+        connected.set()
+        return real_connect(**kwargs)
+
+    monkeypatch.setattr(markdown_transaction, "_WRITER_HEARTBEAT_SECONDS", 0.01)
+    monkeypatch.setattr(coordinator, "_connect", contended_connect)
+    stop = threading.Event()
+    lost = threading.Event()
+    thread = threading.Thread(
+        target=coordinator._heartbeat_writer_gate,
+        args=(token, 1, stop, lost),
+    )
+    thread.start()
+    assert connected.wait(2)
+    stop.set()
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert attempts >= 3
+    assert not lost.is_set()
+
+
+def test_writer_gate_exit_retries_locked_database_then_releases_owner(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    coordinator = MarkdownCoordinator(vault, state_root)
+    real_begin = markdown_transaction.begin_immediate
+    main_thread = threading.get_ident()
+    armed = False
+    injected = False
+
+    @contextlib.contextmanager
+    def contended_begin(database):
+        nonlocal injected
+        if armed and threading.get_ident() == main_thread and not injected:
+            injected = True
+            raise sqlite3.OperationalError("database is locked")
+        with real_begin(database):
+            yield database
+
+    monkeypatch.setattr(markdown_transaction, "begin_immediate", contended_begin)
+    with coordinator.writer_gate():
+        armed = True
+
+    assert injected
+    with sqlite3.connect(coordinator.database_path) as database:
+        assert database.execute("SELECT * FROM writer_owners").fetchall() == []
 
 
 def test_reclaimed_writer_fails_fence_before_filesystem_mutation(

@@ -62,6 +62,8 @@ _PROJECT_CHECKPOINT_SCHEMA = (
 _WRITER_LEASE_SECONDS = 2.0
 _WRITER_HEARTBEAT_SECONDS = 0.5
 _WRITER_WAIT_SECONDS = DEFAULTS.markdown_busy_ms / 1_000
+_WRITER_RETRY_BASE_SECONDS = 0.005
+_WRITER_RETRY_CAP_SECONDS = 0.05
 MAX_KNOWLEDGE_TARGET_BYTES = 64 * 1024 * 1024
 MAX_KNOWLEDGE_PATH_BYTES = 512
 MAX_KNOWLEDGE_COMPONENT_BYTES = 128
@@ -199,6 +201,49 @@ def _require_bytes(content: bytes) -> bytes:
     return content
 
 
+def _is_transient_writer_contention(error: BaseException) -> bool:
+    if isinstance(error, sqlite3.OperationalError):
+        code = getattr(error, "sqlite_errorcode", None)
+        if isinstance(code, int) and code & 0xFF in {
+            sqlite3.SQLITE_BUSY,
+            sqlite3.SQLITE_LOCKED,
+        }:
+            return True
+        message = str(error).casefold()
+        return "busy" in message or "locked" in message
+    if isinstance(error, OSError):
+        return getattr(error, "winerror", None) in {32, 33} or error.errno in {32, 33}
+    return False
+
+
+def _writer_retry_delay(attempt: int, deadline: float) -> float:
+    delay = min(
+        _WRITER_RETRY_BASE_SECONDS * (2 ** min(attempt, 8)),
+        _WRITER_RETRY_CAP_SECONDS,
+    )
+    return max(0.0, min(delay, deadline - time.monotonic()))
+
+
+def _recover_initial_contention(coordinator: MarkdownCoordinator) -> None:
+    deadline = time.monotonic() + _WRITER_WAIT_SECONDS
+    attempt = 0
+    while True:
+        try:
+            coordinator.recover(
+                writer_wait_seconds=max(0.0, deadline - time.monotonic()),
+                deadline=deadline,
+            )
+            return
+        except (OSError, sqlite3.Error) as exc:
+            if not _is_transient_writer_contention(exc):
+                raise
+            delay = _writer_retry_delay(attempt, deadline)
+            if delay <= 0:
+                raise
+            time.sleep(delay)
+            attempt += 1
+
+
 def stable_operation_id(kind: str, event_id: str, content: bytes) -> str:
     """Return a deterministic operation ID bound to one redacted event payload."""
     if not kind or not event_id:
@@ -243,7 +288,7 @@ def mutate_knowledge(
     for content in relative_changes.values():
         if content is not None and len(_require_bytes(content)) > MAX_KNOWLEDGE_TARGET_BYTES:
             raise ValueError("knowledge target size exceeds limit")
-    coordinator.recover()
+    _recover_initial_contention(coordinator)
     existing = coordinator._record_for_operation_id(operation_id)
     if existing is not None:
         existing = _settle_operation(coordinator, operation_id)
@@ -399,7 +444,7 @@ def append_knowledge(
         raise ValueError("operation_id must be non-empty")
     coordinator = _default_coordinator()
     relative = _relative_target(coordinator, Path(path))
-    coordinator.recover()
+    _recover_initial_contention(coordinator)
     attempt = 0
     gate_timeouts = 0
     while attempt < 64:
@@ -746,9 +791,10 @@ class MarkdownCoordinator:
         self._local = threading.local()
         self._initialize_database()
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self, *, busy_ms: int | None = None) -> sqlite3.Connection:
         database = open_operational_db(
-            self.database_path, busy_ms=DEFAULTS.markdown_busy_ms
+            self.database_path,
+            busy_ms=DEFAULTS.markdown_busy_ms if busy_ms is None else busy_ms,
         )
         schema = database.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'transaction'"
@@ -2335,41 +2381,57 @@ class MarkdownCoordinator:
             _WRITER_WAIT_SECONDS if wait_seconds is None else wait_seconds
         )
         fencing_epoch = 0
+        acquisition_attempt = 0
         while True:
             acquired = False
-            with self._connect() as database, begin_immediate(database):
-                row = database.execute(
-                    "SELECT * FROM writer_owners WHERE gate_name = 'global'"
-                ).fetchone()
-                if row is None or self._writer_owner_reclaimable(row):
-                    fence = database.execute(
-                        "SELECT last_epoch FROM writer_fences WHERE gate_name = 'global'"
+            try:
+                remaining_ms = max(1, int((deadline - time.monotonic()) * 1_000))
+                with self._connect(busy_ms=remaining_ms) as database, begin_immediate(
+                    database
+                ):
+                    row = database.execute(
+                        "SELECT * FROM writer_owners WHERE gate_name = 'global'"
                     ).fetchone()
-                    fencing_epoch = 1 if fence is None else fence["last_epoch"] + 1
-                    database.execute(
-                        "INSERT INTO writer_fences (gate_name, last_epoch) VALUES ('global', ?) "
-                        "ON CONFLICT(gate_name) DO UPDATE SET last_epoch = excluded.last_epoch",
-                        (fencing_epoch,),
-                    )
-                    heartbeat = _now()
-                    expires = _future_timestamp(_WRITER_LEASE_SECONDS)
-                    database.execute("DELETE FROM writer_owners WHERE gate_name = 'global'")
-                    database.execute(
-                        "INSERT INTO writer_owners "
-                        "(gate_name, owner_token, process_id, thread_id, acquired_at, "
-                        "heartbeat_at, expires_at, fencing_epoch) "
-                        "VALUES ('global', ?, ?, ?, ?, ?, ?, ?)",
-                        (
-                            owner_token,
-                            os.getpid(),
-                            threading.get_ident(),
-                            heartbeat,
-                            heartbeat,
-                            expires,
-                            fencing_epoch,
-                        ),
-                    )
-                    acquired = True
+                    if row is None or self._writer_owner_reclaimable(row):
+                        fence = database.execute(
+                            "SELECT last_epoch FROM writer_fences WHERE gate_name = 'global'"
+                        ).fetchone()
+                        fencing_epoch = 1 if fence is None else fence["last_epoch"] + 1
+                        database.execute(
+                            "INSERT INTO writer_fences (gate_name, last_epoch) VALUES ('global', ?) "
+                            "ON CONFLICT(gate_name) DO UPDATE SET last_epoch = excluded.last_epoch",
+                            (fencing_epoch,),
+                        )
+                        heartbeat = _now()
+                        expires = _future_timestamp(_WRITER_LEASE_SECONDS)
+                        database.execute("DELETE FROM writer_owners WHERE gate_name = 'global'")
+                        database.execute(
+                            "INSERT INTO writer_owners "
+                            "(gate_name, owner_token, process_id, thread_id, acquired_at, "
+                            "heartbeat_at, expires_at, fencing_epoch) "
+                            "VALUES ('global', ?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                owner_token,
+                                os.getpid(),
+                                threading.get_ident(),
+                                heartbeat,
+                                heartbeat,
+                                expires,
+                                fencing_epoch,
+                            ),
+                        )
+                        acquired = True
+            except (OSError, sqlite3.Error) as exc:
+                if not _is_transient_writer_contention(exc):
+                    raise
+                delay = _writer_retry_delay(acquisition_attempt, deadline)
+                if delay <= 0:
+                    raise TimeoutError(
+                        "timed out waiting for the global Markdown writer gate"
+                    ) from exc
+                time.sleep(delay)
+                acquisition_attempt += 1
+                continue
             if acquired:
                 break
             if time.monotonic() >= deadline:
@@ -2394,18 +2456,51 @@ class MarkdownCoordinator:
             heartbeat_stop.set()
             heartbeat_thread.join(timeout=_WRITER_HEARTBEAT_SECONDS * 2)
             try:
-                with self._connect() as database, begin_immediate(database):
-                    cursor = database.execute(
-                        "DELETE FROM writer_owners WHERE gate_name = 'global' "
-                        "AND owner_token = ? AND fencing_epoch = ?",
-                        (owner_token, fencing_epoch),
-                    )
-                    if cursor.rowcount != 1 or heartbeat_lost.is_set():
-                        raise RuntimeError("Markdown writer gate ownership was lost")
+                self._release_writer_gate(
+                    owner_token, fencing_epoch, heartbeat_lost.is_set()
+                )
             finally:
                 self._local.gate_depth = 0
                 self._local.gate_token = None
                 self._local.gate_fence = None
+
+    def _release_writer_gate(
+        self, owner_token: str, fencing_epoch: int, heartbeat_lost: bool
+    ) -> None:
+        deadline = time.monotonic() + _WRITER_WAIT_SECONDS
+        attempt = 0
+        while True:
+            try:
+                remaining_ms = max(1, int((deadline - time.monotonic()) * 1_000))
+                with self._connect(busy_ms=remaining_ms) as database, begin_immediate(
+                    database
+                ):
+                    row = database.execute(
+                        "SELECT owner_token, fencing_epoch FROM writer_owners "
+                        "WHERE gate_name = 'global'"
+                    ).fetchone()
+                    still_owner = bool(
+                        row is not None
+                        and row["owner_token"] == owner_token
+                        and row["fencing_epoch"] == fencing_epoch
+                    )
+                    if still_owner:
+                        database.execute(
+                            "DELETE FROM writer_owners WHERE gate_name = 'global' "
+                            "AND owner_token = ? AND fencing_epoch = ?",
+                            (owner_token, fencing_epoch),
+                        )
+                if not still_owner or heartbeat_lost:
+                    raise RuntimeError("Markdown writer gate ownership was lost")
+                return
+            except (OSError, sqlite3.Error) as exc:
+                if not _is_transient_writer_contention(exc):
+                    raise
+                delay = _writer_retry_delay(attempt, deadline)
+                if delay <= 0:
+                    raise
+                time.sleep(delay)
+                attempt += 1
 
     def _writer_owner_reclaimable(self, row: sqlite3.Row) -> bool:
         expires_at = row["expires_at"]
@@ -2419,23 +2514,42 @@ class MarkdownCoordinator:
         stop: threading.Event,
         lost: threading.Event,
     ) -> None:
+        lease_deadline = time.monotonic() + _WRITER_LEASE_SECONDS
+        attempt = 0
         while not stop.wait(_WRITER_HEARTBEAT_SECONDS):
             try:
-                with self._connect() as database, begin_immediate(database):
+                remaining = min(
+                    _WRITER_HEARTBEAT_SECONDS,
+                    lease_deadline - time.monotonic(),
+                )
+                remaining_ms = max(1, int(remaining * 1_000))
+                with self._connect(busy_ms=remaining_ms) as database, begin_immediate(
+                    database
+                ):
+                    heartbeat = _now()
                     cursor = database.execute(
                         "UPDATE writer_owners SET heartbeat_at = ?, expires_at = ? "
-                        "WHERE gate_name = 'global' AND owner_token = ? AND fencing_epoch = ?",
+                        "WHERE gate_name = 'global' AND owner_token = ? AND fencing_epoch = ? "
+                        "AND expires_at > ?",
                         (
-                            _now(),
+                            heartbeat,
                             _future_timestamp(_WRITER_LEASE_SECONDS),
                             owner_token,
                             fencing_epoch,
+                            heartbeat,
                         ),
                     )
                     if cursor.rowcount != 1:
                         lost.set()
                         return
-            except (OSError, sqlite3.Error):
+                lease_deadline = time.monotonic() + _WRITER_LEASE_SECONDS
+                attempt = 0
+            except (OSError, sqlite3.Error) as exc:
+                if _is_transient_writer_contention(exc):
+                    delay = _writer_retry_delay(attempt, lease_deadline)
+                    if delay > 0 and not stop.wait(delay):
+                        attempt += 1
+                        continue
                 lost.set()
                 return
 
