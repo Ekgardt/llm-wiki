@@ -756,6 +756,51 @@ def test_reclaimed_writer_fails_fence_before_filesystem_mutation(
             old_gate.__exit__(None, None, None)
 
 
+def test_expired_writer_without_successor_fails_before_filesystem_mutation(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    target = vault / "knowledge/notes/page.md"
+    target.write_bytes(b"before")
+    coordinator = MarkdownCoordinator(vault, state_root)
+    transaction = coordinator.prepare(
+        [MarkdownChange.replace("knowledge/notes/page.md", b"after")],
+        operation_id="expired-without-successor",
+    )
+    monkeypatch.setattr(coordinator, "_heartbeat_writer_gate", lambda *args: None)
+
+    with coordinator.writer_gate():
+        with sqlite3.connect(coordinator.database_path) as database:
+            database.execute(
+                "UPDATE writer_owners SET expires_at = '2000-01-01T00:00:00Z' "
+                "WHERE gate_name = 'global'"
+            )
+            database.commit()
+        with pytest.raises(RuntimeError, match="ownership was lost before mutation"):
+            coordinator.apply(transaction.id)
+
+    assert target.read_bytes() == b"before"
+
+
+def test_writer_ownership_renewal_rejects_expiry_equal_to_captured_now(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    coordinator = MarkdownCoordinator(vault, state_root)
+    fixed_now = "2026-07-15T12:00:00Z"
+    monkeypatch.setattr(coordinator, "_heartbeat_writer_gate", lambda *args: None)
+
+    with coordinator.writer_gate():
+        with sqlite3.connect(coordinator.database_path) as database:
+            database.execute(
+                "UPDATE writer_owners SET expires_at = ? WHERE gate_name = 'global'",
+                (fixed_now,),
+            )
+            database.commit()
+        monkeypatch.setattr(markdown_transaction, "_now", lambda: fixed_now)
+        with coordinator._connect() as database, markdown_transaction.begin_immediate(database):
+            with pytest.raises(RuntimeError, match="ownership was lost before mutation"):
+                coordinator._assert_writer_ownership(database)
+
+
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX dir_fd semantics")
 def test_parent_swap_cannot_redirect_replace_outside_vault(
     vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch

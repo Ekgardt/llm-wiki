@@ -3264,23 +3264,17 @@ class MarkdownCoordinator:
     def _assert_writer_ownership(self, database: sqlite3.Connection) -> None:
         owner_token = getattr(self._local, "gate_token", None)
         fencing_epoch = getattr(self._local, "gate_fence", None)
-        row = database.execute(
-            "SELECT owner_token, fencing_epoch FROM writer_owners WHERE gate_name = 'global'"
-        ).fetchone()
-        if (
-            row is None
-            or row["owner_token"] != owner_token
-            or row["fencing_epoch"] != fencing_epoch
-        ):
-            raise RuntimeError("Markdown writer gate ownership was lost before mutation")
+        heartbeat = _now()
         cursor = database.execute(
             "UPDATE writer_owners SET heartbeat_at = ?, expires_at = ? "
-            "WHERE gate_name = 'global' AND owner_token = ? AND fencing_epoch = ?",
+            "WHERE gate_name = 'global' AND owner_token = ? AND fencing_epoch = ? "
+            "AND expires_at > ?",
             (
-                _now(),
+                heartbeat,
                 _future_timestamp(_WRITER_LEASE_SECONDS),
                 owner_token,
                 fencing_epoch,
+                heartbeat,
             ),
         )
         if cursor.rowcount != 1:
