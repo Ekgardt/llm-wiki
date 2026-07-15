@@ -25,12 +25,15 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from bounded_io import read_stable_bytes  # noqa: E402
 from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
 from memory_state import ROOT, STATE_ROOT  # noqa: E402
+from reliable_memory import sha256_bytes  # noqa: E402
 
 KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
 ACCESS_LOG_FILE = STATE_ROOT / "cache" / "access_log.jsonl"
 BATCH_THRESHOLD = 5  # Flush frontmatter after N accesses per page.
+MAX_ACCESS_PAGE_BYTES = 4 * 1024 * 1024
 
 # In-memory batch: slug → count. Flushed to frontmatter periodically.
 _batch: dict[str, int] = {}
@@ -77,7 +80,10 @@ def flush_access_to_frontmatter(slug: str | None = None) -> int:
             continue
 
         try:
-            content = page_path.read_text(encoding="utf-8")
+            source_bytes = read_stable_bytes(
+                page_path, MAX_ACCESS_PAGE_BYTES, label="access tracking page"
+            )
+            content = source_bytes.decode("utf-8")
             now = datetime.now().isoformat(timespec="seconds")
 
             fm_match = FRONTMATTER_RE.match(content)
@@ -121,6 +127,10 @@ def flush_access_to_frontmatter(slug: str | None = None) -> int:
             mutate_knowledge(
                 stable_operation_id("access", f"{s}:{now}", encoded),
                 {page_path: encoded},
+                preconditions={
+                    page_path.relative_to(KNOWLEDGE_DIR.parent.parent).as_posix():
+                        sha256_bytes(source_bytes)
+                },
             )
             _batch.pop(s, None)
             updated += 1

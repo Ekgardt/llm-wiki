@@ -31,11 +31,14 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
+from bounded_io import read_stable_bytes  # noqa: E402
+from markdown_transaction import ABSENT, mutate_knowledge, stable_operation_id  # noqa: E402
 from memory_state import ROOT  # noqa: E402
+from reliable_memory import sha256_bytes  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
 FEEDBACK_DIR = ROOT / "knowledge" / "feedback"
+MAX_FEEDBACK_CANDIDATE_BYTES = 1024 * 1024
 
 
 def _redact_feedback(value):
@@ -136,7 +139,9 @@ def capture_from_text(
     out = FEEDBACK_DIR / f"{candidate_id}.json"
     encoded = json.dumps(candidate, indent=2, ensure_ascii=False).encode("utf-8")
     mutate_knowledge(
-        stable_operation_id("feedback-capture", candidate_id, encoded), {out: encoded}
+        stable_operation_id("feedback-capture", candidate_id, encoded),
+        {out: encoded},
+        preconditions={out.relative_to(ROOT).as_posix(): ABSENT},
     )
     return candidate_id
 
@@ -195,8 +200,13 @@ def promote_candidate(candidate_id: str, category: str = "patterns") -> str | No
         return None
 
     try:
-        candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+        candidate_bytes_before = read_stable_bytes(
+            candidate_file,
+            MAX_FEEDBACK_CANDIDATE_BYTES,
+            label="feedback candidate",
+        )
+        candidate = json.loads(candidate_bytes_before.decode("utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError, ValueError):
         return None
     candidate = _redact_feedback(candidate)
 
@@ -271,6 +281,12 @@ def promote_candidate(candidate_id: str, category: str = "patterns") -> str | No
     mutate_knowledge(
         stable_operation_id("feedback-promote", candidate_id, page_bytes + candidate_bytes),
         {page_path: page_bytes, candidate_file: candidate_bytes},
+        preconditions={
+            page_path.relative_to(ROOT).as_posix(): ABSENT,
+            candidate_file.relative_to(ROOT).as_posix(): sha256_bytes(
+                candidate_bytes_before
+            ),
+        },
     )
 
     return page_path.relative_to(ROOT).as_posix()

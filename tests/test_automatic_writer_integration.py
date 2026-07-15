@@ -51,6 +51,14 @@ TASK14_BEHAVIORAL_ENTRYPOINTS = {
     "scripts/user_prompt_capture.py:_append_prompt_tag",
 }
 
+TASK14_READ_TRANSFORM_WRITE_ENTRYPOINTS = {
+    "scripts/access_tracking.py:flush_access_to_frontmatter",
+    "scripts/archive_stale.py:_archive_page",
+    "scripts/feedback_capture.py:promote_candidate",
+    "scripts/migrate_to_okf.py:main",
+    "scripts/reflection.py:reflect_page",
+}
+
 
 def _vault(tmp_path: Path) -> tuple[Path, Path]:
     vault = tmp_path / "vault"
@@ -243,6 +251,10 @@ def test_task14_actual_entrypoint_delegates_without_git(
         raise AssertionError(entrypoint)
 
     assert calls, f"{entrypoint} did not delegate to the mutation boundary"
+    if entrypoint in TASK14_READ_TRANSFORM_WRITE_ENTRYPOINTS:
+        assert all(call_kwargs.get("preconditions") for _, call_kwargs in calls), (
+            f"{entrypoint} did not bind its source snapshot"
+        )
     if module_name not in {"archive_stale", "flush_memory", "migrate_to_okf", "rebuild_memory_index"}:
         assert secret not in repr(calls), f"{entrypoint} leaked a secret before prepare"
 
@@ -705,6 +717,80 @@ def test_concurrent_identical_operation_id_converges_once(
             (operation_id, f"{operation_id}:cas:%"),
         ).fetchone()[0]
     assert transaction_count == 1
+
+
+@pytest.mark.parametrize("entrypoint", ["feedback", "migration", "reflection"])
+def test_read_transform_write_conflict_preserves_user_bytes(
+    tmp_path, monkeypatch, entrypoint
+):
+    import markdown_transaction
+
+    vault, state = _vault(tmp_path)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
+    original_mutate = markdown_transaction.mutate_knowledge
+    user_bytes = b"# Concurrent user edit\n"
+
+    if entrypoint == "feedback":
+        import feedback_capture as module
+
+        monkeypatch.setattr(module, "ROOT", vault)
+        monkeypatch.setattr(module, "FEEDBACK_DIR", vault / "knowledge/feedback")
+        module.FEEDBACK_DIR.mkdir()
+        source = module.FEEDBACK_DIR / "abcdef123456.json"
+        source.write_text(json.dumps({
+            "id": "abcdef123456", "type": "correction", "confidence": 0.8,
+            "text": "Use safe storage", "session_id": "s1", "project": "demo",
+            "trigger": "test", "captured_at": "2026-01-01", "status": "candidate",
+        }), encoding="utf-8")
+        destination = vault / "knowledge/notes/feedback-abcdef12.md"
+
+        def invoke():
+            return module.promote_candidate("abcdef123456")
+    elif entrypoint == "migration":
+        import migrate_to_okf as module
+
+        monkeypatch.setattr(module, "ROOT", vault)
+        source = vault / "knowledge/notes/page.md"
+        source.write_text("# Original\n", encoding="utf-8")
+        destination = None
+        monkeypatch.setattr(module, "parse_args", lambda: SimpleNamespace(
+            scope="wiki", apply=True, report=False
+        ))
+        monkeypatch.setattr(module, "collect_files", lambda scope: [source])
+        invoke = module.main
+    else:
+        import reflection as module
+
+        monkeypatch.setattr(module, "ROOT", vault)
+        source = vault / "knowledge/notes/page.md"
+        source.write_text(
+            "---\ntype: concept\n---\n# Original\n\n"
+            "## Update (2026-01-01)\na\n## Update (2026-01-02)\nb\n",
+            encoding="utf-8",
+        )
+        destination = None
+        monkeypatch.setattr(
+            "llm_client.call_llm", lambda *args, **kwargs: "# Reflected\n\nMerged"
+        )
+
+        def invoke():
+            return module.reflect_page(source, apply=True)
+
+    def race(operation_id, changes, **kwargs):
+        source.write_bytes(user_bytes)
+        return original_mutate(operation_id, changes, **kwargs)
+
+    monkeypatch.setattr(module, "mutate_knowledge", race)
+    try:
+        result = invoke()
+    except ValueError:
+        result = 1
+
+    assert result == 1 or "error" in str(result).casefold()
+    assert source.read_bytes() == user_bytes
+    if destination is not None:
+        assert not destination.exists()
 
 
 def test_append_retries_a_cas_conflict_without_overwriting_winner(tmp_path, monkeypatch):

@@ -25,14 +25,17 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from bounded_io import read_stable_bytes  # noqa: E402
 from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
 from memory_state import ROOT  # noqa: E402
+from reliable_memory import sha256_bytes  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
 KNOWLEDGE = ROOT / "knowledge" / "notes"
 SKIP_NAMES = {"index.md", "log.md", "README.md", "state.md", "context.md"}
 
 REFLECTION_THRESHOLD = 2  # Minimum Update sections to trigger reflection.
+MAX_REFLECTION_PAGE_BYTES = 16 * 1024 * 1024
 
 UPDATE_SECTION_RE = re.compile(r"^## Update \(\d{4}-\d{2}-\d{2}\)", re.MULTILINE)
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
@@ -84,7 +87,10 @@ def reflect_page(md: Path, apply: bool = False) -> str:
 
     Returns a summary of what was done (or would be done if dry-run).
     """
-    content = md.read_text(encoding="utf-8")
+    source_bytes = read_stable_bytes(
+        md, MAX_REFLECTION_PAGE_BYTES, label="reflection page"
+    )
+    content = source_bytes.decode("utf-8")
     updates = UPDATE_SECTION_RE.findall(content)
     if len(updates) < REFLECTION_THRESHOLD:
         return f"  {md.stem}: only {len(updates)} updates, skipping."
@@ -151,6 +157,9 @@ Return ONLY the rewritten markdown — no commentary.
     mutate_knowledge(
         stable_operation_id("reflection", md.relative_to(ROOT).as_posix(), encoded),
         {md: encoded},
+        preconditions={
+            md.relative_to(ROOT).as_posix(): sha256_bytes(source_bytes)
+        },
     )
     return f"  {md.stem}: reflected ({len(updates)} updates integrated)."
 

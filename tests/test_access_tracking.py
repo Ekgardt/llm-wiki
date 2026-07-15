@@ -203,3 +203,48 @@ class TestFlushFrontmatter:
 
         n = access_tracking.flush_access_to_frontmatter("nonexistent")
         assert n == 0
+
+    def test_flush_conflict_preserves_user_edit_and_pending_batch(
+        self, tmp_path, monkeypatch
+    ):
+        import access_tracking
+        import markdown_transaction
+
+        vault = tmp_path / "vault"
+        notes = vault / "knowledge" / "notes"
+        notes.mkdir(parents=True)
+        page = notes / "page.md"
+        page.write_text("---\ntype: concept\n---\n# Original\n", encoding="utf-8")
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+        monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
+        monkeypatch.setattr(access_tracking, "KNOWLEDGE_DIR", notes)
+        access_tracking._batch.clear()
+        access_tracking._batch["page"] = 3
+        user_bytes = b"---\ntype: concept\n---\n# User edit\n"
+        original_mutate = markdown_transaction.mutate_knowledge
+
+        def race(operation_id, changes, **kwargs):
+            page.write_bytes(user_bytes)
+            return original_mutate(operation_id, changes, **kwargs)
+
+        monkeypatch.setattr(access_tracking, "mutate_knowledge", race)
+
+        assert access_tracking.flush_access_to_frontmatter("page") == 0
+        assert page.read_bytes() == user_bytes
+        assert access_tracking._batch["page"] == 3
+
+    def test_flush_rejects_page_above_snapshot_bound(self, tmp_path, monkeypatch):
+        import access_tracking
+
+        notes = tmp_path / "knowledge" / "notes"
+        notes.mkdir(parents=True)
+        page = notes / "large.md"
+        page.write_bytes(b"x" * 33)
+        monkeypatch.setattr(access_tracking, "KNOWLEDGE_DIR", notes)
+        monkeypatch.setattr(access_tracking, "MAX_ACCESS_PAGE_BYTES", 32)
+        access_tracking._batch.clear()
+        access_tracking._batch["large"] = 1
+
+        assert access_tracking.flush_access_to_frontmatter("large") == 0
+        assert page.read_bytes() == b"x" * 33
+        assert access_tracking._batch["large"] == 1

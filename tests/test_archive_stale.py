@@ -199,3 +199,43 @@ def test_archive_page_dry_run_does_not_move(fake_file, tmp_path, monkeypatch):
     assert not archived.exists()
     # Result should indicate dry-run.
     assert result.startswith("WOULD ARCHIVE:")
+
+
+@pytest.mark.parametrize("race_target", ["source", "destination"])
+def test_archive_page_conflict_preserves_concurrent_user_bytes(
+    fake_file, tmp_path, monkeypatch, race_target
+):
+    import archive_stale
+    import markdown_transaction
+
+    vault = tmp_path / "vault"
+    notes = vault / "knowledge" / "notes"
+    notes.mkdir(parents=True)
+    state = tmp_path / "state"
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
+    monkeypatch.setattr(archive_stale, "ROOT", vault)
+    monkeypatch.setattr(archive_stale, "KNOWLEDGE", notes)
+    monkeypatch.setattr(archive_stale, "ARCHIVE_ROOT", notes / "archive")
+    source = notes / "page.md"
+    source.write_text("---\ntype: debugging\n---\n# Original\n", encoding="utf-8")
+    destination = notes / "archive" / datetime.now().strftime("%Y") / source.name
+    user_bytes = f"user-{race_target}\n".encode()
+    original_mutate = markdown_transaction.mutate_knowledge
+
+    def race(operation_id, changes, **kwargs):
+        target = source if race_target == "source" else destination
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(user_bytes)
+        return original_mutate(operation_id, changes, **kwargs)
+
+    monkeypatch.setattr(archive_stale, "mutate_knowledge", race)
+    result = archive_stale._archive_page(source, apply=True)
+
+    assert result.startswith("WRITE_ERROR:")
+    if race_target == "source":
+        assert source.read_bytes() == user_bytes
+        assert not destination.exists()
+    else:
+        assert source.exists()
+        assert destination.read_bytes() == user_bytes

@@ -36,11 +36,14 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from bounded_io import read_stable_bytes  # noqa: E402
 from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
 from memory_state import ROOT  # noqa: E402
+from reliable_memory import sha256_bytes  # noqa: E402
 
 # Reserved OKF filenames — no frontmatter allowed at bundle level.
 RESERVED_NAMES = frozenset({"index.md", "log.md"})
+MAX_MIGRATION_PAGE_BYTES = 16 * 1024 * 1024
 
 # Editorial / contract files at the vault root — left alone.
 ROOT_LEVEL_SKIP = frozenset(
@@ -255,9 +258,19 @@ def main() -> int:
 
     counts: dict[str, int] = {}
     plan: list[tuple[Path, str]] = []
+    source_hashes: dict[Path, str] = {}
     skipped_detail: list[tuple[str, Path]] = []
     for path in files:
         rel = path.relative_to(ROOT).as_posix()
+        try:
+            source_hashes[path] = sha256_bytes(
+                read_stable_bytes(path, MAX_MIGRATION_PAGE_BYTES, label="migration page")
+            )
+        except (OSError, ValueError) as exc:
+            status = f"error_read:{type(exc).__name__}"
+            counts[status] = counts.get(status, 0) + 1
+            skipped_detail.append((status, path))
+            continue
         status, new_content = migrate_file(path)
         counts[status] = counts.get(status, 0) + 1
         if status == "migrate":
@@ -294,9 +307,12 @@ def main() -> int:
                     "okf-migrate", path.relative_to(ROOT).as_posix(), encoded
                 ),
                 {path: encoded},
+                preconditions={
+                    path.relative_to(ROOT).as_posix(): source_hashes[path]
+                },
             )
             written += 1
-        except OSError as e:
+        except (OSError, RuntimeError, ValueError) as e:
             print(f"  WRITE ERROR: {path} — {type(e).__name__}: {e}")
             write_errors += 1
     print(f"\nApplied: {written}/{len(plan)} file(s) migrated.")

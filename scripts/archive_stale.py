@@ -25,9 +25,11 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
+from bounded_io import read_stable_bytes  # noqa: E402
+from markdown_transaction import ABSENT, mutate_knowledge, stable_operation_id  # noqa: E402
 from memory_state import ROOT  # noqa: E402
 from okf_types import NEVER_ARCHIVE_TYPES  # noqa: E402
+from reliable_memory import sha256_bytes  # noqa: E402
 
 KNOWLEDGE = ROOT / "knowledge" / "notes"
 # Stay inside knowledge zone (three-zone layout forbids root archive/).
@@ -51,6 +53,7 @@ TYPE_AGE_DAYS = {
 
 # Default for untyped pages
 DEFAULT_AGE_DAYS = 180
+MAX_ARCHIVE_PAGE_BYTES = 16 * 1024 * 1024
 
 
 def _get_type_threshold(page_type: str) -> int:
@@ -131,8 +134,11 @@ def _archive_page(md: Path, apply: bool) -> str:
 
     if apply:
         try:
-            content = md.read_text(encoding="utf-8")
-        except OSError:
+            source_bytes = read_stable_bytes(
+                md, MAX_ARCHIVE_PAGE_BYTES, label="stale archive source"
+            )
+            content = source_bytes.decode("utf-8")
+        except (OSError, UnicodeDecodeError, ValueError):
             return f"READ_ERROR: {md}"
         # Set status: archived — replace existing status value or insert new.
         if FRONTMATTER_RE.match(content):
@@ -167,6 +173,10 @@ def _archive_page(md: Path, apply: bool) -> str:
                     "archive-stale", md.relative_to(ROOT).as_posix(), encoded
                 ),
                 {archive_path: encoded, md: None},
+                preconditions={
+                    md.relative_to(ROOT).as_posix(): sha256_bytes(source_bytes),
+                    archive_path.relative_to(ROOT).as_posix(): ABSENT,
+                },
             )
         except (OSError, RuntimeError, ValueError):
             return f"WRITE_ERROR: {archive_path}"
