@@ -12,7 +12,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import read_stable_bytes  # noqa: E402
-from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
+from claim_tree_manifest import snapshot_claim_tree_with_content  # noqa: E402
+from markdown_transaction import (  # noqa: E402
+    TransactionFailure,
+    mutate_knowledge,
+    stable_operation_id,
+)
 from memory_state import ROOT  # noqa: E402
 
 memory = ROOT / "knowledge"
@@ -49,6 +54,7 @@ MAX_PAGE_BYTES = 4 * 1024 * 1024
 MAX_INDEX_BYTES = 4 * 1024 * 1024
 MAX_PAGE_COUNT = 2_000
 MAX_TOTAL_PAGE_BYTES = 32 * 1024 * 1024
+MAX_REBUILD_ATTEMPTS = 4
 
 
 def extract_hook(md_path: Path) -> str:
@@ -221,9 +227,26 @@ def collect_pages() -> dict[str, list[Path]]:
 
 
 def main() -> int:
-    content = build_index_bytes(ROOT)
-    mutate_knowledge(stable_operation_id("rebuild-index", "index", content), {out: content})
-    return 0
+    for _ in range(MAX_REBUILD_ATTEMPTS):
+        manifest, tree = snapshot_claim_tree_with_content(ROOT)
+        notes = {
+            path: content
+            for path, content in tree.items()
+            if path.startswith("knowledge/notes/")
+        }
+        content = build_index_bytes(ROOT, base=notes)
+        generation = str(manifest["absence_generation"])
+        try:
+            mutate_knowledge(
+                stable_operation_id("rebuild-index", generation, content),
+                {out: content},
+                preconditions={"claim_tree_manifest": manifest},
+            )
+            return 0
+        except TransactionFailure as exc:
+            if exc.code != "precondition_failed":
+                raise
+    raise RuntimeError("knowledge index rebuild did not converge")
 
 
 if __name__ == "__main__":

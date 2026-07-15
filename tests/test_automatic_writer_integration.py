@@ -56,6 +56,7 @@ TASK14_READ_TRANSFORM_WRITE_ENTRYPOINTS = {
     "scripts/archive_stale.py:_archive_page",
     "scripts/feedback_capture.py:promote_candidate",
     "scripts/migrate_to_okf.py:main",
+    "scripts/rebuild_memory_index.py:main",
     "scripts/reflection.py:reflect_page",
 }
 
@@ -214,7 +215,7 @@ def test_task14_actual_entrypoint_delegates_without_git(
     elif module_name == "rebuild_memory_index":
         monkeypatch.setattr(module, "out", vault / "knowledge/index.md")
         monkeypatch.setattr(module, "ROOT", vault)
-        monkeypatch.setattr(module, "build_index_bytes", lambda root: b"safe")
+        monkeypatch.setattr(module, "build_index_bytes", lambda root, **kwargs: b"safe")
         monkeypatch.setattr(module, "mutate_knowledge", boundary)
         function()
     elif module_name == "reflection":
@@ -791,6 +792,70 @@ def test_read_transform_write_conflict_preserves_user_bytes(
     assert source.read_bytes() == user_bytes
     if destination is not None:
         assert not destination.exists()
+
+
+@pytest.mark.parametrize("race", ["add", "delete", "change"])
+def test_rebuild_index_retries_tree_race_with_fresh_snapshot(
+    tmp_path, monkeypatch, race
+):
+    import markdown_transaction
+    import rebuild_memory_index
+
+    vault, state = _vault(tmp_path)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
+    notes = vault / "knowledge" / "notes"
+    primary = notes / "primary.md"
+    primary.write_text(
+        "---\ntype: concept\n---\n# Primary\n\n"
+        "One-sentence summary: old summary\n",
+        encoding="utf-8",
+    )
+    victim = notes / "victim.md"
+    if race == "delete":
+        victim.write_text(
+            "---\ntype: concept\n---\n# Victim\n\n"
+            "One-sentence summary: delete me\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(rebuild_memory_index, "ROOT", vault)
+    monkeypatch.setattr(rebuild_memory_index, "out", vault / "knowledge/index.md")
+    original_mutate = markdown_transaction.mutate_knowledge
+    injected = False
+
+    def racing_mutate(operation_id, changes, **kwargs):
+        nonlocal injected
+        if not injected:
+            injected = True
+            if race == "add":
+                (notes / "added.md").write_text(
+                    "---\ntype: concept\n---\n# Added\n\n"
+                    "One-sentence summary: added summary\n",
+                    encoding="utf-8",
+                )
+            elif race == "delete":
+                victim.unlink()
+            else:
+                primary.write_text(
+                    "---\ntype: concept\n---\n# Primary\n\n"
+                    "One-sentence summary: fresh summary\n",
+                    encoding="utf-8",
+                )
+        return original_mutate(operation_id, changes, **kwargs)
+
+    monkeypatch.setattr(rebuild_memory_index, "mutate_knowledge", racing_mutate)
+    assert rebuild_memory_index.main() == 0
+
+    index = rebuild_memory_index.out.read_text(encoding="utf-8")
+    if race == "add":
+        assert "[[knowledge/notes/added]]" in index
+        assert "added summary" in index
+    elif race == "delete":
+        assert "victim" not in index
+        assert "delete me" not in index
+    else:
+        assert "fresh summary" in index
+        assert "old summary" not in index
 
 
 def test_append_retries_a_cas_conflict_without_overwriting_winner(tmp_path, monkeypatch):

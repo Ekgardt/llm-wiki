@@ -45,10 +45,13 @@ def _paths(vault: Path) -> list[Path]:
     return sorted(pages, key=lambda item: item.relative_to(vault).as_posix())
 
 
-def snapshot_claim_tree(vault: Path) -> dict[str, object]:
+def _snapshot_claim_tree(
+    vault: Path,
+) -> tuple[dict[str, object], dict[str, bytes]]:
     vault = Path(vault).resolve(strict=True)
     discovered = _paths(vault)
     entries = []
+    contents: dict[str, bytes] = {}
     total = 0
     for path in discovered:
         content = read_stable_bytes(
@@ -57,12 +60,9 @@ def snapshot_claim_tree(vault: Path) -> dict[str, object]:
         total += len(content)
         if total > MAX_CLAIM_TREE_TOTAL_BYTES:
             raise ValueError("claim tree exceeds the total byte limit")
-        entries.append(
-            {
-                "path": path.relative_to(vault).as_posix(),
-                "sha256": sha256_bytes(content),
-            }
-        )
+        relative = path.relative_to(vault).as_posix()
+        contents[relative] = content
+        entries.append({"path": relative, "sha256": sha256_bytes(content)})
     if [path.relative_to(vault).as_posix() for path in discovered] != [
         path.relative_to(vault).as_posix() for path in _paths(vault)
     ]:
@@ -75,7 +75,18 @@ def snapshot_claim_tree(vault: Path) -> dict[str, object]:
     }
     if len(canonical_json_bytes(manifest)) > MAX_CLAIM_TREE_MANIFEST_BYTES:
         raise ValueError("claim tree manifest exceeds the byte limit")
-    return manifest
+    return manifest, contents
+
+
+def snapshot_claim_tree(vault: Path) -> dict[str, object]:
+    return _snapshot_claim_tree(vault)[0]
+
+
+def snapshot_claim_tree_with_content(
+    vault: Path,
+) -> tuple[dict[str, object], dict[str, bytes]]:
+    """Return one bounded manifest and the exact bytes hashed into it."""
+    return _snapshot_claim_tree(vault)
 
 
 def validate_claim_tree_manifest(value: object) -> dict[str, object]:
