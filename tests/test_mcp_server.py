@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -1048,6 +1049,90 @@ class TestHandleToolCall:
         assert envelope["data"]["overall_status"] == "ok"
         assert received[0]["max_transactions"] == 7
         assert received[0]["deadline"] > time.monotonic()
+
+    @pytest.mark.parametrize(
+        ("action", "behavior", "expected_code"),
+        [
+            ("queue-inspect", "missing", "unknown_task"),
+            ("queue-cancel", "false", "unknown_or_terminal_task"),
+            ("queue-redrive", "missing", "unknown_task"),
+            ("queue-redrive", "invalid", "redrive_requires_dead"),
+        ],
+    )
+    def test_rejected_queue_actions_use_error_quality_and_protocol_error(
+        self, tmp_path, monkeypatch, action, behavior, expected_code
+    ):
+        import mcp_server
+        import memory_queue
+        import memory_state
+
+        state_root = tmp_path / "state"
+        run = state_root / "run"
+        run.mkdir(parents=True)
+        monkeypatch.setattr(memory_state, "STATE_ROOT", state_root)
+        if action == "queue-inspect":
+            database = run / "queue.sqlite3"
+            with sqlite3.connect(database) as connection:
+                connection.execute("CREATE TABLE tasks(id, state, error_code)")
+        else:
+            class Queue:
+                def __init__(self, root):
+                    pass
+
+                def cancel(self, target_id):
+                    return False
+
+                def redrive(self, target_id):
+                    if behavior == "missing":
+                        raise KeyError(target_id)
+                    raise memory_queue.QueueOperationError("redrive_requires_dead")
+
+            monkeypatch.setattr(memory_queue, "MemoryQueue", Queue)
+
+        data = mcp_server._doctor(
+            action=action,
+            target_id="missing-task",
+            repair=action != "queue-inspect",
+        )
+        monkeypatch.setattr(mcp_server, "_doctor", lambda **kwargs: data)
+        text = asyncio.run(
+            mcp_server._handle_tool_call(
+                "doctor",
+                {
+                    "action": action,
+                    "target_id": "missing-task",
+                    **({"repair": True} if action != "queue-inspect" else {}),
+                },
+            )
+        )
+        envelope = json.loads(text)
+
+        assert data["overall_status"] == "error"
+        assert data["codes"] == [expected_code]
+        assert envelope["partial"] is True
+        assert envelope["confidence"] < 0.5
+
+        class Model:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+
+        monkeypatch.setattr(mcp_server, "TextContent", Model)
+        monkeypatch.setattr(mcp_server, "CallToolResult", Model)
+        monkeypatch.setattr(mcp_server, "MCP_CALL_TOOL_RESULT_AVAILABLE", True)
+        assert mcp_server._format_tool_result(text).isError is True
+
+    def test_queue_inspect_missing_database_is_protocol_error(self, tmp_path, monkeypatch):
+        import mcp_server
+        import memory_state
+
+        state_root = tmp_path / "state"
+        state_root.mkdir()
+        monkeypatch.setattr(memory_state, "STATE_ROOT", state_root)
+
+        data = mcp_server._doctor(action="queue-inspect", target_id="task")
+
+        assert data["overall_status"] == "error"
+        assert data["codes"] == ["queue_missing"]
 
 
 class TestResources:

@@ -492,7 +492,14 @@ def _doctor(
 
             path = STATE_ROOT / "run" / "queue.sqlite3"
             if not path.is_file():
-                return _operator_result(action, codes=["queue_missing"])
+                if action == "queue-dead-list":
+                    return _operator_result(action, codes=["queue_missing"])
+                return _operator_result(
+                    action,
+                    states=["error"],
+                    codes=["queue_missing"],
+                    overall_status="error",
+                )
             connection = open_readonly_operational_db(
                 path,
                 STATE_ROOT,
@@ -504,7 +511,12 @@ def _doctor(
                         "SELECT id,state,error_code FROM tasks WHERE id=?", (target_id,)
                     ).fetchone()
                     if row is None:
-                        return _operator_result(action, codes=["unknown_task"])
+                        return _operator_result(
+                            action,
+                            states=["error"],
+                            codes=["unknown_task"],
+                            overall_status="error",
+                        )
                     return _operator_result(
                         action,
                         ids=[str(row["id"])],
@@ -525,7 +537,7 @@ def _doctor(
                 codes=[str(row["error_code"]) for row in rows if row["error_code"]],
             )
         if action in {"queue-cancel", "queue-redrive"}:
-            from memory_queue import MemoryQueue
+            from memory_queue import MemoryQueue, QueueOperationError
 
             queue = MemoryQueue(STATE_ROOT)
             if action == "queue-cancel":
@@ -533,10 +545,27 @@ def _doctor(
                 return _operator_result(
                     action,
                     ids=[str(target_id)] if changed else [],
-                    states=["cancelled"] if changed else [],
+                    states=["cancelled"] if changed else ["error"],
                     codes=[] if changed else ["unknown_or_terminal_task"],
+                    overall_status="ok" if changed else "error",
                 )
-            replacement = queue.redrive(str(target_id))
+            try:
+                replacement = queue.redrive(str(target_id))
+            except KeyError:
+                return _operator_result(
+                    action,
+                    states=["error"],
+                    codes=["unknown_task"],
+                    overall_status="error",
+                )
+            except QueueOperationError as error:
+                code = str(error) if str(error) == "redrive_requires_dead" else "redrive_invalid"
+                return _operator_result(
+                    action,
+                    states=["error"],
+                    codes=[code],
+                    overall_status="error",
+                )
             return _operator_result(action, ids=[replacement], states=["ready"])
         if action in {"transaction-recover", "transaction-undo"}:
             from markdown_transaction import MarkdownCoordinator

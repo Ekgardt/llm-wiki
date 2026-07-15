@@ -839,6 +839,18 @@ def _queue_v2_check(state_root: Path, now: datetime, deadline: float) -> dict:
             tables = _tables(database, deadline)
             if "tasks" not in tables:
                 raise sqlite3.DatabaseError("tasks table missing")
+            task_columns = _columns(database, "tasks", deadline)
+            if not {"state", "error_code", "blocked_capability"}.issubset(
+                task_columns
+            ):
+                details["codes"].append("queue_metadata_missing")
+                details["deletion_codes"].append("queue_state_corrupt")
+                return _result(
+                    "queue",
+                    "error",
+                    "Queue task metadata is incomplete.",
+                    details,
+                )
             rows = database.execute(
                 "SELECT * FROM tasks LIMIT ?", (MAX_OPERATIONAL_ROWS + 1,)
             ).fetchall()
@@ -850,16 +862,53 @@ def _queue_v2_check(state_root: Path, now: datetime, deadline: float) -> dict:
             capabilities: set[str] = set()
             references: set[str] = set()
             result_hashes: dict[str, object] = {}
+            unknown_state = False
+            corrupt_metadata = False
             for row in rows:
                 if _deadline_reached(deadline):
                     raise TimeoutError("queue check deadline")
-                state = str(row["state"])
-                states[state] = states.get(state, 0) + 1
                 row_columns = set(row.keys())
-                if "error_code" in row_columns and row["error_code"]:
-                    codes.add(str(row["error_code"]))
-                if "blocked_capability" in row_columns and row["blocked_capability"]:
-                    capabilities.add(str(row["blocked_capability"]))
+                state = row["state"]
+                if not isinstance(state, str) or state not in QUEUE_STATES:
+                    unknown_state = True
+                    continue
+                states[state] += 1
+                if not {"error_code", "blocked_capability"}.issubset(row_columns):
+                    corrupt_metadata = True
+                    continue
+                error_code = row["error_code"]
+                blocked_capability = row["blocked_capability"]
+                valid_error_code = error_code is None or (
+                    isinstance(error_code, str)
+                    and 1 <= len(error_code) <= 200
+                    and not any(char in error_code for char in "\r\n")
+                )
+                metadata_matches_state = (
+                    state == "ready"
+                    and valid_error_code
+                    and blocked_capability is None
+                    or state in {"leased", "succeeded"}
+                    and error_code is None
+                    and blocked_capability is None
+                    or state == "blocked"
+                    and error_code is not None
+                    and valid_error_code
+                    and isinstance(blocked_capability, str)
+                    and bool(blocked_capability)
+                    or state == "dead"
+                    and error_code is not None
+                    and valid_error_code
+                    and blocked_capability is None
+                    or state == "cancelled"
+                    and error_code == "cancelled"
+                    and blocked_capability is None
+                )
+                if not metadata_matches_state:
+                    corrupt_metadata = True
+                if error_code:
+                    codes.add(str(error_code))
+                if blocked_capability:
+                    capabilities.add(str(blocked_capability))
                 if "result_reference" in row_columns and row["result_reference"]:
                     reference = str(row["result_reference"])
                     references.add(reference)
@@ -876,6 +925,10 @@ def _queue_v2_check(state_root: Path, now: datetime, deadline: float) -> dict:
                     details["live_workers"] += 1
             details["codes"] = sorted(set(details["codes"]) | codes)
             details["capabilities"] = sorted(capabilities)
+            if unknown_state:
+                details["deletion_codes"].append("queue_state_unknown")
+            if corrupt_metadata:
+                details["deletion_codes"].append("queue_state_corrupt")
             if rows:
                 details["deletion_codes"].append("queue_task_retained")
             if "source_failures" in tables:
@@ -944,7 +997,12 @@ def _queue_v2_check(state_root: Path, now: datetime, deadline: float) -> dict:
         return _result("queue", "error", "Queue state is unreadable.", details)
     if time.monotonic() >= deadline:
         details["budget_exhausted"] = True
-    if states["dead"] or details["results_invalid"] or details["migration"] == "conflict":
+    if (
+        unknown_state
+        or corrupt_metadata
+        or details["results_invalid"]
+        or details["migration"] == "conflict"
+    ):
         status = "error"
     elif states["ready"] or states["leased"] or states["blocked"] or details["migration"] == "pending":
         status = "degraded"
@@ -2380,7 +2438,7 @@ def run_doctor(
     checks.append(
         _result(
             "run_deletion",
-            "ok" if run_deletion["allowed"] else "degraded",
+            "ok",
             "Runtime history may be deleted." if run_deletion["allowed"] else "Runtime history must be retained.",
             run_deletion,
         )

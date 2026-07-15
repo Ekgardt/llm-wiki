@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -71,14 +72,18 @@ def _queue_db(state_root: Path, now: datetime) -> Path:
         connection.executescript(
             """
             CREATE TABLE tasks (
-                id TEXT PRIMARY KEY, state TEXT, result_reference TEXT
+                id TEXT PRIMARY KEY, state TEXT, error_code TEXT,
+                blocked_capability TEXT, result_reference TEXT
             );
             CREATE TABLE queue_ownership (
                 role TEXT PRIMARY KEY, token TEXT, pid INTEGER, expires_at TEXT
             );
             """
         )
-        connection.execute("INSERT INTO tasks VALUES ('task', 'dead', NULL)")
+        connection.execute(
+            "INSERT INTO tasks VALUES "
+            "('task', 'dead', 'attempts_exhausted', NULL, NULL)"
+        )
         connection.execute(
             "INSERT INTO queue_ownership VALUES ('worker', 'token', 1, ?)",
             ((now + timedelta(minutes=5)).isoformat(),),
@@ -176,8 +181,11 @@ def test_deletion_blocks_source_state_and_any_partial_database_error(
     with sqlite3.connect(path) as connection:
         connection.executescript(
             """
-            CREATE TABLE tasks(id TEXT PRIMARY KEY,state TEXT);
-            INSERT INTO tasks VALUES('task','ready');
+            CREATE TABLE tasks(
+                id TEXT PRIMARY KEY, state TEXT, error_code TEXT,
+                blocked_capability TEXT
+            );
+            INSERT INTO tasks VALUES('task','ready',NULL,NULL);
             CREATE TABLE source_fences(daily_id TEXT);
             INSERT INTO source_fences VALUES('2026-01-01');
             CREATE TABLE source_failures(logical_path TEXT);
@@ -264,7 +272,7 @@ def _malformed_transaction_db(
     create_artifact: bool = True,
 ) -> None:
     database = state_root / "run/markdown-transactions.sqlite3"
-    database.parent.mkdir(parents=True)
+    database.parent.mkdir(parents=True, exist_ok=True)
     timestamp = now.isoformat()
     with sqlite3.connect(database) as connection:
         connection.executescript(
@@ -379,3 +387,140 @@ def test_recent_committed_transaction_with_malformed_date_cannot_allow_deletion(
     assert "transaction_state_corrupt" in {
         item["code"] for item in result["blockers"]
     }
+
+
+def _retained_queue_db(state_root: Path, now: datetime) -> None:
+    database = state_root / "run/queue.sqlite3"
+    database.parent.mkdir(parents=True, exist_ok=True)
+    results = state_root / "run/queue-results"
+    results.mkdir(parents=True)
+    result = results / "done.json"
+    result.write_bytes(b'{"ok":true}')
+    result.chmod(0o600)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE tasks(id, state, error_code, blocked_capability, "
+            "lease_expires_at, result_reference, result_sha256)"
+        )
+        connection.executemany(
+            "INSERT INTO tasks VALUES (?, ?, ?, NULL, NULL, ?, ?)",
+            [
+                (
+                    "done",
+                    "succeeded",
+                    None,
+                    None,
+                    None,
+                ),
+                ("cancelled", "cancelled", "cancelled", None, None),
+                ("dead", "dead", "attempts_exhausted", None, None),
+            ],
+        )
+    (state_root / "run/queue-migrated-v2").write_text("complete", encoding="utf-8")
+
+
+def test_policy_retention_blocks_deletion_without_degrading_health(tmp_path, monkeypatch):
+    import doctor
+    import session_start_context
+
+    from tests.test_doctor import _build_root, _create_claim_index, _create_index
+
+    root, state_root, home = _build_root(tmp_path)
+    now = datetime.now(timezone.utc)
+    _malformed_transaction_db(state_root, now)
+    _retained_queue_db(state_root, now)
+    (state_root / "run/state.json").write_text(
+        json.dumps(
+            {
+                "last_nightly_date": now.date().isoformat(),
+                "last_nightly_status": "success",
+            }
+        ),
+        encoding="utf-8",
+    )
+    index = state_root / "cache/index.sqlite"
+    _create_index(index)
+    _create_claim_index(root, state_root)
+    os.utime(index, (now.timestamp(), now.timestamp()))
+
+    report = doctor.run_doctor(root=root, state_root=state_root, home=home, now=now)
+    checks = {check["id"]: check for check in report["checks"]}
+
+    assert report["run_deletion"]["allowed"] is False
+    assert {
+        "transaction_undo_retained",
+        "queue_task_retained",
+        "queue_result_retained",
+    }.issubset(
+        {item["code"] for item in report["run_deletion"]["blockers"]}
+    )
+    assert checks["transactions"]["status"] == "ok"
+    assert checks["queue"]["status"] == "ok", checks["queue"]
+    assert checks["run_deletion"]["status"] == "ok"
+    assert report["overall_status"] == "ok"
+    assert doctor.degraded_summary(report) == ""
+    monkeypatch.setattr(doctor, "run_doctor", lambda **kwargs: report)
+    assert session_start_context.health_block() == ""
+
+
+@pytest.mark.parametrize(
+    ("state", "error_code"),
+    [
+        ("invented", None),
+        ("succeeded", "unexpected_failure"),
+        ("dead", None),
+        ("cancelled", "wrong_code"),
+    ],
+)
+def test_queue_health_fails_closed_on_unknown_state_or_error_metadata(
+    tmp_path, state, error_code
+):
+    import doctor
+
+    state_root = tmp_path / "state"
+    database = state_root / "run/queue.sqlite3"
+    database.parent.mkdir(parents=True)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE tasks(id, state, error_code, blocked_capability, "
+            "lease_expires_at, result_reference, result_sha256)"
+        )
+        connection.execute(
+            "INSERT INTO tasks VALUES ('task', ?, ?, NULL, NULL, NULL, NULL)",
+            (state, error_code),
+        )
+    (state_root / "run/queue-migrated-v2").write_text("complete", encoding="utf-8")
+
+    check = doctor._queue_v2_check(state_root, datetime.now(timezone.utc), float("inf"))
+    deletion = doctor._run_deletion_check(
+        state_root,
+        datetime.now(timezone.utc),
+        collected={"queue": check},
+    )
+
+    assert check["status"] == "error"
+    assert {
+        "queue_state_unknown",
+        "queue_state_corrupt",
+    } & set(check["details"]["deletion_codes"])
+    assert deletion["allowed"] is False
+
+
+def test_queue_health_fails_closed_when_required_state_metadata_is_missing(tmp_path):
+    import doctor
+
+    state_root = tmp_path / "state"
+    database = state_root / "run/queue.sqlite3"
+    database.parent.mkdir(parents=True)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE tasks(id, error_code, blocked_capability)"
+        )
+        connection.execute("INSERT INTO tasks VALUES ('task', NULL, NULL)")
+
+    check = doctor._queue_v2_check(
+        state_root, datetime.now(timezone.utc), float("inf")
+    )
+
+    assert check["status"] == "error"
+    assert "queue_state_corrupt" in check["details"]["deletion_codes"]
