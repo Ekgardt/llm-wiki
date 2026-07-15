@@ -62,6 +62,15 @@ def _vault(tmp_path: Path) -> tuple[Path, Path]:
     return vault, state
 
 
+def _same_operation_worker(api: str, target: str, operation_id: str, content: bytes) -> str:
+    import markdown_transaction
+
+    path = Path(target)
+    if api == "append":
+        return markdown_transaction.append_knowledge(operation_id, path, content).state
+    return markdown_transaction.mutate_knowledge(operation_id, {path: content}).state
+
+
 def test_repository_scanner_finds_no_unapproved_covered_writers():
     from check_knowledge_writers import discover_repository_writers
 
@@ -482,6 +491,33 @@ writer(Path("knowledge/notes/x.md"))
     assert scan_source(Path("scripts/probe.py"), source) == []
 
 
+def test_python_scanner_analyzes_definition_time_expressions():
+    from check_knowledge_writers import scan_source
+
+    source = '''
+def sink(path):
+    path.write_text("x")
+target = Path("knowledge/notes/x.md")
+@sink(target)
+def decorated(
+    annotated: sink(target),
+    defaulted=sink(target),
+    *, keyword=sink(target),
+) -> sink(target):
+    pass
+@sink(target)
+class Defined(
+    sink(target),
+    metaclass=sink(target),
+):
+    pass
+'''
+    findings = scan_source(Path("scripts/probe.py"), source)
+    assert [(item.api, item.approved) for item in findings] == [
+        ("sink", False),
+    ] * 8
+
+
 @pytest.mark.parametrize(
     ("suffix", "source", "expected_api"),
     [
@@ -627,6 +663,48 @@ def test_concurrent_daily_and_project_jsonl_appends_never_interleave(tmp_path, m
     for index in range(12):
         assert daily_text.count(f"D{index:02d}-start\nD{index:02d}-end\n") == 1
         assert jsonl_text.count(f'{{"id":{index}}}\n') == 1
+
+
+@pytest.mark.parametrize("api", ["append", "mutation"])
+@pytest.mark.parametrize("executor_type", ["thread", "process"])
+def test_concurrent_identical_operation_id_converges_once(
+    tmp_path, monkeypatch, api, executor_type
+):
+    import markdown_transaction
+
+    vault, state = _vault(tmp_path)
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
+    target = vault / "knowledge" / "notes" / "same.md"
+    operation_id = f"same-{api}"
+    content = b"same\n"
+    workers = 10
+    executor_class = (
+        concurrent.futures.ThreadPoolExecutor
+        if executor_type == "thread"
+        else concurrent.futures.ProcessPoolExecutor
+    )
+    with executor_class(max_workers=workers) as executor:
+        futures = [
+            executor.submit(
+                _same_operation_worker, api, str(target), operation_id, content
+            )
+            for _ in range(workers)
+        ]
+        assert [future.result(timeout=60) for future in futures] == ["committed"] * workers
+
+    assert target.read_bytes() == content
+    coordinator = markdown_transaction.MarkdownCoordinator(vault, state)
+    record = coordinator._record_for_operation_id(operation_id)
+    assert record is not None
+    assert record.state == "committed"
+    with coordinator._connect() as database:
+        transaction_count = database.execute(
+            'SELECT COUNT(*) FROM "transaction" '
+            'WHERE operation_id = ? OR operation_id LIKE ?',
+            (operation_id, f"{operation_id}:cas:%"),
+        ).fetchone()[0]
+    assert transaction_count == 1
 
 
 def test_append_retries_a_cas_conflict_without_overwriting_winner(tmp_path, monkeypatch):
@@ -798,16 +876,23 @@ def test_mutate_replays_identical_committed_create_replace_delete(
     assert path.read_bytes() == desired if desired is not None else not path.exists()
 
 
-def test_mutate_rejects_rebound_committed_operation(tmp_path, monkeypatch):
+@pytest.mark.parametrize("api", ["append", "mutation"])
+def test_writer_rejects_rebound_committed_operation(tmp_path, monkeypatch, api):
     import markdown_transaction
 
     vault, state = _vault(tmp_path)
     monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
     path = vault / "knowledge" / "notes" / "page.md"
-    markdown_transaction.mutate_knowledge("replay:event", {path: b"one"})
+    if api == "append":
+        markdown_transaction.append_knowledge("replay:event", path, b"one")
+    else:
+        markdown_transaction.mutate_knowledge("replay:event", {path: b"one"})
     with pytest.raises(ValueError, match="different request"):
-        markdown_transaction.mutate_knowledge("replay:event", {path: b"two"})
+        if api == "append":
+            markdown_transaction.append_knowledge("replay:event", path, b"two")
+        else:
+            markdown_transaction.mutate_knowledge("replay:event", {path: b"two"})
 
 
 @pytest.mark.parametrize(

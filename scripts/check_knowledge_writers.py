@@ -315,6 +315,25 @@ def _python_write_calls(source: str) -> list[tuple[int, str, bool, str]]:
                 if statement.name in deleted_names:
                     env.pop(statement.name, None)
                     continue
+                definition_expressions = [
+                    *statement.decorator_list,
+                    *statement.args.defaults,
+                    *(item for item in statement.args.kw_defaults if item is not None),
+                    *(argument.annotation for argument in (
+                        *statement.args.posonlyargs,
+                        *statement.args.args,
+                        *statement.args.kwonlyargs,
+                    ) if argument.annotation is not None),
+                ]
+                if statement.args.vararg and statement.args.vararg.annotation:
+                    definition_expressions.append(statement.args.vararg.annotation)
+                if statement.args.kwarg and statement.args.kwarg.annotation:
+                    definition_expressions.append(statement.args.kwarg.annotation)
+                if statement.returns is not None:
+                    definition_expressions.append(statement.returns)
+                definition_expressions.extend(getattr(statement, "type_params", ()))
+                for expression in definition_expressions:
+                    scan_expression(expression, env, function)
                 env[statement.name] = {f"<function:{statement.name}>"}
                 function_env = {name: set(items) for name, items in env.items()}
                 method_offset = int(bool(statement.args.args) and statement.args.args[0].arg in {"self", "cls"})
@@ -335,6 +354,15 @@ def _python_write_calls(source: str) -> list[tuple[int, str, bool, str]]:
                 process(statement.body, function_env, statement.name)
                 continue
             if isinstance(statement, ast.ClassDef):
+                definition_expressions = [
+                    *statement.decorator_list,
+                    *statement.bases,
+                    *(keyword.value for keyword in statement.keywords),
+                    *getattr(statement, "type_params", ()),
+                ]
+                for expression in definition_expressions:
+                    scan_expression(expression, env, function)
+                env[statement.name] = {f"<function:{statement.name}>"}
                 process(statement.body, env, function)
                 continue
             if isinstance(statement, ast.If):

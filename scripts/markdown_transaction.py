@@ -233,7 +233,9 @@ def mutate_knowledge(
             raise ValueError("knowledge target size exceeds limit")
     coordinator.recover()
     existing = coordinator._record_for_operation_id(operation_id)
-    if existing is not None and existing.state == "committed":
+    if existing is not None:
+        existing = _settle_operation(coordinator, operation_id)
+    if existing is not None:
         desired = {
             path: ABSENT if content is None else sha256_bytes(content)
             for path, content in relative_changes.items()
@@ -241,7 +243,11 @@ def mutate_knowledge(
         persisted = {operation.path: operation.after_hash for operation in existing.operations}
         if desired != persisted:
             raise ValueError("operation_id is already bound to a different request")
-        return existing
+        if existing.state == "committed":
+            return existing
+        raise RuntimeError(
+            f"duplicate mutation ended in noncommitted state {existing.state}"
+        )
     with coordinator.writer_gate():
         captured = {
             relative: coordinator._read_bounded_target(
@@ -266,16 +272,62 @@ def mutate_knowledge(
             prepared.append(MarkdownChange.create(relative, _require_bytes(content)))
         else:
             prepared.append(MarkdownChange.replace(relative, _require_bytes(content)))
-    record = coordinator.prepare(
-        prepared,
-        operation_id=operation_id,
-        validators=validators,
-        preconditions=expected,
-    )
-    return coordinator.apply(record.id)
+    try:
+        record = coordinator.prepare(
+            prepared,
+            operation_id=operation_id,
+            validators=validators,
+            preconditions=expected,
+        )
+    except ValueError as exc:
+        if "operation_id is already bound" not in str(exc):
+            raise
+        record = _settle_operation(coordinator, operation_id)
+        if record is None:
+            raise RuntimeError("winning transaction disappeared during duplicate recovery") from exc
+        desired = {
+            path: ABSENT if content is None else sha256_bytes(content)
+            for path, content in relative_changes.items()
+        }
+        persisted = {operation.path: operation.after_hash for operation in record.operations}
+        if desired != persisted:
+            raise
+        if record.state != "committed":
+            raise RuntimeError(
+                f"duplicate mutation ended in noncommitted state {record.state}"
+            )
+        return record
+    settled = _settle_operation(coordinator, operation_id)
+    if settled is None:
+        raise RuntimeError("prepared transaction disappeared before apply")
+    return settled
 
 
-def _committed_append_matches(
+def _settle_operation(
+    coordinator: MarkdownCoordinator, operation_id: str
+) -> TransactionRecord | None:
+    deadline = time.monotonic() + _WRITER_WAIT_SECONDS
+    while True:
+        record = coordinator._record_for_operation_id(operation_id)
+        if record is None:
+            return None
+        if record.state in {"prepared", "applying"}:
+            return coordinator.apply(record.id)
+        if record.state != "preparing":
+            return record
+        with coordinator._connect() as database:
+            owner = database.execute(
+                'SELECT owner_pid FROM "transaction" WHERE operation_id = ?',
+                (operation_id,),
+            ).fetchone()
+        if owner is None or owner["owner_pid"] is None or not _pid_alive(owner["owner_pid"]):
+            coordinator.recover()
+        if time.monotonic() >= deadline:
+            raise TimeoutError("timed out waiting for duplicate transaction preparation")
+        time.sleep(0.01)
+
+
+def _append_request_matches(
     coordinator: MarkdownCoordinator,
     record: TransactionRecord,
     relative: str,
@@ -326,11 +378,14 @@ def append_knowledge(
     while attempt < 64:
         candidate_id = operation_id if attempt == 0 else f"{operation_id}:cas:{attempt}"
         existing = coordinator._record_for_operation_id(candidate_id)
-        if existing is not None and existing.state == "committed":
-            if _committed_append_matches(coordinator, existing, relative, block):
-                return existing
-            raise ValueError("operation_id is already bound to a different request")
         if existing is not None:
+            existing = _settle_operation(coordinator, candidate_id)
+            if existing is None:
+                continue
+            if not _append_request_matches(coordinator, existing, relative, block):
+                raise ValueError("operation_id is already bound to a different request")
+            if existing.state == "committed":
+                return existing
             attempt += 1
             continue
         try:
@@ -357,13 +412,26 @@ def append_knowledge(
             )
         )
         try:
-            record = coordinator.prepare(
+            coordinator.prepare(
                 [change],
                 operation_id=candidate_id,
                 preconditions={relative: expected},
             )
-            return coordinator.apply(record.id)
+            settled = _settle_operation(coordinator, candidate_id)
+            if settled is None:
+                continue
+            return settled
         except (FileExistsError, FileNotFoundError, ValueError) as exc:
+            if isinstance(exc, ValueError) and "operation_id is already bound" in str(exc):
+                winner = _settle_operation(coordinator, candidate_id)
+                if winner is None or not _append_request_matches(
+                    coordinator, winner, relative, block
+                ):
+                    raise
+                if winner.state == "committed":
+                    return winner
+                attempt += 1
+                continue
             if not isinstance(exc, (FileExistsError, FileNotFoundError)) and (
                 "precondition changed" not in str(exc)
             ):
