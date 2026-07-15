@@ -40,7 +40,7 @@ VALID_TOOL_CALLS = {
     "compile": {},
     "find_dead_code": {"directory": "C:\\project"},
     "get_architecture": {"directory": "C:\\project"},
-    "doctor": {},
+    "doctor": {"action": "status"},
 }
 
 TOOL_HELPERS = {
@@ -83,7 +83,7 @@ WRONG_TYPE_CALLS = [
     ("log_decision", {"summary": "x", "rationale": 1}),
     ("find_dead_code", {"directory": 1}),
     ("get_architecture", {"directory": 1}),
-    ("doctor", {"repair": "yes"}),
+    ("doctor", {"action": "status", "repair": True}),
 ]
 
 
@@ -118,12 +118,71 @@ class TestToolDefinitions:
             assert "get_architecture" in names
             assert "doctor" in names
 
-    def test_doctor_has_optional_repair_boolean(self):
+    def test_doctor_has_closed_exact_action_branches(self):
         import mcp_server
 
         schema = mcp_server.TOOL_INPUT_SCHEMAS["doctor"]
-        assert schema["required"] == []
-        assert schema["properties"]["repair"]["type"] == "boolean"
+        assert set(schema) == {"type", "oneOf"}
+        assert schema["type"] == "object"
+        branches = schema["oneOf"]
+        assert len(branches) == 9
+        assert all(branch["additionalProperties"] is False for branch in branches)
+        assert {
+            branch["properties"]["action"]["const"] for branch in branches
+        } == {
+            "status",
+            "queue-inspect",
+            "queue-cancel",
+            "queue-redrive",
+            "queue-dead-list",
+            "transaction-recover",
+            "transaction-undo",
+            "archive-status",
+            "claim-status",
+        }
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            {},
+            {"action": "unknown"},
+            {"action": "status", "unknown": True},
+            {"action": "status", "repair": True},
+            {"action": "queue-inspect"},
+            {"action": "queue-cancel", "target_id": "task"},
+            {"action": "queue-redrive", "target_id": "task", "repair": False},
+            {"action": "transaction-recover"},
+            {"action": "transaction-undo", "repair": True},
+            {"action": "queue-dead-list", "limit": 0},
+            {"action": "claim-status", "limit": 101},
+        ],
+    )
+    def test_doctor_rejects_unknown_and_forbidden_argument_combinations(
+        self, arguments
+    ):
+        import mcp_server
+
+        assert mcp_server._validate_tool_arguments("doctor", arguments)
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            {"action": "status"},
+            {"action": "status", "limit": 100},
+            {"action": "queue-inspect", "target_id": "task"},
+            {"action": "queue-cancel", "target_id": "task", "repair": True},
+            {"action": "queue-redrive", "target_id": "task", "repair": True},
+            {"action": "queue-dead-list", "limit": 1},
+            {"action": "transaction-recover", "repair": True, "limit": 10},
+            {"action": "transaction-undo", "target_id": "tx", "repair": True},
+            {"action": "archive-status", "limit": 10},
+            {"action": "claim-status", "limit": 10},
+        ],
+    )
+    def test_doctor_accepts_only_declared_action_shapes(self, arguments):
+        import mcp_server
+
+        assert mcp_server._validate_tool_arguments("doctor", arguments) is None
 
     def test_find_dead_code_requires_a_directory(self):
         from mcp_server import _build_tool_definitions
@@ -698,7 +757,7 @@ class TestHandleToolCall:
         monkeypatch.setattr(mcp_server, "_trigger_compile", lambda: {"ok": True})
         monkeypatch.setattr(mcp_server, "_find_dead_code", lambda *args: {"ok": True})
         monkeypatch.setattr(mcp_server, "_get_architecture", lambda *args: {"ok": True})
-        monkeypatch.setattr(mcp_server, "_doctor", lambda *args: {"overall_status": "ok"})
+        monkeypatch.setattr(mcp_server, "_doctor", lambda **kwargs: {"overall_status": "ok"})
         for name, arguments in VALID_TOOL_CALLS.items():
             envelope = json.loads(self._run(name, arguments))
             assert set(envelope) == ENVELOPE_FIELDS, name
@@ -923,13 +982,13 @@ class TestHandleToolCall:
         monkeypatch.setattr(
             mcp_server,
             "_doctor",
-            lambda repair=False: {
+            lambda **kwargs: {
                 "overall_status": "degraded",
                 "checks": [{"id": "index", "status": "degraded", "message": "stale"}],
             },
         )
 
-        envelope = json.loads(self._run("doctor", {"repair": False}))
+        envelope = json.loads(self._run("doctor", {"action": "status"}))
 
         assert set(envelope) == ENVELOPE_FIELDS
         assert envelope["data"]["overall_status"] == "degraded"
@@ -1107,7 +1166,7 @@ class TestCallbackCompatibility:
         ("arguments", "report", "expected_error"),
         [
             (
-                {"repair": True},
+                {"action": "transaction-recover", "repair": True},
                 {
                     "overall_status": "error",
                     "checks": [
@@ -1122,7 +1181,7 @@ class TestCallbackCompatibility:
                 True,
             ),
             (
-                {"repair": False},
+                {"action": "status"},
                 {
                     "overall_status": "error",
                     "checks": [
@@ -1165,7 +1224,7 @@ class TestCallbackCompatibility:
         monkeypatch.setattr(mcp_server, "TextContent", Model)
         monkeypatch.setattr(mcp_server, "CallToolResult", Model)
         monkeypatch.setattr(mcp_server, "MCP_CALL_TOOL_RESULT_AVAILABLE", True)
-        monkeypatch.setattr(mcp_server, "_doctor", lambda repair=False: report)
+        monkeypatch.setattr(mcp_server, "_doctor", lambda **kwargs: report)
         mcp_server._register_tools(server, [])
 
         result = asyncio.run(server.callback("doctor", arguments))

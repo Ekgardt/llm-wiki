@@ -56,6 +56,7 @@ LOG_ENTRY_MAX = 200
 DAILY_EXCERPT_LINES = 6
 DAILY_LINE_MAX = 160
 HOOK_STATE_LOCK_TIMEOUT = 0.1
+RECOVERY_LIMIT_SECONDS = 0.1
 
 
 def _claim_nightly_catchup(today: str | None = None, now: str | None = None) -> bool:
@@ -548,6 +549,21 @@ def health_block() -> str:
     return f"## Health\n\n{summary}\n\n" if summary else ""
 
 
+def _recover_transactions() -> None:
+    """Best-effort bounded recovery before any session context is read."""
+    database = STATE_ROOT / "run" / "markdown-transactions.sqlite3"
+    if not database.is_file():
+        return
+    try:
+        from markdown_transaction import MarkdownCoordinator
+
+        MarkdownCoordinator(ROOT, STATE_ROOT).recover(
+            writer_wait_seconds=RECOVERY_LIMIT_SECONDS
+        )
+    except Exception:  # noqa: BLE001 - SessionStart must remain available
+        pass
+
+
 def build_context() -> str:
     index_txt = (
         MEMORY_INDEX.read_text(encoding="utf-8", errors="replace")
@@ -610,6 +626,7 @@ def main() -> int:
     )
     args = p.parse_args()
 
+    _recover_transactions()
     _maybe_spawn_nightly_catchup()
     additional = build_context()
     daily = latest_daily()

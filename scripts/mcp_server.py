@@ -93,6 +93,51 @@ from mcp_contract import build_envelope, envelope_schema  # noqa: E402
 HEALTH_RESOURCE_URI = "llm-wiki://health"
 CONTEXT_RESOURCE_URI = "llm-wiki://context"
 
+
+def _doctor_branch(
+    action: str,
+    *,
+    target: bool = False,
+    limit: bool = False,
+    mutation: bool = False,
+) -> dict:
+    properties = {"action": {"type": "string", "const": action}}
+    required = ["action"]
+    if target:
+        properties["target_id"] = {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+        }
+        required.append("target_id")
+    if limit:
+        properties["limit"] = {"type": "integer", "minimum": 1, "maximum": 100}
+    if mutation:
+        properties["repair"] = {"type": "boolean", "const": True}
+        required.append("repair")
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": False,
+    }
+
+
+DOCTOR_INPUT_SCHEMA = {
+    "type": "object",
+    "oneOf": [
+        _doctor_branch("status", limit=True),
+        _doctor_branch("queue-inspect", target=True),
+        _doctor_branch("queue-cancel", target=True, mutation=True),
+        _doctor_branch("queue-redrive", target=True, mutation=True),
+        _doctor_branch("queue-dead-list", limit=True),
+        _doctor_branch("transaction-recover", limit=True, mutation=True),
+        _doctor_branch("transaction-undo", target=True, mutation=True),
+        _doctor_branch("archive-status", limit=True),
+        _doctor_branch("claim-status", limit=True),
+    ],
+}
+
 TOOL_INPUT_SCHEMAS = {
     "recall": {
         "type": "object",
@@ -185,17 +230,7 @@ TOOL_INPUT_SCHEMAS = {
         },
         "required": ["directory"],
     },
-    "doctor": {
-        "type": "object",
-        "properties": {
-            "repair": {
-                "type": "boolean",
-                "default": False,
-                "description": "Apply only safe, idempotent local repairs",
-            },
-        },
-        "required": [],
-    },
+    "doctor": DOCTOR_INPUT_SCHEMA,
 }
 
 
@@ -388,11 +423,149 @@ def _get_architecture(directory: str) -> dict:
     return {"directory": str(resolved), "architecture": get_architecture(resolved)}
 
 
-def _doctor(repair: bool = False) -> dict:
-    """Run local health checks without repair unless explicitly requested."""
-    from doctor import run_doctor
+def _operator_result(
+    action: str,
+    *,
+    ids: list[str] | None = None,
+    states: list[str] | None = None,
+    codes: list[str] | None = None,
+    counts: dict[str, int] | None = None,
+) -> dict:
+    return {
+        "action": action,
+        "ids": (ids or [])[:100],
+        "counts": counts or {"items": len(ids or [])},
+        "states": sorted(set(states or [])),
+        "codes": sorted(set(codes or [])),
+    }
 
-    return run_doctor(repair=repair)
+
+def _doctor(
+    *,
+    action: str,
+    target_id: str | None = None,
+    limit: int = 20,
+    repair: bool = False,
+) -> dict:
+    """Dispatch bounded health and recovery actions with redacted output."""
+    from memory_state import ROOT, STATE_ROOT
+
+    mutations = {
+        "queue-cancel",
+        "queue-redrive",
+        "transaction-recover",
+        "transaction-undo",
+    }
+    if action in mutations and repair is not True:
+        return _operator_result(action, states=["error"], codes=["repair_required"])
+    try:
+        if action == "status":
+            from doctor import run_doctor
+
+            report = run_doctor(root=ROOT, state_root=STATE_ROOT)
+            codes = [item["code"] for item in report["run_deletion"]["blockers"]]
+            for check in report["checks"]:
+                codes.extend(str(code) for code in check.get("details", {}).get("codes", []))
+            return _operator_result(
+                action,
+                ids=[str(check["id"]) for check in report["checks"]][:limit],
+                states=[str(report["overall_status"])],
+                codes=codes,
+                counts={key: int(value) for key, value in report["counts"].items()},
+            )
+        if action in {"queue-inspect", "queue-dead-list"}:
+            import sqlite3
+
+            path = STATE_ROOT / "run" / "queue.sqlite3"
+            if not path.is_file():
+                return _operator_result(action, codes=["queue_missing"])
+            connection = sqlite3.connect(
+                f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=0
+            )
+            connection.row_factory = sqlite3.Row
+            try:
+                if action == "queue-inspect":
+                    row = connection.execute(
+                        "SELECT id,state,error_code FROM tasks WHERE id=?", (target_id,)
+                    ).fetchone()
+                    if row is None:
+                        return _operator_result(action, codes=["unknown_task"])
+                    return _operator_result(
+                        action,
+                        ids=[str(row["id"])],
+                        states=[str(row["state"])],
+                        codes=[str(row["error_code"])] if row["error_code"] else [],
+                    )
+                rows = connection.execute(
+                    "SELECT id,state,error_code FROM tasks WHERE state='dead' "
+                    "ORDER BY updated_at,id LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            finally:
+                connection.close()
+            return _operator_result(
+                action,
+                ids=[str(row["id"]) for row in rows],
+                states=[str(row["state"]) for row in rows],
+                codes=[str(row["error_code"]) for row in rows if row["error_code"]],
+            )
+        if action in {"queue-cancel", "queue-redrive"}:
+            from memory_queue import MemoryQueue
+
+            queue = MemoryQueue(STATE_ROOT)
+            if action == "queue-cancel":
+                changed = queue.cancel(str(target_id))
+                return _operator_result(
+                    action,
+                    ids=[str(target_id)] if changed else [],
+                    states=["cancelled"] if changed else [],
+                    codes=[] if changed else ["unknown_or_terminal_task"],
+                )
+            replacement = queue.redrive(str(target_id))
+            return _operator_result(action, ids=[replacement], states=["ready"])
+        if action in {"transaction-recover", "transaction-undo"}:
+            from markdown_transaction import MarkdownCoordinator
+
+            coordinator = MarkdownCoordinator(ROOT, STATE_ROOT)
+            if action == "transaction-recover":
+                records = coordinator.recover()[:limit]
+            else:
+                prepared = coordinator.undo(str(target_id))
+                records = [coordinator.apply(prepared.id)]
+            return _operator_result(
+                action,
+                ids=[record.id for record in records],
+                states=[record.state for record in records],
+                codes=[record.error_code for record in records if record.error_code],
+            )
+        if action in {"archive-status", "claim-status"}:
+            from doctor import _archive_check, _claim_check
+
+            check = (
+                _archive_check(ROOT, STATE_ROOT)
+                if action == "archive-status"
+                else _claim_check(ROOT, STATE_ROOT)
+            )
+            details = check["details"]
+            counts = {
+                key: value
+                for key, value in details.items()
+                if isinstance(value, int) and not isinstance(value, bool)
+            }
+            return _operator_result(
+                action,
+                states=[str(check["status"])],
+                codes=[str(code) for code in details.get("codes", [])],
+                counts=counts,
+            )
+    except Exception as error:  # noqa: BLE001 - stable operator failure boundary
+        code = {
+            "KeyError": "unknown_target",
+            "TimeoutError": "owner_busy",
+            "MigrationBusy": "owner_busy",
+        }.get(type(error).__name__, "operation_failed")
+        return _operator_result(action, states=["error"], codes=[code])
+    return _operator_result(action, states=["error"], codes=["unknown_action"])
 
 
 def _validated_code_directory(directory: str) -> tuple[Path | None, str | None]:
@@ -508,12 +681,28 @@ def _validate_tool_arguments(name: str, arguments) -> str | None:
     if not isinstance(arguments, dict):
         return "arguments must be an object"
     schema = TOOL_INPUT_SCHEMAS[name]
+    if "oneOf" in schema:
+        errors = [
+            _validate_object_schema(branch, arguments)
+            for branch in schema["oneOf"]
+        ]
+        if sum(error is None for error in errors) == 1:
+            return None
+        return "arguments do not match exactly one allowed action"
+    return _validate_object_schema(schema, arguments, reject_unknown=False)
+
+
+def _validate_object_schema(
+    schema: dict, arguments: dict, *, reject_unknown: bool = True
+) -> str | None:
     for key in schema["required"]:
         if key not in arguments:
             return f"required argument is missing: {key}"
     for key, value in arguments.items():
         field = schema["properties"].get(key)
         if field is None:
+            if reject_unknown or schema.get("additionalProperties") is False:
+                return f"unknown argument: {key}"
             continue
         expected = field["type"]
         if expected == "string" and not isinstance(value, str):
@@ -534,6 +723,12 @@ def _validate_tool_arguments(name: str, arguments) -> str | None:
             return f"argument '{key}' must be at least {field['minimum']}"
         if "maximum" in field and value > field["maximum"]:
             return f"argument '{key}' must be at most {field['maximum']}"
+        if "minLength" in field and len(value) < field["minLength"]:
+            return f"argument '{key}' is too short"
+        if "maxLength" in field and len(value) > field["maxLength"]:
+            return f"argument '{key}' is too long"
+        if "const" in field and value != field["const"]:
+            return f"argument '{key}' has an invalid value"
     return None
 
 
@@ -794,7 +989,7 @@ async def _handle_tool_call(name: str, arguments) -> str:
             elif name == "get_architecture":
                 data = _get_architecture(arguments["directory"])
             else:
-                data = _doctor(arguments.get("repair", False))
+                data = _doctor(**arguments)
         except Exception as e:
             data = {"error": str(e)}
 

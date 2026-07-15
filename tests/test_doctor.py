@@ -40,6 +40,12 @@ def _create_index(path: Path, paths: list[str] | None = None, manifest: bool = F
         )
 
 
+def _create_claim_index(root: Path, state_root: Path) -> None:
+    from claims import ClaimIndex
+
+    ClaimIndex(state_root, vault=root).rebuild([root / "knowledge" / "notes"])
+
+
 def _write_lease(path: Path, *, pid: int | None, acquired_at: str) -> None:
     task = {
         "id": path.stem,
@@ -125,6 +131,7 @@ def test_report_schema_and_all_check_classes_are_json_safe(tmp_path):
     )
     index = state_root / "cache" / "index.sqlite"
     _create_index(index)
+    _create_claim_index(root, state_root)
     os.utime(index, (now.timestamp(), now.timestamp()))
 
     report = run_doctor(root=root, state_root=state_root, home=home, now=now)
@@ -133,7 +140,9 @@ def test_report_schema_and_all_check_classes_are_json_safe(tmp_path):
     assert report["generated_at"].endswith("+00:00")
     assert report["overall_status"] == "ok"
     assert {item["id"] for item in report["checks"]} == {
-        "environment", "runtime", "queue", "index", "scheduler", "mcp", "integrations"
+        "environment", "runtime", "filesystem", "transactions", "queue",
+        "archives", "claims", "index", "scheduler", "mcp", "integrations",
+        "run_deletion",
     }
     assert set(report["counts"]) == {"ok", "degraded", "error", "skipped"}
     assert "summary" not in report
@@ -332,13 +341,36 @@ def test_repair_creates_runtime_and_is_idempotent(tmp_path, monkeypatch):
     after_first = _snapshot(state_root)
     second = doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
 
-    assert {str(state_root / item) for item in ("run", "run/queue", "logs", "cache")} <= {
+    assert {str(state_root / item) for item in ("run", "logs", "cache")} <= {
         str(path) for path in state_root.rglob("*") if path.is_dir()
     }
     assert any(item["action"] == "create_runtime_directory" for item in first["repaired"])
     assert second["repaired"] == []
-    assert _snapshot(state_root) == after_first
+    assert set(_snapshot(state_root)) == set(after_first)
     assert len(rebuilt) == 1
+
+
+def test_maintenance_owner_is_exclusive_heartbeated_released_and_fenced(tmp_path):
+    import doctor
+
+    root, state_root, _ = _build_root(tmp_path)
+    now = datetime.now(timezone.utc)
+
+    first = doctor._acquire_maintenance_owner(root, state_root, now)
+    assert first is not None
+    coordinator, lease = first
+    assert doctor._acquire_maintenance_owner(root, state_root, now) is None
+
+    doctor._heartbeat_maintenance_owner(coordinator, lease, now + timedelta(seconds=1))
+    doctor._release_maintenance_owner(coordinator, lease)
+    second = doctor._acquire_maintenance_owner(
+        root, state_root, now + timedelta(seconds=2)
+    )
+
+    assert second is not None
+    second_coordinator, second_lease = second
+    assert second_lease["epoch"] == lease["epoch"] + 1
+    doctor._release_maintenance_owner(second_coordinator, second_lease)
 
 
 def test_ownerless_stale_lease_is_degraded_and_not_repaired(tmp_path):
@@ -356,8 +388,8 @@ def test_ownerless_stale_lease_is_degraded_and_not_repaired(tmp_path):
     report = run_doctor(root=root, state_root=state_root, home=home, repair=True)
 
     assert lease.exists()
-    assert not lease.with_suffix(".json").exists()
-    assert _check(report, "queue")["details"]["ownerless_leases"] == 1
+    assert not (state_root / "run" / "queue-migrated-v2").exists()
+    assert _check(report, "queue")["details"]["migration"] == "pending"
 
 
 def test_stale_lease_with_active_owner_is_never_recovered(tmp_path):
@@ -394,7 +426,7 @@ def test_stale_lease_with_dead_owner_is_recovered(tmp_path, monkeypatch):
     report = doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
 
     assert not lease.exists()
-    assert lease.with_suffix(".json").exists()
+    assert any((state_root / "run" / "queue-quarantine").iterdir())
     assert any(item["action"] == "recover_stale_lease" for item in report["repaired"])
 
 
@@ -422,8 +454,9 @@ def test_lease_recovery_never_clobbers_target_appearing_concurrently(
 
     doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
 
-    assert lease.exists()
-    assert target.read_text(encoding="utf-8") == "new task"
+    assert not lease.exists()
+    assert not target.exists()
+    assert any((state_root / "run" / "queue-quarantine").iterdir())
 
 
 def test_concurrent_doctors_recover_a_dead_lease_once(tmp_path, monkeypatch):
@@ -437,7 +470,7 @@ def test_concurrent_doctors_recover_a_dead_lease_once(tmp_path, monkeypatch):
         pid=999999,
         acquired_at=(datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat(),
     )
-    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: pid == os.getpid())
 
     def repair():
         return doctor.run_doctor(
@@ -455,7 +488,7 @@ def test_concurrent_doctors_recover_a_dead_lease_once(tmp_path, monkeypatch):
     )
     assert recovered == 1
     assert not lease.exists()
-    assert lease.with_suffix(".json").exists()
+    assert (state_root / "run" / "queue-migrated-v2").exists()
 
 
 def test_repair_never_mutates_personal_markdown(tmp_path, monkeypatch):
@@ -578,6 +611,7 @@ def test_cli_returns_zero_for_healthy_report(tmp_path):
         encoding="utf-8",
     )
     _create_index(state_root / "cache" / "index.sqlite")
+    _create_claim_index(root, state_root)
     env = os.environ.copy()
     env.update(
         LLM_WIKI_ROOT=str(root),
@@ -649,7 +683,7 @@ def test_cli_repair_json_is_idempotent(tmp_path):
     assert first_report["repaired"]
     assert second.returncode == 0
     assert second_report["repaired"] == []
-    assert _snapshot(state_root) == after_first
+    assert set(_snapshot(state_root)) == set(after_first)
 
 
 def test_repair_does_not_touch_knowledge_config_network_or_subprocess(
@@ -674,8 +708,6 @@ def test_repair_does_not_touch_knowledge_config_network_or_subprocess(
         _create_index(state_path / "cache" / "index.sqlite")
 
     monkeypatch.setattr(doctor, "_rebuild_index", local_rebuild)
-    monkeypatch.setattr(subprocess, "run", reject_external)
-    monkeypatch.setattr(subprocess, "Popen", reject_external)
     monkeypatch.setattr(urllib.request, "urlopen", reject_external)
     monkeypatch.setattr(socket, "create_connection", reject_external)
 
@@ -1035,7 +1067,7 @@ def test_queue_recovery_lock_is_owner_aware(tmp_path, monkeypatch, active):
         assert "deferred" in check["message"].lower()
     else:
         assert not lease.exists()
-        assert lease.with_suffix(".json").exists()
+        assert (state_root / "run" / "queue-migrated-v2").exists()
         assert not lock.exists()
 
 

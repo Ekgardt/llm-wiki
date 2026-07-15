@@ -2,15 +2,17 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
+import re
 import secrets
 import sqlite3
 import stat
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +22,7 @@ STALE_LEASE_SECONDS = 10 * 60
 PERMANENT_FAILURE_ATTEMPTS = 5
 SUMMARY_LIMIT = 600
 VALID_STATUSES = ("ok", "degraded", "error", "skipped")
-RUNTIME_DIRECTORIES = ("run", "run/queue", "logs", "cache")
+RUNTIME_DIRECTORIES = ("run", "logs", "cache")
 MAX_QUEUE_FILES = 200
 MAX_QUEUE_FILE_BYTES = 64 * 1024
 MAX_CONFIG_BYTES = 64 * 1024
@@ -28,9 +30,22 @@ MAX_STATE_BYTES = 256 * 1024
 MAX_MANIFEST_BYTES = 256 * 1024
 MAX_INDEX_PATHS = 10_000
 MAX_LOCK_BYTES = 4096
+MAX_QUEUE_RESULT_BYTES = 8 * 1024 * 1024
 LOCK_STALE_SECONDS = 10 * 60
 DEFAULT_TIME_BUDGET_SECONDS = 5.0
 INDEX_COLUMNS = {"path", "title", "summary", "body", "project", "timestamp", "slug"}
+TRANSACTION_STATES = (
+    "preparing",
+    "prepared",
+    "applying",
+    "committed",
+    "discarded",
+    "conflicted",
+    "quarantined",
+)
+QUEUE_STATES = ("ready", "leased", "blocked", "succeeded", "dead", "cancelled")
+UNDO_RETENTION_DAYS = 30
+MAINTENANCE_LEASE_SECONDS = 120
 
 
 def _as_utc(value: datetime | None) -> datetime:
@@ -185,6 +200,9 @@ def _lease_state(task: dict, now: datetime) -> tuple[bool, bool]:
 
 
 def _queue_check(state_root: Path, now: datetime, deadline: float) -> dict:
+    database_path = state_root / "run" / "queue.sqlite3"
+    if _safe_kind(database_path, state_root)[0] == "regular":
+        return _queue_v2_check(state_root, now, deadline)
     queue = state_root / "run" / "queue"
     pending = 0
     permanently_failed = 0
@@ -253,6 +271,404 @@ def _queue_check(state_root: Path, now: datetime, deadline: float) -> dict:
     else:
         status, message = "ok", "Queue has no pending or stale work."
     return _result("queue", status, message, details)
+
+
+def _readonly_database(path: Path) -> sqlite3.Connection:
+    database = sqlite3.connect(
+        f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=0
+    )
+    database.row_factory = sqlite3.Row
+    return database
+
+
+def _tables(database: sqlite3.Connection) -> set[str]:
+    return {
+        str(row[0])
+        for row in database.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+
+
+def _columns(database: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in database.execute(f'PRAGMA table_info("{table}")')}
+
+
+def _parse_utc(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _live_owner(row: sqlite3.Row, now: datetime, *, pid_column: str) -> bool:
+    columns = set(row.keys())
+    pid = row[pid_column] if pid_column in columns else None
+    if not isinstance(pid, int) or not _pid_alive(pid):
+        return False
+    expiry = _parse_utc(row["expires_at"]) if "expires_at" in columns else None
+    return expiry is None or expiry > now
+
+
+def _transaction_check(state_root: Path, now: datetime) -> dict:
+    path = state_root / "run" / "markdown-transactions.sqlite3"
+    states = {state: 0 for state in TRANSACTION_STATES}
+    details: dict[str, Any] = {
+        "states": states,
+        "codes": [],
+        "undo_retained": 0,
+        "live_project_leases": 0,
+        "live_writers": 0,
+        "live_maintenance_owners": 0,
+    }
+    kind, _ = _safe_kind(path, state_root)
+    if kind == "missing":
+        return _result("transactions", "ok", "No transaction database exists.", details)
+    if kind != "regular":
+        return _result("transactions", "error", "Transaction database is unsafe.", details)
+    try:
+        with _readonly_database(path) as database:
+            tables = _tables(database)
+            if "transaction" not in tables:
+                raise sqlite3.DatabaseError("transaction table missing")
+            transaction_columns = _columns(database, "transaction")
+            transaction_query = (
+                'SELECT id, state, updated_at, artifacts_pruned_at FROM "transaction"'
+                if "artifacts_pruned_at" in transaction_columns
+                else 'SELECT id, state, updated_at, NULL AS artifacts_pruned_at FROM "transaction"'
+            )
+            rows = database.execute(transaction_query + " LIMIT 10001").fetchall()
+            if len(rows) > 10_000:
+                details["codes"].append("transaction_scan_truncated")
+                rows = rows[:10_000]
+            codes: set[str] = set()
+            cutoff = now - timedelta(days=UNDO_RETENTION_DAYS)
+            for row in rows:
+                state = str(row["state"])
+                states[state] = states.get(state, 0) + 1
+                if state in {"conflicted", "quarantined"}:
+                    code_row = database.execute(
+                        'SELECT error_code FROM "transaction" WHERE id=?', (row["id"],)
+                    ).fetchone() if "error_code" in transaction_columns else None
+                    if code_row is not None and code_row[0]:
+                        codes.add(str(code_row[0]))
+                updated = _parse_utc(row["updated_at"])
+                artifact = state_root / "run" / "transactions" / str(row["id"])
+                if (
+                    state == "committed"
+                    and updated is not None
+                    and updated >= cutoff
+                    and row["artifacts_pruned_at"] is None
+                    and artifact.is_dir()
+                ):
+                    details["undo_retained"] += 1
+            details["codes"] = sorted(set(details["codes"]) | codes)
+            if "project_leases" in tables:
+                details["live_project_leases"] = sum(
+                    (_parse_utc(row[0]) or datetime.min.replace(tzinfo=timezone.utc)) > now
+                    for row in database.execute("SELECT expires_at FROM project_leases")
+                )
+            if "writer_owners" in tables:
+                details["live_writers"] = sum(
+                    _live_owner(row, now, pid_column="process_id")
+                    for row in database.execute("SELECT * FROM writer_owners")
+                )
+            if "maintenance_owners" in tables:
+                details["live_maintenance_owners"] = sum(
+                    _live_owner(row, now, pid_column="process_id")
+                    for row in database.execute("SELECT * FROM maintenance_owners")
+                )
+    except (OSError, sqlite3.Error, ValueError):
+        return _result("transactions", "error", "Transaction state is unreadable.", details)
+    problem = (
+        sum(states[state] for state in ("preparing", "prepared", "applying"))
+        + states["conflicted"]
+        + states["quarantined"]
+    )
+    status = "error" if states["conflicted"] or states["quarantined"] else "degraded" if problem else "ok"
+    return _result(
+        "transactions",
+        status,
+        "Transaction state requires operator attention." if problem else "Transaction state is healthy.",
+        details,
+    )
+
+
+def _queue_v2_check(state_root: Path, now: datetime, deadline: float) -> dict:
+    path = state_root / "run" / "queue.sqlite3"
+    states = {state: 0 for state in QUEUE_STATES}
+    details: dict[str, Any] = {
+        "states": states,
+        "codes": [],
+        "capabilities": [],
+        "live_workers": 0,
+        "live_migrations": 0,
+        "results_retained": 0,
+        "results_invalid": 0,
+        "source_failures": 0,
+        "migration": "not-started",
+    }
+    marker = state_root / "run" / "queue-migrated-v2"
+    legacy = state_root / "run" / "queue"
+    details["migration"] = "complete" if marker.is_file() else "pending"
+    if marker.exists() and legacy.is_dir() and any(legacy.iterdir()):
+        details["migration"] = "conflict"
+    try:
+        with _readonly_database(path) as database:
+            tables = _tables(database)
+            if "tasks" not in tables:
+                raise sqlite3.DatabaseError("tasks table missing")
+            rows = database.execute("SELECT * FROM tasks LIMIT 10001").fetchall()
+            if len(rows) > 10_000:
+                details["codes"].append("queue_scan_truncated")
+                rows = rows[:10_000]
+            codes: set[str] = set()
+            capabilities: set[str] = set()
+            references: set[str] = set()
+            for row in rows:
+                state = str(row["state"])
+                states[state] = states.get(state, 0) + 1
+                row_columns = set(row.keys())
+                if "error_code" in row_columns and row["error_code"]:
+                    codes.add(str(row["error_code"]))
+                if "blocked_capability" in row_columns and row["blocked_capability"]:
+                    capabilities.add(str(row["blocked_capability"]))
+                if "result_reference" in row_columns and row["result_reference"]:
+                    references.add(str(row["result_reference"]))
+                if (
+                    state == "leased"
+                    and "lease_expires_at" in row_columns
+                    and (_parse_utc(row["lease_expires_at"]) or datetime.min.replace(tzinfo=timezone.utc)) > now
+                ):
+                    details["live_workers"] += 1
+            details["codes"] = sorted(set(details["codes"]) | codes)
+            details["capabilities"] = sorted(capabilities)
+            if "source_failures" in tables:
+                details["source_failures"] = int(
+                    database.execute("SELECT count(*) FROM source_failures").fetchone()[0]
+                )
+            if "queue_ownership" in tables:
+                for row in database.execute("SELECT * FROM queue_ownership"):
+                    if row["token"] is None or not _live_owner(row, now, pid_column="pid"):
+                        continue
+                    if row["role"] == "worker":
+                        details["live_workers"] += 1
+                    if row["role"] == "migration":
+                        details["live_migrations"] += 1
+            results = state_root / "run" / "queue-results"
+            files = list(results.glob("*.result")) if results.is_dir() else []
+            details["results_retained"] = len(files)
+            for reference in references:
+                candidate = state_root / reference
+                if not candidate.is_file():
+                    details["results_invalid"] += 1
+                    continue
+                matching = next(
+                    (row for row in rows if "result_reference" in row.keys() and row["result_reference"] == reference),
+                    None,
+                )
+                expected = (
+                    matching["result_sha256"]
+                    if matching is not None and "result_sha256" in matching.keys()
+                    else None
+                )
+                try:
+                    raw = (
+                        candidate.read_bytes()
+                        if candidate.stat().st_size <= MAX_QUEUE_RESULT_BYTES
+                        else b""
+                    )
+                except OSError:
+                    raw = b""
+                if not isinstance(expected, str) or hashlib.sha256(raw).hexdigest() != expected:
+                    details["results_invalid"] += 1
+    except (OSError, sqlite3.Error, ValueError):
+        return _result("queue", "error", "Queue state is unreadable.", details)
+    if time.monotonic() >= deadline:
+        details["budget_exhausted"] = True
+    if states["dead"] or details["results_invalid"] or details["migration"] == "conflict":
+        status = "error"
+    elif states["ready"] or states["leased"] or states["blocked"] or details["migration"] == "pending":
+        status = "degraded"
+    else:
+        status = "ok"
+    return _result(
+        "queue",
+        status,
+        "Queue state requires operator attention." if status != "ok" else "Queue state is healthy.",
+        details,
+    )
+
+
+def _archive_check(root: Path, state_root: Path) -> dict:
+    archive = root / "knowledge" / "daily" / "archive"
+    quarantine = state_root / "run" / "archive-quarantine"
+    details = {"bags": 0, "duplicates": 0, "quarantined": 0, "index": "missing", "codes": []}
+    if quarantine.is_dir():
+        details["quarantined"] = sum(1 for item in quarantine.rglob("*") if item.is_file())
+    if not archive.exists():
+        return _result("archives", "ok", "No archive exists.", details)
+    try:
+        months = [
+            month
+            for month in list(archive.iterdir())[:121]
+            if month.is_dir() and re.fullmatch(r"\d{4}-\d{2}", month.name)
+        ]
+        if len(months) > 120:
+            details["codes"].append("archive_scan_truncated")
+            months = months[:120]
+        bags = []
+        for month in months:
+            for item in list(month.iterdir())[:10_001]:
+                if item.is_dir() and item.name.startswith("bag-"):
+                    bags.append(item)
+                    if len(bags) > 10_000:
+                        details["codes"].append("archive_scan_truncated")
+                        bags = bags[:10_000]
+                        break
+            if len(bags) >= 10_000:
+                break
+        details["bags"] = len(bags)
+        seen: set[tuple[object, object]] = set()
+        bag_paths: set[str] = set()
+        for bag in bags:
+            manifest, problem = _read_bounded_json(
+                bag / "archive-manifest.json", archive, max_bytes=MAX_MANIFEST_BYTES
+            )
+            if problem or not isinstance(manifest, dict):
+                details["codes"].append("archive_manifest_invalid")
+                continue
+            key = (manifest.get("logical_daily_id"), manifest.get("source_hash"))
+            if key in seen:
+                details["duplicates"] += 1
+            seen.add(key)
+            bag_paths.add(bag.relative_to(root).as_posix())
+        index, problem = _read_bounded_json(
+            archive / "archive-index.json", archive, max_bytes=MAX_MANIFEST_BYTES
+        ) if (archive / "archive-index.json").exists() else (None, "missing")
+        if not problem and isinstance(index, dict):
+            indexed = index.get("bags", [])
+            indexed_paths = {
+                str(item.get("bag_path"))
+                for item in indexed
+                if isinstance(item, dict) and isinstance(item.get("bag_path"), str)
+            }
+            details["index"] = (
+                "valid"
+                if index.get("schema_version") == "archive-index/v1"
+                and indexed_paths == bag_paths
+                and len(indexed_paths) == len(indexed)
+                else "invalid"
+            )
+        else:
+            details["index"] = "invalid" if problem != "missing" else "missing"
+    except OSError:
+        details["codes"].append("archive_unreadable")
+    problem = details["duplicates"] or details["quarantined"] or details["codes"] or details["index"] == "invalid"
+    return _result(
+        "archives",
+        "error" if details["codes"] else "degraded" if problem else "ok",
+        "Archive state requires operator attention." if problem else "Archive state is healthy.",
+        details,
+    )
+
+
+def _claim_check(root: Path, state_root: Path) -> dict:
+    path = state_root / "cache" / "claims.sqlite3"
+    details = {"index": "missing", "claims": 0, "diagnostics": 0, "codes": []}
+    if not path.exists():
+        return _result("claims", "degraded", "Claim index is missing.", details)
+    try:
+        from claims import ClaimIndex
+
+        with _readonly_database(path) as database:
+            compatible = ClaimIndex._schema_compatible(database)
+            details["index"] = "valid" if compatible else "invalid"
+            if compatible:
+                details["claims"] = int(database.execute("SELECT count(*) FROM claim").fetchone()[0])
+                rows = database.execute(
+                    "SELECT code,count(*) FROM claim_index_diagnostic GROUP BY code ORDER BY code"
+                ).fetchall()
+                details["diagnostics"] = sum(int(row[1]) for row in rows)
+                details["codes"] = [str(row[0]) for row in rows]
+    except (OSError, sqlite3.Error, ValueError):
+        details["index"] = "invalid"
+    status = "error" if details["index"] == "invalid" else "degraded" if details["diagnostics"] else "ok"
+    return _result(
+        "claims",
+        status,
+        "Claim index requires operator attention." if status != "ok" else "Claim index is healthy.",
+        details,
+    )
+
+
+def _filesystem_check(state_root: Path) -> dict:
+    raw = str(state_root)
+    local = not raw.startswith(("\\\\", "//"))
+    details = {"local": local, "locking": "supported" if local else "unsupported"}
+    return _result(
+        "filesystem",
+        "ok" if local else "error",
+        "Runtime filesystem supports local locking." if local else "Runtime must use a local filesystem.",
+        details,
+    )
+
+
+def _append_blocker(blockers: list[dict[str, str]], code: str) -> None:
+    if not any(item["code"] == code for item in blockers):
+        blockers.append({"code": code})
+
+
+def _run_deletion_check(state_root: Path, now: datetime) -> dict:
+    """Return every reason the operational ``run/`` tree must be retained."""
+    blockers: list[dict[str, str]] = []
+    transaction_check = _transaction_check(state_root, now)
+    transaction = transaction_check["details"]
+    if transaction_check["status"] == "error" and not any(
+        transaction["states"].values()
+    ):
+        _append_blocker(blockers, "transaction_state_unreadable")
+    states = transaction["states"]
+    if any(states.get(state, 0) for state in ("preparing", "prepared", "applying")):
+        _append_blocker(blockers, "transaction_nonterminal")
+    if states.get("conflicted", 0):
+        _append_blocker(blockers, "transaction_conflicted")
+    if states.get("quarantined", 0):
+        _append_blocker(blockers, "transaction_quarantined")
+    if transaction["undo_retained"]:
+        _append_blocker(blockers, "transaction_undo_retained")
+    if transaction["live_project_leases"]:
+        _append_blocker(blockers, "project_lease_live")
+    if transaction["live_writers"]:
+        _append_blocker(blockers, "writer_live")
+    if transaction["live_maintenance_owners"]:
+        _append_blocker(blockers, "maintenance_owner_live")
+
+    queue_path = state_root / "run" / "queue.sqlite3"
+    if queue_path.is_file():
+        try:
+            queue_check = _queue_v2_check(state_root, now, float("inf"))
+            queue = queue_check["details"]
+            if queue_check["status"] == "error" and not sum(queue["states"].values()):
+                _append_blocker(blockers, "queue_state_unreadable")
+            if sum(queue["states"].values()):
+                _append_blocker(blockers, "queue_task_retained")
+            if queue["results_retained"]:
+                _append_blocker(blockers, "queue_result_retained")
+            if queue["live_workers"]:
+                _append_blocker(blockers, "queue_worker_live")
+            if queue["live_migrations"]:
+                _append_blocker(blockers, "queue_migration_live")
+        except (OSError, sqlite3.Error, ValueError):
+            _append_blocker(blockers, "queue_state_unreadable")
+    else:
+        results = state_root / "run" / "queue-results"
+        if results.is_dir() and any(results.iterdir()):
+            _append_blocker(blockers, "queue_result_retained")
+    return {"allowed": not blockers, "blockers": blockers}
 
 
 def _index_deferred(message: str, detail: str) -> dict:
@@ -766,7 +1182,10 @@ def _release_lock(path: Path, root: Path, token: str) -> None:
 
 def _repair_leases(state_root: Path, now: datetime, repaired: list[dict]) -> bool:
     queue = state_root / "run" / "queue"
-    if _safe_kind(queue, state_root)[0] != "directory":
+    kind = _safe_kind(queue, state_root)[0]
+    if kind == "missing":
+        return True
+    if kind != "directory":
         raise OSError("unsafe queue directory")
     lock = queue / ".doctor-recovery.lock"
     lock_token = _acquire_lock(lock, queue, now)
@@ -857,6 +1276,171 @@ def _rebuild_index(root: Path, state_root: Path) -> None:
         ) = previous
 
 
+def _ensure_maintenance_schema(database: sqlite3.Connection) -> None:
+    database.execute(
+        """CREATE TABLE IF NOT EXISTS maintenance_owners (
+               owner_name TEXT PRIMARY KEY,
+               owner_token TEXT NOT NULL,
+               process_id INTEGER NOT NULL,
+               acquired_at TEXT NOT NULL,
+               heartbeat_at TEXT,
+               expires_at TEXT,
+               fencing_epoch INTEGER NOT NULL DEFAULT 1
+           )"""
+    )
+    columns = _columns(database, "maintenance_owners")
+    for name, declaration in (
+        ("heartbeat_at", "TEXT"),
+        ("expires_at", "TEXT"),
+        ("fencing_epoch", "INTEGER NOT NULL DEFAULT 1"),
+    ):
+        if name not in columns:
+            database.execute(
+                f"ALTER TABLE maintenance_owners ADD COLUMN {name} {declaration}"
+            )
+
+
+def _acquire_maintenance_owner(
+    root: Path, state_root: Path, now: datetime
+) -> tuple[Any, dict[str, object]] | None:
+    from markdown_transaction import MarkdownCoordinator
+
+    coordinator = MarkdownCoordinator(root, state_root)
+    token = secrets.token_hex(16)
+    expires = now + timedelta(seconds=MAINTENANCE_LEASE_SECONDS)
+    with coordinator._connect() as database:
+        database.execute("BEGIN IMMEDIATE")
+        _ensure_maintenance_schema(database)
+        row = database.execute(
+            "SELECT * FROM maintenance_owners WHERE owner_name='doctor'"
+        ).fetchone()
+        epoch = 1
+        if row is not None:
+            epoch = int(row["fencing_epoch"] or 0) + 1
+            if _live_owner(row, now, pid_column="process_id"):
+                database.rollback()
+                return None
+        database.execute(
+            """INSERT INTO maintenance_owners(
+                   owner_name,owner_token,process_id,acquired_at,heartbeat_at,
+                   expires_at,fencing_epoch
+               ) VALUES('doctor',?,?,?,?,?,?)
+               ON CONFLICT(owner_name) DO UPDATE SET
+                   owner_token=excluded.owner_token,
+                   process_id=excluded.process_id,
+                   acquired_at=excluded.acquired_at,
+                   heartbeat_at=excluded.heartbeat_at,
+                   expires_at=excluded.expires_at,
+                   fencing_epoch=excluded.fencing_epoch""",
+            (
+                token,
+                os.getpid(),
+                now.isoformat(),
+                now.isoformat(),
+                expires.isoformat(),
+                epoch,
+            ),
+        )
+        database.commit()
+    return coordinator, {"token": token, "epoch": epoch}
+
+
+def _heartbeat_maintenance_owner(
+    coordinator: Any, lease: dict[str, object], now: datetime | None = None
+) -> None:
+    heartbeat = _as_utc(now)
+    expires = heartbeat + timedelta(seconds=MAINTENANCE_LEASE_SECONDS)
+    with coordinator._connect() as database:
+        database.execute("BEGIN IMMEDIATE")
+        changed = database.execute(
+            """UPDATE maintenance_owners SET heartbeat_at=?,expires_at=?
+               WHERE owner_name='doctor' AND owner_token=? AND fencing_epoch=?""",
+            (
+                heartbeat.isoformat(),
+                expires.isoformat(),
+                lease["token"],
+                lease["epoch"],
+            ),
+        ).rowcount
+        if changed != 1:
+            database.rollback()
+            raise RuntimeError("maintenance_owner_fence_lost")
+        database.commit()
+
+
+def _release_maintenance_owner(
+    coordinator: Any, lease: dict[str, object]
+) -> None:
+    with coordinator._connect() as database:
+        database.execute("BEGIN IMMEDIATE")
+        database.execute(
+            """UPDATE maintenance_owners
+               SET owner_token='',process_id=0,heartbeat_at=?,expires_at=?
+               WHERE owner_name='doctor' AND owner_token=? AND fencing_epoch=?""",
+            (
+                datetime.now(timezone.utc).isoformat(),
+                datetime.now(timezone.utc).isoformat(),
+                lease["token"],
+                lease["epoch"],
+            ),
+        )
+        database.commit()
+
+
+def _repair_queue_capabilities(state_root: Path) -> int:
+    path = state_root / "run" / "queue.sqlite3"
+    if not path.is_file():
+        return 0
+    from llm_client import probe_candidate, provider_candidates
+
+    provider_ready = any(probe_candidate(item) for item in provider_candidates())
+    repaired = {"llm.compile", "llm.flush", "llm.query"} if provider_ready else set()
+    if not repaired:
+        return 0
+    placeholders = ",".join("?" for _ in repaired)
+    with sqlite3.connect(path) as database:
+        changed = database.execute(
+            f"UPDATE tasks SET state='ready',blocked_capability=NULL,error_code=NULL "
+            f"WHERE state='blocked' AND blocked_capability IN ({placeholders})",
+            sorted(repaired),
+        ).rowcount
+        database.commit()
+    return changed
+
+
+def _run_bounded_worker(state_root: Path) -> int:
+    from memory_queue import (
+        MemoryQueue,
+        _acquire_queue_owner,
+        _manual_processor,
+        _release_queue_owner,
+        run_worker,
+    )
+
+    MemoryQueue(state_root)
+    configured = Path(
+        os.environ.get(
+            "LLM_WIKI_STATE_ROOT",
+            os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent),
+        )
+    ).resolve()
+    if configured != Path(state_root).resolve():
+        return 0
+    owner = _acquire_queue_owner(
+        state_root, "worker", "worker_busy", ttl_seconds=MAINTENANCE_LEASE_SECONDS
+    )
+    try:
+        summary = run_worker(
+            _manual_processor,
+            max_tasks=20,
+            max_seconds=1,
+            idle_seconds=0,
+        )
+        return summary.processed
+    finally:
+        _release_queue_owner(owner)
+
+
 def run_doctor(
     root: Path | str | None = None,
     state_root: Path | str | None = None,
@@ -878,53 +1462,139 @@ def run_doctor(
     deadline = time.monotonic() + max(0.0, time_budget_seconds)
 
     if repair:
+        maintenance: tuple[Any, dict[str, object]] | None = None
         try:
-            _repair_runtime(state_path, repaired)
-        except OSError as exc:
-            repair_errors.setdefault("runtime", []).append(
-                f"Runtime repair failed: {type(exc).__name__}"
+            maintenance = _acquire_maintenance_owner(
+                root_path, state_path, generated_at
             )
-        try:
-            if not _repair_leases(state_path, generated_at, repaired):
-                repair_deferred.add("queue")
-        except OSError as exc:
-            repair_errors.setdefault("queue", []).append(
-                f"Queue repair failed: {type(exc).__name__}"
-            )
-        index_before = _index_check(state_path, generated_at, deadline)
-        if index_before["details"].get("repairable") and index_before["status"] != "ok":
-            index_lock = state_path / "cache" / ".doctor-index.lock"
-            lock_token = _acquire_lock(index_lock, state_path / "cache", generated_at)
-            if lock_token is None:
-                repair_deferred.add("index")
+            if maintenance is None:
+                repair_deferred.update(
+                    {"runtime", "transactions", "queue", "index", "archives", "claims"}
+                )
             else:
-                try:
-                    _rebuild_index(root_path, state_path)
-                    index_after = _index_check(state_path, generated_at, deadline)
-                    if index_after["status"] == "ok":
-                        repaired.append({"action": "rebuild_index"})
-                    else:
-                        message = (
-                            "Index repair failed: index was not created"
-                            if index_after["details"].get("freshness") == "missing"
-                            else "Index repair failed: rebuilt index did not validate as fresh"
-                        )
-                        repair_errors.setdefault("index", []).append(
-                            message
-                        )
-                except Exception as exc:  # noqa: BLE001
-                    repair_errors.setdefault("index", []).append(
-                        f"Index repair failed: {type(exc).__name__}"
+                coordinator, lease = maintenance
+                _repair_runtime(state_path, repaired)
+                _heartbeat_maintenance_owner(coordinator, lease)
+                recovered = coordinator.recover(writer_wait_seconds=0)
+                if recovered:
+                    repaired.append(
+                        {"action": "recover_transactions", "count": len(recovered)}
                     )
-                finally:
-                    _release_lock(
-                        index_lock, state_path / "cache", lock_token
+                _heartbeat_maintenance_owner(coordinator, lease)
+                legacy_available = _repair_leases(
+                    state_path, generated_at, repaired
+                )
+                if not legacy_available:
+                    repair_deferred.add("queue")
+                from memory_queue import MemoryQueue, migrate_legacy_queue
+
+                marker = state_path / "run" / "queue-migrated-v2"
+                marker_existed = marker.exists()
+                migration = (
+                    migrate_legacy_queue(state_path)
+                    if legacy_available
+                    else None
+                )
+                if migration is not None and (
+                    not marker_existed
+                    or migration.imported
+                    or migration.quarantined
+                ):
+                    repaired.append(
+                        {
+                            "action": "migrate_queue",
+                            "count": migration.imported + migration.quarantined,
+                        }
+                    )
+                if migration is not None or marker.is_file():
+                    MemoryQueue(state_path)
+                queue_v2_ready = migration is not None or marker.is_file()
+                _heartbeat_maintenance_owner(coordinator, lease)
+                index_before = _index_check(state_path, generated_at, deadline)
+                if (
+                    index_before["details"].get("repairable")
+                    and index_before["status"] != "ok"
+                ):
+                    index_lock = state_path / "cache" / ".doctor-index.lock"
+                    lock_token = _acquire_lock(
+                        index_lock, state_path / "cache", generated_at
+                    )
+                    if lock_token is None:
+                        repair_deferred.add("index")
+                    else:
+                        try:
+                            _rebuild_index(root_path, state_path)
+                            index_after = _index_check(
+                                state_path, generated_at, deadline
+                            )
+                            if index_after["status"] == "ok":
+                                repaired.append({"action": "rebuild_index"})
+                            else:
+                                message = (
+                                    "Index repair failed: index was not created"
+                                    if index_after["details"].get("freshness")
+                                    == "missing"
+                                    else "Index repair failed: rebuilt index did not validate as fresh"
+                                )
+                                repair_errors.setdefault("index", []).append(message)
+                        except Exception as exc:  # noqa: BLE001
+                            repair_errors.setdefault("index", []).append(
+                                f"Index repair failed: {type(exc).__name__}"
+                            )
+                        finally:
+                            _release_lock(
+                                index_lock, state_path / "cache", lock_token
+                            )
+                _heartbeat_maintenance_owner(coordinator, lease)
+                archive_before = _archive_check(root_path, state_path)
+                archive_root = root_path / "knowledge" / "daily" / "archive"
+                if archive_root.exists() and archive_before["status"] != "ok":
+                    from archive_daily import DailyArchiver
+
+                    DailyArchiver(root_path, state_path).recover()
+                    repaired.append({"action": "recover_archives"})
+                claim_before = _claim_check(root_path, state_path)
+                if claim_before["status"] != "ok":
+                    from claims import ClaimIndex
+
+                    sources = [root_path / "knowledge" / "notes"]
+                    projects = root_path / "knowledge" / "projects"
+                    if projects.is_dir():
+                        sources.append(projects)
+                    ClaimIndex(state_path, vault=root_path).rebuild(sources)
+                    repaired.append({"action": "rebuild_claim_index"})
+                _heartbeat_maintenance_owner(coordinator, lease)
+                unblocked = (
+                    _repair_queue_capabilities(state_path) if queue_v2_ready else 0
+                )
+                if unblocked:
+                    repaired.append(
+                        {"action": "unblock_capabilities", "count": unblocked}
+                    )
+                processed = _run_bounded_worker(state_path) if queue_v2_ready else 0
+                if processed:
+                    repaired.append({"action": "run_bounded_worker", "count": processed})
+        except Exception as exc:  # noqa: BLE001
+            repair_errors.setdefault("runtime", []).append(
+                f"Repair failed: {type(exc).__name__}"
+            )
+        finally:
+            if maintenance is not None:
+                try:
+                    _release_maintenance_owner(*maintenance)
+                except Exception as exc:  # noqa: BLE001
+                    repair_errors.setdefault("runtime", []).append(
+                        f"Maintenance owner release failed: {type(exc).__name__}"
                     )
 
     checks = [
         _environment_check(root_path, state_path),
         _runtime_check(state_path),
+        _filesystem_check(state_path),
+        _transaction_check(state_path, generated_at),
         _queue_check(state_path, generated_at, deadline),
+        _archive_check(root_path, state_path),
+        _claim_check(root_path, state_path),
     ]
     remaining = (
         ("index", lambda: _index_check(state_path, generated_at, deadline)),
@@ -963,6 +1633,17 @@ def run_doctor(
             check["details"]["repair_errors"] = errors
     counts = {status: sum(check["status"] == status for check in checks) for status in VALID_STATUSES}
     overall = "error" if counts["error"] else "degraded" if counts["degraded"] else "ok"
+    run_deletion = _run_deletion_check(state_path, generated_at)
+    checks.append(
+        _result(
+            "run_deletion",
+            "ok" if run_deletion["allowed"] else "degraded",
+            "Runtime history may be deleted." if run_deletion["allowed"] else "Runtime history must be retained.",
+            run_deletion,
+        )
+    )
+    counts = {status: sum(check["status"] == status for check in checks) for status in VALID_STATUSES}
+    overall = "error" if counts["error"] else "degraded" if counts["degraded"] else "ok"
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at.isoformat(),
@@ -970,6 +1651,7 @@ def run_doctor(
         "repaired": repaired,
         "checks": checks,
         "counts": counts,
+        "run_deletion": run_deletion,
     }
 
 

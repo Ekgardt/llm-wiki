@@ -275,6 +275,31 @@ def test_session_start_health_uses_strict_doctor_budget(monkeypatch):
     assert 0 < received["time_budget_seconds"] <= 0.1
 
 
+def test_session_start_recovers_transactions_before_health_context(monkeypatch):
+    import session_start_context
+
+    events = []
+    monkeypatch.setattr(
+        session_start_context,
+        "_recover_transactions",
+        lambda: events.append("recover"),
+    )
+    monkeypatch.setattr(
+        session_start_context,
+        "build_context",
+        lambda: events.append("context") or "context",
+    )
+    monkeypatch.setattr(session_start_context, "_maybe_spawn_nightly_catchup", lambda: None)
+    monkeypatch.setattr(session_start_context, "latest_daily", lambda: None)
+    monkeypatch.setattr(session_start_context, "write_debug", lambda *args: None)
+    monkeypatch.setattr("sys.argv", ["session_start_context.py", "--output-file", "out"])
+    monkeypatch.setattr(Path, "write_text", lambda *args, **kwargs: None)
+    monkeypatch.setattr(Path, "mkdir", lambda *args, **kwargs: None)
+
+    assert session_start_context.main() == 0
+    assert events == ["recover", "context"]
+
+
 def test_session_start_health_latency_is_bounded_with_large_unsafe_queue(
     tmp_path, monkeypatch
 ):
