@@ -5,6 +5,8 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 
 def _transaction_db(state_root: Path, now: datetime) -> Path:
     database = state_root / "run/markdown-transactions.sqlite3"
@@ -13,8 +15,15 @@ def _transaction_db(state_root: Path, now: datetime) -> Path:
         connection.executescript(
             """
             CREATE TABLE "transaction" (
-                id TEXT PRIMARY KEY, state TEXT, updated_at TEXT,
+                id TEXT PRIMARY KEY, operation_id TEXT, request_hash TEXT,
+                state TEXT, preconditions_json TEXT, plan_hash TEXT,
+                created_at TEXT, updated_at TEXT,
                 artifacts_pruned_at TEXT
+            );
+            CREATE TABLE "operation" (
+                transaction_id TEXT, position INTEGER, kind TEXT, path TEXT,
+                before_hash TEXT, after_hash TEXT, parent_device INTEGER,
+                parent_inode INTEGER, applied INTEGER
             );
             CREATE TABLE project_leases (
                 project TEXT PRIMARY KEY, expires_at TEXT
@@ -28,19 +37,31 @@ def _transaction_db(state_root: Path, now: datetime) -> Path:
             """
         )
         connection.executemany(
-            'INSERT INTO "transaction" VALUES (?, ?, ?, ?)',
+            'INSERT INTO "transaction" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
             [
-                ("tx-active", "applying", now.isoformat(), None),
-                ("tx-conflict", "conflicted", now.isoformat(), None),
-                ("tx-quarantine", "quarantined", now.isoformat(), None),
-                ("tx-undo", "committed", now.isoformat(), None),
+                (name, f"operation-{name}", "a" * 64, state, "{}", "b" * 64,
+                 now.isoformat(), now.isoformat(), None)
+                for name, state in (
+                    ("tx-active", "applying"),
+                    ("tx-conflict", "conflicted"),
+                    ("tx-quarantine", "quarantined"),
+                    ("tx-undo", "committed"),
+                )
+            ],
+        )
+        connection.executemany(
+            'INSERT INTO "operation" VALUES (?, 0, "create", ?, "absent", ?, 1, 2, 1)',
+            [
+                (name, f"knowledge/notes/{name}.md", "c" * 64)
+                for name in ("tx-active", "tx-conflict", "tx-quarantine", "tx-undo")
             ],
         )
         future = (now + timedelta(minutes=5)).isoformat()
         connection.execute("INSERT INTO project_leases VALUES ('p', ?)", (future,))
         connection.execute("INSERT INTO writer_owners VALUES ('global', 1, ?)", (future,))
         connection.execute("INSERT INTO maintenance_owners VALUES ('doctor', 1, ?)", (future,))
-    (state_root / "run/transactions/tx-undo").mkdir(parents=True)
+    for name in ("tx-active", "tx-conflict", "tx-quarantine", "tx-undo"):
+        (state_root / "run/transactions" / name).mkdir(parents=True, exist_ok=True)
     return database
 
 
@@ -225,3 +246,136 @@ def test_deletion_reuses_collected_checks_without_rescanning(tmp_path, monkeypat
     )
 
     assert result == {"allowed": True, "blockers": []}
+
+
+def _malformed_transaction_db(
+    state_root: Path,
+    now: datetime,
+    *,
+    state: object = "committed",
+    updated_at: object | None = None,
+    created_at: object = "valid",
+    request_hash: object = "a" * 64,
+    plan_hash: object = "b" * 64,
+    operation_transaction_id: str = "tx-health",
+    operation_kind: str = "create",
+    before_hash: object = "absent",
+    after_hash: object = "c" * 64,
+    create_artifact: bool = True,
+) -> None:
+    database = state_root / "run/markdown-transactions.sqlite3"
+    database.parent.mkdir(parents=True)
+    timestamp = now.isoformat()
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE "transaction" (
+                id, operation_id, request_hash, state, preconditions_json,
+                plan_hash, created_at, updated_at, artifacts_pruned_at
+            );
+            CREATE TABLE "operation" (
+                transaction_id, position, kind, path, before_hash, after_hash,
+                parent_device, parent_inode, applied
+            );
+            """
+        )
+        connection.execute(
+            'INSERT INTO "transaction" VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)',
+            (
+                "tx-health",
+                "operation-health",
+                request_hash,
+                state,
+                "{}",
+                plan_hash,
+                timestamp if created_at == "valid" else created_at,
+                timestamp if updated_at is None else updated_at,
+            ),
+        )
+        connection.execute(
+            'INSERT INTO "operation" VALUES (?, 0, ?, ?, ?, ?, 1, 2, 1)',
+            (
+                operation_transaction_id,
+                operation_kind,
+                "knowledge/notes/health.md",
+                before_hash,
+                after_hash,
+            ),
+        )
+    if create_artifact:
+        (state_root / "run/transactions/tx-health").mkdir(parents=True)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_code"),
+    [
+        ({"state": "invented"}, "transaction_state_unknown"),
+        ({"updated_at": "not-a-date"}, "transaction_state_corrupt"),
+        ({"created_at": None}, "transaction_state_corrupt"),
+        ({"request_hash": None}, "transaction_state_corrupt"),
+        ({"request_hash": "short"}, "transaction_state_corrupt"),
+        ({"plan_hash": "short"}, "transaction_state_corrupt"),
+        (
+            {"before_hash": "c" * 64, "after_hash": "absent"},
+            "transaction_state_corrupt",
+        ),
+        ({"create_artifact": False}, "transaction_state_corrupt"),
+        (
+            {"operation_transaction_id": "missing-transaction"},
+            "transaction_state_corrupt",
+        ),
+    ],
+)
+def test_transaction_health_blocks_unknown_or_corrupt_rows(
+    tmp_path, mutation, expected_code
+):
+    import doctor
+
+    now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
+    state_root = tmp_path / "state"
+    _malformed_transaction_db(state_root, now, **mutation)
+
+    check = doctor._transaction_check(state_root, now)
+    deletion = doctor._run_deletion_check(
+        state_root, now, collected={"transactions": check}
+    )
+
+    assert check["status"] == "error"
+    assert expected_code in check["details"]["deletion_codes"]
+    assert deletion["allowed"] is False
+
+
+def test_transaction_health_blocks_missing_required_schema(tmp_path):
+    import doctor
+
+    state_root = tmp_path / "state"
+    database = state_root / "run/markdown-transactions.sqlite3"
+    database.parent.mkdir(parents=True)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            'CREATE TABLE "transaction" (id, state, updated_at)'
+        )
+
+    check = doctor._transaction_check(
+        state_root, datetime.now(timezone.utc)
+    )
+
+    assert check["status"] == "error"
+    assert "transaction_state_corrupt" in check["details"]["deletion_codes"]
+
+
+def test_recent_committed_transaction_with_malformed_date_cannot_allow_deletion(
+    tmp_path,
+):
+    import doctor
+
+    now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
+    state_root = tmp_path / "state"
+    _malformed_transaction_db(state_root, now, updated_at="recent-but-malformed")
+
+    result = doctor._run_deletion_check(state_root, now)
+
+    assert result["allowed"] is False
+    assert "transaction_state_corrupt" in {
+        item["code"] for item in result["blockers"]
+    }

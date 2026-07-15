@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import reliable_memory
 from reliable_memory import (
     open_readonly_operational_db,
     read_runtime_bytes,
@@ -57,6 +58,29 @@ QUEUE_STATES = ("ready", "leased", "blocked", "succeeded", "dead", "cancelled")
 UNDO_RETENTION_DAYS = 30
 MAINTENANCE_LEASE_SECONDS = 120
 MAINTENANCE_HEARTBEAT_SECONDS = 40.0
+FILESYSTEM_PROBE_SECONDS = 1.0
+TRANSACTION_REQUIRED_COLUMNS = {
+    "id",
+    "operation_id",
+    "request_hash",
+    "state",
+    "preconditions_json",
+    "plan_hash",
+    "created_at",
+    "updated_at",
+    "artifacts_pruned_at",
+}
+OPERATION_REQUIRED_COLUMNS = {
+    "transaction_id",
+    "position",
+    "kind",
+    "path",
+    "before_hash",
+    "after_hash",
+    "parent_device",
+    "parent_inode",
+    "applied",
+}
 
 
 def _as_utc(value: datetime | None) -> datetime:
@@ -515,34 +539,153 @@ def _transaction_check(
             if "transaction" not in tables:
                 raise sqlite3.DatabaseError("transaction table missing")
             transaction_columns = _columns(database, "transaction", deadline)
-            transaction_query = (
-                'SELECT id, state, updated_at, artifacts_pruned_at FROM "transaction"'
-                if "artifacts_pruned_at" in transaction_columns
-                else 'SELECT id, state, updated_at, NULL AS artifacts_pruned_at FROM "transaction"'
+            operation_columns = (
+                _columns(database, "operation", deadline)
+                if "operation" in tables
+                else set()
             )
-            rows = database.execute(
+            if not TRANSACTION_REQUIRED_COLUMNS.issubset(
+                transaction_columns
+            ) or not OPERATION_REQUIRED_COLUMNS.issubset(operation_columns):
+                details["codes"].append("transaction_metadata_missing")
+                details["deletion_codes"].append("transaction_state_corrupt")
+                return _result(
+                    "transactions",
+                    "error",
+                    "Transaction metadata is incomplete.",
+                    details,
+                )
+            transaction_query = (
+                'SELECT id, operation_id, request_hash, state, preconditions_json, '
+                "plan_hash, created_at, updated_at, artifacts_pruned_at "
+                'FROM "transaction"'
+            )
+            transaction_rows = database.execute(
                 transaction_query + " LIMIT ?", (MAX_OPERATIONAL_ROWS + 1,)
             ).fetchall()
-            if len(rows) > MAX_OPERATIONAL_ROWS:
+            if len(transaction_rows) > MAX_OPERATIONAL_ROWS:
                 details["codes"].append("transaction_scan_truncated")
                 details["deletion_codes"].append("transaction_state_unknown")
-                rows = rows[:MAX_OPERATIONAL_ROWS]
+                transaction_rows = transaction_rows[:MAX_OPERATIONAL_ROWS]
             codes: set[str] = set()
-            known_ids = {str(row["id"]) for row in rows}
+            operation_rows = database.execute(
+                'SELECT transaction_id, position, kind, path, before_hash, '
+                'after_hash, parent_device, parent_inode, applied FROM "operation" '
+                "LIMIT ?",
+                (MAX_OPERATIONAL_ROWS + 1,),
+            ).fetchall()
+            corrupt = False
+            if len(operation_rows) > MAX_OPERATIONAL_ROWS:
+                details["codes"].append("transaction_operation_scan_truncated")
+                details["deletion_codes"].append("transaction_state_unknown")
+                operation_rows = operation_rows[:MAX_OPERATIONAL_ROWS]
+            known_ids = {
+                row["id"]
+                for row in transaction_rows
+                if isinstance(row["id"], str)
+            }
+            operation_positions: dict[str, list[int]] = {
+                transaction_id: [] for transaction_id in known_ids
+            }
+            digest = re.compile(r"[0-9a-f]{64}")
+            for operation in operation_rows:
+                transaction_id = operation["transaction_id"]
+                position = operation["position"]
+                before_hash = operation["before_hash"]
+                after_hash = operation["after_hash"]
+                valid_hashes = all(
+                    value == "absent"
+                    or isinstance(value, str)
+                    and digest.fullmatch(value) is not None
+                    for value in (before_hash, after_hash)
+                )
+                kind = operation["kind"]
+                valid_transition = (
+                    kind == "create"
+                    and before_hash == "absent"
+                    and after_hash != "absent"
+                    or kind == "replace"
+                    and before_hash != "absent"
+                    and after_hash != "absent"
+                    or kind == "delete"
+                    and before_hash != "absent"
+                    and after_hash == "absent"
+                )
+                valid_shape = (
+                    isinstance(transaction_id, str)
+                    and transaction_id in known_ids
+                    and isinstance(position, int)
+                    and not isinstance(position, bool)
+                    and position >= 0
+                    and kind in {"create", "replace", "delete"}
+                    and isinstance(operation["path"], str)
+                    and bool(operation["path"])
+                    and valid_hashes
+                    and valid_transition
+                    and isinstance(operation["parent_device"], int)
+                    and isinstance(operation["parent_inode"], int)
+                    and operation["applied"] in {0, 1}
+                )
+                if not valid_shape:
+                    corrupt = True
+                    continue
+                operation_positions[transaction_id].append(position)
             cutoff = now - timedelta(days=UNDO_RETENTION_DAYS)
-            for row in rows:
+            for row in transaction_rows:
                 if _deadline_reached(deadline):
                     raise TimeoutError("transaction check deadline")
-                state = str(row["state"])
-                states[state] = states.get(state, 0) + 1
+                state = row["state"]
+                transaction_id = row["id"]
+                if not isinstance(state, str) or state not in TRANSACTION_STATES:
+                    details["deletion_codes"].append("transaction_state_unknown")
+                    continue
+                states[state] += 1
                 if state in {"conflicted", "quarantined"}:
                     code_row = database.execute(
                         'SELECT error_code FROM "transaction" WHERE id=?', (row["id"],)
                     ).fetchone() if "error_code" in transaction_columns else None
                     if code_row is not None and code_row[0]:
                         codes.add(str(code_row[0]))
+                created = _parse_utc(row["created_at"])
                 updated = _parse_utc(row["updated_at"])
-                transaction_id = str(row["id"])
+                pruned = (
+                    _parse_utc(row["artifacts_pruned_at"])
+                    if row["artifacts_pruned_at"] is not None
+                    else None
+                )
+                try:
+                    preconditions = json.loads(row["preconditions_json"])
+                except (TypeError, ValueError):
+                    preconditions = None
+                valid_plan_hash = (
+                    state == "preparing" and row["plan_hash"] == ""
+                ) or (
+                    isinstance(row["plan_hash"], str)
+                    and digest.fullmatch(row["plan_hash"]) is not None
+                )
+                row_corrupt = not (
+                    isinstance(transaction_id, str)
+                    and re.fullmatch(r"[0-9a-z_-]{1,128}", transaction_id)
+                    and isinstance(row["operation_id"], str)
+                    and bool(row["operation_id"])
+                    and isinstance(row["request_hash"], str)
+                    and digest.fullmatch(row["request_hash"])
+                    and isinstance(preconditions, dict)
+                    and valid_plan_hash
+                    and created is not None
+                    and updated is not None
+                    and created <= updated
+                    and (
+                        row["artifacts_pruned_at"] is None
+                        or pruned is not None
+                    )
+                )
+                positions = operation_positions.get(transaction_id, [])
+                if positions != list(range(len(positions))):
+                    row_corrupt = True
+                if state not in {"preparing", "discarded"} and not positions:
+                    row_corrupt = True
+                corrupt = corrupt or row_corrupt
                 artifact = state_root / "run" / "transactions" / transaction_id
                 if (
                     state == "committed"
@@ -602,16 +745,43 @@ def _transaction_check(
                 details["deletion_codes"].append(
                     "transaction_artifact_state_unknown"
                 )
+            for row in transaction_rows:
+                transaction_id = row["id"]
+                if not isinstance(transaction_id, str) or transaction_id not in known_ids:
+                    corrupt = True
+                    continue
+                artifact_present = transaction_id in artifacts
+                expects_artifacts = (
+                    row["state"] != "discarded"
+                    and row["artifacts_pruned_at"] is None
+                )
+                if artifact_present != expects_artifacts:
+                    corrupt = True
+            if corrupt:
+                details["codes"].append("transaction_metadata_corrupt")
+                details["deletion_codes"].append("transaction_state_corrupt")
     except (OSError, sqlite3.Error, TimeoutError, ValueError):
         details["read_error"] = True
         details["deletion_codes"].append("transaction_state_unreadable")
         return _result("transactions", "error", "Transaction state is unreadable.", details)
+    details["codes"] = sorted(set(details["codes"]))
+    details["deletion_codes"] = list(dict.fromkeys(details["deletion_codes"]))
     problem = (
         sum(states[state] for state in ("preparing", "prepared", "applying"))
         + states["conflicted"]
         + states["quarantined"]
     )
-    status = "error" if states["conflicted"] or states["quarantined"] else "degraded" if problem else "ok"
+    invalid_state = any(
+        code in details["deletion_codes"]
+        for code in ("transaction_state_unknown", "transaction_state_corrupt")
+    )
+    status = (
+        "error"
+        if states["conflicted"] or states["quarantined"] or invalid_state
+        else "degraded"
+        if problem
+        else "ok"
+    )
     if any(states.get(state, 0) for state in ("preparing", "prepared", "applying")):
         details["deletion_codes"].append("transaction_nonterminal")
     if states["conflicted"]:
@@ -629,7 +799,9 @@ def _transaction_check(
     return _result(
         "transactions",
         status,
-        "Transaction state requires operator attention." if problem else "Transaction state is healthy.",
+        "Transaction state requires operator attention."
+        if problem or invalid_state
+        else "Transaction state is healthy.",
         details,
     )
 
@@ -990,13 +1162,53 @@ def _filesystem_check(
                 "read_error": True,
             },
         )
-    raw = str(state_root)
-    local = not raw.startswith(("\\\\", "//"))
-    details = {"local": local, "locking": "supported" if local else "unsupported"}
+    try:
+        network = reliable_memory._known_network_path(state_root)
+    except (OSError, RuntimeError, ValueError):
+        return _result(
+            "filesystem",
+            "degraded",
+            "Runtime filesystem type could not be determined.",
+            {"local": False, "locking": "unknown", "read_error": True},
+        )
+    if network:
+        return _result(
+            "filesystem",
+            "error",
+            "Runtime must use a local filesystem.",
+            {"local": False, "locking": "unsupported"},
+        )
+    if not state_root.is_dir():
+        return _result(
+            "filesystem",
+            "degraded",
+            "Runtime filesystem locking cannot be probed until the state root exists.",
+            {"local": True, "locking": "unknown"},
+        )
+    probe_deadline = min(deadline, time.monotonic() + FILESYSTEM_PROBE_SECONDS)
+    try:
+        locking = reliable_memory._sqlite_lock_probe(
+            state_root, deadline=probe_deadline
+        )
+    except (OSError, RuntimeError, sqlite3.Error):
+        locking = None
+    details = {
+        "local": True,
+        "locking": "supported"
+        if locking is True
+        else "unsupported"
+        if locking is False
+        else "unknown",
+    }
+    status = "ok" if locking is True else "error" if locking is False else "degraded"
     return _result(
         "filesystem",
-        "ok" if local else "error",
-        "Runtime filesystem supports local locking." if local else "Runtime must use a local filesystem.",
+        status,
+        "Runtime filesystem supports local locking."
+        if locking is True
+        else "Runtime filesystem locking is broken."
+        if locking is False
+        else "Runtime filesystem locking probe is unavailable.",
         details,
     )
 

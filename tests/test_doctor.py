@@ -197,6 +197,110 @@ def test_read_only_run_never_attempts_a_write(tmp_path, monkeypatch):
     assert _check(report, "runtime")["status"] == "ok"
 
 
+@pytest.mark.parametrize(
+    ("system", "mount_data", "darwin_data", "state_path"),
+    [
+        (
+            "Linux",
+            "server:/share /mnt/wiki nfs4 rw 0 0\n",
+            "",
+            "/mnt/wiki/state",
+        ),
+        (
+            "Darwin",
+            "",
+            "//server/share on /Volumes/Wiki (smbfs, nodev)\n",
+            "/Volumes/Wiki/state",
+        ),
+        ("Windows", "", "", r"Z:\\wiki-state"),
+    ],
+)
+def test_filesystem_health_rejects_network_mounts_on_supported_platforms(
+    tmp_path, monkeypatch, system, mount_data, darwin_data, state_path
+):
+    import doctor
+    import reliable_memory
+
+    monkeypatch.setattr(reliable_memory, "_platform_system", lambda: system)
+    monkeypatch.setattr(
+        reliable_memory, "_read_posix_mount_data", lambda: (mount_data, False)
+    )
+    monkeypatch.setattr(reliable_memory, "_query_darwin_mounts", lambda: darwin_data)
+    if system != "Windows":
+        monkeypatch.setattr(
+            type(Path("/")), "resolve", lambda self, *, strict=False: self
+        )
+    if system == "Windows":
+        monkeypatch.setattr(
+            reliable_memory.ctypes,
+            "windll",
+            type(
+                "Windll",
+                (),
+                {"kernel32": type("Kernel32", (), {"GetDriveTypeW": lambda self, anchor: 4})()},
+            )(),
+            raising=False,
+        )
+    monkeypatch.setattr(
+        reliable_memory,
+        "_sqlite_lock_probe",
+        lambda *args, **kwargs: pytest.fail("lock probe ran on network storage"),
+    )
+
+    check = doctor._filesystem_check(Path(state_path))
+
+    assert check["status"] == "error"
+    assert check["details"] == {"local": False, "locking": "unsupported"}
+
+
+def test_filesystem_health_distinguishes_broken_and_unavailable_lock_probe(
+    tmp_path, monkeypatch
+):
+    import doctor
+    import reliable_memory
+
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    monkeypatch.setattr(reliable_memory, "_known_network_path", lambda path: False)
+    monkeypatch.setattr(reliable_memory, "_sqlite_lock_probe", lambda path, **kwargs: False)
+    broken = doctor._filesystem_check(state_root)
+    monkeypatch.setattr(reliable_memory, "_sqlite_lock_probe", lambda path, **kwargs: None)
+    unavailable = doctor._filesystem_check(state_root)
+
+    assert broken["status"] == "error"
+    assert broken["details"] == {"local": True, "locking": "unsupported"}
+    assert unavailable["status"] == "degraded"
+    assert unavailable["details"] == {"local": True, "locking": "unknown"}
+
+
+def test_filesystem_health_runs_bounded_probe_and_leaves_no_artifacts(
+    tmp_path, monkeypatch
+):
+    import doctor
+    import reliable_memory
+
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    before = _snapshot(tmp_path)
+    calls = []
+    real_probe = reliable_memory._sqlite_lock_probe
+
+    def probe(path, *, deadline):
+        calls.append((path, deadline))
+        return real_probe(path, deadline=deadline)
+
+    monkeypatch.setattr(reliable_memory, "_known_network_path", lambda path: False)
+    monkeypatch.setattr(reliable_memory, "_sqlite_lock_probe", probe)
+
+    check = doctor._filesystem_check(state_root, deadline=time.monotonic() + 1)
+
+    assert check["status"] == "ok"
+    assert calls and calls[0][0] == state_root
+    assert calls[0][1] != float("inf")
+    assert _snapshot(tmp_path) == before
+    assert not list(state_root.glob(".llm-wiki-lock-probe-*"))
+
+
 def test_read_only_missing_runtime_does_not_create_it(tmp_path):
     from doctor import run_doctor
 

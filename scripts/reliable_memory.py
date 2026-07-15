@@ -14,6 +14,7 @@ import secrets
 import sqlite3
 import stat
 import subprocess
+import time
 import unicodedata
 import warnings
 from collections.abc import Iterator
@@ -218,15 +219,24 @@ def _windows_reparse_point(path: Path) -> bool:
     return False
 
 
-def _sqlite_lock_probe(root: Path) -> bool:
+def _sqlite_lock_probe(
+    root: Path, *, deadline: float = float("inf")
+) -> bool | None:
+    """Return lock support, or ``None`` when a bounded probe cannot complete."""
     probe = root / f".llm-wiki-lock-probe-{secrets.token_hex(16)}.sqlite3"
     first: sqlite3.Connection | None = None
     second: sqlite3.Connection | None = None
     try:
+        if time.monotonic() >= deadline:
+            return None
         first = sqlite3.connect(probe, timeout=0)
+        if time.monotonic() >= deadline:
+            return None
         second = sqlite3.connect(probe, timeout=0)
         first.execute("PRAGMA journal_mode=DELETE")
         first.execute("BEGIN IMMEDIATE")
+        if time.monotonic() >= deadline:
+            return None
         try:
             second.execute("BEGIN IMMEDIATE")
         except sqlite3.OperationalError as exc:
@@ -234,14 +244,17 @@ def _sqlite_lock_probe(root: Path) -> bool:
         else:
             second.rollback()
             return False
-    except sqlite3.Error:
-        return False
+    except (OSError, sqlite3.Error):
+        return None
     finally:
         if first is not None:
-            first.rollback()
-            first.close()
+            with contextlib.suppress(sqlite3.Error):
+                first.rollback()
+            with contextlib.suppress(sqlite3.Error):
+                first.close()
         if second is not None:
-            second.close()
+            with contextlib.suppress(sqlite3.Error):
+                second.close()
         for suffix in ("", "-journal", "-shm", "-wal"):
             with contextlib.suppress(OSError):
                 Path(f"{probe}{suffix}").unlink()
@@ -263,7 +276,7 @@ def validate_state_root(path: Path) -> None:
         )
     path.mkdir(parents=True, exist_ok=True)
     _set_owner_only(path, 0o700)
-    if not _sqlite_lock_probe(path):
+    if _sqlite_lock_probe(path) is not True:
         raise UnsafeStateRoot(f"state root failed the SQLite two-connection locking probe: {path}")
 
 
