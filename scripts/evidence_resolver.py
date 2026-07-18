@@ -5,6 +5,7 @@ import json
 import os
 import re
 import stat
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -13,6 +14,7 @@ from bounded_io import read_stable_bytes
 from reliable_memory import canonical_json_bytes, sha256_bytes, validate_schema
 
 MAX_DAILY_BYTES = 16 * 1024 * 1024
+MAX_GROUNDED_SOURCE_BYTES = 8 * 1024 * 1024
 MAX_ARCHIVE_MANIFEST_BYTES = 1024 * 1024
 MAX_TAG_FILE_BYTES = 1024 * 1024
 MAX_BAGS_PER_MONTH = 10_000
@@ -697,3 +699,67 @@ def extract_evidence_references(text: str) -> list[EvidenceRef]:
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"evidence reference is not canonical: {candidate}") from exc
     return references
+
+
+def verify_supplied_citation(
+    citation: Mapping[str, object],
+    supplied: Mapping[str, object],
+    *,
+    vault: Path,
+) -> None:
+    """Bind one generated citation to the exact span supplied for generation."""
+    fields = {
+        "citation_id",
+        "relative_path",
+        "source_sha256",
+        "revision",
+        "byte_start",
+        "byte_end",
+        "line_start",
+        "line_end",
+        "span_sha256",
+    }
+    if set(citation) != fields or any(citation.get(key) != supplied.get(key) for key in fields):
+        raise EvidenceResolutionError("citation does not match supplied evidence")
+    relative = citation.get("relative_path")
+    try:
+        from reliable_memory import restricted_relative_path
+
+        normalized = restricted_relative_path(str(relative), ("knowledge",))
+        root = Path(vault).resolve(strict=True)
+        source_path = (root / Path(*normalized.parts)).resolve(strict=True)
+    except (OSError, TypeError, ValueError) as exc:
+        raise EvidenceResolutionError("citation path is invalid") from exc
+    if not source_path.is_relative_to(root):
+        raise EvidenceResolutionError("citation path escapes the vault root")
+    start = citation.get("byte_start")
+    end = citation.get("byte_end")
+    text = supplied.get("text")
+    if (
+        not isinstance(start, int)
+        or isinstance(start, bool)
+        or not isinstance(end, int)
+        or isinstance(end, bool)
+        or start < 0
+        or start >= end
+        or not isinstance(text, str)
+        or sha256_bytes(text.encode("utf-8")) != citation.get("span_sha256")
+    ):
+        raise EvidenceResolutionError("citation span is invalid")
+    try:
+        source = read_stable_bytes(
+            source_path, MAX_GROUNDED_SOURCE_BYTES, label="grounded citation source"
+        )
+    except (OSError, ValueError) as exc:
+        raise EvidenceResolutionError("citation source cannot be verified") from exc
+    if sha256_bytes(source) != citation.get("source_sha256"):
+        raise EvidenceResolutionError("citation source hash mismatch")
+    if end > len(source):
+        raise EvidenceResolutionError("citation range exceeds its source")
+    span = source[start:end]
+    if (
+        sha256_bytes(span) != citation.get("span_sha256")
+        or span != text.encode("utf-8")
+        or _line_span(source, start, end) != (citation.get("line_start"), citation.get("line_end"))
+    ):
+        raise EvidenceResolutionError("citation range or span hash mismatch")
