@@ -80,6 +80,48 @@ def test_source_record_contract_and_logical_identity_survive_content_edits(vault
     assert before.git_oid is None
 
 
+def test_canonical_source_manifest_is_shared_ordered_and_invalidates_contract(vault: Path):
+    write(vault / "knowledge/notes/z.md", page("# Z\nZulu.\n", type="concept"))
+    write(vault / "knowledge/notes/a.md", page("# A\nAlpha.\n", type="concept"))
+    snapshot = collect_corpus(vault)
+    records = [source.record for source in snapshot.sources]
+
+    manifest = corpus_snapshot.canonical_source_manifest(
+        reversed(records), snapshot.policy
+    )
+    digest = corpus_snapshot.canonical_source_manifest_sha256(
+        reversed(records), snapshot.policy
+    )
+
+    assert digest == snapshot.corpus_sha256
+    assert corpus_snapshot.validate_canonical_source_manifest(manifest) == manifest
+    assert [item["relative_path"] for item in manifest["sources"]] == sorted(
+        item.record.relative_path for item in snapshot.sources
+    )
+
+    first = records[0]
+    changed_hash = dataclasses.replace(first, sha256="f" * 64)
+    changed_path = dataclasses.replace(first, relative_path="knowledge/notes/renamed.md")
+    changed_policy = dataclasses.replace(snapshot.policy, include_historical=True)
+    variants = (
+        corpus_snapshot.canonical_source_manifest_sha256(records[1:], snapshot.policy),
+        corpus_snapshot.canonical_source_manifest_sha256(
+            [changed_hash, *records[1:]], snapshot.policy
+        ),
+        corpus_snapshot.canonical_source_manifest_sha256(
+            [changed_path, *records[1:]], snapshot.policy
+        ),
+        corpus_snapshot.canonical_source_manifest_sha256(records, changed_policy),
+        corpus_snapshot.canonical_source_manifest_sha256(
+            records, snapshot.policy, extractor_version="other-extractor/v1"
+        ),
+        corpus_snapshot.canonical_source_manifest_sha256(
+            records, snapshot.policy, collector_version="other-collector/v1"
+        ),
+    )
+    assert all(value != digest for value in variants)
+
+
 def test_as_of_uses_validity_and_frontmatter_must_be_mapping(vault: Path):
     write(
         vault / "knowledge/notes/old.md",

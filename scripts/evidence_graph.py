@@ -15,7 +15,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 
-from reliable_memory import canonical_json_bytes, validate_runtime_file
+from reliable_memory import canonical_json_bytes, read_runtime_bytes, validate_runtime_file
 
 GRAPH_SCHEMA_VERSION = "evidence-graph/v1"
 MAX_DATABASE_BYTES = 16 * 1024 * 1024 * 1024
@@ -26,6 +26,7 @@ MAX_EDGE_TYPES = 64
 MAX_WORK = 100_000
 PROGRESS_OPCODES = 1000
 MAX_VALIDATION_ROWS = 1_000_000
+MAX_SOURCE_MANIFEST_BYTES = 256 * 1024 * 1024
 
 _SHA256 = frozenset("0123456789abcdef")
 _NODE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/#@+\-]{0,511}")
@@ -364,40 +365,6 @@ def _ordered(records: Iterable[Mapping[str, object]], key: str, label: str) -> l
     return sorted(values, key=lambda record: str(record.get(key, "")))
 
 
-def _canonical_source_membership(
-    sources: Iterable[Mapping[str, object]],
-) -> dict[str, object]:
-    normalized: list[dict[str, object]] = []
-    source_ids: set[str] = set()
-    relative_paths: set[str] = set()
-    for record in _ordered(sources, "source_id", "source"):
-        _closed(record, _SOURCE_KEYS, "source")
-        source_id = _text(record["source_id"], "source_id", maximum=512)
-        assert source_id is not None
-        relative_path = _relative_path(record["relative_path"])
-        if source_id in source_ids or relative_path in relative_paths:
-            raise ValueError("source membership IDs and relative paths must be unique")
-        source_ids.add(source_id)
-        relative_paths.add(relative_path)
-        normalized.append(
-            {
-                "source_id": source_id,
-                "relative_path": relative_path,
-                "sha256": _digest(record["sha256"], "source hash"),
-                "size": _integer(record["size"], "source size"),
-                "media_type": _text(record["media_type"], "media_type", maximum=256),
-                "language": _text(record["language"], "language", maximum=128, optional=True),
-                "git_oid": _text(record["git_oid"], "git_oid", maximum=128, optional=True),
-            }
-        )
-    return {"schema_version": "evidence-graph-sources/v1", "sources": normalized}
-
-
-def source_manifest_sha256(sources: Iterable[Mapping[str, object]]) -> str:
-    """Hash the closed, deterministic source membership represented by graph source rows."""
-    return hashlib.sha256(canonical_json_bytes(_canonical_source_membership(sources))).hexdigest()
-
-
 def _configure_write(database: sqlite3.Connection) -> None:
     mode = database.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
     if str(mode).casefold() != "delete":
@@ -718,9 +685,13 @@ def _validate_connection(
         invalid = database.execute(
             """
 SELECT 1 FROM source
-WHERE length(sha256) != 64 OR sha256 GLOB '*[^0-9a-f]*' OR size < 0
+WHERE length(sha256) != 64 OR sha256 GLOB '*[^0-9a-f]*'
+   OR size < 0 OR size > 17179869184
    OR relative_path = '' OR relative_path LIKE '/%' OR relative_path LIKE '%\\%'
    OR relative_path = '..' OR relative_path LIKE '../%' OR relative_path LIKE '%/../%'
+   OR media_type = '' OR length(media_type) > 256
+   OR (language IS NOT NULL AND (language = '' OR length(language) > 128))
+   OR (git_oid IS NOT NULL AND (git_oid = '' OR length(git_oid) > 128))
 UNION ALL
 SELECT 1 FROM node
 WHERE node_id = '' OR length(node_id) > 512 OR metadata_json IS NULL OR NOT json_valid(metadata_json)
@@ -774,24 +745,31 @@ LIMIT 1
         database.set_progress_handler(None, 0)
 
 
-def _stored_source_manifest_sha256(
+def _stored_shared_source_membership(
     database: sqlite3.Connection,
     *,
     deadline: float | None,
     monotonic: Callable[[], float],
-) -> str:
+) -> list[dict[str, str]]:
     _validation_deadline(database, deadline, monotonic)
     try:
         rows = database.execute(
-            "SELECT source_id, relative_path, sha256, size, media_type, language, git_oid "
-            "FROM source ORDER BY source_id LIMIT ?",
+            "SELECT source_id, relative_path, sha256 FROM source "
+            "ORDER BY relative_path, source_id LIMIT ?",
             (MAX_VALIDATION_ROWS + 1,),
         ).fetchall()
         if len(rows) > MAX_VALIDATION_ROWS:
             raise ValueError("Evidence Graph source row ceiling exceeded")
         if deadline is not None and monotonic() >= deadline:
             raise TimeoutError("Evidence Graph validation deadline reached")
-        return source_manifest_sha256([dict(row) for row in rows])
+        return [
+            {
+                "relative_path": row["relative_path"],
+                "sha256": row["sha256"],
+                "logical_id": row["source_id"],
+            }
+            for row in rows
+        ]
     except sqlite3.Error as exc:
         if deadline is not None and (monotonic() >= deadline or "interrupt" in str(exc).casefold()):
             raise TimeoutError("Evidence Graph validation deadline reached") from exc
@@ -811,9 +789,37 @@ def validate_generation_artifact(
     """Validate one graph artifact already bound by the shared generation manifest."""
     if manifest.get("graph_schema_version") != GRAPH_SCHEMA_VERSION:
         raise ValueError("Evidence Graph manifest has the wrong graph schema version")
-    artifacts = [item for item in manifest.get("artifacts", []) if item.get("path") == "evidence.sqlite3"]
-    if len(artifacts) != 1:
+    graph_artifacts = [
+        item for item in manifest.get("artifacts", []) if item.get("path") == "evidence.sqlite3"
+    ]
+    source_artifacts = [
+        item for item in manifest.get("artifacts", []) if item.get("path") == "source-manifest.json"
+    ]
+    if len(graph_artifacts) != 1:
         raise ValueError("Evidence Graph manifest must bind exactly one evidence.sqlite3 artifact")
+    if len(source_artifacts) != 1:
+        raise ValueError("Evidence Graph manifest must bind exactly one shared source-manifest.json artifact")
+    from corpus_snapshot import validate_canonical_source_manifest
+
+    source_manifest_path = Path(generation_path) / "source-manifest.json"
+    source_manifest_bytes = read_runtime_bytes(
+        source_manifest_path, state_root, max_bytes=MAX_SOURCE_MANIFEST_BYTES
+    )
+    try:
+        source_manifest_value = json.loads(source_manifest_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("shared source manifest must contain valid UTF-8 JSON") from exc
+    source_manifest = validate_canonical_source_manifest(source_manifest_value)
+    if canonical_json_bytes(source_manifest) != source_manifest_bytes:
+        raise ValueError("shared source manifest artifact must use canonical JSON")
+    source_manifest_hash = hashlib.sha256(source_manifest_bytes).hexdigest()
+    if source_manifest_hash != manifest.get("source_manifest_sha256"):
+        raise ValueError("shared source manifest hash does not match generation manifest")
+    if (
+        source_manifest["collector"] != manifest.get("collector_version")
+        or source_manifest["extractor"] != manifest.get("extractor_version")
+    ):
+        raise ValueError("shared source manifest versions do not match generation manifest")
     artifact = Path(generation_path) / "evidence.sqlite3"
     expected = validate_runtime_file(artifact, state_root, max_bytes=MAX_DATABASE_BYTES)
     database = sqlite3.connect(f"{artifact.resolve(strict=True).as_uri()}?mode=ro", uri=True, timeout=0)
@@ -825,14 +831,11 @@ def validate_generation_artifact(
         database.execute("PRAGMA query_only=ON")
         database.execute("PRAGMA trusted_schema=OFF")
         _validate_connection(database, deadline=deadline, monotonic=monotonic)
-        expected_source_hash = manifest.get("source_manifest_sha256")
-        if (
-            _stored_source_manifest_sha256(
-                database, deadline=deadline, monotonic=monotonic
-            )
-            != expected_source_hash
-        ):
-            raise ValueError("Evidence Graph source manifest does not match graph source membership")
+        stored_sources = _stored_shared_source_membership(
+            database, deadline=deadline, monotonic=monotonic
+        )
+        if stored_sources != source_manifest["sources"]:
+            raise ValueError("shared source manifest does not match graph source rows")
     finally:
         database.close()
 

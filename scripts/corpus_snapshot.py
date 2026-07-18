@@ -184,6 +184,132 @@ def _canonical_hash(value: object) -> str:
     return _sha256(encoded)
 
 
+def _manifest_source(record: SourceRecord | Mapping[str, object]) -> dict[str, str]:
+    if isinstance(record, SourceRecord):
+        logical_id = record.logical_id
+        relative_path = record.relative_path
+        digest = record.sha256
+    elif isinstance(record, Mapping):
+        if set(record) != {"logical_id", "relative_path", "sha256"}:
+            raise ValueError("canonical source manifest entries must be closed objects")
+        logical_id = record["logical_id"]
+        relative_path = record["relative_path"]
+        digest = record["sha256"]
+    else:
+        raise TypeError("canonical source manifest entries must be SourceRecord values or objects")
+    if not isinstance(logical_id, str) or not logical_id or len(logical_id) > 4096:
+        raise ValueError("canonical source logical_id must be a bounded non-empty string")
+    if not isinstance(relative_path, str) or not relative_path or len(relative_path) > 4096:
+        raise ValueError("canonical source relative_path must be a bounded non-empty string")
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise ValueError("canonical source sha256 must be a lowercase SHA-256 digest")
+    return {"relative_path": relative_path, "sha256": digest, "logical_id": logical_id}
+
+
+def _manifest_policy(policy: SnapshotPolicy | Mapping[str, object]) -> dict[str, object]:
+    if isinstance(policy, SnapshotPolicy):
+        daily_paths = policy.daily_paths
+        code_roots = policy.code_roots
+        include_historical = policy.include_historical
+        as_of = policy.as_of
+    elif isinstance(policy, Mapping):
+        if set(policy) != {"daily_paths", "code_roots", "include_historical", "as_of"}:
+            raise ValueError("canonical source manifest policy must be a closed object")
+        daily_paths = policy["daily_paths"]
+        code_roots = policy["code_roots"]
+        include_historical = policy["include_historical"]
+        as_of = policy["as_of"]
+    else:
+        raise TypeError("canonical source manifest policy must be SnapshotPolicy or an object")
+    if not isinstance(daily_paths, (list, tuple)) or not all(
+        isinstance(value, str) for value in daily_paths
+    ):
+        raise ValueError("canonical daily_paths must be an array of strings")
+    if not isinstance(code_roots, (list, tuple)) or not all(
+        isinstance(value, str) for value in code_roots
+    ):
+        raise ValueError("canonical code_roots must be an array of strings")
+    if not isinstance(include_historical, bool):
+        raise ValueError("canonical include_historical must be boolean")
+    if as_of is not None and not isinstance(as_of, str):
+        raise ValueError("canonical as_of must be null or a string")
+    return {
+        "daily_paths": list(daily_paths),
+        "code_roots": list(code_roots),
+        "include_historical": include_historical,
+        "as_of": as_of,
+    }
+
+
+def canonical_source_manifest(
+    sources: Iterable[SourceRecord | Mapping[str, object]],
+    policy: SnapshotPolicy | Mapping[str, object],
+    *,
+    collector_version: str = COLLECTOR_VERSION,
+    extractor_version: str = EXTRACTOR_VERSION,
+) -> dict[str, object]:
+    """Return the one canonical source manifest shared by every generation consumer."""
+    if not isinstance(collector_version, str) or not collector_version:
+        raise ValueError("collector_version must be a non-empty string")
+    if not isinstance(extractor_version, str) or not extractor_version:
+        raise ValueError("extractor_version must be a non-empty string")
+    entries = sorted(
+        (_manifest_source(source) for source in sources),
+        key=lambda item: (item["relative_path"], item["logical_id"]),
+    )
+    paths = [entry["relative_path"] for entry in entries]
+    logical_ids = [entry["logical_id"] for entry in entries]
+    if len(paths) != len(set(paths)) or len(logical_ids) != len(set(logical_ids)):
+        raise ValueError("canonical source membership paths and logical IDs must be unique")
+    return {
+        "collector": collector_version,
+        "extractor": extractor_version,
+        "policy": _manifest_policy(policy),
+        "sources": entries,
+    }
+
+
+def canonical_source_manifest_sha256(
+    sources: Iterable[SourceRecord | Mapping[str, object]],
+    policy: SnapshotPolicy | Mapping[str, object],
+    *,
+    collector_version: str = COLLECTOR_VERSION,
+    extractor_version: str = EXTRACTOR_VERSION,
+) -> str:
+    """Hash the shared canonical source manifest."""
+    return _canonical_hash(
+        canonical_source_manifest(
+            sources,
+            policy,
+            collector_version=collector_version,
+            extractor_version=extractor_version,
+        )
+    )
+
+
+def validate_canonical_source_manifest(value: object) -> dict[str, object]:
+    """Validate and normalize one closed shared canonical source manifest."""
+    if not isinstance(value, Mapping) or set(value) != {
+        "collector",
+        "extractor",
+        "policy",
+        "sources",
+    }:
+        raise ValueError("canonical source manifest must be a closed object")
+    sources = value["sources"]
+    if not isinstance(sources, list):
+        raise ValueError("canonical source manifest sources must be an array")
+    normalized = canonical_source_manifest(
+        sources,
+        value["policy"],
+        collector_version=value["collector"],
+        extractor_version=value["extractor"],
+    )
+    if value != normalized:
+        raise ValueError("canonical source manifest must use deterministic source ordering")
+    return normalized
+
+
 def _positive_limit(value: object, name: str, *, allow_zero: bool = False) -> int:
     minimum = 0 if allow_zero else 1
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
@@ -1082,26 +1208,8 @@ def _capture(vault: Path, policy: SnapshotPolicy, deadline: float) -> CorpusSnap
         if _sha256(current_content) != first_hashes[candidate.relative]:
             raise CorpusChanged(f"corpus source changed during collection: {candidate.relative}")
 
-    manifest = [
-        {
-            "relative_path": source.record.relative_path,
-            "sha256": source.record.sha256,
-            "logical_id": source.record.logical_id,
-        }
-        for source in captured
-    ]
-    corpus_hash = _canonical_hash(
-        {
-            "collector": COLLECTOR_VERSION,
-            "extractor": EXTRACTOR_VERSION,
-            "policy": {
-                "daily_paths": policy.daily_paths,
-                "code_roots": policy.code_roots,
-                "include_historical": policy.include_historical,
-                "as_of": policy.as_of,
-            },
-            "sources": manifest,
-        }
+    corpus_hash = canonical_source_manifest_sha256(
+        (source.record for source in captured), policy
     )
     return CorpusSnapshot(tuple(captured), tuple(chunks), corpus_hash, policy)
 
