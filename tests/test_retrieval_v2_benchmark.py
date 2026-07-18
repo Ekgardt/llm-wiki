@@ -1829,7 +1829,7 @@ def test_bge_m3_adapter_fuses_learned_sparse_as_a_separate_signal():
     assert adapter.learned_sparse_bytes > 0
 
 
-def test_bound_baseline_is_a_recomputable_retrieval_v2_bge_small_report():
+def test_bound_baseline_is_a_recomputable_retrieval_v2_bge_small_report(monkeypatch):
     runner = _runner_module()
     matrix = json.loads((BENCHMARK / "model-matrix-v1.json").read_bytes())
     baseline = json.loads((ROOT / matrix["selection"]["baseline"]["raw_report_path"]).read_bytes())
@@ -1867,6 +1867,39 @@ def test_bound_baseline_is_a_recomputable_retrieval_v2_bge_small_report():
         baseline
     )
 
+    current_resolution = runner._locked_package_versions(ROOT / "uv.lock")
+    current_resolution["numpy"] = "2.2.6"
+    monkeypatch.setattr(
+        runner, "_locked_package_versions", lambda _lock_path: current_resolution
+    )
+    runner._verified_baseline_metrics(matrix, baseline, corpus_path=CORPUS)
+
+    original_version = runner.importlib_metadata.version
+
+    def base_environment_version(name):
+        if name in {
+            "jieba",
+            "sentence-transformers",
+            "transformers",
+            "torch",
+            "numpy",
+            "usearch",
+        }:
+            raise runner.importlib_metadata.PackageNotFoundError(name)
+        return original_version(name)
+
+    monkeypatch.setattr(runner.importlib_metadata, "version", base_environment_version)
+    runner._verified_baseline_metrics(matrix, baseline, corpus_path=CORPUS)
+    observed = runner._observed_runtime_environment("numpy-exact", lexical_config="L4")
+    assert observed["packages"] == {
+        "jieba": None,
+        "numpy": None,
+        "sentence-transformers": None,
+        "torch": None,
+        "transformers": None,
+        "usearch": None,
+    }
+
     evolved = json.loads(json.dumps(matrix))
     evolved["embeddings"][-1]["variants"][-1]["quality"]["status"] = "measured"
     runner._verified_baseline_metrics(evolved, baseline, corpus_path=CORPUS)
@@ -1882,10 +1915,39 @@ def test_baseline_policy_fingerprint_rejects_mismatched_provenance():
         runner._verified_baseline_metrics(matrix, baseline, corpus_path=CORPUS)
 
     matrix = json.loads((BENCHMARK / "model-matrix-v1.json").read_bytes())
+    baseline = json.loads((BENCHMARK / "baseline-2026-07-16-retrieval.json").read_bytes())
+    baseline["methodology"]["environment_provenance"]["verified_lock"]["packages"][
+        "numpy"
+    ] = "0.0.0"
+    matrix["selection"]["baseline"]["policy_sha256"] = runner._baseline_policy_sha256(
+        baseline
+    )
+    with pytest.raises(ValueError, match="package contract"):
+        runner._verified_baseline_metrics(matrix, baseline, corpus_path=CORPUS)
+
+    matrix = json.loads((BENCHMARK / "model-matrix-v1.json").read_bytes())
+    baseline = json.loads((BENCHMARK / "baseline-2026-07-16-retrieval.json").read_bytes())
     baseline["benchmark_runner_sha256"] = "1" * 64
     with pytest.raises(ValueError, match="policy fingerprint"):
         runner._verified_baseline_metrics(matrix, baseline, corpus_path=CORPUS)
 
+
+def test_real_lexical_worker_emits_parent_accepted_canonical_bytes(tmp_path):
+    runner = _runner_module()
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    argv = runner._lexical_ablation_worker_arguments(cache, 60.0)[0]
+
+    payload = runner._run_bounded_model_worker(argv, deadline_seconds=60.0)
+
+    assert isinstance(payload, runner._WorkerPayload)
+    assert payload.canonical_bytes == runner._canonical_report_bytes(payload.report)
+    assert payload.report["methodology"]["lexical_configuration"]["id"] == "L0"
+    runner._validate_lexical_worker_payload(
+        payload,
+        matrix=json.loads((BENCHMARK / "model-matrix-v1.json").read_bytes()),
+        corpus_path=CORPUS,
+    )
 
 def test_lexical_winner_requires_complete_comparable_l0_through_l4_evidence():
     runner = _runner_module()
@@ -3379,7 +3441,12 @@ def test_aggregation_requires_complete_reports_and_writes_canonical_selection(tm
     assert artifact["quality_claim"] is False
     assert artifact["schema_version"] == "retrieval-comparison/v1"
     assert len(artifact["candidate_reports"]) == len(specs)
-    assert artifact["baseline"] == selection.matrix["selection"]["baseline"]
+    assert {
+        key: value for key, value in artifact["baseline"].items() if key != "observed_runtime"
+    } == selection.matrix["selection"]["baseline"]
+    assert artifact["baseline"]["observed_runtime"] == runner._observed_runtime_environment(
+        "numpy-exact", lexical_config="L4"
+    )
     assert artifact["matrix_sha256"] == selection.matrix_sha256
     assert artifact["matrix_policy_sha256"] == runner.matrix_policy_fingerprint(selection.matrix)
     assert artifact["matrix_policy_sha256"] != artifact["matrix_sha256"]
@@ -3552,6 +3619,8 @@ def test_mocked_orchestration_is_plumbing_only_and_uses_retained_lexical_winner(
     )
 
     assert len(calls) == len(runner.required_candidate_specs(selection.matrix)) + 5
+    assert all("--model-id" not in argv for argv, _deadline in calls[:5])
+    assert "--model-id" in calls[5][0]
     winner = runner._select_lexical_winner(lexical_reports)["id"]
     model_calls = [argv for argv, _deadline in calls if "--model-id" in argv]
     assert all(argv[argv.index("--lexical-config") + 1] == winner for argv in model_calls)
@@ -3635,8 +3704,8 @@ def test_authoritative_orchestration_has_no_public_callback_or_forgeable_result(
     assert not hasattr(runner, "_ParentAttestedResult")
     assert not hasattr(runner, "_ATTESTATION_CAPABILITY")
     assert not hasattr(runner, "_orchestrate_selection_impl")
-    synthetic = runner._WorkerPayload({}, b"{}\n")
-    assert runner._consume_execution_bound_payload(synthetic) is False
+    assert not hasattr(runner, "_consume_execution_bound_payload")
+    assert not hasattr(runner, "_make_execution_bound_worker")
     with pytest.raises(TypeError):
         runner.orchestrate_selection(
             matrix_path=BENCHMARK / "model-matrix-v1.json",
@@ -3647,6 +3716,119 @@ def test_authoritative_orchestration_has_no_public_callback_or_forgeable_result(
             cache_root=tmp_path / "cache",
             deadline_seconds=30.0,
             worker=lambda spec: spec,
+        )
+
+
+def test_stale_out_of_band_payloads_from_replaced_worker_are_analysis_only(
+    tmp_path, monkeypatch
+):
+    runner = _runner_module()
+    matrix = json.loads((BENCHMARK / "model-matrix-v1.json").read_bytes())
+    repo = tmp_path / "repo"
+    baseline = repo / matrix["selection"]["baseline"]["raw_report_path"]
+    baseline.parent.mkdir(parents=True)
+    baseline.write_bytes((BENCHMARK / "baseline-2026-07-16-retrieval.json").read_bytes())
+    stale = {}
+    for lexical in runner.LEXICAL_CONFIGURATIONS:
+        report = runner.run_benchmark(
+            runner.load_corpus(CORPUS, SCHEMA),
+            corpus_path=CORPUS,
+            matrix_path=BENCHMARK / "model-matrix-v1.json",
+            cache_root=tmp_path / f"stale-{lexical}",
+            lexical_config=lexical,
+            test_segmenter=_PinnedJieba(),
+        )
+        stale[lexical] = runner._WorkerPayload(
+            report, runner._canonical_report_bytes(report)
+        )
+
+    def replaced_worker(argv, **_kwargs):
+        assert "--model-id" not in argv
+        return stale[argv[argv.index("--lexical-config") + 1]]
+
+    monkeypatch.setattr(runner, "required_candidate_specs", lambda _matrix: [])
+    monkeypatch.setattr(runner, "_run_bounded_model_worker", replaced_worker)
+    artifact = runner.orchestrate_selection(
+        matrix_path=BENCHMARK / "model-matrix-v1.json",
+        corpus_path=CORPUS,
+        repo_root=repo,
+        output_path=repo / "benchmark/results/stale.json",
+        measured_at="2026-07-17T12:00:00Z",
+        cache_root=tmp_path / "cache",
+        deadline_seconds=30.0,
+    )
+
+    assert artifact["schema_version"] == "retrieval-comparison/v1"
+    assert artifact["quality_claim"] is False
+    assert artifact["release_evidence"] is False
+
+
+@pytest.mark.parametrize("attack", ["wrong-candidate", "replay"])
+def test_replaced_worker_wrong_binding_or_replay_cannot_publish(
+    tmp_path, monkeypatch, attack
+):
+    runner = _runner_module()
+    selection = runner.load_model_selection(
+        BENCHMARK / "model-matrix-v1.json",
+        CORPUS,
+        model_id="BAAI/bge-small-en-v1.5",
+        variant_id="float32-384d",
+    )
+    specs = runner.required_candidate_specs(selection.matrix)
+    first_payload = None
+
+    def replaced_worker(argv, **_kwargs):
+        nonlocal first_payload
+        lexical = argv[argv.index("--lexical-config") + 1]
+        if "--model-id" not in argv:
+            report = runner.run_benchmark(
+                runner.load_corpus(CORPUS, SCHEMA),
+                corpus_path=CORPUS,
+                matrix_path=BENCHMARK / "model-matrix-v1.json",
+                cache_root=tmp_path / f"lexical-{lexical}",
+                lexical_config=lexical,
+                test_segmenter=_PinnedJieba(),
+            )
+            return runner._WorkerPayload(report, runner._canonical_report_bytes(report))
+        requested_id = argv[argv.index("--model-id") + 1]
+        requested_variant = argv[argv.index("--variant-id") + 1]
+        requested_reranker = (
+            argv[argv.index("--reranker-id") + 1] if "--reranker-id" in argv else None
+        )
+        requested_index = next(
+            index
+            for index, spec in enumerate(specs)
+            if spec["embedding"]["id"] == requested_id
+            and spec["embedding"]["variant_id"] == requested_variant
+            and (spec["reranker"]["id"] if spec["reranker"] else None)
+            == requested_reranker
+        )
+        if attack == "replay" and requested_index == 1:
+            return first_payload
+        returned_spec = specs[1] if attack == "wrong-candidate" else specs[requested_index]
+        report = json.loads(
+            _candidate_report(runner, selection, returned_spec, offset=requested_index)
+        )
+        report["quality_claim"] = False
+        report["methodology"]["lexical_configuration"] = runner.LEXICAL_CONFIGURATIONS[
+            lexical
+        ]
+        payload = runner._WorkerPayload(report, runner._canonical_report_bytes(report))
+        if requested_index == 0:
+            first_payload = payload
+        return payload
+
+    monkeypatch.setattr(runner, "_run_bounded_model_worker", replaced_worker)
+    monkeypatch.setattr(runner, "_verify_locked_environment", lambda *_args, **_kwargs: {})
+    with pytest.raises(ValueError, match="requested matrix candidate"):
+        runner.orchestrate_selection(
+            matrix_path=BENCHMARK / "model-matrix-v1.json",
+            corpus_path=CORPUS,
+            repo_root=tmp_path / "repo",
+            output_path=tmp_path / "repo/benchmark/results/adversarial.json",
+            measured_at="2026-07-17T12:00:00Z",
+            cache_root=tmp_path / "cache",
+            deadline_seconds=30.0,
         )
 
 

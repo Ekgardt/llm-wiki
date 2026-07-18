@@ -1044,6 +1044,18 @@ def _environment_provenance(vector_backend: str | None) -> dict:
     }
 
 
+def _observed_runtime_environment(
+    vector_backend: str | None, *, lexical_config: str | None = None
+) -> dict:
+    observed = _environment_provenance(vector_backend)
+    if lexical_config in {"L3", "L4"}:
+        try:
+            observed["packages"]["jieba"] = importlib_metadata.version("jieba")
+        except importlib_metadata.PackageNotFoundError:
+            observed["packages"]["jieba"] = None
+    return observed
+
+
 def _locked_package_versions(lock_path: Path) -> dict[str, str]:
     raw = read_stable_bytes(lock_path, 16 * 1024 * 1024, label="uv lock")
     parsed = tomllib.loads(raw.decode("utf-8"))
@@ -1055,6 +1067,16 @@ def _locked_package_versions(lock_path: Path) -> dict[str, str]:
         name = package["name"].casefold().replace("_", "-")
         observed.setdefault(name, set()).add(package["version"])
     return {name: next(iter(versions)) for name, versions in observed.items() if len(versions) == 1}
+
+
+def _locked_package_version_sets(lock_path: Path) -> dict[str, set[str]]:
+    raw = read_stable_bytes(lock_path, 16 * 1024 * 1024, label="uv lock")
+    parsed = tomllib.loads(raw.decode("utf-8"))
+    observed: dict[str, set[str]] = {}
+    for package in parsed.get("package", []):
+        name = package["name"].casefold().replace("_", "-")
+        observed.setdefault(name, set()).add(package["version"])
+    return observed
 
 
 def _verify_locked_environment(
@@ -3712,6 +3734,47 @@ def _baseline_policy_sha256(report: dict) -> str:
     )
 
 
+def _verify_baseline_package_contract(report: dict) -> dict:
+    environment = report.get("methodology", {}).get("environment_provenance")
+    verified = environment.get("verified_lock") if isinstance(environment, dict) else None
+    locked = _locked_package_version_sets(ROOT / "uv.lock")
+    required = {"jieba", "numpy", "sentence-transformers", "torch", "transformers"}
+    frozen_packages = verified.get("packages") if isinstance(verified, dict) else None
+    expected_environment_packages = {
+        name: frozen_packages.get(name) if isinstance(frozen_packages, dict) else None
+        for name in ("numpy", "sentence-transformers", "torch", "transformers")
+    }
+    expected_environment_packages["usearch"] = None
+    lock_sha256 = _sha256_file(ROOT / "uv.lock")
+    if (
+        not isinstance(environment, dict)
+        or set(environment) != {
+            "packages",
+            "runner_sha256",
+            "uv_lock_sha256",
+            "verified_lock",
+        }
+        or not isinstance(verified, dict)
+        or set(verified) != {"packages", "package_map_sha256", "uv_lock_sha256"}
+        or not isinstance(frozen_packages, dict)
+        or set(frozen_packages) != required
+        or any(
+            not isinstance(version, str) or version not in locked.get(name, set())
+            for name, version in frozen_packages.items()
+        )
+        or environment["packages"] != expected_environment_packages
+        or environment["runner_sha256"] != report.get("benchmark_runner_sha256")
+        or environment["uv_lock_sha256"] != lock_sha256
+        or verified["uv_lock_sha256"] != lock_sha256
+        or verified["package_map_sha256"] != _sha256_json(frozen_packages)
+    ):
+        raise ValueError("bound baseline frozen package contract mismatch")
+    lexical_config = report.get("methodology", {}).get("lexical_configuration", {}).get("id")
+    return _observed_runtime_environment(
+        report.get("vector_backend"), lexical_config=lexical_config
+    )
+
+
 def _verified_baseline_metrics(matrix: dict, report: dict, *, corpus_path: Path | str):
     baseline_target = {
         "embedding": {
@@ -3722,16 +3785,11 @@ def _verified_baseline_metrics(matrix: dict, report: dict, *, corpus_path: Path 
         },
         "reranker": None,
     }
-    environment = report.get("methodology", {}).get("environment_provenance")
-    comparable_environment = dict(environment) if isinstance(environment, dict) else environment
-    if isinstance(comparable_environment, dict):
-        comparable_environment.pop("verified_lock", None)
-    expected_environment = _environment_provenance("numpy-exact")
-    expected_environment["runner_sha256"] = report.get("benchmark_runner_sha256")
     if matrix["selection"]["baseline"].get("policy_sha256") != _baseline_policy_sha256(
         report
     ):
         raise ValueError("bound baseline policy fingerprint mismatch")
+    _verify_baseline_package_contract(report)
     if (
         set(report) != REPORT_FIELDS
         or report.get("schema_version") != "retrieval-report/v2"
@@ -3750,9 +3808,6 @@ def _verified_baseline_metrics(matrix: dict, report: dict, *, corpus_path: Path 
         or report.get("thresholds") != THRESHOLDS
         or report.get("methodology", {}).get("lexical_configuration")
         != LEXICAL_CONFIGURATIONS["L4"]
-        or comparable_environment != expected_environment
-        or not isinstance(environment, dict)
-        or not isinstance(environment.get("verified_lock"), dict)
     ):
         raise ValueError("bound baseline is not comparable retrieval-v2 BGE-small evidence")
     corpus = load_corpus(corpus_path, Path(corpus_path).with_name(DEFAULT_SCHEMA.name))
@@ -4078,6 +4133,9 @@ def _aggregate_reports(
     if baseline_raw != _canonical_report_bytes(baseline_report):
         raise ValueError("bound baseline raw report must use canonical JSON bytes")
     _verified_baseline_metrics(matrix, baseline_report, corpus_path=corpus_path)
+    baseline_observed_runtime = _observed_runtime_environment(
+        baseline_report["vector_backend"], lexical_config="L4"
+    )
     corpus = load_corpus(corpus_path, Path(corpus_path).with_name(DEFAULT_SCHEMA.name))
     expected = {_candidate_key(spec): spec for spec in required_candidate_specs(matrix)}
     reports = {}
@@ -4226,7 +4284,7 @@ def _aggregate_reports(
         "corpus_sha256": validated.corpus_sha256,
         "benchmark_contract_sha256": contract_hash,
         "benchmark_runner_sha256": runner_hash,
-        "baseline": baseline,
+        "baseline": {**baseline, "observed_runtime": baseline_observed_runtime},
         "candidate_reports": [
             {
                 "candidate": reports[key]["candidate"],
@@ -4330,10 +4388,11 @@ def _orchestrate_selection_impl(
     measured_at: str,
     cache_root: Path | str | None = None,
     deadline_seconds: float | None = None,
-    _execution_consumer=None,
+    _trusted_worker=None,
+    _trusted_process_runner=None,
 ) -> dict:
-    if _execution_consumer is None:
-        raise TypeError("authoritative orchestration requires its bound execution consumer")
+    if _trusted_worker is None or _trusted_process_runner is None:
+        raise TypeError("authoritative orchestration requires its bound subprocess transport")
     matrix = json.loads(read_stable_bytes(Path(matrix_path), MAX_CORPUS_BYTES, label="model matrix"))
     specs = required_candidate_specs(matrix)
     if cache_root is None or deadline_seconds is None:
@@ -4345,14 +4404,44 @@ def _orchestrate_selection_impl(
     cache_root = _validate_cache_root(requested_cache).resolve(strict=True)
     if _is_reparse_point(cache_root):
         raise ValueError("model cache root must not be a symlink or reparse point")
+    worker = _run_bounded_model_worker
+    invocation_nonce = secrets.token_bytes(32)
+    invocation_records = {}
+    trusted_transport = worker is _trusted_worker and _run_process_tree is _trusted_process_runner
+
+    def run_worker(argv, expected):
+        payload = worker(argv, deadline_seconds=deadline_seconds)
+        if trusted_transport and isinstance(payload, _WorkerPayload):
+            invocation_records[id(payload)] = (
+                invocation_nonce,
+                payload,
+                tuple(argv),
+                _sha256_json(expected),
+                hashlib.sha256(payload.canonical_bytes).digest(),
+            )
+        return payload
+
+    def consume_worker(payload, argv, expected):
+        registered = invocation_records.pop(id(payload), None)
+        return (
+            registered is not None
+            and registered[0] is invocation_nonce
+            and registered[1] is payload
+            and registered[2] == tuple(argv)
+            and registered[3] == _sha256_json(expected)
+            and registered[4] == hashlib.sha256(payload.canonical_bytes).digest()
+        )
+
     lexical_results = []
     execution_bound = True
     for argv in _lexical_ablation_worker_arguments(cache_root, deadline_seconds):
-        payload = _run_bounded_model_worker(argv, deadline_seconds=deadline_seconds)
+        lexical_config = argv[argv.index("--lexical-config") + 1]
+        expected = {"candidate": None, "lexical_configuration": lexical_config}
+        payload = run_worker(argv, expected)
         if not isinstance(payload, _WorkerPayload):
             raise TypeError("lexical worker transport returned an invalid payload")
         _validate_lexical_worker_payload(payload, matrix=matrix, corpus_path=corpus_path)
-        execution_bound &= _execution_consumer(payload)
+        execution_bound &= consume_worker(payload, argv, expected)
         lexical_results.append(payload)
     lexical_config = _select_lexical_winner([item.report for item in lexical_results])["id"]
     candidate_payloads = []
@@ -4360,7 +4449,8 @@ def _orchestrate_selection_impl(
         argv = _candidate_worker_arguments(
             spec, cache_root, deadline_seconds, lexical_config=lexical_config
         )
-        payload = _run_bounded_model_worker(argv, deadline_seconds=deadline_seconds)
+        expected = {"candidate": spec, "lexical_configuration": lexical_config}
+        payload = run_worker(argv, expected)
         if not isinstance(payload, _WorkerPayload):
             raise TypeError("authoritative worker transport returned an invalid payload")
         if payload.report.get("effective_mode") != MODEL_MATRIX_ADAPTER_KIND:
@@ -4372,11 +4462,11 @@ def _orchestrate_selection_impl(
             "id"
         ) != lexical_config:
             raise ValueError("candidate report does not use the frozen lexical winner")
-        execution_bound &= _execution_consumer(payload)
-        candidate_payloads.append(payload)
         _validate_worker_payload(payload.report, payload.canonical_bytes)
         if payload.report.get("candidate") != spec:
             raise ValueError("worker result does not match requested matrix candidate")
+        execution_bound &= consume_worker(payload, argv, expected)
+        candidate_payloads.append(payload)
     with tempfile.TemporaryDirectory(prefix="llm-wiki-authoritative-selection-") as temporary:
         paths = []
         for index, result in enumerate(candidate_payloads):
@@ -4696,7 +4786,7 @@ def _validate_worker_payload(report: dict, raw: bytes) -> None:
     _verify_locked_environment(report["vector_backend"], lexical_config=lexical)
 
 
-def _run_bounded_model_worker_impl(
+def _run_bounded_model_worker(
     argv: Sequence[str], *, deadline_seconds: float
 ) -> _WorkerPayload | dict:
     with tempfile.TemporaryDirectory(prefix="llm-wiki-retrieval-worker-") as temporary:
@@ -4738,37 +4828,7 @@ def _run_bounded_model_worker_impl(
         return _WorkerPayload(report, raw)
 
 
-def _make_execution_bound_worker(worker, process_runner):
-    registry = {}
-
-    def run(argv: Sequence[str], *, deadline_seconds: float):
-        execution_bound = _run_process_tree is process_runner
-        result = worker(argv, deadline_seconds=deadline_seconds)
-        if execution_bound and isinstance(result, _WorkerPayload):
-            registry[id(result)] = (
-                result,
-                hashlib.sha256(result.canonical_bytes).digest(),
-            )
-        return result
-
-    def consume(payload: _WorkerPayload) -> bool:
-        registered = registry.pop(id(payload), None)
-        return (
-            registered is not None
-            and registered[0] is payload
-            and registered[1] == hashlib.sha256(payload.canonical_bytes).digest()
-        )
-
-    return run, consume
-
-
-_run_bounded_model_worker, _consume_execution_bound_payload = _make_execution_bound_worker(
-    _run_bounded_model_worker_impl, _run_process_tree
-)
-del _make_execution_bound_worker
-
-
-def _bind_orchestrator(implementation, execution_consumer):
+def _bind_orchestrator(implementation, trusted_worker, trusted_process_runner):
     def orchestrate_selection(
         *,
         matrix_path: Path | str,
@@ -4787,14 +4847,15 @@ def _bind_orchestrator(implementation, execution_consumer):
             measured_at=measured_at,
             cache_root=cache_root,
             deadline_seconds=deadline_seconds,
-            _execution_consumer=execution_consumer,
+            _trusted_worker=trusted_worker,
+            _trusted_process_runner=trusted_process_runner,
         )
 
     return orchestrate_selection
 
 
 orchestrate_selection = _bind_orchestrator(
-    _orchestrate_selection_impl, _consume_execution_bound_payload
+    _orchestrate_selection_impl, _run_bounded_model_worker, _run_process_tree
 )
 del _bind_orchestrator
 del _orchestrate_selection_impl
@@ -4883,7 +4944,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             if not isinstance(payload, _WorkerPayload):
                 raise ValueError("benchmark worker did not return a worker payload")
-            _consume_execution_bound_payload(payload)
             _validate_worker_payload(payload.report, payload.canonical_bytes)
             report = json.loads(json.dumps(payload.report))
             if args.output is None:
@@ -4919,7 +4979,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 cache_root=args.cache_root,
                 **run_options,
             )
-        if args.adapter == MODEL_MATRIX_ADAPTER_KIND:
+        if args.adapter == MODEL_MATRIX_ADAPTER_KIND or args.internal_worker:
             serialized = _canonical_report_bytes(report).decode("utf-8")
         else:
             serialized = json.dumps(
