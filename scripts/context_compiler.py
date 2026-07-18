@@ -24,6 +24,7 @@ Design contract (from docs/superpowers/plans/2026-07-16-unified-evidence-retriev
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -92,6 +93,22 @@ class MaterializationTrace:
 
 
 @dataclass(frozen=True)
+class RetrievalTrace:
+    candidate_parent_ids: tuple[str, ...]
+    shortlisted_parent_ids: tuple[str, ...]
+    evidence_chunk_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PackingTrace:
+    packed_item_ids: tuple[str, ...]
+    dropped_item_ids: tuple[str, ...]
+    packed_tokens: int
+    counter_source: str
+    budget_model: str | None
+
+
+@dataclass(frozen=True)
 class CompilationTrace:
     candidate_count: int
     l0_count: int
@@ -100,6 +117,8 @@ class CompilationTrace:
     materializations: tuple[MaterializationTrace, ...]
     generated_context_enabled: bool
     duplicate_stems: tuple[str, ...]
+    retrieval: RetrievalTrace
+    packing: PackingTrace
 
 
 @dataclass(frozen=True)
@@ -183,10 +202,7 @@ def _build_parents(snapshot: CorpusSnapshot) -> tuple[_Parent, ...]:
     parents: list[_Parent] = []
     for source in snapshot.sources:
         relative_path = source.record.relative_path
-        try:
-            content_text = source.content.decode("utf-8", errors="strict")
-        except UnicodeDecodeError:
-            content_text = source.content.decode("utf-8", errors="replace")
+        content_text = source.content.decode("utf-8", errors="strict")
         frontmatter = _parse_frontmatter(content_text)
         title = _extract_title(content_text, Path(relative_path).stem)
         summary = _extract_summary(content_text) or title
@@ -203,7 +219,7 @@ def _build_parents(snapshot: CorpusSnapshot) -> tuple[_Parent, ...]:
     return tuple(parents)
 
 
-def _metadata_prefix(parent: _Parent) -> str:
+def _metadata_prefix(parent: _Parent, heading_path: tuple[str, ...] = ()) -> str:
     """One-line deterministic prefix carrying every metadata signal."""
     parts: list[str] = [parent.title]
     meta = parent.source.metadata
@@ -223,6 +239,8 @@ def _metadata_prefix(parent: _Parent) -> str:
         parts.append(f"authority={meta.authority}")
     if parent.aliases:
         parts.append("aliases=" + ", ".join(parent.aliases))
+    if heading_path:
+        parts.append("heading=" + " > ".join(heading_path))
     parts.append(f"sha256={record.sha256[:12]}")
     return "[" + " | ".join(parts) + "]"
 
@@ -248,26 +266,20 @@ def _l1_text(parent: _Parent) -> str:
             frontmatter_end = end + 4
     body = body[frontmatter_end:]
     overview_lines: list[str] = []
-    char_count = 0
     overview_lines.append(parent.summary)
-    char_count += len(parent.summary)
     for raw in body.splitlines()[1:]:
         stripped = raw.strip()
         if not stripped:
             continue
         if stripped.lower().startswith("## history"):
             break
-        if char_count + len(stripped) >= 1500:
-            overview_lines.append("…(truncated, see full page for more)")
-            break
         overview_lines.append(stripped)
-        char_count += len(stripped)
     return f"{_metadata_prefix(parent)}\n" + "\n".join(overview_lines)
 
 
 def _l2_text_small_parent(parent: _Parent) -> str:
-    body = parent.source.content.decode("utf-8", errors="replace")
-    return f"{_metadata_prefix(parent)}\n{body.rstrip()}"
+    body = parent.source.content.decode("utf-8", errors="strict")
+    return f"{_metadata_prefix(parent, (parent.title,))}\n{body}"
 
 
 def _l2_text_heading_subtree(
@@ -275,31 +287,29 @@ def _l2_text_heading_subtree(
     chunk: RetrievalChunk,
     *,
     subtree_char_budget: int,
-) -> str:
-    body = parent.source.content.decode("utf-8", errors="replace")
-    # Find the heading line that introduced this chunk's deepest heading.
-    target_heading = chunk.heading_ancestry[-1] if chunk.heading_ancestry else ""
+) -> tuple[str, int, int]:
+    content = parent.source.content
+    if not 0 <= chunk.byte_start <= chunk.byte_end <= len(content):
+        raise ValueError("evidence chunk byte span is outside its captured source")
+    headings = list(re.finditer(rb"(?m)^[ ]{0,3}(#{1,6})[ \t]+[^\r\n]+", content))
+    target = next((match for match in headings if match.start() == chunk.byte_start), None)
     section_start = chunk.byte_start
-    if target_heading:
-        needle = target_heading
-        # Try to anchor to the actual heading line within the body.
-        idx = body.rfind(needle, 0, chunk.byte_start + 1)
-        if idx >= 0:
-            line_start = body.rfind("\n", 0, idx) + 1
-            section_start = line_start
-
-    # End at the next sibling/outer heading, or end of body.
-    next_heading = body.find("\n##", section_start + 1)
-    if next_heading < 0:
-        next_heading = body.find("\n#", section_start + 1)
-    section_end = len(body) if next_heading < 0 else next_heading
-
-    # Bounded adjacent context (the next N chars after the section).
-    adjacent_end = min(len(body), section_end + ADJACENT_CONTEXT_CHARS)
-    section_end = min(adjacent_end, section_start + subtree_char_budget)
-
-    text = body[section_start:section_end]
-    return f"{_metadata_prefix(parent)}\n{text.rstrip()}"
+    section_end = chunk.byte_end
+    if target is not None:
+        level = len(target.group(1))
+        section_end = len(content)
+        for heading in headings:
+            if heading.start() <= section_start:
+                continue
+            if len(heading.group(1)) <= level:
+                section_end = heading.start()
+                break
+    if section_end - section_start > subtree_char_budget:
+        section_end = chunk.byte_end
+    span = content[section_start:section_end]
+    text = span.decode("utf-8", errors="strict")
+    prefix = _metadata_prefix(parent, chunk.heading_ancestry)
+    return f"{prefix}\n{text}", section_start, section_end
 
 
 def _short_hash(source: CapturedSource) -> str:
@@ -315,11 +325,15 @@ def _make_compiled_item(
     byte_start: int,
     byte_end: int,
     relevance: float,
+    discriminator: str = "",
 ) -> CompiledItem:
     meta = parent.source.metadata
     record = parent.source.record
     return CompiledItem(
-        item_id=f"{representation}:{record.logical_id}:{_short_hash(parent.source)}",
+        item_id=(
+            f"{representation}:{record.logical_id}:{_short_hash(parent.source)}"
+            + (f":{discriminator}" if discriminator else "")
+        ),
         text=text,
         source=record.relative_path,
         parent_id=record.relative_path,
@@ -352,6 +366,8 @@ def _to_context_item(compiled: CompiledItem) -> ContextItem:
         token_cost=len(compiled.text.encode("utf-8")),
         mandatory=False,
         representation=compiled.representation,
+        parent_id=compiled.parent_id,
+        priority_class="evidence" if compiled.representation != "l1" else "decision",
     )
 
 
@@ -403,9 +419,10 @@ def _build_l2_item(
             representation="l2",
             text=_l2_text_small_parent(parent),
             heading_path=cited_headings,
-            byte_start=cited_start,
-            byte_end=cited_end,
+            byte_start=0,
+            byte_end=body_bytes,
             relevance=DEFAULT_RELEVANCE_L2,
+            discriminator=chunk.id if chunk is not None else "full",
         )
         return item, "small_parent_full"
     if chunk is None:
@@ -421,16 +438,18 @@ def _build_l2_item(
             relevance=DEFAULT_RELEVANCE_L2,
         )
         return item, "small_parent_full"
+    text, emitted_start, emitted_end = _l2_text_heading_subtree(
+        parent, chunk, subtree_char_budget=large_parent_subtree_chars
+    )
     item = _make_compiled_item(
         parent=parent,
         representation="l2",
-        text=_l2_text_heading_subtree(
-            parent, chunk, subtree_char_budget=large_parent_subtree_chars
-        ),
+        text=text,
         heading_path=cited_headings,
-        byte_start=cited_start,
-        byte_end=cited_end,
+        byte_start=emitted_start,
+        byte_end=emitted_end,
         relevance=DEFAULT_RELEVANCE_L2,
+        discriminator=chunk.id,
     )
     return item, "heading_subtree"
 
@@ -457,10 +476,12 @@ def compile_context(
         raise ValueError("small_parent_chars must be nonnegative")
     if large_parent_subtree_chars < 0:
         raise ValueError("large_parent_subtree_chars must be nonnegative")
+    if generated_context:
+        raise ValueError("generated_context=True requires a successful frozen ablation")
 
     parents = _build_parents(snapshot)
     shortlist_set = {str(s) for s in shortlist}
-    evidence_set = {str(c) for c in evidence_chunk_ids}
+    evidence_ids = tuple(sorted({str(c) for c in evidence_chunk_ids}))
     chunks_by_id: dict[str, RetrievalChunk] = {}
     for chunk in snapshot.chunks:
         chunks_by_id[chunk.id] = chunk
@@ -499,7 +520,7 @@ def compile_context(
         )
 
     # 3. Final L2/source evidence.
-    for chunk_id in evidence_set:
+    for chunk_id in evidence_ids:
         chunk = chunks_by_id.get(chunk_id)
         if chunk is None:
             continue
@@ -529,35 +550,48 @@ def compile_context(
 
     duplicate_stems = _detect_duplicate_stems(parents)
 
-    # 4. Pack under the shared budget.
+    # 4. Always pack under the shared budget, including the default path.
     active_budget = budget if budget is not None else DEFAULT_BUDGET
-    packed_items = list(compiled_items)
-    packed_text = "\n\n".join(item.text for item in packed_items)
-    packed_tokens = sum(len(item.text.encode("utf-8")) for item in packed_items)
-
-    if budget is not None and packed_tokens > active_budget.available_input_tokens:
-        packed = pack_context(
-            [_to_context_item(item) for item in compiled_items],
-            active_budget,
-            emergency_byte_cap=None,
-        )
-        kept_ids = {item.item_id for item in packed.items}
-        packed_items = [item for item in compiled_items if item.item_id in kept_ids]
-        packed_text = packed.text
-        packed_tokens = packed.packed_tokens
+    packed = pack_context(
+        [_to_context_item(item) for item in compiled_items],
+        active_budget,
+        per_source_cap=6,
+        per_parent_cap=6,
+    )
+    compiled_by_id = {item.item_id: item for item in compiled_items}
+    trace_by_id = {
+        item.item_id: trace
+        for item, trace in zip(compiled_items, materializations)
+    }
+    packed_items = [compiled_by_id[item.item_id] for item in packed.items]
+    materializations = [trace_by_id[item.item_id] for item in packed.items]
 
     trace = CompilationTrace(
         candidate_count=len(parents),
-        l0_count=sum(1 for i in compiled_items if i.representation == "l0"),
-        l1_count=sum(1 for i in compiled_items if i.representation == "l1"),
-        l2_count=sum(1 for i in compiled_items if i.representation == "l2"),
+        l0_count=sum(1 for i in packed_items if i.representation == "l0"),
+        l1_count=sum(1 for i in packed_items if i.representation == "l1"),
+        l2_count=sum(1 for i in packed_items if i.representation == "l2"),
         materializations=tuple(materializations),
         generated_context_enabled=bool(generated_context),
         duplicate_stems=duplicate_stems,
+        retrieval=RetrievalTrace(
+            candidate_parent_ids=tuple(
+                sorted(parent.source.record.logical_id for parent in parents)
+            ),
+            shortlisted_parent_ids=tuple(sorted(shortlist_set)),
+            evidence_chunk_ids=evidence_ids,
+        ),
+        packing=PackingTrace(
+            packed_item_ids=tuple(item.item_id for item in packed_items),
+            dropped_item_ids=tuple(drop.item_id for drop in packed.dropped),
+            packed_tokens=packed.packed_tokens,
+            counter_source=packed.counter_source,
+            budget_model=active_budget.model,
+        ),
     )
     return CompiledContext(
         items=tuple(packed_items),
-        text=packed_text,
+        text=packed.text,
         trace=trace,
-        packed_tokens=packed_tokens,
+        packed_tokens=packed.packed_tokens,
     )

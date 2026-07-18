@@ -7,9 +7,28 @@ from dataclasses import dataclass
 from numbers import Real
 from typing import Literal
 
-CountSource = Literal["reported", "tokenizer", "estimated", "unknown"]
+CountSource = Literal["reported", "tokenizer", "estimated", "mixed", "unknown"]
 CostKind = Literal["reported", "estimated", "unknown"]
 TokenCounter = Callable[[str], int]
+PriorityClass = Literal[
+    "safety",
+    "health",
+    "handoff",
+    "blocker",
+    "decision",
+    "evidence",
+    "history",
+]
+
+PRIORITY_CLASS_ORDER: dict[str, int] = {
+    "safety": 1,
+    "health": 2,
+    "handoff": 3,
+    "blocker": 4,
+    "decision": 5,
+    "evidence": 6,
+    "history": 7,
+}
 
 
 def _is_nonnegative_int(value: object) -> bool:
@@ -39,6 +58,14 @@ class ContextBudget:
             - self.reserved_output_tokens
             - self.safety_margin_tokens
         )
+
+
+DEFAULT_CONTEXT_BUDGET = ContextBudget(
+    model=None,
+    max_input_tokens=8192,
+    reserved_output_tokens=0,
+    safety_margin_tokens=512,
+)
 
 
 @dataclass(frozen=True)
@@ -82,7 +109,7 @@ class TokenCount:
     source: CountSource = "unknown"
 
     def __post_init__(self) -> None:
-        if self.source not in {"reported", "tokenizer", "estimated", "unknown"}:
+        if self.source not in {"reported", "tokenizer", "estimated", "mixed", "unknown"}:
             raise ValueError("source is invalid")
         if self.tokens is not None and not _is_nonnegative_int(self.tokens):
             raise ValueError("tokens must be a nonnegative integer or None")
@@ -138,6 +165,8 @@ class ContextItem:
     token_cost: int
     mandatory: bool
     representation: str
+    parent_id: str | None = None
+    priority_class: PriorityClass = "evidence"
 
     def __post_init__(self) -> None:
         if not isinstance(self.item_id, str) or not self.item_id:
@@ -165,6 +194,12 @@ class ContextItem:
             raise ValueError("mandatory must be a boolean")
         if not isinstance(self.representation, str) or not self.representation:
             raise ValueError("representation must be a non-empty string")
+        if self.parent_id is not None and (
+            not isinstance(self.parent_id, str) or not self.parent_id
+        ):
+            raise ValueError("parent_id must be a non-empty string or None")
+        if self.priority_class not in PRIORITY_CLASS_ORDER:
+            raise ValueError("priority_class is invalid")
 
 
 @dataclass(frozen=True)
@@ -190,8 +225,46 @@ class PackedContext:
     truncated: bool
 
 
+@dataclass(frozen=True)
+class BudgetFailure:
+    code: str
+    mandatory_item_ids: tuple[str, ...]
+    required_tokens: int
+    available_tokens: int
+    model: str | None
+    counter_source: CountSource
+    required_bytes: int | None = None
+    available_bytes: int | None = None
+
+    def render(self) -> str:
+        item_ids = ", ".join(self.mandatory_item_ids)
+        rendered = (
+            "## Context budget failure\n"
+            f"- code: `{self.code}`\n"
+            f"- mandatory_items: `{item_ids}`\n"
+            f"- required_tokens: `{self.required_tokens}`\n"
+            f"- available_tokens: `{self.available_tokens}`\n"
+            f"- model: `{self.model or 'unspecified'}`\n"
+            f"- counter_source: `{self.counter_source}`"
+        )
+        if self.required_bytes is not None and self.available_bytes is not None:
+            rendered += (
+                f"\n- required_bytes: `{self.required_bytes}`"
+                f"\n- available_bytes: `{self.available_bytes}`"
+            )
+        return rendered
+
+
 class BudgetExceededError(ValueError):
     """Raised when mandatory items cannot fit within the usable budget."""
+
+    def __init__(self, failure: BudgetFailure):
+        self.failure = failure
+        super().__init__(
+            "mandatory context cannot fit: "
+            f"{failure.required_tokens} > {failure.available_tokens} "
+            f"({failure.code})"
+        )
 
 
 def _normalize_items(items: Iterable[ContextItem]) -> tuple[ContextItem, ...]:
@@ -212,7 +285,7 @@ def _item_costs(
     *,
     model: str | None,
     counter: Mapping[str, TokenCounter] | None,
-) -> tuple[tuple[int, ...], CountSource]:
+) -> tuple[tuple[int, ...], tuple[CountSource, ...]]:
     """Return per-item token costs and the counter source label.
 
     When a tokenizer adapter is available for ``model``, every item's cost is
@@ -222,25 +295,59 @@ def _item_costs(
     """
     adapter = counter.get(model) if counter is not None and model is not None else None
     if adapter is None:
-        return tuple(item.token_cost for item in items), "estimated"
+        return tuple(item.token_cost for item in items), tuple("estimated" for _ in items)
     costs: list[int] = []
+    sources: list[CountSource] = []
     for item in items:
         try:
             measured = adapter(item.text)
         except Exception:  # noqa: BLE001 - adapters are an optional isolation boundary
             costs.append(item.token_cost)
+            sources.append("estimated")
             continue
         if not _is_nonnegative_int(measured):
             costs.append(item.token_cost)
+            sources.append("estimated")
             continue
         costs.append(measured)
-    return tuple(costs), "tokenizer"
+        sources.append("tokenizer")
+    return tuple(costs), tuple(sources)
 
 
-def _utility_key(item: ContextItem, cost: int) -> tuple[float, str]:
-    """Larger-is-better utility per token, ties broken by item_id ascending."""
+def _utility(item: ContextItem, cost: int) -> float:
+    """Return semantic priority plus relevance-per-token utility."""
     safe_cost = max(cost, 1)
-    return (float(item.relevance) / safe_cost, item.item_id)
+    semantic = len(PRIORITY_CLASS_ORDER) - PRIORITY_CLASS_ORDER[item.priority_class]
+    return semantic * 1_000_000 + float(item.relevance) / safe_cost
+
+
+def _ranked(items: Iterable[ContextItem], costs: Mapping[str, int]) -> list[ContextItem]:
+    return sorted(items, key=lambda item: (-_utility(item, costs[item.item_id]), item.item_id))
+
+
+def _render(items: Iterable[ContextItem]) -> str:
+    return "\n\n".join(item.text for item in items)
+
+
+def _measure_rendered(
+    text: str,
+    *,
+    model: str | None,
+    counter: Mapping[str, TokenCounter] | None,
+) -> tuple[int, CountSource]:
+    measured = count_tokens(text, model=model, adapters=counter)
+    if measured.tokens is None:
+        return len(text.encode("utf-8")), "estimated"
+    return measured.tokens, measured.source
+
+
+def _combined_source(sources: Iterable[CountSource]) -> CountSource:
+    used = {source for source in sources if source != "unknown"}
+    if not used:
+        return "unknown"
+    if len(used) == 1:
+        return next(iter(used))
+    return "mixed"
 
 
 def pack_context(
@@ -251,6 +358,7 @@ def pack_context(
     counter: Mapping[str, TokenCounter] | None = None,
     section_bounds: Mapping[int, int] | None = None,
     per_source_cap: int | None = None,
+    per_parent_cap: int | None = None,
     emergency_byte_cap: int | None = None,
 ) -> PackedContext:
     """Pack complete :class:`ContextItem` instances under a shared budget.
@@ -286,14 +394,22 @@ def pack_context(
         normalized_bounds = {}
     if per_source_cap is not None and (not _is_nonnegative_int(per_source_cap)):
         raise ValueError("per_source_cap must be a nonnegative integer")
+    if per_parent_cap is not None and (not _is_nonnegative_int(per_parent_cap)):
+        raise ValueError("per_parent_cap must be a nonnegative integer")
     if emergency_byte_cap is not None and not _is_nonnegative_int(emergency_byte_cap):
         raise ValueError("emergency_byte_cap must be a nonnegative integer")
 
     normalized = _normalize_items(items)
-    costs, counter_source = _item_costs(
-        normalized, model=model, counter=counter
+    active_model = budget.model if model is None else model
+    if model is not None and budget.model is not None and model != budget.model:
+        raise ValueError("model must match budget.model")
+    costs, item_sources = _item_costs(
+        normalized, model=active_model, counter=counter
     )
     cost_by_id = {item.item_id: cost for item, cost in zip(normalized, costs)}
+    source_by_id = {
+        item.item_id: source for item, source in zip(normalized, item_sources)
+    }
 
     dropped: list[DroppedItem] = []
     mandatory: list[ContextItem] = []
@@ -304,18 +420,32 @@ def pack_context(
         else:
             optional.append(item)
 
-    mandatory_tokens = sum(cost_by_id[i.item_id] for i in mandatory)
+    mandatory = sorted(
+        mandatory,
+        key=lambda item: (PRIORITY_CLASS_ORDER[item.priority_class], item.item_id),
+    )
+    mandatory_text = _render(mandatory)
+    mandatory_tokens, mandatory_render_source = _measure_rendered(
+        mandatory_text, model=active_model, counter=counter
+    )
     if mandatory_tokens > budget.available_input_tokens:
         raise BudgetExceededError(
-            "mandatory items require "
-            f"{mandatory_tokens} tokens but the budget leaves "
-            f"{budget.available_input_tokens}"
+            BudgetFailure(
+                code="mandatory_budget_exceeded",
+                mandatory_item_ids=tuple(item.item_id for item in mandatory),
+                required_tokens=mandatory_tokens,
+                available_tokens=budget.available_input_tokens,
+                model=active_model,
+                counter_source=mandatory_render_source,
+            )
         )
 
-    # Section caps: drop optional items whose priority section is already full.
+    ranked = _ranked(optional, cost_by_id)
+
+    # Caps are applied after utility ranking so lower-value input order cannot win.
     section_used: dict[int, int] = {}
     section_survivors: list[ContextItem] = []
-    for item in optional:
+    for item in ranked:
         cap = normalized_bounds.get(item.priority) if normalized_bounds else None
         if cap is not None:
             used = section_used.get(item.priority, 0)
@@ -325,62 +455,64 @@ def pack_context(
                 continue
             section_used[item.priority] = used + cost
         section_survivors.append(item)
-    optional = section_survivors
+    ranked = section_survivors
 
-    # Per-source diversity caps: keep the highest-utility items per source.
-    if per_source_cap is not None:
-        by_source: dict[str, list[ContextItem]] = {}
-        for item in optional:
-            by_source.setdefault(item.source, []).append(item)
-        kept_ids: set[str] = set()
-        for source_items in by_source.values():
-            source_items.sort(
-                key=lambda it: _utility_key(it, cost_by_id[it.item_id]), reverse=True
-            )
-            for kept in source_items[:per_source_cap]:
-                kept_ids.add(kept.item_id)
-        new_optional: list[ContextItem] = []
-        for item in optional:
-            if item.item_id in kept_ids:
-                new_optional.append(item)
-            else:
-                dropped.append(DroppedItem(item.item_id, "diversity"))
-        optional = new_optional
-
-    # Greedy add by utility per token.
-    ranked = sorted(
-        optional,
-        key=lambda it: _utility_key(it, cost_by_id[it.item_id]),
-        reverse=True,
-    )
-    remaining = budget.available_input_tokens - mandatory_tokens
+    source_counts: dict[str, int] = {}
+    parent_counts: dict[str, int] = {}
     kept_optional: list[ContextItem] = []
     for item in ranked:
-        cost = cost_by_id[item.item_id]
-        if cost > remaining:
+        if per_source_cap is not None and source_counts.get(item.source, 0) >= per_source_cap:
+            dropped.append(DroppedItem(item.item_id, "diversity"))
+            continue
+        parent = item.parent_id or item.source
+        if per_parent_cap is not None and parent_counts.get(parent, 0) >= per_parent_cap:
+            dropped.append(DroppedItem(item.item_id, "diversity"))
+            continue
+        candidate = [*mandatory, *kept_optional, item]
+        candidate_tokens, _ = _measure_rendered(
+            _render(candidate), model=active_model, counter=counter
+        )
+        if candidate_tokens > budget.available_input_tokens:
             dropped.append(DroppedItem(item.item_id, "budget"))
             continue
-        remaining -= cost
         kept_optional.append(item)
+        source_counts[item.source] = source_counts.get(item.source, 0) + 1
+        parent_counts[parent] = parent_counts.get(parent, 0) + 1
 
-    # Final output order: priority ascending (safety first), ties by item_id.
-    packed_items = sorted(
-        [*mandatory, *kept_optional],
-        key=lambda it: (it.priority, it.item_id),
-    )
+    packed_items = [*mandatory, *kept_optional]
 
-    text = "\n\n".join(item.text for item in packed_items)
+    text = _render(packed_items)
     truncated = False
     if emergency_byte_cap is not None and len(text.encode("utf-8")) > emergency_byte_cap:
-        # Drop whole items from the tail (least important) until it fits.
-        # Mandatory items are never dropped here — they were validated above.
-        while packed_items and len(text.encode("utf-8")) > emergency_byte_cap:
+        while kept_optional and len(text.encode("utf-8")) > emergency_byte_cap:
+            kept_optional.pop()
             victim = packed_items.pop()
-            text = "\n\n".join(item.text for item in packed_items)
+            text = _render(packed_items)
             truncated = True
             dropped.append(DroppedItem(victim.item_id, "emergency_cap"))
+        if len(text.encode("utf-8")) > emergency_byte_cap:
+            required, source = _measure_rendered(
+                text, model=active_model, counter=counter
+            )
+            raise BudgetExceededError(
+                BudgetFailure(
+                    code="mandatory_emergency_cap_exceeded",
+                    mandatory_item_ids=tuple(item.item_id for item in mandatory),
+                    required_tokens=required,
+                    available_tokens=budget.available_input_tokens,
+                    model=active_model,
+                    counter_source=source,
+                    required_bytes=len(text.encode("utf-8")),
+                    available_bytes=emergency_byte_cap,
+                )
+            )
 
-    packed_tokens = sum(cost_by_id[i.item_id] for i in packed_items)
+    packed_tokens, rendered_source = _measure_rendered(
+        text, model=active_model, counter=counter
+    )
+    counter_source = _combined_source(
+        [rendered_source, *(source_by_id[item.item_id] for item in packed_items)]
+    )
     return PackedContext(
         items=tuple(packed_items),
         text=text,

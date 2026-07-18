@@ -405,21 +405,36 @@ def build_handoff(
         raise ValueError("handoff bounds must be positive")
     max_actions = min(max_actions, 3)
 
-    lines = [f"# Project handoff: {project.project}"]
+    from context_budget import (
+        DEFAULT_CONTEXT_BUDGET,
+        BudgetExceededError,
+        ContextItem,
+        pack_context,
+    )
 
-    def add_section(title: str, values: Sequence[tuple[str, str]]) -> None:
+    sections: list[tuple[str, str, str, bool]] = [
+        ("title", f"# Project handoff: {project.project}", "handoff", True)
+    ]
+
+    def add_section(
+        title: str, values: Sequence[tuple[str, str]], priority_class: str
+    ) -> None:
         if not values:
             return
-        lines.extend(("", f"## {title}"))
-        lines.extend(f"- `{item_id}`: {value}" for item_id, value in values)
+        text = "\n".join(
+            [f"## {title}", *(f"- `{item_id}`: {value}" for item_id, value in values)]
+        )
+        sections.append((title, text, priority_class, False))
 
-    add_section("Active goal", list(project.goal.items())[-1:])
-    add_section("Active task", list(project.current_task.items())[-1:])
-    add_section("Next actions", list(project.next_actions.items())[-max_actions:])
-    add_section("Blockers", list(project.blockers.items()))
-    add_section("Recent decisions", list(project.decisions.items())[-5:])
+    add_section("Active goal", list(project.goal.items())[-1:], "handoff")
+    add_section("Active task", list(project.current_task.items())[-1:], "handoff")
+    add_section("Next actions", list(project.next_actions.items())[-max_actions:], "handoff")
+    add_section("Blockers", list(project.blockers.items()), "blocker")
+    add_section("Recent decisions", list(project.decisions.items())[-5:], "decision")
     if project.legacy_context:
-        lines.extend(("", "## Legacy context", project.legacy_context))
+        sections.append(
+            ("legacy", f"## Legacy context\n{project.legacy_context}", "history", False)
+        )
     identifiers = "\n".join(
         (
             "## MCP identifiers",
@@ -427,14 +442,34 @@ def build_handoff(
             f"- `sequence:{project.last_applied_sequence}`",
         )
     )
-    body = "\n".join(lines).rstrip()
-    text = body + "\n\n" + identifiers + "\n"
-    if len(text) <= max_chars:
-        return text
-    suffix = "\n... (handoff truncated)\n\n" + identifiers + "\n"
-    if len(suffix) >= max_chars:
-        return suffix[-max_chars:]
-    return body[: max_chars - len(suffix)].rstrip() + suffix
+    sections.append(("identifiers", identifiers, "handoff", True))
+    items = [
+        ContextItem(
+            item_id=f"handoff:{index:02d}:{name}",
+            text=text,
+            source=f"project:{project.project}",
+            priority=index + 1,
+            relevance=1.0 if mandatory else 0.8,
+            confidence="high",
+            freshness="fresh",
+            token_cost=len(text.encode("utf-8")),
+            mandatory=mandatory,
+            representation="l1",
+            parent_id=f"project:{project.project}",
+            priority_class=priority_class,
+        )
+        for index, (name, text, priority_class, mandatory) in enumerate(sections)
+    ]
+    try:
+        return pack_context(
+            items,
+            DEFAULT_CONTEXT_BUDGET,
+            emergency_byte_cap=max_chars,
+            per_source_cap=len(items),
+            per_parent_cap=len(items),
+        ).text + "\n"
+    except BudgetExceededError as error:
+        return error.failure.render() + "\n"
 
 
 def recover_project_handoff(

@@ -24,8 +24,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from context_budget import (  # noqa: E402
+    DEFAULT_CONTEXT_BUDGET,
     BudgetExceededError,
-    ContextBudget,
     ContextItem,
     pack_context,
 )
@@ -103,7 +103,7 @@ def _find_recent_daily_activity(slug: str, days: int = 7) -> list[str]:
             # Extract lines mentioning the slug
             for line in content.splitlines():
                 if slug.lower() in line.lower() and line.strip():
-                    results.append(f"{md.stem}: {line.strip()[:120]}")
+                    results.append(f"{md.stem}: {line.strip()}")
                     if len(results) >= 10:
                         return results
     return results
@@ -200,8 +200,8 @@ def _project_context_item(index: int, text: str, *, total: int) -> ContextItem |
     stripped = (text or "").strip()
     if not stripped:
         return None
-    # Earlier sections are more important (title is index 0).
-    priority = min(index + 1, 7)
+    is_handoff = index == 0 or stripped.startswith("### Where you left off")
+    priority = 3 if is_handoff else min(index + 3, 7)
     return ContextItem(
         item_id=f"project:{index:03d}",
         text=stripped,
@@ -211,8 +211,10 @@ def _project_context_item(index: int, text: str, *, total: int) -> ContextItem |
         confidence="medium",
         freshness="fresh",
         token_cost=len(stripped.encode("utf-8")),
-        mandatory=index == 0,
+        mandatory=is_handoff,
         representation="l1",
+        parent_id="project-handoff",
+        priority_class="handoff" if is_handoff else "evidence",
     )
 
 
@@ -233,20 +235,17 @@ def _pack_project_context(parts: list[str], max_chars: int) -> str:
     ]
     if not items:
         return ""
-    budget = ContextBudget(
-        model=None,
-        max_input_tokens=max(8192, max_chars * 4),
-        reserved_output_tokens=0,
-        safety_margin_tokens=0,
-    )
     try:
-        packed = pack_context(items, budget, emergency_byte_cap=max(0, max_chars - 2))
+        packed = pack_context(
+            items,
+            DEFAULT_CONTEXT_BUDGET,
+            emergency_byte_cap=max_chars,
+            per_source_cap=5,
+            per_parent_cap=12,
+        )
         return packed.text
-    except BudgetExceededError:
-        text = "\n".join(parts).rstrip()
-        if len(text) > max_chars:
-            text = text[: max_chars - 20].rstrip() + "\n… (truncated)\n"
-        return text
+    except BudgetExceededError as error:
+        return error.failure.render()
 
 
 def build_context(slug: str, max_chars: int = 2000, agent: str | None = None) -> str:
@@ -264,7 +263,7 @@ def build_context(slug: str, max_chars: int = 2000, agent: str | None = None) ->
     # 1. Handoff note from state.md
     handoff = _read_state_handoff(slug)
     if handoff:
-        parts.append(f"### Where you left off\n{handoff[:500]}\n")
+        parts.append(f"### Where you left off\n{handoff}\n")
 
     # 2. Knowledge pages tagged for this project
     pages = _find_project_pages(slug)
@@ -294,7 +293,7 @@ def build_context(slug: str, max_chars: int = 2000, agent: str | None = None) ->
         for ptype in sorted(by_type.keys()):
             parts.append(f"**{ptype}s:**")
             for p in by_type[ptype][:5]:
-                summary = p["summary"][:80] if p["summary"] else p["title"]
+                summary = p["summary"] if p["summary"] else p["title"]
                 parts.append(f"- {summary}")
             parts.append("")
 

@@ -66,6 +66,11 @@ def get_context(
     *,
     generation_dir: Path | None = None,
     extractor_version: str = CONTEXT_EXTRACTOR_VERSION,
+    source_sha256: str | None = None,
+    logical_path: str | None = None,
+    generation_mode: str = "deterministic",
+    model_descriptor: object | None = None,
+    model_revision: str | None = None,
 ) -> str | None:
     """Read by captured source in generation mode or string slug in legacy mode."""
     if generation_dir is None:
@@ -74,7 +79,12 @@ def get_context(
         slug = _legacy_slug(source)
         context_root = Path(os.path.abspath(CONTEXT_DIR))
         _validate_existing_ancestors(context_root, "legacy context cache")
-        ctx_file = context_root / f"{slug}.ctx"
+        ctx_file = legacy_context_cache_path(
+            slug,
+            source_sha256=source_sha256,
+            logical_path=logical_path,
+            extractor_version=extractor_version,
+        )
         try:
             artifact_metadata = ctx_file.lstat()
         except FileNotFoundError:
@@ -87,7 +97,13 @@ def get_context(
 
     captured = _validate_source(source)
     version = _extractor_version(extractor_version)
-    key = context_artifact_key(captured, extractor_version=version)
+    key = context_artifact_key(
+        captured,
+        extractor_version=version,
+        generation_mode=generation_mode,
+        model_descriptor=model_descriptor,
+        model_revision=model_revision,
+    )
     generation = _real_directory(generation_dir, "generation directory")
     contextual = generation / "contextual"
     try:
@@ -125,6 +141,15 @@ def get_context(
         or len(context) > MAX_CONTEXT_CHARS
         or artifact.get("key") != key
         or artifact.get("extractor_version") != version
+        or artifact.get("generation")
+        != {
+            "mode": generation_mode,
+            "model": (
+                {**model_descriptor.canonical(), "revision": model_revision}
+                if model_descriptor is not None
+                else None
+            ),
+        }
         or artifact_source.get("logical_id") != captured.record.logical_id
         or artifact_source.get("sha256") != captured.record.sha256
     ):
@@ -263,13 +288,35 @@ def _validate_llm_options(
 
 
 def context_artifact_key(
-    source: CapturedSource, *, extractor_version: str = CONTEXT_EXTRACTOR_VERSION
+    source: CapturedSource,
+    *,
+    extractor_version: str = CONTEXT_EXTRACTOR_VERSION,
+    generation_mode: str = "deterministic",
+    model_descriptor: object | None = None,
+    model_revision: str | None = None,
 ) -> str:
     """Return the stable key for one exact captured source and extractor."""
     source = _validate_source(source)
     version = _extractor_version(extractor_version)
+    if generation_mode not in {"deterministic", "llm"}:
+        raise ValueError("generation_mode must be 'deterministic' or 'llm'")
+    if generation_mode == "llm" and model_descriptor is None:
+        raise ValueError("LLM cache identity requires a model descriptor and revision")
+    if generation_mode == "deterministic" and (
+        model_descriptor is not None or model_revision is not None
+    ):
+        raise ValueError("deterministic cache identity cannot include a model")
+    model = None
+    if model_descriptor is not None:
+        from llm_client import ProviderDescriptor
+
+        if not isinstance(model_descriptor, ProviderDescriptor):
+            raise TypeError("model_descriptor must be a ProviderDescriptor")
+        if not model_revision:
+            raise ValueError("model_revision is required with a model descriptor")
+        model = {**model_descriptor.canonical(), "revision": model_revision}
     identity = json.dumps(
-        [source.record.logical_id, source.record.sha256, version],
+        [source.record.relative_path, source.record.sha256, version, generation_mode, model],
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")
@@ -346,13 +393,18 @@ Return ONLY the context sentence. No preamble."""
 
 
 def _artifact_bytes(
-    source: CapturedSource, context: str, key: str, extractor_version: str
+    source: CapturedSource,
+    context: str,
+    key: str,
+    extractor_version: str,
+    generation: Mapping[str, object],
 ) -> bytes:
     metadata = source.metadata
     payload = {
         "context": context,
         "extractor_version": extractor_version,
         "key": key,
+        "generation": generation,
         "source": {
             "authority": metadata.authority,
             "confidence": metadata.confidence,
@@ -388,6 +440,7 @@ def build_snapshot_contexts(
     max_prompt_chars: int | None = None,
     disclosure_policy: str | None = None,
     model_descriptor: object | None = None,
+    model_revision: str | None = None,
 ) -> list[dict[str, object]]:
     """Publish exact-snapshot context artifacts into an unpublished generation."""
     if not isinstance(snapshot, CorpusSnapshot):
@@ -403,6 +456,16 @@ def build_snapshot_contexts(
             disclosure_policy=disclosure_policy,
             model_descriptor=model_descriptor,
         )
+        if model_descriptor is None or not model_revision:
+            raise ValueError("LLM generation requires a model descriptor and revision")
+    generation_identity: dict[str, object] = {
+        "mode": "llm" if use_llm else "deterministic",
+        "model": (
+            {**model_descriptor.canonical(), "revision": model_revision}
+            if model_descriptor is not None
+            else None
+        ),
+    }
     generation = _real_directory(generation_dir, "generation directory")
     output = generation / "contextual"
     try:
@@ -419,7 +482,13 @@ def build_snapshot_contexts(
     try:
         _real_directory(staging, "contextual staging directory")
         for source in sources:
-            key = context_artifact_key(source, extractor_version=version)
+            key = context_artifact_key(
+                source,
+                extractor_version=version,
+                generation_mode=str(generation_identity["mode"]),
+                model_descriptor=model_descriptor,
+                model_revision=model_revision,
+            )
             context = generate_context_for_source(
                 source,
                 use_llm=use_llm,
@@ -429,7 +498,7 @@ def build_snapshot_contexts(
                 disclosure_policy=disclosure_policy,
                 model_descriptor=model_descriptor,
             )
-            raw = _artifact_bytes(source, context, key, version)
+            raw = _artifact_bytes(source, context, key, version, generation_identity)
             name = f"{key}.json"
             with (staging / name).open("xb") as artifact:
                 artifact.write(raw)
@@ -458,23 +527,69 @@ def build_snapshot_contexts(
     return descriptors
 
 
-def legacy_context_cache_path(slug: str, *, source_sha256: str | None = None) -> Path:
+def legacy_context_cache_path(
+    slug: str,
+    *,
+    source_sha256: str | None = None,
+    logical_path: str | None = None,
+    extractor_version: str = CONTEXT_EXTRACTOR_VERSION,
+    generation_mode: str = "deterministic",
+    model_descriptor: Mapping[str, object] | None = None,
+    model_revision: str | None = None,
+) -> Path:
     """Return the legacy mutable-cache path for a contextual entry.
 
     When ``source_sha256`` is provided the path is hash-suffixed so stale
     contextual entries invalidate on content changes (Task 15 contract).
     """
+    safe_slug = _legacy_slug(slug)
     if not source_sha256:
-        return CONTEXT_DIR / f"{slug}.ctx"
-    digest_input = f"{source_sha256}:{CONTEXT_EXTRACTOR_VERSION}".encode()
-    suffix = hashlib.sha256(digest_input).hexdigest()[:12]
-    return CONTEXT_DIR / f"{slug}.{suffix}.ctx"
+        return CONTEXT_DIR / f"{safe_slug}.ctx"
+    logical = _safe_logical_path(logical_path or f"{slug}.md")
+    identity = json.dumps(
+        [
+            logical,
+            source_sha256,
+            extractor_version,
+            generation_mode,
+            model_descriptor,
+            model_revision,
+        ],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    suffix = hashlib.sha256(identity).hexdigest()[:20]
+    return CONTEXT_DIR / f"{safe_slug}.{suffix}.ctx"
+
+
+def _safe_logical_path(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value)
+    posix = Path(normalized.replace("/", os.sep))
+    windows = PureWindowsPath(normalized)
+    parts = tuple(part for part in normalized.split("/") if part)
+    if (
+        not value
+        or normalized != value
+        or normalized != "/".join(parts)
+        or posix.is_absolute()
+        or windows.is_absolute()
+        or windows.drive
+        or any(part in {".", ".."} for part in parts)
+        or any(part.rstrip(". ") != part for part in parts)
+        or any(part.split(".", 1)[0].casefold() in _WINDOWS_RESERVED for part in parts)
+        or any("\\" in part or ":" in part or "\x00" in part for part in parts)
+    ):
+        raise ValueError("logical_path must be a normalized safe relative path")
+    return "/".join(parts)
 
 
 def generate_context(
     slug: str,
     use_llm: bool = True,
     source_sha256: str | None = None,
+    logical_path: str | None = None,
+    captured_bytes: bytes | None = None,
 ) -> str:
     """Legacy path-based context generation compatibility wrapper.
 
@@ -487,7 +602,10 @@ def generate_context(
     slug = _legacy_slug(slug)
     knowledge_root = Path(os.path.abspath(KNOWLEDGE_DIR))
     _validate_existing_ancestors(knowledge_root, "legacy knowledge directory")
-    page_path = knowledge_root / f"{slug}.md"
+    logical = _safe_logical_path(logical_path or f"{slug}.md")
+    page_path = knowledge_root.joinpath(*logical.split("/"))
+    if not page_path.resolve().is_relative_to(knowledge_root.resolve()):
+        raise PermissionError("legacy knowledge page is outside the knowledge root")
     try:
         page_metadata = page_path.lstat()
     except FileNotFoundError:
@@ -495,7 +613,10 @@ def generate_context(
     if _is_link_or_reparse(page_metadata) or not stat.S_ISREG(page_metadata.st_mode):
         raise PermissionError("legacy knowledge page must be a real file")
 
-    content = page_path.read_text(encoding="utf-8", errors="ignore")
+    raw = page_path.read_bytes() if captured_bytes is None else captured_bytes
+    if source_sha256 is not None and hashlib.sha256(raw).hexdigest() != source_sha256:
+        raise ValueError("captured source bytes do not match source_sha256")
+    content = raw.decode("utf-8", errors="strict")
     title, summary = _context_fields(content, slug)
 
     project = ""
@@ -553,21 +674,24 @@ def build_all_contexts(use_llm: bool = True, verbose: bool = True) -> dict:
         if md.name in SKIP_NAMES or "archive" in md.parts:
             continue
 
-        content = md.read_text(encoding="utf-8", errors="ignore")
+        try:
+            captured = md.read_bytes()
+            content = captured.decode("utf-8", errors="strict")
+        except (OSError, UnicodeDecodeError):
+            stats["errors"] += 1
+            continue
         if "status: superseded" in content or "status: archived" in content:
             stats["skipped"] += 1
             continue
 
         slug = md.stem
-        try:
-            source_sha256 = hashlib.sha256(md.read_bytes()).hexdigest()
-        except OSError:
-            source_sha256 = None
-        ctx_file = legacy_context_cache_path(slug, source_sha256=source_sha256)
-        legacy_file = legacy_context_cache_path(slug)
+        source_sha256 = hashlib.sha256(captured).hexdigest()
+        logical_path = md.relative_to(knowledge_root).as_posix()
+        ctx_file = legacy_context_cache_path(
+            slug, source_sha256=source_sha256, logical_path=logical_path
+        )
 
-        # Skip if hash-keyed context exists and page hasn't changed; fall
-        # back to legacy un-suffixed cache for migration compatibility.
+        # Hash-qualified reads and writes never consult stale unqualified entries.
         if ctx_file.exists():
             try:
                 if md.stat().st_mtime <= ctx_file.stat().st_mtime:
@@ -575,16 +699,14 @@ def build_all_contexts(use_llm: bool = True, verbose: bool = True) -> dict:
                     continue
             except OSError:
                 pass
-        elif legacy_file.exists():
-            try:
-                if md.stat().st_mtime <= legacy_file.stat().st_mtime:
-                    stats["skipped"] += 1
-                    continue
-            except OSError:
-                pass
-
         try:
-            ctx = generate_context(slug, use_llm=use_llm, source_sha256=source_sha256)
+            ctx = generate_context(
+                slug,
+                use_llm=use_llm,
+                source_sha256=source_sha256,
+                logical_path=logical_path,
+                captured_bytes=captured,
+            )
             if ctx:
                 atomic_write(ctx_file, ctx)
                 stats["generated"] += 1

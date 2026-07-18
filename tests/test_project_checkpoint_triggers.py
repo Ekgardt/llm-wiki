@@ -320,7 +320,7 @@ def test_handoff_is_bounded_and_contains_only_active_operational_fields():
     assert "sequence:42" in handoff
 
 
-def test_handoff_hard_limit_applies_to_long_values():
+def test_handoff_hard_limit_drops_complete_optional_items_without_slicing():
     projection = ProjectProjection(
         project="demo",
         goal={"goal": "g" * 4000},
@@ -329,6 +329,8 @@ def test_handoff_hard_limit_applies_to_long_values():
         last_applied_sequence=1,
     )
     handoff = build_handoff(projection, max_chars=300)
-    assert len(handoff) <= 300
+    assert len(handoff.encode()) <= 300
     assert "project:demo" in handoff
     assert "sequence:1" in handoff
+    assert "g" * 100 not in handoff
+    assert "handoff truncated" not in handoff
