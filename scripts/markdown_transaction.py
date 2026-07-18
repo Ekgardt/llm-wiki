@@ -86,6 +86,20 @@ _SQLITE_INT64_MAX = (1 << 63) - 1
 _UINT64_MODULUS = 1 << 64
 
 
+def _unsigned_filesystem_id(value: object) -> int:
+    """Normalize signed or unsigned OS stat representations to unsigned 64-bit."""
+    if type(value) is not int or not _SQLITE_INT64_MIN <= value < _UINT64_MODULUS:
+        raise ValueError("filesystem identity is not a 64-bit integer")
+    return value if value >= 0 else value + _UINT64_MODULUS
+
+
+def _stat_identity(metadata: object) -> tuple[int, int]:
+    return (
+        _unsigned_filesystem_id(getattr(metadata, "st_dev")),
+        _unsigned_filesystem_id(getattr(metadata, "st_ino")),
+    )
+
+
 def _encode_filesystem_id(value: object) -> int:
     """Map an unsigned filesystem ID bijectively onto SQLite's signed int64."""
     if type(value) is not int or not 0 <= value < _UINT64_MODULUS:
@@ -2855,7 +2869,7 @@ class MarkdownCoordinator:
         metadata = parent.stat(follow_symlinks=False)
         if not stat.S_ISDIR(metadata.st_mode) or _is_reparse_point(parent):
             raise RuntimeError(f"parent identity is not a stable directory: {parent}")
-        return metadata.st_dev, metadata.st_ino
+        return _stat_identity(metadata)
 
     def _capture_target(
         self, target: Path, *, max_before_bytes: int | None = None
@@ -2871,7 +2885,7 @@ class MarkdownCoordinator:
         descriptor = os.open(target.parent, flags)
         try:
             metadata = os.fstat(descriptor)
-            identity = (metadata.st_dev, metadata.st_ino)
+            identity = _stat_identity(metadata)
             content = self._read_bounded_from_parent(
                 descriptor, target.name, max_before_bytes
             )
@@ -2997,7 +3011,7 @@ class MarkdownCoordinator:
 
     @staticmethod
     def _same_capture_identity(left: os.stat_result, right: os.stat_result) -> bool:
-        return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+        return _stat_identity(left) == _stat_identity(right)
 
     @classmethod
     def _same_capture_snapshot(cls, left: os.stat_result, right: os.stat_result) -> bool:
@@ -3035,7 +3049,7 @@ class MarkdownCoordinator:
         descriptor = os.open(target.parent, flags)
         try:
             metadata = os.fstat(descriptor)
-            if (metadata.st_dev, metadata.st_ino) != expected:
+            if _stat_identity(metadata) != expected:
                 raise RuntimeError(f"parent identity mismatch for {row['path']}")
             yield target, descriptor
             if self._parent_identity(target.parent) != expected:

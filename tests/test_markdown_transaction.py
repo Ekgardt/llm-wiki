@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import inspect
+import json
 import os
 import sqlite3
 import stat
@@ -12,6 +13,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import markdown_transaction
 import pytest
@@ -89,6 +91,87 @@ def test_sqlite_filesystem_identity_encoding_round_trips_without_collisions(iden
     ) == 2
 
 
+def _stat_with_identity(metadata: os.stat_result, identity: tuple[int, int]) -> object:
+    return SimpleNamespace(
+        st_mode=metadata.st_mode,
+        st_ino=identity[1],
+        st_dev=identity[0],
+        st_size=metadata.st_size,
+        st_mtime_ns=metadata.st_mtime_ns,
+        st_ctime_ns=metadata.st_ctime_ns,
+        st_file_attributes=getattr(metadata, "st_file_attributes", 0),
+    )
+
+
+def test_read_normalizes_equivalent_signed_and_unsigned_stat_identities(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    target = vault / "knowledge/notes/page.md"
+    target.write_bytes(b"content")
+    coordinator = MarkdownCoordinator(vault, state_root)
+    identity = (11853635609087352826, (1 << 63) + 7)
+    encoded = tuple(markdown_transaction._encode_filesystem_id(value) for value in identity)
+    real_lstat = os.lstat
+    real_fstat = os.fstat
+    monkeypatch.setattr(
+        os,
+        "lstat",
+        lambda path: _stat_with_identity(real_lstat(path), identity),
+    )
+    monkeypatch.setattr(
+        os,
+        "fstat",
+        lambda descriptor: _stat_with_identity(real_fstat(descriptor), encoded),
+    )
+
+    assert coordinator._read_target(target) == b"content"
+
+
+def test_hash_normalizes_equivalent_signed_and_unsigned_stat_identities(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    target = vault / "knowledge/notes/page.md"
+    target.write_bytes(b"content")
+    coordinator = MarkdownCoordinator(vault, state_root)
+    identity = (11853635609087352826, (1 << 63) + 7)
+    encoded = tuple(markdown_transaction._encode_filesystem_id(value) for value in identity)
+    real_lstat = os.lstat
+    real_fstat = os.fstat
+    monkeypatch.setattr(
+        os,
+        "lstat",
+        lambda path: _stat_with_identity(real_lstat(path), identity),
+    )
+    monkeypatch.setattr(
+        os,
+        "fstat",
+        lambda descriptor: _stat_with_identity(real_fstat(descriptor), encoded),
+    )
+
+    assert coordinator._hash_bounded_target(target) == sha256_bytes(b"content")
+
+
+def test_prepare_apply_preserves_real_parent_identity(vault: Path, state_root: Path):
+    target = vault / "knowledge/notes/page.md"
+    target.write_bytes(b"before")
+    coordinator = MarkdownCoordinator(vault, state_root)
+    expected = coordinator._parent_identity(target.parent)
+
+    transaction = coordinator.prepare(
+        [MarkdownChange.replace("knowledge/notes/page.md", b"after")],
+        operation_id="real-parent-identity",
+    )
+
+    with sqlite3.connect(coordinator.database_path) as database:
+        persisted = database.execute(
+            'SELECT parent_device, parent_inode FROM "operation" WHERE transaction_id = ?',
+            (transaction.id,),
+        ).fetchone()
+    assert markdown_transaction._decode_parent_identity(persisted) == expected
+    assert coordinator.apply(transaction.id).state == "committed"
+    assert target.read_bytes() == b"after"
+
+
 def test_prepare_persists_unsigned_64_bit_parent_identity(
     vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -101,6 +184,7 @@ def test_prepare_persists_unsigned_64_bit_parent_identity(
         return path.read_bytes(), parent_identity
 
     monkeypatch.setattr(coordinator, "_capture_target", capture_with_unsigned_identity)
+    monkeypatch.setattr(coordinator, "_parent_identity", lambda path: parent_identity)
 
     transaction = coordinator.prepare(
         [MarkdownChange.replace("knowledge/notes/page.md", b"after")],
@@ -115,8 +199,14 @@ def test_prepare_persists_unsigned_64_bit_parent_identity(
     assert persisted == tuple(
         markdown_transaction._encode_filesystem_id(value) for value in parent_identity
     )
+    manifest = json.loads(
+        (state_root / "run/transactions" / transaction.id / "manifest.json").read_bytes()
+    )
+    assert (
+        manifest["operations"][0]["parent_device"],
+        manifest["operations"][0]["parent_inode"],
+    ) == parent_identity
 
-    monkeypatch.setattr(coordinator, "_parent_identity", lambda path: parent_identity)
     committed = coordinator.apply(transaction.id)
 
     assert committed.state == "committed"
