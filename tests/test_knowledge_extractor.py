@@ -104,6 +104,25 @@ def test_symbol_references_require_explicit_identity_and_observe_bare_ambiguity(
     ]
 
 
+def test_unindexed_bare_and_explicit_symbol_mentions_are_ambiguous_observations():
+    from knowledge_extractor import extract_knowledge
+
+    content = (
+        b"---\ntype: concept\n---\n# Calls\n"
+        b"Use `missing_name` and `scripts/api.py::missing`.\n"
+    )
+    result = extract_knowledge((_source("knowledge/notes/calls.md", content),))
+
+    assert not [row for row in result.assertions if row["edge_type"] == "REFERENCES_SYMBOL"]
+    assert [
+        (row["edge_type"], row["target_text"], row["reason"])
+        for row in result.observations
+    ] == [
+        ("REFERENCES_SYMBOL", "missing_name", "ambiguous_target"),
+        ("REFERENCES_SYMBOL", "scripts/api.py::missing", "ambiguous_target"),
+    ]
+
+
 def test_ambiguous_wikilinks_are_observations_and_work_is_bounded():
     from knowledge_extractor import extract_knowledge
 
@@ -183,6 +202,61 @@ def test_rejects_tampered_captured_sources_and_record_overflow():
         extract_knowledge((tampered,))
     with pytest.raises(ValueError, match="record ceiling"):
         extract_knowledge((source,), max_records=1)
+
+
+def test_adversarial_5000_links_stop_at_record_limit(monkeypatch):
+    import knowledge_extractor
+
+    content = b"---\ntype: concept\n---\n" + b" ".join(
+        f"[[missing-{index}]]".encode() for index in range(5000)
+    )
+    calls = 0
+    evidence = knowledge_extractor._evidence
+
+    def counted_evidence(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return evidence(*args, **kwargs)
+
+    monkeypatch.setattr(knowledge_extractor, "_evidence", counted_evidence)
+    with pytest.raises(ValueError, match="record ceiling"):
+        knowledge_extractor.extract_knowledge(
+            (_source("knowledge/notes/adversarial.md", content),),
+            max_records=20,
+        )
+    assert calls < 50
+
+
+def test_wikilink_and_mention_loops_honor_deadline_and_cancellation():
+    from knowledge_extractor import extract_knowledge
+
+    link_content = b"---\ntype: concept\n---\n" + b" ".join(
+        b"[[missing]]" for _ in range(100)
+    )
+    link_source = _source("knowledge/notes/bounded-links.md", link_content)
+    ticks = 0
+
+    def monotonic():
+        nonlocal ticks
+        ticks += 1
+        return float(ticks)
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        extract_knowledge((link_source,), deadline=10.0, monotonic=monotonic)
+
+    checks = 0
+    mention_content = b"---\ntype: concept\n---\n" + b" ".join(
+        b"`missing`" for _ in range(100)
+    )
+    mention_source = _source("knowledge/notes/bounded-mentions.md", mention_content)
+
+    def cancelled():
+        nonlocal checks
+        checks += 1
+        return checks >= 10
+
+    with pytest.raises(TimeoutError, match="cancel"):
+        extract_knowledge((mention_source,), cancelled=cancelled)
 
 
 def test_output_is_directly_accepted_by_evidence_graph_v1(tmp_path):

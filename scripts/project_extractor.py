@@ -28,6 +28,16 @@ def _check_deadline(deadline: float | None, monotonic: Callable[[], float]) -> N
         raise TimeoutError("project extraction deadline reached")
 
 
+def _check_stop(
+    deadline: float | None,
+    monotonic: Callable[[], float],
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    _check_deadline(deadline, monotonic)
+    if cancelled is not None and cancelled():
+        raise TimeoutError("project extraction cancelled")
+
+
 def extract_projects(
     sources: Sequence[CapturedSource],
     *,
@@ -35,6 +45,7 @@ def extract_projects(
     max_records: int = MAX_RECORDS,
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    cancelled: Callable[[], bool] | None = None,
 ) -> ExtractionResult:
     """Project journal projection for graph construction; never writes the journal."""
     if isinstance(sources, (bytes, str)) or not isinstance(sources, Sequence):
@@ -43,9 +54,11 @@ def extract_projects(
         raise ValueError("max_sources must be positive")
     if not isinstance(max_records, int) or isinstance(max_records, bool) or max_records < 1:
         raise ValueError("max_records must be positive")
+    if cancelled is not None and not callable(cancelled):
+        raise TypeError("cancelled must be callable")
     if len(sources) > min(max_sources, MAX_SOURCES):
         raise ValueError("project extraction source ceiling exceeded")
-    _check_deadline(deadline, monotonic)
+    _check_stop(deadline, monotonic, cancelled)
     paths = [item.record.relative_path for item in sources if isinstance(item, CapturedSource)]
     source_ids = [item.record.logical_id for item in sources if isinstance(item, CapturedSource)]
     if len(paths) != len(sources) or len(paths) != len(set(paths)) or len(source_ids) != len(set(source_ids)):
@@ -59,6 +72,11 @@ def extract_projects(
     occurrences: dict[str, dict[str, object]] = {}
     assertions: dict[str, dict[str, object]] = {}
     evidence: dict[str, dict[str, object]] = {}
+
+    def check_work() -> None:
+        _check_stop(deadline, monotonic, cancelled)
+        if sum(map(len, (nodes, occurrences, assertions, evidence))) >= record_limit:
+            raise ValueError("project extraction record ceiling exceeded")
 
     def relation(source: CapturedSource, source_node: str, edge: str, target: str, start: int, end: int) -> None:
         assertion_id = _identifier(
@@ -82,7 +100,7 @@ def extract_projects(
     for source in sorted(sources, key=lambda item: item.record.relative_path):
         if not isinstance(source, CapturedSource):
             raise TypeError("sources must contain CapturedSource values")
-        _check_deadline(deadline, monotonic)
+        check_work()
         path = source.record.relative_path
         if not path.endswith("/journal.md") or "/projects/" not in path:
             continue
@@ -92,6 +110,7 @@ def extract_projects(
         events = parse_journal_events(slug, source.content)
         search_start = 0
         for event in events:
+            check_work()
             encoded = canonical_json_bytes(event)
             event_start = source.content.find(encoded, search_start)
             if event_start < 0:
@@ -122,6 +141,7 @@ def extract_projects(
                 operations = delta[field]
                 assert isinstance(operations, list)
                 for operation in operations:
+                    check_work()
                     if operation["action"] != "upsert":
                         continue
                     value = str(operation["value"])
@@ -138,6 +158,7 @@ def extract_projects(
                     relation(source, checkpoint_id, edge, target_id, start, end)
 
             for event_id in event["evidence_event_ids"]:
+                check_work()
                 token = canonical_json_bytes(event_id)
                 start = source.content.find(token, event_start, event_end)
                 if start < 0:

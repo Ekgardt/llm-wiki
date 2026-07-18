@@ -20,6 +20,7 @@ MAX_RECORDS = 100_000
 _FRONTMATTER = re.compile(rb"\A---[ \t]*\r?\n(.*?)^---[ \t]*\r?\n", re.MULTILINE | re.DOTALL)
 _WIKILINK = re.compile(rb"\[\[([^\]|#]+?)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
 _CODE_SPAN = re.compile(rb"`([^`\r\n]+)`")
+_BARE_SYMBOL = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/#@+\-]{0,511}")
 
 
@@ -49,6 +50,16 @@ def _check_deadline(deadline: float | None, monotonic: Callable[[], float]) -> N
         raise ValueError("deadline must be a finite monotonic timestamp")
     if deadline is not None and monotonic() >= deadline:
         raise TimeoutError("knowledge extraction deadline reached")
+
+
+def _check_stop(
+    deadline: float | None,
+    monotonic: Callable[[], float],
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    _check_deadline(deadline, monotonic)
+    if cancelled is not None and cancelled():
+        raise TimeoutError("knowledge extraction cancelled")
 
 
 def _span(source: CapturedSource, start: int, end: int) -> dict[str, object]:
@@ -127,6 +138,12 @@ def _page_kind(page_type: object) -> str:
     return "knowledge-page"
 
 
+def _is_explicit_symbol_reference(reference: str) -> bool:
+    return reference.startswith(("scip-", "symbol:")) or (
+        "/" in reference and ("::" in reference or ":" in reference or "#" in reference)
+    )
+
+
 def _assertion(record_id: str, source: str, edge: str, target: str, authority: str) -> dict[str, object]:
     return {
         "assertion_id": record_id,
@@ -149,6 +166,7 @@ def extract_knowledge(
     max_records: int = MAX_RECORDS,
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    cancelled: Callable[[], bool] | None = None,
 ) -> ExtractionResult:
     """Extract deterministic graph rows without reading or mutating live files."""
     from claims import parse_claim_ledger
@@ -159,9 +177,11 @@ def extract_knowledge(
         raise ValueError("max_sources must be positive")
     if not isinstance(max_records, int) or isinstance(max_records, bool) or max_records < 1:
         raise ValueError("max_records must be positive")
+    if cancelled is not None and not callable(cancelled):
+        raise TypeError("cancelled must be callable")
     if len(sources) > min(max_sources, MAX_SOURCES):
         raise ValueError("knowledge extraction source ceiling exceeded")
-    _check_deadline(deadline, monotonic)
+    _check_stop(deadline, monotonic, cancelled)
     ordered = sorted(sources, key=lambda item: item.record.relative_path)
     if any(not isinstance(item, CapturedSource) for item in ordered):
         raise TypeError("sources must contain CapturedSource values")
@@ -182,7 +202,7 @@ def extract_knowledge(
     page_by_path: dict[str, str] = {}
     aliases: dict[str, list[str]] = {}
     for source in ordered:
-        _check_deadline(deadline, monotonic)
+        _check_stop(deadline, monotonic, cancelled)
         metadata, _match = _frontmatter(source)
         path = source.record.relative_path
         page_id = _identifier("page", path)
@@ -196,6 +216,11 @@ def extract_knowledge(
     assertions: dict[str, dict[str, object]] = {}
     evidence: dict[str, dict[str, object]] = {}
     observations: dict[str, dict[str, object]] = {}
+
+    def check_work() -> None:
+        _check_stop(deadline, monotonic, cancelled)
+        if sum(map(len, (nodes, occurrences, assertions, evidence, observations))) >= record_limit:
+            raise ValueError("knowledge extraction record ceiling exceeded")
 
     def add_relation(
         source: CapturedSource,
@@ -235,7 +260,7 @@ def extract_knowledge(
         evidence[str(row["evidence_id"])] = row
 
     for source in ordered:
-        _check_deadline(deadline, monotonic)
+        check_work()
         path = source.record.relative_path
         metadata = metadata_by_path[path]
         page_id = page_by_path[path]
@@ -260,6 +285,7 @@ def extract_knowledge(
             add_relation(source, page_id, "BELONGS_TO_PROJECT", project_id, start, end, authority)
 
         for match in _WIKILINK.finditer(source.content):
+            check_work()
             target = match.group(1).decode("utf-8", errors="strict").strip()
             candidates = sorted(dict.fromkeys(aliases.get(target.removesuffix(".md").casefold(), [])))
             if len(candidates) == 1:
@@ -288,15 +314,22 @@ def extract_knowledge(
                 add_observation(source, page_id, "SUPERSEDES", target, "ambiguous_target" if candidates else "unresolved_reference", start, end)
 
         for match in _CODE_SPAN.finditer(source.content):
+            check_work()
             reference = match.group(1).decode("utf-8", errors="strict")
             target_node = symbols.get(reference)
             if target_node is None:
+                if _BARE_SYMBOL.fullmatch(reference) or _is_explicit_symbol_reference(reference):
+                    add_observation(
+                        source,
+                        page_id,
+                        "REFERENCES_SYMBOL",
+                        reference,
+                        "ambiguous_target",
+                        match.start(),
+                        match.end(),
+                    )
                 continue
-            explicit = (
-                reference.startswith(("scip-", "symbol:"))
-                or ("/" in reference and ("::" in reference or ":" in reference or "#" in reference))
-            )
-            if explicit:
+            if _is_explicit_symbol_reference(reference):
                 nodes.setdefault(target_node, _node(target_node, "symbol", "external-symbol/v1", reference))
                 add_relation(source, page_id, "REFERENCES_SYMBOL", target_node, match.start(), match.end(), authority)
             else:
@@ -306,6 +339,7 @@ def extract_knowledge(
         if ledger is not None:
             search_start = 0
             for record in ledger["claims"]:
+                check_work()
                 encoded = canonical_json_bytes(record)
                 start = source.content.find(encoded, search_start)
                 if start < 0:
