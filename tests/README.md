@@ -4,7 +4,7 @@ Small pytest-based suite covering the critical scenarios surfaced by four rounds
 
 ## Coverage
 
-The suite currently has **2503 tests**. Highlights:
+The suite currently has **2560 tests**. Highlights:
 
 | Test file | Guards against |
 |---|---|
@@ -68,7 +68,7 @@ pytest tests/
   - `MEMORY_LLM_PROVIDER` → `fake` (no live LLM calls)
   - a skeleton `state.json` if it doesn't exist yet
 
-No pre-configuration required. Current collection: 2503 tests.
+No pre-configuration required. Current collection: 2560 tests.
 
 All tests are self-contained and use `tmp_path` + state snapshots, so running them does not mutate the vault permanently. The compile-failure test briefly flips `state.json::last_compile_status` and restores it via fixture.
 
@@ -103,4 +103,3 @@ This switches conftest to `setdefault` semantics so a pre-set `LLM_WIKI_STATE_RO
 ## If you add a test
 
 Name it `test_<feature>_<invariant>.py`. Start the docstring with "Regression test:" and reference the round/finding that motivated it. Keep the test self-contained — no cross-file fixtures beyond `conftest.py`'s path setup.
-

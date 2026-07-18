@@ -324,6 +324,103 @@ def test_every_resolved_assertion_requires_nonempty_half_open_evidence(tmp_path)
     evidence_graph.create_generation_database(tmp_path / "half-open.sqlite3", **records)
 
 
+def test_resolved_literal_assertion_is_valid(tmp_path):
+    import evidence_graph
+
+    records = _records()
+    records["assertions"].append(
+        {
+            "assertion_id": "literal",
+            "source_node_id": "caller",
+            "edge_type": "RETURNS",
+            "target_node_id": None,
+            "literal": {"type": "str"},
+            "confidence": "high",
+            "authority": "ai-derived",
+            "resolution": "resolved",
+            "extractor": "python/v1",
+        }
+    )
+    records["evidence"].append(
+        {
+            "evidence_id": "ev-literal",
+            "assertion_id": "literal",
+            "observation_id": None,
+            "source_id": "src-code",
+            "byte_start": 0,
+            "byte_end": 3,
+            "span_sha256": _sha(records["source_bytes"]["src-code"][:3]),
+        }
+    )
+
+    evidence_graph.create_generation_database(tmp_path / "literal.sqlite3", **records)
+    graph = evidence_graph.EvidenceGraph(tmp_path / "literal.sqlite3", state_root=tmp_path)
+    graph.close()
+
+
+def test_resolved_node_assertion_requires_a_concrete_target(tmp_path):
+    import evidence_graph
+
+    records = _records()
+    records["assertions"][0].update(target_node_id=None, literal=None)
+
+    with pytest.raises(ValueError, match="target node or literal"):
+        evidence_graph.create_generation_database(tmp_path / "missing-target.sqlite3", **records)
+
+
+def test_unresolved_or_ambiguous_assertions_use_observations_instead(tmp_path):
+    import evidence_graph
+
+    for resolution in ("unresolved", "ambiguous"):
+        records = _records()
+        records["assertions"][0].update(
+            resolution=resolution,
+            target_node_id=None,
+            literal=None,
+        )
+        with pytest.raises(ValueError, match="observation|resolved"):
+            evidence_graph.create_generation_database(
+                tmp_path / f"{resolution}.sqlite3", **records
+            )
+
+
+@pytest.mark.parametrize(
+    "occurrence",
+    [
+        {"byte_start": 0, "byte_end": 13, "line_start": 2, "line_end": 2},
+        {"byte_start": 0, "byte_end": 13, "line_start": 1, "line_end": 2},
+        {"byte_start": 0, "byte_end": 14, "line_start": 1, "line_end": 1},
+        {"byte_start": 4, "byte_end": 4, "line_start": 1, "line_end": 1},
+    ],
+)
+def test_occurrence_lines_must_exactly_match_nonempty_source_byte_span(tmp_path, occurrence):
+    import evidence_graph
+
+    records = _records()
+    records["occurrences"][0].update(occurrence)
+
+    with pytest.raises(ValueError, match="occurrence.*line|non-empty|range"):
+        evidence_graph.create_generation_database(tmp_path / "bad-lines.sqlite3", **records)
+
+
+def test_multiline_occurrence_uses_exact_half_open_byte_line_mapping(tmp_path):
+    import evidence_graph
+
+    records = _records()
+    records["occurrences"][0].update(
+        byte_start=4,
+        byte_end=20,
+        line_start=1,
+        line_end=2,
+    )
+
+    evidence_graph.create_generation_database(tmp_path / "multiline.sqlite3", **records)
+
+    records = _records()
+    records["occurrences"][0].update(byte_end=14, line_start=1, line_end=2)
+    evidence_graph.create_generation_database(tmp_path / "newline-end.sqlite3", **records)
+
+
 def test_evidence_source_binding_is_verified(tmp_path):
     import evidence_graph
 
