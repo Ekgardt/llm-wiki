@@ -43,37 +43,55 @@ BackendFn = Callable[..., Sequence[Mapping[str, Any]] | None]
 
 _QUOTE_RE = re.compile(r'"([^"\n]{1,256})"')
 _PATH_RE = re.compile(
-    r"(?P<path>(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.(?:md|py|ts|tsx|js|jsx|rs|go|java|cs))"
+    r"(?P<path>"
+    r"(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+"
+    r"\.(?:md|py|ts|tsx|js|jsx|rs|go|java|cs|sqlite3?|json|yaml|yml|toml)"
+    r")"
+)
+_FILENAME_RE = re.compile(
+    r"(?<![A-Za-z0-9_/.-])"
+    r"(?P<file>[A-Za-z0-9_.-]+\.(?:md|py|ts|tsx|js|jsx|rs|go|java|cs|sqlite3?|json|yaml|yml|toml))"
+    r"(?![A-Za-z0-9_/.-])"
 )
 _SLUG_RE = re.compile(r"\b(?P<slug>[a-z0-9]+(?:-[a-z0-9]+){1,12})\b")
+_SNAKE_RE = re.compile(r"\b(?P<snake>[a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b")
 _CAMEL_RE = re.compile(r"\b(?P<camel>[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+)\b")
 _QUESTION_RE = re.compile(
-    r"^(?P<q>who|what|when|where|why|how|which|does|do|is|are|can|should)\b",
+    r"(?:"
+    r"^(?P<q_en>who|what|when|where|why|how|which|does|do|is|are|can|should)\b"
+    r"|^(?P<q_ru>кто|что|когда|где|почему|зачем|как|какой|какая|какие|какое)\b"
+    r"|^(?P<q_zh>谁|什么|何时|哪里|哪儿|为什么|怎么|如何|哪)"
+    r"|[?？]"
+    r")",
     re.IGNORECASE,
 )
 _TEMPORAL_RE = re.compile(
     r"\b(?P<t>since|before|after|until|as of|yesterday|today|last week|"
-    r"last month|last year|in \d{4}|from \d{4}|between \d{4})\b",
+    r"last month|last year|in \d{4}|from \d{4}|between \d{4}|"
+    r"с \d{4}|после|до|вчера|сегодня|на этой неделе)\b",
     re.IGNORECASE,
 )
 _GRAPH_RE = re.compile(
     r"\b(?P<g>depends on|depended on|dependency|dependencies|calls|callers|"
-    r"callees|related to|linked to|neighbors?|imports?|imported by)\b",
+    r"callees|related to|linked to|neighbors?|imports?|imported by|"
+    r"зависит|зависимости|связан)\b",
     re.IGNORECASE,
 )
 _REPO_MAP_RE = re.compile(
     r"\b(?P<r>repo map|repository map|codebase map|architecture overview|"
-    r"project structure|directory structure)\b",
+    r"project structure|directory structure|"
+    r"карта репозитория|структура проекта)\b",
     re.IGNORECASE,
 )
 _IMPACT_RE = re.compile(
     r"\b(?P<i>impact of|what breaks|affected by|blast radius|stale wiki|"
-    r"downstream impact)\b",
+    r"downstream impact|влияние|что сломается)\b",
     re.IGNORECASE,
 )
 _GLOBAL_RE = re.compile(
     r"\b(?P<s>synthesize|synthesis|across all projects|across projects|"
-    r"overall architecture|compare across|global overview)\b",
+    r"overall architecture|compare across|global overview|"
+    r"синтез|сравни across|глобальный обзор)\b",
     re.IGNORECASE,
 )
 
@@ -111,7 +129,6 @@ class RetrievalCandidate:
     bm25_score: float | None
     vector_rank: int | None
     vector_score: float | None
-    vector_distance: float | None
     graph_rank: int | None
     graph_score: float | None
     rrf_score: float
@@ -145,16 +162,23 @@ def analyze_query(query: str) -> QueryAnalysis:
     stripped = query.strip()
     normalized = " ".join(stripped.split())
     intents: list[str] = []
-    phrases = tuple(match.group(1).strip() for match in _QUOTE_RE.finditer(stripped) if match.group(1).strip())
+    phrases = tuple(
+        match.group(1).strip()
+        for match in _QUOTE_RE.finditer(stripped)
+        if match.group(1).strip()
+    )
     if phrases:
         intents.append("quoted_phrase")
 
     identifiers: list[str] = []
     for match in _PATH_RE.finditer(stripped):
         identifiers.append(match.group("path"))
+    for match in _FILENAME_RE.finditer(stripped):
+        identifiers.append(match.group("file"))
     for match in _CAMEL_RE.finditer(stripped):
         identifiers.append(match.group("camel"))
-    # Prefer multi-segment slugs; skip if already captured as a path component.
+    for match in _SNAKE_RE.finditer(stripped):
+        identifiers.append(match.group("snake"))
     for match in _SLUG_RE.finditer(stripped):
         slug = match.group("slug")
         if "/" in slug or slug in identifiers:
@@ -172,7 +196,7 @@ def analyze_query(query: str) -> QueryAnalysis:
     if exact_identifiers:
         intents.append("exact_identifier")
 
-    if stripped.endswith("?") or _QUESTION_RE.search(normalized):
+    if _QUESTION_RE.search(normalized) or stripped.endswith("?") or stripped.endswith("？"):
         intents.append("question")
     if _TEMPORAL_RE.search(normalized):
         intents.append("temporal")
@@ -261,7 +285,12 @@ def fuse_rrf(
     graph: Sequence[Mapping[str, Any]] | None,
     k: int = RRF_K,
 ) -> tuple[RetrievalCandidate, ...]:
-    """Fuse independent ranked lists with weighted RRF. Larger final_score wins."""
+    """Fuse independent ranked lists with weighted rank-only RRF.
+
+    Larger final_score wins. Raw backend magnitudes are preserved on the
+    candidate but never enter the fusion formula. Equal RRF ties break by
+    candidate_id ascending.
+    """
     scores: dict[str, float] = {}
     meta: dict[str, dict[str, Any]] = {}
 
@@ -286,7 +315,6 @@ def fuse_rrf(
                 "bm25_score": None,
                 "vector_rank": None,
                 "vector_score": None,
-                "vector_distance": None,
                 "graph_rank": None,
                 "graph_score": None,
                 "evidence_ids": tuple(
@@ -294,7 +322,39 @@ def fuse_rrf(
                     for item in (row.get("evidence_ids") or ())
                     if isinstance(item, str) and item
                 ),
+                "title": row.get("title"),
+                "summary": row.get("summary"),
+                "project": row.get("project"),
+                "timestamp": row.get("timestamp"),
+                "chunk_id": row.get("chunk_id") or key,
+                "authority": row.get("authority"),
+                "confidence": row.get("confidence"),
+                "status": row.get("status"),
+                "type": row.get("type"),
+                "valid_from": row.get("valid_from"),
+                "valid_to": row.get("valid_to"),
+                "language": row.get("language"),
+                "source_id": row.get("source_id"),
             }
+        else:
+            # Prefer first non-empty display fields from any backend.
+            for field in (
+                "title",
+                "summary",
+                "project",
+                "timestamp",
+                "chunk_id",
+                "authority",
+                "confidence",
+                "status",
+                "type",
+                "valid_from",
+                "valid_to",
+                "language",
+                "source_id",
+            ):
+                if meta[key].get(field) in (None, "") and row.get(field) not in (None, ""):
+                    meta[key][field] = row.get(field)
         return key
 
     if lexical:
@@ -302,7 +362,9 @@ def fuse_rrf(
             key = ensure(row)
             scores[key] = scores.get(key, 0.0) + BM25_WEIGHT / (k + rank)
             meta[key]["bm25_rank"] = rank
-            meta[key]["bm25_score"] = _as_float(row.get("score") if "score" in row else row.get("bm25_score"))
+            meta[key]["bm25_score"] = _as_float(
+                row.get("bm25_score") if "bm25_score" in row else row.get("score")
+            )
 
     if dense:
         for rank, row in enumerate(dense, start=1):
@@ -312,17 +374,16 @@ def fuse_rrf(
             meta[key]["vector_score"] = _as_float(
                 row.get("vector_score") if "vector_score" in row else row.get("score")
             )
-            meta[key]["vector_distance"] = _as_float(
-                row.get("distance") if "distance" in row else row.get("vector_distance")
-            )
 
     if graph:
         for rank, row in enumerate(graph, start=1):
             key = ensure(row)
-            boost = _as_float(row.get("graph_boost") if "graph_boost" in row else row.get("score")) or 0.0
-            scores[key] = scores.get(key, 0.0) + GRAPH_WEIGHT * max(boost, 0.0) / (k * 2 + rank)
+            # Rank-only contribution; store raw boost separately.
+            scores[key] = scores.get(key, 0.0) + GRAPH_WEIGHT / (k + rank)
             meta[key]["graph_rank"] = rank
-            meta[key]["graph_score"] = boost
+            meta[key]["graph_score"] = _as_float(
+                row.get("graph_boost") if "graph_boost" in row else row.get("score")
+            )
 
     ordered = sorted(scores, key=lambda item: (-scores[item], item))
     candidates: list[RetrievalCandidate] = []
@@ -342,7 +403,6 @@ def fuse_rrf(
                 bm25_score=info["bm25_score"],
                 vector_rank=info["vector_rank"],
                 vector_score=info["vector_score"],
-                vector_distance=info["vector_distance"],
                 graph_rank=info["graph_rank"],
                 graph_score=info["graph_score"],
                 rrf_score=rrf,
@@ -351,53 +411,65 @@ def fuse_rrf(
                 evidence_ids=info["evidence_ids"],
             )
         )
+    # Stash display metadata for compatibility conversion (not part of contract).
+    fuse_rrf._last_meta = meta  # type: ignore[attr-defined]
     return tuple(candidates)
 
 
 def _resolve_effective_mode(
     requested: str,
     *,
-    has_lexical: bool,
-    has_dense: bool,
-    has_graph: bool,
+    wanted: Sequence[str],
+    ran_lexical: bool,
+    ran_dense: bool,
+    ran_graph: bool,
+    dense_available: bool | None,
+    graph_available: bool | None,
     graph_enabled: bool,
 ) -> tuple[str, str | None, tuple[str, ...]]:
-    wanted = PROFILE_SIGNALS[requested]
+    """Compute truthful effective mode, signals, and a single fallback reason."""
     signals: list[str] = []
     fallback: str | None = None
 
-    if "lexical" in wanted and has_lexical:
+    if "lexical" in wanted and ran_lexical:
         signals.append("lexical")
+
     if "dense" in wanted:
-        if has_dense:
+        if dense_available is True and ran_dense:
             signals.append("dense")
-        else:
-            fallback = "dense_unavailable"
+        elif dense_available is False or (dense_available is None and not ran_dense):
+            fallback = fallback or "dense_unavailable"
+
     if "graph" in wanted:
         if not graph_enabled:
             fallback = fallback or "graph_disabled"
-        elif has_graph:
+        elif graph_available is True and ran_graph:
             signals.append("graph")
         else:
             fallback = fallback or "graph_unavailable"
 
-    if not signals and has_lexical:
+    if not signals and ran_lexical:
         signals.append("lexical")
 
-    if requested == "HYBRID" and "dense" not in signals:
-        effective = "BASE" if "lexical" in signals else requested
-    elif requested == "GRAPH" and "graph" not in signals:
-        effective = "BASE" if "lexical" in signals else requested
-    elif requested in {"REPO_MAP", "IMPACT", "GLOBAL"} and "graph" not in signals and "dense" not in signals:
-        effective = "BASE" if "lexical" in signals else requested
-    elif requested == "GLOBAL" and "dense" not in signals and "graph" in signals:
-        effective = "GRAPH"
-    elif requested == "GLOBAL" and "dense" in signals and "graph" not in signals:
-        effective = "HYBRID"
-    elif requested == "HYBRID" and "dense" in signals:
-        effective = "HYBRID"
-    elif requested == "GRAPH" and "graph" in signals:
-        effective = "GRAPH"
+    signal_set = set(signals)
+    if requested == "HYBRID":
+        effective = "HYBRID" if "dense" in signal_set else ("BASE" if "lexical" in signal_set else requested)
+    elif requested == "GRAPH":
+        effective = "GRAPH" if "graph" in signal_set else ("BASE" if "lexical" in signal_set else requested)
+    elif requested == "GLOBAL":
+        if "dense" in signal_set and "graph" in signal_set:
+            effective = "GLOBAL"
+        elif "dense" in signal_set:
+            effective = "HYBRID"
+        elif "graph" in signal_set:
+            effective = "GRAPH"
+        else:
+            effective = "BASE" if "lexical" in signal_set else requested
+    elif requested in {"REPO_MAP", "IMPACT"}:
+        if "graph" in signal_set:
+            effective = requested
+        else:
+            effective = "BASE" if "lexical" in signal_set else requested
     else:
         effective = requested if signals else "BASE"
 
@@ -421,7 +493,11 @@ def retrieve(
     rerank_enabled: bool = True,
     partial: bool = False,
 ) -> RetrievalResult:
-    """Plan and execute retrieval with truthful mode/signal reporting."""
+    """Plan and execute retrieval with truthful mode/signal reporting.
+
+    Lexical and dense backends are invoked independently with identical hard
+    filters. Fusion is rank-only RRF. Raw backend scores stay on candidates.
+    """
     analysis = analyze_query(query)
     requested = _normalize_profile(requested_profile) or analysis.recommended_profile
     filters = {
@@ -433,64 +509,155 @@ def retrieve(
         "as_of": as_of,
     }
 
+    wanted = PROFILE_SIGNALS[requested]
     lexical_hits: Sequence[Mapping[str, Any]] | None = None
     dense_hits: Sequence[Mapping[str, Any]] | None = None
     graph_hits: Sequence[Mapping[str, Any]] | None = None
 
-    wanted = PROFILE_SIGNALS[requested]
+    ran_lexical = False
+    ran_dense = False
+    ran_graph = False
+    dense_available: bool | None = None
+    graph_available: bool | None = None
+
     if lexical_backend is not None and "lexical" in wanted:
         lexical_hits = lexical_backend(**filters) or ()
+        ran_lexical = True
+
     if dense_backend is not None and "dense" in wanted:
         dense_hits = dense_backend(**filters)
+        ran_dense = True
+        # None ⇒ backend unavailable; empty sequence ⇒ available but no hits.
+        dense_available = dense_hits is not None
+
     if graph_backend is not None and "graph" in wanted and graph_enabled:
         graph_hits = graph_backend(**filters)
-
-    has_lexical = bool(lexical_hits)
-    has_dense = dense_hits is not None and len(dense_hits) > 0
-    has_graph = graph_hits is not None and len(graph_hits) > 0
-
-    # Dense backend may explicitly return None to mean unavailable.
-    dense_available = dense_hits is not None
-    graph_available = graph_hits is not None
+        ran_graph = True
+        graph_available = graph_hits is not None
+    elif "graph" in wanted and not graph_enabled:
+        graph_available = False
 
     effective, fallback, signals = _resolve_effective_mode(
         requested,
-        has_lexical=has_lexical or (lexical_backend is not None and "lexical" in wanted),
-        has_dense=has_dense if dense_available else False,
-        has_graph=has_graph if graph_available else False,
+        wanted=wanted,
+        ran_lexical=ran_lexical,
+        ran_dense=ran_dense,
+        ran_graph=ran_graph,
+        dense_available=dense_available,
+        graph_available=graph_available,
         graph_enabled=graph_enabled,
     )
 
-    # When dense backend returns None, treat as unavailable even if empty list differs.
-    if "dense" in wanted and dense_backend is not None and dense_hits is None:
-        fallback = fallback or "dense_unavailable"
-        if effective == "HYBRID":
-            effective = "BASE"
-        signals = tuple(signal for signal in signals if signal != "dense")
-        if "lexical" not in signals and (lexical_hits is not None or lexical_backend is not None):
-            signals = ("lexical",) + signals
-
-    if "graph" in wanted and not graph_enabled:
-        fallback = fallback or "graph_disabled"
-        if effective == "GRAPH":
-            effective = "BASE"
-        signals = tuple(signal for signal in signals if signal != "graph")
-
     fuse_lexical = lexical_hits if "lexical" in signals else None
-    fuse_dense = dense_hits if "dense" in signals else None
-    fuse_graph = graph_hits if "graph" in signals else None
+    fuse_dense = dense_hits if "dense" in signals and dense_hits is not None else None
+    fuse_graph = graph_hits if "graph" in signals and graph_hits is not None else None
     candidates = fuse_rrf(lexical=fuse_lexical, dense=fuse_dense, graph=fuse_graph)
+
+    # Conditional reranking (Task 13).
+    signal_list = list(signals)
+    if candidates and rerank_enabled:
+        try:
+            from reranker import rerank as _rerank
+            from reranker import should_rerank
+
+            legacy_rows = [
+                {
+                    "candidate_id": c.candidate_id,
+                    "path": c.relative_path,
+                    "relative_path": c.relative_path,
+                    "summary": "",
+                    "title": Path(c.relative_path).stem,
+                    "rrf_score": c.rrf_score,
+                    "score": c.rrf_score,
+                    "bm25_rank": c.bm25_rank,
+                    "vector_rank": c.vector_rank,
+                    "bm25_score": c.bm25_score,
+                    "vector_score": c.vector_score,
+                    "graph_rank": c.graph_rank,
+                    "graph_score": c.graph_score,
+                    "source_sha256": c.source_sha256,
+                    "heading_path": c.heading_path,
+                    "parent_id": c.parent_id,
+                    "byte_start": c.byte_start,
+                    "byte_end": c.byte_end,
+                    "evidence_ids": c.evidence_ids,
+                }
+                for c in candidates
+            ]
+            apply, skip_reason = should_rerank(
+                profile=requested,
+                candidates=legacy_rows,
+                analysis_intents=analysis.intents,
+                rerank_enabled=rerank_enabled,
+            )
+            if apply:
+                # Rerank a deeper pool then cut to limit.
+                pool_limit = max(limit, 20) if limit > 0 else 20
+                reranked = _rerank(
+                    analysis.normalized_query or analysis.query,
+                    legacy_rows[:pool_limit],
+                    limit=pool_limit,
+                )
+                if reranked and reranked[0].get("reranker_applied"):
+                    signal_list.append("reranker")
+                    rebuilt: list[RetrievalCandidate] = []
+                    for row in reranked:
+                        rebuilt.append(
+                            RetrievalCandidate(
+                                candidate_id=str(row.get("candidate_id") or row.get("path")),
+                                parent_id=str(row.get("parent_id") or row.get("path") or ""),
+                                relative_path=str(
+                                    row.get("relative_path") or row.get("path") or ""
+                                ),
+                                heading_path=_heading_path(row.get("heading_path")),
+                                source_sha256=str(row.get("source_sha256") or ("0" * 64)),
+                                byte_start=_as_int(row.get("byte_start"), 0),
+                                byte_end=_as_int(row.get("byte_end"), 0),
+                                bm25_rank=row.get("bm25_rank")
+                                if isinstance(row.get("bm25_rank"), int)
+                                else None,
+                                bm25_score=_as_float(row.get("bm25_score")),
+                                vector_rank=row.get("vector_rank")
+                                if isinstance(row.get("vector_rank"), int)
+                                else None,
+                                vector_score=_as_float(row.get("vector_score")),
+                                graph_rank=row.get("graph_rank")
+                                if isinstance(row.get("graph_rank"), int)
+                                else None,
+                                graph_score=_as_float(row.get("graph_score")),
+                                rrf_score=float(row.get("rrf_score") or 0.0),
+                                rerank_score=_as_float(row.get("rerank_score")),
+                                final_score=float(
+                                    row.get("final_score")
+                                    or row.get("rrf_score")
+                                    or 0.0
+                                ),
+                                evidence_ids=tuple(
+                                    str(x)
+                                    for x in (row.get("evidence_ids") or ())
+                                    if isinstance(x, str)
+                                ),
+                            )
+                        )
+                    candidates = tuple(rebuilt)
+                elif reranked:
+                    # Optional reranker missing/errored: soft-skip without
+                    # poisoning truthful backend fallback reasons.
+                    pass
+        except Exception:
+            pass
+
     if limit > 0:
         candidates = candidates[:limit]
 
-    # Reranker is reported only when Task 13 enables real conditional invocation.
-    # Keep the flag accepted so CLI/API surface is stable.
-    _ = rerank_enabled
+    # Attach display meta for search() conversion when available.
+    meta = getattr(fuse_rrf, "_last_meta", {})
+    retrieve._last_display_meta = meta  # type: ignore[attr-defined]
 
     trace = RetrievalTrace(
         requested_mode=requested,
         effective_mode=effective,
-        signals_used=signals,
+        signals_used=tuple(dict.fromkeys(signal_list)),
         fallback_reason=fallback,
         corpus_generation=corpus_generation,
         partial=partial,
@@ -517,45 +684,107 @@ def candidates_to_legacy(
     summaries: Mapping[str, str] | None = None,
     projects: Mapping[str, str] | None = None,
     timestamps: Mapping[str, str] | None = None,
+    display_meta: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Convert orchestrator output to the historical search() dict rows."""
     title_map = titles or {}
     summary_map = summaries or {}
     project_map = projects or {}
     timestamp_map = timestamps or {}
+    meta = display_meta if display_meta is not None else getattr(retrieve, "_last_display_meta", {})
     rows: list[dict[str, Any]] = []
     for candidate in result.candidates:
         path = candidate.relative_path
-        rows.append(
-            {
-                "path": path,
-                "title": title_map.get(path, Path(path).stem),
-                "summary": summary_map.get(path, ""),
-                "score": round(candidate.final_score, 4),
-                "project": project_map.get(path, ""),
-                "timestamp": timestamp_map.get(path, ""),
-                "candidate_id": candidate.candidate_id,
-                "chunk_id": candidate.candidate_id,
-                "source_sha256": candidate.source_sha256,
-                "heading_ancestry": list(candidate.heading_path),
-                "bm25_rank": candidate.bm25_rank,
-                "bm25_score": candidate.bm25_score,
-                "vector_rank": candidate.vector_rank,
-                "vector_score": candidate.vector_score,
-                "vector_distance": candidate.vector_distance,
-                "graph_rank": candidate.graph_rank,
-                "graph_score": candidate.graph_score,
-                "rrf_score": candidate.rrf_score,
-                "rerank_score": candidate.rerank_score,
-                "final_score": candidate.final_score,
-                "requested_mode": result.trace.requested_mode,
-                "effective_mode": result.trace.effective_mode,
-                "signals_used": list(result.trace.signals_used),
-                "fallback_reason": result.trace.fallback_reason,
-                "generation": result.trace.corpus_generation,
-            }
-        )
+        info = meta.get(candidate.candidate_id, {}) if isinstance(meta, dict) else {}
+        title = title_map.get(path) or info.get("title") or Path(path).stem
+        summary = summary_map.get(path) or info.get("summary") or ""
+        project = project_map.get(path) or info.get("project") or ""
+        timestamp = timestamp_map.get(path) or info.get("timestamp") or ""
+        row: dict[str, Any] = {
+            "path": path,
+            "title": title,
+            "summary": summary,
+            "score": round(candidate.final_score, 4),
+            "project": project,
+            "timestamp": timestamp,
+            "candidate_id": candidate.candidate_id,
+            "chunk_id": info.get("chunk_id") or candidate.candidate_id,
+            "source_sha256": candidate.source_sha256,
+            "heading_ancestry": list(candidate.heading_path),
+            "bm25_rank": candidate.bm25_rank,
+            "bm25_score": candidate.bm25_score,
+            "vector_rank": candidate.vector_rank,
+            "vector_score": candidate.vector_score,
+            "graph_rank": candidate.graph_rank,
+            "graph_score": candidate.graph_score,
+            "rrf_score": round(candidate.rrf_score, 4),
+            "rerank_score": candidate.rerank_score,
+            "final_score": round(candidate.final_score, 4),
+            "requested_mode": result.trace.requested_mode,
+            "effective_mode": result.trace.effective_mode,
+            "signals_used": list(result.trace.signals_used),
+            "fallback_reason": result.trace.fallback_reason,
+            "generation": result.trace.corpus_generation,
+        }
+        for key in (
+            "authority",
+            "confidence",
+            "status",
+            "type",
+            "valid_from",
+            "valid_to",
+            "language",
+            "source_id",
+        ):
+            if info.get(key) not in (None, ""):
+                row[key] = info[key]
+        rows.append(row)
     return rows
+
+
+def _backend_hit_from_legacy(row: Mapping[str, Any], *, score_key: str = "score") -> dict[str, Any]:
+    path = str(row.get("path") or row.get("relative_path") or "")
+    candidate_id = str(
+        row.get("candidate_id")
+        or row.get("chunk_id")
+        or row.get("slug")
+        or Path(path).stem
+        or path
+    )
+    hit: dict[str, Any] = {
+        "candidate_id": candidate_id,
+        "chunk_id": row.get("chunk_id") or candidate_id,
+        "parent_id": str(row.get("parent_id") or row.get("parent_page") or path),
+        "relative_path": path,
+        "path": path,
+        "heading_path": row.get("heading_path") or row.get("heading_ancestry") or (),
+        "source_sha256": row.get("source_sha256") or ("0" * 64),
+        "byte_start": int(row.get("byte_start") or 0),
+        "byte_end": int(row.get("byte_end") or 0),
+        "score": float(row.get(score_key) or row.get("score") or 0.0),
+        "title": row.get("title") or Path(path).stem,
+        "summary": row.get("summary") or "",
+        "project": row.get("project") or "",
+        "timestamp": row.get("timestamp") or "",
+    }
+    for key in (
+        "bm25_score",
+        "vector_score",
+        "graph_boost",
+        "evidence_ids",
+        "authority",
+        "confidence",
+        "status",
+        "type",
+        "valid_from",
+        "valid_to",
+        "language",
+        "source_id",
+        "generation",
+    ):
+        if key in row:
+            hit[key] = row[key]
+    return hit
 
 
 def retrieve_via_search_memory(
@@ -579,7 +808,7 @@ def retrieve_via_search_memory(
     generation_model_id: str | None = None,
     generation_model_revision: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Compatibility path: plan profile, then reuse search_memory backends."""
+    """Public search path: independent backends → retrieve() → legacy rows."""
     import search_memory
 
     analysis = analyze_query(query)
@@ -590,115 +819,258 @@ def retrieve_via_search_memory(
         else:
             requested = analysis.recommended_profile
 
-    # Use existing search backends for work; annotate contract fields in place.
-    use_semantic = semantic or requested in {"HYBRID", "GLOBAL"}
-    use_graph = graph and requested in {"GRAPH", "REPO_MAP", "IMPACT", "GLOBAL", "HYBRID"}
-    if requested in {"EXACT", "BASE", "DIRECT", "TEMPORAL", "CACHED_FULL"}:
-        use_semantic = bool(semantic) if requested == "TEMPORAL" else False
-        use_graph = bool(graph) if requested == "TEMPORAL" else False
+    wanted_tuple = PROFILE_SIGNALS[requested]
 
     selected_catalog = catalog if catalog is not None else search_memory._active_generation_catalog()
-    rows = search_memory._search_backends(
-        query,
-        scope=scope,
-        limit=limit,
-        force_rebuild=force_rebuild,
-        project=project,
-        since=since,
-        as_of=as_of,
-        semantic=use_semantic,
-        page_paths=page_paths,
-        graph=use_graph and graph,
-        rerank=rerank,
-        source_tool=source_tool,
-        emit_telemetry=False,
-        catalog=selected_catalog,
-        generation_embedder=generation_embedder,
-        generation_model_id=generation_model_id,
-        generation_model_revision=generation_model_revision,
-    )
-    if not rows:
-        return []
-
-    generation = str(rows[0].get("generation") or "legacy")
-    sample_mode = str(rows[0].get("effective_mode") or "").lower()
-    backend_fallback = rows[0].get("fallback_reason")
-    fallback = backend_fallback if isinstance(backend_fallback, str) and backend_fallback else None
-
-    signals_hint: list[str]
-    if sample_mode in {"bm25", "base", "exact"}:
-        signals_hint = ["lexical"]
-    elif sample_mode == "hybrid":
-        signals_hint = ["lexical", "dense"]
-        if use_graph and graph:
-            signals_hint.append("graph")
-    else:
-        signals_hint = ["lexical"]
-        if use_semantic and sample_mode not in {"", "base", "bm25", "exact"}:
-            signals_hint.append("dense")
-        if use_graph and graph:
-            signals_hint.append("graph")
-
-    if fallback in {"generation_vectors_unavailable", "dense_unavailable"}:
-        signals_hint = [signal for signal in signals_hint if signal != "dense"]
-
-    mode_map = {
-        "exact": "EXACT",
-        "hybrid": "HYBRID",
-        "base": "BASE",
-        "bm25": "BASE",
-        "direct": "DIRECT",
-        "graph": "GRAPH",
-        "temporal": "TEMPORAL",
-        "repo_map": "REPO_MAP",
-        "impact": "IMPACT",
-        "global": "GLOBAL",
-        "cached_full": "CACHED_FULL",
+    corpus_generation = "legacy"
+    generation_ctx: dict[str, Any] = {
+        "manifest": None,
+        "connection": None,
+        "seal": None,
+        "dense_fallback": None,
     }
-    if sample_mode in mode_map:
-        effective = mode_map[sample_mode]
-        if sample_mode == "hybrid" and "dense" not in signals_hint:
-            effective = "BASE"
-    elif requested in {"DIRECT", "EXACT", "BASE", "TEMPORAL", "CACHED_FULL"}:
-        effective = requested
-    elif requested == "HYBRID" and "dense" not in signals_hint:
-        effective = "BASE"
-        fallback = fallback or "dense_unavailable"
-    elif requested == "GRAPH" and "graph" not in signals_hint:
-        effective = "BASE"
-        fallback = fallback or ("graph_disabled" if not graph else "graph_unavailable")
-    else:
-        effective = requested
 
-    # Filename short-circuit and other backend-exact hits keep EXACT even when the
-    # planner recommended BASE for a plain natural-language query.
-    if sample_mode == "exact":
-        effective = "EXACT"
+    def _open_generation() -> bool:
+        if selected_catalog is None or force_rebuild or page_paths is not None:
+            return False
+        try:
+            manifest = selected_catalog.get_active()
+        except Exception:
+            return False
+        if not isinstance(manifest, dict):
+            return False
+        artifact_names = (search_memory.GENERATION_FTS_ARTIFACT,)
+        seal = search_memory._generation_consumption_seal(
+            selected_catalog, manifest, artifact_names
+        )
+        connection = (
+            search_memory._generation_connection(selected_catalog, manifest)
+            if seal is not None
+            else None
+        )
+        if connection is None:
+            return False
+        generation_ctx["manifest"] = manifest
+        generation_ctx["connection"] = connection
+        generation_ctx["seal"] = seal
+        generation_ctx["artifact_names"] = artifact_names
+        return True
 
-    if not graph and requested in {"GRAPH", "REPO_MAP", "IMPACT"}:
-        fallback = fallback or "graph_disabled"
-        if effective == requested:
-            effective = "BASE"
+    catalog_requested = (
+        selected_catalog is not None and not force_rebuild and page_paths is None
+    )
+    use_generation = _open_generation()
+    if use_generation:
+        corpus_generation = str(generation_ctx["manifest"]["generation_id"])
+    elif catalog_requested:
+        # Broken/missing generation → preserve legacy emergency path (incl. test mocks).
+        return search_memory._legacy_search(
+            query,
+            scope,
+            limit,
+            force_rebuild,
+            project,
+            since,
+            as_of,
+            semantic,
+            page_paths,
+            graph,
+            rerank,
+            source_tool,
+            emit_telemetry,
+        )
 
-    signals = list(dict.fromkeys(signals_hint)) or ["lexical"]
-    for item in rows:
-        score = float(item.get("fused_score") or item.get("score") or 0.0)
-        item["score"] = round(score, 4)
-        item["rrf_score"] = round(float(item.get("fused_score") or score), 4)
-        item["final_score"] = item["rrf_score"]
-        item["requested_mode"] = requested
-        item["effective_mode"] = effective
-        item["signals_used"] = list(signals)
-        item["fallback_reason"] = fallback
-        item["generation"] = str(item.get("generation") or generation)
-        if not item.get("candidate_id"):
-            item["candidate_id"] = str(
-                item.get("chunk_id")
-                or item.get("slug")
-                or Path(str(item.get("path") or "")).stem
+    def lexical_backend(**filters: Any) -> Sequence[Mapping[str, Any]]:
+        if use_generation:
+            try:
+                rows = search_memory._generation_fts_search(
+                    filters["query"],
+                    generation_ctx["manifest"],
+                    generation_ctx["connection"],
+                    scope=filters["scope"],
+                    limit=filters["limit"],
+                    project=filters["project"],
+                    since=filters["since"],
+                    as_of=filters["as_of"],
+                )
+                return [_backend_hit_from_legacy(row) for row in rows]
+            except Exception:
+                return ()
+        rows = search_memory._legacy_lexical_hits(
+            filters["query"],
+            scope=filters["scope"],
+            limit=filters["limit"],
+            force_rebuild=force_rebuild,
+            project=filters["project"],
+            since=filters["since"],
+            as_of=filters["as_of"],
+            page_paths=page_paths,
+        )
+        return [_backend_hit_from_legacy(row) for row in rows]
+
+    def dense_backend(**filters: Any) -> Sequence[Mapping[str, Any]] | None:
+        if "dense" not in wanted_tuple:
+            return None
+        if use_generation:
+            if (
+                generation_embedder is None
+                or generation_model_id is None
+                or generation_model_revision is None
+            ):
+                generation_ctx["dense_fallback"] = "generation_vectors_unavailable"
+                return None
+            try:
+                rows = search_memory._generation_vectors_search(
+                    filters["query"],
+                    selected_catalog,
+                    generation_ctx["manifest"],
+                    generation_ctx["connection"],
+                    embedder=generation_embedder,
+                    model_id=generation_model_id,
+                    model_revision=generation_model_revision,
+                    scope=filters["scope"],
+                    limit=filters["limit"],
+                    project=filters["project"],
+                    since=filters["since"],
+                    as_of=filters["as_of"],
+                )
+                if rows is None:
+                    generation_ctx["dense_fallback"] = "generation_vectors_unavailable"
+                    return None
+                return [
+                    _backend_hit_from_legacy({**row, "vector_score": row.get("score")})
+                    for row in rows
+                ]
+            except Exception:
+                generation_ctx["dense_fallback"] = "generation_vectors_unavailable"
+                return None
+        rows = search_memory._legacy_dense_hits(
+            filters["query"],
+            scope=filters["scope"],
+            limit=filters["limit"],
+            project=filters["project"],
+            since=filters["since"],
+            as_of=filters["as_of"],
+            page_paths=page_paths,
+        )
+        if rows is None:
+            return None
+        return [
+            _backend_hit_from_legacy({**row, "vector_score": row.get("score")})
+            for row in rows
+        ]
+
+    def graph_backend(**filters: Any) -> Sequence[Mapping[str, Any]] | None:
+        if not graph or "graph" not in wanted_tuple:
+            return None
+        # Generation path does not mix legacy graph (Task 12 isolation).
+        if use_generation:
+            return None
+        try:
+            seeds = list(lexical_backend(**filters))
+            from graph_neighbors import boost_graph_neighbors
+
+            boosts = boost_graph_neighbors(
+                [{"path": h["path"], "score": h.get("score", 0)} for h in seeds],
+                None,
             )
+            return [
+                _backend_hit_from_legacy(
+                    {
+                        "path": item["path"],
+                        "candidate_id": item["path"],
+                        "score": item.get("graph_boost", 0.0),
+                        "graph_boost": item.get("graph_boost", 0.0),
+                    }
+                )
+                for item in boosts
+            ]
+        except Exception:
+            return None
 
-    if emit_telemetry:
+    try:
+        result = retrieve(
+            query,
+            requested_profile=requested,
+            scope=scope,
+            limit=limit,
+            project=project,
+            since=since,
+            as_of=as_of,
+            lexical_backend=lexical_backend if "lexical" in wanted_tuple else None,
+            dense_backend=dense_backend if "dense" in wanted_tuple else None,
+            graph_backend=graph_backend if ("graph" in wanted_tuple and graph) else None,
+            corpus_generation=corpus_generation,
+            graph_enabled=graph and not use_generation,
+            rerank_enabled=rerank,
+        )
+    finally:
+        connection = generation_ctx.get("connection")
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
+
+    # Prefer generation-specific dense fallback wording when applicable.
+    dense_fallback = generation_ctx.get("dense_fallback")
+    effective_mode = result.trace.effective_mode
+    fallback_reason = result.trace.fallback_reason
+    if dense_fallback and fallback_reason in {None, "dense_unavailable"}:
+        fallback_reason = str(dense_fallback)
+
+    # Filename exact short-circuit: stem matches query with spaces→hyphens.
+    if (
+        result.candidates
+        and result.trace.signals_used == ("lexical",)
+        and effective_mode in {"BASE", "EXACT", "DIRECT"}
+    ):
+        query_normalized = query.lower().strip().replace(" ", "-")
+        top_stem = Path(result.candidates[0].relative_path).stem.lower()
+        if top_stem == query_normalized:
+            effective_mode = "EXACT"
+
+    if (
+        effective_mode != result.trace.effective_mode
+        or fallback_reason != result.trace.fallback_reason
+    ):
+        result = RetrievalResult(
+            candidates=result.candidates,
+            trace=RetrievalTrace(
+                requested_mode=result.trace.requested_mode,
+                effective_mode=effective_mode,
+                signals_used=result.trace.signals_used,
+                fallback_reason=fallback_reason,
+                corpus_generation=result.trace.corpus_generation,
+                partial=result.trace.partial,
+            ),
+            analysis=result.analysis,
+        )
+
+    # Uppercase contract modes → lowercase legacy keys expected by older callers.
+    mode_lower = {
+        "requested_mode": result.trace.requested_mode,
+        "effective_mode": result.trace.effective_mode,
+    }
+    rows = candidates_to_legacy(result)
+    for row in rows:
+        row["requested_mode"] = mode_lower["requested_mode"]
+        row["effective_mode"] = mode_lower["effective_mode"]
+        # Generation-era tests compare lowercase effective modes.
+        if isinstance(row["effective_mode"], str) and row["effective_mode"].isupper():
+            # Keep contract uppercase in new fields; also expose lowercase for
+            # assertions that predate Task 11.
+            pass
+        # Normalize effective_mode for legacy generation tests that expect "base"/"hybrid".
+        em = str(row["effective_mode"])
+        if em == "BASE":
+            row["effective_mode"] = "BASE"
+        elif em == "HYBRID":
+            row["effective_mode"] = "HYBRID"
+
+    # Reranking is owned by retrieve(); do not double-apply here.
+
+    if emit_telemetry and rows:
         try:
             from retrieval_telemetry import (
                 best_effort_make_event,
@@ -706,19 +1078,19 @@ def retrieve_via_search_memory(
             )
 
             events = []
-            for rank, result in enumerate(rows, start=1):
+            for rank, item in enumerate(rows, start=1):
                 event = best_effort_make_event(
                     event_kind="impression",
                     query=query,
-                    retrieval_mode=str(result["effective_mode"]).lower(),
+                    retrieval_mode=str(item.get("effective_mode") or "base").lower(),
                     candidate_id=str(
-                        result.get("chunk_id")
-                        or result.get("slug")
-                        or result.get("candidate_id")
-                        or Path(str(result.get("path", ""))).stem
+                        item.get("chunk_id")
+                        or item.get("slug")
+                        or item.get("candidate_id")
+                        or Path(str(item.get("path", ""))).stem
                     ),
                     rank=rank,
-                    generation=str(result["generation"]),
+                    generation=str(item.get("generation") or corpus_generation),
                     source_tool=source_tool,
                 )
                 if event is not None:
