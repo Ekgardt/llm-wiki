@@ -247,6 +247,19 @@ TOOL_INPUT_SCHEMAS = {
                 "type": "string",
                 "description": "Project directory to analyze",
             },
+            "mode": {
+                "type": "string",
+                "maxLength": 32,
+                "description": "Architecture summary (default) or impact analysis",
+            },
+            "comparison": {
+                "type": "string",
+                "maxLength": 32,
+                "description": "Impact endpoint comparison: dirty, worktree-index, index-HEAD, two-commits, or merge-base-branch",
+            },
+            "base": {"type": "string", "maxLength": 1024},
+            "target": {"type": "string", "maxLength": 1024},
+            "branch": {"type": "string", "maxLength": 1024},
         },
         "required": ["directory"],
     },
@@ -561,6 +574,31 @@ def _get_architecture(directory: str) -> dict:
     if error:
         return {"error": error}
     return {"directory": str(resolved), "architecture": get_architecture(resolved)}
+
+
+def _analyze_impact(
+    *,
+    directory: str,
+    comparison: str = "dirty",
+    base: str | None = None,
+    target: str | None = None,
+    branch: str | None = None,
+) -> dict:
+    """Run bounded diff-to-graph impact through the architecture tool."""
+    from impact_analysis import COMPARISONS, analyze_impact
+
+    resolved, error = _validated_code_directory(directory)
+    if error:
+        return {"error": error}
+    if comparison not in COMPARISONS:
+        return {"error": "invalid impact comparison"}
+    return analyze_impact(
+        root=resolved,
+        comparison=comparison,
+        base=base,
+        target=target,
+        branch=branch,
+    )
 
 
 def _operator_result(
@@ -1057,6 +1095,23 @@ def _quality_for(
                 confidence=0.8,
             )
         return quality
+    if name == "get_architecture" and arguments and arguments.get("mode") == "impact":
+        classification = data.get("classification") if isinstance(data, dict) else None
+        if classification == "exact":
+            return {"coverage": 0.9, "confidence": 0.9}
+        if classification == "conservative":
+            return {
+                "coverage": 0.6,
+                "confidence": 0.55,
+                "partial": True,
+                "warnings": list(data.get("warnings", [])) or ["Impact analysis is conservative."],
+            }
+        return {
+            "coverage": 0.2,
+            "confidence": 0.25,
+            "partial": True,
+            "warnings": list(data.get("warnings", [])) or ["Impact analysis is unresolved."],
+        }
     if name in {"find_dead_code", "get_architecture"}:
         return {
             "coverage": 0.6,
@@ -1210,7 +1265,18 @@ async def _handle_tool_call(name: str, arguments) -> str:
             elif name == "find_dead_code":
                 data = _find_dead_code(arguments["directory"])
             elif name == "get_architecture":
-                data = _get_architecture(arguments["directory"])
+                if arguments.get("mode", "summary") == "impact":
+                    data = _analyze_impact(
+                        directory=arguments["directory"],
+                        comparison=arguments.get("comparison", "dirty"),
+                        base=arguments.get("base"),
+                        target=arguments.get("target"),
+                        branch=arguments.get("branch"),
+                    )
+                elif arguments.get("mode", "summary") == "summary":
+                    data = _get_architecture(arguments["directory"])
+                else:
+                    data = {"error": "get_architecture mode must be summary or impact"}
             else:
                 data = _doctor(**arguments)
         except Exception as e:
