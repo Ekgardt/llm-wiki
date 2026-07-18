@@ -368,9 +368,33 @@ def _render_new_state(state_template: Path, slug: str, project_dir: Path) -> str
 
 
 def _clip(text: str, limit: int) -> str:
-    if len(text) <= limit:
-        return text
-    return text[: limit - 30].rstrip() + "\n… (truncated for hook injection)\n"
+    from context_budget import (
+        DEFAULT_CONTEXT_BUDGET,
+        BudgetExceededError,
+        ContextItem,
+        pack_context,
+    )
+
+    item = ContextItem(
+        item_id="project-state",
+        text=text,
+        source="project-state",
+        priority=3,
+        relevance=1.0,
+        confidence="high",
+        freshness="fresh",
+        token_cost=len(text.encode("utf-8")),
+        mandatory=True,
+        representation="l2",
+        parent_id="project-state",
+        priority_class="handoff",
+    )
+    try:
+        return pack_context(
+            [item], DEFAULT_CONTEXT_BUDGET, emergency_byte_cap=limit
+        ).text
+    except BudgetExceededError as error:
+        return error.failure.render()
 
 
 def _build_context(state_path: Path, slug: str, is_new: bool) -> str:

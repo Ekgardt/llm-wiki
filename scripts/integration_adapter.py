@@ -1302,11 +1302,52 @@ def _recover_project_handoff(slug: str | None, project_dir: Path | None) -> str:
 
 
 def _append_context(context: str, handoff: str) -> str:
-    if not handoff:
-        return context
-    if not context:
-        return handoff
-    return context.rstrip() + "\n\n" + handoff
+    from context_budget import (
+        DEFAULT_CONTEXT_BUDGET,
+        BudgetExceededError,
+        ContextItem,
+        pack_context,
+    )
+
+    global_text = context.rstrip()
+    handoff_text = handoff.strip()
+    items: list[ContextItem] = []
+    if global_text:
+        items.append(ContextItem(
+            item_id="session-start:global",
+            text=global_text,
+            source="session-start",
+            priority=1,
+            relevance=1.0,
+            confidence="high",
+            freshness="fresh",
+            token_cost=len(global_text.encode("utf-8")),
+            mandatory=True,
+            representation="l1",
+            parent_id="session-start",
+            priority_class="safety",
+        ))
+    if handoff_text:
+        items.append(ContextItem(
+            item_id="session-start:project-handoff",
+            text=handoff_text,
+            source="project-handoff",
+            priority=3,
+            relevance=1.0,
+            confidence="high",
+            freshness="fresh",
+            token_cost=len(handoff_text.encode("utf-8")),
+            mandatory=True,
+            representation="l1",
+            parent_id="project-handoff",
+            priority_class="handoff",
+        ))
+    if not items:
+        return ""
+    try:
+        return pack_context(items, DEFAULT_CONTEXT_BUDGET).text
+    except BudgetExceededError as error:
+        return error.failure.render()
 
 
 def ingest_event(

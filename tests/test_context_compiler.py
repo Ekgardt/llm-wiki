@@ -19,6 +19,8 @@ import hashlib
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from context_budget import ContextBudget  # noqa: E402
@@ -185,12 +187,13 @@ def test_l1_promotion_for_shortlisted_parents():
 def test_l2_source_span_materialized_for_final_evidence():
     body = "## Decision\n\nWe chose JWT over sessions for the llm-wiki project.\n"
     page = _page("auth.md", "Auth", "Auth summary.", body)
+    start = page.content.index(b"## Decision")
     chunk = _chunk(
         page,
         chunk_id="auth#decision",
         heading_ancestry=("Auth", "Decision"),
-        byte_start=body.index("## Decision"),
-        byte_end=len(body),
+        byte_start=start,
+        byte_end=len(page.content),
     )
     snapshot = _snapshot((page,), (chunk,))
 
@@ -204,8 +207,8 @@ def test_l2_source_span_materialized_for_final_evidence():
     assert len(l2_items) == 1
     assert "JWT" in l2_items[0].text
     # L2 carries authoritative byte ranges from the captured span.
-    assert l2_items[0].byte_start == chunk.byte_start
-    assert l2_items[0].byte_end == chunk.byte_end
+    assert l2_items[0].byte_start == 0
+    assert l2_items[0].byte_end == len(page.content)
     assert l2_items[0].source_sha256 == page.record.sha256
 
 
@@ -225,7 +228,7 @@ def test_source_hash_invalidation_rejects_stale_items():
 
     assert first_item_ids != second_item_ids
     # Item IDs embed the source hash so cache keys cannot conflate versions.
-    assert page_v1.record.sha256 not in second_item_ids.__str__() or True
+    assert all(page_v1.record.sha256 not in item_id for item_id in second_item_ids)
     assert any(page_v2.record.sha256 in i.item_id for i in second.items)
     assert any(page_v1.record.sha256 in i.item_id for i in first.items)
 
@@ -263,6 +266,13 @@ def test_generated_context_is_disabled_by_default():
     # No contextual prefix claims an LLM-generated contextual sentence.
     for item in compiled.items:
         assert "contextual:" not in item.text.lower()
+
+
+def test_generated_context_true_is_rejected_until_ablation():
+    page = _page("auth.md", "Auth", "Auth summary.", "Body.")
+
+    with pytest.raises(ValueError, match="ablation"):
+        compile_context(_snapshot((page,)), generated_context=True)
 
 
 def test_chunks_carry_deterministic_metadata_prefix():
@@ -326,12 +336,14 @@ def test_large_parent_pages_expand_to_matched_heading_subtree():
         + "## Alternatives\n\n" + ("alt " * 200) + "\n"
     )
     page = _page("big.md", "Big", "Big summary.", body)
+    decision_start = page.content.index(b"## Decision")
+    background_start = page.content.index(b"## Background")
     decision_chunk = _chunk(
         page,
         chunk_id="big#decision",
         heading_ancestry=("Big", "Decision"),
-        byte_start=body.index("## Decision"),
-        byte_end=body.index("## Background"),
+        byte_start=decision_start,
+        byte_end=background_start,
     )
     snapshot = _snapshot((page,), (decision_chunk,))
 
@@ -352,6 +364,56 @@ def test_large_parent_pages_expand_to_matched_heading_subtree():
     )
 
 
+def test_l2_materialization_uses_utf8_byte_spans_and_heading_level_subtree():
+    page = _page(
+        "unicode.md",
+        "Unicode",
+        "Résumé.",
+        "## Parent\n\n€ lead\n\n### Child\n\n😀 evidence\n\n### Sibling\n\nkeep sibling out\n\n## Next\n\nstop\n",
+    )
+    content = page.content
+    start = content.index(b"### Child")
+    end = content.index(b"### Sibling")
+    chunk = _chunk(
+        page,
+        chunk_id="unicode-child",
+        heading_ancestry=("Unicode", "Parent", "Child"),
+        byte_start=start,
+        byte_end=end,
+        text=content[start:end].decode(),
+    )
+
+    compiled = compile_context(
+        _snapshot((page,), (chunk,)),
+        evidence_chunk_ids=(chunk.id,),
+        small_parent_chars=1,
+        large_parent_subtree_chars=10_000,
+    )
+
+    l2 = next(item for item in compiled.items if item.representation == "l2")
+    assert "heading=Unicode > Parent > Child" in l2.text
+    assert "😀 evidence" in l2.text
+    assert "keep sibling out" not in l2.text
+    assert page.content[l2.byte_start:l2.byte_end].decode() in l2.text
+    assert (l2.byte_start, l2.byte_end) == (start, end)
+
+
+def test_multiple_evidence_chunks_have_unique_ids_and_sorted_trace():
+    page = _page("multi.md", "Multi", "Summary.", "## A\n\none\n## B\n\ntwo\n")
+    first_start = page.content.index(b"## A")
+    second_start = page.content.index(b"## B")
+    chunks = (
+        _chunk(page, chunk_id="z", heading_ancestry=("Multi", "A"), byte_start=first_start, byte_end=second_start, text=page.content[first_start:second_start].decode()),
+        _chunk(page, chunk_id="a", heading_ancestry=("Multi", "B"), byte_start=second_start, byte_end=len(page.content), text=page.content[second_start:].decode()),
+    )
+
+    compiled = compile_context(_snapshot((page,), chunks), evidence_chunk_ids=("z", "a"))
+
+    l2 = [item for item in compiled.items if item.representation == "l2"]
+    assert len({item.item_id for item in l2}) == 2
+    assert compiled.trace.retrieval.evidence_chunk_ids == ("a", "z")
+
+
 def test_compilation_returns_retrieval_and_materialization_trace():
     page = _page("auth.md", "Auth", "Auth summary.", "Body.")
     snapshot = _snapshot((page,))
@@ -360,8 +422,9 @@ def test_compilation_returns_retrieval_and_materialization_trace():
 
     assert isinstance(compiled, CompiledContext)
     assert isinstance(compiled.trace, CompilationTrace)
-    assert compiled.trace.candidate_count >= 1
-    assert compiled.trace.l0_count >= 1
+    assert compiled.trace.retrieval.candidate_parent_ids == (page.record.logical_id,)
+    assert compiled.trace.packing.packed_item_ids == tuple(i.item_id for i in compiled.items)
+    assert compiled.trace.l0_count == 1
     assert all(isinstance(m, MaterializationTrace) for m in compiled.trace.materializations)
 
 
@@ -378,6 +441,18 @@ def test_budget_packs_compiled_items_under_shared_token_limit():
     compiled = compile_context(snapshot, budget=budget)
 
     assert compiled.packed_tokens <= budget.available_input_tokens
+
+
+def test_compiler_enforces_default_budget_even_when_budget_omitted(monkeypatch):
+    import context_compiler
+
+    monkeypatch.setattr(context_compiler, "DEFAULT_BUDGET", ContextBudget(None, 10, 0, 0))
+    page = _page("large.md", "Large", "summary", "body " * 100)
+
+    compiled = context_compiler.compile_context(_snapshot((page,)))
+
+    assert compiled.packed_tokens <= 10
+    assert compiled.trace.packing.dropped_item_ids
 
 
 def test_aliases_propagated_into_prefix_when_present():
@@ -411,14 +486,19 @@ def test_shortlist_filters_to_only_requested_parents_for_l1():
 
 
 def test_compiled_text_joins_items_deterministically():
-    page = _page("auth.md", "Auth", "Auth summary.", "Body.")
-    snapshot = _snapshot((page,))
+    page_b = _page("b.md", "Beta", "Beta summary.", "Body.")
+    page_a = _page("a.md", "Alpha", "Alpha summary.", "Body.")
+    snapshot = _snapshot((page_a, page_b))
 
     first = compile_context(snapshot)
     second = compile_context(snapshot)
 
     assert first.text == second.text
     assert first.items == second.items
+    assert first.text == "\n\n".join(item.text for item in first.items)
+    assert first.trace.packing.packed_item_ids == tuple(
+        item.item_id for item in first.items
+    )
 
 
 def test_build_tiers_get_l1_keys_legacy_cache_by_source_hash(tmp_path, monkeypatch):

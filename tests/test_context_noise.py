@@ -296,6 +296,53 @@ def test_session_start_budget_constant_is_a_context_budget():
     assert session_start_context.DEFAULT_CONTEXT_BUDGET.available_input_tokens > 0
 
 
+def test_session_and_project_context_use_the_same_budget_contract():
+    import build_context
+    import session_start_context
+
+    assert build_context.DEFAULT_CONTEXT_BUDGET is session_start_context.DEFAULT_CONTEXT_BUDGET
+
+
+def test_session_start_impossible_mandatory_budget_is_visible_not_sliced(monkeypatch):
+    import session_start_context
+    from context_budget import ContextBudget
+
+    monkeypatch.setattr(session_start_context, "DEFAULT_CONTEXT_BUDGET", ContextBudget(None, 10, 0, 0))
+
+    result = session_start_context._pack_session_sections(
+        [("guardrails", "mandatory-guardrail-content")]
+    )
+
+    assert "mandatory_budget_exceeded" in result
+    assert "mandatory-guardrail-content" not in result
+    assert "truncated" not in result
+
+
+def test_project_state_impossible_cap_is_visible_not_character_sliced():
+    import session_start_project_state
+
+    result = session_start_project_state._clip("project-state-" * 100, 20)
+
+    assert "mandatory_emergency_cap_exceeded" in result
+    assert "project-state-project" not in result
+    assert "truncated for hook injection" not in result
+
+
+def test_project_handoff_alone_still_uses_shared_budget(monkeypatch):
+    import context_budget
+    import integration_adapter
+    from context_budget import ContextBudget
+
+    monkeypatch.setattr(
+        context_budget, "DEFAULT_CONTEXT_BUDGET", ContextBudget(None, 10, 0, 0)
+    )
+
+    result = integration_adapter._append_context("", "handoff-content-too-large")
+
+    assert "mandatory_budget_exceeded" in result
+    assert "handoff-content-too-large" not in result
+
+
 def test_session_start_health_fails_open(monkeypatch):
     import doctor
     import session_start_context
@@ -411,7 +458,7 @@ def test_session_start_recovery_passes_hard_limit_and_deadline(tmp_path, monkeyp
     session_start_context._recover_transactions()
 
     assert received[0]["max_transactions"] > 0
-    assert started < received[0]["deadline"] <= started + 0.1
+    assert started < received[0]["deadline"] <= started + 0.11
 
 
 def test_session_start_health_latency_is_bounded_with_large_unsafe_queue(

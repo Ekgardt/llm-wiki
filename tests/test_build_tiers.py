@@ -235,6 +235,44 @@ class TestBuildAllTiers:
         assert all("." in path.stem for path in l1_files)
         assert all(not path.name.endswith("a.l1.md") for path in l1_files)
 
+    def test_duplicate_stems_use_captured_relative_paths(self, tmp_path, monkeypatch):
+        import build_tiers
+
+        notes = tmp_path / "notes"
+        (notes / "one").mkdir(parents=True)
+        (notes / "two").mkdir(parents=True)
+        (notes / "one/shared.md").write_text("# One\n\nFirst.\n", encoding="utf-8")
+        (notes / "two/shared.md").write_text("# Two\n\nSecond.\n", encoding="utf-8")
+        tiers = tmp_path / "tiers"
+        monkeypatch.setattr(build_tiers, "KNOWLEDGE_DIR", notes)
+        monkeypatch.setattr(build_tiers, "TIERS_DIR", tiers)
+
+        stats = build_tiers.build_all_tiers(use_llm=False, verbose=False)
+
+        assert stats == {"generated": 2, "skipped": 0, "errors": 0}
+        outputs = sorted(tiers.glob("*.l1.md"))
+        assert len(outputs) == 2
+        rendered = {path.read_text(encoding="utf-8") for path in outputs}
+        assert any("First." in value for value in rendered)
+        assert any("Second." in value for value in rendered)
+
+    def test_legacy_tier_cache_rejects_escaping_and_windows_names(self, tmp_path, monkeypatch):
+        import build_tiers
+
+        monkeypatch.setattr(build_tiers, "TIERS_DIR", tmp_path)
+        for slug, logical_path in (
+            ("../escape", "escape.md"),
+            ("con", "con.md"),
+            ("safe", "../escape.md"),
+            ("safe", "C:/escape.md"),
+        ):
+            with pytest.raises(ValueError):
+                build_tiers.tier_legacy_cache_path(
+                    slug,
+                    source_sha256="a" * 64,
+                    logical_path=logical_path,
+                )
+
 
 class TestCapturedSourceTiers:
     def test_l0_l1_l2_use_captured_bytes_after_live_source_changes(self, tmp_path):
@@ -304,7 +342,7 @@ class TestCapturedSourceTiers:
             tier_artifact_key(source_before, extractor_version="tiers/v1")
         )
 
-    def test_llm_identity_binds_descriptor_revision_and_generated_bytes(self, tmp_path):
+    def test_llm_identity_binds_descriptor_and_revision_not_generated_output(self, tmp_path):
         _, snapshot = _snapshot(tmp_path, {"page.md": "# Page\n\nBody.\n"})
         source = snapshot.sources[0]
         descriptor = _model_descriptor()
@@ -315,7 +353,7 @@ class TestCapturedSourceTiers:
 
         first = tier_artifact_key(source, generated_l1="First", **options)
 
-        assert first != tier_artifact_key(source, generated_l1="Second", **options)
+        assert first == tier_artifact_key(source, generated_l1="Second", **options)
         assert first != tier_artifact_key(
             source,
             generated_l1="First",

@@ -30,7 +30,9 @@ import shutil
 import stat
 import sys
 import tempfile
-from pathlib import Path
+import unicodedata
+from collections.abc import Mapping
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -137,7 +139,7 @@ def get_l0_for_source(source: CapturedSource) -> str:
     for line in lines[1:]:
         stripped = line.strip()
         if stripped and not stripped.startswith("#") and not stripped.startswith("---"):
-            return stripped[:200]
+            return stripped
 
     return Path(source.record.relative_path).stem.replace("-", " ")
 
@@ -168,7 +170,7 @@ Keep it under 500 words. Include:
 - Links to related concepts
 
 === PAGE ===
-{body[:3000]}
+{body}
 
 === OUTPUT ===
 Return ONLY the overview markdown (no title, no commentary).
@@ -204,11 +206,14 @@ def tier_artifact_key(
     model = _model_provenance(use_llm, model_descriptor, model_revision)
     if use_llm and not isinstance(generated_l1, str):
         raise ValueError("LLM artifact identity requires generated L1 bytes")
-    generated_hash = (
-        hashlib.sha256(generated_l1.encode("utf-8")).hexdigest() if use_llm else None
-    )
     identity = json.dumps(
-        [source.record.logical_id, source.record.sha256, version, model, generated_hash],
+        [
+            source.record.relative_path,
+            source.record.sha256,
+            version,
+            "llm" if use_llm else "deterministic",
+            model,
+        ],
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")
@@ -373,7 +378,7 @@ def get_l0(slug: str) -> str:
     for line in lines[1:]:
         stripped = line.strip()
         if stripped and not stripped.startswith("#") and not stripped.startswith("---"):
-            return stripped[:200]
+            return stripped
 
     return slug.replace("-", " ")
 
@@ -386,9 +391,7 @@ def get_l1(
 ) -> str | None:
     """Get L1 (structured overview) for a page. ~500-1000 tokens.
 
-    When ``source_sha256`` is provided, prefer a hash-suffixed cache file so
-    stale L1 overviews cannot be served after the source bytes change. Falls
-    back to the legacy ``<slug>.l1.md`` path for migration compatibility.
+    Hash-qualified reads fail closed and never consult an unqualified legacy file.
 
     The hash suffix is derived from the source SHA-256 and extractor version
     so cache invalidation honors Task 15's logical-path-plus-source-hash
@@ -400,7 +403,8 @@ def get_l1(
         )
         if hashed_path.exists():
             return hashed_path.read_text(encoding="utf-8", errors="ignore")
-    legacy_path = TIERS_DIR / f"{slug}.l1.md"
+        return None
+    legacy_path = tier_legacy_cache_path(slug)
     if not legacy_path.exists():
         return None
     return legacy_path.read_text(encoding="utf-8", errors="ignore")
@@ -411,6 +415,9 @@ def tier_legacy_cache_path(
     *,
     source_sha256: str | None = None,
     extractor_version: str = TIER_EXTRACTOR_VERSION,
+    logical_path: str | None = None,
+    generation_mode: str = "deterministic",
+    model_provenance: Mapping[str, object] | None = None,
 ) -> Path:
     """Return the legacy mutable-cache path for an L1 overview.
 
@@ -418,11 +425,46 @@ def tier_legacy_cache_path(
     of (source SHA-256, extractor version) so stale caches invalidate on
     content or extractor changes.
     """
+    safe_slug = _safe_cache_slug(slug)
     if not source_sha256:
-        return TIERS_DIR / f"{slug}.l1.md"
-    digest_input = f"{source_sha256}:{extractor_version}".encode()
-    suffix = hashlib.sha256(digest_input).hexdigest()[:12]
-    return TIERS_DIR / f"{slug}.{suffix}.l1.md"
+        return TIERS_DIR / f"{safe_slug}.l1.md"
+    logical = _safe_logical_path(logical_path or f"{slug}.md")
+    identity = json.dumps(
+        [logical, source_sha256, extractor_version, generation_mode, model_provenance],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    suffix = hashlib.sha256(identity).hexdigest()[:20]
+    return TIERS_DIR / f"{safe_slug}.{suffix}.l1.md"
+
+
+def _safe_cache_slug(value: str) -> str:
+    _safe_logical_path(f"{value}.md")
+    return value
+
+
+def _safe_logical_path(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value)
+    posix = PurePosixPath(normalized)
+    windows = PureWindowsPath(normalized)
+    reserved = {"con", "prn", "aux", "nul"} | {
+        f"{prefix}{number}" for prefix in ("com", "lpt") for number in range(1, 10)
+    }
+    if (
+        not value
+        or normalized != value
+        or posix.is_absolute()
+        or windows.is_absolute()
+        or windows.drive
+        or any(part in {"", ".", ".."} for part in posix.parts)
+        or posix.as_posix() != value
+        or any(part.rstrip(". ") != part for part in posix.parts)
+        or any(PurePosixPath(part).stem.casefold() in reserved for part in posix.parts)
+        or any("\\" in part or ":" in part or "\x00" in part for part in posix.parts)
+    ):
+        raise ValueError("logical_path must be a normalized safe relative path")
+    return posix.as_posix()
 
 
 def get_l2(slug: str) -> str:
@@ -439,19 +481,16 @@ def _needs_l1_regeneration(
     source_sha256: str | None = None,
     *,
     extractor_version: str = TIER_EXTRACTOR_VERSION,
+    logical_path: str | None = None,
 ) -> bool:
     """Check if L1 needs to be (re)generated for this page."""
     l1_path = tier_legacy_cache_path(
-        slug, source_sha256=source_sha256, extractor_version=extractor_version
+        slug,
+        source_sha256=source_sha256,
+        extractor_version=extractor_version,
+        logical_path=logical_path,
     )
     if not l1_path.exists():
-        # Fall back to the un-suffixed legacy cache during migration.
-        legacy_path = TIERS_DIR / f"{slug}.l1.md"
-        if legacy_path.exists():
-            try:
-                return page_path.stat().st_mtime > legacy_path.stat().st_mtime
-            except OSError:
-                return True
         return True
     # Check if page changed since L1 was generated.
     try:
@@ -504,7 +543,7 @@ Keep it under 500 words. Include:
 - Links to related concepts
 
 === PAGE ===
-{body[:3000]}
+{body}
 
 === OUTPUT ===
 Return ONLY the overview markdown (no title, no commentary).
@@ -523,10 +562,14 @@ def write_l1(
     *,
     source_sha256: str | None = None,
     extractor_version: str = TIER_EXTRACTOR_VERSION,
+    logical_path: str | None = None,
 ) -> Path:
     """Persist an L1 overview to the (optionally hash-suffixed) legacy cache."""
     target = tier_legacy_cache_path(
-        slug, source_sha256=source_sha256, extractor_version=extractor_version
+        slug,
+        source_sha256=source_sha256,
+        extractor_version=extractor_version,
+        logical_path=logical_path,
     )
     atomic_write(target, l1_text)
     return target
@@ -586,7 +629,8 @@ def build_all_tiers(use_llm: bool = True, verbose: bool = True) -> dict:
 
         # Skip superseded pages.
         try:
-            content = md.read_text(encoding="utf-8", errors="ignore")
+            captured = md.read_bytes()
+            content = captured.decode("utf-8", errors="strict")
             if "status: superseded" in content or "status: archived" in content:
                 stats["skipped"] += 1
                 continue
@@ -595,19 +639,31 @@ def build_all_tiers(use_llm: bool = True, verbose: bool = True) -> dict:
             continue
 
         slug = md.stem
-        try:
-            source_sha256 = hashlib.sha256(md.read_bytes()).hexdigest()
-        except OSError:
-            source_sha256 = None
+        source_sha256 = hashlib.sha256(captured).hexdigest()
+        logical_path = md.relative_to(KNOWLEDGE_DIR).as_posix()
 
-        if not _needs_l1_regeneration(slug, md, source_sha256):
+        if not _needs_l1_regeneration(
+            slug, md, source_sha256, logical_path=logical_path
+        ):
             stats["skipped"] += 1
             continue
 
         try:
-            l1 = generate_l1(slug, use_llm=use_llm, source_sha256=source_sha256)
+            body = FRONTMATTER_RE.sub("", content, count=1)
+            summary_match = SUMMARY_RE.search(body)
+            l0 = summary_match.group(1).strip() if summary_match else slug.replace("-", " ")
+            l1 = (
+                _deterministic_l1(slug, body, l0)
+                if not use_llm or os_env_fake()
+                else generate_l1(slug, use_llm=True, source_sha256=source_sha256)
+            )
             if l1:
-                write_l1(slug, l1, source_sha256=source_sha256)
+                write_l1(
+                    slug,
+                    l1,
+                    source_sha256=source_sha256,
+                    logical_path=logical_path,
+                )
                 stats["generated"] += 1
                 if verbose:
                     print(f"  Generated L1: {slug}")

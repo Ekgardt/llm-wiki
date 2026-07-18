@@ -33,8 +33,8 @@ if hasattr(sys.stdout, "reconfigure"):
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from context_budget import (  # noqa: E402
+    DEFAULT_CONTEXT_BUDGET,
     BudgetExceededError,
-    ContextBudget,
     ContextItem,
     pack_context,
 )
@@ -61,12 +61,6 @@ MAX_CONTEXT_CHARS = 2200
 # Shared SessionStart token budget. The character cap below remains as the
 # emergency failure guard (never slices Markdown mid-item) so existing
 # callers and tests continue to observe the same upper bound.
-DEFAULT_CONTEXT_BUDGET = ContextBudget(
-    model=None,
-    max_input_tokens=8192,
-    reserved_output_tokens=0,
-    safety_margin_tokens=512,
-)
 # Priority classes (low number = high importance, packed first):
 #   1 safety       — guardrails (always mandatory)
 #   2 health       — degraded doctor findings, self-awareness (mandatory)
@@ -209,16 +203,15 @@ def is_noise(line: str) -> bool:
 
 
 def clip(line: str, limit: int) -> str:
-    if len(line) <= limit:
-        return line
-    return line[: limit - 1].rstrip() + "…"
+    """Keep lines whole; section and global budgets decide whether they fit."""
+    return line
 
 
 def trim_index(index_txt: str, *, max_chars: int = INDEX_MAX_CHARS) -> str:
     """Keep H1, Entry points, and the first N non-empty knowledge sections.
 
-    Each bullet line is clipped to INDEX_BULLET_MAX chars so descriptions
-    don't blow up the startup context. Editorial-note sections are dropped.
+    Editorial-note sections are dropped. Lines remain whole so downstream
+    packing can drop complete sections instead of slicing Markdown.
     Output is bounded by ``max_chars`` so the index fits a per-section
     budget without slicing bullets in half — whole bullets/sections are
     dropped once the bound is reached.
@@ -648,6 +641,15 @@ def _section_item(name: str, text: str) -> ContextItem | None:
         return None
     priority = SECTION_PRIORITIES.get(name, 5)
     mandatory = priority <= 2
+    priority_class = {
+        1: "safety",
+        2: "health",
+        3: "evidence",
+        4: "decision",
+        5: "evidence",
+        6: "history",
+        7: "history",
+    }.get(priority, "evidence")
     return ContextItem(
         item_id=f"session:{name}",
         text=stripped,
@@ -659,6 +661,8 @@ def _section_item(name: str, text: str) -> ContextItem | None:
         token_cost=len(stripped.encode("utf-8")),
         mandatory=mandatory,
         representation="l1",
+        parent_id="session-start",
+        priority_class=priority_class,
     )
 
 
@@ -678,13 +682,8 @@ def _pack_session_sections(sections: list[tuple[str, str]]) -> str:
             emergency_byte_cap=max(0, MAX_CONTEXT_CHARS - 2),
         )
         return packed.text
-    except BudgetExceededError:
-        # Extremely unlikely: mandatory sections alone overflow the budget.
-        # Fall back to the legacy hard truncation so SessionStart stays usable.
-        text = "\n\n".join(item.text for item in items).rstrip()
-        if len(text) > MAX_CONTEXT_CHARS:
-            text = text[: MAX_CONTEXT_CHARS - 20].rstrip() + "\n… (truncated)\n"
-        return text
+    except BudgetExceededError as error:
+        return error.failure.render()
 
 
 def build_context() -> str:

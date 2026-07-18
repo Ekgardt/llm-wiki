@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import pytest
 from context_budget import (
+    BudgetExceededError,
     ContextBudget,
     ContextItem,
     DroppedItem,
@@ -33,6 +34,8 @@ def _item(
     freshness: str = "fresh",
     mandatory: bool = False,
     representation: str = "l1",
+    parent_id: str | None = None,
+    priority_class: str = "evidence",
 ) -> ContextItem:
     return ContextItem(
         item_id=item_id,
@@ -45,6 +48,8 @@ def _item(
         token_cost=len(text.encode("utf-8")),
         mandatory=mandatory,
         representation=representation,
+        parent_id=parent_id,
+        priority_class=priority_class,
     )
 
 
@@ -83,12 +88,16 @@ def test_mandatory_items_reserved_first_and_fit():
     assert packed.dropped == (DroppedItem("history", "budget"),)
 
 
-def test_impossible_mandatory_budget_raises_visibility():
+def test_impossible_mandatory_budget_raises_structured_visibility():
     budget = ContextBudget(None, max_input_tokens=10, reserved_output_tokens=0, safety_margin_tokens=0)
     mandatory = _item("big", "x" * 200, mandatory=True, priority=1)
 
-    with pytest.raises(Exception, match="mandatory"):
+    with pytest.raises(BudgetExceededError, match="mandatory") as raised:
         pack_context([mandatory], budget)
+
+    assert raised.value.failure.code == "mandatory_budget_exceeded"
+    assert raised.value.failure.mandatory_item_ids == ("big",)
+    assert raised.value.failure.required_tokens > raised.value.failure.available_tokens
 
 
 def test_per_section_bounds_drop_low_priority_even_when_budget_remains():
@@ -125,6 +134,17 @@ def test_deterministic_selection_by_utility_per_token_with_ties():
     assert [i.item_id for i in packed.items] == ["a", "b", "c"]
 
 
+def test_utility_ranking_happens_before_section_cap():
+    budget = ContextBudget(None, 100, 0, 0)
+    lower = _item("a-lower", "xxxx", priority=5, relevance=0.1)
+    higher = _item("z-higher", "xxxx", priority=5, relevance=0.9)
+
+    packed = pack_context([lower, higher], budget, section_bounds={5: 4})
+
+    assert [item.item_id for item in packed.items] == ["z-higher"]
+    assert packed.dropped == (DroppedItem("a-lower", "section"),)
+
+
 def test_higher_relevance_per_token_wins_under_tight_budget():
     budget = ContextBudget(None, max_input_tokens=10, reserved_output_tokens=0, safety_margin_tokens=0)
     cheap_low_rel = _item("cheap", "abcdef", priority=5, relevance=0.1)  # 6 tokens, 0.0167/token
@@ -157,6 +177,20 @@ def test_per_source_diversity_caps_overflowing_source():
     assert len(packed.dropped) == 16
 
 
+def test_per_parent_diversity_caps_distinct_sources_for_same_parent():
+    budget = ContextBudget(None, 100, 0, 0)
+    items = [
+        _item("low", "x", source="chunk-a", parent_id="page.md", relevance=0.1),
+        _item("high", "x", source="chunk-b", parent_id="page.md", relevance=0.9),
+        _item("other", "x", source="chunk-c", parent_id="other.md", relevance=0.5),
+    ]
+
+    packed = pack_context(items, budget, per_parent_cap=1)
+
+    assert [item.item_id for item in packed.items] == ["high", "other"]
+    assert DroppedItem("low", "diversity") in packed.dropped
+
+
 def test_unicode_token_costs_counted_honestly():
     budget = ContextBudget(None, max_input_tokens=10, reserved_output_tokens=0, safety_margin_tokens=0)
     # 4 chars, 10 UTF-8 bytes (€ = 3, 😀 = 4, plus 2 ASCII) → conservatively
@@ -170,19 +204,47 @@ def test_unicode_token_costs_counted_honestly():
 
 
 def test_registered_tokenizer_counts_overrule_byte_estimate():
-    budget = ContextBudget(None, max_input_tokens=10, reserved_output_tokens=0, safety_margin_tokens=0)
+    budget = ContextBudget("my-model", max_input_tokens=10, reserved_output_tokens=0, safety_margin_tokens=0)
     item = _item("t", "abcdefghij" * 5, priority=1, relevance=1.0, mandatory=True)  # 50 bytes
 
     # tokenizer reports 4 tokens instead of 50 bytes — packing must use 4.
     packed = pack_context(
         [item],
         budget,
-        model="my-model",
         counter={"my-model": lambda text: 4},
     )
 
     assert packed.packed_tokens == 4
     assert packed.counter_source == "tokenizer"
+
+
+def test_final_rendered_separator_is_tokenized_and_budgeted():
+    budget = ContextBudget("words", 3, 0, 0)
+    items = [_item("a", "alpha"), _item("b", "beta")]
+
+    packed = pack_context(
+        items,
+        budget,
+        counter={"words": lambda text: len(text.replace("\n\n", " SEP ").split())},
+    )
+
+    assert packed.text == "alpha\n\nbeta"
+    assert packed.packed_tokens == 3
+
+
+def test_counter_source_is_mixed_when_tokenizer_falls_back_for_an_item():
+    budget = ContextBudget("model", 100, 0, 0)
+    items = [_item("a", "alpha"), _item("b", "fallback")]
+
+    def count(text: str) -> int:
+        if text == "fallback":
+            raise ValueError("cannot encode")
+        return 1
+
+    packed = pack_context(items, budget, counter={"model": count})
+
+    assert packed.counter_source == "mixed"
+    assert packed.packed_tokens == 1
 
 
 def test_no_mid_item_truncation_when_emergency_byte_cap_hits():
@@ -203,6 +265,17 @@ def test_no_mid_item_truncation_when_emergency_byte_cap_hits():
     assert "second paragraph end" not in packed.text
     assert "first paragraph end" in packed.text
     assert any(d.item_id == "b" and d.reason == "emergency_cap" for d in packed.dropped)
+
+
+def test_emergency_cap_never_drops_or_slices_mandatory_item():
+    budget = ContextBudget(None, 10_000, 0, 0)
+    mandatory = _item("safety", "mandatory safety text", mandatory=True)
+
+    with pytest.raises(BudgetExceededError) as raised:
+        pack_context([mandatory], budget, emergency_byte_cap=5)
+
+    assert raised.value.failure.code == "mandatory_emergency_cap_exceeded"
+    assert raised.value.failure.mandatory_item_ids == ("safety",)
 
 
 def test_packed_text_joins_complete_items_with_separators():
@@ -263,3 +336,13 @@ def test_dropped_reasons_distinguish_budget_from_section_and_diversity():
     assert reasons["over_section"] == "section"
     assert "fits" not in reasons
     assert "keep" not in reasons
+
+
+def test_semantic_priority_classes_override_numeric_input_priority():
+    budget = ContextBudget(None, 1, 0, 0)
+    history = _item("history", "x", priority=1, priority_class="history", relevance=1.0)
+    blocker = _item("blocker", "x", priority=99, priority_class="blocker", relevance=1.0)
+
+    packed = pack_context([history, blocker], budget)
+
+    assert [item.item_id for item in packed.items] == ["blocker"]

@@ -201,6 +201,70 @@ class TestBuildAll:
         assert all(not path.name.endswith("a.ctx") for path in ctx_files)
         assert all("." in path.stem for path in ctx_files)
 
+    def test_duplicate_stems_write_distinct_hash_qualified_contexts(self, tmp_path, monkeypatch):
+        import contextual_retrieval
+
+        notes = tmp_path / "notes"
+        (notes / "one").mkdir(parents=True)
+        (notes / "two").mkdir(parents=True)
+        (notes / "one/shared.md").write_text("# One\n\nFirst body.\n", encoding="utf-8")
+        (notes / "two/shared.md").write_text("# Two\n\nSecond body.\n", encoding="utf-8")
+        cache = tmp_path / "ctx"
+        monkeypatch.setattr(contextual_retrieval, "KNOWLEDGE_DIR", notes)
+        monkeypatch.setattr(contextual_retrieval, "CONTEXT_DIR", cache)
+
+        stats = contextual_retrieval.build_all_contexts(use_llm=False, verbose=False)
+
+        assert stats == {"generated": 2, "skipped": 0, "errors": 0}
+        outputs = sorted(cache.glob("*.ctx"))
+        assert len(outputs) == 2
+        assert {path.read_text(encoding="utf-8") for path in outputs} == {
+            "Topic: One.",
+            "Topic: Two.",
+        }
+
+    def test_hash_qualified_reader_consumes_newly_written_context(self, tmp_path, monkeypatch):
+        import hashlib
+
+        import contextual_retrieval
+
+        notes = tmp_path / "notes"
+        notes.mkdir()
+        page = notes / "auth.md"
+        page.write_text("# Auth\n\nAuth body.\n", encoding="utf-8")
+        digest = hashlib.sha256(page.read_bytes()).hexdigest()
+        cache = tmp_path / "ctx"
+        monkeypatch.setattr(contextual_retrieval, "KNOWLEDGE_DIR", notes)
+        monkeypatch.setattr(contextual_retrieval, "CONTEXT_DIR", cache)
+        contextual_retrieval.build_all_contexts(use_llm=False, verbose=False)
+
+        assert contextual_retrieval.get_context(
+            "auth", source_sha256=digest, logical_path="auth.md"
+        ) == "Topic: Auth."
+
+    def test_hash_qualified_read_never_falls_back_to_stale_legacy(self, tmp_path, monkeypatch):
+        import contextual_retrieval
+
+        cache = tmp_path / "ctx"
+        cache.mkdir()
+        (cache / "auth.ctx").write_text("STALE", encoding="utf-8")
+        monkeypatch.setattr(contextual_retrieval, "CONTEXT_DIR", cache)
+
+        assert contextual_retrieval.get_context(
+            "auth", source_sha256="a" * 64, logical_path="auth.md"
+        ) is None
+
+    def test_legacy_cache_rejects_unsafe_logical_paths(self, tmp_path, monkeypatch):
+        import contextual_retrieval
+        import pytest
+
+        monkeypatch.setattr(contextual_retrieval, "CONTEXT_DIR", tmp_path)
+        for path in ("../auth.md", "C:/auth.md", "con.md", "dir/NUL.md"):
+            with pytest.raises(ValueError):
+                contextual_retrieval.legacy_context_cache_path(
+                    "auth", source_sha256="a" * 64, logical_path=path
+                )
+
     def test_build_all_rejects_reparse_cache_before_write(self, tmp_path, monkeypatch):
         import contextual_retrieval
 
@@ -383,6 +447,50 @@ class TestSnapshotContexts:
         )
         assert contextual_retrieval.get_context(other, generation_dir=generation) is None
         assert contextual_retrieval.get_context("shared") == "legacy collision"
+
+    def test_reader_uses_full_model_descriptor_and_revision_for_llm_artifact(
+        self, tmp_path, monkeypatch
+    ):
+        import contextual_retrieval
+        from llm_client import ProviderDescriptor
+
+        source = _source("knowledge/notes/page.md", b"# Captured\n")
+        descriptor = ProviderDescriptor(
+            provider="fake",
+            model="model-a",
+            capabilities={"json": True},
+            inference_settings={"temperature": "0"},
+            candidate_index=2,
+            fallback_from=("openai:model-b",),
+        )
+        generation = tmp_path / "generation"
+        generation.mkdir()
+        monkeypatch.setenv("MEMORY_LLM_PROVIDER", "fake")
+        contextual_retrieval.build_snapshot_contexts(
+            _snapshot(source),
+            generation,
+            use_llm=True,
+            max_prompt_bytes=4096,
+            max_prompt_chars=4096,
+            disclosure_policy="local",
+            model_descriptor=descriptor,
+            model_revision="revision-1",
+        )
+
+        assert "Captured" in contextual_retrieval.get_context(
+            source,
+            generation_dir=generation,
+            generation_mode="llm",
+            model_descriptor=descriptor,
+            model_revision="revision-1",
+        )
+        assert contextual_retrieval.get_context(
+            source,
+            generation_dir=generation,
+            generation_mode="llm",
+            model_descriptor=descriptor,
+            model_revision="revision-2",
+        ) is None
 
     def test_generation_context_defaults_to_deterministic(self, monkeypatch):
         import contextual_retrieval
