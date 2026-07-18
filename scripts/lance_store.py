@@ -207,12 +207,12 @@ def upsert_vectors(
                 pass
             return 0
 
-        # Activate: replace live table only after staging validates.
+        # Legacy mutable path remains compatibility-only. Prefer
+        # publish_generation_vectors() which never drops the live table.
         try:
             db.drop_table(TABLE_NAME)
         except Exception:
             pass
-        # LanceDB has no atomic rename; recreate active from staging bytes.
         live = db.create_table(TABLE_NAME, data=data)
         try:
             live.create_index(
@@ -235,6 +235,65 @@ def upsert_vectors(
         except Exception:
             pass
         return 0
+
+
+def publish_generation_vectors(
+    *,
+    generation_dir: Path,
+    paths: list[str],
+    titles: list[str],
+    summaries: list[str],
+    projects: list[str],
+    timestamps: list[str],
+    vectors: list[list[float]],
+    model: str = "BAAI/bge-small-en-v1.5",
+) -> dict[str, object]:
+    """Write Lance vectors under an immutable generation directory only.
+
+    Never drops or mutates the legacy live TABLE_NAME. Activation is owned by
+    the generation catalog CAS outside this helper.
+    """
+    directory = Path(generation_dir)
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        if not _have_lancedb():
+            return {"status": "skipped", "reason": "lancedb_unavailable", "count": 0}
+        import lancedb
+        import pyarrow as pa
+
+        lance_dir = directory / "lance"
+        if lance_dir.exists() or lance_dir.is_symlink():
+            return {"status": "skipped", "reason": "already_exists", "count": 0}
+        db = lancedb.connect(str(lance_dir))
+        schema = pa.schema(
+            [
+                pa.field("path", pa.string()),
+                pa.field("title", pa.string()),
+                pa.field("summary", pa.string()),
+                pa.field("project", pa.string()),
+                pa.field("timestamp", pa.string()),
+                pa.field("vector", pa.list_(pa.float32(), EMBEDDING_DIM)),
+                pa.field("model", pa.string()),
+            ]
+        )
+        data = pa.table(
+            {
+                "path": paths,
+                "title": titles,
+                "summary": summaries,
+                "project": projects,
+                "timestamp": timestamps,
+                "vector": vectors,
+                "model": [model] * len(vectors),
+            },
+            schema=schema,
+        )
+        table = db.create_table("chunks", data=data)
+        if table.count_rows() != len(vectors):
+            return {"status": "failed", "reason": "count_mismatch", "count": 0}
+        return {"status": "ok", "reason": None, "count": len(vectors), "path": str(lance_dir)}
+    except Exception as exc:
+        return {"status": "failed", "reason": f"{type(exc).__name__}", "count": 0}
 
 
 def vector_search(

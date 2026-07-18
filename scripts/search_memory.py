@@ -2218,6 +2218,8 @@ def _vector_search(
     Builds embeddings for all pages (cached) and the query, then
     returns pages ranked by cosine similarity.
     """
+    import numpy as np
+
     # Load or build vector cache
     vectors_data = _load_or_build_vectors(pages)
     if not vectors_data:
@@ -2229,49 +2231,70 @@ def _vector_search(
     projects = vectors_data["projects"]
     timestamps = vectors_data["timestamps"]
     vectors = vectors_data["vectors"]
+    if isinstance(vectors, list):
+        # Refuse list-converted caches; require ndarray/mmap.
+        return None
+    matrix = np.asarray(vectors)
+    if matrix.ndim != 2 or matrix.shape[0] != len(paths):
+        return None
 
     # Embed the query
     query_vec = _embed_texts([query], is_query=True)
     if not query_vec:
         return None
+    q = np.asarray(query_vec[0], dtype=np.float32)
+    if q.shape[0] != matrix.shape[1] or not np.isfinite(q).all():
+        return None
 
-    # Compute cosine similarity
-    sims = _cosine_similarity(query_vec[0], vectors)
+    # Compute cosine similarity without materializing full Python lists.
+    sims = _cosine_similarity(q, matrix)
 
     # Build results
     results = []
     for i, sim in enumerate(sims):
         proj = projects[i]
         ts = timestamps[i]
-        # Apply temporal filter
+        path = paths[i]
         if since and ts:
             try:
                 if ts[:10] < since:
                     continue
             except (IndexError, TypeError):
                 pass
-        # Temporal filter for vector hits (parity with BM25 as_of).
         if as_of and ts:
             try:
                 if ts[:10] > as_of[:10]:
                     continue
             except (IndexError, TypeError):
                 pass
-        if as_of and not _valid_as_of(paths[i], as_of):
+        if as_of and not _valid_as_of(path, as_of):
             continue
-        score = round(sim, 4)
+        # status filter parity when frontmatter status is superseded and no as_of
+        if not as_of:
+            try:
+                p = ROOT / path if not Path(path).is_absolute() else Path(path)
+                content = p.read_text(encoding="utf-8", errors="ignore")
+                status = (_extract_frontmatter_field(content, re.compile(
+                    r"^status:\s*[\"']?([^\"'\n]+)[\"']?\s*$", re.MULTILINE
+                )) or "active").strip().lower()
+                if status and status not in {"active", ""}:
+                    continue
+            except OSError:
+                pass
+        score = round(float(sim), 4)
         if project and proj and proj.lower() == project.lower():
             score = round(score * 1.5, 4)
         results.append({
-            "path": paths[i],
+            "path": path,
             "title": titles[i],
-            "summary": summaries[i][:120],
+            "summary": (summaries[i] or "")[:120],
             "score": score,
             "project": proj,
             "timestamp": ts,
+            "candidate_id": Path(path).stem,
         })
 
-    results.sort(key=lambda x: x["score"], reverse=True)
+    results.sort(key=lambda x: (-x["score"], x["path"]))
     return results[:limit]
 
 
@@ -2286,22 +2309,47 @@ def _load_or_build_vectors(pages: list[Path]) -> dict | None:
         p.relative_to(ROOT).as_posix() for p in pages if p.exists()
     )
 
-    # Try .npy format (fast, memory-mapped).
+    # Try .npy format (fast, memory-mapped). Never convert mmap → Python list.
     if VECTOR_NPY.exists() and VECTOR_META.exists():
         try:
+            import numpy as np
+
             cache_meta = json.loads(VECTOR_META.read_text(encoding="utf-8"))
-            if sorted(cache_meta.get("paths") or []) == current_paths:
-                needs_rebuild = any(
-                    p.stat().st_mtime > VECTOR_NPY.stat().st_mtime
-                    for p in pages if p.exists()
-                )
-                if not needs_rebuild:
-                    import numpy as np
-                    vectors = np.load(str(VECTOR_NPY), mmap_mode="r")
-                    cache_meta["vectors"] = vectors.tolist()
-                    return cache_meta
+            paths = cache_meta.get("paths") or []
+            if sorted(paths) != current_paths:
+                return _build_vectors(pages)
+            needs_rebuild = any(
+                p.stat().st_mtime > VECTOR_NPY.stat().st_mtime
+                for p in pages if p.exists()
+            )
+            if needs_rebuild:
+                return _build_vectors(pages)
+            vectors = np.load(str(VECTOR_NPY), mmap_mode="r", allow_pickle=False)
+            dims = cache_meta.get("dimensions")
+            model = cache_meta.get("model") or cache_meta.get("model_id")
+            if not isinstance(model, str) or not model:
+                return None
+            if dims is not None and (
+                not isinstance(dims, int)
+                or vectors.ndim != 2
+                or vectors.shape[1] != dims
+                or vectors.shape[0] != len(paths)
+            ):
+                return None
+            if vectors.dtype != np.dtype(np.float32) and vectors.dtype.kind != "f":
+                return None
+            if not np.isfinite(vectors).all():
+                return None
+            source_hashes = cache_meta.get("source_sha256")
+            if source_hashes is not None and (
+                not isinstance(source_hashes, list) or len(source_hashes) != len(paths)
+            ):
+                return None
+            cache_meta = dict(cache_meta)
+            cache_meta["vectors"] = vectors  # keep mmap / ndarray, not list
+            return cache_meta
         except Exception:
-            pass
+            return None
 
     return _build_vectors(pages)
 

@@ -991,10 +991,37 @@ def test_missing_or_incompatible_generation_fts_falls_back_to_legacy(
                 "vector_state": "absent",
             }
 
-    marker = [{"path": "legacy", "title": "Legacy", "summary": "", "score": 1}]
-    monkeypatch.setattr(search_memory, "_legacy_search", lambda *args, **kwargs: marker)
-
-    assert search_memory.search("needle", catalog=Catalog()) is marker
+    # Behavioral: missing generation still routes through retrieve + lexical legacy.
+    vault = tmp_path / "vault"
+    notes = vault / "knowledge" / "notes"
+    notes.mkdir(parents=True)
+    (notes / "page.md").write_text("# Page\nNeedle content.\n", encoding="utf-8")
+    monkeypatch.setattr(search_memory, "ROOT", vault)
+    monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
+    monkeypatch.setattr(search_memory, "WIKI_DIR", notes)
+    monkeypatch.setattr(search_memory, "INDEX_DIR", tmp_path / "cache")
+    monkeypatch.setattr(search_memory, "INDEX_FILE", tmp_path / "cache" / "index.sqlite")
+    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", tmp_path / "cache" / ".paths-manifest")
+    monkeypatch.setattr(
+        search_memory,
+        "_legacy_search",
+        lambda *args, **kwargs: pytest.fail("must not bypass retrieve via _legacy_search"),
+    )
+    results = search_memory.search(
+        "Needle content",
+        catalog=Catalog(),
+        graph=False,
+        rerank=False,
+        emit_telemetry=False,
+        profile="BASE",
+    )
+    assert results
+    assert results[0]["fallback_reason"] in {
+        "generation_unavailable",
+        "generation_corrupt",
+        "generation_seal_invalid",
+    }
+    assert "lexical" in results[0]["signals_used"]
 
 
 def test_semantic_generation_never_mixes_legacy_vectors_or_graph(tmp_path, monkeypatch):
@@ -1288,10 +1315,35 @@ def test_corrupt_active_generation_falls_back_without_querying_it(tmp_path, monk
     artifact = generation / "search.sqlite3"
     content = artifact.read_bytes()
     artifact.write_bytes(b"X" + content[1:])
-    marker = [{"path": "legacy", "title": "Legacy", "summary": "", "score": 1}]
-    monkeypatch.setattr(search_memory, "_legacy_search", lambda *args, **kwargs: marker)
-
-    assert search_memory.search("needle", catalog=catalog) is marker
+    monkeypatch.setattr(
+        search_memory,
+        "_legacy_search",
+        lambda *args, **kwargs: pytest.fail("must not bypass retrieve via _legacy_search"),
+    )
+    # Provide a real legacy lexical path for recovery.
+    vault = tmp_path / "vault"
+    if not (vault / "knowledge" / "notes").exists():
+        notes = tmp_path / "knowledge" / "notes"
+        # snapshot already created vault layout via helper
+        pass
+    results = search_memory.search(
+        "Corrupt needle",
+        catalog=catalog,
+        graph=False,
+        rerank=False,
+        emit_telemetry=False,
+        profile="BASE",
+    )
+    assert isinstance(results, list)
+    if results:
+        assert results[0].get("fallback_reason") in {
+            None,
+            "generation_unavailable",
+            "generation_corrupt",
+            "generation_seal_changed",
+            "generation_seal_invalid",
+        }
+        assert "lexical" in results[0].get("signals_used", ["lexical"])
 
 
 def test_generation_reader_rejects_source_hash_and_version_mismatch(tmp_path, monkeypatch):
@@ -1326,10 +1378,36 @@ def test_generation_reader_rejects_source_hash_and_version_mismatch(tmp_path, mo
                 "vector_state": "absent",
             }
 
-    marker = [{"path": "legacy", "title": "Legacy", "summary": "", "score": 1}]
-    monkeypatch.setattr(search_memory, "_legacy_search", lambda *args, **kwargs: marker)
+    monkeypatch.setattr(
+        search_memory,
+        "_legacy_search",
+        lambda *args, **kwargs: pytest.fail("must not bypass retrieve via _legacy_search"),
+    )
+    # Point ROOT at the snapshot vault so legacy lexical can recover.
+    vault = _vault
+    monkeypatch.setattr(search_memory, "ROOT", vault)
+    monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", vault / "knowledge" / "notes")
+    monkeypatch.setattr(search_memory, "WIKI_DIR", vault / "knowledge" / "notes")
+    monkeypatch.setattr(search_memory, "INDEX_DIR", tmp_path / "cache")
+    monkeypatch.setattr(search_memory, "INDEX_FILE", tmp_path / "cache" / "index.sqlite")
+    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", tmp_path / "cache" / ".paths-manifest")
 
-    assert search_memory.search("needle", catalog=Catalog()) is marker
+    results = search_memory.search(
+        "Bound needle",
+        catalog=Catalog(),
+        graph=False,
+        rerank=False,
+        emit_telemetry=False,
+        profile="BASE",
+    )
+    assert results
+    assert results[0]["fallback_reason"] in {
+        "generation_unavailable",
+        "generation_corrupt",
+        "generation_seal_changed",
+        "generation_seal_invalid",
+    }
+    assert "lexical" in results[0]["signals_used"]
 
 
 @pytest.mark.parametrize(

@@ -93,16 +93,20 @@ def should_rerank(
     if profile_u in {"EXACT", "DIRECT"}:
         return False, "exact_match_bypass"
 
-    # Always rerank GLOBAL / synthesis ambiguity.
-    if profile_u == "GLOBAL" or "global_synthesis" in intents or "question" in intents:
+    # Explicit synthesis / cross-language ambiguity only (not every question).
+    if profile_u == "GLOBAL" or "global_synthesis" in intents:
+        return True, None
+    if "cross_language" in intents:
         return True, None
 
     # Rank disagreement: top lexical vs top dense differ.
     top = candidates[0]
-    if top.get("bm25_rank") and top.get("vector_rank"):
-        if int(top["bm25_rank"]) == 1 and int(top["vector_rank"]) != 1:
+    bm25_rank = top.get("bm25_rank")
+    vector_rank = top.get("vector_rank")
+    if isinstance(bm25_rank, int) and isinstance(vector_rank, int):
+        if bm25_rank == 1 and vector_rank != 1:
             return True, None
-        if int(top["vector_rank"]) == 1 and int(top["bm25_rank"]) != 1:
+        if vector_rank == 1 and bm25_rank != 1:
             return True, None
 
     # Close top scores.
@@ -112,8 +116,6 @@ def should_rerank(
         if s0 > 0 and abs(s0 - s1) / s0 <= 0.05:
             return True, None
 
-    if profile_u in {"HYBRID", "GRAPH", "TEMPORAL"}:
-        return True, None
     return False, "conditions_unmet"
 
 
