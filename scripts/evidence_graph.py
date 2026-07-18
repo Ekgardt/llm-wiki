@@ -364,6 +364,40 @@ def _ordered(records: Iterable[Mapping[str, object]], key: str, label: str) -> l
     return sorted(values, key=lambda record: str(record.get(key, "")))
 
 
+def _canonical_source_membership(
+    sources: Iterable[Mapping[str, object]],
+) -> dict[str, object]:
+    normalized: list[dict[str, object]] = []
+    source_ids: set[str] = set()
+    relative_paths: set[str] = set()
+    for record in _ordered(sources, "source_id", "source"):
+        _closed(record, _SOURCE_KEYS, "source")
+        source_id = _text(record["source_id"], "source_id", maximum=512)
+        assert source_id is not None
+        relative_path = _relative_path(record["relative_path"])
+        if source_id in source_ids or relative_path in relative_paths:
+            raise ValueError("source membership IDs and relative paths must be unique")
+        source_ids.add(source_id)
+        relative_paths.add(relative_path)
+        normalized.append(
+            {
+                "source_id": source_id,
+                "relative_path": relative_path,
+                "sha256": _digest(record["sha256"], "source hash"),
+                "size": _integer(record["size"], "source size"),
+                "media_type": _text(record["media_type"], "media_type", maximum=256),
+                "language": _text(record["language"], "language", maximum=128, optional=True),
+                "git_oid": _text(record["git_oid"], "git_oid", maximum=128, optional=True),
+            }
+        )
+    return {"schema_version": "evidence-graph-sources/v1", "sources": normalized}
+
+
+def source_manifest_sha256(sources: Iterable[Mapping[str, object]]) -> str:
+    """Hash the closed, deterministic source membership represented by graph source rows."""
+    return hashlib.sha256(canonical_json_bytes(_canonical_source_membership(sources))).hexdigest()
+
+
 def _configure_write(database: sqlite3.Connection) -> None:
     mode = database.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
     if str(mode).casefold() != "delete":
@@ -740,6 +774,32 @@ LIMIT 1
         database.set_progress_handler(None, 0)
 
 
+def _stored_source_manifest_sha256(
+    database: sqlite3.Connection,
+    *,
+    deadline: float | None,
+    monotonic: Callable[[], float],
+) -> str:
+    _validation_deadline(database, deadline, monotonic)
+    try:
+        rows = database.execute(
+            "SELECT source_id, relative_path, sha256, size, media_type, language, git_oid "
+            "FROM source ORDER BY source_id LIMIT ?",
+            (MAX_VALIDATION_ROWS + 1,),
+        ).fetchall()
+        if len(rows) > MAX_VALIDATION_ROWS:
+            raise ValueError("Evidence Graph source row ceiling exceeded")
+        if deadline is not None and monotonic() >= deadline:
+            raise TimeoutError("Evidence Graph validation deadline reached")
+        return source_manifest_sha256([dict(row) for row in rows])
+    except sqlite3.Error as exc:
+        if deadline is not None and (monotonic() >= deadline or "interrupt" in str(exc).casefold()):
+            raise TimeoutError("Evidence Graph validation deadline reached") from exc
+        raise ValueError("Evidence Graph source manifest validation failed") from exc
+    finally:
+        database.set_progress_handler(None, 0)
+
+
 def validate_generation_artifact(
     generation_path: Path,
     manifest: Mapping[str, object],
@@ -765,6 +825,14 @@ def validate_generation_artifact(
         database.execute("PRAGMA query_only=ON")
         database.execute("PRAGMA trusted_schema=OFF")
         _validate_connection(database, deadline=deadline, monotonic=monotonic)
+        expected_source_hash = manifest.get("source_manifest_sha256")
+        if (
+            _stored_source_manifest_sha256(
+                database, deadline=deadline, monotonic=monotonic
+            )
+            != expected_source_hash
+        ):
+            raise ValueError("Evidence Graph source manifest does not match graph source membership")
     finally:
         database.close()
 

@@ -15,17 +15,22 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 
-def _publish(catalog, generation_id: str, *, parent: str | None = None):
+def _publish(
+    catalog,
+    generation_id: str,
+    *,
+    parent: str | None = None,
+    sources=None,
+    source_bytes=None,
+):
     import evidence_graph
     from reliable_memory import canonical_json_bytes
 
     directory = catalog.generations_path / generation_id
     directory.mkdir(parents=True)
     content = b"def f(): pass\n"
-    database_path = directory / "evidence.sqlite3"
-    evidence_graph.create_generation_database(
-        database_path,
-        sources=[
+    if sources is None:
+        sources = [
             {
                 "source_id": "source",
                 "relative_path": "app.py",
@@ -35,8 +40,14 @@ def _publish(catalog, generation_id: str, *, parent: str | None = None):
                 "language": "python",
                 "git_oid": None,
             }
-        ],
-        source_bytes={"source": content},
+        ]
+    if source_bytes is None:
+        source_bytes = {"source": content}
+    database_path = directory / "evidence.sqlite3"
+    evidence_graph.create_generation_database(
+        database_path,
+        sources=sources,
+        source_bytes=source_bytes,
         nodes=[],
         occurrences=[],
         assertions=[],
@@ -57,7 +68,7 @@ def _publish(catalog, generation_id: str, *, parent: str | None = None):
         "vector_dimensions": None,
         "graph_schema_version": "evidence-graph/v1",
         "graph_extractor_version": "graph-extractor/v1",
-        "source_manifest_sha256": hashlib.sha256(b"sources").hexdigest(),
+        "source_manifest_sha256": evidence_graph.source_manifest_sha256(sources),
         "artifacts": [
             {
                 "path": "evidence.sqlite3",
@@ -193,3 +204,89 @@ def test_registration_rejects_wrong_index_definition_with_expected_name(tmp_path
 
     with pytest.raises(ValueError, match="index|schema"):
         catalog.register("wrong-index")
+
+
+def test_registration_accepts_canonical_multi_source_membership_and_rejects_mismatch(tmp_path):
+    from generation_catalog import GenerationCatalog
+    from reliable_memory import canonical_json_bytes
+
+    first = b"alpha"
+    second = b"beta"
+    sources = [
+        {
+            "source_id": "z-source",
+            "relative_path": "z.py",
+            "sha256": hashlib.sha256(first).hexdigest(),
+            "size": len(first),
+            "media_type": "text/x-python",
+            "language": "python",
+            "git_oid": None,
+        },
+        {
+            "source_id": "a-source",
+            "relative_path": "a.md",
+            "sha256": hashlib.sha256(second).hexdigest(),
+            "size": len(second),
+            "media_type": "text/markdown",
+            "language": "markdown",
+            "git_oid": "abc123",
+        },
+    ]
+    catalog = GenerationCatalog(tmp_path / "state")
+    manifest = _publish(
+        catalog,
+        "multi",
+        sources=list(reversed(sources)),
+        source_bytes={"z-source": first, "a-source": second},
+    )
+    assert catalog.register("multi") == manifest
+
+    mismatch = _publish(
+        catalog,
+        "mismatch",
+        sources=sources,
+        source_bytes={"z-source": first, "a-source": second},
+    )
+    mismatch["source_manifest_sha256"] = "0" * 64
+    path = catalog.generations_path / "mismatch/manifest.json"
+    path.write_bytes(canonical_json_bytes(mismatch))
+    with pytest.raises(ValueError, match="source manifest|membership"):
+        catalog.register("mismatch")
+
+
+def test_source_membership_drift_falls_back_and_orphan_probe_skips_mismatch(tmp_path):
+    import evidence_graph
+    from generation_catalog import GenerationCatalog
+    from reliable_memory import canonical_json_bytes
+
+    catalog = GenerationCatalog(tmp_path / "state")
+    _publish(catalog, "gen-1")
+    _publish(catalog, "gen-2", parent="gen-1")
+    for identifier in ("gen-1", "gen-2"):
+        catalog.register(identifier)
+    assert catalog.activate("gen-1", expected_active=None)
+    assert catalog.activate("gen-2", expected_active="gen-1")
+    with sqlite3.connect(catalog.generations_path / "gen-2/evidence.sqlite3") as database:
+        database.execute("UPDATE source SET sha256=?", ("f" * 64,))
+    _rebind_registered_manifest(catalog, "gen-2")
+
+    graph = evidence_graph.EvidenceGraph.open_active(catalog)
+    assert graph is not None
+    assert graph.generation_id == "gen-1"
+    graph.close()
+
+    _publish(catalog, "activate-mismatch", parent="gen-1")
+    catalog.register("activate-mismatch")
+    with sqlite3.connect(
+        catalog.generations_path / "activate-mismatch/evidence.sqlite3"
+    ) as database:
+        database.execute("UPDATE source SET sha256=?", ("d" * 64,))
+    _rebind_registered_manifest(catalog, "activate-mismatch")
+    with pytest.raises(ValueError, match="source manifest|membership"):
+        catalog.activate("activate-mismatch", expected_active="gen-1")
+
+    orphan = _publish(catalog, "orphan")
+    orphan["source_manifest_sha256"] = "e" * 64
+    orphan_path = catalog.generations_path / "orphan/manifest.json"
+    orphan_path.write_bytes(canonical_json_bytes(orphan))
+    assert catalog.recover_orphans() == []

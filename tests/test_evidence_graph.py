@@ -183,6 +183,33 @@ def test_manifest_schema_is_closed_and_bounded():
         )
 
 
+def test_source_membership_hash_is_closed_canonical_and_order_independent():
+    import evidence_graph
+    from reliable_memory import canonical_json_bytes
+
+    sources = _records()["sources"]
+    second = {
+        "source_id": "src-doc",
+        "relative_path": "knowledge/notes/decision.md",
+        "sha256": _sha(b"decision"),
+        "size": len(b"decision"),
+        "media_type": "text/markdown",
+        "language": "markdown",
+        "git_oid": "abc123",
+    }
+    expected = {
+        "schema_version": "evidence-graph-sources/v1",
+        "sources": sorted([*sources, second], key=lambda row: row["source_id"]),
+    }
+
+    forward = evidence_graph.source_manifest_sha256([*sources, second])
+    reverse = evidence_graph.source_manifest_sha256([second, *sources])
+
+    assert forward == reverse == _sha(canonical_json_bytes(expected))
+    with pytest.raises(ValueError, match="closed|unknown"):
+        evidence_graph.source_manifest_sha256([{**second, "unknown": True}])
+
+
 def test_generation_database_has_canonical_tables_indexes_and_pragmas(tmp_path):
     graph = _create(tmp_path)
     graph.close()
