@@ -3719,7 +3719,7 @@ def test_authoritative_orchestration_has_no_public_callback_or_forgeable_result(
         )
 
 
-def test_trusted_complete_no_winner_persists_authoritative_negative_evidence(
+def test_mutated_completeness_helpers_cannot_attest_authoritative_evidence(
     tmp_path, monkeypatch
 ):
     runner = _runner_module()
@@ -3731,6 +3731,7 @@ def test_trusted_complete_no_winner_persists_authoritative_negative_evidence(
     output = repo / "benchmark/results/no-winner.json"
     trusted_worker = runner._run_bounded_model_worker
     trusted_process_runner = runner._run_process_tree
+    aggregate = runner._aggregate_reports
 
     lexical_argv = runner._lexical_ablation_worker_arguments
     monkeypatch.setattr(
@@ -3740,33 +3741,26 @@ def test_trusted_complete_no_winner_persists_authoritative_negative_evidence(
     )
     monkeypatch.setattr(runner, "_select_lexical_winner", lambda _reports: {"id": "L0"})
     monkeypatch.setattr(runner, "required_candidate_specs", lambda _matrix: [])
-    artifact = runner.orchestrate_selection(
-        matrix_path=BENCHMARK / "model-matrix-v1.json",
-        corpus_path=CORPUS,
-        repo_root=repo,
-        output_path=output,
-        measured_at="2026-07-17T12:00:00Z",
-        cache_root=tmp_path / "cache",
-        deadline_seconds=60.0,
-    )
+    monkeypatch.setattr(runner, "_aggregate_reports", lambda *args, **kwargs: aggregate(*args, **kwargs))
+    with pytest.raises(ValueError, match="authoritative.*contract|completeness"):
+        runner.orchestrate_selection(
+            matrix_path=BENCHMARK / "model-matrix-v1.json",
+            corpus_path=CORPUS,
+            repo_root=repo,
+            output_path=output,
+            measured_at="2026-07-17T12:00:00Z",
+            cache_root=tmp_path / "cache",
+            deadline_seconds=60.0,
+        )
 
     assert runner._run_bounded_model_worker is trusted_worker
     assert runner._run_process_tree is trusted_process_runner
-    assert artifact["schema_version"] == "retrieval-selection/v1"
-    assert artifact["release_evidence"] is True
-    assert artifact["quality_claim"] is False
-    assert artifact["selected"] is None
-    assert artifact["gates"] == {
-        "fallback": "current-bm25",
-        "outcome": "no-winner",
-    }
-    assert artifact["measurements"] is None
-    assert output.read_bytes() == canonical_json_bytes(artifact) + b"\n"
+    assert not output.exists()
     assert matrix["selection"]["default_embedding"] is None
     assert matrix["selection"]["default_reranker"] is None
 
 
-def test_stale_out_of_band_payloads_from_replaced_worker_are_analysis_only(
+def test_stale_out_of_band_payloads_with_mutated_enumeration_fail_closed(
     tmp_path, monkeypatch
 ):
     runner = _runner_module()
@@ -3795,19 +3789,18 @@ def test_stale_out_of_band_payloads_from_replaced_worker_are_analysis_only(
 
     monkeypatch.setattr(runner, "required_candidate_specs", lambda _matrix: [])
     monkeypatch.setattr(runner, "_run_bounded_model_worker", replaced_worker)
-    artifact = runner.orchestrate_selection(
-        matrix_path=BENCHMARK / "model-matrix-v1.json",
-        corpus_path=CORPUS,
-        repo_root=repo,
-        output_path=repo / "benchmark/results/stale.json",
-        measured_at="2026-07-17T12:00:00Z",
-        cache_root=tmp_path / "cache",
-        deadline_seconds=30.0,
-    )
-
-    assert artifact["schema_version"] == "retrieval-comparison/v1"
-    assert artifact["quality_claim"] is False
-    assert artifact["release_evidence"] is False
+    output = repo / "benchmark/results/stale.json"
+    with pytest.raises(ValueError, match="authoritative completeness contract"):
+        runner.orchestrate_selection(
+            matrix_path=BENCHMARK / "model-matrix-v1.json",
+            corpus_path=CORPUS,
+            repo_root=repo,
+            output_path=output,
+            measured_at="2026-07-17T12:00:00Z",
+            cache_root=tmp_path / "cache",
+            deadline_seconds=30.0,
+        )
+    assert not output.exists()
 
 
 @pytest.mark.parametrize("attack", ["wrong-candidate", "replay"])
