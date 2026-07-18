@@ -354,6 +354,7 @@ def fuse_rrf(
                 ),
                 "title": row.get("title"),
                 "summary": row.get("summary"),
+                "content": row.get("content") or row.get("summary"),
                 "project": row.get("project"),
                 "timestamp": row.get("timestamp"),
                 "chunk_id": row.get("chunk_id") or key,
@@ -365,12 +366,14 @@ def fuse_rrf(
                 "valid_to": row.get("valid_to"),
                 "language": row.get("language"),
                 "source_id": row.get("source_id"),
+                "lance_distance": row.get("lance_distance"),
             }
         else:
             # Prefer first non-empty display fields from any backend.
             for field in (
                 "title",
                 "summary",
+                "content",
                 "project",
                 "timestamp",
                 "chunk_id",
@@ -382,6 +385,7 @@ def fuse_rrf(
                 "valid_to",
                 "language",
                 "source_id",
+                "lance_distance",
             ):
                 if meta[key].get(field) in (None, "") and row.get(field) not in (None, ""):
                     meta[key][field] = row.get(field)
@@ -504,6 +508,15 @@ def _resolve_effective_mode(
     return effective, fallback, tuple(signals)
 
 
+def _check_deadline(deadline_monotonic: float | None) -> None:
+    if deadline_monotonic is None:
+        return
+    import time
+
+    if time.monotonic() >= float(deadline_monotonic):
+        raise TimeoutError("retrieval deadline exceeded")
+
+
 def retrieve(
     query: str,
     *,
@@ -520,18 +533,28 @@ def retrieve(
     graph_enabled: bool = True,
     rerank_enabled: bool = True,
     partial: bool = False,
+    deadline_monotonic: float | None = None,
+    max_candidates: int | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> RetrievalResult:
     """Plan and execute retrieval with truthful mode/signal reporting.
 
     Lexical and dense backends are invoked independently with identical hard
     filters. Fusion is rank-only RRF. Raw backend scores stay on candidates.
     """
+    _check_deadline(deadline_monotonic)
+    if cancelled is not None and cancelled():
+        raise TimeoutError("retrieval cancelled")
     analysis = analyze_query(query)
     requested = _normalize_profile(requested_profile) or analysis.recommended_profile
+    if max_candidates is not None and int(max_candidates) > 0:
+        backend_limit = min(limit if limit > 0 else int(max_candidates), int(max_candidates))
+    else:
+        backend_limit = limit
     filters = {
         "query": analysis.normalized_query or analysis.query,
         "scope": scope,
-        "limit": limit,
+        "limit": backend_limit,
         "project": project,
         "since": since,
         "as_of": as_of,
@@ -549,19 +572,31 @@ def retrieve(
     graph_available: bool | None = None
 
     if lexical_backend is not None and "lexical" in wanted:
+        _check_deadline(deadline_monotonic)
+        if cancelled is not None and cancelled():
+            raise TimeoutError("retrieval cancelled")
         lexical_hits = lexical_backend(**filters) or ()
         ran_lexical = True
+        _check_deadline(deadline_monotonic)
 
     if dense_backend is not None and "dense" in wanted:
+        _check_deadline(deadline_monotonic)
+        if cancelled is not None and cancelled():
+            raise TimeoutError("retrieval cancelled")
         dense_hits = dense_backend(**filters)
         ran_dense = True
         # None ⇒ backend unavailable; empty sequence ⇒ available but no hits.
         dense_available = dense_hits is not None
+        _check_deadline(deadline_monotonic)
 
     if graph_backend is not None and "graph" in wanted and graph_enabled:
+        _check_deadline(deadline_monotonic)
+        if cancelled is not None and cancelled():
+            raise TimeoutError("retrieval cancelled")
         graph_hits = graph_backend(**filters)
         ran_graph = True
         graph_available = graph_hits is not None
+        _check_deadline(deadline_monotonic)
     elif "graph" in wanted and not graph_enabled:
         graph_available = False
 
@@ -597,17 +632,22 @@ def retrieve(
             from reranker import should_rerank
 
             legacy_rows = []
+            query_norm = (analysis.normalized_query or analysis.query).casefold().strip()
+            exact_title_hit = False
             for c in candidates:
                 info = display_meta.get(c.candidate_id, {})
-                title = info.get("title") or Path(c.relative_path).stem
-                summary = info.get("summary") or info.get("content") or ""
+                title = str(info.get("title") or Path(c.relative_path).stem)
+                summary = str(info.get("summary") or "")
+                content = str(info.get("content") or summary or "")
+                if title.casefold().strip() == query_norm:
+                    exact_title_hit = True
                 legacy_rows.append(
                     {
                         "candidate_id": c.candidate_id,
                         "path": c.relative_path,
                         "relative_path": c.relative_path,
                         "summary": summary,
-                        "content": summary,
+                        "content": content,
                         "title": title,
                         "rrf_score": c.rrf_score,
                         "score": c.rrf_score,
@@ -623,14 +663,35 @@ def retrieve(
                         "byte_start": c.byte_start,
                         "byte_end": c.byte_end,
                         "evidence_ids": c.evidence_ids,
+                        "lance_distance": info.get("lance_distance"),
                     }
                 )
-            apply, skip_reason = should_rerank(
-                profile=requested,
-                candidates=legacy_rows,
-                analysis_intents=analysis.intents,
-                rerank_enabled=rerank_enabled,
-            )
+            if exact_title_hit:
+                apply, skip_reason = False, "exact_title_bypass"
+                # Promote exact title match to rank 1 before any rerank.
+                legacy_rows.sort(
+                    key=lambda row: (
+                        0 if str(row.get("title", "")).casefold().strip() == query_norm else 1,
+                        -float(row.get("rrf_score") or 0.0),
+                        str(row.get("candidate_id") or ""),
+                    )
+                )
+                rebuilt_exact: list[RetrievalCandidate] = []
+                id_map = {c.candidate_id: c for c in candidates}
+                for row in legacy_rows:
+                    base = id_map.get(str(row["candidate_id"]))
+                    if base is None:
+                        continue
+                    rebuilt_exact.append(base)
+                if rebuilt_exact:
+                    candidates = tuple(rebuilt_exact)
+            else:
+                apply, skip_reason = should_rerank(
+                    profile=requested,
+                    candidates=legacy_rows,
+                    analysis_intents=analysis.intents,
+                    rerank_enabled=rerank_enabled,
+                )
             if not apply:
                 reranker_fallback_reason = skip_reason
             else:
@@ -811,6 +872,8 @@ def candidates_to_legacy(
             "valid_to",
             "language",
             "source_id",
+            "content",
+            "lance_distance",
         ):
             if info.get(key) not in (None, ""):
                 row[key] = info[key]
@@ -857,9 +920,13 @@ def _backend_hit_from_legacy(row: Mapping[str, Any], *, score_key: str = "score"
         "language",
         "source_id",
         "generation",
+        "content",
+        "lance_distance",
     ):
         if key in row:
             hit[key] = row[key]
+    if "content" not in hit:
+        hit["content"] = hit.get("summary") or ""
     return hit
 
 
@@ -889,13 +956,17 @@ def retrieve_via_search_memory(
 
     analysis = analyze_query(query)
     requested = _normalize_profile(profile)
+    # semantic=False always forces BASE/lexical regardless of planner profile.
+    if not semantic:
+        requested = "BASE"
+    elif requested is None:
+        requested = "HYBRID" if semantic else analysis.recommended_profile
     if requested is None:
-        if semantic:
-            requested = "HYBRID"
-        else:
-            requested = analysis.recommended_profile
+        requested = analysis.recommended_profile
 
     wanted_tuple = PROFILE_SIGNALS[requested]
+    if not semantic:
+        wanted_tuple = tuple(s for s in wanted_tuple if s != "dense") or ("lexical",)
 
     selected_catalog = catalog if catalog is not None else search_memory._active_generation_catalog()
     corpus_generation = "legacy"
@@ -906,7 +977,13 @@ def retrieve_via_search_memory(
         "dense_fallback": None,
     }
 
-    def _open_generation() -> bool:
+    def _artifact_names_for(manifest: dict[str, object], *, want_vectors: bool) -> tuple[str, ...]:
+        names: list[str] = [search_memory.GENERATION_FTS_ARTIFACT]
+        if want_vectors and manifest.get("vector_state") == "complete":
+            names.extend(search_memory.GENERATION_VECTOR_ARTIFACTS)
+        return tuple(names)
+
+    def _open_generation(*, want_vectors: bool) -> bool:
         if selected_catalog is None or force_rebuild or page_paths is not None:
             return False
         try:
@@ -915,7 +992,7 @@ def retrieve_via_search_memory(
             return False
         if not isinstance(manifest, dict):
             return False
-        artifact_names = (search_memory.GENERATION_FTS_ARTIFACT,)
+        artifact_names = _artifact_names_for(manifest, want_vectors=want_vectors)
         seal = search_memory._generation_consumption_seal(
             selected_catalog, manifest, artifact_names
         )
@@ -935,7 +1012,8 @@ def retrieve_via_search_memory(
     catalog_requested = (
         selected_catalog is not None and not force_rebuild and page_paths is None
     )
-    use_generation = _open_generation()
+    want_vectors = "dense" in wanted_tuple and semantic
+    use_generation = _open_generation(want_vectors=want_vectors)
     generation_fallback: str | None = None
     if use_generation:
         corpus_generation = str(generation_ctx["manifest"]["generation_id"])
@@ -976,7 +1054,14 @@ def retrieve_via_search_memory(
                     ):
                         generation_fallback = "generation_seal_changed"
                     else:
-                        return [_backend_hit_from_legacy(row) for row in rows]
+                        hits = [_backend_hit_from_legacy(row) for row in rows]
+                        return search_memory.apply_hard_filters(
+                            hits,
+                            project=filters.get("project"),
+                            since=filters.get("since"),
+                            as_of=filters.get("as_of"),
+                            scope=filters.get("scope", "all"),
+                        )
             except Exception:
                 generation_fallback = generation_fallback or "generation_corrupt"
         rows = search_memory._legacy_lexical_hits(
@@ -989,7 +1074,14 @@ def retrieve_via_search_memory(
             as_of=filters["as_of"],
             page_paths=page_paths,
         )
-        return [_backend_hit_from_legacy(row) for row in rows]
+        hits = [_backend_hit_from_legacy(row) for row in rows]
+        return search_memory.apply_hard_filters(
+            hits,
+            project=filters.get("project"),
+            since=filters.get("since"),
+            as_of=filters.get("as_of"),
+            scope=filters.get("scope", "all"),
+        )
 
     def dense_backend(**filters: Any) -> Sequence[Mapping[str, Any]] | None:
         nonlocal generation_fallback
@@ -1046,10 +1138,17 @@ def retrieve_via_search_memory(
                     generation_ctx["dense_fallback"] = "generation_seal_changed"
                     generation_fallback = "generation_seal_changed"
                     return None
-                return [
+                hits = [
                     _backend_hit_from_legacy({**row, "vector_score": row.get("score")})
                     for row in rows
                 ]
+                return search_memory.apply_hard_filters(
+                    hits,
+                    project=filters.get("project"),
+                    since=filters.get("since"),
+                    as_of=filters.get("as_of"),
+                    scope=filters.get("scope", "all"),
+                )
             except Exception:
                 generation_ctx["dense_fallback"] = "generation_vectors_unavailable"
                 return None
@@ -1065,10 +1164,17 @@ def retrieve_via_search_memory(
         )
         if rows is None:
             return None
-        return [
+        hits = [
             _backend_hit_from_legacy({**row, "vector_score": row.get("score")})
             for row in rows
         ]
+        return search_memory.apply_hard_filters(
+            hits,
+            project=filters.get("project"),
+            since=filters.get("since"),
+            as_of=filters.get("as_of"),
+            scope=filters.get("scope", "all"),
+        )
 
     def graph_backend(**filters: Any) -> Sequence[Mapping[str, Any]] | None:
         if not graph or "graph" not in wanted_tuple:
@@ -1108,7 +1214,7 @@ def retrieve_via_search_memory(
             since=since,
             as_of=as_of,
             lexical_backend=lexical_backend if "lexical" in wanted_tuple else None,
-            dense_backend=dense_backend if "dense" in wanted_tuple else None,
+            dense_backend=dense_backend if ("dense" in wanted_tuple and semantic) else None,
             graph_backend=graph_backend if ("graph" in wanted_tuple and graph) else None,
             corpus_generation=corpus_generation,
             graph_enabled=graph and not use_generation,

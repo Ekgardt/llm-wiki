@@ -1333,18 +1333,70 @@ def _generation_filters(
     return (" AND " + " AND ".join(clauses) if clauses else ""), values
 
 
+def apply_hard_filters(
+    rows: list[dict],
+    *,
+    project: str | None = None,
+    since: str | None = None,
+    as_of: str | None = None,
+    scope: str = "all",
+    authority: str | None = None,
+    **_ignored: object,
+) -> list[dict]:
+    """Single hard-filter contract shared by lexical / NumPy / Lance paths."""
+    filtered: list[dict] = []
+    for row in rows:
+        path = str(row.get("path") or row.get("relative_path") or "")
+        if scope in {"wiki", "memory", "knowledge"} and path and "knowledge/notes/" not in path.replace("\\", "/"):
+            continue
+        proj = str(row.get("project") or "")
+        if project and proj.casefold() != project.casefold():
+            continue
+        auth = str(row.get("authority") or "")
+        if authority and auth.casefold() != authority.casefold():
+            continue
+        ts = str(row.get("timestamp") or row.get("valid_from") or "")
+        status = str(row.get("status") or "").casefold()
+        valid_from = str(row.get("valid_from") or "")[:10]
+        valid_to = str(row.get("valid_to") or "")[:10]
+        if since and ts:
+            try:
+                if ts[:10] < since[:10]:
+                    continue
+            except (IndexError, TypeError):
+                pass
+        if as_of:
+            if ts:
+                try:
+                    if ts[:10] > as_of[:10]:
+                        continue
+                except (IndexError, TypeError):
+                    pass
+            if valid_from and valid_from > as_of[:10]:
+                continue
+            if valid_to and valid_to not in {"", "null", "none"} and valid_to <= as_of[:10]:
+                continue
+        elif status and status not in {"", "active"}:
+            continue
+        filtered.append(row)
+    return filtered
+
+
 def _generation_result(row: sqlite3.Row, generation_id: str) -> dict[str, object]:
     score = -float(row["rank"])
     authority = row["authority"] or ""
     score *= AUTHORITY_WEIGHTS.get(authority.casefold(), 1.0)
+    content = row["content"] or ""
     return {
         "path": row["source_path"],
         "title": row["title"] or Path(row["source_path"]).stem,
-        "summary": row["content"].strip().splitlines()[0][:120],
+        "summary": content.strip().splitlines()[0][:120] if content.strip() else "",
+        "content": content,
         "score": round(score, 4),
         "project": row["project"] or "",
         "timestamp": (row["valid_from"] or "")[:10],
         "chunk_id": row["chunk_id"],
+        "candidate_id": row["chunk_id"],
         "source_id": row["source_id"],
         "source_sha256": row["source_sha256"],
         "heading_ancestry": json.loads(row["heading_ancestry"]),
@@ -1401,6 +1453,9 @@ def _generation_fts_search(
     )
     for result in results:
         result.pop("_chunk_order", None)
+    results = apply_hard_filters(
+        results, project=project, since=since, as_of=as_of, scope=scope
+    )
     return results[:limit]
 
 
@@ -2329,6 +2384,9 @@ def _load_or_build_vectors(pages: list[Path]) -> dict | None:
             model = cache_meta.get("model") or cache_meta.get("model_id")
             if not isinstance(model, str) or not model:
                 return None
+            revision = cache_meta.get("model_revision") or cache_meta.get("revision")
+            if not isinstance(revision, str) or not revision:
+                return None
             if dims is not None and (
                 not isinstance(dims, int)
                 or vectors.ndim != 2
@@ -2341,9 +2399,9 @@ def _load_or_build_vectors(pages: list[Path]) -> dict | None:
             if not np.isfinite(vectors).all():
                 return None
             source_hashes = cache_meta.get("source_sha256")
-            if source_hashes is not None and (
-                not isinstance(source_hashes, list) or len(source_hashes) != len(paths)
-            ):
+            if not isinstance(source_hashes, list) or len(source_hashes) != len(paths):
+                return None
+            if any(not isinstance(item, str) or len(item) != 64 for item in source_hashes):
                 return None
             cache_meta = dict(cache_meta)
             cache_meta["vectors"] = vectors  # keep mmap / ndarray, not list

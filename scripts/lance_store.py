@@ -108,39 +108,29 @@ def apply_vector_filters(
     project: str | None = None,
     since: str | None = None,
     as_of: str | None = None,
+    scope: str = "all",
+    authority: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Apply the same hard filters used by the exact NumPy generation path."""
-    filtered: list[dict[str, Any]] = []
-    for row in rows:
-        proj = str(row.get("project") or "")
-        ts = str(row.get("timestamp") or row.get("valid_from") or "")
-        status = str(row.get("status") or "").casefold()
-        valid_from = str(row.get("valid_from") or "")[:10]
-        valid_to = str(row.get("valid_to") or "")[:10]
+    """Apply the shared hard-filter contract (parity with lexical/NumPy)."""
+    try:
+        from search_memory import apply_hard_filters
 
-        if project and proj.casefold() != project.casefold():
-            continue
-        if since and ts:
-            try:
-                if ts[:10] < since[:10]:
-                    continue
-            except (IndexError, TypeError):
-                pass
-        if as_of:
-            if ts:
-                try:
-                    if ts[:10] > as_of[:10]:
-                        continue
-                except (IndexError, TypeError):
-                    pass
-            if valid_from and valid_from > as_of[:10]:
+        return apply_hard_filters(
+            rows,
+            project=project,
+            since=since,
+            as_of=as_of,
+            scope=scope,
+            authority=authority,
+        )
+    except Exception:
+        # Minimal local fallback if search_memory is unavailable.
+        filtered: list[dict[str, Any]] = []
+        for row in rows:
+            if project and str(row.get("project") or "").casefold() != project.casefold():
                 continue
-            if valid_to and valid_to not in {"", "null", "none"} and valid_to <= as_of[:10]:
-                continue
-        elif status and status not in {"", "active"}:
-            continue
-        filtered.append(row)
-    return filtered
+            filtered.append(row)
+        return filtered
 
 
 def upsert_vectors(
@@ -152,89 +142,16 @@ def upsert_vectors(
     vectors: list[list[float]],
     model: str = "BAAI/bge-small-en-v1.5",
 ) -> int:
-    """Build-validate-activate vector table. Returns count of vectors stored."""
-    db = _get_db()
-    if db is None:
-        return 0
+    """Closed: destructive live-table mutation is no longer a public path.
 
-    try:
-        import pyarrow as pa
-
-        schema = pa.schema(
-            [
-                pa.field("path", pa.string()),
-                pa.field("title", pa.string()),
-                pa.field("summary", pa.string()),
-                pa.field("project", pa.string()),
-                pa.field("timestamp", pa.string()),
-                pa.field("vector", pa.list_(pa.float32(), EMBEDDING_DIM)),
-                pa.field("model", pa.string()),
-            ]
-        )
-        data = pa.table(
-            {
-                "path": paths,
-                "title": titles,
-                "summary": summaries,
-                "project": projects,
-                "timestamp": timestamps,
-                "vector": vectors,
-                "model": [model] * len(vectors),
-            },
-            schema=schema,
-        )
-
-        # Drop any leftover staging table, build into staging, validate, activate.
-        try:
-            db.drop_table(STAGING_TABLE_NAME)
-        except Exception:
-            pass
-        table = db.create_table(STAGING_TABLE_NAME, data=data)
-        try:
-            table.create_index(
-                index_type="IVF_PQ",
-                vector_column_name="vector",
-                num_partitions=min(256, max(1, len(vectors) // 100)),
-            )
-        except Exception:
-            pass
-
-        count = table.count_rows()
-        if count != len(vectors):
-            try:
-                db.drop_table(STAGING_TABLE_NAME)
-            except Exception:
-                pass
-            return 0
-
-        # Legacy mutable path remains compatibility-only. Prefer
-        # publish_generation_vectors() which never drops the live table.
-        try:
-            db.drop_table(TABLE_NAME)
-        except Exception:
-            pass
-        live = db.create_table(TABLE_NAME, data=data)
-        try:
-            live.create_index(
-                index_type="IVF_PQ",
-                vector_column_name="vector",
-                num_partitions=min(256, max(1, len(vectors) // 100)),
-            )
-        except Exception:
-            pass
-        try:
-            db.drop_table(STAGING_TABLE_NAME)
-        except Exception:
-            pass
-        return len(vectors)
-    except Exception:
-        try:
-            db = _get_db()
-            if db is not None:
-                db.drop_table(STAGING_TABLE_NAME)
-        except Exception:
-            pass
-        return 0
+    Publish only via publish_generation_vectors() into an immutable generation
+    directory, then activate through the generation catalog CAS.
+    """
+    raise RuntimeError(
+        "destructive Lance live-table upsert is closed; "
+        "publish vectors into an immutable generation via "
+        "publish_generation_vectors() and activate with catalog CAS"
+    )
 
 
 def publish_generation_vectors(
