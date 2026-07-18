@@ -181,10 +181,14 @@ def get_link_graph(
     deadline: float | None = None,
 ) -> dict[str, list[str]]:
     """Prefer the active immutable graph and honestly source-scan if absent."""
+    global _link_graph_cache
+    active = _read_active_link_graph(catalog, deadline=deadline)
+    if active is not None:
+        _link_graph_cache = None
+        return active
     if _link_graph_cache is not None:
         return _link_graph_cache
-    active = _read_active_link_graph(catalog, deadline=deadline)
-    return _build_link_graph(deadline=deadline) if active is None else active
+    return _build_link_graph(deadline=deadline)
 
 
 def get_neighbor_records(

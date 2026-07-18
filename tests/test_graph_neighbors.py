@@ -150,6 +150,15 @@ def test_active_generation_is_preferred_and_source_scan_is_honest_fallback(fake_
         }
 
 
+def test_active_generation_invalidates_explicit_source_scan_cache(fake_graph):
+    fake_graph._link_graph_cache = {"stale.md": ["fallback.md"]}
+    active = {"current.md": ["generation.md"]}
+
+    with patch.object(fake_graph, "_read_active_link_graph", return_value=active):
+        assert fake_graph.get_link_graph(catalog=object()) == active
+        assert fake_graph._link_graph_cache is None
+
+
 def test_neighbor_records_are_ordered_by_hop_then_node(fake_graph):
     fake_graph._link_graph_cache = {
         "a.md": ["c.md", "b.md"],

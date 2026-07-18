@@ -65,6 +65,44 @@ def _journal():
     return source
 
 
+def _journal_with_events(count: int, *, empty: bool = False):
+    from corpus_snapshot import CapturedSource
+    from project_journal import JOURNAL_HEADER
+    from reliable_memory import canonical_json_bytes
+
+    base = _journal()
+    events = []
+    for sequence in range(1, count + 1):
+        event = _event()
+        event["occurrence_id"] = f"checkpoint-{sequence}"
+        event["idempotency_key"] = f"task:{sequence}"
+        event["sequence"] = sequence
+        event["last_applied_sequence"] = sequence
+        if empty:
+            event["delta"]["decisions"] = []
+            event["delta"]["blockers"] = []
+            event["delta"]["changed_files"] = []
+            event["evidence_event_ids"] = []
+        events.append(event)
+    content = JOURNAL_HEADER.encode() + b"".join(
+        canonical_json_bytes(event) + b"\n" for event in events
+    )
+    record = base.record
+    return CapturedSource(
+        type(record)(
+            record.logical_id,
+            record.relative_path,
+            hashlib.sha256(content).hexdigest(),
+            len(content),
+            record.media_type,
+            record.language,
+            record.git_oid,
+        ),
+        base.metadata,
+        content,
+    )
+
+
 def test_projects_journal_edges_without_mutating_authoritative_bytes():
     from project_extractor import extract_projects
 
@@ -126,6 +164,31 @@ def test_project_extraction_honors_source_and_deadline_bounds():
         extract_projects((source, source), max_sources=1)
     with pytest.raises(TimeoutError, match="deadline"):
         extract_projects((source,), deadline=time.monotonic() - 1)
+
+
+def test_project_event_loop_honors_deadline_and_cancellation():
+    from project_extractor import extract_projects
+
+    source = _journal_with_events(20, empty=True)
+    ticks = 0
+
+    def monotonic():
+        nonlocal ticks
+        ticks += 1
+        return float(ticks)
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        extract_projects((source,), deadline=6.0, monotonic=monotonic)
+
+    checks = 0
+
+    def cancelled():
+        nonlocal checks
+        checks += 1
+        return checks >= 4
+
+    with pytest.raises(TimeoutError, match="cancel"):
+        extract_projects((source,), cancelled=cancelled)
 
 
 def test_project_output_is_directly_accepted_by_evidence_graph_v1(tmp_path):
