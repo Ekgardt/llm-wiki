@@ -44,6 +44,11 @@ from bounded_io import read_stable_bytes  # noqa: E402
 MAX_MCP_PAGE_BYTES = 4 * 1024 * 1024
 MAX_MCP_EVIDENCE_BYTES = 64 * 1024
 MAX_MCP_TOTAL_EVIDENCE_BYTES = 256 * 1024
+MAX_MCP_QUERY_LENGTH = 8_192
+MAX_MCP_SLUG_LENGTH = 255
+MAX_MCP_CONTEXT_SLUGS = 20
+MAX_MCP_CONTEXT_INCLUDE = 10
+MAX_MCP_INCLUDE_LENGTH = 64
 
 MCP_AVAILABLE = False
 MCP_RESOURCES_AVAILABLE = False
@@ -143,7 +148,11 @@ TOOL_INPUT_SCHEMAS = {
     "recall": {
         "type": "object",
         "properties": {
-            "query": {"type": "string", "description": "Search query"},
+            "query": {
+                "type": "string",
+                "maxLength": MAX_MCP_QUERY_LENGTH,
+                "description": "Search query",
+            },
             "limit": {
                 "type": "integer",
                 "default": 8,
@@ -157,6 +166,7 @@ TOOL_INPUT_SCHEMAS = {
         "properties": {
             "slug": {
                 "type": "string",
+                "maxLength": MAX_MCP_SLUG_LENGTH,
                 "description": "Page slug (e.g. 'auth-decision')",
             },
         },
@@ -167,7 +177,11 @@ TOOL_INPUT_SCHEMAS = {
     "get_decisions": {
         "type": "object",
         "properties": {
-            "query": {"type": "string", "description": "Optional filter query"},
+            "query": {
+                "type": "string",
+                "maxLength": MAX_MCP_QUERY_LENGTH,
+                "description": "Optional filter query",
+            },
             "limit": {
                 "type": "integer",
                 "default": 10,
@@ -181,12 +195,17 @@ TOOL_INPUT_SCHEMAS = {
         "properties": {
             "slugs": {
                 "type": "array",
-                "items": {"type": "string"},
+                "minItems": 1,
+                "maxItems": MAX_MCP_CONTEXT_SLUGS,
+                "uniqueItems": True,
+                "items": {"type": "string", "maxLength": MAX_MCP_SLUG_LENGTH},
                 "description": "List of page slugs",
             },
             "include": {
                 "type": "array",
-                "items": {"type": "string"},
+                "maxItems": MAX_MCP_CONTEXT_INCLUDE,
+                "uniqueItems": True,
+                "items": {"type": "string", "maxLength": MAX_MCP_INCLUDE_LENGTH},
                 "description": "Optional strings; 'frontmatter' adds content_preview for backward compatibility",
             },
         },
@@ -237,14 +256,20 @@ TOOL_INPUT_SCHEMAS = {
 
 def _search_vault(query: str, limit: int = 8) -> list[dict]:
     """Run hybrid search on the vault."""
+    if not isinstance(query, str) or len(query) > MAX_MCP_QUERY_LENGTH:
+        raise ValueError("query exceeds the MCP retrieval bound")
     from search_memory import search
-    return search(query, limit=limit)
+    return search(query, limit=limit, source_tool="mcp.recall")
 
 
-def _read_page(slug: str) -> dict:
+def _read_page(
+    slug: str, *, emit_telemetry: bool = True, resolve_evidence: bool = True
+) -> dict:
     """Read a full page by slug."""
     from memory_state import ROOT, STATE_ROOT
 
+    if not isinstance(slug, str) or len(slug) > MAX_MCP_SLUG_LENGTH:
+        return {"error": "Invalid page slug"}
     windows_path = PureWindowsPath(slug)
     if (
         slug in {".", ".."}
@@ -274,7 +299,8 @@ def _read_page(slug: str) -> dict:
     evidence_bytes = 0
     resolver = EvidenceResolver(ROOT, state_root=STATE_ROOT)
     try:
-        for reference in extract_evidence_references(content):
+        references = extract_evidence_references(content) if resolve_evidence else []
+        for reference in references:
             resolved = resolver.resolve(reference)
             if len(resolved.bytes) > MAX_MCP_EVIDENCE_BYTES:
                 raise EvidenceResolutionError(
@@ -294,12 +320,40 @@ def _read_page(slug: str) -> dict:
             )
     except (EvidenceResolutionError, OSError, UnicodeDecodeError, ValueError) as exc:
         return {"error": f"Evidence resolution failed for {slug}: {exc}"}
-    return {
+    result = {
         "slug": slug,
         "path": str(page_path.relative_to(ROOT)),
         "content": content,
         "evidence": evidence,
     }
+    if emit_telemetry:
+        try:
+            from retrieval_telemetry import (
+                best_effort_make_event,
+                best_effort_record_events,
+            )
+
+            events = []
+            for kind, candidate_id in [
+                ("page_read", slug),
+                *(("evidence_read", item["sha256"]) for item in evidence),
+            ]:
+                event = best_effort_make_event(
+                    event_kind=kind,
+                    query=None,
+                    retrieval_mode="direct",
+                    candidate_id=candidate_id,
+                    rank=None,
+                    generation="legacy",
+                    source_tool="mcp.read_page",
+                )
+                if event is not None:
+                    events.append(event)
+            if events:
+                best_effort_record_events(events)
+        except Exception:
+            pass
+    return result
 
 
 def _wiki_overview() -> dict:
@@ -345,22 +399,107 @@ def _vault_status() -> dict:
 def _get_decisions(query: str | None = None, limit: int = 10) -> list[dict]:
     """Get active decisions from the vault."""
     from search_memory import search
-    results = search(query or "decision", limit=limit)
+    if query is not None and (
+        not isinstance(query, str) or len(query) > MAX_MCP_QUERY_LENGTH
+    ):
+        raise ValueError("query exceeds the MCP retrieval bound")
+    effective_query = query or "decision"
+    candidates = search(
+        effective_query,
+        limit=limit,
+        source_tool="mcp.get_decisions",
+        emit_telemetry=False,
+    )
     # Filter to decision-type pages
-    return [r for r in results if r.get("type") == "decision" or "decision" in r.get("path", "").lower()]
+    results = [
+        result
+        for result in candidates
+        if result.get("type") == "decision"
+        or "decision" in result.get("path", "").lower()
+    ]
+    if results:
+        try:
+            from retrieval_telemetry import (
+                best_effort_make_event,
+                best_effort_record_events,
+            )
+
+            events = []
+            for rank, result in enumerate(results, start=1):
+                candidate_id = result.get("slug") or Path(
+                    result.get("path", "")
+                ).stem
+                event = best_effort_make_event(
+                    event_kind="impression",
+                    query=effective_query,
+                    retrieval_mode="decision-filter",
+                    candidate_id=candidate_id,
+                    rank=rank,
+                    generation="legacy",
+                    source_tool="mcp.get_decisions",
+                )
+                if event is not None:
+                    events.append(event)
+            if events:
+                best_effort_record_events(events)
+        except Exception:
+            pass
+    return results
 
 
 def _get_context(slugs: list[str], include: list[str] | None = None) -> dict:
     """Batch page context; ``frontmatter`` retains the legacy content preview."""
+    if not isinstance(slugs, list) or not 1 <= len(slugs) <= MAX_MCP_CONTEXT_SLUGS:
+        raise ValueError("slugs exceed the MCP context bound")
+    if any(
+        not isinstance(slug, str) or len(slug) > MAX_MCP_SLUG_LENGTH
+        for slug in slugs
+    ):
+        raise ValueError("slug exceeds the MCP context bound")
     include = include or []
+    if not isinstance(include, list) or len(include) > MAX_MCP_CONTEXT_INCLUDE:
+        raise ValueError("include exceeds the MCP context bound")
+    if any(
+        not isinstance(item, str) or len(item) > MAX_MCP_INCLUDE_LENGTH
+        for item in include
+    ):
+        raise ValueError("include item exceeds the MCP context bound")
+    slugs = list(dict.fromkeys(slugs))
+    include = list(dict.fromkeys(include))
     result = {}
     for slug in slugs:
-        page = _read_page(slug)
+        page = _read_page(slug, emit_telemetry=False, resolve_evidence=False)
         if "error" not in page:
             entry = {"slug": slug, "title": slug}
             if "content" in page and "frontmatter" in (include or []):
                 entry["content_preview"] = page["content"][:500]
             result[slug] = entry
+    if result:
+        try:
+            from retrieval_telemetry import (
+                best_effort_make_event,
+                best_effort_record_events,
+            )
+
+            events = [
+                event
+                for slug in result
+                if (
+                    event := best_effort_make_event(
+                        event_kind="context_injected",
+                        query=None,
+                        retrieval_mode="direct",
+                        candidate_id=slug,
+                        rank=None,
+                        generation="legacy",
+                        source_tool="mcp.get_context",
+                    )
+                ) is not None
+            ]
+            if events:
+                best_effort_record_events(events)
+        except Exception:
+            pass
     return result
 
 
@@ -770,6 +909,17 @@ def _validate_object_schema(
             item_type = field.get("items", {}).get("type")
             if item_type == "string" and any(not isinstance(item, str) for item in value):
                 return f"argument '{key}' items must be strings"
+            if "minItems" in field and len(value) < field["minItems"]:
+                return f"argument '{key}' has too few items"
+            if "maxItems" in field and len(value) > field["maxItems"]:
+                return f"argument '{key}' has too many items"
+            if field.get("uniqueItems") and len(set(value)) != len(value):
+                return f"argument '{key}' items must be unique"
+            item_max_length = field.get("items", {}).get("maxLength")
+            if item_max_length is not None and any(
+                len(item) > item_max_length for item in value
+            ):
+                return f"argument '{key}' item is too long"
         if "minimum" in field and value < field["minimum"]:
             return f"argument '{key}' must be at least {field['minimum']}"
         if "maximum" in field and value > field["maximum"]:

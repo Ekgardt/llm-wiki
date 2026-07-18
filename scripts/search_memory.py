@@ -21,19 +21,25 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
+import stat
 import sys
 import tempfile
 import time
 import uuid
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from bounded_io import read_stable_bytes  # noqa: E402
+from corpus_snapshot import CorpusSnapshot, validate_live_snapshot  # noqa: E402
+from generation_catalog import GenerationCatalog  # noqa: E402
 from memory_state import ROOT, STATE_ROOT, _is_pid_alive, atomic_write  # noqa: E402
 
 INDEX_DIR = STATE_ROOT / "cache"
@@ -45,6 +51,60 @@ VECTOR_META = INDEX_DIR / "vectors_meta.json"  # Metadata without vectors (small
 _INDEX_SWAP_WAIT_SECONDS = 10.0
 _INDEX_SWAP_STALE_SECONDS = 30.0
 _INDEX_REPLACE_WAIT_SECONDS = 1.0
+MAX_SEARCHABLE_PAGES = 10_000
+MAX_SEARCH_ENTRIES = 20_000
+MAX_SEARCH_DIRECTORIES = 2_000
+MAX_SEARCH_DEPTH = 32
+MAX_SEARCH_LIMIT = 1_000
+MAX_PAGE_BYTES = 8 * 1024 * 1024
+MAX_PATH_MANIFEST_BYTES = 4 * 1024 * 1024
+SEARCH_INDEX_COLUMNS = (
+    "path", "title", "summary", "body", "project", "timestamp", "slug",
+)
+GENERATION_SEARCH_SCHEMA_VERSION = "corpus-search/v1"
+GENERATION_TOKENIZER = "porter unicode61"
+GENERATION_TOKENIZER_VERSION = "sqlite-fts5/porter-unicode61/v1"
+GENERATION_TOKENIZER_CONFIG_SHA256 = hashlib.sha256(
+    GENERATION_TOKENIZER.encode("utf-8")
+).hexdigest()
+GENERATION_FTS_ARTIFACT = "search.sqlite3"
+GENERATION_VECTOR_ARTIFACTS = ("vectors.json", "vectors.npy")
+GENERATION_FTS_COLUMNS = (
+    "chunk_id",
+    "chunk_order",
+    "source_id",
+    "source_path",
+    "source_sha256",
+    "parent_page",
+    "heading_ancestry",
+    "byte_start",
+    "byte_end",
+    "line_start",
+    "line_end",
+    "span_sha256",
+    "type",
+    "project",
+    "authority",
+    "confidence",
+    "status",
+    "valid_from",
+    "valid_to",
+    "language",
+    "title",
+    "content",
+)
+GENERATION_METADATA_KEYS = frozenset(
+    {
+        "schema_version",
+        "collector_version",
+        "extractor_version",
+        "tokenizer_version",
+        "tokenizer_config_sha256",
+        "source_manifest_sha256",
+        "chunk_count",
+    }
+)
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
 # Legacy alias retained for tests and external callers. Post-three-zone
@@ -98,6 +158,312 @@ def _get_embedder():
 _embedder_cache = None
 
 
+def _validate_search_limit(value: object) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= MAX_SEARCH_LIMIT
+    ):
+        raise ValueError(f"limit must be an integer from 1 to {MAX_SEARCH_LIMIT}")
+    return value
+
+
+def _cli_search_limit(value: str) -> int:
+    try:
+        return _validate_search_limit(int(value))
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _artifact_descriptor(path: Path, relative: str) -> dict[str, object]:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as artifact:
+        while chunk := artifact.read(64 * 1024):
+            size += len(chunk)
+            digest.update(chunk)
+    return {
+        "path": relative,
+        "size": size,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def _generation_directory(directory: Path) -> Path:
+    selected = Path(directory)
+    info = selected.lstat()
+    if selected.is_symlink() or not stat.S_ISDIR(info.st_mode):
+        raise PermissionError("generation output must be an existing regular directory")
+    return selected
+
+
+def _publish_new_file(temporary: Path, destination: Path) -> None:
+    """Atomically expose a completed file without replacing an existing artifact."""
+    try:
+        os.link(temporary, destination)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def build_generation_fts(
+    snapshot: CorpusSnapshot,
+    generation_directory: Path,
+) -> dict[str, object]:
+    """Build one immutable generation-local FTS5 artifact from captured chunks."""
+    if not isinstance(snapshot, CorpusSnapshot):
+        raise TypeError("snapshot must be a CorpusSnapshot")
+    directory = _generation_directory(generation_directory)
+    destination = directory / GENERATION_FTS_ARTIFACT
+    if destination.exists() or destination.is_symlink():
+        raise FileExistsError(destination)
+    temporary = directory / f".{GENERATION_FTS_ARTIFACT}.{uuid.uuid4().hex}.tmp"
+    database = None
+    try:
+        database = sqlite3.connect(temporary)
+        database.execute("PRAGMA journal_mode=DELETE")
+        database.execute("PRAGMA synchronous=FULL")
+        database.executescript(
+            """
+            CREATE TABLE generation_metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE VIRTUAL TABLE chunks USING fts5(
+                chunk_id UNINDEXED,
+                chunk_order UNINDEXED,
+                source_id UNINDEXED,
+                source_path UNINDEXED,
+                source_sha256 UNINDEXED,
+                parent_page UNINDEXED,
+                heading_ancestry UNINDEXED,
+                byte_start UNINDEXED,
+                byte_end UNINDEXED,
+                line_start UNINDEXED,
+                line_end UNINDEXED,
+                span_sha256 UNINDEXED,
+                type UNINDEXED,
+                project UNINDEXED,
+                authority UNINDEXED,
+                confidence UNINDEXED,
+                status UNINDEXED,
+                valid_from UNINDEXED,
+                valid_to UNINDEXED,
+                language UNINDEXED,
+                title,
+                content,
+                tokenize = 'porter unicode61'
+            );
+            """
+        )
+        metadata = {
+            "schema_version": GENERATION_SEARCH_SCHEMA_VERSION,
+            "collector_version": snapshot.collector_version,
+            "extractor_version": snapshot.extractor_version,
+            "tokenizer_version": GENERATION_TOKENIZER_VERSION,
+            "tokenizer_config_sha256": GENERATION_TOKENIZER_CONFIG_SHA256,
+            "source_manifest_sha256": snapshot.corpus_sha256,
+            "chunk_count": str(len(snapshot.chunks)),
+        }
+        database.executemany(
+            "INSERT INTO generation_metadata(key, value) VALUES (?, ?)",
+            sorted(metadata.items()),
+        )
+        rows = []
+        for order, chunk in enumerate(snapshot.chunks):
+            title = chunk.heading_ancestry[-1] if chunk.heading_ancestry else Path(
+                chunk.source_path
+            ).stem
+            rows.append(
+                (
+                    chunk.id,
+                    order,
+                    chunk.source_id,
+                    chunk.source_path,
+                    chunk.source_sha256,
+                    chunk.parent_page,
+                    json.dumps(
+                        chunk.heading_ancestry,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    chunk.byte_start,
+                    chunk.byte_end,
+                    chunk.line_start,
+                    chunk.line_end,
+                    chunk.span_sha256,
+                    chunk.type,
+                    chunk.project,
+                    chunk.authority,
+                    chunk.confidence,
+                    chunk.status,
+                    chunk.valid_from,
+                    chunk.valid_to,
+                    chunk.language,
+                    title,
+                    chunk.text,
+                )
+            )
+        database.executemany(
+            "INSERT INTO chunks VALUES ("
+            + ",".join("?" for _ in range(22))
+            + ")",
+            rows,
+        )
+        database.commit()
+        if database.execute("PRAGMA integrity_check").fetchone() != ("ok",):
+            raise ValueError("generation FTS integrity check failed")
+        database.close()
+        database = None
+        _publish_new_file(temporary, destination)
+        return _artifact_descriptor(destination, GENERATION_FTS_ARTIFACT)
+    finally:
+        if database is not None:
+            database.close()
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _call_generation_embedder(embedder: object, texts: list[str]):
+    if callable(embedder):
+        return embedder(texts)
+    encode = getattr(embedder, "encode", None)
+    if not callable(encode):
+        raise TypeError("embedder must be callable or provide encode()")
+    return encode(texts, show_progress_bar=False, convert_to_numpy=True)
+
+
+def build_generation_numpy_vectors(
+    snapshot: CorpusSnapshot,
+    generation_directory: Path,
+    *,
+    embedder: object,
+    model_id: str,
+    model_revision: str,
+    dimensions: int,
+) -> list[dict[str, object]]:
+    """Build an exact NumPy matrix and closed metadata from one chunk sequence."""
+    if not isinstance(snapshot, CorpusSnapshot):
+        raise TypeError("snapshot must be a CorpusSnapshot")
+    if not model_id or not model_revision:
+        raise ValueError("model ID and revision must be non-empty")
+    if isinstance(dimensions, bool) or not isinstance(dimensions, int) or dimensions < 1:
+        raise ValueError("dimensions must be a positive integer")
+    directory = _generation_directory(generation_directory)
+    destinations = [directory / name for name in GENERATION_VECTOR_ARTIFACTS]
+    for destination in destinations:
+        if destination.exists() or destination.is_symlink():
+            raise FileExistsError(destination)
+
+    import numpy as np
+
+    texts = [chunk.text for chunk in snapshot.chunks]
+    matrix = np.asarray(_call_generation_embedder(embedder, texts))
+    if matrix.ndim != 2 or matrix.shape != (len(snapshot.chunks), dimensions):
+        raise ValueError("embedder returned a matrix with incompatible shape")
+    if matrix.dtype.kind not in "fiu" or not np.isfinite(matrix).all():
+        raise ValueError("embedder returned a non-finite numeric matrix")
+    matrix = np.ascontiguousarray(matrix, dtype=np.float32)
+    metadata = {
+        "schema_version": "corpus-vectors/v1",
+        "corpus_sha256": snapshot.corpus_sha256,
+        "collector_version": snapshot.collector_version,
+        "extractor_version": snapshot.extractor_version,
+        "model_id": model_id,
+        "model_revision": model_revision,
+        "dimensions": dimensions,
+        "chunk_ids": [chunk.id for chunk in snapshot.chunks],
+        "source_ids": [chunk.source_id for chunk in snapshot.chunks],
+        "source_paths": [chunk.source_path for chunk in snapshot.chunks],
+        "source_sha256": [chunk.source_sha256 for chunk in snapshot.chunks],
+    }
+    temporary_json = directory / f".vectors.json.{uuid.uuid4().hex}.tmp"
+    temporary_npy = directory / f".vectors.npy.{uuid.uuid4().hex}.tmp"
+    created: list[Path] = []
+    try:
+        temporary_json.write_text(
+            json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+            newline="",
+        )
+        with temporary_npy.open("wb") as output:
+            np.save(output, matrix, allow_pickle=False)
+        for temporary, destination in zip(
+            (temporary_json, temporary_npy), destinations, strict=True
+        ):
+            _publish_new_file(temporary, destination)
+            created.append(destination)
+    except BaseException:
+        for path in created:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        raise
+    finally:
+        for path in (temporary_json, temporary_npy):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+    return [
+        _artifact_descriptor(directory / name, name)
+        for name in GENERATION_VECTOR_ARTIFACTS
+    ]
+
+
+def publish_generation(
+    snapshot: CorpusSnapshot,
+    vault: Path,
+    catalog: GenerationCatalog,
+    generation_id: str,
+    *,
+    expected_active: str | None,
+    coordinator: object | None = None,
+    deadline: float | None = None,
+) -> bool:
+    """Fence live bytes, register a complete generation, then CAS-activate it."""
+    if deadline is not None and (
+        isinstance(deadline, bool)
+        or not isinstance(deadline, (int, float))
+        or not math.isfinite(deadline)
+    ):
+        raise ValueError("deadline must be a finite monotonic timestamp")
+
+    def remaining() -> float | None:
+        if deadline is None:
+            return None
+        value = float(deadline) - time.monotonic()
+        if value <= 0:
+            raise TimeoutError("generation publication deadline reached")
+        return value
+
+    wait_seconds = remaining()
+    if coordinator is None:
+        gate = nullcontext()
+    elif wait_seconds is None:
+        gate = coordinator.writer_gate()
+    else:
+        gate = coordinator.writer_gate(wait_seconds=wait_seconds)
+    with gate:
+        validation_options = {"coordinator": None}
+        if deadline is not None:
+            validation_options["deadline_seconds"] = remaining()
+        validate_live_snapshot(snapshot, vault, **validation_options)
+        remaining()
+        catalog_options = {}
+        if deadline is not None:
+            catalog_options["deadline"] = float(deadline)
+        catalog.register(generation_id, **catalog_options)
+        remaining()
+        return catalog.activate(
+            generation_id,
+            expected_active=expected_active,
+            **catalog_options,
+        )
+
+
 def _embed_texts(texts: list[str], is_query: bool = False) -> list[list[float]] | None:
     """Embed a list of texts. Returns None if model unavailable.
 
@@ -127,39 +493,112 @@ def _cosine_similarity(query_vec: list[float], doc_vecs: list[list[float]]) -> l
     return (docs_norm @ q_norm).tolist()
 
 
-def _collect_pages(scope: str = "all") -> list[Path]:
-    """Collect all searchable markdown pages."""
+def _collect_pages(
+    scope: str = "all",
+    *,
+    knowledge_dir: Path | None = None,
+    root: Path | None = None,
+    deadline: float = float("inf"),
+) -> list[Path]:
+    """Collect bounded regular markdown pages without following links."""
     pages: list[Path] = []
     seen: set[Path] = set()
+    inspected_entries = 0
+    traversed_directories = 0
+    selected_knowledge = knowledge_dir or KNOWLEDGE_DIR
+    source_root = root or selected_knowledge.parents[1]
+
+    def check_deadline() -> None:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("searchable page collection deadline reached")
+
+    def is_safe(path: Path, *, directory: bool) -> bool:
+        try:
+            info = path.lstat()
+        except OSError:
+            return False
+        unsafe = path.is_symlink() or bool(
+            getattr(info, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        )
+        expected = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+        return not unsafe and expected
 
     roots: list[Path] = []
     # All scope values resolve to the single knowledge/notes tree after the
     # three-zone consolidation; "wiki" and "memory" are kept as legacy aliases.
     if scope in ("wiki", "memory", "knowledge", "all"):
-        roots.append(KNOWLEDGE_DIR)
+        roots.append(selected_knowledge)
 
     for root in roots:
+        check_deadline()
         if not root.exists():
             continue
-        for md in sorted(root.rglob("*.md")):
-            if not md.is_file() or md in seen:
-                continue
-            if md.name in SKIP_NAMES:
-                continue
-            if any(skip in md.relative_to(root).parts for skip in SKIP_DIRS):
-                continue
-            # Skip superseded/archived pages from active search results
+        try:
+            relative_root = root.relative_to(source_root)
+        except ValueError as exc:
+            raise OSError("searchable knowledge root escapes the vault") from exc
+        components = [source_root]
+        component = source_root
+        for part in relative_root.parts:
+            component /= part
+            components.append(component)
+        if not all(is_safe(component, directory=True) for component in components):
+            raise OSError("unsafe knowledge directory")
+        pending = [(root, 0)]
+        while pending:
+            current_path, depth = pending.pop()
+            check_deadline()
+            traversed_directories += 1
+            if traversed_directories > MAX_SEARCH_DIRECTORIES:
+                raise ValueError("searchable directory limit exceeded")
+            if depth > MAX_SEARCH_DEPTH:
+                raise ValueError("searchable directory depth limit exceeded")
+            safe_directories: list[Path] = []
+            filenames: list[str] = []
             try:
-                content = md.read_text(encoding="utf-8", errors="ignore")
+                with os.scandir(current_path) as entries:
+                    for entry in entries:
+                        check_deadline()
+                        inspected_entries += 1
+                        if inspected_entries > MAX_SEARCH_ENTRIES:
+                            raise ValueError("searchable entry limit exceeded")
+                        name = entry.name
+                        path = current_path / name
+                        if name not in SKIP_DIRS and is_safe(path, directory=True):
+                            safe_directories.append(path)
+                        elif name.endswith(".md"):
+                            filenames.append(name)
+            except OSError:
+                continue
+            if depth >= MAX_SEARCH_DEPTH and safe_directories:
+                raise ValueError("searchable directory depth limit exceeded")
+            check_deadline()
+            for name in sorted(filenames):
+                check_deadline()
+                md = current_path / name
+                if not name.endswith(".md") or name in SKIP_NAMES or md in seen:
+                    continue
+                if not is_safe(md, directory=False):
+                    continue
+                try:
+                    content = read_stable_bytes(md, MAX_PAGE_BYTES, label="search page").decode(
+                        "utf-8", errors="ignore"
+                    )
+                except (OSError, ValueError):
+                    continue
                 fm = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
                 if fm:
                     status_m = re.search(r"^status:\s*(.+?)\s*$", fm.group(1), re.MULTILINE)
                     if status_m and status_m.group(1).strip() in ("superseded", "archived"):
                         continue
-            except OSError:
-                continue
-            seen.add(md)
-            pages.append(md)
+                seen.add(md)
+                pages.append(md)
+                if len(pages) > MAX_SEARCHABLE_PAGES:
+                    raise ValueError("searchable page limit exceeded")
+            check_deadline()
+            for directory in reversed(sorted(safe_directories)):
+                pending.append((directory, depth + 1))
     return pages
 
 
@@ -210,35 +649,74 @@ def _strip_frontmatter(content: str) -> str:
     return FRONTMATTER_RE.sub("", content, count=1)
 
 
-def _needs_rebuild(pages: list[Path]) -> bool:
+def _needs_rebuild(
+    pages: list[Path],
+    *,
+    root: Path | None = None,
+    index_file: Path | None = None,
+    index_manifest: Path | None = None,
+    deadline: float = float("inf"),
+) -> bool:
     """Check if any page is newer than the index, or if pages were added/removed."""
-    if not INDEX_FILE.exists():
+    source_root = root or ROOT
+    current_index = index_file or INDEX_FILE
+    current_manifest = index_manifest or INDEX_MANIFEST
+    if not current_index.exists():
         return True
     try:
-        conn = sqlite3.connect(str(INDEX_FILE))
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(pages)")}
-        conn.close()
-        if "slug" not in columns:
+        with sqlite3.connect(str(current_index)) as conn:
+            columns = tuple(
+                row[1] for row in conn.execute("PRAGMA table_info(pages)")
+            )
+            schema_row = conn.execute(
+                "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
+                ("pages",),
+            ).fetchone()
+        schema_sql = schema_row[0] if schema_row and isinstance(schema_row[0], str) else ""
+        normalized_schema = " ".join(schema_sql.casefold().split())
+        if columns != SEARCH_INDEX_COLUMNS or re.search(
+            r"\bCREATE\s+VIRTUAL\s+TABLE\b.*\bUSING\s+fts5\s*\(",
+            schema_sql,
+            re.IGNORECASE | re.DOTALL,
+        ) is None or any(
+            marker not in normalized_schema
+            for marker in (
+                "path unindexed",
+                "project unindexed",
+                "timestamp unindexed",
+                "tokenize = 'porter unicode61'",
+            )
+        ):
             return True
     except sqlite3.Error:
         return True
     # Manifest check: if the set of indexed paths differs from the
     # current set (e.g. a page was deleted), trigger rebuild.
-    current_paths = sorted(p.relative_to(ROOT).as_posix() for p in pages)
-    if INDEX_MANIFEST.exists():
+    if time.monotonic() >= deadline:
+        raise TimeoutError("index freshness deadline reached")
+    current_paths = sorted(p.relative_to(source_root).as_posix() for p in pages)
+    if current_manifest.exists():
         try:
             manifest_paths = json.loads(
-                INDEX_MANIFEST.read_text(encoding="utf-8")
+                read_stable_bytes(
+                    current_manifest,
+                    MAX_PATH_MANIFEST_BYTES,
+                    label="index path manifest",
+                ).decode("utf-8")
             )
             if manifest_paths != current_paths:
                 return True
-        except (OSError, json.JSONDecodeError):
+        except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
             return True
     else:
         # No manifest from a prior build — rebuild to create one.
         return True
-    index_mtime = INDEX_FILE.stat().st_mtime
+    if time.monotonic() >= deadline:
+        raise TimeoutError("index freshness deadline reached")
+    index_mtime = current_index.stat().st_mtime
     for p in pages:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("index freshness deadline reached")
         try:
             if p.stat().st_mtime > index_mtime:
                 return True
@@ -380,8 +858,10 @@ def _build_index(pages: list[Path]) -> None:
 
         for p in pages:
             try:
-                content = p.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
+                content = read_stable_bytes(p, MAX_PAGE_BYTES, label="search page").decode(
+                    "utf-8", errors="ignore"
+                )
+            except (OSError, ValueError):
                 continue
             title, summary = _extract_title_and_summary(content, p.stem)
             body = _strip_frontmatter(content)
@@ -491,20 +971,576 @@ def _maybe_rerank(query: str, results: list[dict], limit: int) -> list[dict]:
     except Exception:
         pass
 
-    # Log access for each result (powers forgetting curve + quality score).
-    try:
-        from access_tracking import record_access
-        for i, r in enumerate(results):
-            slug = Path(r.get("path", "")).stem
-            if slug:
-                record_access(slug, source="search", query=query, rank=i + 1)
-    except Exception:
-        pass
-
-    # Deduplicate by slug (same page in flat + subdir).
     results = _deduplicate_by_slug(results)
 
     return results[:limit]
+
+
+def _finalize_results(
+    query: str,
+    results: list[dict],
+    limit: int,
+    *,
+    retrieval_mode: str,
+    source_tool: str,
+    emit_telemetry: bool,
+) -> list[dict]:
+    """Finalize one returned list and best-effort record its impressions once."""
+    final = _deduplicate_by_slug(results)[:limit]
+    if not final or not emit_telemetry:
+        return final
+    try:
+        from retrieval_telemetry import (
+            best_effort_make_event,
+            best_effort_record_events,
+        )
+
+        events = []
+        for rank, result in enumerate(final, start=1):
+            candidate_id = result.get("slug") or Path(result.get("path", "")).stem
+            event = best_effort_make_event(
+                event_kind="impression",
+                query=query,
+                retrieval_mode=retrieval_mode,
+                candidate_id=candidate_id,
+                rank=rank,
+                generation="legacy",
+                source_tool=source_tool,
+            )
+            if event is not None:
+                events.append(event)
+        if events:
+            best_effort_record_events(events)
+    except Exception:
+        pass
+    return final
+
+
+def _active_generation_catalog() -> GenerationCatalog | None:
+    catalog_path = STATE_ROOT / "cache/evidence-graph/catalog.sqlite3"
+    if not catalog_path.exists():
+        return None
+    try:
+        return GenerationCatalog(STATE_ROOT, catalog_path=catalog_path)
+    except (OSError, PermissionError, sqlite3.Error, TypeError, ValueError):
+        return None
+
+
+def _generation_artifact(manifest: dict[str, object], name: str) -> bool:
+    artifacts = manifest.get("artifacts")
+    return isinstance(artifacts, list) and any(
+        isinstance(artifact, dict) and artifact.get("path") == name
+        for artifact in artifacts
+    )
+
+
+def _canonical_manifest_bytes(manifest: dict[str, object]) -> bytes:
+    return json.dumps(
+        manifest,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _sealed_file(path: Path, expected: dict[str, object] | None = None) -> tuple:
+    before = path.lstat()
+    if path.is_symlink() or not stat.S_ISREG(before.st_mode):
+        raise PermissionError("generation artifact must be a regular file")
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as source:
+        opened = os.fstat(source.fileno())
+        if not os.path.samestat(before, opened):
+            raise PermissionError("generation artifact changed while opening")
+        while chunk := source.read(64 * 1024):
+            size += len(chunk)
+            digest.update(chunk)
+        after_open = os.fstat(source.fileno())
+    after = path.lstat()
+    if (
+        not os.path.samestat(opened, after_open)
+        or not os.path.samestat(after_open, after)
+        or (opened.st_size, opened.st_mtime_ns)
+        != (after_open.st_size, after_open.st_mtime_ns)
+    ):
+        raise PermissionError("generation artifact changed while hashing")
+    checksum = digest.hexdigest()
+    if expected is not None and (
+        expected.get("size") != size or expected.get("sha256") != checksum
+    ):
+        raise ValueError("generation artifact does not match active manifest")
+    return (
+        after.st_dev,
+        after.st_ino,
+        after.st_mode,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+        checksum,
+    )
+
+
+def _generation_consumption_seal(
+    catalog: object,
+    manifest: dict[str, object],
+    artifact_names: tuple[str, ...],
+) -> tuple | None:
+    try:
+        generation_id = manifest["generation_id"]
+        generations_path = Path(getattr(catalog, "generations_path"))
+        if not isinstance(generation_id, str):
+            return None
+        artifacts = manifest.get("artifacts")
+        if not isinstance(artifacts, list):
+            return None
+        descriptors = {
+            item.get("path"): item
+            for item in artifacts
+            if isinstance(item, dict) and isinstance(item.get("path"), str)
+        }
+        if len(descriptors) != len(artifacts):
+            return None
+        directory = generations_path / generation_id
+        seals = []
+        for name in artifact_names:
+            descriptor = descriptors.get(name)
+            if not isinstance(descriptor, dict):
+                return None
+            seals.append((name, _sealed_file(directory / name, descriptor)))
+        manifest_path = directory / "manifest.json"
+        canonical = _canonical_manifest_bytes(manifest)
+        if manifest_path.exists() or manifest_path.is_symlink():
+            manifest_seal = _sealed_file(
+                manifest_path,
+                {
+                    "size": len(canonical),
+                    "sha256": hashlib.sha256(canonical).hexdigest(),
+                },
+            )
+        else:
+            manifest_seal = None
+        return hashlib.sha256(canonical).hexdigest(), manifest_seal, tuple(seals)
+    except (OSError, PermissionError, TypeError, ValueError):
+        return None
+
+
+def _generation_consumption_unchanged(
+    catalog: object,
+    manifest: dict[str, object],
+    artifact_names: tuple[str, ...],
+    expected_seal: tuple,
+) -> bool:
+    try:
+        active = catalog.get_active()
+        return (
+            isinstance(active, dict)
+            and _canonical_manifest_bytes(active) == _canonical_manifest_bytes(manifest)
+            and _generation_consumption_seal(catalog, active, artifact_names)
+            == expected_seal
+        )
+    except (OSError, PermissionError, sqlite3.Error, TypeError, ValueError):
+        return False
+
+
+def _generation_connection(
+    catalog: object, manifest: dict[str, object]
+) -> sqlite3.Connection | None:
+    generation_id = manifest.get("generation_id")
+    generations_path = getattr(catalog, "generations_path", None)
+    if not isinstance(generation_id, str) or generations_path is None:
+        return None
+    if not _generation_artifact(manifest, GENERATION_FTS_ARTIFACT):
+        return None
+    artifact = Path(generations_path) / generation_id / GENERATION_FTS_ARTIFACT
+    try:
+        connection = sqlite3.connect(f"{artifact.resolve().as_uri()}?mode=ro", uri=True)
+        if not _valid_generation_fts(connection, manifest):
+            connection.close()
+            return None
+        return connection
+    except (OSError, PermissionError, sqlite3.Error, TypeError, ValueError):
+        try:
+            connection.close()
+        except (UnboundLocalError, sqlite3.Error):
+            pass
+        return None
+
+
+def _valid_generation_fts(
+    connection: sqlite3.Connection, manifest: dict[str, object]
+) -> bool:
+    if connection.execute("PRAGMA integrity_check").fetchone() != ("ok",):
+        return False
+    metadata_schema = tuple(
+        (row[1], row[2].upper(), row[3], row[5])
+        for row in connection.execute("PRAGMA table_info(generation_metadata)")
+    )
+    chunk_columns = tuple(row[1] for row in connection.execute("PRAGMA table_info(chunks)"))
+    if metadata_schema != (
+        ("key", "TEXT", 0, 1),
+        ("value", "TEXT", 1, 0),
+    ) or chunk_columns != GENERATION_FTS_COLUMNS:
+        return False
+    schema_row = connection.execute(
+        "SELECT sql FROM sqlite_schema WHERE type='table' AND name='chunks'"
+    ).fetchone()
+    if not schema_row or not isinstance(schema_row[0], str):
+        return False
+    normalized_schema = " ".join(schema_row[0].casefold().split())
+    prefix = "create virtual table chunks using fts5("
+    if not normalized_schema.startswith(prefix) or not normalized_schema.endswith(")"):
+        return False
+    arguments = [
+        argument.strip()
+        for argument in normalized_schema[len(prefix) : -1].split(",")
+    ]
+    expected_arguments = [
+        *(f"{column} unindexed" for column in GENERATION_FTS_COLUMNS[:-2]),
+        "title",
+        "content",
+        "tokenize = 'porter unicode61'",
+    ]
+    if arguments != expected_arguments:
+        return False
+    metadata_rows = list(connection.execute("SELECT key, value FROM generation_metadata"))
+    if (
+        len(metadata_rows) != len(GENERATION_METADATA_KEYS)
+        or {row[0] for row in metadata_rows} != GENERATION_METADATA_KEYS
+        or any(not isinstance(row[1], str) for row in metadata_rows)
+    ):
+        return False
+    metadata = dict(metadata_rows)
+    expected = {
+        "schema_version": GENERATION_SEARCH_SCHEMA_VERSION,
+        "collector_version": manifest.get("collector_version"),
+        "extractor_version": manifest.get("extractor_version"),
+        "tokenizer_version": GENERATION_TOKENIZER_VERSION,
+        "tokenizer_config_sha256": GENERATION_TOKENIZER_CONFIG_SHA256,
+        "source_manifest_sha256": manifest.get("source_manifest_sha256"),
+    }
+    if any(metadata.get(key) != value for key, value in expected.items()):
+        return False
+    count = connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+    if not isinstance(count, int) or metadata.get("chunk_count") != str(count):
+        return False
+    seen_chunk_ids: set[str] = set()
+    rows = connection.execute(
+        "SELECT chunk_id, chunk_order, source_id, source_path, source_sha256, "
+        "parent_page, heading_ancestry, byte_start, byte_end, line_start, line_end, "
+        "span_sha256, type, project, authority, confidence, status, valid_from, "
+        "valid_to, language, title, content FROM chunks ORDER BY chunk_order"
+    )
+    for expected_order, row in enumerate(rows):
+        (
+            chunk_id,
+            chunk_order,
+            source_id,
+            source_path,
+            source_sha256,
+            parent_page,
+            ancestry_json,
+            byte_start,
+            byte_end,
+            line_start,
+            line_end,
+            span_sha256,
+            type_value,
+            project,
+            authority,
+            confidence,
+            status_value,
+            valid_from,
+            valid_to,
+            language,
+            title,
+            content,
+        ) = row
+        try:
+            ancestry = json.loads(ancestry_json)
+        except (TypeError, json.JSONDecodeError):
+            return False
+        optional_text = (project, authority, confidence, valid_from, valid_to, language)
+        if (
+            not isinstance(chunk_id, str)
+            or _SHA256_RE.fullmatch(chunk_id) is None
+            or chunk_id in seen_chunk_ids
+            or chunk_order != expected_order
+            or not isinstance(source_id, str)
+            or source_id != f"source:{source_path}"
+            or not isinstance(source_path, str)
+            or not source_path
+            or parent_page != source_path
+            or not isinstance(source_sha256, str)
+            or _SHA256_RE.fullmatch(source_sha256) is None
+            or not isinstance(ancestry, list)
+            or any(not isinstance(item, str) for item in ancestry)
+            or not isinstance(byte_start, int)
+            or not isinstance(byte_end, int)
+            or not 0 <= byte_start <= byte_end
+            or not isinstance(line_start, int)
+            or not isinstance(line_end, int)
+            or not 1 <= line_start <= line_end
+            or not isinstance(span_sha256, str)
+            or _SHA256_RE.fullmatch(span_sha256) is None
+            or not isinstance(type_value, str)
+            or not type_value
+            or any(value is not None and not isinstance(value, str) for value in optional_text)
+            or not isinstance(status_value, str)
+            or not isinstance(title, str)
+            or not isinstance(content, str)
+            or not content.strip()
+        ):
+            return False
+        seen_chunk_ids.add(chunk_id)
+    return len(seen_chunk_ids) == count
+
+
+def _fts_query(query: str) -> str:
+    return " ".join(f'"{word.replace(chr(34), chr(34) * 2)}"' for word in query.split() if word)
+
+
+def _generation_filters(
+    *, scope: str, since: str | None, as_of: str | None
+) -> tuple[str, list[str]]:
+    clauses = []
+    values: list[str] = []
+    if scope in {"wiki", "memory", "knowledge"}:
+        clauses.append("source_path LIKE 'knowledge/notes/%'")
+    if as_of:
+        clauses.extend(
+            (
+                "(valid_from IS NULL OR valid_from = '' OR substr(valid_from, 1, 10) <= ?)",
+                "(valid_to IS NULL OR valid_to = '' OR substr(valid_to, 1, 10) > ?)",
+            )
+        )
+        values.extend((as_of[:10], as_of[:10]))
+    else:
+        clauses.append("(status IS NULL OR status = '' OR lower(status) = 'active')")
+    if since:
+        clauses.append(
+            "(valid_from IS NULL OR valid_from = '' OR substr(valid_from, 1, 10) >= ?)"
+        )
+        values.append(since[:10])
+    return (" AND " + " AND ".join(clauses) if clauses else ""), values
+
+
+def _generation_result(row: sqlite3.Row, generation_id: str) -> dict[str, object]:
+    score = -float(row["rank"])
+    authority = row["authority"] or ""
+    score *= AUTHORITY_WEIGHTS.get(authority.casefold(), 1.0)
+    return {
+        "path": row["source_path"],
+        "title": row["title"] or Path(row["source_path"]).stem,
+        "summary": row["content"].strip().splitlines()[0][:120],
+        "score": round(score, 4),
+        "project": row["project"] or "",
+        "timestamp": (row["valid_from"] or "")[:10],
+        "chunk_id": row["chunk_id"],
+        "source_id": row["source_id"],
+        "source_sha256": row["source_sha256"],
+        "heading_ancestry": json.loads(row["heading_ancestry"]),
+        "type": row["type"],
+        "authority": authority,
+        "confidence": row["confidence"] or "",
+        "status": row["status"] or "",
+        "valid_from": row["valid_from"],
+        "valid_to": row["valid_to"],
+        "language": row["language"],
+        "generation": generation_id,
+        "requested_mode": "base",
+        "effective_mode": "base",
+        "fallback_reason": None,
+        "_chunk_order": row["chunk_order"],
+    }
+
+
+def _generation_fts_search(
+    query: str,
+    manifest: dict[str, object],
+    connection: sqlite3.Connection,
+    *,
+    scope: str,
+    limit: int,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+) -> list[dict[str, object]]:
+    connection.row_factory = sqlite3.Row
+    filters, values = _generation_filters(scope=scope, since=since, as_of=as_of)
+    rows = connection.execute(
+        "SELECT chunk_id, chunk_order, source_id, source_path, source_sha256, "
+        "heading_ancestry, type, project, authority, confidence, status, valid_from, "
+        "valid_to, language, title, content, bm25(chunks) AS rank FROM chunks "
+        f"WHERE chunks MATCH ?{filters} ORDER BY rank, chunk_order LIMIT ?",
+        [_fts_query(query), *values, limit * 5],
+    ).fetchall()
+    generation_id = str(manifest["generation_id"])
+    results = [_generation_result(row, generation_id) for row in rows]
+    query_words = set(query.casefold().split())
+    for result in results:
+        if project and str(result["project"]).casefold() == project.casefold():
+            result["score"] = round(float(result["score"]) * 2.0, 4)
+        title_words = set(str(result["title"]).casefold().split())
+        if query_words and query_words.issubset(title_words):
+            result["score"] = round(float(result["score"]) * 3.0, 4)
+    results.sort(
+        key=lambda item: (
+            -float(item["score"]),
+            str(item["path"]),
+            int(item["_chunk_order"]),
+        )
+    )
+    for result in results:
+        result.pop("_chunk_order", None)
+    return results[:limit]
+
+
+def _generation_vectors_search(
+    query: str,
+    catalog: object,
+    manifest: dict[str, object],
+    connection: sqlite3.Connection,
+    *,
+    embedder: object,
+    model_id: str,
+    model_revision: str,
+    scope: str,
+    limit: int,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+) -> list[dict[str, object]] | None:
+    if (
+        manifest.get("vector_state") != "complete"
+        or manifest.get("embedding_model_id") != model_id
+        or manifest.get("embedding_model_revision") != model_revision
+        or not all(_generation_artifact(manifest, name) for name in GENERATION_VECTOR_ARTIFACTS)
+    ):
+        return None
+    generation_id = str(manifest["generation_id"])
+    directory = Path(getattr(catalog, "generations_path")) / generation_id
+    try:
+        import numpy as np
+
+        metadata = json.loads((directory / "vectors.json").read_text(encoding="utf-8"))
+        matrix = np.load(directory / "vectors.npy", mmap_mode="r", allow_pickle=False)
+        ordered = connection.execute(
+            "SELECT chunk_id, source_id, source_path, source_sha256 "
+            "FROM chunks ORDER BY chunk_order"
+        ).fetchall()
+        dimensions = manifest.get("vector_dimensions")
+        if (
+            metadata.get("schema_version") != "corpus-vectors/v1"
+            or metadata.get("corpus_sha256") != manifest.get("source_manifest_sha256")
+            or metadata.get("collector_version") != manifest.get("collector_version")
+            or metadata.get("extractor_version") != manifest.get("extractor_version")
+            or metadata.get("model_id") != model_id
+            or metadata.get("model_revision") != model_revision
+            or metadata.get("dimensions") != dimensions
+            or metadata.get("chunk_ids") != [row[0] for row in ordered]
+            or metadata.get("source_ids") != [row[1] for row in ordered]
+            or metadata.get("source_paths") != [row[2] for row in ordered]
+            or metadata.get("source_sha256") != [row[3] for row in ordered]
+            or matrix.shape != (len(ordered), dimensions)
+            or matrix.dtype != np.dtype(np.float32)
+            or not np.isfinite(matrix).all()
+        ):
+            return None
+        query_matrix = np.asarray(_call_generation_embedder(embedder, [query]))
+        if (
+            query_matrix.shape != (1, dimensions)
+            or query_matrix.dtype.kind != "f"
+            or not np.isfinite(query_matrix).all()
+        ):
+            return None
+        query_vector = query_matrix[0]
+        similarities = (matrix @ query_vector) / (
+            (np.linalg.norm(matrix, axis=1) + 1e-10)
+            * (np.linalg.norm(query_vector) + 1e-10)
+        )
+        filters, values = _generation_filters(scope=scope, since=since, as_of=as_of)
+        rows = connection.execute(
+            "SELECT chunk_id, chunk_order, source_id, source_path, source_sha256, "
+            "heading_ancestry, type, project, authority, confidence, status, valid_from, "
+            "valid_to, language, title, content, 0.0 AS rank FROM chunks "
+            f"WHERE 1=1{filters} ORDER BY chunk_order",
+            values,
+        ).fetchall()
+        results = []
+        for row in rows:
+            result = _generation_result(row, generation_id)
+            score = float(similarities[row["chunk_order"]])
+            if project and str(result["project"]).casefold() == project.casefold():
+                score *= 1.5
+            result["score"] = round(score, 4)
+            result["requested_mode"] = "hybrid"
+            result["effective_mode"] = "hybrid"
+            results.append(result)
+        results.sort(key=lambda item: (-float(item["score"]), str(item["chunk_id"])))
+        return results[: limit * 3]
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _fuse_generation_results(
+    lexical: list[dict[str, object]], vectors: list[dict[str, object]], limit: int
+) -> list[dict[str, object]]:
+    scores: dict[str, float] = {}
+    metadata: dict[str, dict[str, object]] = {}
+    for rank, result in enumerate(lexical, 1):
+        chunk_id = str(result["chunk_id"])
+        scores[chunk_id] = scores.get(chunk_id, 0.0) + 2.0 / (60 + rank)
+        metadata[chunk_id] = result
+    for rank, result in enumerate(vectors, 1):
+        chunk_id = str(result["chunk_id"])
+        scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (60 + rank)
+        metadata.setdefault(chunk_id, result)
+    ordered = sorted(scores, key=lambda key: (-scores[key], key))
+    results = []
+    for chunk_id in ordered[:limit]:
+        result = dict(metadata[chunk_id])
+        result["score"] = round(scores[chunk_id], 4)
+        result["requested_mode"] = "hybrid"
+        result["effective_mode"] = "hybrid"
+        result["fallback_reason"] = None
+        results.append(result)
+    return results
+
+
+def _finalize_generation_results(
+    results: list[dict[str, object]],
+    *,
+    query: str,
+    source_tool: str,
+    emit_telemetry: bool,
+) -> list[dict[str, object]]:
+    if not results or not emit_telemetry:
+        return results
+    try:
+        from retrieval_telemetry import (
+            best_effort_make_event,
+            best_effort_record_events,
+        )
+
+        events = []
+        for rank, result in enumerate(results, 1):
+            event = best_effort_make_event(
+                event_kind="impression",
+                query=query,
+                retrieval_mode=str(result["effective_mode"]),
+                candidate_id=str(result["chunk_id"]),
+                rank=rank,
+                generation=str(result["generation"]),
+                source_tool=source_tool,
+            )
+            if event is not None:
+                events.append(event)
+        if events:
+            best_effort_record_events(events)
+    except Exception:
+        pass
+    return results
 
 
 def search(
@@ -519,6 +1555,147 @@ def search(
     page_paths: list[Path] | None = None,
     graph: bool = True,
     rerank: bool = True,
+    source_tool: str = "search_memory",
+    emit_telemetry: bool = True,
+    *,
+    catalog: GenerationCatalog | None = None,
+    generation_embedder: object | None = None,
+    generation_model_id: str | None = None,
+    generation_model_revision: str | None = None,
+) -> list[dict]:
+    """Prefer a validated generation and otherwise preserve legacy search behavior."""
+    limit = _validate_search_limit(limit)
+    if not query or not query.strip():
+        return []
+    selected_catalog = catalog if catalog is not None else _active_generation_catalog()
+    if selected_catalog is not None and not force_rebuild and page_paths is None:
+        try:
+            manifest = selected_catalog.get_active()
+        except (OSError, PermissionError, sqlite3.Error, TypeError, ValueError):
+            manifest = None
+        if isinstance(manifest, dict):
+            artifact_names = (GENERATION_FTS_ARTIFACT,)
+            vector_requested = (
+                semantic
+                and generation_embedder is not None
+                and generation_model_id is not None
+                and generation_model_revision is not None
+                and manifest.get("vector_state") == "complete"
+            )
+            if vector_requested:
+                artifact_names += GENERATION_VECTOR_ARTIFACTS
+            consumption_seal = _generation_consumption_seal(
+                selected_catalog, manifest, artifact_names
+            )
+            connection = (
+                _generation_connection(selected_catalog, manifest)
+                if consumption_seal is not None
+                else None
+            )
+            if connection is not None:
+                try:
+                    lexical = _generation_fts_search(
+                        query,
+                        manifest,
+                        connection,
+                        scope=scope,
+                        limit=limit,
+                        project=project,
+                        since=since,
+                        as_of=as_of,
+                    )
+                    if semantic:
+                        vectors = None
+                        if (
+                            generation_embedder is not None
+                            and generation_model_id is not None
+                            and generation_model_revision is not None
+                        ):
+                            vectors = _generation_vectors_search(
+                                query,
+                                selected_catalog,
+                                manifest,
+                                connection,
+                                embedder=generation_embedder,
+                                model_id=generation_model_id,
+                                model_revision=generation_model_revision,
+                                scope=scope,
+                                limit=limit,
+                                project=project,
+                                since=since,
+                                as_of=as_of,
+                            )
+                        if vectors is not None:
+                            if _generation_consumption_unchanged(
+                                selected_catalog,
+                                manifest,
+                                artifact_names,
+                                consumption_seal,
+                            ):
+                                return _finalize_generation_results(
+                                    _fuse_generation_results(lexical, vectors, limit),
+                                    query=query,
+                                    source_tool=source_tool,
+                                    emit_telemetry=emit_telemetry,
+                                )
+                            vectors = None
+                        for result in lexical:
+                            result["requested_mode"] = "hybrid"
+                            result["fallback_reason"] = "generation_vectors_unavailable"
+                    if _generation_consumption_unchanged(
+                        selected_catalog,
+                        manifest,
+                        artifact_names,
+                        consumption_seal,
+                    ):
+                        return _finalize_generation_results(
+                            lexical,
+                            query=query,
+                            source_tool=source_tool,
+                            emit_telemetry=emit_telemetry,
+                        )
+                except (
+                    OSError,
+                    PermissionError,
+                    sqlite3.Error,
+                    TypeError,
+                    ValueError,
+                    json.JSONDecodeError,
+                ):
+                    pass
+                finally:
+                    connection.close()
+    return _legacy_search(
+        query,
+        scope,
+        limit,
+        force_rebuild,
+        project,
+        since,
+        as_of,
+        semantic,
+        page_paths,
+        graph,
+        rerank,
+        source_tool,
+        emit_telemetry,
+    )
+
+
+def _legacy_search(
+    query: str,
+    scope: str = "all",
+    limit: int = 10,
+    force_rebuild: bool = False,
+    project: str | None = None,
+    since: str | None = None,
+    as_of: str | None = None,
+    semantic: bool = False,
+    page_paths: list[Path] | None = None,
+    graph: bool = True,
+    rerank: bool = True,
+    source_tool: str = "search_memory",
+    emit_telemetry: bool = True,
 ) -> list[dict]:
     """Run a hybrid BM25 + optional vector search.
 
@@ -666,7 +1843,14 @@ def search(
         )
         best = filename_matches[0]
         rest = [x for x in bm25_results if x["path"] != best["path"]][:limit-1]
-        return [best] + rest
+        return _finalize_results(
+            query,
+            [best] + rest,
+            limit,
+            retrieval_mode="exact",
+            source_tool=source_tool,
+            emit_telemetry=emit_telemetry,
+        )
 
     # Optional: vector search for semantic matching
     vector_results = None
@@ -713,11 +1897,27 @@ def search(
                 if r.get("project", "").lower() == project.lower():
                     r["fused_score"] = round(r["fused_score"] * 1.5, 4)
             fused.sort(key=lambda x: x.get("fused_score", 0), reverse=True)
-        return _maybe_rerank(query, fused, limit) if rerank else fused[:limit]
+        final = _maybe_rerank(query, fused, limit) if rerank else fused[:limit]
+        return _finalize_results(
+            query,
+            final,
+            limit,
+            retrieval_mode="hybrid",
+            source_tool=source_tool,
+            emit_telemetry=emit_telemetry,
+        )
 
     # BM25 only (fallback)
     bm25_results.sort(key=lambda x: x["score"], reverse=True)
-    return _maybe_rerank(query, bm25_results, limit) if rerank else bm25_results[:limit]
+    final = _maybe_rerank(query, bm25_results, limit) if rerank else bm25_results[:limit]
+    return _finalize_results(
+        query,
+        final,
+        limit,
+        retrieval_mode="bm25",
+        source_tool=source_tool,
+        emit_telemetry=emit_telemetry,
+    )
 
 
 def _rrf_fuse_triple(
@@ -949,7 +2149,7 @@ def main() -> int:
     p = argparse.ArgumentParser(description="Built-in FTS5 search over the vault.")
     p.add_argument("query", nargs="?", default=None, help="Search query")
     p.add_argument("--scope", choices=["all", "wiki", "memory", "knowledge"], default="all")
-    p.add_argument("--limit", type=int, default=10)
+    p.add_argument("--limit", type=_cli_search_limit, default=10)
     p.add_argument("--project", default=None, help="Boost results from this project slug")
     p.add_argument("--since", default=None, help="Only results since YYYY-MM-DD")
     p.add_argument("--as-of", dest="as_of", default=None, help="Only results valid on YYYY-MM-DD")

@@ -1,4 +1,8 @@
-# Codex-Memory Wrapper: automatic memory capture for Codex CLI sessions.
+# Codex-Memory Wrapper: compatibility fallback for Codex CLI sessions.
+#
+# Official hooks are the primary integration. This wrapper remains functional
+# for older Codex versions, but its transcript-free exit capture is
+# heartbeat-only unless an explicit stable transcript path is supplied.
 #
 # Install (one-time, in your PowerShell profile):
 #   1. Open your profile: `notepad $PROFILE`

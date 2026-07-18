@@ -1,12 +1,54 @@
 """Tests for contextual_retrieval.py."""
+
 from __future__ import annotations
 
+import hashlib
+import json
+import stat
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from contextual_retrieval import generate_context, get_context  # noqa: E402
+from corpus_snapshot import (  # noqa: E402
+    CapturedSource,
+    CorpusSnapshot,
+    SnapshotPolicy,
+    SourceMetadata,
+    SourceRecord,
+)
+
+
+def _source(
+    relative_path: str,
+    content: bytes,
+    *,
+    type_name: str = "concept",
+    project: str | None = None,
+    logical_id: str | None = None,
+) -> CapturedSource:
+    digest = hashlib.sha256(content).hexdigest()
+    return CapturedSource(
+        SourceRecord(
+            logical_id=logical_id or f"source:{relative_path}",
+            relative_path=relative_path,
+            sha256=digest,
+            size=len(content),
+            media_type="text/markdown",
+            language="en",
+            git_oid=None,
+        ),
+        SourceMetadata(type=type_name, project=project, authority="user", confidence="high"),
+        content,
+    )
+
+
+def _snapshot(*sources: CapturedSource) -> CorpusSnapshot:
+    policy = SnapshotPolicy((), (), False, None, 100, 1024 * 1024, 1024 * 1024, 100, 100, 8)
+    return CorpusSnapshot(tuple(sources), (), "a" * 64, policy)
 
 
 class TestGenerateContext:
@@ -54,6 +96,42 @@ class TestGenerateContext:
         ctx = generate_context("x", use_llm=False)
         assert "pattern" in ctx.lower()
 
+    @pytest.mark.parametrize(
+        "slug",
+        ["", ".", "..", "../secret", "a/b", r"a\b", "/absolute", "C:drive", "Ａ"],
+    )
+    def test_legacy_generation_rejects_unsafe_or_non_normalized_slug(self, slug):
+        with pytest.raises(ValueError, match="normalized safe component"):
+            generate_context(slug, use_llm=False)
+
+    def test_legacy_generation_rejects_reparse_knowledge_ancestor(
+        self, tmp_path, monkeypatch
+    ):
+        import contextual_retrieval
+
+        notes = tmp_path / "notes"
+        notes.mkdir()
+        (notes / "page.md").write_text("# Page\n", encoding="utf-8")
+        original_lstat = Path.lstat
+
+        class ReparseMetadata:
+            def __init__(self, wrapped):
+                self._wrapped = wrapped
+                self.st_file_attributes = 0x400
+
+            def __getattr__(self, name):
+                return getattr(self._wrapped, name)
+
+        def fake_lstat(path):
+            metadata = original_lstat(path)
+            return ReparseMetadata(metadata) if path == notes else metadata
+
+        monkeypatch.setattr(contextual_retrieval, "KNOWLEDGE_DIR", notes)
+        monkeypatch.setattr(Path, "lstat", fake_lstat)
+
+        with pytest.raises(PermissionError, match="unsafe.*ancestor"):
+            generate_context("page", use_llm=False)
+
 
 class TestGetContext:
     """Test cached context retrieval."""
@@ -75,6 +153,24 @@ class TestGetContext:
         monkeypatch.setattr(contextual_retrieval, "CONTEXT_DIR", tmp_path / "ctx")
         result = get_context("nonexistent")
         assert result is None
+
+    def test_legacy_mode_rejects_captured_source(self):
+        source = _source("knowledge/notes/page.md", b"# Page\n")
+
+        with pytest.raises(TypeError, match="legacy.*string slug"):
+            get_context(source)
+
+    def test_generation_mode_rejects_string_slug(self, tmp_path):
+        with pytest.raises(TypeError, match="CapturedSource"):
+            get_context("page", generation_dir=tmp_path / "generation")
+
+    @pytest.mark.parametrize(
+        "slug",
+        ["", ".", "..", "../secret", "a/b", r"a\b", "/absolute", "C:drive", "Ａ"],
+    )
+    def test_legacy_lookup_rejects_unsafe_or_non_normalized_slug(self, slug):
+        with pytest.raises(ValueError, match="normalized safe component"):
+            get_context(slug)
 
 
 class TestBuildAll:
@@ -101,3 +197,415 @@ class TestBuildAll:
         assert stats["generated"] == 2
         assert (tmp_path / "ctx" / "a.ctx").exists()
         assert (tmp_path / "ctx" / "b.ctx").exists()
+
+    def test_build_all_rejects_reparse_cache_before_write(self, tmp_path, monkeypatch):
+        import contextual_retrieval
+
+        notes = tmp_path / "notes"
+        notes.mkdir()
+        (notes / "a.md").write_text("# A\n", encoding="utf-8")
+        context_dir = tmp_path / "contextual"
+        context_dir.mkdir()
+        original_lstat = Path.lstat
+
+        class ReparseMetadata:
+            def __init__(self, wrapped):
+                self._wrapped = wrapped
+                self.st_file_attributes = 0x400
+
+            def __getattr__(self, name):
+                return getattr(self._wrapped, name)
+
+        def fake_lstat(path):
+            metadata = original_lstat(path)
+            return ReparseMetadata(metadata) if path == context_dir else metadata
+
+        monkeypatch.setattr(contextual_retrieval, "KNOWLEDGE_DIR", notes)
+        monkeypatch.setattr(contextual_retrieval, "CONTEXT_DIR", context_dir)
+        monkeypatch.setattr(Path, "lstat", fake_lstat)
+
+        with pytest.raises(PermissionError, match="unsafe.*ancestor"):
+            contextual_retrieval.build_all_contexts(use_llm=False, verbose=False)
+
+        assert list(context_dir.iterdir()) == []
+
+
+class TestSnapshotContexts:
+    def test_source_generation_uses_captured_bytes_without_live_reread(self, tmp_path, monkeypatch):
+        import contextual_retrieval
+
+        live = tmp_path / "knowledge/notes/page.md"
+        live.parent.mkdir(parents=True)
+        captured = b"---\ntype: concept\n---\n# Captured\nOne-sentence summary: Old bytes.\n"
+        live.write_bytes(captured)
+        source = _source("knowledge/notes/page.md", captured)
+        live.write_text("# Changed live content", encoding="utf-8")
+        monkeypatch.setattr(contextual_retrieval, "KNOWLEDGE_DIR", live.parent)
+        monkeypatch.setattr(
+            Path,
+            "read_text",
+            lambda *_args, **_kwargs: pytest.fail("snapshot consumer reread a live file"),
+        )
+
+        context = contextual_retrieval.generate_context_for_source(source, use_llm=False)
+
+        assert "Captured" in context
+        assert "Old bytes" in context
+        assert "Changed" not in context
+
+    def test_context_key_uses_logical_id_hash_and_extractor_version(self):
+        import contextual_retrieval
+
+        first = _source("knowledge/notes/concepts/shared.md", b"# First\n")
+        duplicate_stem = _source("knowledge/notes/decisions/shared.md", b"# First\n")
+        changed = _source("knowledge/notes/concepts/shared.md", b"# Other\n")
+
+        first_key = contextual_retrieval.context_artifact_key(first)
+
+        assert first_key != contextual_retrieval.context_artifact_key(duplicate_stem)
+        assert first_key != contextual_retrieval.context_artifact_key(changed)
+        assert first_key != contextual_retrieval.context_artifact_key(
+            first, extractor_version="context-extractor/v-next"
+        )
+        assert first_key == contextual_retrieval.context_artifact_key(first)
+
+    def test_batch_uses_exact_snapshot_membership_and_distinguishes_duplicate_stems(self, tmp_path):
+        import contextual_retrieval
+
+        sources = (
+            _source("knowledge/notes/concepts/shared.md", b"# Concept Shared\n"),
+            _source("knowledge/notes/decisions/shared.md", b"# Decision Shared\n"),
+        )
+        generation = tmp_path / "generation-1"
+        generation.mkdir()
+
+        descriptors = contextual_retrieval.build_snapshot_contexts(
+            _snapshot(*sources), generation, use_llm=False
+        )
+
+        assert len(descriptors) == 2
+        assert descriptors == sorted(descriptors, key=lambda item: item["path"])
+        assert all(set(item) == {"path", "size", "sha256"} for item in descriptors)
+        payloads = [json.loads((generation / item["path"]).read_bytes()) for item in descriptors]
+        assert {item["source"]["logical_id"] for item in payloads} == {
+            source.record.logical_id for source in sources
+        }
+        assert len({item["key"] for item in payloads}) == 2
+        assert not (generation / "shared.ctx").exists()
+
+    @pytest.mark.parametrize(
+        ("first_id", "second_id"),
+        [
+            ("source:same", "source:same"),
+            ("source:Page", "source:page"),
+            ("source:Ａ", "source:A"),
+        ],
+    )
+    def test_batch_rejects_duplicate_or_normalized_logical_ids(
+        self, tmp_path, first_id, second_id
+    ):
+        import contextual_retrieval
+
+        sources = (
+            _source("knowledge/notes/a.md", b"# A\n", logical_id=first_id),
+            _source("knowledge/notes/b.md", b"# B\n", logical_id=second_id),
+        )
+        generation = tmp_path / "generation-1"
+        generation.mkdir()
+
+        with pytest.raises(ValueError, match="logical ID collision"):
+            contextual_retrieval.build_snapshot_contexts(_snapshot(*sources), generation)
+
+        assert list(generation.iterdir()) == []
+
+    def test_artifact_records_captured_metadata_provenance(self, tmp_path):
+        import contextual_retrieval
+
+        source = _source(
+            "knowledge/notes/page.md",
+            b"---\ntype: decision\nproject: alpha\n---\n# Page\n",
+            type_name="decision",
+            project="alpha",
+        )
+        generation = tmp_path / "generation-1"
+        generation.mkdir()
+
+        [descriptor] = contextual_retrieval.build_snapshot_contexts(
+            _snapshot(source), generation, use_llm=False
+        )
+
+        raw = (generation / descriptor["path"]).read_bytes()
+        artifact = json.loads(raw)
+        assert descriptor == {
+            "path": descriptor["path"],
+            "size": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        }
+        assert artifact["source"] == {
+            "authority": "user",
+            "confidence": "high",
+            "git_oid": None,
+            "language": "en",
+            "logical_id": "source:knowledge/notes/page.md",
+            "media_type": "text/markdown",
+            "project": "alpha",
+            "relative_path": "knowledge/notes/page.md",
+            "sha256": source.record.sha256,
+            "size": len(source.content),
+            "status": "active",
+            "type": "decision",
+            "valid_from": None,
+            "valid_to": None,
+        }
+
+    def test_generation_lookup_uses_source_key_without_legacy_fallback(
+        self, tmp_path, monkeypatch
+    ):
+        import contextual_retrieval
+
+        source = _source("knowledge/notes/concepts/shared.md", b"# Captured\n")
+        other = _source("knowledge/notes/decisions/shared.md", b"# Other\n")
+        generation = tmp_path / "generation-1"
+        generation.mkdir()
+        legacy = tmp_path / "legacy"
+        legacy.mkdir()
+        (legacy / "shared.ctx").write_text("legacy collision", encoding="utf-8")
+        monkeypatch.setattr(contextual_retrieval, "CONTEXT_DIR", legacy)
+        contextual_retrieval.build_snapshot_contexts(
+            _snapshot(source), generation, use_llm=False
+        )
+
+        assert "Captured" in contextual_retrieval.get_context(
+            source, generation_dir=generation
+        )
+        assert contextual_retrieval.get_context(other, generation_dir=generation) is None
+        assert contextual_retrieval.get_context("shared") == "legacy collision"
+
+    def test_generation_context_defaults_to_deterministic(self, monkeypatch):
+        import contextual_retrieval
+        import llm_client
+
+        source = _source("knowledge/notes/page.md", b"# Captured default\n")
+        monkeypatch.delenv("MEMORY_LLM_PROVIDER", raising=False)
+        monkeypatch.setattr(
+            llm_client,
+            "call_llm",
+            lambda *_args, **_kwargs: pytest.fail("generation LLM was not opted in"),
+        )
+
+        assert "Captured default" in contextual_retrieval.generate_context_for_source(source)
+
+    def test_llm_opt_in_requires_prompt_bounds_and_disclosure(self, monkeypatch):
+        import contextual_retrieval
+        import llm_client
+
+        source = _source("knowledge/notes/page.md", b"# Page\n")
+        monkeypatch.delenv("MEMORY_LLM_PROVIDER", raising=False)
+        monkeypatch.setattr(
+            llm_client,
+            "call_llm",
+            lambda *_args, **_kwargs: pytest.fail("invalid opt-in reached the LLM"),
+        )
+
+        with pytest.raises(ValueError, match="max_prompt_bytes.*max_prompt_chars"):
+            contextual_retrieval.generate_context_for_source(source, use_llm=True)
+        with pytest.raises(ValueError, match="disclosure"):
+            contextual_retrieval.generate_context_for_source(
+                source,
+                use_llm=True,
+                max_prompt_bytes=4096,
+                max_prompt_chars=4096,
+            )
+
+    def test_llm_rejects_complete_oversized_prompt_without_call(self, monkeypatch):
+        import contextual_retrieval
+        import llm_client
+
+        source = _source("knowledge/notes/page.md", ("# " + "é" * 100).encode())
+        monkeypatch.delenv("MEMORY_LLM_PROVIDER", raising=False)
+        monkeypatch.setattr(
+            llm_client,
+            "call_llm",
+            lambda *_args, **_kwargs: pytest.fail("oversized prompt reached the LLM"),
+        )
+
+        with pytest.raises(ValueError, match="prompt exceeds"):
+            contextual_retrieval.generate_context_for_source(
+                source,
+                use_llm=True,
+                max_prompt_bytes=128,
+                max_prompt_chars=4096,
+                disclosure_policy="local",
+            )
+
+    def test_llm_receives_complete_bounded_captured_content(self, monkeypatch):
+        import contextual_retrieval
+        import llm_client
+
+        source = _source("knowledge/notes/page.md", b"# Secret captured phrase\n")
+        prompts = []
+
+        def fake_call(prompt, _system, max_tokens):
+            prompts.append((prompt, max_tokens))
+            return "Generated context."
+
+        monkeypatch.delenv("MEMORY_LLM_PROVIDER", raising=False)
+        monkeypatch.setattr(llm_client, "call_llm", fake_call)
+
+        assert (
+            contextual_retrieval.generate_context_for_source(
+                source,
+                use_llm=True,
+                max_prompt_bytes=4096,
+                max_prompt_chars=4096,
+                disclosure_policy="remote",
+            )
+            == "Generated context."
+        )
+        assert "Secret captured phrase" in prompts[0][0]
+
+    def test_generation_read_rejects_malformed_source_object(self, tmp_path):
+        import contextual_retrieval
+
+        source = _source("knowledge/notes/page.md", b"# Page\n")
+        generation = tmp_path / "generation-1"
+        generation.mkdir()
+        [descriptor] = contextual_retrieval.build_snapshot_contexts(_snapshot(source), generation)
+        artifact_path = generation / descriptor["path"]
+        artifact = json.loads(artifact_path.read_bytes())
+        artifact["source"] = []
+        artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="context artifact is invalid"):
+            contextual_retrieval.get_context(source, generation_dir=generation)
+
+    def test_generation_read_and_write_reject_symlink_ancestors(self, tmp_path, monkeypatch):
+        import contextual_retrieval
+
+        source = _source("knowledge/notes/page.md", b"# Page\n")
+        parent = tmp_path / "linked"
+        generation = parent / "generation-1"
+        generation.mkdir(parents=True)
+        original_lstat = Path.lstat
+
+        class SymlinkMetadata:
+            def __init__(self, wrapped):
+                self._wrapped = wrapped
+                self.st_mode = stat.S_IFLNK | (wrapped.st_mode & 0o777)
+
+            def __getattr__(self, name):
+                return getattr(self._wrapped, name)
+
+        def fake_lstat(path):
+            metadata = original_lstat(path)
+            return SymlinkMetadata(metadata) if path == parent else metadata
+
+        monkeypatch.setattr(Path, "lstat", fake_lstat)
+
+        with pytest.raises(PermissionError, match="unsafe.*ancestor"):
+            contextual_retrieval.build_snapshot_contexts(_snapshot(source), generation)
+        with pytest.raises(PermissionError, match="unsafe.*ancestor"):
+            contextual_retrieval.get_context(source, generation_dir=generation)
+
+        assert list(generation.iterdir()) == []
+
+    def test_generation_read_rejects_contextual_symlink(self, tmp_path, monkeypatch):
+        import contextual_retrieval
+
+        source = _source("knowledge/notes/page.md", b"# Page\n")
+        generation = tmp_path / "generation-1"
+        contextual = generation / "contextual"
+        contextual.mkdir(parents=True)
+        original_lstat = Path.lstat
+
+        class SymlinkMetadata:
+            def __init__(self, wrapped):
+                self._wrapped = wrapped
+                self.st_mode = stat.S_IFLNK | (wrapped.st_mode & 0o777)
+
+            def __getattr__(self, name):
+                return getattr(self._wrapped, name)
+
+        def fake_lstat(path):
+            metadata = original_lstat(path)
+            return SymlinkMetadata(metadata) if path == contextual else metadata
+
+        monkeypatch.setattr(Path, "lstat", fake_lstat)
+
+        with pytest.raises(PermissionError, match="contextual"):
+            contextual_retrieval.get_context(source, generation_dir=generation)
+        with pytest.raises(PermissionError, match="contextual"):
+            contextual_retrieval.build_snapshot_contexts(_snapshot(source), generation)
+
+    def test_generation_write_rejects_reparse_ancestor(self, tmp_path, monkeypatch):
+        import contextual_retrieval
+
+        source = _source("knowledge/notes/page.md", b"# Page\n")
+        parent = tmp_path / "parent"
+        generation = parent / "generation-1"
+        generation.mkdir(parents=True)
+        original_lstat = Path.lstat
+
+        class ReparseMetadata:
+            def __init__(self, wrapped):
+                self._wrapped = wrapped
+                self.st_file_attributes = 0x400
+
+            def __getattr__(self, name):
+                return getattr(self._wrapped, name)
+
+        def fake_lstat(path):
+            metadata = original_lstat(path)
+            return ReparseMetadata(metadata) if path == parent else metadata
+
+        monkeypatch.setattr(Path, "lstat", fake_lstat)
+
+        with pytest.raises(PermissionError, match="unsafe.*ancestor"):
+            contextual_retrieval.build_snapshot_contexts(_snapshot(source), generation)
+
+        assert list(generation.iterdir()) == []
+
+    def test_batch_failure_publishes_no_partial_output(self, tmp_path, monkeypatch):
+        import contextual_retrieval
+
+        sources = (
+            _source("knowledge/notes/a.md", b"# A\n"),
+            _source("knowledge/notes/b.md", b"# B\n"),
+        )
+        generation = tmp_path / "generation-1"
+        generation.mkdir()
+        original = contextual_retrieval.generate_context_for_source
+        calls = 0
+
+        def fail_second(source, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("LLM failed")
+            return original(source, **kwargs)
+
+        monkeypatch.setattr(contextual_retrieval, "generate_context_for_source", fail_second)
+
+        with pytest.raises(RuntimeError, match="LLM failed"):
+            contextual_retrieval.build_snapshot_contexts(
+                _snapshot(*sources), generation, use_llm=False
+            )
+
+        assert not (generation / "contextual").exists()
+        assert list(generation.iterdir()) == []
+
+    def test_batch_refuses_to_overwrite_generation_output(self, tmp_path):
+        import contextual_retrieval
+
+        source = _source("knowledge/notes/a.md", b"# A\n")
+        generation = tmp_path / "generation-1"
+        (generation / "contextual").mkdir(parents=True)
+        marker = generation / "contextual/marker"
+        marker.write_text("keep", encoding="utf-8")
+
+        with pytest.raises(FileExistsError, match="contextual"):
+            contextual_retrieval.build_snapshot_contexts(
+                _snapshot(source), generation, use_llm=False
+            )
+
+        assert marker.read_text(encoding="utf-8") == "keep"

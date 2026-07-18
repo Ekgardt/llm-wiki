@@ -1,0 +1,55 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python \"$LLM_WIKI_ROOT/scripts/codex_memory.py\" hook",
+            "commandWindows": "uv run --directory \"%LLM_WIKI_ROOT%\" python \"%LLM_WIKI_ROOT%\\scripts\\codex_memory.py\" hook",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python \"$LLM_WIKI_ROOT/scripts/codex_memory.py\" hook",
+            "commandWindows": "uv run --directory \"%LLM_WIKI_ROOT%\" python \"%LLM_WIKI_ROOT%\\scripts\\codex_memory.py\" hook",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python \"$LLM_WIKI_ROOT/scripts/codex_memory.py\" hook",
+            "commandWindows": "uv run --directory \"%LLM_WIKI_ROOT%\" python \"%LLM_WIKI_ROOT%\\scripts\\codex_memory.py\" hook",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python \"$LLM_WIKI_ROOT/scripts/codex_memory.py\" hook",
+            "commandWindows": "uv run --directory \"%LLM_WIKI_ROOT%\" python \"%LLM_WIKI_ROOT%\\scripts\\codex_memory.py\" hook",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

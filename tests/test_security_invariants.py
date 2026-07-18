@@ -572,6 +572,21 @@ class TestMarkdownTransactionBoundary:
                 coordinator.assert_external_work_allowed()
         assert not coordinator.writer_gate_held()
 
+    def test_guardrails_is_an_explicit_transaction_target(self, tmp_path):
+        from markdown_transaction import MarkdownChange, MarkdownCoordinator
+
+        vault = tmp_path / "vault"
+        state_root = tmp_path / "state"
+        (vault / "knowledge").mkdir(parents=True)
+        coordinator = MarkdownCoordinator(vault, state_root)
+
+        record = coordinator.prepare(
+            [MarkdownChange.create("knowledge/guardrails.md", b"guardrails\n")],
+            operation_id="security:guardrails-target",
+        )
+
+        assert record.operations[0].path == "knowledge/guardrails.md"
+
 
 # ---------------------------------------------------------------------------
 # INVARIANT 12: Compile snapshot excludes superseded pages

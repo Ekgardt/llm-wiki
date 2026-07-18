@@ -16,7 +16,14 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   transactions/tasks/results, the 30-day undo window, and live owners.
 - Recorded the local-filesystem requirement, current `synchronous=FULL`/no-WAL
   policy, bounded defaults and CLI overrides, cooperating-writer CAS boundary, and
-  explicit non-goals. The suite now collects **1804 tests**.
+  explicit non-goals. The suite now collects **2503 tests**.
+- Implemented Task 9 with `generation_catalog.py` and `corpus_snapshot.py`:
+  a bounded rollback-journal catalog with CAS activation, validated fallback,
+  orphan recovery, and deadlines, plus immutable source-hash corpus snapshots.
+- FTS, NumPy, Lance, contextual-retrieval, and tier builders are generation-aware.
+  POSIX collection is descriptor-authoritative; Windows reparse and identity checks
+  are best effort. Legacy caches remain readable fallback state; there is no daemon,
+  automatic migration, or automatic legacy-cache removal.
 
 ## [4.0.0] — Unreleased
 
@@ -58,7 +65,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - **SessionStart impact advisory** — stale wiki pages from code changes.
 - **MCP config in install scripts** — Claude Code + OpenCode auto-config.
 - **Optional extras** — `hybrid`, `code-graph`, `mcp-server`, `reranker`, `full`.
-- **1804 tests**.
+- **2503 tests**.
 
 ## [3.4.0] — 2026-07-11
 

@@ -42,6 +42,44 @@ def _run_with_stdin(module_name: str, stdin_text: str) -> int:
 FIXED_TIME = datetime(2026, 7, 13, 12, 30, 45, tzinfo=timezone.utc)
 
 
+@pytest.fixture
+def codex_hook_inputs(tmp_path):
+    common = {
+        "session_id": "codex-session-1",
+        "transcript_path": str(tmp_path / "session.jsonl"),
+        "cwd": str(tmp_path / "project"),
+        "model": "gpt-5.6",
+    }
+    return {
+        "SessionStart": {
+            **common,
+            "hook_event_name": "SessionStart",
+            "permission_mode": "default",
+            "source": "startup",
+        },
+        "PreCompact": {
+            **common,
+            "hook_event_name": "PreCompact",
+            "turn_id": "turn-pre",
+            "trigger": "auto",
+        },
+        "PostCompact": {
+            **common,
+            "hook_event_name": "PostCompact",
+            "turn_id": "turn-post",
+            "trigger": "manual",
+        },
+        "Stop": {
+            **common,
+            "hook_event_name": "Stop",
+            "turn_id": "turn-stop",
+            "permission_mode": "default",
+            "stop_hook_active": False,
+            "last_assistant_message": "finished",
+        },
+    }
+
+
 def _semantic(envelope):
     return envelope.to_dict()
 
@@ -470,6 +508,199 @@ def test_codex_run_script_timeout_returns_fixed_failure(monkeypatch, tmp_path):
     assert result.returncode == 124
     assert result.stdout == ""
     assert result.stderr == ""
+
+
+@pytest.mark.parametrize(
+    ("hook_name", "event_type", "reason"),
+    [
+        ("SessionStart", "session_start", "startup"),
+        ("PreCompact", "pre_compact", "auto"),
+        ("PostCompact", "session_start", "compact"),
+        ("Stop", "session_end", "stop"),
+    ],
+)
+def test_codex_hook_payloads_normalize_through_shared_envelope(
+    codex_hook_inputs, hook_name, event_type, reason
+):
+    import codex_memory
+
+    envelope = codex_memory.normalize_codex_hook(codex_hook_inputs[hook_name])
+
+    assert envelope.event_type == event_type
+    assert envelope.session == "codex-session-1"
+    assert envelope.worktree.endswith("project")
+    assert envelope.payload["reason"] == reason
+    if event_type in {"pre_compact", "session_end"}:
+        assert envelope.payload["transcript_path"].endswith("session.jsonl")
+    if "turn_id" in codex_hook_inputs[hook_name]:
+        assert envelope.source_event_id == codex_hook_inputs[hook_name]["turn_id"]
+
+
+@pytest.mark.parametrize(
+    ("hook_name", "required_field"),
+    [
+        ("SessionStart", "permission_mode"),
+        ("PreCompact", "turn_id"),
+        ("PostCompact", "turn_id"),
+        ("Stop", "turn_id"),
+        ("Stop", "permission_mode"),
+        ("Stop", "stop_hook_active"),
+        ("Stop", "last_assistant_message"),
+        ("Stop", "transcript_path"),
+    ],
+)
+def test_codex_hook_rejects_missing_official_required_fields(
+    codex_hook_inputs, hook_name, required_field
+):
+    import codex_memory
+
+    payload = dict(codex_hook_inputs[hook_name])
+    del payload[required_field]
+
+    with pytest.raises(ValueError, match="invalid Codex hook input"):
+        codex_memory.normalize_codex_hook(payload)
+
+
+@pytest.mark.parametrize("hook_name", ["SessionStart", "PreCompact", "PostCompact", "Stop"])
+def test_codex_hook_rejects_additional_properties(codex_hook_inputs, hook_name):
+    import codex_memory
+
+    payload = {**codex_hook_inputs[hook_name], "unexpected": "field"}
+
+    with pytest.raises(ValueError, match="invalid Codex hook input"):
+        codex_memory.normalize_codex_hook(payload)
+
+
+def test_compact_hooks_do_not_accept_permission_mode(codex_hook_inputs):
+    import codex_memory
+
+    for hook_name in ("PreCompact", "PostCompact"):
+        payload = {**codex_hook_inputs[hook_name], "permission_mode": "default"}
+        with pytest.raises(ValueError, match="invalid Codex hook input"):
+            codex_memory.normalize_codex_hook(payload)
+
+
+@pytest.mark.parametrize("hook_name", ["SessionStart", "Stop"])
+def test_codex_hook_rejects_invalid_permission_mode(codex_hook_inputs, hook_name):
+    import codex_memory
+
+    payload = {**codex_hook_inputs[hook_name], "permission_mode": "unknown"}
+
+    with pytest.raises(ValueError, match="invalid Codex hook input"):
+        codex_memory.normalize_codex_hook(payload)
+
+
+@pytest.mark.parametrize("hook_name", ["PreCompact", "PostCompact"])
+def test_codex_compact_optional_agent_fields_must_be_strings(
+    codex_hook_inputs, hook_name
+):
+    import codex_memory
+
+    payload = {**codex_hook_inputs[hook_name], "agent_id": 123}
+
+    with pytest.raises(ValueError, match="invalid Codex hook input"):
+        codex_memory.normalize_codex_hook(payload)
+
+
+def test_codex_stop_accepts_required_nullable_fields(codex_hook_inputs):
+    import codex_memory
+
+    payload = {
+        **codex_hook_inputs["Stop"],
+        "transcript_path": None,
+        "last_assistant_message": None,
+    }
+
+    envelope = codex_memory.normalize_codex_hook(payload)
+
+    assert envelope.payload["transcript_path"] is None
+
+
+@pytest.mark.parametrize(
+    ("hook_name", "expected_output"),
+    [
+        (
+            "SessionStart",
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": "# Shared context\n",
+                }
+            },
+        ),
+        ("PreCompact", {}),
+        ("PostCompact", {}),
+        ("Stop", {}),
+    ],
+)
+def test_codex_hook_emits_only_event_supported_output(
+    monkeypatch, capsys, codex_hook_inputs, hook_name, expected_output
+):
+    import codex_memory
+
+    observed = []
+    monkeypatch.setattr(
+        codex_memory,
+        "ingest_event",
+        lambda envelope, **kwargs: observed.append((envelope, kwargs))
+        or {"context": "# Shared context\n", "returncode": 0},
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(codex_hook_inputs[hook_name])))
+
+    assert codex_memory.command_hook(Namespace()) == 0
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == expected_output
+    assert captured.err == ""
+    assert len(observed) == 1
+
+
+@pytest.mark.parametrize("stdin_text", ["", "[]", "{} {}", "not-json"])
+def test_codex_hook_invalid_input_is_host_safe(stdin_text, monkeypatch, capsys):
+    import codex_memory
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO(stdin_text))
+    assert codex_memory.command_hook(Namespace()) == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "codex_memory: hook skipped\n"
+
+
+def test_codex_hook_input_is_bounded_and_secret_free(monkeypatch, capsys):
+    import codex_memory
+
+    secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
+    payload = json.dumps({"hook_event_name": "Stop", "padding": secret + "x" * 100})
+    monkeypatch.setattr(codex_memory, "MAX_HOOK_INPUT_BYTES", 32, raising=False)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
+
+    assert codex_memory.command_hook(Namespace()) == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "codex_memory: hook skipped\n"
+    assert secret not in captured.err
+
+
+def test_codex_stop_failure_still_emits_required_json(
+    monkeypatch, capsys, codex_hook_inputs
+):
+    import codex_memory
+
+    secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
+    monkeypatch.setattr(
+        codex_memory,
+        "ingest_event",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError(secret)),
+    )
+    monkeypatch.setattr(
+        sys, "stdin", io.StringIO(json.dumps(codex_hook_inputs["Stop"]))
+    )
+
+    assert codex_memory.command_hook(Namespace()) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {}
+    assert captured.err == "codex_memory: hook skipped\n"
+    assert secret not in captured.out + captured.err
 
 
 def test_codex_lookup_tier_uses_bounded_runner_and_fixed_timeout_error(

@@ -135,6 +135,33 @@ def test_prepare_rejects_oversized_before_image_without_artifact(
         assert database.execute('SELECT * FROM "transaction"').fetchall() == []
 
 
+def test_apply_hashes_oversized_changed_target_without_materializing_it(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    target = vault / "knowledge/guardrails.md"
+    target.write_bytes(b"before")
+    monkeypatch.setattr(markdown_transaction, "MAX_KNOWLEDGE_TARGET_BYTES", 8)
+    coordinator = MarkdownCoordinator(vault, state_root)
+    transaction = coordinator.prepare(
+        [MarkdownChange.replace("knowledge/guardrails.md", b"after")],
+        operation_id="oversized-before-apply",
+    )
+    target.write_bytes(b"x" * 9)
+    real_sha256_bytes = markdown_transaction.sha256_bytes
+
+    def reject_materialized_oversize(value: bytes) -> str:
+        assert value != b"x" * 9, "oversized target was materialized for hashing"
+        return real_sha256_bytes(value)
+
+    monkeypatch.setattr(markdown_transaction, "sha256_bytes", reject_materialized_oversize)
+
+    with pytest.raises(markdown_transaction.TransactionFailure) as raised:
+        coordinator.apply(transaction.id)
+
+    assert raised.value.code == "before_hash_mismatch"
+    assert target.read_bytes() == b"x" * 9
+
+
 def test_prepare_rejects_target_replaced_between_lstat_and_open(
     vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ):

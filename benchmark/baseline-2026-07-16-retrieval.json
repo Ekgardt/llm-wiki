@@ -1,0 +1,1638 @@
+{
+  "current": {
+    "total_queries": 116,
+    "corpus_version": "current-generated-v2",
+    "semantic": false,
+    "k_values": [
+      1,
+      3,
+      5,
+      10
+    ],
+    "recall_at_k": {
+      "1": 0.9569,
+      "3": 1.0,
+      "5": 1.0,
+      "10": 1.0
+    },
+    "mrr_sum": 113.16666666666666,
+    "latencies_ms": [
+      68.30140000238316,
+      10.092399999848567,
+      6.128799999714829,
+      9.771799999725772,
+      13.750699999945937,
+      5.894099998840829,
+      6.734200000209967,
+      4.427299998496892,
+      3.2422000003862195,
+      5.484600002091611,
+      6.449000000429805,
+      5.9172000001126435,
+      3.987199997936841,
+      3.9180000021588057,
+      3.300899999885587,
+      3.8669999994453974,
+      3.9052000029187184,
+      3.2468999997945502,
+      4.127899999730289,
+      4.508800000621704,
+      4.820900001504924,
+      5.040299998654518,
+      4.227100002026418,
+      4.911200001515681,
+      5.623500001092907,
+      4.434499998751562,
+      5.477100003190571,
+      5.365299999539275,
+      5.42440000208444,
+      4.186800000752555,
+      3.280000000813743,
+      4.3284000021230895,
+      3.694900002301438,
+      3.3402000008209143,
+      3.5084999981336296,
+      4.438399999344256,
+      2.885099998820806,
+      3.4653000002435874,
+      3.0155999993439764,
+      3.1583999989379663,
+      4.709000000730157,
+      2.661999998963438,
+      4.681200000050012,
+      3.909499999281252,
+      3.0942999983381014,
+      3.7861999990127515,
+      3.969700002926402,
+      3.8900999970792327,
+      5.8833000002778135,
+      4.56560000020545,
+      3.5325999997439794,
+      3.0570000017178245,
+      3.9133999998739455,
+      3.723499998159241,
+      3.4776999964378774,
+      3.646700002718717,
+      4.506199999013916,
+      3.4613999996508937,
+      3.033799999684561,
+      3.1827999991946854,
+      5.3633999996236525,
+      4.663000003347406,
+      5.932399999437621,
+      5.304199999955017,
+      5.687999997462612,
+      3.876700000546407,
+      6.492399999842746,
+      5.1338999983272515,
+      3.592100001696963,
+      5.029899999499321,
+      6.649800001468975,
+      5.875999999261694,
+      5.444599999464117,
+      8.10780000028899,
+      4.9409999992349185,
+      5.134700000780867,
+      5.578400003287243,
+      4.730999997264007,
+      5.7923999993363395,
+      5.320299998857081,
+      3.471299998636823,
+      3.5373999999137595,
+      4.421999998157844,
+      3.495699998893542,
+      4.517699999269098,
+      3.4685000027820934,
+      5.178700001124525,
+      3.5017000009247568,
+      4.797599998710211,
+      3.673999999591615,
+      4.705499999545282,
+      3.3870999977807514,
+      4.074899999977788,
+      3.4955000010086223,
+      4.866700001002755,
+      4.472700002224883,
+      4.647699999623001,
+      3.8172000022314023,
+      5.638700000417884,
+      5.113600000186125,
+      3.5175000011804514,
+      3.038900002138689,
+      4.849100001592888,
+      3.554800001438707,
+      4.824400002689799,
+      3.146099999867147,
+      7.868900000175927,
+      3.3080000030167866,
+      3.898700000718236,
+      4.876399998465786,
+      4.646400000638096,
+      4.174500001681736,
+      3.535399999236688,
+      3.6236000014469028,
+      4.739200001495192,
+      4.6828999984427355
+    ],
+    "per_query": [
+      {
+        "query": "three conventions, one root \u2014 2026-04-13 memory review",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/2026-04-13 Three Conventions One Root.md",
+        "found_at": 1,
+        "latency_ms": 68.3,
+        "num_results": 4
+      },
+      {
+        "query": "knowledge notes editorial notes",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/2026-04-13 Three Conventions One Root.md",
+        "found_at": 3,
+        "latency_ms": 10.1,
+        "num_results": 10
+      },
+      {
+        "query": "three conventions,",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/2026-04-13 Three Conventions One Root.md",
+        "found_at": 1,
+        "latency_ms": 6.1,
+        "num_results": 8
+      },
+      {
+        "query": "2026 04 13 three conventions one root",
+        "query_type": "slug_match",
+        "gold": "knowledge/notes/2026-04-13 Three Conventions One Root.md",
+        "found_at": 1,
+        "latency_ms": 9.8,
+        "num_results": 6
+      },
+      {
+        "query": "add reciprocal backlinks at creation",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/add-reciprocal-backlinks-at-creation.md",
+        "found_at": 1,
+        "latency_ms": 13.8,
+        "num_results": 5
+      },
+      {
+        "query": "creating synthesis concept decision",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/add-reciprocal-backlinks-at-creation.md",
+        "found_at": 1,
+        "latency_ms": 5.9,
+        "num_results": 1
+      },
+      {
+        "query": "add reciprocal",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/add-reciprocal-backlinks-at-creation.md",
+        "found_at": 1,
+        "latency_ms": 6.7,
+        "num_results": 5
+      },
+      {
+        "query": "mcp is the common agent interface, native adapters supply lifecycle events",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/agent-native-mcp-foundation.md",
+        "found_at": 1,
+        "latency_ms": 4.4,
+        "num_results": 1
+      },
+      {
+        "query": "wiki uses common read",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/agent-native-mcp-foundation.md",
+        "found_at": 1,
+        "latency_ms": 3.2,
+        "num_results": 1
+      },
+      {
+        "query": "mcp is",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/agent-native-mcp-foundation.md",
+        "found_at": 1,
+        "latency_ms": 5.5,
+        "num_results": 5
+      },
+      {
+        "query": "agent native mcp foundation",
+        "query_type": "slug_match",
+        "gold": "knowledge/notes/agent-native-mcp-foundation.md",
+        "found_at": 1,
+        "latency_ms": 6.4,
+        "num_results": 4
+      },
+      {
+        "query": "andrej karpathy",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/Andrej Karpathy.md",
+        "found_at": 1,
+        "latency_ms": 5.9,
+        "num_results": 5
+      },
+      {
+        "query": "researcher educator source author",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/Andrej Karpathy.md",
+        "found_at": 1,
+        "latency_ms": 4.0,
+        "num_results": 1
+      },
+      {
+        "query": "audit syntheses: separate current state from intended model",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/audit-current-vs-intended.md",
+        "found_at": 1,
+        "latency_ms": 3.9,
+        "num_results": 2
+      },
+      {
+        "query": "audit must distinguish true",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/audit-current-vs-intended.md",
+        "found_at": 1,
+        "latency_ms": 3.3,
+        "num_results": 1
+      },
+      {
+        "query": "audit syntheses:",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/audit-current-vs-intended.md",
+        "found_at": 1,
+        "latency_ms": 3.9,
+        "num_results": 6
+      },
+      {
+        "query": "audit current vs intended",
+        "query_type": "slug_match",
+        "gold": "knowledge/notes/audit-current-vs-intended.md",
+        "found_at": 1,
+        "latency_ms": 3.9,
+        "num_results": 6
+      },
+      {
+        "query": "b-sim: emulate hook lifecycle without a live claude code window",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/b-sim-hook-testing.md",
+        "found_at": 1,
+        "latency_ms": 3.2,
+        "num_results": 1
+      },
+      {
+        "query": "full session start edit",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/b-sim-hook-testing.md",
+        "found_at": 1,
+        "latency_ms": 4.1,
+        "num_results": 3
+      },
+      {
+        "query": "b-sim: emulate",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/b-sim-hook-testing.md",
+        "found_at": 1,
+        "latency_ms": 4.5,
+        "num_results": 1
+      },
+      {
+        "query": "b sim hook testing",
+        "query_type": "slug_match",
+        "gold": "knowledge/notes/b-sim-hook-testing.md",
+        "found_at": 1,
+        "latency_ms": 4.8,
+        "num_results": 4
+      },
+      {
+        "query": "case-sensitive grep on injected context gives false failure",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/case-sensitive-grep-injected-context.md",
+        "found_at": 1,
+        "latency_ms": 5.0,
+        "num_results": 1
+      },
+      {
+        "query": "grepping injected additionalcontext payload",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/case-sensitive-grep-injected-context.md",
+        "found_at": 1,
+        "latency_ms": 4.2,
+        "num_results": 1
+      },
+      {
+        "query": "case-sensitive grep",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/case-sensitive-grep-injected-context.md",
+        "found_at": 1,
+        "latency_ms": 4.9,
+        "num_results": 3
+      },
+      {
+        "query": "case sensitive grep injected context",
+        "query_type": "slug_match",
+        "gold": "knowledge/notes/case-sensitive-grep-injected-context.md",
+        "found_at": 1,
+        "latency_ms": 5.6,
+        "num_results": 3
+      },
+      {
+        "query": "centralized memory subsystem independent of worktree mode",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/centralized-memory-subsystem.md",
+        "found_at": 1,
+        "latency_ms": 4.4,
+        "num_results": 1
+      },
+      {
+        "query": "memory subsystem state json",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/centralized-memory-subsystem.md",
+        "found_at": 1,
+        "latency_ms": 5.5,
+        "num_results": 4
+      },
+      {
+        "query": "centralized memory",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/centralized-memory-subsystem.md",
+        "found_at": 1,
+        "latency_ms": 5.4,
+        "num_results": 4
+      },
+      {
+        "query": "centralized memory subsystem",
+        "query_type": "slug_match",
+        "gold": "knowledge/notes/centralized-memory-subsystem.md",
+        "found_at": 1,
+        "latency_ms": 5.4,
+        "num_results": 4
+      },
+      {
+        "query": "docs portability: absolute paths",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/docs-portability-absolute-paths.md",
+        "found_at": 1,
+        "latency_ms": 4.2,
+        "num_results": 4
+      },
+      {
+        "query": "replace hardcoded absolute paths",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/docs-portability-absolute-paths.md",
+        "found_at": 1,
+        "latency_ms": 3.3,
+        "num_results": 2
+      },
+      {
+        "query": "docs portability:",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/docs-portability-absolute-paths.md",
+        "found_at": 1,
+        "latency_ms": 4.3,
+        "num_results": 6
+      },
+      {
+        "query": "docs portability absolute paths",
+        "query_type": "slug_match",
+        "gold": "knowledge/notes/docs-portability-absolute-paths.md",
+        "found_at": 1,
+        "latency_ms": 3.7,
+        "num_results": 4
+      },
+      {
+        "query": "edit tool: \"found n matches\" error",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/edit-multiple-matches.md",
+        "found_at": 1,
+        "latency_ms": 3.3,
+        "num_results": 1
+      },
+      {
+        "query": "edit tool fails because",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/edit-multiple-matches.md",
+        "found_at": 1,
+        "latency_ms": 3.5,
+        "num_results": 2
+      },
+      {
+        "query": "edit tool:",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/edit-multiple-matches.md",
+        "found_at": 1,
+        "latency_ms": 4.4,
+        "num_results": 6
+      },
+      {
+        "query": "edit multiple matches",
+        "query_type": "slug_match",
+        "gold": "knowledge/notes/edit-multiple-matches.md",
+        "found_at": 1,
+        "latency_ms": 2.9,
+        "num_results": 2
+      },
+      {
+        "query": "editorial disclaimer over history rewrite",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/editorial-disclaimer-over-history-rewrite.md",
+        "found_at": 1,
+        "latency_ms": 3.5,
+        "num_results": 5
+      },
+      {
+        "query": "changelog historical entries contradict",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/editorial-disclaimer-over-history-rewrite.md",
+        "found_at": 1,
+        "latency_ms": 3.0,
+        "num_results": 1
+      },
+      {
+        "query": "editorial disclaimer",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/editorial-disclaimer-over-history-rewrite.md",
+        "found_at": 1,
+        "latency_ms": 3.2,
+        "num_results": 5
+      },
+      {
+        "query": "editorial notes pattern",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/editorial-notes-pattern.md",
+        "found_at": 1,
+        "latency_ms": 4.7,
+        "num_results": 10
+      },
+      {
+        "query": "editorial note footer marks",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/editorial-notes-pattern.md",
+        "found_at": 1,
+        "latency_ms": 2.7,
+        "num_results": 1
+      },
+      {
+        "query": "editorial notes",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/editorial-notes-pattern.md",
+        "found_at": 1,
+        "latency_ms": 4.7,
+        "num_results": 10
+      },
+      {
+        "query": "flag inferred content as preliminary",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/flag-inferred-content-as-preliminary.md",
+        "found_at": 1,
+        "latency_ms": 3.9,
+        "num_results": 8
+      },
+      {
+        "query": "writing wiki about topic",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/flag-inferred-content-as-preliminary.md",
+        "found_at": 1,
+        "latency_ms": 3.1,
+        "num_results": 1
+      },
+      {
+        "query": "flag inferred",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/flag-inferred-content-as-preliminary.md",
+        "found_at": 1,
+        "latency_ms": 3.8,
+        "num_results": 8
+      },
+      {
+        "query": "global multi-project migration plan",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/Global Multi-Project Migration Plan.md",
+        "found_at": 1,
+        "latency_ms": 4.0,
+        "num_results": 8
+      },
+      {
+        "query": "plan extending wiki single",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/Global Multi-Project Migration Plan.md",
+        "found_at": 1,
+        "latency_ms": 3.9,
+        "num_results": 2
+      },
+      {
+        "query": "global multi-project",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/Global Multi-Project Migration Plan.md",
+        "found_at": 1,
+        "latency_ms": 5.9,
+        "num_results": 8
+      },
+      {
+        "query": "global multi project migration plan",
+        "query_type": "slug_match",
+        "gold": "knowledge/notes/Global Multi-Project Migration Plan.md",
+        "found_at": 1,
+        "latency_ms": 4.6,
+        "num_results": 8
+      },
+      {
+        "query": "hook errors silent without llm_wiki_state_root",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/hook-errors-silent-without-state-root.md",
+        "found_at": 1,
+        "latency_ms": 3.5,
+        "num_results": 4
+      },
+      {
+        "query": "absent claude settings json",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/hook-errors-silent-without-state-root.md",
+        "found_at": 1,
+        "latency_ms": 3.1,
+        "num_results": 2
+      },
+      {
+        "query": "hook errors",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/hook-errors-silent-without-state-root.md",
+        "found_at": 1,
+        "latency_ms": 3.9,
+        "num_results": 6
+      },
+      {
+        "query": "hook errors silent without state root",
+        "query_type": "slug_match",
+        "gold": "knowledge/notes/hook-errors-silent-without-state-root.md",
+        "found_at": 1,
+        "latency_ms": 3.7,
+        "num_results": 6
+      },
+      {
+        "query": "hook scripts defense-in-depth",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/hook-scripts-defense-in-depth.md",
+        "found_at": 1,
+        "latency_ms": 3.5,
+        "num_results": 4
+      },
+      {
+        "query": "hardening decisions made prevent",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/hook-scripts-defense-in-depth.md",
+        "found_at": 1,
+        "latency_ms": 3.6,
+        "num_results": 1
+      },
+      {
+        "query": "hook scripts",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/hook-scripts-defense-in-depth.md",
+        "found_at": 1,
+        "latency_ms": 4.5,
+        "num_results": 9
+      },
+      {
+        "query": "hook scripts defense in depth",
+        "query_type": "slug_match",
+        "gold": "knowledge/notes/hook-scripts-defense-in-depth.md",
+        "found_at": 1,
+        "latency_ms": 3.5,
+        "num_results": 4
+      },
+      {
+        "query": "where does a source file live after it's been compiled \u2014 `knowledge/inbox/` or `",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/inbox-vs-raw-after-compile.md",
+        "found_at": 1,
+        "latency_ms": 3.0,
+        "num_results": 1
+      },
+      {
+        "query": "once source compiled durable",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/inbox-vs-raw-after-compile.md",
+        "found_at": 1,
+        "latency_ms": 3.2,
+        "num_results": 3
+      },
+      {
+        "query": "where does",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/inbox-vs-raw-after-compile.md",
+        "found_at": 1,
+        "latency_ms": 5.4,
+        "num_results": 8
+      },
+      {
+        "query": "inbox vs raw after compile",
+        "query_type": "slug_match",
+        "gold": "knowledge/notes/inbox-vs-raw-after-compile.md",
+        "found_at": 1,
+        "latency_ms": 4.7,
+        "num_results": 6
+      },
+      {
+        "query": "ingestion workflow",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/Ingestion Workflow.md",
+        "found_at": 1,
+        "latency_ms": 5.9,
+        "num_results": 10
+      },
+      {
+        "query": "source material captured knowledge",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/Ingestion Workflow.md",
+        "found_at": 1,
+        "latency_ms": 5.3,
+        "num_results": 7
+      },
+      {
+        "query": "karpathy llm wiki workflow",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/Karpathy LLM Wiki Workflow.md",
+        "found_at": 1,
+        "latency_ms": 5.7,
+        "num_results": 10
+      },
+      {
+        "query": "pattern andrej karpathy april",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/Karpathy LLM Wiki Workflow.md",
+        "found_at": 3,
+        "latency_ms": 3.9,
+        "num_results": 3
+      },
+      {
+        "query": "karpathy llm",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/Karpathy LLM Wiki Workflow.md",
+        "found_at": 1,
+        "latency_ms": 6.5,
+        "num_results": 10
+      },
+      {
+        "query": "karpathy x thread \u2014 april 2026",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/Karpathy X Thread - April 2026.md",
+        "found_at": 1,
+        "latency_ms": 5.1,
+        "num_results": 8
+      },
+      {
+        "query": "durable wiki side pointer",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/Karpathy X Thread - April 2026.md",
+        "found_at": 1,
+        "latency_ms": 3.6,
+        "num_results": 1
+      },
+      {
+        "query": "karpathy x",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/Karpathy X Thread - April 2026.md",
+        "found_at": 1,
+        "latency_ms": 5.0,
+        "num_results": 9
+      },
+      {
+        "query": "karpathy x thread   april 2026",
+        "query_type": "slug_match",
+        "gold": "knowledge/notes/Karpathy X Thread - April 2026.md",
+        "found_at": 1,
+        "latency_ms": 6.6,
+        "num_results": 8
+      },
+      {
+        "query": "llm knowledge base",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/LLM Knowledge Base.md",
+        "found_at": 1,
+        "latency_ms": 5.9,
+        "num_results": 10
+      },
+      {
+        "query": "personal maintained markdown wiki",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/LLM Knowledge Base.md",
+        "found_at": 1,
+        "latency_ms": 5.4,
+        "num_results": 3
+      },
+      {
+        "query": "llm knowledge",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/LLM Knowledge Base.md",
+        "found_at": 2,
+        "latency_ms": 8.1,
+        "num_results": 10
+      },
+      {
+        "query": "memory subsystem action plan",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/Memory Subsystem Action Plan.md",
+        "found_at": 1,
+        "latency_ms": 4.9,
+        "num_results": 9
+      },
+      {
+        "query": "historical plan turning knowledge",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/Memory Subsystem Action Plan.md",
+        "found_at": 1,
+        "latency_ms": 5.1,
+        "num_results": 3
+      },
+      {
+        "query": "memory subsystem",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/Memory Subsystem Action Plan.md",
+        "found_at": 2,
+        "latency_ms": 5.6,
+        "num_results": 10
+      },
+      {
+        "query": "mirror existing pipelines",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/mirror-existing-pipelines.md",
+        "found_at": 1,
+        "latency_ms": 4.7,
+        "num_results": 8
+      },
+      {
+        "query": "introducing subsystem mirror structure",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/mirror-existing-pipelines.md",
+        "found_at": 1,
+        "latency_ms": 5.8,
+        "num_results": 3
+      },
+      {
+        "query": "mirror existing",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/mirror-existing-pipelines.md",
+        "found_at": 1,
+        "latency_ms": 5.3,
+        "num_results": 8
+      },
+      {
+        "query": "no .gitkeep in knowledge/inbox/articles",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/no-gitkeep-in-inbox-articles.md",
+        "found_at": 1,
+        "latency_ms": 3.5,
+        "num_results": 2
+      },
+      {
+        "query": "gitkeep knowledge inbox articles",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/no-gitkeep-in-inbox-articles.md",
+        "found_at": 1,
+        "latency_ms": 3.5,
+        "num_results": 2
+      },
+      {
+        "query": "no .gitkeep",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/no-gitkeep-in-inbox-articles.md",
+        "found_at": 1,
+        "latency_ms": 4.4,
+        "num_results": 2
+      },
+      {
+        "query": "no gitkeep in inbox articles",
+        "query_type": "slug_match",
+        "gold": "knowledge/notes/no-gitkeep-in-inbox-articles.md",
+        "found_at": 1,
+        "latency_ms": 3.5,
+        "num_results": 2
+      },
+      {
+        "query": "obsidian",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/Obsidian.md",
+        "found_at": 1,
+        "latency_ms": 4.5,
+        "num_results": 8
+      },
+      {
+        "query": "obsidian markdown based note",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/Obsidian.md",
+        "found_at": 1,
+        "latency_ms": 3.5,
+        "num_results": 4
+      },
+      {
+        "query": "pipeline mirroring",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/pipeline-mirroring.md",
+        "found_at": 1,
+        "latency_ms": 5.2,
+        "num_results": 8
+      },
+      {
+        "query": "noun form counterpart pattern",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/pipeline-mirroring.md",
+        "found_at": 1,
+        "latency_ms": 3.5,
+        "num_results": 2
+      },
+      {
+        "query": "preliminary flagging",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/Preliminary Flagging.md",
+        "found_at": 1,
+        "latency_ms": 4.8,
+        "num_results": 10
+      },
+      {
+        "query": "convention writing wiki pages",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/Preliminary Flagging.md",
+        "found_at": 1,
+        "latency_ms": 3.7,
+        "num_results": 4
+      },
+      {
+        "query": "product requirements in the ai era",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/Product Requirements in the AI Era.md",
+        "found_at": 1,
+        "latency_ms": 4.7,
+        "num_results": 3
+      },
+      {
+        "query": "synthesis product business requirements",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/Product Requirements in the AI Era.md",
+        "found_at": 1,
+        "latency_ms": 3.4,
+        "num_results": 1
+      },
+      {
+        "query": "product requirements",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/Product Requirements in the AI Era.md",
+        "found_at": 1,
+        "latency_ms": 4.1,
+        "num_results": 3
+      },
+      {
+        "query": "prospective memory page drift",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/prospective-memory-page-drift.md",
+        "found_at": 1,
+        "latency_ms": 3.5,
+        "num_results": 4
+      },
+      {
+        "query": "memory wiki pages written",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/prospective-memory-page-drift.md",
+        "found_at": 1,
+        "latency_ms": 4.9,
+        "num_results": 3
+      },
+      {
+        "query": "prospective memory",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/prospective-memory-page-drift.md",
+        "found_at": 1,
+        "latency_ms": 4.5,
+        "num_results": 4
+      },
+      {
+        "query": "provenance rule 6: mark uncertainty explicitly",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/provenance-rule-6.md",
+        "found_at": 1,
+        "latency_ms": 4.6,
+        "num_results": 5
+      },
+      {
+        "query": "claude rule mark uncertainty",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/provenance-rule-6.md",
+        "found_at": 1,
+        "latency_ms": 3.8,
+        "num_results": 4
+      },
+      {
+        "query": "provenance rule",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/provenance-rule-6.md",
+        "found_at": 1,
+        "latency_ms": 5.6,
+        "num_results": 10
+      },
+      {
+        "query": "provenance rule 6",
+        "query_type": "slug_match",
+        "gold": "knowledge/notes/provenance-rule-6.md",
+        "found_at": 1,
+        "latency_ms": 5.1,
+        "num_results": 9
+      },
+      {
+        "query": "reliable memory uses recoverable markdown transactions and derived operational s",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/reliable-memory-stage-2.md",
+        "found_at": 1,
+        "latency_ms": 3.5,
+        "num_results": 1
+      },
+      {
+        "query": "stage keeps markdown authoritative",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/reliable-memory-stage-2.md",
+        "found_at": 1,
+        "latency_ms": 3.0,
+        "num_results": 1
+      },
+      {
+        "query": "reliable memory",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/reliable-memory-stage-2.md",
+        "found_at": 1,
+        "latency_ms": 4.8,
+        "num_results": 4
+      },
+      {
+        "query": "reliable memory stage 2",
+        "query_type": "slug_match",
+        "gold": "knowledge/notes/reliable-memory-stage-2.md",
+        "found_at": 1,
+        "latency_ms": 3.6,
+        "num_results": 3
+      },
+      {
+        "query": "retrieval workflow",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/Retrieval Workflow.md",
+        "found_at": 1,
+        "latency_ms": 4.8,
+        "num_results": 8
+      },
+      {
+        "query": "answers come compiled wiki",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/Retrieval Workflow.md",
+        "found_at": 1,
+        "latency_ms": 3.1,
+        "num_results": 1
+      },
+      {
+        "query": "review workflow",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/Review Workflow.md",
+        "found_at": 1,
+        "latency_ms": 7.9,
+        "num_results": 10
+      },
+      {
+        "query": "wiki pruned linked quality",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/Review Workflow.md",
+        "found_at": 1,
+        "latency_ms": 3.3,
+        "num_results": 1
+      },
+      {
+        "query": "state.md exempt from lint",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/state-md-exempt-from-lint.md",
+        "found_at": 1,
+        "latency_ms": 3.9,
+        "num_results": 5
+      },
+      {
+        "query": "state files under knowledge",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/state-md-exempt-from-lint.md",
+        "found_at": 1,
+        "latency_ms": 4.9,
+        "num_results": 4
+      },
+      {
+        "query": "state.md exempt",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/state-md-exempt-from-lint.md",
+        "found_at": 1,
+        "latency_ms": 4.6,
+        "num_results": 6
+      },
+      {
+        "query": "state md exempt from lint",
+        "query_type": "slug_match",
+        "gold": "knowledge/notes/state-md-exempt-from-lint.md",
+        "found_at": 1,
+        "latency_ms": 4.2,
+        "num_results": 5
+      },
+      {
+        "query": "karpathy llm wiki vs claude-memory-compiler vs fusion",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/Wiki vs Memory Compiler vs Fusion.md",
+        "found_at": 1,
+        "latency_ms": 3.5,
+        "num_results": 1
+      },
+      {
+        "query": "three approaches giving durable",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/Wiki vs Memory Compiler vs Fusion.md",
+        "found_at": 1,
+        "latency_ms": 3.6,
+        "num_results": 1
+      },
+      {
+        "query": "karpathy llm",
+        "query_type": "partial_title",
+        "gold": "knowledge/notes/Wiki vs Memory Compiler vs Fusion.md",
+        "found_at": 2,
+        "latency_ms": 4.7,
+        "num_results": 10
+      },
+      {
+        "query": "wiki vs memory compiler vs fusion",
+        "query_type": "slug_match",
+        "gold": "knowledge/notes/Wiki vs Memory Compiler vs Fusion.md",
+        "found_at": 1,
+        "latency_ms": 4.7,
+        "num_results": 6
+      }
+    ],
+    "mrr": 0.9756,
+    "latency_p50_ms": 4.4,
+    "latency_p95_ms": 7.9,
+    "latency_avg_ms": 5.2
+  },
+  "legacy": {
+    "total_queries": 60,
+    "corpus_version": "legacy-60-v1",
+    "semantic": false,
+    "k_values": [
+      1,
+      3,
+      5,
+      10
+    ],
+    "recall_at_k": {
+      "1": 0.9333,
+      "3": 1.0,
+      "5": 1.0,
+      "10": 1.0
+    },
+    "mrr_sum": 57.666666666666664,
+    "latencies_ms": [
+      44.87090000111493,
+      10.345099999540253,
+      6.380700000590878,
+      5.640600000333507,
+      5.937899997661589,
+      4.34799999857205,
+      3.502600000501843,
+      4.367599998658989,
+      4.264900002453942,
+      4.24409999686759,
+      3.0374000016308855,
+      2.646200002345722,
+      5.698400000255788,
+      6.826200002251426,
+      4.367599998658989,
+      6.209500003024004,
+      5.703699996956857,
+      5.371199997171061,
+      5.406399999628775,
+      5.815399999846704,
+      13.004800002818229,
+      5.08119999722112,
+      6.329299998469651,
+      3.3029000005626585,
+      5.6007999992289115,
+      3.390999998373445,
+      5.321500000718515,
+      4.273300000932068,
+      3.649599999334896,
+      3.3468000001448672,
+      4.923199998302152,
+      4.811099999642465,
+      4.979400000593159,
+      5.215299999690615,
+      7.16640000246116,
+      4.30430000051274,
+      6.8562999986170325,
+      3.34139999904437,
+      4.488499998842599,
+      3.390199999557808,
+      6.330599997454556,
+      3.613100001530256,
+      3.2348999993701,
+      3.2490999983565416,
+      4.99389999822597,
+      3.981599998951424,
+      6.724799997755326,
+      4.4390999973984435,
+      4.4593000020540785,
+      3.6918999976478517,
+      3.793500000028871,
+      3.3995999983744696,
+      4.403200000524521,
+      4.0222999996331055,
+      3.788699999859091,
+      3.5839999982272275,
+      3.832399997918401,
+      3.508900001179427,
+      2.9204999991634395,
+      3.588899999158457
+    ],
+    "per_query": [
+      {
+        "query": "three conventions, one root \u2014 2026-04-13 memory review",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/2026-04-13 Three Conventions One Root.md",
+        "found_at": 1,
+        "latency_ms": 44.9,
+        "num_results": 4
+      },
+      {
+        "query": "knowledge notes editorial notes",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/2026-04-13 Three Conventions One Root.md",
+        "found_at": 3,
+        "latency_ms": 10.3,
+        "num_results": 10
+      },
+      {
+        "query": "add reciprocal backlinks at creation",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/add-reciprocal-backlinks-at-creation.md",
+        "found_at": 1,
+        "latency_ms": 6.4,
+        "num_results": 5
+      },
+      {
+        "query": "creating synthesis concept decision",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/add-reciprocal-backlinks-at-creation.md",
+        "found_at": 1,
+        "latency_ms": 5.6,
+        "num_results": 1
+      },
+      {
+        "query": "andrej karpathy",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/Andrej Karpathy.md",
+        "found_at": 1,
+        "latency_ms": 5.9,
+        "num_results": 5
+      },
+      {
+        "query": "researcher educator source author",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/Andrej Karpathy.md",
+        "found_at": 1,
+        "latency_ms": 4.3,
+        "num_results": 1
+      },
+      {
+        "query": "audit syntheses: separate current state from intended model",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/audit-current-vs-intended.md",
+        "found_at": 1,
+        "latency_ms": 3.5,
+        "num_results": 2
+      },
+      {
+        "query": "audit must distinguish true",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/audit-current-vs-intended.md",
+        "found_at": 1,
+        "latency_ms": 4.4,
+        "num_results": 1
+      },
+      {
+        "query": "b-sim: emulate hook lifecycle without a live claude code window",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/b-sim-hook-testing.md",
+        "found_at": 1,
+        "latency_ms": 4.3,
+        "num_results": 1
+      },
+      {
+        "query": "full session start edit",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/b-sim-hook-testing.md",
+        "found_at": 1,
+        "latency_ms": 4.2,
+        "num_results": 3
+      },
+      {
+        "query": "case-sensitive grep on injected context gives false failure",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/case-sensitive-grep-injected-context.md",
+        "found_at": 1,
+        "latency_ms": 3.0,
+        "num_results": 1
+      },
+      {
+        "query": "grepping injected additionalcontext payload",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/case-sensitive-grep-injected-context.md",
+        "found_at": 1,
+        "latency_ms": 2.6,
+        "num_results": 1
+      },
+      {
+        "query": "centralized memory subsystem independent of worktree mode",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/centralized-memory-subsystem.md",
+        "found_at": 1,
+        "latency_ms": 5.7,
+        "num_results": 1
+      },
+      {
+        "query": "memory subsystem state json",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/centralized-memory-subsystem.md",
+        "found_at": 1,
+        "latency_ms": 6.8,
+        "num_results": 4
+      },
+      {
+        "query": "docs portability: absolute paths",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/docs-portability-absolute-paths.md",
+        "found_at": 1,
+        "latency_ms": 4.4,
+        "num_results": 4
+      },
+      {
+        "query": "replace hardcoded absolute paths",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/docs-portability-absolute-paths.md",
+        "found_at": 1,
+        "latency_ms": 6.2,
+        "num_results": 2
+      },
+      {
+        "query": "edit tool: \"found n matches\" error",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/edit-multiple-matches.md",
+        "found_at": 1,
+        "latency_ms": 5.7,
+        "num_results": 1
+      },
+      {
+        "query": "edit tool fails because",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/edit-multiple-matches.md",
+        "found_at": 1,
+        "latency_ms": 5.4,
+        "num_results": 2
+      },
+      {
+        "query": "editorial disclaimer over history rewrite",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/editorial-disclaimer-over-history-rewrite.md",
+        "found_at": 1,
+        "latency_ms": 5.4,
+        "num_results": 5
+      },
+      {
+        "query": "changelog historical entries contradict",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/editorial-disclaimer-over-history-rewrite.md",
+        "found_at": 1,
+        "latency_ms": 5.8,
+        "num_results": 1
+      },
+      {
+        "query": "editorial notes pattern",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/editorial-notes-pattern.md",
+        "found_at": 1,
+        "latency_ms": 13.0,
+        "num_results": 10
+      },
+      {
+        "query": "editorial note footer marks",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/editorial-notes-pattern.md",
+        "found_at": 1,
+        "latency_ms": 5.1,
+        "num_results": 1
+      },
+      {
+        "query": "flag inferred content as preliminary",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/flag-inferred-content-as-preliminary.md",
+        "found_at": 1,
+        "latency_ms": 6.3,
+        "num_results": 8
+      },
+      {
+        "query": "writing wiki about topic",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/flag-inferred-content-as-preliminary.md",
+        "found_at": 1,
+        "latency_ms": 3.3,
+        "num_results": 1
+      },
+      {
+        "query": "global multi-project migration plan",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/Global Multi-Project Migration Plan.md",
+        "found_at": 1,
+        "latency_ms": 5.6,
+        "num_results": 8
+      },
+      {
+        "query": "plan extending wiki single",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/Global Multi-Project Migration Plan.md",
+        "found_at": 1,
+        "latency_ms": 3.4,
+        "num_results": 2
+      },
+      {
+        "query": "hook errors silent without llm_wiki_state_root",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/hook-errors-silent-without-state-root.md",
+        "found_at": 1,
+        "latency_ms": 5.3,
+        "num_results": 4
+      },
+      {
+        "query": "absent claude settings json",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/hook-errors-silent-without-state-root.md",
+        "found_at": 1,
+        "latency_ms": 4.3,
+        "num_results": 2
+      },
+      {
+        "query": "hook scripts defense-in-depth",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/hook-scripts-defense-in-depth.md",
+        "found_at": 1,
+        "latency_ms": 3.6,
+        "num_results": 4
+      },
+      {
+        "query": "hardening decisions made prevent",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/hook-scripts-defense-in-depth.md",
+        "found_at": 1,
+        "latency_ms": 3.3,
+        "num_results": 1
+      },
+      {
+        "query": "where does a source file live after it's been compiled \u2014 `knowledge/inbox/` or `",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/inbox-vs-raw-after-compile.md",
+        "found_at": 1,
+        "latency_ms": 4.9,
+        "num_results": 1
+      },
+      {
+        "query": "once source compiled durable",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/inbox-vs-raw-after-compile.md",
+        "found_at": 1,
+        "latency_ms": 4.8,
+        "num_results": 3
+      },
+      {
+        "query": "karpathy llm wiki workflow",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/Karpathy LLM Wiki Workflow.md",
+        "found_at": 1,
+        "latency_ms": 5.0,
+        "num_results": 10
+      },
+      {
+        "query": "pattern andrej karpathy april",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/Karpathy LLM Wiki Workflow.md",
+        "found_at": 3,
+        "latency_ms": 5.2,
+        "num_results": 3
+      },
+      {
+        "query": "karpathy x thread \u2014 april 2026",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/Karpathy X Thread - April 2026.md",
+        "found_at": 1,
+        "latency_ms": 7.2,
+        "num_results": 8
+      },
+      {
+        "query": "durable wiki side pointer",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/Karpathy X Thread - April 2026.md",
+        "found_at": 1,
+        "latency_ms": 4.3,
+        "num_results": 1
+      },
+      {
+        "query": "llm knowledge base",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/LLM Knowledge Base.md",
+        "found_at": 1,
+        "latency_ms": 6.9,
+        "num_results": 10
+      },
+      {
+        "query": "personal maintained markdown wiki",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/LLM Knowledge Base.md",
+        "found_at": 1,
+        "latency_ms": 3.3,
+        "num_results": 3
+      },
+      {
+        "query": "memory subsystem action plan",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/Memory Subsystem Action Plan.md",
+        "found_at": 1,
+        "latency_ms": 4.5,
+        "num_results": 9
+      },
+      {
+        "query": "historical plan turning knowledge",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/Memory Subsystem Action Plan.md",
+        "found_at": 1,
+        "latency_ms": 3.4,
+        "num_results": 3
+      },
+      {
+        "query": "mirror existing pipelines",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/mirror-existing-pipelines.md",
+        "found_at": 1,
+        "latency_ms": 6.3,
+        "num_results": 8
+      },
+      {
+        "query": "introducing subsystem mirror structure",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/mirror-existing-pipelines.md",
+        "found_at": 1,
+        "latency_ms": 3.6,
+        "num_results": 3
+      },
+      {
+        "query": "no .gitkeep in knowledge/inbox/articles",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/no-gitkeep-in-inbox-articles.md",
+        "found_at": 1,
+        "latency_ms": 3.2,
+        "num_results": 2
+      },
+      {
+        "query": "gitkeep knowledge inbox articles",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/no-gitkeep-in-inbox-articles.md",
+        "found_at": 1,
+        "latency_ms": 3.2,
+        "num_results": 2
+      },
+      {
+        "query": "obsidian",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/Obsidian.md",
+        "found_at": 1,
+        "latency_ms": 5.0,
+        "num_results": 8
+      },
+      {
+        "query": "markdown based note human",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/Obsidian.md",
+        "found_at": 1,
+        "latency_ms": 4.0,
+        "num_results": 4
+      },
+      {
+        "query": "pipeline mirroring",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/mirror-existing-pipelines.md",
+        "found_at": 2,
+        "latency_ms": 6.7,
+        "num_results": 8
+      },
+      {
+        "query": "noun form counterpart pattern",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/mirror-existing-pipelines.md",
+        "found_at": 2,
+        "latency_ms": 4.4,
+        "num_results": 2
+      },
+      {
+        "query": "preliminary flagging",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/Preliminary Flagging.md",
+        "found_at": 1,
+        "latency_ms": 4.5,
+        "num_results": 10
+      },
+      {
+        "query": "convention writing wiki pages",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/Preliminary Flagging.md",
+        "found_at": 1,
+        "latency_ms": 3.7,
+        "num_results": 4
+      },
+      {
+        "query": "product requirements in the ai era",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/Product Requirements in the AI Era.md",
+        "found_at": 1,
+        "latency_ms": 3.8,
+        "num_results": 3
+      },
+      {
+        "query": "synthesis product business requirements",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/Product Requirements in the AI Era.md",
+        "found_at": 1,
+        "latency_ms": 3.4,
+        "num_results": 1
+      },
+      {
+        "query": "prospective memory page drift",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/prospective-memory-page-drift.md",
+        "found_at": 1,
+        "latency_ms": 4.4,
+        "num_results": 4
+      },
+      {
+        "query": "memory wiki pages written",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/prospective-memory-page-drift.md",
+        "found_at": 1,
+        "latency_ms": 4.0,
+        "num_results": 3
+      },
+      {
+        "query": "provenance rule 6: mark uncertainty explicitly",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/provenance-rule-6.md",
+        "found_at": 1,
+        "latency_ms": 3.8,
+        "num_results": 5
+      },
+      {
+        "query": "claude rule mark uncertainty",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/provenance-rule-6.md",
+        "found_at": 1,
+        "latency_ms": 3.6,
+        "num_results": 4
+      },
+      {
+        "query": "state.md exempt from lint",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/state-md-exempt-from-lint.md",
+        "found_at": 1,
+        "latency_ms": 3.8,
+        "num_results": 5
+      },
+      {
+        "query": "state files under knowledge",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/state-md-exempt-from-lint.md",
+        "found_at": 1,
+        "latency_ms": 3.5,
+        "num_results": 4
+      },
+      {
+        "query": "karpathy llm wiki vs claude-memory-compiler vs fusion",
+        "query_type": "exact_title",
+        "gold": "knowledge/notes/Wiki vs Memory Compiler vs Fusion.md",
+        "found_at": 1,
+        "latency_ms": 2.9,
+        "num_results": 1
+      },
+      {
+        "query": "three approaches giving durable",
+        "query_type": "keywords_from_summary",
+        "gold": "knowledge/notes/Wiki vs Memory Compiler vs Fusion.md",
+        "found_at": 1,
+        "latency_ms": 3.6,
+        "num_results": 1
+      }
+    ],
+    "mrr": 0.9611,
+    "latency_p50_ms": 4.4,
+    "latency_p95_ms": 7.2,
+    "latency_avg_ms": 5.5
+  }
+}

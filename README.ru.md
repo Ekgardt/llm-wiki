@@ -1,6 +1,6 @@
 # LLM Wiki
 
-[![Tests](https://img.shields.io/badge/tests-1804%20collected-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://img.shields.io/badge/tests-2503%20collected-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-4.0.0-blue.svg)](CHANGELOG.md)
@@ -101,7 +101,7 @@ LLM Wiki даёт каждому AI-агенту, которым вы польз
 - **5 LLM-бэкендов** (авто-детекция): OpenCode → Codex → Claude CLI → OpenAI → Ollama
 - **Кросс-платформенность**: Windows, macOS, Linux, WSL2
 - **Локально и без daemon-процессов** — установленный baseline включает MCP-пакет; vector search и Cognee остаются опциональными
-- **1804 регрессионных теста**, CI green на Ubuntu + Windows + macOS, Python 3.10 + 3.13
+- **2503 регрессионных теста**, CI green на Ubuntu + Windows + macOS, Python 3.10 + 3.13
 - **Pre-commit хуки**: ruff (статический анализ) + структурный lint + gitleaks (сканирование секретов)
 
 ---
@@ -134,7 +134,7 @@ irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 1. Проверяет требования (Python 3.10+, git)
 2. Устанавливает `uv` (быстрый Python-менеджер пакетов), если отсутствует
 3. Синхронизирует locked baseline-зависимости (`uv sync --locked --extra mcp-server`)
-4. Запускает тестовый набор (1804 теста)
+4. Запускает тестовый набор (2503 теста)
 5. Устанавливает переменную окружения `LLM_WIKI_ROOT` (user scope)
 6. Создаёт runtime-директории (`cache/`, `logs/`, `run/`, `cache/cognee/` — gitignored)
 7. Регистрирует плановое обслуживание (cron на Unix, Task Scheduler на Windows)
@@ -147,7 +147,7 @@ irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync --locked --extra mcp-server
-uv run pytest -q          # собирает 1804 теста
+uv run pytest -q          # собирает 2503 теста
 ```
 
 ### Проверка работы
@@ -236,9 +236,9 @@ uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contra
 
 ## Бенчмарк
 
-> **Методология**: только BM25/FTS5 по git-tracked публичному корпусу; graph, vectors и reranker отключены. `current-generated-v2` содержит 112 детерминированных запросов: точный заголовок, ключевые слова summary, частичный заголовок и slug. `legacy-60-v1.json` хранит исходные 60 текстов запросов и gold paths дословно, поэтому последующие правки страниц не меняют gate. Ignored личные страницы и `$LLM_WIKI_ROOT` исключены, поэтому clean clone воспроизводит тот же корпус. Это не LoCoMo и не LongMemEval; числа конкурентов получены на других датасетах.
+> **Историческая legacy-методология**: только BM25/FTS5 по git-tracked публичному корпусу; graph, vectors и reranker отключены. `current-generated-v2` содержал 112 детерминированных запросов: точный заголовок, ключевые слова summary, частичный заголовок и slug. `legacy-60-v1.json` хранит исходные 60 текстов запросов и gold paths дословно, поэтому последующие правки страниц не меняют gate. Ignored личные страницы и `$LLM_WIKI_ROOT` исключены, поэтому clean clone воспроизводит тот же корпус. Это не LoCoMo и не LongMemEval; числа конкурентов получены на других датасетах.
 
-| Метрика | Текущие 112 | Legacy 60 | agentmemory | Zep | Mem0 |
+| Историческая метрика | Исторические текущие 112 | Исторические legacy 60 | agentmemory | Zep | Mem0 |
 |---------|-------------|-----------|-------------|-----|------|
 | Recall@1 | **94.6%** | n/a | n/a | n/a | n/a |
 | Recall@3 | **100.0%** | n/a | n/a | n/a | n/a |
@@ -247,9 +247,11 @@ uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contra
 | MRR | **0.9702** | **0.9694** | 0.882 | n/a | n/a |
 | Латентность p50 | **6.3мс** | n/a | 14мс | 155мс | 880мс |
 
-Regression floors: Recall@5 >=95% для растущего текущего корпуса и 100% для `legacy-60-v1`. Старый 60-query результат остаётся видимым и не скрывается новым большим корпусом.
+Это исторические результаты legacy-runner. Команда по умолчанию теперь запускает frozen retrieval-v2 benchmark. Только отдельный флаг `--legacy-only` выбирает старый gate; сочетание с `--semantic` или `--report` завершается закрытым отказом.
 
-Воспроизведите: `uv run python benchmark/run_benchmark.py`
+Запустите retrieval-v2: `uv run python benchmark/run_benchmark.py`
+
+Воспроизведите старый gate: `uv run python benchmark/run_benchmark.py --legacy-only`
 
 ### MCP agent interface
 

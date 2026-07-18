@@ -36,6 +36,63 @@ ok()    { echo -e "${GREEN}[OK]${NC} $1"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 fail()  { echo -e "${RED}[FAIL]${NC} $1"; exit 1; }
 
+install_codex_hooks() {
+  local vault_root="$1"
+  local codex_dir="$2"
+  local hook_exit
+  if uv run --directory "$vault_root" python "$vault_root/scripts/codex_memory.py" \
+    merge-hooks \
+    --source "$vault_root/integrations/codex/hooks.json" \
+    --destination "$codex_dir/hooks.json" \
+    --config "$codex_dir/config.toml"; then
+    return 0
+  else
+    hook_exit=$?
+  fi
+  if [ "$hook_exit" -eq 4 ]; then
+    echo "Codex lifecycle hooks are disabled. Set [features] hooks = true in config.toml and rerun the installer; hooks.json was not changed." >&2
+  fi
+  return "$hook_exit"
+}
+
+configure_codex_mcp() {
+  local vault_root="$1"
+  local config="$2"
+  local state vault_json block
+  state="$(uv run --directory "$vault_root" python "$vault_root/scripts/codex_memory.py" \
+    config-state --config "$config" --vault-root "$vault_root")" || return 1
+  case "$state" in
+    equivalent)
+      return 0
+      ;;
+    absent)
+      mkdir -p "$(dirname "$config")"
+      vault_json="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$vault_root")"
+      block="$(printf '%s\n' \
+        '[mcp_servers.llm-wiki]' \
+        'command = "uv"' \
+        "args = [\"run\", \"--directory\", $vault_json, \"python\", \"scripts/mcp_server.py\"]")"
+      if [ -f "$config" ]; then
+        cp -p "$config" "$config.bak"
+        if [ -s "$config" ]; then
+          printf '\n%s\n' "$block" >> "$config"
+        else
+          printf '%s\n' "$block" >> "$config"
+        fi
+      else
+        printf '%s\n' "$block" > "$config"
+      fi
+      return 0
+      ;;
+    conflict|invalid)
+      return 2
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 # ─── 1. Resolve vault root ──────────────────────────────────────────
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -153,13 +210,7 @@ STATE_ROOT="${LLM_WIKI_STATE_ROOT:-$VAULT_ROOT}"
 mkdir -p "$STATE_ROOT/run" "$STATE_ROOT/run/queue" "$STATE_ROOT/logs" "$STATE_ROOT/cache" "$STATE_ROOT/cache/cognee"
 ok "Runtime dirs: $STATE_ROOT/{run,logs,cache} (gitignored)"
 
-# ─── 6. Build search index ─────────────────────────────────────────
-
-info "Building FTS5 search index..."
-uv run python "$VAULT_ROOT/scripts/search_memory.py" --rebuild 2>/dev/null || true
-ok "Search index built"
-
-# ─── 7. Set up scheduled maintenance ────────────────────────────────
+# ─── 6. Set up scheduled maintenance ────────────────────────────────
 
 info "Setting up scheduled maintenance..."
 
@@ -176,7 +227,7 @@ fi
 ( crontab -l 2>/dev/null; echo "# LLM-Wiki-cron-start"; echo "$CRON_NIGHTLY"; echo "$CRON_WEEKLY"; echo "# LLM-Wiki-cron-end" ) | crontab -
 ok "Cron scheduled: nightly 03:00, weekly Sunday 04:00"
 
-# ─── 8. Detect and wire up agents ──────────────────────────────────
+# ─── 7. Detect and wire up agents ──────────────────────────────────
 
 info "Detecting installed agents..."
 
@@ -203,23 +254,34 @@ fi
 if command -v codex &>/dev/null; then
   AGENTS_FOUND="$AGENTS_FOUND Codex"
   CODEX_CONFIG="$HOME/.codex/config.toml"
-  CODEX_BLOCK=$(printf '%s\n' \
-    '[mcp_servers.llm-wiki]' \
-    'command = "uv"' \
-    "args = [\"run\", \"--directory\", $VAULT_JSON, \"python\", \"scripts/mcp_server.py\"]")
   mkdir -p "$HOME/.codex"
-  if ! grep -q '^\[mcp_servers\.llm-wiki\]$' "$CODEX_CONFIG" 2>/dev/null; then
-    if [ -f "$CODEX_CONFIG" ]; then
-      cp -p "$CODEX_CONFIG" "$CODEX_CONFIG.bak"
-      printf '\n%s\n' "$CODEX_BLOCK" >> "$CODEX_CONFIG"
-      ok "Codex MCP config appended; backup: $CODEX_CONFIG.bak"
+  if configure_codex_mcp "$VAULT_ROOT" "$CODEX_CONFIG"; then
+    ok "Codex MCP config verified: $CODEX_CONFIG"
+  else
+    mcp_exit=$?
+    if [ "$mcp_exit" -eq 2 ]; then
+      warn "Existing Codex MCP entry conflicts with LLM-Wiki; config.toml was not changed. Merge manually."
     else
-      printf '%s\n' "$CODEX_BLOCK" > "$CODEX_CONFIG"
-      ok "Codex MCP config created: $CODEX_CONFIG"
+      warn "Codex MCP config could not be verified; config.toml was not changed."
     fi
   fi
-  info "Codex CLI detected. Add this to your shell profile:"
-  info "  alias codex-mem='uv run python $VAULT_ROOT/scripts/codex_memory.py daily-log --cwd \$(pwd) --reason codex-session-end --json'"
+  CODEX_HOOKS="$HOME/.codex/hooks.json"
+  if install_codex_hooks "$VAULT_ROOT" "$HOME/.codex"; then
+    ok "Codex official hooks merged: $CODEX_HOOKS"
+    info "Open /hooks in Codex to review and trust the LLM-Wiki commands."
+  else
+    hook_exit=$?
+    if [ "$hook_exit" -eq 2 ]; then
+      warn "Active inline Codex hooks require manual merge and /hooks trust review; hooks.json was not changed."
+    elif [ "$hook_exit" -eq 3 ]; then
+      ok "Equivalent LLM-Wiki hooks are already configured inline; hooks.json was not changed."
+      info "Open /hooks in Codex to review and trust the inline LLM-Wiki commands."
+    elif [ "$hook_exit" -eq 4 ]; then
+      : # install_codex_hooks already printed the manual enable instruction.
+    else
+      warn "Codex hooks were not changed; review the existing hooks configuration manually."
+    fi
+  fi
 fi
 
 # Cursor
@@ -279,6 +341,18 @@ if [ -d "$HOME/.config/opencode" ] || command -v opencode &>/dev/null; then
   fi
 fi
 
+# ─── 8. Bounded runtime sync ───────────────────────────────────────
+
+info "Synchronizing runtime state and derived indexes..."
+SYNC_EXIT=0
+SYNC_WARNING=0
+uv run --locked --no-sync python "$VAULT_ROOT/scripts/sync_memory.py" --apply || SYNC_EXIT=$?
+case "$SYNC_EXIT" in
+  0) ok "Runtime state synchronized" ;;
+  1) SYNC_WARNING=1; warn "Runtime synchronization completed with warnings" ;;
+  *) fail "Runtime synchronization failed" ;;
+esac
+
 # ─── 9. Optional: semantic + hybrid search ─────────────────────────
 
 info "Optional: install hybrid search (BM25 + vector + reranker)?"
@@ -289,7 +363,11 @@ info "  uv sync --extra reranker     # cross-encoder reranker (ONNX)"
 
 echo ""
 echo "=============================================="
-echo -e "${GREEN}  LLM-Wiki installed successfully!${NC}"
+if [ "$SYNC_WARNING" -eq 1 ]; then
+  echo -e "${YELLOW}  LLM-Wiki installed with warnings${NC}"
+else
+  echo -e "${GREEN}  LLM-Wiki installed successfully!${NC}"
+fi
 echo "=============================================="
 echo ""
 echo "Vault:          $VAULT_ROOT"

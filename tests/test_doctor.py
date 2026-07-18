@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import socket
@@ -18,14 +19,53 @@ SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 DOCTOR = SCRIPTS / "doctor.py"
 
 
-def _create_index(path: Path, paths: list[str] | None = None, manifest: bool = False) -> None:
+def _codex_hooks_fixture() -> dict:
+    command = {
+        "type": "command",
+        "command": 'uv run --directory "$LLM_WIKI_ROOT" python "$LLM_WIKI_ROOT/scripts/codex_memory.py" hook',
+        "commandWindows": 'uv run --directory "%LLM_WIKI_ROOT%" python "%LLM_WIKI_ROOT%\\scripts\\codex_memory.py" hook',
+        "timeout": 15,
+    }
+    return {
+        "hooks": {
+            "SessionStart": [
+                {"matcher": "startup|resume|clear|compact", "hooks": [command]}
+            ],
+            "PreCompact": [{"matcher": "manual|auto", "hooks": [command]}],
+            "PostCompact": [{"matcher": "manual|auto", "hooks": [command]}],
+            "Stop": [{"hooks": [command]}],
+        }
+    }
+
+
+def _runtime_hooks(root: Path, *, trust: str = "trusted", enabled: bool = True) -> dict:
+    template = _codex_hooks_fixture()["hooks"]
+    hooks = []
+    for event_name, groups in template.items():
+        group = groups[0]
+        handler = group["hooks"][0]
+        hooks.append(
+            {
+                "eventName": event_name,
+                "matcher": group.get("matcher"),
+                "command": handler["commandWindows"] if os.name == "nt" else handler["command"],
+                "enabled": enabled,
+                "trustStatus": trust,
+                "source": "user",
+                "currentHash": "never-report-this-hash",
+            }
+        )
+    return {"data": [{"cwd": str(root), "hooks": hooks, "warnings": [], "errors": []}]}
+
+
+def _create_index(path: Path, paths: list[str] | None = None, manifest: bool = True) -> None:
     paths = paths or []
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path)
     connection.execute(
         "CREATE VIRTUAL TABLE pages USING fts5("
         "path UNINDEXED, title, summary, body, project UNINDEXED, "
-        "timestamp UNINDEXED, slug)"
+        "timestamp UNINDEXED, slug, tokenize = 'porter unicode61')"
     )
     for item in paths:
         connection.execute(
@@ -86,6 +126,7 @@ def _build_root(tmp_path: Path) -> tuple[Path, Path, Path]:
         root / "knowledge" / "notes",
         root / "scripts",
         root / "integrations" / "claude-code",
+        root / "integrations" / "codex",
         root / "integrations" / "cursor" / "rules",
         root / "integrations" / "antigravity",
         state_root / "run" / "queue",
@@ -105,6 +146,9 @@ def _build_root(tmp_path: Path) -> tuple[Path, Path, Path]:
         "integrations/antigravity/AGENTS.md",
     ):
         (root / relative).write_text("{}\n", encoding="utf-8")
+    (root / "integrations" / "codex" / "hooks.json").write_text(
+        json.dumps(_codex_hooks_fixture(), indent=2) + "\n", encoding="utf-8"
+    )
     return root, state_root, home
 
 
@@ -426,6 +470,530 @@ def test_integrations_use_injected_home_and_skip_absent_optional_hosts(tmp_path)
     assert check["details"]["hosts"]["claude"]["status"] == "ok"
     assert check["details"]["hosts"]["opencode"]["status"] == "skipped"
     assert str(home) not in json.dumps(check)
+
+
+def test_codex_mcp_config_alone_does_not_claim_capture(tmp_path):
+    from doctor import run_doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    config = home / ".codex" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        '[mcp_servers.llm-wiki]\ncommand = "uv"\nargs = ["python", "scripts/mcp_server.py"]\n',
+        encoding="utf-8",
+    )
+
+    check = _check(run_doctor(root=root, state_root=state_root, home=home), "integrations")
+
+    codex = check["details"]["hosts"]["codex"]
+    assert codex["status"] == "degraded"
+    assert codex["capture_mode"] == "none"
+
+
+def test_codex_quoted_mcp_table_is_accepted(tmp_path):
+    from doctor import run_doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    config = home / ".codex" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        '[mcp_servers."llm-wiki"]\ncommand = "uv"\n'
+        'args = ["run", "python", "scripts/mcp_server.py"]\n',
+        encoding="utf-8",
+    )
+
+    check = _check(run_doctor(root=root, state_root=state_root, home=home), "integrations")
+
+    assert check["details"]["hosts"]["codex"]["status"] == "degraded"
+
+
+def test_codex_doctor_prefers_trusted_runtime_hooks(tmp_path, monkeypatch):
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    codex_dir = home / ".codex"
+    codex_dir.mkdir(parents=True)
+    (codex_dir / "config.toml").write_text(
+        '[mcp_servers.llm-wiki]\ncommand = "uv"\nargs = ["scripts/mcp_server.py"]\n',
+        encoding="utf-8",
+    )
+    (codex_dir / "hooks.json").write_bytes(
+        (root / "integrations" / "codex" / "hooks.json").read_bytes()
+    )
+
+    monkeypatch.setattr(
+        doctor, "_probe_codex_hooks_list", lambda *_args, **_kwargs: _runtime_hooks(root)
+    )
+    check = _check(
+        doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations"
+    )
+    codex = check["details"]["hosts"]["codex"]
+
+    assert codex["status"] == "ok"
+    assert codex["capture_mode"] == "official-hooks"
+    assert codex["trust"] == "review-with-/hooks"
+    assert "currentHash" not in json.dumps(codex)
+
+
+def test_codex_runtime_hook_health_is_decoupled_from_mcp_config(tmp_path, monkeypatch):
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    (home / ".codex").mkdir()
+    monkeypatch.setattr(
+        doctor, "_probe_codex_hooks_list", lambda *_args, **_kwargs: _runtime_hooks(root)
+    )
+
+    check = _check(
+        doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations"
+    )
+
+    assert check["details"]["hosts"]["codex"]["status"] == "ok"
+
+
+@pytest.mark.parametrize("trust", ["untrusted", "modified"])
+def test_codex_runtime_untrusted_or_modified_is_degraded_without_capture(
+    tmp_path, monkeypatch, trust
+):
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    (home / ".codex").mkdir()
+    monkeypatch.setattr(
+        doctor,
+        "_probe_codex_hooks_list",
+        lambda *_args, **_kwargs: _runtime_hooks(root, trust=trust),
+    )
+
+    codex = _check(
+        doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations"
+    )["details"]["hosts"]["codex"]
+
+    assert codex["status"] == "degraded"
+    assert codex["capture_mode"] == "none"
+    assert codex["reason"] == f"runtime_hooks_{trust}"
+
+
+def test_codex_runtime_probe_warnings_are_degraded(tmp_path, monkeypatch):
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    (home / ".codex").mkdir()
+    response = _runtime_hooks(root)
+    response["data"][0]["warnings"] = ["configuration warning"]
+    monkeypatch.setattr(doctor, "_probe_codex_hooks_list", lambda *_args, **_kwargs: response)
+
+    codex = _check(
+        doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations"
+    )["details"]["hosts"]["codex"]
+
+    assert codex["status"] == "degraded"
+    assert codex["reason"] == "runtime_hooks_warning_or_error"
+    assert "configuration warning" not in json.dumps(codex)
+
+
+def test_codex_unavailable_probe_reports_unverified_and_no_capture(tmp_path, monkeypatch):
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    (home / ".codex").mkdir()
+    monkeypatch.setattr(doctor, "_probe_codex_hooks_list", lambda *_args, **_kwargs: None)
+
+    codex = _check(
+        doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations"
+    )["details"]["hosts"]["codex"]
+
+    assert codex["status"] == "degraded"
+    assert codex["reason"] == "runtime_hooks_unverified"
+    assert codex["capture_mode"] == "none"
+
+
+def test_codex_configured_wrapper_is_reported_as_heartbeat_fallback(tmp_path, monkeypatch):
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    (root / "scripts" / "codex-memory-wrapper.ps1").write_text(
+        "function codex {}\n", encoding="utf-8"
+    )
+    (home / ".codex").mkdir()
+    profile = home / "Documents" / "PowerShell" / "Microsoft.PowerShell_profile.ps1"
+    profile.parent.mkdir(parents=True)
+    profile.write_text(
+        '. "$env:LLM_WIKI_ROOT\\scripts\\codex-memory-wrapper.ps1"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(doctor, "_probe_codex_hooks_list", lambda *_args, **_kwargs: None)
+
+    codex = _check(
+        doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations"
+    )["details"]["hosts"]["codex"]
+
+    assert codex["capture_mode"] == "wrapper-fallback-heartbeat-only"
+
+
+def test_codex_hooks_probe_skips_spawn_when_deadline_budget_is_too_small(
+    tmp_path, monkeypatch
+):
+    import doctor
+
+    root, _, home = _build_root(tmp_path)
+    (home / ".codex").mkdir()
+    monkeypatch.setattr(
+        doctor,
+        "_codex_app_server_command",
+        lambda: ["codex", "app-server", "--listen", "stdio://"],
+    )
+    monkeypatch.setattr(
+        doctor.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("insufficient budget spawned Codex"),
+    )
+
+    deadline = time.monotonic() + doctor.CODEX_HOOK_PROBE_STARTUP_SECONDS / 2
+    response = doctor._probe_codex_hooks_list(root, home, deadline=deadline)
+    check = doctor._integration_check(root, home, deadline=deadline)
+
+    assert response is None
+    codex = check["details"]["hosts"]["codex"]
+    assert codex["reason"] == "runtime_hooks_not_completed"
+    assert codex["not_completed"] is True
+
+
+def test_codex_hooks_probe_cleanup_honors_absolute_deadline(tmp_path, monkeypatch):
+    import doctor
+
+    root, _, home = _build_root(tmp_path)
+    clock = [100.0]
+    waits = []
+
+    class Process:
+        def __init__(self, *_args, **_kwargs):
+            self.returncode = None
+            self.stdin = io.BytesIO()
+            self.stdout = io.BytesIO()
+            self.stderr = io.BytesIO()
+
+        def wait(self, timeout=None):
+            waits.append(timeout)
+            clock[0] += timeout
+            raise subprocess.TimeoutExpired("codex", timeout)
+
+        def kill(self):
+            return None
+
+    monkeypatch.setattr(doctor.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(doctor.subprocess, "Popen", Process)
+    monkeypatch.setattr(
+        doctor,
+        "_codex_app_server_command",
+        lambda: ["codex", "app-server", "--listen", "stdio://"],
+    )
+
+    active, reason = doctor._codex_runtime_hooks_state(root, home, deadline=100.5)
+
+    assert active is False
+    assert reason == "runtime_hooks_not_completed"
+    assert waits[0] == pytest.approx(0.5)
+    assert sum(waits) <= 0.500001
+
+
+def test_codex_hooks_probe_own_timeout_remains_unverified(tmp_path, monkeypatch):
+    import doctor
+
+    root, _, home = _build_root(tmp_path)
+    clock = [100.0]
+
+    class Process:
+        def __init__(self, *_args, **_kwargs):
+            self.returncode = None
+            self.stdin = io.BytesIO()
+            self.stdout = io.BytesIO()
+            self.stderr = io.BytesIO()
+
+        def wait(self, timeout=None):
+            clock[0] += timeout
+            raise subprocess.TimeoutExpired("codex", timeout)
+
+        def kill(self):
+            return None
+
+    monkeypatch.setattr(doctor.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(doctor.subprocess, "Popen", Process)
+    monkeypatch.setattr(
+        doctor,
+        "_codex_app_server_command",
+        lambda: ["codex", "app-server", "--listen", "stdio://"],
+    )
+
+    active, reason = doctor._codex_runtime_hooks_state(root, home, deadline=105.0)
+
+    assert active is False
+    assert reason == "runtime_hooks_unverified"
+
+
+def test_codex_hooks_probe_is_bounded_and_uses_exact_cwd(tmp_path, monkeypatch):
+    import doctor
+
+    root, _, home = _build_root(tmp_path)
+    observed = {}
+
+    class Input(io.BytesIO):
+        def close(self):
+            pass
+
+    class Process:
+        def __init__(self, args, **kwargs):
+            observed["args"] = args
+            observed["kwargs"] = kwargs
+            self.returncode = 0
+            response = {
+                "id": 2,
+                "result": _runtime_hooks(root),
+            }
+            self.stdin = Input()
+            self.stdout = io.BytesIO((json.dumps(response) + "\n").encode())
+            self.stderr = io.BytesIO()
+
+        def wait(self, timeout=None):
+            observed["timeout"] = timeout
+            observed["input"] = self.stdin.getvalue().decode()
+            return self.returncode
+
+        def kill(self):
+            pytest.fail("bounded probe unexpectedly timed out")
+
+    monkeypatch.setattr(doctor.subprocess, "Popen", Process)
+    monkeypatch.setattr(
+        doctor,
+        "_codex_app_server_command",
+        lambda: ["codex", "app-server", "--listen", "stdio://"],
+    )
+
+    response = doctor._probe_codex_hooks_list(
+        root,
+        home,
+        deadline=time.monotonic() + doctor.CODEX_HOOK_PROBE_SECONDS,
+    )
+
+    requests = [json.loads(line) for line in observed["input"].splitlines()]
+    assert observed["args"] == ["codex", "app-server", "--listen", "stdio://"]
+    assert observed["kwargs"]["cwd"] == str(root)
+    assert observed["kwargs"]["env"]["CODEX_HOME"] == str(home / ".codex")
+    assert observed["kwargs"]["stdout"] is subprocess.PIPE
+    assert observed["kwargs"]["stderr"] is subprocess.PIPE
+    assert observed["timeout"] <= doctor.CODEX_HOOK_PROBE_SECONDS
+    assert requests[0]["method"] == "initialize"
+    assert requests[1]["method"] == "initialized"
+    assert requests[2] == {"id": 2, "method": "hooks/list", "params": {"cwds": [str(root)]}}
+    assert "bypass" not in observed["input"].casefold()
+    assert response == _runtime_hooks(root)
+
+
+def test_codex_app_server_command_supports_windows_cmd_shim(monkeypatch):
+    import doctor
+
+    shim = r"C:\Users\Test User\AppData\Roaming\npm\codex.cmd"
+    monkeypatch.setattr(
+        doctor.shutil,
+        "which",
+        lambda name: shim if name == "codex.cmd" else None,
+    )
+    monkeypatch.setenv("ComSpec", r"C:\Windows\System32\cmd.exe")
+
+    command = doctor._codex_app_server_command(platform="nt")
+
+    assert command[:4] == [r"C:\Windows\System32\cmd.exe", "/d", "/s", "/c"]
+    assert "codex.cmd" in command[4]
+    assert "app-server" in command[4]
+
+
+def test_codex_app_server_command_uses_direct_executable_on_unix(monkeypatch):
+    import doctor
+
+    monkeypatch.setattr(
+        doctor.shutil, "which", lambda name: "/usr/local/bin/codex" if name == "codex" else None
+    )
+
+    assert doctor._codex_app_server_command(platform="posix") == [
+        "/usr/local/bin/codex",
+        "app-server",
+        "--listen",
+        "stdio://",
+    ]
+
+
+def test_codex_doctor_rejects_runtime_disabled_hooks(tmp_path, monkeypatch):
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    codex_dir = home / ".codex"
+    codex_dir.mkdir(parents=True)
+    (codex_dir / "config.toml").write_text(
+        '[features]\nhooks = false\n\n[mcp_servers.llm-wiki]\n'
+        'command = "uv"\nargs = ["scripts/mcp_server.py"]\n',
+        encoding="utf-8",
+    )
+    hooks = json.loads(
+        (root / "integrations" / "codex" / "hooks.json").read_text(encoding="utf-8")
+    )
+    hooks["hooks"]["Stop"][0]["hooks"][0]["timeout"] = 999
+    (codex_dir / "hooks.json").write_text(json.dumps(hooks), encoding="utf-8")
+
+    monkeypatch.setattr(
+        doctor,
+        "_probe_codex_hooks_list",
+        lambda *_args, **_kwargs: _runtime_hooks(root, enabled=False),
+    )
+    check = _check(
+        doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations"
+    )
+    codex = check["details"]["hosts"]["codex"]
+
+    assert codex["status"] == "degraded"
+    assert codex["reason"] == "runtime_hooks_disabled"
+    assert codex["capture_mode"] == "none"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        '# [mcp_servers.llm-wiki]\n# command = "uv"\n# args = ["scripts/mcp_server.py"]\n',
+        'description = "mcp_servers.llm-wiki command uv scripts/mcp_server.py"\n',
+        '[other]\ncommand = "uv"\nargs = ["scripts/mcp_server.py"]\n',
+        '[mcp_servers.llm-wiki]\ncommand = "uv"\nargs = ["scripts/mcp_server.py"]\nenabled = false\n',
+        '[mcp_servers."llm-wiki"\ncommand = "uv"\nargs = ["scripts/mcp_server.py"]\n',
+    ],
+    ids=["commented", "unrelated-string", "unrelated-table", "disabled", "malformed"],
+)
+def test_codex_config_requires_active_valid_toml_table(tmp_path, content):
+    from doctor import run_doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    config = home / ".codex" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(content, encoding="utf-8")
+
+    check = _check(run_doctor(root=root, state_root=state_root, home=home), "integrations")
+
+    assert check["details"]["hosts"]["codex"]["status"] == "degraded"
+
+
+def test_codex_parser_prefers_stdlib_tomllib(monkeypatch):
+    import doctor
+
+    calls = []
+
+    class Parser:
+        @staticmethod
+        def loads(text):
+            calls.append(text)
+            return {"source": "stdlib"}
+
+    class Backport:
+        @staticmethod
+        def loads(text):
+            pytest.fail("Tomli used while stdlib tomllib was available")
+
+    monkeypatch.setattr(doctor, "STDLIB_TOML", Parser, raising=False)
+    monkeypatch.setattr(doctor, "TOMLI", Backport, raising=False)
+
+    document, error = doctor._parse_toml_document("key = 'value'")
+
+    assert document == {"source": "stdlib"}
+    assert error is None
+    assert calls == ["key = 'value'"]
+
+
+def test_codex_parser_uses_tomli_when_stdlib_unavailable(monkeypatch):
+    import doctor
+
+    calls = []
+
+    class Parser:
+        @staticmethod
+        def loads(text):
+            calls.append(text)
+            return {"source": "tomli"}
+
+    monkeypatch.setattr(doctor, "STDLIB_TOML", None, raising=False)
+    monkeypatch.setattr(doctor, "TOMLI", Parser, raising=False)
+
+    document, error = doctor._parse_toml_document("key = 'value'")
+
+    assert document == {"source": "tomli"}
+    assert error is None
+    assert calls == ["key = 'value'"]
+
+
+def test_codex_hook_health_does_not_use_local_toml_parser(tmp_path, monkeypatch):
+    import doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    config = home / ".codex" / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        '[mcp_servers.llm-wiki]\ncommand = "uv"\n'
+        'args = ["scripts/mcp_server.py"]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(doctor, "STDLIB_TOML", None, raising=False)
+    monkeypatch.setattr(doctor, "TOMLI", None, raising=False)
+    monkeypatch.setattr(
+        doctor, "_probe_codex_hooks_list", lambda *_args, **_kwargs: _runtime_hooks(root)
+    )
+
+    check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations")
+    codex = check["details"]["hosts"]["codex"]
+
+    assert codex["status"] == "ok"
+
+
+def test_codex_real_parser_rejects_malformed_surrounding_toml(tmp_path):
+    import doctor
+
+    config = tmp_path / "config.toml"
+    config.write_text(
+        "broken = [\n"
+        '[mcp_servers.llm-wiki]\ncommand = "uv"\n'
+        'args = ["scripts/mcp_server.py"]\n',
+        encoding="utf-8",
+    )
+
+    configured, reason = doctor._codex_config_state(config)
+
+    assert configured is False
+    assert reason == "toml_invalid"
+
+
+def test_codex_parser_input_remains_file_bounded(tmp_path, monkeypatch):
+    import doctor
+
+    config = tmp_path / "config.toml"
+    config.write_text(
+        '[mcp_servers.llm-wiki]\ncommand = "uv"\n'
+        'args = ["scripts/mcp_server.py"]\n# padding padding padding\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(doctor, "MAX_CONFIG_BYTES", 32)
+
+    configured, reason = doctor._codex_config_state(config)
+
+    assert configured is False
+    assert reason == "config_missing_or_unsafe"
+
+
+def test_project_scoped_cursor_and_antigravity_are_advisory(tmp_path):
+    from doctor import run_doctor
+
+    root, state_root, home = _build_root(tmp_path)
+    (home / ".cursor").mkdir()
+    (home / ".gemini" / "antigravity").mkdir(parents=True)
+
+    check = _check(run_doctor(root=root, state_root=state_root, home=home), "integrations")
+
+    assert check["status"] == "ok"
+    assert check["details"]["hosts"]["cursor"]["status"] == "skipped"
+    assert check["details"]["hosts"]["antigravity"]["status"] == "skipped"
 
 
 def test_repair_creates_runtime_and_is_idempotent(tmp_path, monkeypatch):
@@ -856,7 +1424,10 @@ def test_repair_does_not_touch_knowledge_config_network_or_subprocess(
         raise AssertionError("repair attempted an external operation")
 
     def local_rebuild(root_path, state_path, **kwargs):
-        _create_index(state_path / "cache" / "index.sqlite")
+        _create_index(
+            state_path / "cache" / "index.sqlite",
+            ["knowledge/notes/private.md"],
+        )
 
     monkeypatch.setattr(doctor, "_rebuild_index", local_rebuild)
     monkeypatch.setattr(urllib.request, "urlopen", reject_external)
@@ -968,8 +1539,9 @@ def test_index_validates_manifest_against_indexed_paths(tmp_path):
 
     check = _check(run_doctor(root=root, state_root=state_root, home=home), "index")
 
-    assert check["status"] == "error"
-    assert check["details"]["freshness"] == "corrupt"
+    assert check["status"] == "degraded"
+    assert check["details"]["freshness"] == "stale"
+    assert check["details"]["source_rebuild_required"] is True
 
 
 def test_index_symlink_is_rejected_and_external_target_untouched(tmp_path):
@@ -1381,7 +1953,11 @@ def test_unrelated_installed_configs_are_not_false_positives(tmp_path):
     check = _check(run_doctor(root=root, state_root=state_root, home=home), "integrations")
 
     assert check["status"] == "degraded"
-    assert all(item["status"] == "degraded" for item in check["details"]["hosts"].values())
+    assert check["details"]["hosts"]["claude"]["status"] == "degraded"
+    assert check["details"]["hosts"]["opencode"]["status"] == "degraded"
+    assert check["details"]["hosts"]["codex"]["status"] == "degraded"
+    assert check["details"]["hosts"]["cursor"]["status"] == "skipped"
+    assert check["details"]["hosts"]["antigravity"]["status"] == "skipped"
 
 
 @pytest.mark.parametrize(
@@ -1393,7 +1969,11 @@ def test_unrelated_installed_configs_are_not_false_positives(tmp_path):
             ".config/opencode/plugins/llm-wiki-memory.js",
             "session.created LLM_WIKI_ROOT",
         ),
-        ("codex", ".codex/config.toml", "codex-memory-wrapper codex_memory"),
+        (
+            "codex",
+            ".codex/config.toml",
+            '[mcp_servers.llm-wiki]\ncommand = "uv"\nargs = ["scripts/mcp_server.py"]',
+        ),
         ("cursor", ".cursor/rules/llm-wiki.mdc", "LLM-Wiki LLM_WIKI_ROOT"),
         (
             "antigravity",
@@ -1414,4 +1994,5 @@ def test_installed_integration_requires_expected_marker(
 
     check = _check(run_doctor(root=root, state_root=state_root, home=home), "integrations")
 
-    assert check["details"]["hosts"][host]["status"] == "ok"
+    expected = "degraded" if host == "codex" else "ok"
+    assert check["details"]["hosts"][host]["status"] == expected

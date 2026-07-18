@@ -103,6 +103,25 @@ source failure, any 30-day undo artifact, retained work/result, or live owner. T
 is no automatic Git operation, persistent daemon, cloud service, remote queue/cache,
 exactly-once promise, or gzip archive tier.
 
+**Derived evidence generations:** Markdown, Git, and project journals are
+authoritative. All graph, FTS, vector, tier, and telemetry generation state is
+disposable and derived. `cache/evidence-graph/` is the new target generation layout.
+The rollback-journal,
+`synchronous=FULL`, no WAL catalog at `cache/evidence-graph/catalog.sqlite3`
+selects one active generation under
+`cache/evidence-graph/generations/<generation-id>/`.
+Each generation is immutable after activation; optional vectors are absent,
+complete, or explicitly stale.
+These databases require a local filesystem with correct locking. Cache deletion is
+regenerable and does not change the existing `run/` deletion contract.
+No generation database belongs under `run/`; it remains operational state only.
+The design requires no persistent daemon.
+
+Legacy `cache/index.sqlite`, `cache/vectors.npy`, `cache/vectors_meta.json`, and
+`cache/lancedb/` remain readable during migration. They are disposable derived
+caches, not members of a generation. They must not be removed until installed-vault
+migration evidence makes that safe.
+
 **Forbidden at vault root:** `wiki/`, `memory/`, `outputs/`, `state/`,
 `LLM-wiki-state/` (legacy sibling layout — removed). Runtime lives **inside**
 the vault under gitignored `cache/logs/run/`.
@@ -283,7 +302,7 @@ for tests/e2e.
 ## 7. Quick command reference
 
 ```bash
-uv run pytest -q                              # run the test suite (1804 tests collected)
+uv run pytest -q                              # run the test suite (2503 tests collected)
 uv run ruff check scripts/ tests/             # Python static analysis
 uv run python scripts/lint_memory.py --scope all   # structural lint
 uv run python scripts/search_memory.py "query"     # hybrid search

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import shutil
 import socket
@@ -50,6 +51,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 
+from context_budget import TokenCount, TokenCounter, TokenUsage, count_tokens
 from reliable_memory import canonical_json_bytes
 
 # ---------------------------------------------------------------------------
@@ -100,6 +102,16 @@ class LLMResult:
     available: bool
     failure_class: str | None
     structured_output: str
+    usage: TokenUsage = field(default_factory=TokenUsage)
+    input_token_count: TokenCount | None = None
+
+
+@dataclass(frozen=True)
+class BackendResponse:
+    """Internal response carrying provider text and reported usage."""
+
+    text: str
+    usage: TokenUsage = field(default_factory=TokenUsage)
 
 
 def provider_candidates(
@@ -165,6 +177,7 @@ def call_candidate(
     max_tokens: int | None = None,
     schema: Mapping[str, object] | None = None,
     available: bool | None = None,
+    token_adapters: Mapping[str, TokenCounter] | None = None,
 ) -> LLMResult:
     """Probe and call one resolved candidate, returning a stable outcome."""
     if descriptor.resolution_failure is not None:
@@ -216,20 +229,73 @@ def call_candidate(
         call_system_prompt = (
             f"{system_prompt}\n\n{instruction}" if system_prompt else instruction
         )
+    native_schema_json = None
+    if schema is not None and structured_output == "native":
+        try:
+            native_schema_json = json.dumps(
+                schema, sort_keys=True, separators=(",", ":")
+            )
+        except Exception:  # noqa: BLE001 - counting must not replace provider validation
+            pass
+    counted_parts = [part for part in (call_system_prompt, native_schema_json, prompt) if part]
+    pre_call_count = (
+        count_tokens(
+            "\n\n".join(counted_parts),
+            model=descriptor.model,
+            adapters=token_adapters,
+        )
+        if schema is None or structured_output != "native" or native_schema_json is not None
+        else TokenCount()
+    )
     try:
         if structured_output == "native":
-            text = caller(descriptor, prompt, call_system_prompt, schema)
+            response = caller(descriptor, prompt, call_system_prompt, schema)
         else:
-            text = caller(descriptor, prompt, call_system_prompt, None)
+            response = caller(descriptor, prompt, call_system_prompt, None)
     except Exception as exc:  # noqa: BLE001 - providers must not crash callers
         print(
             f"llm_client: {descriptor.provider} backend failed: {type(exc).__name__}",
             file=sys.stderr,
         )
-        return LLMResult(descriptor, None, True, "provider_error", structured_output)
-    if not text or not text.strip():
-        return LLMResult(descriptor, None, True, "empty_response", structured_output)
-    return LLMResult(descriptor, text.strip(), True, None, structured_output)
+        return LLMResult(
+            descriptor,
+            None,
+            True,
+            "provider_error",
+            structured_output,
+            TokenUsage(),
+            pre_call_count,
+        )
+    if isinstance(response, BackendResponse):
+        text = response.text
+        usage = response.usage
+    else:
+        text = response
+        usage = TokenUsage()
+    input_token_count = (
+        TokenCount(usage.input_tokens, "reported")
+        if usage.input_tokens is not None
+        else pre_call_count
+    )
+    if not isinstance(text, str) or not text.strip():
+        return LLMResult(
+            descriptor,
+            None,
+            True,
+            "empty_response",
+            structured_output,
+            usage,
+            input_token_count,
+        )
+    return LLMResult(
+        descriptor,
+        text.strip(),
+        True,
+        None,
+        structured_output,
+        usage,
+        input_token_count,
+    )
 
 def call_llm(prompt: str, system_prompt: str = "", max_tokens: int = 2000) -> str | None:
     """Synchronous LLM call. Returns response text, "" on soft failure,
@@ -467,6 +533,123 @@ def _timeout_s() -> int:
     return int(os.environ.get("MEMORY_LLM_TIMEOUT_S", "90"))
 
 
+def _reported_count(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+def _finite_number(value: object) -> float | None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _usage_from_counts(
+    *,
+    input_tokens: object = None,
+    output_tokens: object = None,
+    cache_read_tokens: object = None,
+    cache_write_tokens: object = None,
+    duration_ms: object = None,
+) -> TokenUsage:
+    return TokenUsage(
+        input_tokens=_reported_count(input_tokens),
+        output_tokens=_reported_count(output_tokens),
+        cache_read_tokens=_reported_count(cache_read_tokens),
+        cache_write_tokens=_reported_count(cache_write_tokens),
+        duration_ms=_reported_count(duration_ms),
+    )
+
+
+def _parse_http_usage(data: object) -> TokenUsage:
+    if not isinstance(data, Mapping):
+        return TokenUsage()
+    usage = data.get("usage")
+    usage = usage if isinstance(usage, Mapping) else {}
+    details = usage.get("prompt_tokens_details")
+    details = details if isinstance(details, Mapping) else {}
+    return _usage_from_counts(
+        input_tokens=usage.get("prompt_tokens"),
+        output_tokens=usage.get("completion_tokens"),
+        cache_read_tokens=details.get("cached_tokens"),
+    )
+
+
+def _usage_from_opencode_tokens(tokens: object) -> TokenUsage:
+    if not isinstance(tokens, Mapping):
+        return TokenUsage()
+    cache = tokens.get("cache")
+    cache = cache if isinstance(cache, Mapping) else {}
+    return _usage_from_counts(
+        input_tokens=tokens.get("input"),
+        output_tokens=tokens.get("output"),
+        cache_read_tokens=cache.get("read"),
+        cache_write_tokens=cache.get("write"),
+    )
+
+
+def _parse_opencode_usage(data: object) -> TokenUsage:
+    if not isinstance(data, Mapping):
+        return TokenUsage()
+    root = data.get("data") if isinstance(data.get("data"), Mapping) else data
+    info = root.get("info") if isinstance(root.get("info"), Mapping) else {}
+    if isinstance(info.get("tokens"), Mapping):
+        token_usage = _usage_from_opencode_tokens(info["tokens"])
+    else:
+        totals: dict[str, int | None] = {
+            "input_tokens": None,
+            "output_tokens": None,
+            "cache_read_tokens": None,
+            "cache_write_tokens": None,
+        }
+        parts = root.get("parts")
+        if isinstance(parts, list):
+            for part in parts:
+                if (
+                    not isinstance(part, Mapping)
+                    or part.get("type") != "step-finish"
+                    or not isinstance(part.get("tokens"), Mapping)
+                ):
+                    continue
+                part_usage = _usage_from_opencode_tokens(part["tokens"])
+                for name in totals:
+                    value = getattr(part_usage, name)
+                    if value is not None:
+                        totals[name] = (totals[name] or 0) + value
+        token_usage = TokenUsage(**totals)
+
+    cost = _finite_number(info.get("cost"))
+    if cost is not None and cost < 0:
+        cost = None
+    time = info.get("time") if isinstance(info.get("time"), Mapping) else {}
+    created = _finite_number(time.get("created"))
+    completed = _finite_number(time.get("completed"))
+    delta = (
+        _finite_number(completed - created)
+        if created is not None
+        and completed is not None
+        and created >= 0
+        and completed >= 0
+        and completed >= created
+        else None
+    )
+    duration_ms = math.floor(delta) if delta is not None and delta >= 0 else None
+    return TokenUsage(
+        input_tokens=token_usage.input_tokens,
+        output_tokens=token_usage.output_tokens,
+        cache_read_tokens=token_usage.cache_read_tokens,
+        cache_write_tokens=token_usage.cache_write_tokens,
+        duration_ms=duration_ms,
+        estimated_cost=cost,
+        cost_kind="reported" if cost is not None else "unknown",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Backend 1: OpenCode server (HTTP API) — uses your OpenCode subscription
 # ---------------------------------------------------------------------------
@@ -477,7 +660,7 @@ def _call_opencode(
     prompt: str,
     system_prompt: str,
     schema: Mapping[str, object] | None = None,
-) -> str:
+) -> str | BackendResponse:
     """Call OpenCode's HTTP API: create session → prompt → read → delete."""
     port = int(os.environ.get("OPENCODE_PORT", "4096"))
     base = f"http://127.0.0.1:{port}"
@@ -531,8 +714,15 @@ def _call_opencode(
         parts_root = data
         if isinstance(data, dict) and isinstance(data.get("data"), dict):
             parts_root = data["data"]
-        parts = parts_root.get("parts", []) or []
-        return "\n".join(p.get("text", "") for p in parts if p.get("type") == "text")
+        parts = parts_root.get("parts", []) if isinstance(parts_root, Mapping) else []
+        text = "\n".join(
+            part["text"]
+            for part in parts
+            if isinstance(part, Mapping)
+            and part.get("type") == "text"
+            and isinstance(part.get("text"), str)
+        )
+        return BackendResponse(text, _parse_opencode_usage(data))
     finally:
         # 4. Delete session — best-effort cleanup.
         try:
@@ -690,7 +880,7 @@ def _call_openai(
     prompt: str,
     system_prompt: str,
     schema: Mapping[str, object] | None = None,
-) -> str:
+) -> str | BackendResponse:
     api_key = os.environ.get("MEMORY_LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if not api_key:
         return ""
@@ -732,7 +922,10 @@ def _call_openai(
     )
     with urllib.request.urlopen(req, timeout=_timeout_s()) as resp:
         data = json.loads(resp.read().decode("utf-8"))
-    return data["choices"][0]["message"]["content"]
+    return BackendResponse(
+        data["choices"][0]["message"]["content"],
+        _parse_http_usage(data),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -745,7 +938,7 @@ def _call_ollama(
     prompt: str,
     system_prompt: str,
     schema: Mapping[str, object] | None = None,
-) -> str:
+) -> str | BackendResponse:
     if descriptor._endpoint is None:
         raise ValueError("Ollama endpoint was not resolved in the provider descriptor")
     base_url = descriptor._endpoint
@@ -782,7 +975,10 @@ def _call_ollama(
     )
     with urllib.request.urlopen(req, timeout=_timeout_s()) as resp:
         data = json.loads(resp.read().decode("utf-8"))
-    return data["choices"][0]["message"]["content"]
+    return BackendResponse(
+        data["choices"][0]["message"]["content"],
+        _parse_http_usage(data),
+    )
 
 
 # Backend registry.

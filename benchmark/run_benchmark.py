@@ -1,27 +1,27 @@
-"""Benchmark suite for LLM-wiki memory system.
+"""Benchmark entry point for LLM-wiki retrieval evaluation.
 
-Measures objective metrics that can be compared to competitors
-(agentmemory, Mem0, Zep, ReMe):
+The frozen public retrieval-v2 corpus is the default. The generated title and
+summary benchmark remains available only as the explicit ``--legacy-only``
+regression slice. Real semantic and report runs belong to Task 10 and fail
+closed here until that implementation exists.
 
-1. Recall@K — can search find the right page when given a query derived from the page's title and summary?
-2. MRR (Mean Reciprocal Rank) — how high is the correct result ranked?
-3. Search latency — p50/p95 response time
-4. Token efficiency — tokens consumed per operation
-5. Context injection quality — is SessionStart context informative?
+The legacy-only slice measures Recall@K, MRR, and search latency for queries
+derived from public page titles and summaries.
 
-Methodology:
+Legacy-only methodology:
 - Generates synthetic Q&A pairs from existing knowledge pages
 - Each page's title + summary → exact title query and summary-derived keyword query
 - Runs search_memory.py with BM25-only and optional BM25+Vector
 - Measures standard IR metrics (Recall@K, MRR)
 
-This is a "known-item retrieval" benchmark — the simplest and most
-relevant test for a personal memory vault.
+That slice is a known-item retrieval regression check, not the primary quality
+claim.
 
 Usage:
-    uv run python benchmark/run_benchmark.py                # full suite
-    uv run python benchmark/run_benchmark.py --semantic      # with vector search
-    uv run python benchmark/run_benchmark.py --report        # write report
+    uv run python benchmark/run_benchmark.py                 # retrieval-v2 fake orchestration
+    uv run python benchmark/run_benchmark.py --legacy-only   # legacy BM25 regression slice
+    uv run python benchmark/run_benchmark.py --semantic      # Task 10: currently fails closed
+    uv run python benchmark/run_benchmark.py --report        # Task 10: currently fails closed
 """
 from __future__ import annotations
 
@@ -63,6 +63,13 @@ H1_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
 SUMMARY_RE = re.compile(
     r"^One-sentence summary:\s*(.+?)\s*$", re.MULTILINE | re.IGNORECASE
 )
+
+
+def _run_retrieval_v2(args: list[str]) -> int:
+    """Dispatch the default benchmark to retrieval-v2."""
+    from run_retrieval_v2 import main as retrieval_v2_main
+
+    return retrieval_v2_main(args)
 
 
 def _generate_qa_pairs() -> list[dict]:
@@ -438,9 +445,18 @@ def _format_report(results: dict, legacy_results: dict | None = None) -> str:
 
 
 def main() -> int:
+    arguments = sys.argv[1:]
+    explicit_legacy = "--legacy-only" in arguments
+    conflicting_legacy_flags = {"--semantic", "--report"} & set(arguments)
+    if explicit_legacy and conflicting_legacy_flags:
+        conflict = argparse.ArgumentParser(description="Run LLM-wiki benchmark suite.")
+        conflict.error("--legacy-only cannot be combined with --semantic or --report")
+    if "--retrieval-v2" in arguments or not explicit_legacy:
+        forwarded = [arg for arg in arguments if arg != "--retrieval-v2"]
+        return _run_retrieval_v2(forwarded)
     p = argparse.ArgumentParser(description="Run LLM-wiki benchmark suite.")
-    p.add_argument("--semantic", action="store_true", help="Enable vector search")
-    p.add_argument("--report", action="store_true", help="Write report to benchmark/report.md")
+    p.add_argument("--semantic", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--report", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--json", action="store_true", help="Output raw JSON")
     p.add_argument(
         "--legacy-only",

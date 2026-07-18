@@ -781,9 +781,52 @@ def _mark_page_superseded(content: bytes, source_page: str) -> bytes:
 def default_secondary_search(
     root: Path, query: str, limit: int
 ) -> Sequence[Mapping[str, object]]:
-    from search_memory import search
+    from search_memory import (
+        MAX_PAGE_BYTES,
+        _collect_pages,
+        _extract_title_and_summary,
+        _strip_frontmatter,
+        search,
+    )
+    from search_memory import ROOT as search_root
 
-    return search(query, limit=max(0, min(limit, 5)))
+    bounded_limit = max(0, min(limit, 5))
+    if bounded_limit == 0:
+        return ()
+    root = root.resolve()
+    if root == search_root.resolve():
+        return search(query, limit=bounded_limit)
+
+    terms = tuple(dict.fromkeys(re.findall(r"\w+", query.casefold())))
+    if not terms:
+        return ()
+    pages = _collect_pages(
+        "all", knowledge_dir=root / "knowledge" / "notes", root=root
+    )
+    results: list[dict[str, object]] = []
+    for page in pages:
+        try:
+            content = read_stable_bytes(
+                page, MAX_PAGE_BYTES, label="secondary search page"
+            ).decode("utf-8", errors="ignore")
+        except (OSError, ValueError):
+            continue
+        searchable = _strip_frontmatter(content).casefold()
+        if not all(term in searchable for term in terms):
+            continue
+        title, summary = _extract_title_and_summary(content, page.stem)
+        score = sum(searchable.count(term) for term in terms)
+        results.append({
+            "path": page.relative_to(root).as_posix(),
+            "title": title,
+            "summary": summary[:120],
+            "score": score,
+            "project": "",
+            "timestamp": "",
+        })
+
+    results.sort(key=lambda item: (-int(item["score"]), str(item["path"])))
+    return results[:bounded_limit]
 
 
 def run_frozen_benchmark(corpus: Mapping[str, object]) -> BenchmarkMetrics:

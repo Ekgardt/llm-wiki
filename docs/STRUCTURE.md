@@ -21,10 +21,13 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── evidence_resolver.py          flat/archive evidence resolution
 │   ├── claims.py                     atomic claims + quarantine
 │   ├── contradiction_pipeline.py     claim contradiction policy
+│   ├── generation_catalog.py         immutable generation catalog + activation
+│   ├── corpus_snapshot.py            source-hash corpus snapshots + chunks
 │   ├── schemas/                      transaction/queue/compile/archive/claim schemas
 │   ├── lance_store.py               v4.0: LanceDB embedded vector backend (HNSW)
 │   ├── reranker.py                  v4.0: cross-encoder reranker (ONNX)
-│   ├── access_tracking.py           v4.0: access logs + Ebbinghaus decay
+│   ├── access_tracking.py           explicit telemetry promotion + decay stats
+│   ├── retrieval_telemetry.py       private bounded retrieval event cache
 │   ├── reflection.py                v4.0: A-MEM page consolidation
 │   ├── mcp_server.py                v4.0: MCP server (12 task-shaped tools, stdio)
 │   ├── integration_adapter.py       v4.x: thin native lifecycle adapter
@@ -35,7 +38,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── impact_analysis.py           v4.0: LINK layer (code→wiki impact)
 │   ├── build_tiers.py               v4.0: L0/L1/L2 progressive disclosure
 │   └── queries/                     v4.0: 12 tree-sitter .scm language queries
-├── tests/                         CODE — regression suite (pytest, 1804 tests)
+├── tests/                         CODE — regression suite (pytest, 2503 tests)
 ├── docs/                          CODE — architecture + user guide
 ├── skills/                        CODE — 9 agent skills (SKILL.md)
 ├── rules/                         CODE — file-handling policies
@@ -53,11 +56,20 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   └── feedback/                    correction candidates
 │
 ├── cache/                        RUNTIME — gitignored (FTS5/vector/graph/LanceDB)
+│   ├── evidence-graph/              new target generation layout
+│   │   ├── catalog.sqlite3            active-generation catalog
+│   │   ├── telemetry.sqlite3          private cross-generation telemetry
+│   │   └── generations/<generation-id>/ immutable after activation
+│   │       ├── manifest.json
+│   │       ├── evidence.sqlite3
+│   │       ├── search.sqlite3
+│   │       ├── vectors.npy             optional
+│   │       └── vectors.json            optional
 │   ├── lancedb/                     v4.0: LanceDB vector store (optional, --extra hybrid)
 │   ├── models/                      v4.0: ML model cache (reranker, embeddings)
 │   ├── compile/                     validated content-addressed compile plans
 │   ├── claims.sqlite3               derived claim candidate index
-│   ├── access_log.jsonl             v4.0: access tracking log
+│   ├── access_log.jsonl             legacy bounded read-only access history
 │   ├── code_tools.json               v4.0: atomic code-tool capability manifest
 │   ├── vectors.npy                  v4.0: numpy binary vector cache (memory-mapped)
 │   ├── vectors_meta.json            v4.0: vector metadata (paths, titles — no vectors)
@@ -109,7 +121,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
   `maybe_compile.py` (PID-locked spawn), `search_memory.py` (triple-RRF),
   `llm_client.py` (5 backends + fake), `integration_adapter.py` (thin host
   lifecycle boundary), `mcp_server.py` (12 task-shaped tools), and `doctor.py`.
-- `tests/` — 1804 tests collected. Hermetic via `conftest.py` (pins
+- `tests/` — 2503 tests collected. Hermetic via `conftest.py` (pins
   `LLM_WIKI_ROOT` to checkout, redirects `LLM_WIKI_STATE_ROOT` to a temp
   dir, defaults `MEMORY_LLM_PROVIDER=fake`).
 - `docs/` — `ARCHITECTURE.md`, `USER-GUIDE.md`, `AGENTS.md` (knowledge
@@ -131,8 +143,11 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
   (rules), and antigravity (AGENTS.md). MCP is the common read/action interface.
   Obsidian is an optional Markdown viewer and requires no bundled integration.
 - `benchmark/` — retrieval and frozen contradiction corpora/runners, including
-  `run_benchmark.py`, `legacy-60-v1.json`, `run_contradiction_benchmark.py`, and
-  `contradiction-v1.json`.
+  `run_benchmark.py`, `run_retrieval_v2.py`, `retrieval-v2.json`,
+  `retrieval-v2.schema.json`, `legacy-60-v1.json`,
+  `run_contradiction_benchmark.py`, and `contradiction-v1.json`.
+  `run_benchmark.py` defaults to retrieval-v2. Only plain `--legacy-only`
+  selects the old gate; conflicting legacy flags fail closed.
 
 ### KNOWLEDGE zone (tracked: public fixtures; gitignored: personal)
 - `knowledge/daily/` — append-only `YYYY-MM-DD.md`. Private (gitignored).
@@ -154,12 +169,51 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 - `knowledge/feedback/` — correction candidates (JSON). Gitignored.
 
 ### RUNTIME zone (always gitignored, inside vault)
+- Task 9 is implemented by `generation_catalog.py` and `corpus_snapshot.py`.
+  The bounded rollback-journal catalog provides CAS activation, validated fallback,
+  orphan recovery, and deadlines. Corpus snapshots bind immutable captured bytes to
+  source hashes, and the FTS, NumPy, Lance, contextual-retrieval, and tier builders
+  can publish from one generation snapshot. POSIX collection is
+  descriptor-authoritative; Windows reparse and identity checks are best effort.
+  This adds no daemon or automatic migration, and does not remove legacy caches.
 - `cache/` — `index.sqlite` (FTS5), `vectors.npy` (binary numpy, mmap),
   `vectors_meta.json` (metadata),
   `code_tools.json` (fresh code-tool detection and active semantic capabilities).
   v4.0: `lancedb/` (LanceDB vector store, optional), `models/` (ML model cache),
-  `access_log.jsonl` (retrieval analytics), `cache/compile/` (validated compile-plan
+  legacy bounded read-only `access_log.jsonl`, `cache/compile/` (validated compile-plan
   action cache), and `cache/claims.sqlite3` (derived claim index).
+- `cache/evidence-graph/` — disposable derived graph, FTS, vector, tier, and
+  telemetry generation state. This is the new target generation layout:
+
+```text
+cache/evidence-graph/catalog.sqlite3
+cache/evidence-graph/telemetry.sqlite3
+cache/evidence-graph/generations/<generation-id>/
+├── manifest.json
+├── evidence.sqlite3
+├── search.sqlite3
+├── vectors.npy
+└── vectors.json
+```
+
+  `catalog.sqlite3` contains generation metadata and selects one active generation.
+  `telemetry.sqlite3` is private, disposable cross-generation retrieval telemetry.
+  It is not authoritative and contains query hashes rather than raw query or response
+  content. Ingestion enforces a transactional row ceiling. Explicit bounded promotion
+  records a per-page sequence watermark in the same recoverable Markdown mutation as
+  access counters, making retries idempotent. Legacy `access_log.jsonl` is stats-only
+  history and is never promoted automatically. Telemetry sits beside the catalog and
+  generations, never under `run/`.
+  A generation is immutable after activation. The vector pair is optional and must
+  be absent, complete, or explicitly stale; partial vectors are never silently
+  used. `cache/evidence-graph/` can be deleted and regenerated from authoritative
+  Markdown, Git, and project journals. No generation database belongs under `run/`;
+  `run/` remains operational state only.
+- Legacy `cache/index.sqlite`, `cache/vectors.npy`, `cache/vectors_meta.json`, and
+  `cache/lancedb/` remain readable during migration. They are disposable derived
+  caches retained as fallback, not members of a generation. They must not be removed
+  until installed-vault migration evidence makes that safe. The new reader switches
+  only after a validated generation is active.
 - `logs/` — `lint-YYYY-MM-DD.md`, `compile-last.log`, `session-start-last.txt`.
 - `run/` — `state.json`, `compile.pid`, `run/markdown-transactions.sqlite3`,
   `run/transactions/`, `run/queue.sqlite3`, `run/queue-results/`, receipts, and

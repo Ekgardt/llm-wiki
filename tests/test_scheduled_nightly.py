@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 
 def test_failed_nightly_releases_claim_and_records_failure(tmp_path, monkeypatch):
@@ -73,3 +74,12 @@ def test_nightly_releases_claim_when_maintenance_lock_prevents_run(tmp_path, mon
     assert state["last_nightly_date"] == "2026-07-11"
     assert state["last_nightly_skip"]["reason"] == "maintenance_lock_held"
     assert "last_nightly_failure" not in state
+
+
+def test_nightly_source_compacts_telemetry_and_never_flushes_frontmatter():
+    source = (Path(__file__).resolve().parent.parent / "scripts/scheduled_nightly.py").read_text(
+        encoding="utf-8"
+    )
+    assert "from retrieval_telemetry import compact" in source
+    assert "telemetry: compacted" in source
+    assert "from access_tracking import flush_all" not in source

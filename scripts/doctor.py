@@ -8,8 +8,10 @@ import json
 import os
 import re
 import secrets
+import shutil
 import sqlite3
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -18,10 +20,21 @@ from pathlib import Path
 from typing import Any
 
 import reliable_memory
+from bounded_io import read_stable_bytes
 from reliable_memory import (
     open_readonly_operational_db,
     read_runtime_bytes,
 )
+
+try:
+    import tomllib as STDLIB_TOML
+except ModuleNotFoundError:  # Python 3.10
+    STDLIB_TOML = None
+
+try:
+    import tomli as TOMLI
+except ModuleNotFoundError:  # Python 3.11+ does not install the backport
+    TOMLI = None
 
 SCHEMA_VERSION = "1.0"
 INDEX_FRESH_SECONDS = 24 * 60 * 60
@@ -29,6 +42,9 @@ STALE_LEASE_SECONDS = 10 * 60
 PERMANENT_FAILURE_ATTEMPTS = 5
 SUMMARY_LIMIT = 600
 VALID_STATUSES = ("ok", "degraded", "error", "skipped")
+VALID_REPAIR_ACTIONS = frozenset(
+    {"runtime", "transactions", "queue", "indexes", "archives"}
+)
 RUNTIME_DIRECTORIES = ("run", "logs", "cache")
 MAX_QUEUE_FILES = 200
 MAX_QUEUE_FILE_BYTES = 64 * 1024
@@ -44,6 +60,10 @@ MAX_OPERATIONAL_ROWS = 10_000
 MAX_RUNTIME_ENTRIES = 10_000
 LOCK_STALE_SECONDS = 10 * 60
 DEFAULT_TIME_BUDGET_SECONDS = 5.0
+CODEX_HOOK_PROBE_SECONDS = 2.0
+CODEX_HOOK_PROBE_STARTUP_SECONDS = 0.25
+MAX_CODEX_HOOK_PROBE_BYTES = 256 * 1024
+_CODEX_PROBE_NOT_COMPLETED = object()
 INDEX_COLUMNS = {"path", "title", "summary", "body", "project", "timestamp", "slug"}
 TRANSACTION_STATES = (
     "preparing",
@@ -1327,6 +1347,8 @@ def _index_check(
     state_root: Path,
     now: datetime,
     deadline: float = float("inf"),
+    *,
+    root: Path | None = None,
 ) -> dict:
     index = state_root / "cache" / "index.sqlite"
     kind, info = _safe_kind(index, state_root)
@@ -1398,6 +1420,8 @@ def _index_check(
             raise ValueError("invalid indexed path")
         manifest = state_root / "cache" / ".paths-manifest"
         manifest_kind, _ = _safe_kind(manifest, state_root)
+        manifest_state = "missing"
+        manifest_matches_index = False
         if manifest_kind != "missing":
             manifest_paths, manifest_error = _read_bounded_json(
                 manifest,
@@ -1411,10 +1435,15 @@ def _index_check(
                     "FTS manifest check exceeded its time budget.",
                     "budget_exhausted",
                 )
-            if manifest_error or any(not isinstance(item, str) for item in manifest_paths):
-                raise ValueError("invalid manifest")
-            if sorted(manifest_paths) != sorted(indexed_paths):
-                raise ValueError("manifest mismatch")
+            if manifest_error or any(
+                not isinstance(item, str) for item in (manifest_paths or [])
+            ):
+                manifest_state = "invalid"
+            else:
+                manifest_state = "current"
+                manifest_matches_index = sorted(manifest_paths) == sorted(indexed_paths)
+                if not manifest_matches_index:
+                    manifest_state = "mismatch"
         timestamp = datetime.fromtimestamp(info.st_mtime, tz=timezone.utc)
     except sqlite3.OperationalError as exc:
         lowered = str(exc).lower()
@@ -1447,7 +1476,44 @@ def _index_check(
                 "repairable": False,
             },
         )
+    source_root = Path(root or state_root)
+    try:
+        import search_memory
+
+        pages = search_memory._collect_pages(
+            "all",
+            knowledge_dir=source_root / "knowledge" / "notes",
+            root=source_root,
+            deadline=deadline,
+        )
+        source_rebuild_required = search_memory._needs_rebuild(
+            pages,
+            root=source_root,
+            index_file=index,
+            index_manifest=manifest,
+            deadline=deadline,
+        )
+    except (OSError, ValueError, sqlite3.Error):
+        return _index_deferred(
+            "FTS source freshness could not be determined.",
+            "source_freshness_unknown",
+        )
     age = max(0, int((now - timestamp).total_seconds()))
+    if source_rebuild_required or not manifest_matches_index:
+        return _result(
+            "index",
+            "degraded",
+            "FTS index is stale relative to searchable knowledge sources.",
+            {
+                "exists": True,
+                "freshness": "stale",
+                "age_seconds": age,
+                "repairable": True,
+                "source_rebuild_required": True,
+                "source_contract": "path-manifest+mtime",
+                "manifest": manifest_state,
+            },
+        )
     freshness = "fresh" if age <= INDEX_FRESH_SECONDS else "stale"
     status = "ok" if freshness == "fresh" else "degraded"
     message = "FTS index is fresh." if status == "ok" else "FTS index is stale."
@@ -1460,6 +1526,9 @@ def _index_check(
             "freshness": freshness,
             "age_seconds": age,
             "repairable": freshness == "stale",
+            "source_rebuild_required": False,
+            "source_contract": "path-manifest+mtime",
+            "manifest": manifest_state,
         },
     )
 
@@ -1542,11 +1611,290 @@ def _contains_markers(path: Path, markers: tuple[str, ...]) -> bool:
     return all(marker.lower() in lowered for marker in markers)
 
 
-def _integration_check(root: Path, home: Path) -> dict:
+def _parse_toml_document(text: str) -> tuple[dict[str, Any] | None, str | None]:
+    parser = STDLIB_TOML or TOMLI
+    if parser is None:
+        return None, "toml_parser_unavailable"
+    try:
+        document = parser.loads(text)
+    except (ValueError, TypeError):
+        return None, "toml_invalid"
+    return (document, None) if isinstance(document, dict) else (None, "toml_invalid")
+
+
+def _codex_config_state(path: Path) -> tuple[bool | None, str]:
+    kind, info = _safe_kind(path, path.parent)
+    if kind != "regular" or info is None or info.st_size > MAX_CONFIG_BYTES:
+        return False, "config_missing_or_unsafe"
+    try:
+        raw = read_stable_bytes(path, MAX_CONFIG_BYTES, label="Codex config")
+        text = raw.decode("utf-8")
+    except (OSError, UnicodeDecodeError, ValueError):
+        return False, "config_missing_or_unsafe"
+    document, error = _parse_toml_document(text)
+    if error is not None:
+        return (None, error) if error == "toml_parser_unavailable" else (False, error)
+    assert document is not None
+    servers = document.get("mcp_servers")
+    table = servers.get("llm-wiki") if isinstance(servers, dict) else None
+    if not isinstance(table, dict):
+        return False, "target_missing_or_invalid"
+    command = table.get("command")
+    args = table.get("args")
+    enabled = table.get("enabled", True)
+    configured = (
+        command == "uv"
+        and isinstance(args, list)
+        and all(isinstance(item, str) for item in args)
+        and "scripts/mcp_server.py" in args
+        and enabled is True
+    )
+    return configured, "configured" if configured else "target_missing_or_invalid"
+
+
+def _codex_app_server_command(*, platform: str = os.name) -> list[str] | None:
+    arguments = ["app-server", "--listen", "stdio://"]
+    if platform == "nt":
+        executable = shutil.which("codex.exe")
+        if executable:
+            return [executable, *arguments]
+        shim = shutil.which("codex.cmd")
+        command_processor = os.environ.get("ComSpec")
+        if shim and command_processor:
+            command_line = subprocess.list2cmdline([shim, *arguments])
+            return [command_processor, "/d", "/s", "/c", command_line]
+        return None
+    executable = shutil.which("codex")
+    return [executable, *arguments] if executable else None
+
+
+def _probe_codex_hooks_list(
+    root: Path, home: Path, *, deadline: float = float("inf")
+) -> dict[str, Any] | object | None:
+    started_at = time.monotonic()
+    probe_deadline = min(deadline, started_at + CODEX_HOOK_PROBE_SECONDS)
+
+    def deadline_result() -> object | None:
+        return _CODEX_PROBE_NOT_COMPLETED if _deadline_reached(deadline) else None
+
+    if probe_deadline - started_at < CODEX_HOOK_PROBE_STARTUP_SECONDS:
+        return None
+    requests = (
+        {
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {
+                    "name": "llm-wiki-doctor",
+                    "title": "LLM-Wiki Doctor",
+                    "version": SCHEMA_VERSION,
+                },
+                "capabilities": {"experimentalApi": True},
+            },
+        },
+        {"method": "initialized", "params": {}},
+        {"id": 2, "method": "hooks/list", "params": {"cwds": [str(root)]}},
+    )
+    payload = "".join(
+        json.dumps(item, separators=(",", ":")) + "\n" for item in requests
+    ).encode("utf-8")
+    command = _codex_app_server_command()
+    if command is None:
+        return None
+    env = os.environ.copy()
+    env["CODEX_HOME"] = str(home / ".codex")
+    try:
+        process = subprocess.Popen(  # noqa: S603
+            command,
+            cwd=str(root),
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if process.stdin is None or process.stdout is None or process.stderr is None:
+            process.kill()
+            try:
+                process.wait(timeout=max(0.0, probe_deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                pass
+            return deadline_result()
+        overflow = threading.Event()
+        captured = {"stdout": bytearray(), "stderr": bytearray()}
+
+        def drain(name: str, stream: Any) -> None:
+            try:
+                while chunk := stream.read(8192):
+                    remaining = MAX_CODEX_HOOK_PROBE_BYTES - len(captured[name])
+                    if len(chunk) > remaining:
+                        captured[name].extend(chunk[: max(0, remaining)])
+                        overflow.set()
+                        process.kill()
+                        return
+                    captured[name].extend(chunk)
+            except OSError:
+                overflow.set()
+                process.kill()
+
+        readers = [
+            threading.Thread(target=drain, args=("stdout", process.stdout), daemon=True),
+            threading.Thread(target=drain, args=("stderr", process.stderr), daemon=True),
+        ]
+        for reader in readers:
+            reader.start()
+        if _deadline_reached(probe_deadline):
+            process.kill()
+            try:
+                process.wait(timeout=0)
+            except subprocess.TimeoutExpired:
+                pass
+            return deadline_result()
+        process.stdin.write(payload)
+        process.stdin.flush()
+        process.stdin.close()
+        try:
+            process.wait(timeout=max(0.0, probe_deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            process.kill()
+            try:
+                process.wait(timeout=max(0.0, probe_deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                pass
+            return deadline_result()
+        for reader in readers:
+            reader.join(timeout=max(0.0, probe_deadline - time.monotonic()))
+        if any(reader.is_alive() for reader in readers):
+            if process.returncode is None:
+                process.kill()
+            return deadline_result()
+        if process.returncode != 0 or overflow.is_set():
+            return None
+        raw = bytes(captured["stdout"])
+    except (OSError, PermissionError, subprocess.SubprocessError, ValueError):
+        return deadline_result()
+    try:
+        text = raw.decode("utf-8")
+        for line in text.splitlines():
+            message = json.loads(line)
+            if isinstance(message, dict) and message.get("id") == 2:
+                result = message.get("result")
+                return result if isinstance(result, dict) else None
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return None
+
+
+def _expected_codex_runtime_hooks(template_path: Path) -> list[dict[str, Any]]:
+    value, problem = _read_bounded_json(
+        template_path,
+        template_path.parent,
+        max_bytes=MAX_CONFIG_BYTES,
+    )
+    if problem or not isinstance(value, dict) or not isinstance(value.get("hooks"), dict):
+        raise ValueError("invalid Codex hook template")
+    expected = []
+    for event_name, groups in value["hooks"].items():
+        if not isinstance(event_name, str) or not isinstance(groups, list) or len(groups) != 1:
+            raise ValueError("invalid Codex hook template")
+        group = groups[0]
+        handlers = group.get("hooks") if isinstance(group, dict) else None
+        if not isinstance(handlers, list) or len(handlers) != 1:
+            raise ValueError("invalid Codex hook template")
+        handler = handlers[0]
+        if not isinstance(handler, dict):
+            raise ValueError("invalid Codex hook template")
+        command_key = "commandWindows" if os.name == "nt" else "command"
+        command = handler.get(command_key)
+        if not isinstance(command, str):
+            raise ValueError("invalid Codex hook template")
+        expected.append(
+            {
+                "eventName": event_name,
+                "matcher": group.get("matcher"),
+                "command": command,
+            }
+        )
+    return expected
+
+
+def _codex_runtime_hooks_state(
+    root: Path, home: Path, *, deadline: float = float("inf")
+) -> tuple[bool, str]:
+    if deadline - time.monotonic() < CODEX_HOOK_PROBE_STARTUP_SECONDS:
+        return False, "runtime_hooks_not_completed"
+    response = _probe_codex_hooks_list(root, home, deadline=deadline)
+    if response is _CODEX_PROBE_NOT_COMPLETED:
+        return False, "runtime_hooks_not_completed"
+    if response is None:
+        return False, "runtime_hooks_unverified"
+    assert isinstance(response, dict)
+    data = response.get("data")
+    if not isinstance(data, list) or len(data) != 1 or not isinstance(data[0], dict):
+        return False, "runtime_hooks_invalid"
+    entry = data[0]
+    try:
+        if Path(entry.get("cwd", "")).resolve() != root.resolve():
+            return False, "runtime_hooks_wrong_cwd"
+    except (OSError, TypeError, ValueError):
+        return False, "runtime_hooks_invalid"
+    if entry.get("warnings") or entry.get("errors"):
+        return False, "runtime_hooks_warning_or_error"
+    hooks = entry.get("hooks")
+    if not isinstance(hooks, list) or any(not isinstance(item, dict) for item in hooks):
+        return False, "runtime_hooks_invalid"
+    try:
+        expected = _expected_codex_runtime_hooks(
+            root / "integrations" / "codex" / "hooks.json"
+        )
+    except ValueError:
+        return False, "runtime_hooks_template_invalid"
+    ours = [
+        hook
+        for hook in hooks
+        if isinstance(hook.get("command"), str)
+        and "codex_memory.py" in hook["command"]
+        and hook["command"].rstrip().endswith(" hook")
+    ]
+    if len(ours) != len(expected):
+        return False, "runtime_hooks_mismatch"
+    for wanted in expected:
+        matches = [
+            hook
+            for hook in ours
+            if all(hook.get(field) == value for field, value in wanted.items())
+        ]
+        if len(matches) != 1:
+            return False, "runtime_hooks_mismatch"
+        hook = matches[0]
+        if hook.get("enabled") is not True:
+            return False, "runtime_hooks_disabled"
+        trust = hook.get("trustStatus")
+        if trust not in {"trusted", "managed"}:
+            return False, f"runtime_hooks_{trust}" if trust in {"untrusted", "modified"} else "runtime_hooks_trust_unknown"
+    return True, "runtime_hooks_active"
+
+
+def _codex_wrapper_configured(root: Path, home: Path) -> bool:
+    if not (root / "scripts" / "codex-memory-wrapper.ps1").is_file():
+        return False
+    profiles = (
+        home / "Documents" / "PowerShell" / "Microsoft.PowerShell_profile.ps1",
+        home / "Documents" / "WindowsPowerShell" / "Microsoft.PowerShell_profile.ps1",
+        home / ".config" / "powershell" / "Microsoft.PowerShell_profile.ps1",
+    )
+    return any(
+        _contains_markers(profile, ("codex-memory-wrapper.ps1", "LLM_WIKI_ROOT"))
+        for profile in profiles
+    )
+
+
+def _integration_check(
+    root: Path, home: Path, *, deadline: float = float("inf")
+) -> dict:
     sources = {
         "claude": root / "integrations" / "claude-code" / "settings.json",
         "opencode": root / "scripts" / "llm-wiki-memory-opencode.js",
-        "codex": root / "scripts" / "codex_memory.py",
+        "codex": root / "integrations" / "codex" / "hooks.json",
         "cursor": root / "integrations" / "cursor" / "rules" / "llm-wiki.mdc",
         "antigravity": root / "integrations" / "antigravity" / "AGENTS.md",
     }
@@ -1561,7 +1909,15 @@ def _integration_check(root: Path, home: Path) -> dict:
                 ),
             ],
         ),
-        "codex": (home / ".codex", [(home / ".codex" / "config.toml", ("codex-memory-wrapper", "codex_memory"))]),
+        "codex": (
+            home / ".codex",
+            [
+                (
+                    home / ".codex" / "config.toml",
+                    ("mcp_servers.llm-wiki", "mcp_server.py"),
+                )
+            ],
+        ),
         "cursor": (home / ".cursor", [(home / ".cursor" / "rules" / "llm-wiki.mdc", ("LLM-Wiki", "LLM_WIKI_ROOT"))]),
         "antigravity": (
             home / ".gemini" / "antigravity",
@@ -1574,12 +1930,46 @@ def _integration_check(root: Path, home: Path) -> dict:
     for name, (host_dir, configs) in host_configs.items():
         if not host_dir.exists():
             hosts[name] = {"status": "skipped", "message": "Optional host not installed."}
-        elif any(_contains_markers(path, markers) for path, markers in configs):
+        elif name == "codex":
+            hooks_active, reason = _codex_runtime_hooks_state(
+                root, home, deadline=deadline
+            )
+            if hooks_active:
+                hosts[name] = {
+                    "status": "ok",
+                    "message": "Official Codex hooks are active and trusted; review changes in /hooks.",
+                    "capture_mode": "official-hooks",
+                    "trust": "review-with-/hooks",
+                }
+            else:
+                configured_missing += 1
+                wrapper = _codex_wrapper_configured(root, home)
+                hosts[name] = {
+                    "status": "degraded",
+                    "message": "Official Codex hooks are not verified; wrapper fallback is heartbeat-only."
+                    if wrapper
+                    else "Official Codex hooks are not verified and no capture fallback is configured.",
+                    "reason": reason,
+                    "capture_mode": "wrapper-fallback-heartbeat-only" if wrapper else "none",
+                }
+                if reason == "runtime_hooks_not_completed":
+                    hosts[name]["not_completed"] = True
+        elif name != "codex" and any(
+            _contains_markers(path, markers) for path, markers in configs
+        ):
             hosts[name] = {"status": "ok", "message": "User integration config detected."}
+        elif name in {"cursor", "antigravity"}:
+            hosts[name] = {
+                "status": "skipped",
+                "message": "Project-scoped integration is optional and was not checked.",
+            }
         else:
             configured_missing += 1
             hosts[name] = {"status": "degraded", "message": "Host detected without LLM-Wiki config."}
-    missing_sources = sum(not present for present in source_details.values())
+    required_sources = {"claude", "opencode", "codex"}
+    missing_sources = sum(
+        not source_details[name] for name in required_sources
+    )
     if missing_sources:
         status, message = "error", f"{missing_sources} integration source adapter(s) are missing."
     elif configured_missing:
@@ -2188,10 +2578,15 @@ def run_doctor(
     state_root: Path | str | None = None,
     home: Path | str | None = None,
     repair: bool = False,
+    repair_actions: set[str] | frozenset[str] | None = None,
     now: datetime | None = None,
     time_budget_seconds: float = DEFAULT_TIME_BUDGET_SECONDS,
 ) -> dict:
     """Return a JSON-safe local health report; mutate only with ``repair=True``."""
+    selected_repairs = set(VALID_REPAIR_ACTIONS if repair_actions is None else repair_actions)
+    unknown_repairs = selected_repairs - VALID_REPAIR_ACTIONS
+    if unknown_repairs:
+        raise ValueError(f"unknown doctor repair actions: {sorted(unknown_repairs)}")
     root_path = Path(root or os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent)).resolve()
     state_path = Path(
         os.path.abspath(state_root or os.environ.get("LLM_WIKI_STATE_ROOT", root_path))
@@ -2211,164 +2606,192 @@ def run_doctor(
                 root_path, state_path, generated_at
             )
             if maintenance is None:
-                repair_deferred.update(
-                    {"runtime", "transactions", "queue", "index", "archives", "claims"}
-                )
+                deferred_by_action = {
+                    "runtime": {"runtime"},
+                    "transactions": {"transactions"},
+                    "queue": {"queue"},
+                    "indexes": {"index", "claims"},
+                    "archives": {"archives"},
+                }
+                for action in selected_repairs:
+                    repair_deferred.update(deferred_by_action[action])
             else:
                 coordinator, lease = maintenance
                 with _MaintenanceHeartbeat(
                     coordinator, lease, deadline=deadline
                 ) as guard:
                     guard_entered = True
-                    guard.run(_repair_runtime, state_path, repaired)
-                    recovered = guard.run(
-                        coordinator.recover,
-                        writer_wait_seconds=0,
-                        max_transactions=MAX_OPERATIONAL_ROWS,
-                        deadline=deadline,
-                        cancelled=guard.cancelled,
-                    )
-                    if recovered:
-                        repaired.append(
-                            {"action": "recover_transactions", "count": len(recovered)}
-                        )
-                    legacy_available = guard.run(
-                        _repair_leases, state_path, generated_at, repaired
-                    )
-                    if not legacy_available:
-                        repair_deferred.add("queue")
-                    from memory_queue import MemoryQueue, migrate_legacy_queue
-
-                    marker = state_path / "run" / "queue-migrated-v2"
-                    marker_existed = _safe_kind(marker, state_path)[0] == "regular"
-                    migration = (
-                        guard.run(
-                            migrate_legacy_queue,
-                            state_path,
+                    if "runtime" in selected_repairs:
+                        guard.run(_repair_runtime, state_path, repaired)
+                    if "transactions" in selected_repairs:
+                        recovered = guard.run(
+                            coordinator.recover,
+                            writer_wait_seconds=0,
+                            max_transactions=MAX_OPERATIONAL_ROWS,
                             deadline=deadline,
                             cancelled=guard.cancelled,
                         )
-                        if legacy_available
-                        else None
-                    )
-                    if migration is not None and (
-                        not marker_existed
-                        or migration.imported
-                        or migration.quarantined
-                    ):
-                        repaired.append(
-                            {
-                                "action": "migrate_queue",
-                                "count": migration.imported + migration.quarantined,
-                            }
+                        if recovered:
+                            repaired.append(
+                                {
+                                    "action": "recover_transactions",
+                                    "count": len(recovered),
+                                }
+                            )
+                    queue_v2_ready = False
+                    if "queue" in selected_repairs:
+                        legacy_available = guard.run(
+                            _repair_leases, state_path, generated_at, repaired
                         )
-                    marker_valid = _safe_kind(marker, state_path)[0] == "regular"
-                    if migration is not None or marker_valid:
-                        guard.run(MemoryQueue, state_path)
-                    queue_v2_ready = migration is not None or marker_valid
-                    index_before = _index_check(state_path, generated_at, deadline)
-                    if (
-                        index_before["details"].get("repairable")
-                        and index_before["status"] != "ok"
-                    ):
-                        index_lock = state_path / "cache" / ".doctor-index.lock"
-                        lock_token = guard.run(
-                            _acquire_lock,
-                            index_lock,
-                            state_path / "cache",
-                            generated_at,
-                        )
-                        if lock_token is None:
-                            repair_deferred.add("index")
-                        else:
-                            try:
-                                guard.run(
-                                    _rebuild_index,
-                                    root_path,
-                                    state_path,
-                                    deadline=deadline,
-                                    cancelled=guard.cancelled,
-                                )
-                                index_after = _index_check(
-                                    state_path, generated_at, deadline
-                                )
-                                if index_after["status"] == "ok":
-                                    repaired.append({"action": "rebuild_index"})
-                                else:
-                                    message = (
-                                        "Index repair failed: index was not created"
-                                        if index_after["details"].get("freshness")
-                                        == "missing"
-                                        else "Index repair failed: rebuilt index did not validate as fresh"
-                                    )
-                                    repair_errors.setdefault("index", []).append(message)
-                            except Exception as exc:  # noqa: BLE001
-                                repair_errors.setdefault("index", []).append(
-                                    f"Index repair failed: {type(exc).__name__}"
-                                )
-                            finally:
-                                guard.cleanup(
-                                    _release_lock,
-                                    index_lock,
-                                    state_path / "cache",
-                                    lock_token,
-                                )
-                    archive_before = _archive_check(
-                        root_path, state_path, deadline
-                    )
-                    archive_root = _archive_path(root_path)
-                    if (
-                        _safe_kind(archive_root, root_path)[0] == "directory"
-                        and archive_before["status"] != "ok"
-                    ):
-                        from archive_daily import DailyArchiver
+                        if not legacy_available:
+                            repair_deferred.add("queue")
+                        from memory_queue import MemoryQueue, migrate_legacy_queue
 
-                        guard.run(
-                            lambda: DailyArchiver(root_path, state_path).recover(
+                        marker = state_path / "run" / "queue-migrated-v2"
+                        marker_existed = _safe_kind(marker, state_path)[0] == "regular"
+                        migration = (
+                            guard.run(
+                                migrate_legacy_queue,
+                                state_path,
                                 deadline=deadline,
                                 cancelled=guard.cancelled,
                             )
+                            if legacy_available
+                            else None
                         )
-                        repaired.append({"action": "recover_archives"})
-                    claim_before = _claim_check(root_path, state_path, deadline)
-                    if claim_before["status"] != "ok":
-                        from claims import ClaimIndex
+                        if migration is not None and (
+                            not marker_existed
+                            or migration.imported
+                            or migration.quarantined
+                        ):
+                            repaired.append(
+                                {
+                                    "action": "migrate_queue",
+                                    "count": migration.imported
+                                    + migration.quarantined,
+                                }
+                            )
+                        marker_valid = _safe_kind(marker, state_path)[0] == "regular"
+                        if migration is not None or marker_valid:
+                            guard.run(MemoryQueue, state_path)
+                        queue_v2_ready = migration is not None or marker_valid
+                    if "indexes" in selected_repairs:
+                        index_before = _index_check(
+                            state_path, generated_at, deadline, root=root_path
+                        )
+                        if (
+                            index_before["details"].get("repairable")
+                            and index_before["status"] != "ok"
+                        ):
+                            index_lock = state_path / "cache" / ".doctor-index.lock"
+                            lock_token = guard.run(
+                                _acquire_lock,
+                                index_lock,
+                                state_path / "cache",
+                                generated_at,
+                            )
+                            if lock_token is None:
+                                repair_deferred.add("index")
+                            else:
+                                try:
+                                    guard.run(
+                                        _rebuild_index,
+                                        root_path,
+                                        state_path,
+                                        deadline=deadline,
+                                        cancelled=guard.cancelled,
+                                    )
+                                    index_after = _index_check(
+                                        state_path,
+                                        generated_at,
+                                        deadline,
+                                        root=root_path,
+                                    )
+                                    if index_after["status"] == "ok":
+                                        repaired.append({"action": "rebuild_index"})
+                                    else:
+                                        message = (
+                                            "Index repair failed: index was not created"
+                                            if index_after["details"].get("freshness")
+                                            == "missing"
+                                            else "Index repair failed: rebuilt index did not validate as fresh"
+                                        )
+                                        repair_errors.setdefault("index", []).append(
+                                            message
+                                        )
+                                except Exception as exc:  # noqa: BLE001
+                                    repair_errors.setdefault("index", []).append(
+                                        f"Index repair failed: {type(exc).__name__}"
+                                    )
+                                finally:
+                                    guard.cleanup(
+                                        _release_lock,
+                                        index_lock,
+                                        state_path / "cache",
+                                        lock_token,
+                                    )
+                    if "archives" in selected_repairs:
+                        archive_before = _archive_check(
+                            root_path, state_path, deadline
+                        )
+                        archive_root = _archive_path(root_path)
+                        if (
+                            _safe_kind(archive_root, root_path)[0] == "directory"
+                            and archive_before["status"] != "ok"
+                        ):
+                            from archive_daily import DailyArchiver
 
-                        sources = [root_path / "knowledge" / "notes"]
-                        projects = root_path / "knowledge" / "projects"
-                        if _safe_kind(projects, root_path)[0] == "directory":
-                            sources.append(projects)
-                        claim_index = ClaimIndex(state_path, vault=root_path)
-                        guard.run(
-                            claim_index.rebuild,
-                            sources,
-                            deadline=deadline,
-                            cancelled=guard.cancelled,
+                            guard.run(
+                                lambda: DailyArchiver(root_path, state_path).recover(
+                                    deadline=deadline,
+                                    cancelled=guard.cancelled,
+                                )
+                            )
+                            repaired.append({"action": "recover_archives"})
+                    if "indexes" in selected_repairs:
+                        claim_before = _claim_check(root_path, state_path, deadline)
+                        if claim_before["status"] != "ok":
+                            from claims import ClaimIndex
+
+                            sources = [root_path / "knowledge" / "notes"]
+                            projects = root_path / "knowledge" / "projects"
+                            if _safe_kind(projects, root_path)[0] == "directory":
+                                sources.append(projects)
+                            claim_index = ClaimIndex(state_path, vault=root_path)
+                            guard.run(
+                                claim_index.rebuild,
+                                sources,
+                                deadline=deadline,
+                                cancelled=guard.cancelled,
+                            )
+                            repaired.append({"action": "rebuild_claim_index"})
+                    if "queue" in selected_repairs:
+                        unblocked = (
+                            guard.run(_repair_queue_capabilities, state_path)
+                            if queue_v2_ready
+                            else 0
                         )
-                        repaired.append({"action": "rebuild_claim_index"})
-                    unblocked = (
-                        guard.run(_repair_queue_capabilities, state_path)
-                        if queue_v2_ready
-                        else 0
-                    )
-                    if unblocked:
-                        repaired.append(
-                            {"action": "unblock_capabilities", "count": unblocked}
+                        if unblocked:
+                            repaired.append(
+                                {
+                                    "action": "unblock_capabilities",
+                                    "count": unblocked,
+                                }
+                            )
+                        processed = (
+                            guard.run(
+                                _run_bounded_worker,
+                                state_path,
+                                deadline=deadline,
+                                cancelled=guard.cancelled,
+                            )
+                            if queue_v2_ready
+                            else 0
                         )
-                    processed = (
-                        guard.run(
-                            _run_bounded_worker,
-                            state_path,
-                            deadline=deadline,
-                            cancelled=guard.cancelled,
-                        )
-                        if queue_v2_ready
-                        else 0
-                    )
-                    if processed:
-                        repaired.append(
-                            {"action": "run_bounded_worker", "count": processed}
-                        )
+                        if processed:
+                            repaired.append(
+                                {"action": "run_bounded_worker", "count": processed}
+                            )
         except Exception as exc:  # noqa: BLE001
             repair_errors.setdefault("runtime", []).append(
                 f"Repair failed: {type(exc).__name__}"
@@ -2392,7 +2815,12 @@ def run_doctor(
         _claim_check(root_path, state_path, deadline),
     ]
     remaining = (
-        ("index", lambda: _index_check(state_path, generated_at, deadline)),
+        (
+            "index",
+            lambda: _index_check(
+                state_path, generated_at, deadline, root=root_path
+            ),
+        ),
         (
             "scheduler",
             lambda: _scheduler_check(
@@ -2400,7 +2828,10 @@ def run_doctor(
             ),
         ),
         ("mcp", lambda: _mcp_check(root_path)),
-        ("integrations", lambda: _integration_check(root_path, home_path)),
+        (
+            "integrations",
+            lambda: _integration_check(root_path, home_path, deadline=deadline),
+        ),
     )
     for check_id, operation in remaining:
         if time.monotonic() >= deadline:

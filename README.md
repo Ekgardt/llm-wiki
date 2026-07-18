@@ -1,6 +1,6 @@
 # LLM Wiki
 
-[![Tests](https://img.shields.io/badge/tests-1804%20collected-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://img.shields.io/badge/tests-2503%20collected-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-4.0.0-blue.svg)](CHANGELOG.md)
@@ -101,7 +101,7 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 - **5 LLM backends** (auto-detected): OpenCode → Codex → Claude CLI → OpenAI → Ollama
 - **Cross-platform**: Windows, macOS, Linux, WSL2
 - **Local and zero-daemon** — the installed baseline includes the MCP package; vector search and Cognee remain optional
-- **1804 regression tests**, CI green on Ubuntu + Windows + macOS, Python 3.10 + 3.13
+- **2503 regression tests**, CI green on Ubuntu + Windows + macOS, Python 3.10 + 3.13
 - **Pre-commit hooks**: ruff (static analysis) + structural lint + gitleaks (secret scanning)
 
 ---
@@ -134,7 +134,7 @@ The installer:
 1. Checks prerequisites (Python 3.10+, git)
 2. Installs `uv` (fast Python package manager) if missing
 3. Syncs locked baseline dependencies (`uv sync --locked --extra mcp-server`)
-4. Runs the test suite (1804 tests collected)
+4. Runs the test suite (2503 tests collected)
 5. Sets `LLM_WIKI_ROOT` environment variable (user scope)
 6. Creates runtime dirs (`cache/`, `logs/`, `run/`, `cache/cognee/` — gitignored)
 7. Registers scheduled maintenance (cron on Unix, Task Scheduler on Windows)
@@ -147,7 +147,7 @@ The installer:
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync --locked --extra mcp-server
-uv run pytest -q          # collects 1804 tests
+uv run pytest -q          # collects 2503 tests
 ```
 
 ### Verify it works
@@ -236,9 +236,9 @@ Queue delivery is at least once, so handlers use stable operation IDs for idempo
 
 ## Benchmark
 
-> **Methodology**: BM25-only FTS5 over the git-tracked public corpus, with graph, vectors, and reranking disabled. `current-generated-v2` has 112 deterministic known-item queries: exact title, summary keywords, partial title, and slug. `legacy-60-v1.json` stores the original 60 query texts and gold paths verbatim, so later page edits cannot change that gate. Ignored personal pages and `$LLM_WIKI_ROOT` are excluded, so a clean clone reproduces the same corpus. This is not LoCoMo or LongMemEval; competitor rows use different datasets.
+> **Historical legacy methodology**: BM25-only FTS5 over the git-tracked public corpus, with graph, vectors, and reranking disabled. `current-generated-v2` had 112 deterministic known-item queries: exact title, summary keywords, partial title, and slug. `legacy-60-v1.json` stores the original 60 query texts and gold paths verbatim, so later page edits cannot change that gate. Ignored personal pages and `$LLM_WIKI_ROOT` are excluded, so a clean clone reproduces the same corpus. This is not LoCoMo or LongMemEval; competitor rows use different datasets.
 
-| Metric | Current 112 | Legacy 60 | agentmemory | Zep | Mem0 |
+| Historical metric | Historical current 112 | Historical legacy 60 | agentmemory | Zep | Mem0 |
 |--------|-------------|-----------|-------------|-----|------|
 | Recall@1 | **94.6%** | n/a | n/a | n/a | n/a |
 | Recall@3 | **100.0%** | n/a | n/a | n/a | n/a |
@@ -247,9 +247,11 @@ Queue delivery is at least once, so handlers use stable operation IDs for idempo
 | MRR | **0.9702** | **0.9694** | 0.882 | n/a | n/a |
 | Latency p50 | **6.3ms** | n/a | 14ms | 155ms | 880ms |
 
-Regression gates are Recall@5 >=95% for the expanding current corpus and 100% for `legacy-60-v1`. The old 60-query report remains directly visible rather than being silently replaced by the larger corpus.
+These are historical results from the legacy runner. The default command now runs the frozen retrieval-v2 benchmark. Only plain `--legacy-only` selects the old gate; combining it with `--semantic` or `--report` fails closed.
 
-Reproduce: `uv run python benchmark/run_benchmark.py`
+Run retrieval-v2: `uv run python benchmark/run_benchmark.py`
+
+Reproduce the old gate: `uv run python benchmark/run_benchmark.py --legacy-only`
 
 ### MCP agent interface
 

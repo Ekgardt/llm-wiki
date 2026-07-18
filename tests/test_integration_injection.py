@@ -17,6 +17,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import textwrap
 import threading
 import time
@@ -1582,6 +1583,791 @@ def test_codex_wrapper_recovers_project_state_before_launch():
     assert recovery < launch
 
 
+def test_codex_official_hook_template_matches_supported_contract():
+    template = json.loads(
+        (ROOT / "integrations" / "codex" / "hooks.json").read_text(encoding="utf-8")
+    )
+    hooks = template["hooks"]
+    assert set(hooks) == {"SessionStart", "PreCompact", "PostCompact", "Stop"}
+    assert hooks["SessionStart"][0]["matcher"] == "startup|resume|clear|compact"
+    assert hooks["PreCompact"][0]["matcher"] == "manual|auto"
+    assert hooks["PostCompact"][0]["matcher"] == "manual|auto"
+    assert "matcher" not in hooks["Stop"][0]
+    for groups in hooks.values():
+        for group in groups:
+            assert len(group["hooks"]) == 1
+            command = group["hooks"][0]
+            assert command["type"] == "command"
+            assert "codex_memory.py" in command["command"]
+            assert command["command"].endswith(" hook")
+            assert "codex_memory.py" in command["commandWindows"]
+            assert command["commandWindows"].endswith(" hook")
+            assert 0 < command["timeout"] <= 15
+
+
+def test_codex_hook_merge_preserves_user_hooks_and_is_idempotent(tmp_path):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import codex_memory
+
+    source = ROOT / "integrations" / "codex" / "hooks.json"
+    destination = tmp_path / "hooks.json"
+    destination.write_text(
+        json.dumps(
+            {
+                "custom": {"preserved": True},
+                "hooks": {
+                    "Stop": [
+                        {"hooks": [{"type": "command", "command": "echo user"}]},
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "old scripts/codex_memory.py hook",
+                                }
+                            ]
+                        },
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    codex_memory.merge_codex_hooks(source, destination)
+    first = destination.read_bytes()
+    codex_memory.merge_codex_hooks(source, destination)
+    merged = json.loads(destination.read_text(encoding="utf-8"))
+
+    assert destination.read_bytes() == first
+    assert merged["custom"] == {"preserved": True}
+    assert any(
+        hook.get("command") == "echo user"
+        for group in merged["hooks"]["Stop"]
+        for hook in group["hooks"]
+    )
+    ours = [
+        hook
+        for groups in merged["hooks"].values()
+        for group in groups
+        for hook in group["hooks"]
+        if "codex_memory.py" in hook.get("command", "")
+    ]
+    assert len(ours) == 4
+
+
+def _codex_inline_hooks_toml(*, include_stop: bool = True) -> str:
+    template = json.loads(
+        (ROOT / "integrations" / "codex" / "hooks.json").read_text(encoding="utf-8")
+    )["hooks"]
+    blocks = []
+    for event_name, groups in template.items():
+        if event_name == "Stop" and not include_stop:
+            continue
+        group = groups[0]
+        blocks.append(f"[[hooks.{event_name}]]")
+        if "matcher" in group:
+            blocks.append(f'matcher = {json.dumps(group["matcher"])}')
+        handler = group["hooks"][0]
+        blocks.extend(
+            [
+                "",
+                f"[[hooks.{event_name}.hooks]]",
+                'type = "command"',
+                f'command = {json.dumps(handler["command"])}',
+                f'command_windows = {json.dumps(handler["commandWindows"])}',
+                f'timeout = {handler["timeout"]}',
+                "",
+            ]
+        )
+    return "\n".join(blocks)
+
+
+def test_codex_hook_merge_skips_equivalent_inline_hooks(tmp_path):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import codex_memory
+
+    source = ROOT / "integrations" / "codex" / "hooks.json"
+    config = tmp_path / "config.toml"
+    destination = tmp_path / "hooks.json"
+    config.write_text(_codex_inline_hooks_toml(), encoding="utf-8")
+    destination.write_text(
+        '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo user"}]}]}}\n',
+        encoding="utf-8",
+    )
+    before = destination.read_bytes()
+
+    result = codex_memory.merge_codex_hooks(source, destination, config=config)
+
+    assert result == "inline-equivalent"
+    assert destination.read_bytes() == before
+
+
+def test_codex_hook_command_reports_equivalent_inline_without_creating_json(
+    tmp_path, capsys
+):
+    import argparse
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import codex_memory
+
+    source = ROOT / "integrations" / "codex" / "hooks.json"
+    config = tmp_path / "config.toml"
+    destination = tmp_path / "hooks.json"
+    config.write_text(_codex_inline_hooks_toml(), encoding="utf-8")
+
+    result = codex_memory.command_merge_hooks(
+        argparse.Namespace(source=str(source), destination=str(destination), config=str(config))
+    )
+
+    assert result == 3
+    assert capsys.readouterr().out.strip() == "inline-equivalent"
+    assert not destination.exists()
+
+
+def test_codex_hook_merge_preserves_json_when_inline_is_equivalent(tmp_path):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import codex_memory
+
+    source = ROOT / "integrations" / "codex" / "hooks.json"
+    config = tmp_path / "config.toml"
+    destination = tmp_path / "hooks.json"
+    config.write_text(_codex_inline_hooks_toml(), encoding="utf-8")
+    installed = json.loads(source.read_text(encoding="utf-8"))
+    installed["custom"] = True
+    installed["hooks"]["Stop"].insert(
+        0, {"hooks": [{"type": "command", "command": "echo user"}]}
+    )
+    destination.write_text(json.dumps(installed), encoding="utf-8")
+
+    result = codex_memory.merge_codex_hooks(source, destination, config=config)
+
+    assert result == "inline-equivalent"
+    assert json.loads(destination.read_text(encoding="utf-8")) == installed
+
+
+def test_codex_hook_merge_rejects_unrelated_inline_hooks_without_creating_json(tmp_path):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import codex_memory
+
+    source = ROOT / "integrations" / "codex" / "hooks.json"
+    config = tmp_path / "config.toml"
+    destination = tmp_path / "hooks.json"
+    config.write_text(
+        '[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = "echo user"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="manual merge and trust review required"):
+        codex_memory.merge_codex_hooks(source, destination, config=config)
+
+    assert not destination.exists()
+
+
+def test_codex_hook_merge_rejects_partial_inline_hooks_without_writing(tmp_path):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import codex_memory
+
+    source = ROOT / "integrations" / "codex" / "hooks.json"
+    config = tmp_path / "config.toml"
+    destination = tmp_path / "hooks.json"
+    config.write_text(_codex_inline_hooks_toml(include_stop=False), encoding="utf-8")
+    destination.write_text('{"custom":true}\n', encoding="utf-8")
+    before = destination.read_bytes()
+
+    with pytest.raises(ValueError, match="manual merge and trust review required"):
+        codex_memory.merge_codex_hooks(source, destination, config=config)
+
+    assert destination.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("features", "expected"),
+    [
+        ("hooks = false", "disabled"),
+        ("codex_hooks = false", "disabled"),
+        ("hooks = true\ncodex_hooks = false", "enabled"),
+        ("hooks = false\ncodex_hooks = true", "disabled"),
+        ("hooks = true", "enabled"),
+        ("", "enabled"),
+    ],
+    ids=[
+        "canonical-disabled",
+        "alias-disabled",
+        "canonical-enabled-wins",
+        "canonical-disabled-wins",
+        "canonical-enabled",
+        "default-enabled",
+    ],
+)
+def test_codex_hooks_feature_state_obeys_canonical_precedence(
+    tmp_path, features, expected
+):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import codex_memory
+
+    config = tmp_path / "config.toml"
+    body = f"[features]\n{features}\n" if features else 'model = "gpt-5.6"\n'
+    config.write_text(body, encoding="utf-8")
+
+    assert codex_memory.codex_hooks_feature_state(config) == expected
+
+
+def test_codex_hook_command_reports_disabled_without_writing(tmp_path, capsys):
+    import argparse
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import codex_memory
+
+    source = ROOT / "integrations" / "codex" / "hooks.json"
+    config = tmp_path / "config.toml"
+    destination = tmp_path / "hooks.json"
+    config.write_text("[features]\nhooks = false\n", encoding="utf-8")
+
+    result = codex_memory.command_merge_hooks(
+        argparse.Namespace(source=str(source), destination=str(destination), config=str(config))
+    )
+
+    assert result == 4
+    assert capsys.readouterr().out.strip() == "hooks-disabled"
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("quoted", [False, True], ids=["dotted", "quoted"])
+def test_codex_mcp_config_state_accepts_exact_enabled_table(tmp_path, quoted):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import codex_memory
+
+    config = tmp_path / "config.toml"
+    table = '[mcp_servers."llm-wiki"]' if quoted else "[mcp_servers.llm-wiki]"
+    config.write_text(
+        f'{table}\ncommand = "uv"\n'
+        f'args = ["run", "--directory", {json.dumps(str(ROOT))}, '
+        '"python", "scripts/mcp_server.py"]\nenabled = true\n',
+        encoding="utf-8",
+    )
+
+    assert codex_memory.codex_mcp_config_state(config, ROOT) == "equivalent"
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ('model = "gpt-5.6"\n', "absent"),
+        (
+            '[mcp_servers.llm-wiki]\ncommand = "uv"\n'
+            'args = ["python", "other.py"]\n',
+            "conflict",
+        ),
+        (
+            '[mcp_servers.llm-wiki]\ncommand = "uv"\n'
+            'args = ["run", "--directory", "wrong", "python", '
+            '"scripts/mcp_server.py"]\nenabled = false\n',
+            "conflict",
+        ),
+    ],
+)
+def test_codex_mcp_config_state_distinguishes_absent_and_conflicting(
+    tmp_path, body, expected
+):
+    import sys
+
+    scripts = ROOT / "scripts"
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    import codex_memory
+
+    config = tmp_path / "config.toml"
+    config.write_text(body, encoding="utf-8")
+
+    assert codex_memory.codex_mcp_config_state(config, ROOT) == expected
+
+
+def test_codex_installers_use_official_hooks_and_request_trust_review():
+    shell = (ROOT / "install.sh").read_text(encoding="utf-8")
+    powershell = (ROOT / "install.ps1").read_text(encoding="utf-8")
+
+    for installer in (shell, powershell):
+        assert "integrations/codex/hooks.json" in installer.replace("\\", "/")
+        assert "codex_memory.py" in installer
+        assert "merge-hooks" in installer
+        assert "--config" in installer
+        assert "/hooks" in installer
+        assert "trust" in installer.casefold()
+    assert "not installed automatically" in powershell.casefold()
+
+
+def _shell_function(source: str, name: str) -> str:
+    match = re.search(rf"(?ms)^{re.escape(name)}\(\) \{{.*?^\}}", source)
+    assert match, f"{name} missing"
+    return match.group(0)
+
+
+def _codex_mcp_toml(vault: Path, *, quoted: bool, conflicting: bool = False) -> str:
+    table = '[mcp_servers."llm-wiki"]' if quoted else "[mcp_servers.llm-wiki]"
+    args = ["python", "other.py"] if conflicting else [
+        "run",
+        "--directory",
+        str(vault),
+        "python",
+        "scripts/mcp_server.py",
+    ]
+    return f'{table}\ncommand = "uv"\nargs = {json.dumps(args)}\n'
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_exit"),
+    [("equivalent", 0), ("conflicting", 2), ("absent", 0)],
+    ids=["quoted-equivalent", "conflicting", "absent"],
+)
+def test_unix_installer_mcp_function_uses_parser_in_temp_home(
+    tmp_path, scenario, expected_exit
+):
+    bash = Path(r"C:\Program Files\Git\bin\bash.exe")
+    if not bash.exists():
+        pytest.skip("Git Bash unavailable")
+    source = (ROOT / "install.sh").read_text(encoding="utf-8")
+    function = _shell_function(source, "configure_codex_mcp")
+    home = tmp_path / "home"
+    config = home / ".codex" / "config.toml"
+    config.parent.mkdir(parents=True)
+    original = (
+        'model = "gpt-5.6"\n'
+        if scenario == "absent"
+        else _codex_mcp_toml(
+            ROOT, quoted=True, conflicting=scenario == "conflicting"
+        )
+    )
+    config.write_text(original, encoding="utf-8")
+    before = config.read_bytes()
+    runner = tmp_path / "installer-mcp-contract.sh"
+    runner.write_text(
+        function
+        + "\nuv() {\n"
+        + "  while [[ $# -gt 0 && $1 != config-state ]]; do shift; done\n"
+        + '  command "$TEST_PYTHON" "$TEST_VAULT/scripts/codex_memory.py" "$@"\n'
+        + "}\nset +e\n"
+        + 'configure_codex_mcp "$TEST_VAULT" "$HOME/.codex/config.toml"\n'
+        + "exit $?\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env.update(HOME=str(home), TEST_VAULT=str(ROOT), TEST_PYTHON=sys.executable)
+
+    result = subprocess.run(
+        [str(bash), str(runner)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert result.returncode == expected_exit, result.stderr
+    if scenario == "absent":
+        assert config.read_text(encoding="utf-8").startswith(original)
+        assert config.read_bytes() != before
+    else:
+        assert config.read_bytes() == before
+    assert config.read_text(encoding="utf-8").count("[mcp_servers.") == 1
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_exit"),
+    [("equivalent", 0), ("conflicting", 2), ("absent", 0)],
+    ids=["quoted-equivalent", "conflicting", "absent"],
+)
+def test_windows_installer_mcp_function_uses_parser_in_temp_home(
+    tmp_path, scenario, expected_exit
+):
+    source = ROOT / "install.ps1"
+    home = tmp_path / "home"
+    config = home / ".codex" / "config.toml"
+    config.parent.mkdir(parents=True)
+    original = (
+        'model = "gpt-5.6"\n'
+        if scenario == "absent"
+        else _codex_mcp_toml(
+            ROOT, quoted=True, conflicting=scenario == "conflicting"
+        )
+    )
+    config.write_text(original, encoding="utf-8")
+    before = config.read_bytes()
+    command = textwrap.dedent(
+        f"""
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            {json.dumps(str(source))}, [ref]$tokens, [ref]$errors)
+        if ($errors.Count) {{ throw ($errors | Out-String) }}
+        $fn = $ast.Find({{ param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Install-CodexMcp'
+        }}, $true)
+        if ($null -eq $fn) {{ throw 'Install-CodexMcp missing' }}
+        Invoke-Expression $fn.Extent.Text
+        function uv {{
+            $all = @($args)
+            $index = [Array]::IndexOf($all, 'config-state')
+            if ($index -lt 0) {{ throw 'config-state missing' }}
+            & {json.dumps(sys.executable)} {json.dumps(str(ROOT / 'scripts/codex_memory.py'))} $all[$index..($all.Count - 1)]
+        }}
+        $code = Install-CodexMcp -VaultRoot {json.dumps(str(ROOT))} -Config {json.dumps(str(config))}
+        exit $code
+        """
+    )
+
+    result = subprocess.run(
+        ["pwsh", "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert result.returncode == expected_exit, result.stderr
+    if scenario == "absent":
+        assert config.read_text(encoding="utf-8").startswith(original)
+        assert config.read_bytes() != before
+    else:
+        assert config.read_bytes() == before
+    assert config.read_text(encoding="utf-8").count("[mcp_servers.") == 1
+
+
+def test_unix_installer_hook_function_executes_in_temp_home(tmp_path):
+    bash = Path(r"C:\Program Files\Git\bin\bash.exe")
+    if not bash.exists():
+        pytest.skip("Git Bash unavailable")
+    source = (ROOT / "install.sh").read_text(encoding="utf-8")
+    function = _shell_function(source, "install_codex_hooks")
+    home = tmp_path / "home"
+    codex_dir = home / ".codex"
+    codex_dir.mkdir(parents=True)
+    (codex_dir / "config.toml").write_text('model = "gpt-5.6"\n', encoding="utf-8")
+    (codex_dir / "hooks.json").write_text(
+        '{"custom":true,"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo user"}]}]}}\n',
+        encoding="utf-8",
+    )
+    runner = tmp_path / "installer-contract.sh"
+    runner.write_text(
+        function
+        + "\nuv() {\n"
+        + "  while [[ $# -gt 0 && $1 != merge-hooks ]]; do shift; done\n"
+        + '  command "$TEST_PYTHON" "$TEST_VAULT/scripts/codex_memory.py" "$@"\n'
+        + "}\n"
+        + 'install_codex_hooks "$TEST_VAULT" "$HOME/.codex"\n'
+        + 'install_codex_hooks "$TEST_VAULT" "$HOME/.codex"\n',
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env.update(HOME=str(home), TEST_VAULT=str(ROOT), TEST_PYTHON=sys.executable)
+
+    result = subprocess.run(
+        [str(bash), str(runner)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    merged = json.loads((codex_dir / "hooks.json").read_text(encoding="utf-8"))
+    assert merged["custom"] is True
+    assert sum(
+        "codex_memory.py" in handler.get("command", "")
+        for groups in merged["hooks"].values()
+        for group in groups
+        for handler in group["hooks"]
+    ) == 4
+    assert any(
+        handler.get("command") == "echo user"
+        for group in merged["hooks"]["Stop"]
+        for handler in group["hooks"]
+    )
+
+
+def test_unix_installer_preserves_json_when_unrelated_inline_hooks_exist(tmp_path):
+    bash = Path(r"C:\Program Files\Git\bin\bash.exe")
+    if not bash.exists():
+        pytest.skip("Git Bash unavailable")
+    function = _shell_function(
+        (ROOT / "install.sh").read_text(encoding="utf-8"), "install_codex_hooks"
+    )
+    home = tmp_path / "home"
+    codex_dir = home / ".codex"
+    codex_dir.mkdir(parents=True)
+    (codex_dir / "config.toml").write_text(
+        '[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = "echo user"\n',
+        encoding="utf-8",
+    )
+    destination = codex_dir / "hooks.json"
+    destination.write_text('{"custom":true}\n', encoding="utf-8")
+    before = destination.read_bytes()
+    runner = tmp_path / "installer-inline-contract.sh"
+    runner.write_text(
+        function
+        + "\nuv() {\n"
+        + "  while [[ $# -gt 0 && $1 != merge-hooks ]]; do shift; done\n"
+        + '  command "$TEST_PYTHON" "$TEST_VAULT/scripts/codex_memory.py" "$@"\n'
+        + "}\nset +e\n"
+        + 'install_codex_hooks "$TEST_VAULT" "$HOME/.codex"\n'
+        + "exit $?\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env.update(HOME=str(home), TEST_VAULT=str(ROOT), TEST_PYTHON=sys.executable)
+
+    result = subprocess.run(
+        [str(bash), str(runner)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "manual merge and trust review" in result.stderr
+    assert destination.read_bytes() == before
+
+
+def test_windows_installer_hook_function_executes_in_temp_home(tmp_path):
+    source = ROOT / "install.ps1"
+    home = tmp_path / "home"
+    codex_dir = home / ".codex"
+    codex_dir.mkdir(parents=True)
+    (codex_dir / "config.toml").write_text('model = "gpt-5.6"\n', encoding="utf-8")
+    (codex_dir / "hooks.json").write_text(
+        '{"custom":true,"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo user"}]}]}}\n',
+        encoding="utf-8",
+    )
+    command = textwrap.dedent(
+        f"""
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            {json.dumps(str(source))}, [ref]$tokens, [ref]$errors)
+        if ($errors.Count) {{ throw ($errors | Out-String) }}
+        $fn = $ast.Find({{ param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Install-CodexHooks'
+        }}, $true)
+        if ($null -eq $fn) {{ throw 'Install-CodexHooks missing' }}
+        Invoke-Expression $fn.Extent.Text
+        function uv {{
+            $all = @($args)
+            $index = [Array]::IndexOf($all, 'merge-hooks')
+            if ($index -lt 0) {{ throw 'merge-hooks missing' }}
+            & {json.dumps(sys.executable)} {json.dumps(str(ROOT / 'scripts/codex_memory.py'))} $all[$index..($all.Count - 1)]
+        }}
+        Install-CodexHooks -VaultRoot {json.dumps(str(ROOT))} -CodexDir {json.dumps(str(codex_dir))}
+        if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}
+        Install-CodexHooks -VaultRoot {json.dumps(str(ROOT))} -CodexDir {json.dumps(str(codex_dir))}
+        exit $LASTEXITCODE
+        """
+    )
+
+    result = subprocess.run(
+        ["pwsh", "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    merged = json.loads((codex_dir / "hooks.json").read_text(encoding="utf-8"))
+    assert merged["custom"] is True
+    assert sum(
+        "codex_memory.py" in handler.get("command", "")
+        for groups in merged["hooks"].values()
+        for group in groups
+        for handler in group["hooks"]
+    ) == 4
+    assert any(
+        handler.get("command") == "echo user"
+        for group in merged["hooks"]["Stop"]
+        for handler in group["hooks"]
+    )
+
+
+def test_windows_installer_preserves_json_when_partial_inline_hooks_exist(tmp_path):
+    source = ROOT / "install.ps1"
+    home = tmp_path / "home"
+    codex_dir = home / ".codex"
+    codex_dir.mkdir(parents=True)
+    (codex_dir / "config.toml").write_text(
+        _codex_inline_hooks_toml(include_stop=False), encoding="utf-8"
+    )
+    destination = codex_dir / "hooks.json"
+    destination.write_text('{"custom":true}\n', encoding="utf-8")
+    before = destination.read_bytes()
+    command = textwrap.dedent(
+        f"""
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            {json.dumps(str(source))}, [ref]$tokens, [ref]$errors)
+        if ($errors.Count) {{ throw ($errors | Out-String) }}
+        $fn = $ast.Find({{ param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Install-CodexHooks'
+        }}, $true)
+        Invoke-Expression $fn.Extent.Text
+        function uv {{
+            $all = @($args)
+            $index = [Array]::IndexOf($all, 'merge-hooks')
+            & {json.dumps(sys.executable)} {json.dumps(str(ROOT / 'scripts/codex_memory.py'))} $all[$index..($all.Count - 1)]
+        }}
+        $code = Install-CodexHooks -VaultRoot {json.dumps(str(ROOT))} -CodexDir {json.dumps(str(codex_dir))}
+        exit $code
+        """
+    )
+
+    result = subprocess.run(
+        ["pwsh", "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "manual merge and trust review" in result.stderr
+    assert destination.read_bytes() == before
+
+
+def test_unix_installer_warns_and_preserves_json_when_hooks_feature_disabled(tmp_path):
+    bash = Path(r"C:\Program Files\Git\bin\bash.exe")
+    if not bash.exists():
+        pytest.skip("Git Bash unavailable")
+    function = _shell_function(
+        (ROOT / "install.sh").read_text(encoding="utf-8"), "install_codex_hooks"
+    )
+    home = tmp_path / "home"
+    codex_dir = home / ".codex"
+    codex_dir.mkdir(parents=True)
+    (codex_dir / "config.toml").write_text(
+        "[features]\ncodex_hooks = false\n", encoding="utf-8"
+    )
+    destination = codex_dir / "hooks.json"
+    destination.write_text('{"custom":true}\n', encoding="utf-8")
+    before = destination.read_bytes()
+    runner = tmp_path / "installer-disabled-contract.sh"
+    runner.write_text(
+        function
+        + "\nuv() {\n"
+        + "  while [[ $# -gt 0 && $1 != merge-hooks ]]; do shift; done\n"
+        + '  command "$TEST_PYTHON" "$TEST_VAULT/scripts/codex_memory.py" "$@"\n'
+        + "}\nset +e\n"
+        + 'install_codex_hooks "$TEST_VAULT" "$HOME/.codex"\n'
+        + "exit $?\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env.update(HOME=str(home), TEST_VAULT=str(ROOT), TEST_PYTHON=sys.executable)
+
+    result = subprocess.run(
+        [str(bash), str(runner)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert result.returncode == 4
+    assert "hooks = true" in result.stderr
+    assert destination.read_bytes() == before
+
+
+def test_windows_installer_warns_and_preserves_json_when_hooks_feature_disabled(
+    tmp_path,
+):
+    source = ROOT / "install.ps1"
+    codex_dir = tmp_path / "home" / ".codex"
+    codex_dir.mkdir(parents=True)
+    (codex_dir / "config.toml").write_text(
+        "[features]\nhooks = false\ncodex_hooks = true\n", encoding="utf-8"
+    )
+    destination = codex_dir / "hooks.json"
+    destination.write_text('{"custom":true}\n', encoding="utf-8")
+    before = destination.read_bytes()
+    command = textwrap.dedent(
+        f"""
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            {json.dumps(str(source))}, [ref]$tokens, [ref]$errors)
+        $fn = $ast.Find({{ param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Install-CodexHooks'
+        }}, $true)
+        Invoke-Expression $fn.Extent.Text
+        function uv {{
+            $all = @($args)
+            $index = [Array]::IndexOf($all, 'merge-hooks')
+            & {json.dumps(sys.executable)} {json.dumps(str(ROOT / 'scripts/codex_memory.py'))} $all[$index..($all.Count - 1)]
+        }}
+        $code = Install-CodexHooks -VaultRoot {json.dumps(str(ROOT))} -CodexDir {json.dumps(str(codex_dir))}
+        exit $code
+        """
+    )
+
+    result = subprocess.run(
+        ["pwsh", "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert result.returncode == 4
+    assert "hooks = true" in result.stderr
+    assert destination.read_bytes() == before
+
+
+def test_codex_wrapper_is_labeled_compatibility_heartbeat_fallback():
+    wrapper = (ROOT / "scripts" / "codex-memory-wrapper.ps1").read_text(encoding="utf-8")
+    assert "compatibility fallback" in wrapper.casefold()
+    assert "heartbeat-only" in wrapper.casefold()
+    assert "official hooks" in wrapper.casefold()
+
+
 def test_opencode_host_directory_maps_directly_to_worktree_or_null():
     import sys
 
@@ -1970,18 +2756,16 @@ def test_install_scripts_generate_context(tmp_path):
         }
     }
 
+    sh_codex_mcp = _shell_function(install_sh, "configure_codex_mcp")
     assert 'CODEX_CONFIG="$HOME/.codex/config.toml"' in sh_codex
-    assert "[mcp_servers.llm-wiki]" in sh_codex
-    assert 'command = "uv"' in sh_codex
-    assert 'args = [\\"run\\", \\"--directory\\"' in sh_codex
-    assert "CODEX_CONFIG.bak" in sh_codex
-    assert "codex_memory.py daily-log" in sh_codex
-    sh_args_line = next(line for line in sh_codex.splitlines() if "args = [" in line)
-    sh_args = sh_args_line.split("args = ", 1)[1].rsplit('"', 1)[0]
-    sh_args = sh_args.replace('\\"', '"').replace("$VAULT_JSON", '"ROOT"')
-    assert json.loads(sh_args) == [
-        "run", "--directory", "ROOT", "python", "scripts/mcp_server.py"
-    ]
+    assert "config-state" in sh_codex_mcp
+    assert "[mcp_servers.llm-wiki]" in sh_codex_mcp
+    assert 'command = "uv"' in sh_codex_mcp
+    assert 'args = [\\"run\\", \\"--directory\\"' in sh_codex_mcp
+    assert "config.bak" in sh_codex_mcp
+    assert "grep" not in sh_codex_mcp
+    assert "install_codex_hooks" in sh_codex
+    assert "merge-hooks" in install_sh
 
     assert '$claudeUserConfig = Join-Path $env:USERPROFILE ".claude.json"' in install_ps1
     assert "$claudeMcp = $claudeUserConfig" in ps_claude
@@ -1999,17 +2783,16 @@ def test_install_scripts_generate_context(tmp_path):
     assert "-notmatch '\"llm-wiki\"\\s*:'" in ps_opencode
 
     assert '$codexConfig = Join-Path $env:USERPROFILE ".codex\\config.toml"' in ps_codex
-    assert "[mcp_servers.llm-wiki]" in ps_codex
-    assert 'command = "uv"' in ps_codex
-    assert 'args = ["run", "--directory"' in ps_codex
-    assert "Copy-Item -LiteralPath $codexConfig" in ps_codex
-    assert "codexConfig.bak" in ps_codex
+    assert "function Install-CodexMcp" in install_ps1
+    assert "config-state" in install_ps1
+    assert "[mcp_servers.llm-wiki]" in install_ps1
+    assert 'command = "uv"' in install_ps1
+    assert 'args = ["run", "--directory"' in install_ps1
+    assert "Copy-Item -LiteralPath $Config" in install_ps1
+    assert "Config.bak" in install_ps1
     assert "codex-memory-wrapper" in ps_codex
-    ps_args_line = next(line for line in ps_codex.splitlines() if line.startswith("args = ["))
-    ps_args = ps_args_line.split("=", 1)[1].strip().replace('"$tomlVault"', '"ROOT"')
-    assert json.loads(ps_args) == [
-        "run", "--directory", "ROOT", "python", "scripts/mcp_server.py"
-    ]
+    assert "Install-CodexHooks" in ps_codex
+    assert "merge-hooks" in install_ps1
 
     assert "v4.0 optional features" not in install_sh
     assert "mcp-server" not in install_sh.split("Useful commands:", 1)[-1]
@@ -2020,13 +2803,12 @@ def test_install_scripts_generate_context(tmp_path):
     for block, config_var in (
         (ps_opencode, "$openCodeMcp"),
         (ps_claude, "$claudeMcp"),
-        (ps_codex, "$codexConfig"),
     ):
         assert f"Write-Utf8NoBom {config_var}" in block
         assert f"Set-Content -LiteralPath {config_var}" not in block
         assert f"Add-Content -LiteralPath {config_var}" not in block
-    assert "Copy-Item -LiteralPath $codexConfig" in ps_codex
-    assert "$codexExisting +" in ps_codex
+    assert "Set-Content -LiteralPath $Config" not in install_ps1
+    assert "Add-Content -LiteralPath $Config" not in install_ps1
     install_path = ROOT / "install.ps1"
     external = str(tmp_path / "external runtime")
     vault = str(tmp_path / "vault")

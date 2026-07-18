@@ -23,9 +23,24 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # UserPromptSubmit capture — user_prompt_capture.py
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def isolated_capture_state(tmp_path, monkeypatch):
+    """Keep hook transaction and lock state out of the suite runtime."""
+    import daily_log_append
+    import user_prompt_capture
+
+    state_root = tmp_path / "state"
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
+    monkeypatch.setattr(daily_log_append, "STATE_ROOT", state_root)
+    monkeypatch.setattr(user_prompt_capture, "STATE_ROOT", state_root)
+    return state_root
 
 
 def _run_capture_with_stdin(module_name: str, stdin_payload: dict | str) -> int:
@@ -215,7 +230,9 @@ def test_prompt_capture_skips_vault_internal_sessions(monkeypatch, tmp_path):
     assert not daily_dir.exists() or list(daily_dir.glob("*.md")) == []
 
 
-def test_prompt_capture_writes_line_for_real_prompt(monkeypatch, tmp_path):
+def test_prompt_capture_writes_line_for_real_prompt(
+    monkeypatch, tmp_path, isolated_capture_state
+):
     """Long-enough prompt from a non-vault cwd writes one line."""
     import user_prompt_capture  # noqa: WPS433
 
@@ -253,6 +270,9 @@ def test_prompt_capture_writes_line_for_real_prompt(monkeypatch, tmp_path):
     assert "test-slug" in content
     assert "abc123de" in content  # session_id[:8]
     assert "Help me refactor" in content
+    assert (
+        isolated_capture_state / "run" / "markdown-transactions.sqlite3"
+    ).is_file()
 
 
 def test_prompt_capture_redacts_and_builds_envelope_before_append(monkeypatch, tmp_path):

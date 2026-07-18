@@ -36,7 +36,7 @@ VALID_TOOL_CALLS = {
     "wiki_overview": {},
     "vault_status": {},
     "get_decisions": {},
-    "get_context": {"slugs": []},
+    "get_context": {"slugs": ["missing"]},
     "check_contradiction": {"claim": "test"},
     "log_decision": {"summary": "test"},
     "compile": {},
@@ -232,6 +232,20 @@ class TestToolDefinitions:
         assert "clamp" in decision_limit["description"].lower()
         assert "neighbors" not in include["description"].lower()
         assert "content_preview" in include["description"]
+
+    def test_retrieval_schemas_declare_hard_string_and_array_bounds(self):
+        import mcp_server
+
+        schemas = mcp_server.TOOL_INPUT_SCHEMAS
+        assert schemas["recall"]["properties"]["query"]["maxLength"] == 8192
+        assert schemas["get_decisions"]["properties"]["query"]["maxLength"] == 8192
+        assert schemas["read_page"]["properties"]["slug"]["maxLength"] == 255
+        slugs = schemas["get_context"]["properties"]["slugs"]
+        include = schemas["get_context"]["properties"]["include"]
+        assert (slugs["minItems"], slugs["maxItems"], slugs["uniqueItems"]) == (1, 20, True)
+        assert slugs["items"]["maxLength"] == 255
+        assert (include["maxItems"], include["uniqueItems"]) == (10, True)
+        assert include["items"]["maxLength"] == 64
 
 
 class TestHelperFunctions:
@@ -585,6 +599,154 @@ class TestHelperFunctions:
         result = _get_context(["nonexistent-1", "nonexistent-2"])
         assert isinstance(result, dict)
 
+    def test_get_context_direct_call_deduplicates_and_enforces_bounds(self, monkeypatch):
+        import mcp_server
+
+        reads = []
+        monkeypatch.setattr(
+            mcp_server,
+            "_read_page",
+            lambda slug, **kwargs: reads.append(slug) or {"slug": slug, "content": ""},
+        )
+
+        assert list(mcp_server._get_context(["first", "first", "second"])) == [
+            "first", "second"
+        ]
+        assert reads == ["first", "second"]
+        with pytest.raises(ValueError, match="slugs"):
+            mcp_server._get_context([f"page-{index}" for index in range(21)])
+        with pytest.raises(ValueError, match="slug"):
+            mcp_server._get_context(["x" * 256])
+        with pytest.raises(ValueError, match="include"):
+            mcp_server._get_context(["page"], ["x" * 65])
+
+    def test_recall_and_decisions_pass_distinct_source_tools(self, monkeypatch):
+        import mcp_server
+        import search_memory
+
+        calls = []
+        monkeypatch.setattr(
+            search_memory,
+            "search",
+            lambda query, **kwargs: calls.append((query, kwargs)) or [],
+        )
+
+        assert mcp_server._search_vault("secret", 2) == []
+        assert mcp_server._get_decisions("choice", 3) == []
+        assert calls[0][1]["source_tool"] == "mcp.recall"
+        assert calls[1][1]["source_tool"] == "mcp.get_decisions"
+        assert calls[1][1]["emit_telemetry"] is False
+
+    def test_get_decisions_records_only_filtered_final_candidates(self, tmp_path, monkeypatch):
+        import mcp_server
+        import retrieval_telemetry
+        import search_memory
+
+        database = tmp_path / "cache/evidence-graph/telemetry.sqlite3"
+        monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
+        monkeypatch.setattr(
+            search_memory,
+            "search",
+            lambda query, **kwargs: [
+                {"path": "knowledge/notes/concept.md", "type": "concept"},
+                {"path": "knowledge/notes/first-decision.md", "type": "decision"},
+                {"path": "knowledge/notes/second-decision.md", "type": "decision"},
+            ],
+        )
+
+        results = mcp_server._get_decisions("private decision query", 10)
+
+        assert [Path(result["path"]).stem for result in results] == [
+            "first-decision", "second-decision"
+        ]
+        rows = list(reversed(retrieval_telemetry.read_events(limit=10, db_path=database)))
+        assert [(row.candidate_id, row.rank) for row in rows] == [
+            ("first-decision", 1), ("second-decision", 2)
+        ]
+        assert all(row.retrieval_mode == "decision-filter" for row in rows)
+        assert all(row.source_tool == "mcp.get_decisions" for row in rows)
+        assert b"private decision query" not in database.read_bytes()
+
+    def test_get_decisions_empty_result_emits_no_events(self, tmp_path, monkeypatch):
+        import mcp_server
+        import retrieval_telemetry
+        import search_memory
+
+        database = tmp_path / "cache/evidence-graph/telemetry.sqlite3"
+        monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
+        monkeypatch.setattr(search_memory, "search", lambda query, **kwargs: [])
+
+        assert mcp_server._get_decisions("none", 10) == []
+        assert retrieval_telemetry.read_events(limit=10, db_path=database) == []
+
+    def test_read_page_emits_page_and_evidence_events_without_content(self, tmp_path, monkeypatch):
+        import mcp_server
+        import memory_state
+        import retrieval_telemetry
+        from reliable_memory import sha256_bytes
+
+        notes = tmp_path / "vault/knowledge/notes"
+        daily = tmp_path / "vault/knowledge/daily/2026-01-01.md"
+        notes.mkdir(parents=True)
+        daily.parent.mkdir(parents=True)
+        quote = b"distinctive evidence content secret"
+        source = b"## [evt-1] event\n" + quote + b"\n"
+        daily.write_bytes(source)
+        start = source.index(quote)
+        reference = (
+            f"daily:2026-01-01 sha256:{sha256_bytes(source)} block:evt-1 "
+            f"bytes:{start}-{start + len(quote)}"
+        )
+        (notes / "page.md").write_text(f"# Page\n`{reference}`\n", encoding="utf-8")
+        database = tmp_path / "state/cache/evidence-graph/telemetry.sqlite3"
+        monkeypatch.setattr(memory_state, "ROOT", tmp_path / "vault")
+        monkeypatch.setattr(memory_state, "STATE_ROOT", tmp_path / "state")
+        monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
+
+        result = mcp_server._read_page("page")
+
+        assert result["slug"] == "page"
+        rows = retrieval_telemetry.read_events(limit=10, db_path=database)
+        assert {(row.event_kind, row.source_tool) for row in rows} == {
+            ("page_read", "mcp.read_page"),
+            ("evidence_read", "mcp.read_page"),
+        }
+        evidence_event = next(row for row in rows if row.event_kind == "evidence_read")
+        assert evidence_event.candidate_id == sha256_bytes(quote)
+        assert quote not in database.read_bytes()
+
+    def test_context_emits_injection_without_duplicate_page_read(self, tmp_path, monkeypatch):
+        import mcp_server
+        import memory_state
+        import retrieval_telemetry
+
+        notes = tmp_path / "vault/knowledge/notes"
+        notes.mkdir(parents=True)
+        (notes / "page.md").write_text("# Context Page\n", encoding="utf-8")
+        database = tmp_path / "state/cache/evidence-graph/telemetry.sqlite3"
+        monkeypatch.setattr(memory_state, "ROOT", tmp_path / "vault")
+        monkeypatch.setattr(memory_state, "STATE_ROOT", tmp_path / "state")
+        monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
+
+        assert "page" in mcp_server._get_context(["page"])
+
+        rows = retrieval_telemetry.read_events(limit=10, db_path=database)
+        assert [(row.event_kind, row.source_tool) for row in rows] == [
+            ("context_injected", "mcp.get_context")
+        ]
+
+    def test_failed_mcp_reads_emit_no_success_events(self, tmp_path, monkeypatch):
+        import mcp_server
+        import memory_state
+        import retrieval_telemetry
+
+        database = tmp_path / "state/cache/evidence-graph/telemetry.sqlite3"
+        monkeypatch.setattr(memory_state, "ROOT", tmp_path / "vault")
+        monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
+
+        assert "error" in mcp_server._read_page("missing")
+        assert retrieval_telemetry.read_events(limit=10, db_path=database) == []
+
     def test_trigger_compile_returns_dict(self):
         from mcp_server import _trigger_compile
         result = _trigger_compile()
@@ -736,6 +898,36 @@ class TestHandleToolCall:
 
         assert "error" in envelope["data"]
         assert envelope["partial"] is True
+        assert called is False
+
+    @pytest.mark.parametrize(
+        ("tool_name", "arguments"),
+        [
+            ("recall", {"query": "x" * 8193}),
+            ("get_decisions", {"query": "x" * 8193}),
+            ("read_page", {"slug": "x" * 256}),
+            ("get_context", {"slugs": []}),
+            ("get_context", {"slugs": [f"page-{index}" for index in range(21)]}),
+            ("get_context", {"slugs": ["same", "same"]}),
+            ("get_context", {"slugs": ["page"], "include": [str(index) for index in range(11)]}),
+            ("get_context", {"slugs": ["page"], "include": ["x" * 65]}),
+        ],
+    )
+    def test_retrieval_bounds_are_rejected_before_helper_dispatch(
+        self, monkeypatch, tool_name, arguments
+    ):
+        import mcp_server
+
+        called = False
+
+        def helper(*args, **kwargs):
+            nonlocal called
+            called = True
+
+        monkeypatch.setattr(mcp_server, TOOL_HELPERS[tool_name], helper)
+        envelope = json.loads(self._run(tool_name, arguments))
+
+        assert "error" in envelope["data"]
         assert called is False
 
     @pytest.mark.parametrize("arguments", [None, [], "query", 1, True])
@@ -911,7 +1103,9 @@ class TestHandleToolCall:
         )
 
         envelope = json.loads(
-            self._run("get_context", {"slugs": [], "include": ["future-option"]})
+            self._run(
+                "get_context", {"slugs": ["missing"], "include": ["future-option"]}
+            )
         )
 
         assert envelope["data"]["include"] == ["future-option"]

@@ -13,7 +13,7 @@ EXECUTABLE_SUFFIXES = {".py", ".js", ".ps1", ".sh"}
 SEARCH_DIRS = ("scripts", "integrations")
 _COVERED_RE = re.compile(
     r"(?:^|/)knowledge/(?:daily|notes|projects|inbox|feedback)(?:/|$)|"
-    r"(?:^|/)knowledge/(?:index|log)\.md$",
+    r"(?:^|/)knowledge/(?:guardrails|index|log)\.md$",
     re.IGNORECASE,
 )
 _BOUNDARIES = {

@@ -22,12 +22,22 @@ Usage:
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import re
+import shutil
+import stat
 import sys
+import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import ROOT, STATE_ROOT, atomic_write  # noqa: E402
+
+if TYPE_CHECKING:
+    from corpus_snapshot import CapturedSource, CorpusSnapshot
 
 KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
 TIERS_DIR = STATE_ROOT / "cache" / "tiers"
@@ -39,6 +49,306 @@ SUMMARY_RE = re.compile(
     r"^One-sentence summary:\s*(.+?)\s*$", re.MULTILINE | re.IGNORECASE
 )
 STATUS_RE = re.compile(r"^status:\s*(.+?)\s*$", re.MULTILINE)
+TIER_EXTRACTOR_VERSION = "tier-extractor/v1"
+TIER_ARTIFACT_SCHEMA_VERSION = "tier-artifact/v1"
+MAX_TIER_SOURCES = 10_000
+MAX_TIER_ARTIFACT_BYTES = 512 * 1024 * 1024
+MAX_MODEL_DESCRIPTOR_BYTES = 16 * 1024
+
+
+def _validate_source(source: CapturedSource) -> CapturedSource:
+    from corpus_snapshot import CapturedSource
+
+    if not isinstance(source, CapturedSource):
+        raise TypeError("source must be a CapturedSource")
+    digest = hashlib.sha256(source.content).hexdigest()
+    if source.record.size != len(source.content) or source.record.sha256 != digest:
+        raise ValueError("captured source content does not match its record")
+    return source
+
+
+def _extractor_version(value: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 128
+        or any(character in value for character in "\x00\r\n")
+    ):
+        raise ValueError("extractor_version must be a bounded non-empty string")
+    return value
+
+
+def _bounded_model_value(value: object, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 128
+        or any(character in value for character in "\x00\r\n")
+    ):
+        raise ValueError(f"{label} must be a bounded non-empty string")
+    return value
+
+
+def _model_provenance(
+    use_llm: bool, model_descriptor: object | None, model_revision: str | None
+) -> dict[str, object] | None:
+    if not use_llm:
+        if model_descriptor is not None or model_revision is not None:
+            raise ValueError("model descriptor and revision require LLM generation")
+        return None
+    if model_descriptor is None or model_revision is None:
+        raise ValueError("LLM generation requires a model descriptor and revision")
+
+    from llm_client import ProviderDescriptor
+
+    if not isinstance(model_descriptor, ProviderDescriptor):
+        raise TypeError("model_descriptor must be a ProviderDescriptor")
+    _bounded_model_value(model_descriptor.provider, "model provider")
+    _bounded_model_value(model_descriptor.model, "model name")
+    revision = _bounded_model_value(model_revision, "model revision")
+    provenance = {**model_descriptor.canonical(), "revision": revision}
+    encoded = json.dumps(
+        provenance, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    if len(encoded) > MAX_MODEL_DESCRIPTOR_BYTES:
+        raise ValueError("model descriptor exceeds the supported bound")
+    return provenance
+
+
+def _captured_text(source: CapturedSource) -> str:
+    return _validate_source(source).captured_bytes.decode("utf-8", errors="strict")
+
+
+def _fsync_directory(path: Path) -> None:
+    from reliable_memory import fsync_directory
+
+    fsync_directory(path)
+
+
+def get_l0_for_source(source: CapturedSource) -> str:
+    """Get L0 from immutable captured source bytes without live filesystem I/O."""
+    content = _captured_text(source)
+    body = FRONTMATTER_RE.sub("", content, count=1)
+    match = SUMMARY_RE.search(body)
+    if match:
+        return match.group(1).strip()
+
+    lines = body.splitlines()
+    for line in lines[1:]:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and not stripped.startswith("---"):
+            return stripped[:200]
+
+    return Path(source.record.relative_path).stem.replace("-", " ")
+
+
+def generate_l1_for_source(
+    source: CapturedSource,
+    use_llm: bool = False,
+    *,
+    model_descriptor: object | None = None,
+    model_revision: str | None = None,
+) -> str:
+    """Generate L1 using only immutable captured source bytes."""
+    content = _captured_text(source)
+    body = FRONTMATTER_RE.sub("", content, count=1)
+    l0 = get_l0_for_source(source)
+    slug = Path(source.record.relative_path).stem
+    if not use_llm:
+        _model_provenance(False, model_descriptor, model_revision)
+        return _deterministic_l1(slug, body, l0)
+
+    _model_provenance(True, model_descriptor, model_revision)
+    from llm_client import call_candidate
+
+    prompt = f"""Summarize this knowledge page into a structured overview.
+Keep it under 500 words. Include:
+- Key points (bulleted)
+- Important decisions or constraints
+- Links to related concepts
+
+=== PAGE ===
+{body[:3000]}
+
+=== OUTPUT ===
+Return ONLY the overview markdown (no title, no commentary).
+"""
+    result = call_candidate(
+        model_descriptor,
+        prompt,
+        "You are a knowledge summarizer.",
+        max_tokens=1000,
+    ).text
+    if not result or not result.strip():
+        raise RuntimeError("LLM returned no L1 overview")
+    return result.strip()
+
+
+def get_l2_for_source(source: CapturedSource) -> str:
+    """Get L2 directly from immutable captured source bytes."""
+    return _captured_text(source)
+
+
+def tier_artifact_key(
+    source: CapturedSource,
+    *,
+    extractor_version: str = TIER_EXTRACTOR_VERSION,
+    model_descriptor: object | None = None,
+    model_revision: str | None = None,
+    generated_l1: str | None = None,
+) -> str:
+    """Return the content/version-bound identity for one source's tier data."""
+    source = _validate_source(source)
+    version = _extractor_version(extractor_version)
+    use_llm = model_descriptor is not None or model_revision is not None or generated_l1 is not None
+    model = _model_provenance(use_llm, model_descriptor, model_revision)
+    if use_llm and not isinstance(generated_l1, str):
+        raise ValueError("LLM artifact identity requires generated L1 bytes")
+    generated_hash = (
+        hashlib.sha256(generated_l1.encode("utf-8")).hexdigest() if use_llm else None
+    )
+    identity = json.dumps(
+        [source.record.logical_id, source.record.sha256, version, model, generated_hash],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(identity).hexdigest()
+
+
+def _tier_entry(
+    source: CapturedSource,
+    key: str,
+    tiers: dict[str, str],
+) -> dict[str, object]:
+    metadata = source.metadata
+    return {
+        "key": key,
+        "source": {
+            "authority": metadata.authority,
+            "confidence": metadata.confidence,
+            "git_oid": source.record.git_oid,
+            "language": source.record.language,
+            "logical_id": source.record.logical_id,
+            "media_type": source.record.media_type,
+            "project": metadata.project,
+            "relative_path": source.record.relative_path,
+            "sha256": source.record.sha256,
+            "size": source.record.size,
+            "status": metadata.status,
+            "type": metadata.type,
+            "valid_from": metadata.valid_from,
+            "valid_to": metadata.valid_to,
+        },
+        "tiers": tiers,
+    }
+
+
+def _tier_artifact_bytes(
+    entries: list[dict[str, object]],
+    extractor_version: str,
+    model: dict[str, object] | None,
+) -> bytes:
+    payload = {
+        "entries": entries,
+        "extractor_version": extractor_version,
+        "generation": {"mode": "llm" if model is not None else "deterministic", "model": model},
+        "schema_version": TIER_ARTIFACT_SCHEMA_VERSION,
+    }
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    if len(encoded) > MAX_TIER_ARTIFACT_BYTES:
+        raise ValueError("tier artifact exceeds the supported bound")
+    return encoded
+
+
+def build_snapshot_tiers(
+    snapshot: CorpusSnapshot,
+    generation_dir: Path,
+    *,
+    use_llm: bool = False,
+    extractor_version: str = TIER_EXTRACTOR_VERSION,
+    model_descriptor: object | None = None,
+    model_revision: str | None = None,
+) -> list[dict[str, object]]:
+    """Build deterministic tier artifacts for exactly one immutable snapshot."""
+    from corpus_snapshot import CorpusSnapshot
+
+    if not isinstance(snapshot, CorpusSnapshot):
+        raise TypeError("snapshot must be a CorpusSnapshot")
+    if len(snapshot.sources) > MAX_TIER_SOURCES:
+        raise ValueError("snapshot has too many sources for tier artifacts")
+    version = _extractor_version(extractor_version)
+    model = _model_provenance(use_llm, model_descriptor, model_revision)
+    generation = Path(generation_dir)
+    metadata = generation.lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or generation.is_symlink():
+        raise ValueError("generation_dir must be a regular unpublished directory")
+    output = generation / "tiers"
+    if output.exists() or output.is_symlink():
+        raise FileExistsError("tier output already exists")
+
+    staging = Path(tempfile.mkdtemp(prefix=".tiers-", dir=generation))
+    entries: list[dict[str, object]] = []
+    seen_sources: set[str] = set()
+    published = False
+    try:
+        for source in snapshot.sources:
+            source = _validate_source(source)
+            if source.record.logical_id in seen_sources:
+                raise ValueError("snapshot contains duplicate logical source IDs")
+            seen_sources.add(source.record.logical_id)
+            l1 = generate_l1_for_source(
+                source,
+                use_llm=use_llm,
+                model_descriptor=model_descriptor,
+                model_revision=model_revision,
+            )
+            key = tier_artifact_key(
+                source,
+                extractor_version=version,
+                model_descriptor=model_descriptor,
+                model_revision=model_revision,
+                generated_l1=l1 if use_llm else None,
+            )
+            tiers = {
+                "l0": get_l0_for_source(source),
+                "l1": l1,
+                "l2": get_l2_for_source(source),
+            }
+            entries.append(_tier_entry(source, key, tiers))
+        entries.sort(key=lambda item: str(item["source"]["logical_id"]))  # type: ignore[index]
+        content = _tier_artifact_bytes(entries, version, model)
+        name = "tiers.json"
+        with (staging / name).open("xb") as artifact:
+            artifact.write(content)
+            artifact.flush()
+            os.fsync(artifact.fileno())
+        _fsync_directory(staging)
+        descriptors = [
+            {
+                "path": f"tiers/{name}",
+                "size": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+        ]
+        if output.exists() or output.is_symlink():
+            raise FileExistsError("tier output already exists")
+        staging.replace(output)
+        published = True
+        _fsync_directory(generation)
+        return descriptors
+    except BaseException:
+        if published and output.exists() and not output.is_symlink():
+            shutil.rmtree(output)
+            try:
+                _fsync_directory(generation)
+            except OSError:
+                pass
+        raise
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
 
 
 def get_l0(slug: str) -> str:

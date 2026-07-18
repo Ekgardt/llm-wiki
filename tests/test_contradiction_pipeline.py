@@ -416,8 +416,11 @@ def test_all_compatible_supersession_mutations_are_sorted_and_conflicts_quaranti
     assert conflicted.lifecycle_mutations == ()
 
 
-def test_secondary_search_context_is_retrieval_only_and_cannot_mutate():
-    from contradiction_pipeline import ContradictionPipeline
+def test_secondary_search_context_is_retrieval_only_and_cannot_mutate(
+    tmp_path, monkeypatch
+):
+    import search_memory
+    from contradiction_pipeline import ContradictionPipeline, default_secondary_search
 
     pipeline = ContradictionPipeline(
         evaluators=(),
@@ -430,6 +433,28 @@ def test_secondary_search_context_is_retrieval_only_and_cannot_mutate():
     assert result.recommendation == "quarantine"
     assert result.lifecycle_mutations == ()
     assert result.evidence[0]["retrieval_only"] is True
+
+    vault = tmp_path / "vault"
+    notes = vault / "knowledge" / "notes"
+    notes.mkdir(parents=True)
+    (notes / "local-evidence.md").write_text(
+        "---\ntype: concept\n---\n# Local Evidence\n\nThe project state is green.\n",
+        encoding="utf-8",
+    )
+    global_calls = []
+    monkeypatch.setattr(
+        search_memory,
+        "search",
+        lambda *args, **kwargs: global_calls.append((args, kwargs))
+        or [{"path": "knowledge/notes/global.md"}],
+    )
+
+    results = default_secondary_search(vault, "project state green", 5)
+
+    assert global_calls == []
+    assert [item["path"] for item in results] == [
+        "knowledge/notes/local-evidence.md"
+    ]
 
 
 def test_deterministic_lifecycle_edit_is_committed_without_candidate(tmp_path):

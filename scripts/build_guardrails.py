@@ -30,17 +30,29 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT, atomic_write  # noqa: E402
+from bounded_io import read_stable_bytes  # noqa: E402
+from claim_tree_manifest import snapshot_guardrail_sources_with_content  # noqa: E402
+from markdown_transaction import (  # noqa: E402
+    ABSENT,
+    MAX_KNOWLEDGE_TARGET_BYTES,
+    mutate_knowledge,
+    stable_operation_id,
+)
+from memory_state import ROOT  # noqa: E402
+from reliable_memory import sha256_bytes  # noqa: E402
 
 KNOWLEDGE = ROOT / "knowledge" / "notes"
 FEEDBACK_DIR = ROOT / "knowledge" / "feedback"
 GUARDRAILS_FILE = ROOT / "knowledge" / "guardrails.md"
+MAX_GUARDRAILS_BYTES = MAX_KNOWLEDGE_TARGET_BYTES
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 TYPE_RE = re.compile(r"^type:\s*(.+?)\s*$", re.MULTILINE)
@@ -53,7 +65,11 @@ SUMMARY_RE = re.compile(
 )
 
 
-def _collect_corrections(project: str | None = None) -> list[dict]:
+def _collect_corrections(
+    project: str | None = None,
+    *,
+    source_contents: Mapping[str, bytes] | None = None,
+) -> list[dict]:
     """Collect all knowledge pages that are corrections/preferences/rules.
 
     Sources:
@@ -61,15 +77,15 @@ def _collect_corrections(project: str | None = None) -> list[dict]:
     2. Promoted feedback candidates (from knowledge/feedback/)
     3. Patterns with 'do not' / 'always' / 'never' in summary
     """
+    if source_contents is None:
+        _, source_contents = snapshot_guardrail_sources_with_content(ROOT)
     corrections = []
 
     # Source 1: knowledge pages with correction-like types
-    if KNOWLEDGE.exists():
-        for md in KNOWLEDGE.rglob("*.md"):
-            try:
-                content = md.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                continue
+    for relative, source_bytes in source_contents.items():
+        if relative.startswith("knowledge/notes/") and relative.endswith(".md"):
+            md = ROOT / relative
+            content = source_bytes.decode("utf-8", errors="ignore")
             fm = FRONTMATTER_RE.match(content)
             if not fm:
                 continue
@@ -100,12 +116,11 @@ def _collect_corrections(project: str | None = None) -> list[dict]:
             })
 
     # Source 2: promoted feedback candidates
-    if FEEDBACK_DIR.exists():
-        import json
-        for f in FEEDBACK_DIR.glob("*.json"):
+    for relative, source_bytes in source_contents.items():
+        if relative.startswith("knowledge/feedback/") and relative.endswith(".json"):
             try:
-                candidate = json.loads(f.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+                candidate = json.loads(source_bytes)
+            except json.JSONDecodeError:
                 continue
             if candidate.get("status") != "promoted":
                 continue
@@ -128,13 +143,18 @@ def _extract(text: str, pattern: re.Pattern) -> str | None:
     return m.group(1).strip() if m else None
 
 
-def build_guardrails(project: str | None = None, max_rules: int = 15) -> str:
+def build_guardrails(
+    project: str | None = None,
+    max_rules: int = 15,
+    *,
+    source_contents: Mapping[str, bytes] | None = None,
+) -> str:
     """Build the guard rails block for SessionStart injection.
 
     This is the "learned instincts" — rules the agent must follow
     because they were learned from past corrections.
     """
-    corrections = _collect_corrections(project)
+    corrections = _collect_corrections(project, source_contents=source_contents)
 
     if not corrections:
         return ""
@@ -181,22 +201,49 @@ def main() -> int:
     p.add_argument("--apply", action="store_true", help="Write to knowledge/guardrails.md")
     args = p.parse_args()
 
-    guardrails = build_guardrails(args.project, args.max_rules)
+    source_manifest, source_contents = snapshot_guardrail_sources_with_content(ROOT)
+    guardrails = build_guardrails(
+        args.project,
+        args.max_rules,
+        source_contents=source_contents,
+    )
 
     if not guardrails:
         print("(no guard rails — no corrections learned yet)")
         return 0
 
     if args.apply:
-        atomic_write(
-            GUARDRAILS_FILE,
-            f"---\n"
-            f"type: guardrails\n"
+        content = (
+            "---\n"
+            "type: guardrails\n"
             f'title: "Learned Guard Rails"\n'
             f'description: "Auto-generated rules from past corrections"\n'
             f"timestamp: {datetime.now().isoformat(timespec='seconds')}\n"
-            f"---\n\n"
-            f"{guardrails}\n",
+            "---\n\n"
+            f"{guardrails}\n"
+        )
+        encoded = content.encode("utf-8")
+        try:
+            before_hash = sha256_bytes(
+                read_stable_bytes(
+                    GUARDRAILS_FILE,
+                    MAX_GUARDRAILS_BYTES,
+                    label="guardrails target",
+                )
+            )
+        except FileNotFoundError:
+            before_hash = ABSENT
+        mutate_knowledge(
+            stable_operation_id(
+                "build-guardrails",
+                f"{before_hash}:{source_manifest['source_manifest_sha256']}",
+                encoded,
+            ),
+            {GUARDRAILS_FILE: encoded},
+            preconditions={
+                "guardrails_source_manifest": source_manifest,
+                GUARDRAILS_FILE.relative_to(ROOT).as_posix(): before_hash,
+            },
         )
         print(f"Written: {GUARDRAILS_FILE.relative_to(ROOT)}")
     else:

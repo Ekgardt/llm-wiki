@@ -45,6 +45,60 @@ function Resolve-StateRoot(
     if (-not [string]::IsNullOrWhiteSpace($UserState)) { return $UserState }
     return $VaultRoot
 }
+function Install-CodexHooks(
+    [string]$VaultRoot,
+    [string]$CodexDir
+) {
+    & uv run --directory $VaultRoot python (Join-Path $VaultRoot "scripts\codex_memory.py") `
+        merge-hooks `
+        --source (Join-Path $VaultRoot "integrations\codex\hooks.json") `
+        --destination (Join-Path $CodexDir "hooks.json") `
+        --config (Join-Path $CodexDir "config.toml") | Out-Null
+    $hookExit = $LASTEXITCODE
+    if ($hookExit -eq 4) {
+        [Console]::Error.WriteLine(
+            "Codex lifecycle hooks are disabled. Set [features] hooks = true in config.toml " +
+            "and rerun the installer; hooks.json was not changed."
+        )
+    }
+    return $hookExit
+}
+function Install-CodexMcp(
+    [string]$VaultRoot,
+    [string]$Config
+) {
+    $state = (& uv run --directory $VaultRoot python (Join-Path $VaultRoot "scripts\codex_memory.py") `
+        config-state --config $Config --vault-root $VaultRoot | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) { return 1 }
+    if ($state -eq "equivalent") { return 0 }
+    if ($state -in @("conflict", "invalid")) { return 2 }
+    if ($state -ne "absent") { return 1 }
+
+    $directory = Split-Path $Config -Parent
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    $tomlVault = $VaultRoot.Replace("\", "\\").Replace('"', '\"')
+    $block = @"
+[mcp_servers.llm-wiki]
+command = "uv"
+args = ["run", "--directory", "$tomlVault", "python", "scripts/mcp_server.py"]
+"@
+    $encoding = [System.Text.UTF8Encoding]::new($false)
+    if (Test-Path $Config) {
+        Copy-Item -LiteralPath $Config -Destination "$Config.bak" -Force
+        $existing = [System.IO.File]::ReadAllText($Config)
+        $separator = if ([string]::IsNullOrEmpty($existing)) {
+            ""
+        } elseif ($existing.EndsWith("`n")) {
+            "`n"
+        } else {
+            "`n`n"
+        }
+        [System.IO.File]::AppendAllText($Config, $separator + $block + "`n", $encoding)
+    } else {
+        [System.IO.File]::WriteAllText($Config, $block + "`n", $encoding)
+    }
+    return 0
+}
 
 # ─── 1. Resolve vault root ──────────────────────────────────────────
 
@@ -140,13 +194,7 @@ New-Item -ItemType Directory -Path "$STATE_ROOT\cache" -Force | Out-Null
 New-Item -ItemType Directory -Path "$STATE_ROOT\cache\cognee" -Force | Out-Null
 Ok "LLM_WIKI_ROOT set (User scope); runtime at $STATE_ROOT\{run,logs,cache} (gitignored)"
 
-# ─── 6. Build search index ─────────────────────────────────────────
-
-Info "Building search index..."
-uv run python scripts\search_memory.py --rebuild 2>$null | Out-Null
-Ok "Search index built"
-
-# ─── 7. Register Task Scheduler ────────────────────────────────────
+# ─── 6. Register Task Scheduler ────────────────────────────────────
 
 Info "Registering Windows Task Scheduler..."
 $pythonExe = (Get-Command python).Source
@@ -158,7 +206,7 @@ try {
     Warn "Task Scheduler registration failed — run scripts\install-scheduled-tasks.ps1 manually"
 }
 
-# ─── 8. Detect and wire up agents ──────────────────────────────────
+# ─── 7. Detect and wire up agents ──────────────────────────────────
 
 Info "Detecting agents..."
 $agents = @()
@@ -206,47 +254,33 @@ if ((Get-Process "OpenCode*" -ErrorAction SilentlyContinue) -or (Test-Path $open
 # Codex
 if (Get-Command codex -ErrorAction SilentlyContinue) {
     $agents += "Codex"
-    # Add wrapper to profile
-    $profilePath = $PROFILE
-    $profileDir = Split-Path $profilePath -Parent
-    if (-not (Test-Path $profileDir)) {
-        New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
-    }
-    if (-not (Test-Path $profilePath)) {
-        New-Item -ItemType File -Path $profilePath -Force | Out-Null
-    }
-    $content = Get-Content $profilePath -Raw -ErrorAction SilentlyContinue
-    if ($content -notmatch "codex-memory-wrapper") {
-        Add-Content $profilePath '. "$env:LLM_WIKI_ROOT\scripts\codex-memory-wrapper.ps1"'
-        Ok "Codex wrapper added to $profilePath"
-    }
     $codexConfig = Join-Path $env:USERPROFILE ".codex\config.toml"
     $codexDir = Split-Path $codexConfig -Parent
     New-Item -ItemType Directory -Path $codexDir -Force | Out-Null
-    $tomlVault = $VAULT_ROOT.Replace("\", "\\").Replace('"', '\"')
-    $codexBlock = @"
-[mcp_servers.llm-wiki]
-command = "uv"
-args = ["run", "--directory", "$tomlVault", "python", "scripts/mcp_server.py"]
-"@
-    if (-not (Test-Path $codexConfig)) {
-        Write-Utf8NoBom $codexConfig ($codexBlock + "`n")
-        Ok "Codex MCP config created → $codexConfig"
+    $codexMcpExit = Install-CodexMcp -VaultRoot $VAULT_ROOT -Config $codexConfig
+    if ($codexMcpExit -eq 0) {
+        Ok "Codex MCP config verified → $codexConfig"
+    } elseif ($codexMcpExit -eq 2) {
+        Warn "Existing Codex MCP entry conflicts with LLM-Wiki; config.toml was not changed. Merge manually."
     } else {
-        $codexExisting = Get-Content -LiteralPath $codexConfig -Raw
-        if ($codexExisting -notmatch '(?m)^\s*\[mcp_servers\.llm-wiki\]\s*$') {
-            Copy-Item -LiteralPath $codexConfig -Destination "$codexConfig.bak" -Force
-            $codexSeparator = if ([string]::IsNullOrEmpty($codexExisting)) {
-                ""
-            } elseif ($codexExisting.EndsWith("`n")) {
-                "`n"
-            } else {
-                "`n`n"
-            }
-            Write-Utf8NoBom $codexConfig ($codexExisting + $codexSeparator + $codexBlock + "`n")
-            Ok "Codex MCP config appended; backup: $codexConfig.bak"
-        }
+        Warn "Codex MCP config could not be verified; config.toml was not changed."
     }
+    $codexHooks = Join-Path $codexDir "hooks.json"
+    $codexHookExit = Install-CodexHooks -VaultRoot $VAULT_ROOT -CodexDir $codexDir
+    if ($codexHookExit -eq 0) {
+        Ok "Codex official hooks merged → $codexHooks"
+        Info "Open /hooks in Codex to review and trust the LLM-Wiki commands."
+    } elseif ($codexHookExit -eq 2) {
+        Warn "Active inline Codex hooks require manual merge and /hooks trust review; hooks.json was not changed."
+    } elseif ($codexHookExit -eq 3) {
+        Ok "Equivalent LLM-Wiki hooks are already configured inline; hooks.json was not changed."
+        Info "Open /hooks in Codex to review and trust the inline LLM-Wiki commands."
+    } elseif ($codexHookExit -eq 4) {
+        # Install-CodexHooks already printed the manual enable instruction.
+    } else {
+        Warn "Codex hooks were not changed; review the existing hooks configuration manually."
+    }
+    Info "The heartbeat-only codex-memory-wrapper is not installed automatically; official hooks are primary."
     Ok "Codex detected"
 }
 
@@ -306,11 +340,27 @@ if ($agents.Count -eq 0) {
     Ok "Agents: $($agents -join ', ')"
 }
 
+# ─── 8. Bounded runtime sync ───────────────────────────────────────
+
+Info "Synchronizing runtime state and derived indexes..."
+uv run --locked --no-sync python "$VAULT_ROOT\scripts\sync_memory.py" --apply
+$syncExit = $LASTEXITCODE
+$syncWarning = $false
+switch ($syncExit) {
+    0 { Ok "Runtime state synchronized" }
+    1 { $syncWarning = $true; Warn "Runtime synchronization completed with warnings" }
+    default { Fail "Runtime synchronization failed" }
+}
+
 # ─── 9. Summary ────────────────────────────────────────────────────
 
 Write-Host ""
 Write-Host "==============================================" -ForegroundColor Green
-Write-Host "  LLM-Wiki installed successfully!" -ForegroundColor Green
+if ($syncWarning) {
+    Write-Host "  LLM-Wiki installed with warnings" -ForegroundColor Yellow
+} else {
+    Write-Host "  LLM-Wiki installed successfully!" -ForegroundColor Green
+}
 Write-Host "==============================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "Vault:       $VAULT_ROOT"

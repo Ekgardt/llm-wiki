@@ -48,7 +48,7 @@ The installer detects your agents and wires them up automatically.
    git clone https://github.com/Ekgardt/llm-wiki.git
    cd llm-wiki
    uv sync --locked --extra mcp-server
-   uv run pytest -q          # verify: 1804 tests collected should pass
+   uv run pytest -q          # verify: 2503 tests collected should pass
    ```
 
 2. **Set environment variables** (add to your shell profile):
@@ -157,7 +157,28 @@ uv run python scripts/lint_memory.py --contradictions      # + LLM-judged contra
 uv run python scripts/archive_stale.py --apply           # archive old pages by type
 uv run python scripts/lookup_mode.py                       # show direct/base/hybrid mode
 uv run python scripts/doctor.py                            # local health; --repair is explicit
+uv run --locked --no-sync python scripts/sync_memory.py --check --json  # read-only check
 ```
+
+### Bounded synchronization
+
+```bash
+uv run --locked --no-sync python scripts/sync_memory.py --check --json
+uv run --locked --no-sync python scripts/sync_memory.py --apply --json
+```
+
+`sync_memory.py` defaults to `--check`. It reports the ordered actions
+`environment`, `dependencies`, `integrations`, `transactions`, `queue`,
+`indexes`, and `doctor`, each as `ok`, `changed`, `skipped`, or `error`.
+Apply mode has explicit elapsed-time and action-count limits, uses the locked
+MCP baseline only, repairs missing runtime directories, and rebuilds a stale
+FTS index in a bounded child process. Transaction recovery and queued
+flush/compile work remain diagnostic-only here; run the explicit Doctor,
+transaction, or queue operator command when those actions require attention.
+Sync does not install semantic, reranker, code-graph, or model dependencies,
+does not run Git, and never writes under `knowledge/`.
+Exit codes are stable: `0` means synchronized (`ok` or `changed`), `1` means
+incomplete or degraded, and `2` means an error or invalid invocation.
 
 ## Reliable operations
 
@@ -301,8 +322,8 @@ setup steps.
 
 ### "Tests fail on fresh clone"
 - Run `uv sync --locked --extra mcp-server` first (the installed baseline includes MCP)
-- `uv run pytest -q` — should report 1804 tests collected
-- If `< 1804`, your checkout is stale; `git pull`
+- `uv run pytest -q` — should report 2503 tests collected
+- If `< 2503`, your checkout is stale; `git pull`
 
 ---
 
@@ -311,7 +332,7 @@ setup steps.
 | Path | Zone | Purpose |
 |------|------|---------|
 | `scripts/` | CODE | Pipeline + hooks + helpers |
-| `tests/` | CODE | 1804 tests collected |
+| `tests/` | CODE | 2503 tests collected |
 | `docs/` | CODE | This file + ARCHITECTURE + STRUCTURE + SETUP-COGNEE + EXPORTING |
 | `skills/` | CODE | 9 agent skills |
 | `rules/` | CODE | 3 file-handling policies |

@@ -27,6 +27,7 @@ WRITER_TARGETS = [
     ("knowledge/feedback/abcdef123456.json", b"{}"),
     ("knowledge/index.md", b"index"),
     ("knowledge/log.md", b"log"),
+    ("knowledge/guardrails.md", b"guardrails"),
     ("knowledge/projects/demo/.blackboard/tasks.jsonl", b"{}\n"),
 ]
 
@@ -35,6 +36,7 @@ TASK14_BEHAVIORAL_ENTRYPOINTS = {
     "scripts/archive_stale.py:_archive_page",
     "scripts/blackboard.py:_append_jsonl",
     "scripts/bootstrap_project.py:bootstrap",
+    "scripts/build_guardrails.py:main",
     "scripts/build_context.py:main",
     "scripts/daily_log_append.py:locked_append",
     "scripts/daily_log_append.py:locked_append_once",
@@ -55,6 +57,7 @@ TASK14_BEHAVIORAL_ENTRYPOINTS = {
 TASK14_READ_TRANSFORM_WRITE_ENTRYPOINTS = {
     "scripts/access_tracking.py:flush_access_to_frontmatter",
     "scripts/archive_stale.py:_archive_page",
+    "scripts/build_guardrails.py:main",
     "scripts/feedback_capture.py:promote_candidate",
     "scripts/migrate_to_okf.py:main",
     "scripts/rebuild_memory_index.py:main",
@@ -103,7 +106,8 @@ def test_scanner_writer_set_equals_behavioral_matrix():
 
     assert discover_repository_entrypoints(ROOT, files={
         "access_tracking.py", "archive_stale.py", "blackboard.py",
-        "bootstrap_project.py", "build_context.py", "daily_log_append.py",
+        "bootstrap_project.py", "build_guardrails.py", "build_context.py",
+        "daily_log_append.py",
         "feedback_capture.py", "flush_memory.py", "migrate_to_okf.py",
         "query_memory.py", "rebuild_memory_index.py", "reflection.py",
         "session_end_project_tag.py", "session_start_project_state.py",
@@ -137,12 +141,22 @@ def test_task14_actual_entrypoint_delegates_without_git(
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "state"))
 
     if module_name == "access_tracking":
+        import retrieval_telemetry
+
         page = vault / "knowledge/notes/page.md"
         page.write_text("---\ntype: concept\n---\n# Page\n", encoding="utf-8")
+        database = tmp_path / "state/cache/evidence-graph/telemetry.sqlite3"
         monkeypatch.setattr(module, "KNOWLEDGE_DIR", page.parent)
         monkeypatch.setattr(module, "mutate_knowledge", boundary)
-        module._batch.clear()
-        module._batch["page"] = 1
+        monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
+        retrieval_telemetry.record_event(
+            retrieval_telemetry.make_event(
+                event_kind="page_read", query=None, retrieval_mode="direct",
+                candidate_id="page", rank=None, generation="legacy",
+                source_tool="writer-test",
+            ),
+            db_path=database,
+        )
         function("page")
     elif module_name == "archive_stale":
         page = vault / "knowledge/notes/page.md"
@@ -169,6 +183,22 @@ def test_task14_actual_entrypoint_delegates_without_git(
         monkeypatch.setattr(module, "_run_git", lambda *args: "")
         monkeypatch.setattr(module, "mutate_knowledge", boundary)
         function(str(tmp_path), apply=True)
+    elif module_name == "build_guardrails":
+        page = vault / "knowledge/notes/page.md"
+        page.write_text(
+            "---\ntype: pattern\n---\n# Page\n\n"
+            "One-sentence summary: Always use safe storage\n",
+            encoding="utf-8",
+        )
+        target = vault / "knowledge/guardrails.md"
+        target.write_bytes(b"old\n")
+        monkeypatch.setattr(module, "ROOT", vault)
+        monkeypatch.setattr(module, "KNOWLEDGE", page.parent)
+        monkeypatch.setattr(module, "FEEDBACK_DIR", vault / "knowledge/feedback")
+        monkeypatch.setattr(module, "GUARDRAILS_FILE", target)
+        monkeypatch.setattr(module, "mutate_knowledge", boundary, raising=False)
+        monkeypatch.setattr(sys, "argv", ["build_guardrails.py", "--apply"])
+        function()
     elif module_name == "build_context":
         monkeypatch.setattr(module, "ROOT", vault)
         monkeypatch.setattr(module, "PROJECTS_DIR", vault / "knowledge/projects")
@@ -306,6 +336,22 @@ def test_python_scanner_recognizes_feedback_and_boundary_calls():
     )
     findings = scan_source(Path("scripts/probe.py"), source)
     assert [(item.api, item.approved) for item in findings] == [("mutate_knowledge", True)]
+
+
+def test_python_scanner_detects_direct_guardrails_atomic_write():
+    from check_knowledge_writers import scan_source
+
+    source = (
+        'from memory_state import atomic_write\n'
+        'target = ROOT / "knowledge" / "guardrails.md"\n'
+        'atomic_write(target, "unsafe")\n'
+    )
+
+    findings = scan_source(Path("scripts/probe.py"), source)
+
+    assert [(item.api, item.approved) for item in findings] == [
+        ("atomic_write", False)
+    ]
 
 
 def test_python_scanner_traces_parameter_sink_alias_and_path_alias():

@@ -214,14 +214,14 @@ def main() -> int:
                 log(f"  graph: OS error ({e}) — skipping, continuing")
                 failures += 1
 
-            # Step 3d: flush access tracking to frontmatter (v4.0).
-            log("Step 3d: flushing access tracking...")
+            # Step 3d: compact disposable telemetry without touching knowledge.
+            log("Step 3d: compacting retrieval telemetry...")
             try:
-                from access_tracking import flush_all
-                flushed = flush_all()
-                log(f"  access: flushed {flushed} page(s)")
+                from retrieval_telemetry import compact
+                compacted = compact()
+                log(f"  telemetry: compacted {compacted} event(s)")
             except Exception as e:
-                log(f"  access: failed ({e}) — skipping")
+                log(f"  telemetry: failed ({e}) — skipping")
 
             # Step 3e: index code graph (v4.0, best-effort).
             log("Step 3e: indexing code graph...")

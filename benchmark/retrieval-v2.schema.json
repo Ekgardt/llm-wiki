@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/retrieval-v2.json",
+  "type": "object",
+  "description": "Closed public synthetic retrieval and QA corpus. Metrics follow TREC/ir-measures definitions: Recall@k is the fraction of known relevant evidence retrieved, MRR@10 uses the first relevant rank, and nDCG@10 uses graded gains with log2 discount normalized by the ideal ranking. See https://ir-measur.es/en/latest/measures.html.",
+  "required": ["schema_version", "corpus_id", "description", "documents", "queries"],
+  "properties": {
+    "schema_version": {"const": "retrieval-corpus/v2"},
+    "corpus_id": {"const": "public-synthetic-retrieval-v2"},
+    "description": {"type": "string", "minLength": 20, "maxLength": 500},
+    "documents": {
+      "type": "array",
+      "minItems": 12,
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "required": ["parent_id", "relative_path", "language", "project", "status", "valid_from", "valid_to", "superseded_by", "parent_text", "evidence_spans"],
+        "properties": {
+          "parent_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,63}$"},
+          "relative_path": {"type": "string", "pattern": "^synthetic/[a-z0-9/-]+\\.md$", "maxLength": 160},
+          "language": {"enum": ["EN", "RU", "ZH"]},
+          "project": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,31}$"},
+          "status": {"enum": ["active", "superseded"]},
+          "valid_from": {"type": "string", "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}$"},
+          "valid_to": {"oneOf": [{"type": "string", "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}$"}, {"type": "null"}]},
+          "superseded_by": {"oneOf": [{"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,63}$"}, {"type": "null"}]},
+          "parent_text": {"type": "string", "minLength": 10, "maxLength": 4000},
+          "evidence_spans": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "required": ["evidence_id", "heading_path", "text", "byte_start", "byte_end", "span_sha256"],
+              "properties": {
+                "evidence_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,63}$"},
+                "heading_path": {"type": "array", "minItems": 1, "maxItems": 6, "items": {"type": "string", "minLength": 1, "maxLength": 100}},
+                "text": {"type": "string", "minLength": 1, "maxLength": 1000},
+                "byte_start": {"type": "integer", "minimum": 0, "maximum": 1000000},
+                "byte_end": {"type": "integer", "minimum": 1, "maximum": 1000000},
+                "span_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "queries": {
+      "type": "array",
+      "minItems": 18,
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "required": ["query_id", "text", "language", "profile", "answerability", "relevant_parents", "required_evidence_spans", "graded_evidence", "negative_candidates", "temporal_scope", "project_scope", "allowed_abstention_reason", "query_type", "cross_language"],
+        "properties": {
+          "query_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,63}$"},
+          "text": {"type": "string", "minLength": 2, "maxLength": 500},
+          "language": {"enum": ["EN", "RU", "ZH"]},
+          "profile": {"enum": ["exact", "lexical", "semantic", "synthesis", "safety"]},
+          "answerability": {"enum": ["answerable", "unanswerable"]},
+          "relevant_parents": {"type": "array", "maxItems": 10, "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,63}$"}},
+          "required_evidence_spans": {"type": "array", "maxItems": 20, "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,63}$"}},
+          "graded_evidence": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "required": ["evidence_id", "gain"],
+              "properties": {
+                "evidence_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,63}$"},
+                "gain": {"type": "integer", "minimum": 1, "maximum": 3}
+              },
+              "additionalProperties": false
+            }
+          },
+          "negative_candidates": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,63}$"}},
+          "temporal_scope": {
+            "type": "object",
+            "required": ["mode", "as_of"],
+            "properties": {
+              "mode": {"enum": ["current", "as_of"]},
+              "as_of": {"oneOf": [{"type": "string", "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}$"}, {"type": "null"}]}
+            },
+            "additionalProperties": false
+          },
+          "project_scope": {"type": "array", "minItems": 1, "maxItems": 5, "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,31}$"}},
+          "allowed_abstention_reason": {"oneOf": [{"enum": ["not-in-corpus", "insufficient-evidence", "out-of-scope"]}, {"type": "null"}]},
+          "query_type": {"enum": ["exact-name", "relative-path", "command", "code-symbol", "paraphrase", "cross-language", "temporal-decision", "supersession", "contradiction", "multi-parent-synthesis", "no-answer", "prompt-injection"]},
+          "cross_language": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

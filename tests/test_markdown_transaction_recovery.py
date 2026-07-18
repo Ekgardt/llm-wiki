@@ -464,6 +464,35 @@ def test_recover_conflicts_when_target_matches_neither_hash(
     assert "private unknown content" not in json.dumps(coordinator.deletion_blockers())
 
 
+def test_recovery_hashes_oversized_changed_target_without_materializing_it(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    target = vault / "knowledge/guardrails.md"
+    target.write_bytes(b"before")
+    monkeypatch.setattr(markdown_transaction, "MAX_KNOWLEDGE_TARGET_BYTES", 8)
+    coordinator = MarkdownCoordinator(vault, state_root)
+    coordinator.prepare(
+        [MarkdownChange.replace("knowledge/guardrails.md", b"after")],
+        operation_id="oversized-before-recovery",
+    )
+    target.write_bytes(b"x" * 9)
+    real_sha256_bytes = markdown_transaction.sha256_bytes
+
+    def reject_materialized_oversize(value: bytes) -> str:
+        assert value != b"x" * 9, "oversized target was materialized for hashing"
+        return real_sha256_bytes(value)
+
+    monkeypatch.setattr(markdown_transaction, "sha256_bytes", reject_materialized_oversize)
+
+    recovered = coordinator.recover()[0]
+
+    assert (recovered.state, recovered.error_code) == (
+        "conflicted",
+        "unknown_target_bytes",
+    )
+    assert target.read_bytes() == b"x" * 9
+
+
 def test_recover_create_conflicts_if_target_appeared(vault: Path, state_root: Path):
     target = vault / "knowledge/notes/new.md"
     coordinator = MarkdownCoordinator(vault, state_root)

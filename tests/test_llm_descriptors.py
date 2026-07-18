@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import replace
 
 import llm_client
 import pytest
+from context_budget import TokenCount, TokenUsage
 from reliable_memory import canonical_json_bytes
 
 
@@ -424,3 +426,502 @@ def test_forced_provider_remains_strict(monkeypatch):
 
     assert llm_client.call_llm("prompt") is None
     assert seen == ["codex"]
+
+
+def test_llm_result_preserves_five_argument_positional_compatibility():
+    descriptor = llm_client.provider_candidates("fake", max_tokens=10)[0]
+
+    result = llm_client.LLMResult(descriptor, "answer", True, None, "prompt")
+
+    assert result.usage == TokenUsage()
+    assert result.input_token_count is None
+
+
+def test_fake_descriptor_forwards_the_requested_output_limit():
+    descriptor = llm_client.provider_candidates("fake", max_tokens=37)[0]
+
+    assert descriptor.inference_settings["max_tokens"] == 37
+    assert descriptor.capabilities["max_tokens_enforced"] is True
+
+
+def test_call_candidate_accepts_response_envelope_and_plain_string(monkeypatch):
+    descriptor = llm_client.provider_candidates("fake", max_tokens=10)[0]
+    usage = TokenUsage(input_tokens=4, output_tokens=2)
+    responses = [llm_client.BackendResponse("first", usage), "second"]
+    monkeypatch.setitem(llm_client._BACKENDS, "fake", lambda *args: responses.pop(0))
+
+    first = llm_client.call_candidate(descriptor, "prompt", "system", available=True)
+    second = llm_client.call_candidate(descriptor, "prompt", "system", available=True)
+
+    assert first.text == "first"
+    assert first.usage == usage
+    assert second.text == "second"
+    assert second.usage == TokenUsage()
+    assert second.input_token_count == TokenCount(
+        len(b"system\n\nprompt"), "estimated"
+    )
+
+
+def test_call_candidate_counts_injected_schema_text_with_model_adapter(monkeypatch):
+    monkeypatch.setenv("MEMORY_CODEX_MODEL", "known-model")
+    descriptor = llm_client.provider_candidates("codex", max_tokens=10)[0]
+    counted = []
+    monkeypatch.setitem(llm_client._BACKENDS, "codex", lambda *args: "answer")
+
+    def adapter(text):
+        counted.append(text)
+        return 17
+
+    result = llm_client.call_candidate(
+        descriptor,
+        "user prompt",
+        "system prompt",
+        schema={"type": "object"},
+        available=True,
+        token_adapters={"known-model": adapter},
+    )
+
+    assert counted == [
+        'system prompt\n\nOutput only JSON matching this schema: {"type":"object"}'
+        "\n\nuser prompt"
+    ]
+    assert counted[0].count('{"type":"object"}') == 1
+    assert result.input_token_count == TokenCount(17, "tokenizer")
+
+
+def test_native_schema_is_counted_once_as_compact_sorted_json(monkeypatch):
+    descriptor = llm_client.provider_candidates("openai", max_tokens=10)[0]
+    schema = {
+        "type": "object",
+        "properties": {"body": {"type": "string", "description": "x" * 1000}},
+    }
+    schema_json = json.dumps(schema, sort_keys=True, separators=(",", ":"))
+    counted = []
+    monkeypatch.setitem(llm_client._BACKENDS, "openai", lambda *args: "answer")
+
+    def adapter(text):
+        counted.append(text)
+        return len(text)
+
+    result = llm_client.call_candidate(
+        descriptor,
+        "user prompt",
+        "system prompt",
+        schema=schema,
+        available=True,
+        token_adapters={descriptor.model: adapter},
+    )
+
+    assert counted == [f"system prompt\n\n{schema_json}\n\nuser prompt"]
+    assert counted[0].count(schema_json) == 1
+    assert result.input_token_count == TokenCount(len(counted[0]), "tokenizer")
+    assert result.input_token_count.tokens > 1000
+
+
+def test_unserializable_native_schema_counts_unknown_then_reaches_provider_boundary(
+    monkeypatch,
+):
+    descriptor = llm_client.provider_candidates("openai", max_tokens=10)[0]
+    called = []
+
+    def backend(*args):
+        called.append(True)
+        raise TypeError("schema is not serializable")
+
+    monkeypatch.setitem(llm_client._BACKENDS, "openai", backend)
+
+    result = llm_client.call_candidate(
+        descriptor,
+        "prompt",
+        "system",
+        schema={"bad": object()},
+        available=True,
+    )
+
+    assert called == [True]
+    assert result.failure_class == "provider_error"
+    assert result.input_token_count == TokenCount(tokens=None, source="unknown")
+
+
+def test_surrogate_input_count_fails_closed_without_crashing_candidate(monkeypatch):
+    descriptor = llm_client.provider_candidates("fake", max_tokens=10)[0]
+    monkeypatch.setitem(llm_client._BACKENDS, "fake", lambda *args: "answer")
+
+    result = llm_client.call_candidate(
+        descriptor, "prompt\ud800", "system", available=True
+    )
+
+    assert result.text == "answer"
+    assert result.input_token_count == TokenCount(tokens=None, source="unknown")
+
+
+def _http_call(monkeypatch, provider, response_data):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    descriptor = llm_client.provider_candidates(provider, max_tokens=37)[0]
+    requests = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps(response_data).encode("utf-8")
+
+    def urlopen(request, timeout):
+        requests.append(request)
+        return Response()
+
+    monkeypatch.setattr(llm_client.urllib.request, "urlopen", urlopen)
+    result = llm_client.call_candidate(
+        descriptor, "prompt", "system", available=True, max_tokens=37
+    )
+    return result, json.loads(requests[0].data), requests[0].full_url
+
+
+@pytest.mark.parametrize("provider", ["openai", "ollama"])
+def test_openai_compatible_usage_and_request_limit(provider, monkeypatch):
+    result, payload, url = _http_call(
+        monkeypatch,
+        provider,
+        {
+            "choices": [{"message": {"content": "answer"}}],
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 4,
+                "prompt_tokens_details": {"cached_tokens": 3},
+            },
+        },
+    )
+
+    assert result.usage == TokenUsage(
+        input_tokens=12, output_tokens=4, cache_read_tokens=3
+    )
+    assert result.input_token_count == TokenCount(12, "reported")
+    assert payload["max_tokens"] == 37
+    assert url.endswith("/v1/chat/completions")
+
+
+@pytest.mark.parametrize("provider", ["openai", "ollama"])
+def test_compatibility_usage_ignores_native_ollama_top_level_fields(provider, monkeypatch):
+    result, _, _ = _http_call(
+        monkeypatch,
+        provider,
+        {
+            "choices": [{"message": {"content": "answer"}}],
+            "prompt_eval_count": 9,
+            "eval_count": 5,
+            "total_duration": 1_999_999,
+        },
+    )
+
+    assert result.usage == TokenUsage()
+    assert result.input_token_count is not None
+    assert result.input_token_count.source == "estimated"
+
+
+def test_malformed_usage_fields_are_ignored_field_by_field(monkeypatch):
+    result, _, _ = _http_call(
+        monkeypatch,
+        "openai",
+        {
+            "choices": [{"message": {"content": "answer"}}],
+            "usage": {
+                "prompt_tokens": True,
+                "completion_tokens": -1,
+                "prompt_tokens_details": {"cached_tokens": 2},
+            },
+            "total_duration": "secret payload must not leak",
+        },
+    )
+
+    assert result.text == "answer"
+    assert result.usage == TokenUsage(cache_read_tokens=2)
+
+
+def test_opencode_aggregate_usage_wins_over_part_usage(monkeypatch):
+    descriptor = llm_client.provider_candidates("opencode", max_tokens=37)[0]
+    calls = []
+    responses = [
+        {"id": "session-id"},
+        {
+            "data": {
+                "info": {
+                    "tokens": {
+                        "input": 10,
+                        "output": 4,
+                        "reasoning": 8,
+                        "cache": {"read": 3, "write": 2},
+                    },
+                    "cost": 0.5,
+                    "time": {"created": -1e308, "completed": 1e308},
+                },
+                "parts": [
+                    {"type": "text", "text": None},
+                    {"type": "text", "text": False},
+                    {"type": "text", "text": 3},
+                    {"type": "text", "text": ["wire"]},
+                    {"type": "text", "text": {"wire": "value"}},
+                    {"type": "text", "text": "answer", "tokens": {"input": 99}},
+                ],
+            }
+        },
+    ]
+
+    class Response:
+        status = 200
+
+        def __init__(self, data=None):
+            self.data = data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps(self.data).encode("utf-8")
+
+    def urlopen(request, timeout):
+        calls.append(request)
+        if request.method == "DELETE":
+            return Response({})
+        return Response(responses.pop(0))
+
+    monkeypatch.setattr(llm_client.urllib.request, "urlopen", urlopen)
+    result = llm_client.call_candidate(descriptor, "prompt", "", available=True)
+
+    assert result.text == "answer"
+    assert result.usage == TokenUsage(
+        input_tokens=10,
+        output_tokens=4,
+        cache_read_tokens=3,
+        cache_write_tokens=2,
+        estimated_cost=0.5,
+        cost_kind="reported",
+    )
+    prompt_payload = json.loads(calls[1].data)
+    assert "max_tokens" not in prompt_payload
+
+
+def test_opencode_sums_part_usage_only_when_aggregate_is_absent(monkeypatch):
+    data = {
+        "parts": [
+            {"type": "text", "text": "a", "tokens": {"input": 2, "output": 1}},
+            {"type": "metadata", "tokens": {"input": 100, "output": 100}},
+            {
+                "type": "step-finish",
+                "tokens": {
+                    "input": 3,
+                    "output": 4,
+                    "cache": {"read": 1, "write": 2},
+                },
+            },
+        ]
+    }
+
+    assert llm_client._parse_opencode_usage(data) == TokenUsage(
+        input_tokens=3,
+        output_tokens=4,
+        cache_read_tokens=1,
+        cache_write_tokens=2,
+    )
+
+
+def test_opencode_aggregate_parses_reported_cost_and_elapsed_milliseconds():
+    usage = llm_client._parse_opencode_usage(
+        {
+            "info": {
+                "tokens": {"input": 3, "output": 2},
+                "cost": 0.125,
+                "time": {"created": 1000.9, "completed": 1004.8},
+            }
+        }
+    )
+
+    assert usage == TokenUsage(
+        input_tokens=3,
+        output_tokens=2,
+        duration_ms=3,
+        estimated_cost=0.125,
+        cost_kind="reported",
+    )
+
+
+@pytest.mark.parametrize(
+    ("cost", "time", "expected_cost", "expected_kind", "expected_duration"),
+    [
+        (True, {"created": 10, "completed": 15}, None, "unknown", 5),
+        (-1, {"created": 10, "completed": 9}, None, "unknown", None),
+        (0.5, {"created": "bad", "completed": 15}, 0.5, "reported", None),
+        (float("nan"), {"created": 10, "completed": 15}, None, "unknown", 5),
+        (10**400, {"created": 10, "completed": 15}, None, "unknown", 5),
+        (0.5, {"created": 10**400, "completed": 10**400}, 0.5, "reported", None),
+    ],
+)
+def test_opencode_malformed_cost_and_time_are_independent(
+    cost, time, expected_cost, expected_kind, expected_duration
+):
+    usage = llm_client._parse_opencode_usage(
+        {"info": {"tokens": {"input": 3}, "cost": cost, "time": time}}
+    )
+
+    assert usage.input_tokens == 3
+    assert usage.estimated_cost == expected_cost
+    assert usage.cost_kind == expected_kind
+    assert usage.duration_ms == expected_duration
+
+
+def test_opencode_large_positive_finite_elapsed_time_is_floored():
+    created = 1e308
+    completed = 1.7e308
+
+    usage = llm_client._parse_opencode_usage(
+        {
+            "info": {
+                "tokens": {"input": 3},
+                "cost": 0.25,
+                "time": {"created": created, "completed": completed},
+            }
+        }
+    )
+
+    assert usage.duration_ms == math.floor(completed - created)
+    assert usage.input_tokens == 3
+    assert usage.estimated_cost == 0.25
+
+
+def test_opencode_only_invalid_text_returns_empty_with_reported_usage(monkeypatch):
+    descriptor = llm_client.provider_candidates("opencode", max_tokens=10)[0]
+    responses = [
+        {"id": "session-id"},
+        {
+            "info": {"tokens": {"input": 7, "output": 2}},
+            "parts": [
+                {"type": "text", "text": None},
+                {"type": "text", "text": True},
+                {"type": "text", "text": 3},
+                {"type": "text", "text": ["wire"]},
+                {"type": "text", "text": {"wire": "value"}},
+            ],
+        },
+    ]
+
+    class Response:
+        def __init__(self, data=None):
+            self.data = data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps(self.data).encode("utf-8")
+
+    def urlopen(request, timeout):
+        if request.method == "DELETE":
+            return Response({})
+        return Response(responses.pop(0))
+
+    monkeypatch.setattr(llm_client.urllib.request, "urlopen", urlopen)
+    result = llm_client.call_candidate(descriptor, "prompt", "", available=True)
+
+    assert result.failure_class == "empty_response"
+    assert result.usage == TokenUsage(input_tokens=7, output_tokens=2)
+    assert result.input_token_count == TokenCount(7, "reported")
+
+
+@pytest.mark.parametrize("provider", ["codex", "claude"])
+def test_cli_text_response_does_not_fabricate_usage(provider, monkeypatch):
+    descriptor = llm_client.provider_candidates(provider, max_tokens=37)[0]
+    monkeypatch.setitem(llm_client._BACKENDS, provider, lambda *args: "answer")
+
+    result = llm_client.call_candidate(descriptor, "prompt", "system", available=True)
+
+    assert result.usage == TokenUsage()
+    assert result.input_token_count == TokenCount(
+        len(b"system\n\nprompt"), "estimated"
+    )
+
+
+def test_provider_error_preserves_pre_call_estimate(monkeypatch):
+    descriptor = llm_client.provider_candidates("fake", max_tokens=10)[0]
+    monkeypatch.setitem(
+        llm_client._BACKENDS,
+        "fake",
+        lambda *args: (_ for _ in ()).throw(RuntimeError("provider detail")),
+    )
+
+    result = llm_client.call_candidate(descriptor, "prompt", "system", available=True)
+
+    assert result.failure_class == "provider_error"
+    assert result.usage == TokenUsage()
+    assert result.input_token_count == TokenCount(
+        len(b"system\n\nprompt"), "estimated"
+    )
+
+
+def test_empty_response_preserves_pre_call_estimate(monkeypatch):
+    descriptor = llm_client.provider_candidates("fake", max_tokens=10)[0]
+    monkeypatch.setitem(llm_client._BACKENDS, "fake", lambda *args: "")
+
+    result = llm_client.call_candidate(descriptor, "prompt", "system", available=True)
+
+    assert result.failure_class == "empty_response"
+    assert result.usage == TokenUsage()
+    assert result.input_token_count == TokenCount(
+        len(b"system\n\nprompt"), "estimated"
+    )
+
+
+def test_empty_envelope_preserves_usage_and_reported_input_count(monkeypatch):
+    descriptor = llm_client.provider_candidates("fake", max_tokens=10)[0]
+    usage = TokenUsage(input_tokens=9, output_tokens=3)
+    monkeypatch.setitem(
+        llm_client._BACKENDS,
+        "fake",
+        lambda *args: llm_client.BackendResponse("", usage),
+    )
+
+    result = llm_client.call_candidate(descriptor, "prompt", "system", available=True)
+
+    assert result.failure_class == "empty_response"
+    assert result.usage == usage
+    assert result.input_token_count == TokenCount(9, "reported")
+
+
+def test_whitespace_envelope_preserves_partial_usage_and_pre_call_count(monkeypatch):
+    descriptor = llm_client.provider_candidates("fake", max_tokens=10)[0]
+    usage = TokenUsage(output_tokens=3, cache_read_tokens=2)
+    monkeypatch.setitem(
+        llm_client._BACKENDS,
+        "fake",
+        lambda *args: llm_client.BackendResponse("  \n", usage),
+    )
+
+    result = llm_client.call_candidate(descriptor, "prompt", "system", available=True)
+
+    assert result.failure_class == "empty_response"
+    assert result.usage == usage
+    assert result.input_token_count == TokenCount(len(b"system\n\nprompt"), "estimated")
+
+
+def test_non_string_envelope_text_fails_safely_without_losing_usage(monkeypatch):
+    descriptor = llm_client.provider_candidates("fake", max_tokens=10)[0]
+    usage = TokenUsage(input_tokens=5, cache_write_tokens=1)
+    monkeypatch.setitem(
+        llm_client._BACKENDS,
+        "fake",
+        lambda *args: llm_client.BackendResponse(None, usage),
+    )
+
+    result = llm_client.call_candidate(descriptor, "prompt", "system", available=True)
+
+    assert result.failure_class == "empty_response"
+    assert result.usage == usage
+    assert result.input_token_count == TokenCount(5, "reported")

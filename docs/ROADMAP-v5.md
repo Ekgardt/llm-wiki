@@ -1,31 +1,44 @@
 # v5.0 Roadmap
 
-> v4.0 is COMPLETE. All planned features shipped. This file tracks
-> ideas for future versions, not incomplete work.
+The v4 components are shipped, but the 2026-07-16 audit found that several of
+them are not yet connected through one generation-consistent pipeline. Code and
+wikilink graphs are process-local, vectors can be stale, query answering bypasses
+retrieval, access telemetry is not cross-process, and context limits are based on
+characters rather than tokens.
 
-## Resolved (implemented in v4.0)
+The canonical implementation plan is:
 
-- ✅ Bi-temporal code edges — git commit tracking per symbol (`valid_from`).
-- ✅ Label propagation community detection — pure Python, zero deps.
-- ✅ Constrained decoding — `call_llm_json()` through existing providers.
+- [Unified Evidence Retrieval Implementation Plan](superpowers/plans/2026-07-16-unified-evidence-retrieval.md)
+- [Task 1 frozen baseline (2026-07-16)](../benchmark/baseline-2026-07-16.md)
 
-## Removed from roadmap (not needed for personal knowledge vault)
+## Planned Critical Path
 
-- ~~Quality calibration~~ — existing lint checks (14) + access tracking
-  + archive thresholds already provide quality signals. Logistic regression
-  on top adds complexity without new information. This is an enterprise
-  RAG feature (Cognee, Zep), not a personal vault feature.
-- ~~Code health markers (25)~~ — existing tools (ruff, radon) cover
-  complexity/linting. The "calibrated against defect corpus" part is
-  an enterprise team-lead feature (repowise target audience), not a
-  solo developer memory tool.
+1. Close the remaining Stage 1 and Stage 2 integration gaps.
+2. Freeze EN/RU/ZH quality, token, latency, and Graphify comparison baselines.
+3. Introduce coherent corpus generations and a truthful retrieval contract.
+4. Build the Adaptive Context Compiler and evidence-grounded QA.
+5. Persist code, knowledge, and project relationships in a derived Evidence Graph.
+6. Add full-rebuild-equivalent incremental indexing and graph-backed impact analysis.
+7. Publish reproducible quality, token, freshness, and failure evidence.
 
-## Future ideas (v5.0+, not planned yet)
+## Preserved v4 Foundations
 
-- Bi-temporal time-travel queries ("show auth as of March commit X")
-- Cross-service API topology (HTTP call graph between repositories)
-- Temporal scoring modes (impact, novelty, recency — Memtrace pattern)
+- Tree-sitter queries and lazy optional grammars for 12 languages.
+- Python/Jedi semantic resolution and canonical qualified symbols.
+- FTS5, optional vectors, RRF, reranking, and L0/L1/L2 tiers.
+- Typed Markdown knowledge, project journals, checkpoints, and supersession.
+- Recoverable Markdown transactions, queue leases, archives, claims, and evidence.
+- Twelve task-shaped MCP tools with one response envelope.
 
-## Resolved by task7
+## Deferred Until The Pipeline Is Proven
 
-- tree-sitter `.scm` queries and lazy optional grammars for 12 languages.
+- Full temporal time-travel graph queries.
+- Cross-repository and cross-service topology.
+- Visual graph explorer.
+- Broad document/media ingestion.
+- Additional language expansion.
+- HTTP MCP and package-wide CLI migration.
+- Learned retrieval policies and default LLM-generated graph/context artifacts.
+
+The derived graph never replaces Markdown, Git, or project journals as sources of
+truth. No deferred feature may block the critical path above.

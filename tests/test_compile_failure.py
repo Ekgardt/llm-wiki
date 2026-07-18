@@ -19,34 +19,47 @@ import pytest
 
 
 @pytest.fixture
-def state_snapshot(tmp_path):
-    """Save / restore state.json around the test.
+def isolated_compile_state(tmp_path, monkeypatch):
+    """Give failed compiles disposable state and restore cached paths afterward."""
+    import compile_memory
+    import maybe_compile
+    import memory_state
 
-    Log is redirected to tmp_path via monkeypatch in the test itself
-    so the real knowledge/log.md is never touched.
-    """
-    from memory_state import STATE_FILE
-
-    state_file = STATE_FILE
-
-    if not state_file.exists():
-        state_file.parent.mkdir(parents=True, exist_ok=True)
-        state_file.write_text("{}\n", encoding="utf-8")
-
-    state_before = state_file.read_text(encoding="utf-8")
-
-    yield {
+    state_root = tmp_path / "state"
+    state_dir = state_root / "run"
+    state_file = state_dir / "state.json"
+    state_dir.mkdir(parents=True)
+    state_file.write_text("{}\n", encoding="utf-8")
+    owner_before = maybe_compile._current_owner
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
+    monkeypatch.setattr(memory_state, "STATE_ROOT", state_root)
+    monkeypatch.setattr(memory_state, "STATE_DIR", state_dir)
+    monkeypatch.setattr(memory_state, "STATE_FILE", state_file)
+    monkeypatch.setattr(memory_state, "LOCK_FILE", state_dir / "state.json.lock")
+    monkeypatch.setattr(compile_memory, "STATE_ROOT", state_root)
+    monkeypatch.setattr(maybe_compile, "STATE_ROOT", state_root)
+    monkeypatch.setattr(maybe_compile, "_current_owner", None)
+    monkeypatch.setattr(maybe_compile, "LOCK_FILE", state_dir / "compile.pid")
+    monkeypatch.setattr(
+        maybe_compile, "LOG_OUT", state_root / "logs" / "maybe-compile-last.log"
+    )
+    monkeypatch.setattr(
+        maybe_compile, "LOG_ERR", state_root / "logs" / "maybe-compile-last.err.log"
+    )
+    return {
+        "owner_before": owner_before,
+        "state_root": state_root,
         "state_file": state_file,
-        "state_before": state_before,
+        "state_before": "{}\n",
         "log_md": tmp_path / "test-log.md",
     }
 
-    state_file.write_text(state_before, encoding="utf-8")
 
-
-def test_failed_compile_does_not_mark_hash(state_snapshot, monkeypatch):
+def test_failed_compile_does_not_mark_hash(isolated_compile_state, monkeypatch):
     import compile_memory  # noqa: WPS433
+    import maybe_compile
 
+    state_snapshot = isolated_compile_state
     vault = state_snapshot["log_md"].parent / "vault"
     daily_dir = vault / "knowledge/daily"
     notes = vault / "knowledge/notes"
@@ -117,10 +130,13 @@ def test_failed_compile_does_not_mark_hash(state_snapshot, monkeypatch):
     from memory_queue import MemoryQueue
     from reliable_memory import sha256_bytes
 
-    failure = MemoryQueue(compile_memory.STATE_ROOT).source_failure(
+    failure = MemoryQueue(state_snapshot["state_root"]).source_failure(
         "knowledge/daily/2026-01-01.md",
         sha256_bytes(b"snapshot"),
     )
     assert failure is not None
     assert failure["producer"] == "compile"
     assert failure["error_code"] == "RuntimeError"
+
+    monkeypatch.undo()
+    assert maybe_compile._current_owner == state_snapshot["owner_before"]

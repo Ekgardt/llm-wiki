@@ -1,6 +1,6 @@
 # LLM Wiki
 
-[![Tests](https://img.shields.io/badge/tests-1804%20collected-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://img.shields.io/badge/tests-2503%20collected-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-4.0.0-blue.svg)](CHANGELOG.md)
@@ -101,7 +101,7 @@ LLM Wiki 为你使用的每一个 AI 编码智能体——OpenCode、Codex、Cla
 - **5 个 LLM 后端**（自动检测）：OpenCode → Codex → Claude CLI → OpenAI → Ollama
 - **跨平台**：Windows、macOS、Linux、WSL2
 - **本地且零 daemon**——安装基线包含 MCP 包；vector search 和 Cognee 仍为可选项
-- **1804 个回归测试**，CI 在 Ubuntu + Windows + macOS 上通过，Python 3.10 + 3.13
+- **2503 个回归测试**，CI 在 Ubuntu + Windows + macOS 上通过，Python 3.10 + 3.13
 - **Pre-commit 钩子**：ruff（静态分析）+ 结构 lint + gitleaks（密钥扫描）
 
 ---
@@ -134,7 +134,7 @@ irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 1. 检查前置条件（Python 3.10+、git）
 2. 如缺失则安装 `uv`（快速 Python 包管理器）
 3. 同步 locked 基线依赖（`uv sync --locked --extra mcp-server`）
-4. 运行测试套件（1804 个测试）
+4. 运行测试套件（2503 个测试）
 5. 设置 `LLM_WIKI_ROOT` 环境变量（用户级）
 6. 创建运行时目录（`cache/`、`logs/`、`run/`、`cache/cognee/`——gitignored）
 7. 注册计划维护（Unix 上 cron，Windows 上 Task Scheduler）
@@ -147,7 +147,7 @@ irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync --locked --extra mcp-server
-uv run pytest -q          # 收集 1804 个测试
+uv run pytest -q          # 收集 2503 个测试
 ```
 
 ### 验证可用
@@ -236,9 +236,9 @@ uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contra
 
 ## 基准测试
 
-> **方法论**：仅在 git-tracked 公共语料上运行 BM25/FTS5，禁用 graph、vectors 和 reranker。`current-generated-v2` 包含 112 个确定性查询：精确标题、摘要关键词、部分标题和 slug。`legacy-60-v1.json` 逐字保存原始 60 条查询文本及其 gold path，因此后续页面内容修改不会改变该门禁。忽略的个人页面和 `$LLM_WIKI_ROOT` 不参与，因此 clean clone 可复现相同语料。这不是 LoCoMo 或 LongMemEval；竞争对手数字来自不同数据集。
+> **历史 legacy 方法论**：仅在 git-tracked 公共语料上运行 BM25/FTS5，禁用 graph、vectors 和 reranker。`current-generated-v2` 当时包含 112 个确定性查询：精确标题、摘要关键词、部分标题和 slug。`legacy-60-v1.json` 逐字保存原始 60 条查询文本及其 gold path，因此后续页面内容修改不会改变该门禁。忽略的个人页面和 `$LLM_WIKI_ROOT` 不参与，因此 clean clone 可复现相同语料。这不是 LoCoMo 或 LongMemEval；竞争对手数字来自不同数据集。
 
-| 指标 | 当前 112 | Legacy 60 | agentmemory | Zep | Mem0 |
+| 历史指标 | 历史当前 112 | 历史 legacy 60 | agentmemory | Zep | Mem0 |
 |------|----------|-----------|-------------|-----|------|
 | Recall@1 | **94.6%** | n/a | n/a | n/a | n/a |
 | Recall@3 | **100.0%** | n/a | n/a | n/a | n/a |
@@ -247,9 +247,11 @@ uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contra
 | MRR | **0.9702** | **0.9694** | 0.882 | n/a | n/a |
 | 延迟 p50 | **6.3ms** | n/a | 14ms | 155ms | 880ms |
 
-回归下限：不断扩展的当前语料 Recall@5 >=95%，`legacy-60-v1` 为 100%。旧的 60 查询结果继续明确展示，不会被更大的新语料静默替换。
+这些是 legacy runner 的历史结果。默认命令现在运行 frozen retrieval-v2 benchmark。只有单独使用 `--legacy-only` 才会选择旧 gate；它与 `--semantic` 或 `--report` 组合时会以失败关闭。
 
-复现：`uv run python benchmark/run_benchmark.py`
+运行 retrieval-v2：`uv run python benchmark/run_benchmark.py`
+
+复现旧 gate：`uv run python benchmark/run_benchmark.py --legacy-only`
 
 ### MCP 智能体接口
 

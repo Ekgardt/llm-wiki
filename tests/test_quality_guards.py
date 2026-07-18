@@ -296,12 +296,14 @@ def test_architecture_no_recall_at_2():
     assert "vectors.json" not in guide
 
     structure = (ROOT / "docs" / "STRUCTURE.md").read_text(encoding="utf-8")
-    assert "vectors.json" not in structure
+    assert "cache/vectors.json" not in structure
+    assert "cache/evidence-graph/generations/<generation-id>/" in structure
+    assert "vectors.json" in structure
     search_source = (ROOT / "scripts" / "search_memory.py").read_text(encoding="utf-8")
     assert "legacy vectors.json" not in search_source
 
     contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
-    assert "1804 tests collected" in contributing
+    assert "2503 tests collected" in contributing
 
     integrations = (ROOT / "integrations" / "README.md").read_text(encoding="utf-8")
     assert "installer baseline" in integrations.casefold()
