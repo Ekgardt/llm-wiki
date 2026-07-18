@@ -32,7 +32,7 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
@@ -125,6 +125,7 @@ SUMMARY_RE = re.compile(
 # Same 384d as all-MiniLM-L6-v2 — no dimension change needed.
 # Query instruction prefix improves retrieval accuracy (per BGE model card).
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
+EMBEDDING_MODEL_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
 EMBEDDING_DIM = 384
 QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages:"
 
@@ -149,7 +150,9 @@ def _get_embedder():
         return _embedder_cache
     try:
         from sentence_transformers import SentenceTransformer
-        _embedder_cache = SentenceTransformer(EMBEDDING_MODEL)
+        _embedder_cache = SentenceTransformer(
+            EMBEDDING_MODEL, revision=EMBEDDING_MODEL_REVISION
+        )
         return _embedder_cache
     except Exception:
         return None
@@ -1626,6 +1629,9 @@ def search(
     generation_embedder: object | None = None,
     generation_model_id: str | None = None,
     generation_model_revision: str | None = None,
+    deadline_monotonic: float | None = None,
+    max_candidates: int | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[dict]:
     """Public search API — always routes through retrieval.retrieve()."""
     limit = _validate_search_limit(limit)
@@ -1652,6 +1658,9 @@ def search(
         generation_embedder=generation_embedder,
         generation_model_id=generation_model_id,
         generation_model_revision=generation_model_revision,
+        deadline_monotonic=deadline_monotonic,
+        max_candidates=max_candidates,
+        cancelled=cancelled,
     )
 
 
@@ -1798,7 +1807,14 @@ def _legacy_dense_hits(
             qvecs = _embed_texts([query], is_query=True)
             if qvecs:
                 lance_results = _lance_search(
-                    qvecs[0], limit * 3, project, since=since, as_of=as_of
+                    qvecs[0],
+                    limit * 3,
+                    project,
+                    since=since,
+                    as_of=as_of,
+                    expected_model_id=EMBEDDING_MODEL,
+                    expected_model_revision=EMBEDDING_MODEL_REVISION,
+                    expected_sources=_legacy_vector_source_membership(pages),
                 )
                 if lance_results:
                     vector_results = []
@@ -2353,59 +2369,85 @@ def _vector_search(
     return results[:limit]
 
 
+def _legacy_vector_documents(pages: list[Path]) -> dict[str, list[str]]:
+    documents = {
+        "source_paths": [],
+        "source_sha256": [],
+        "titles": [],
+        "summaries": [],
+        "projects": [],
+        "timestamps": [],
+        "texts": [],
+    }
+    ordered = sorted(
+        (page for page in pages if page.exists()),
+        key=lambda page: page.relative_to(ROOT).as_posix(),
+    )
+    for page in ordered:
+        raw = read_stable_bytes(page, MAX_PAGE_BYTES, label="legacy vector source")
+        content = raw.decode("utf-8", errors="ignore")
+        title, summary = _extract_title_and_summary(content, page.stem)
+        body = _strip_frontmatter(content)[:500]
+        project = _extract_frontmatter_field(content, PROJECT_FIELD_RE) or ""
+        timestamp = _extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or ""
+        documents["source_paths"].append(page.relative_to(ROOT).as_posix())
+        documents["source_sha256"].append(hashlib.sha256(raw).hexdigest())
+        documents["titles"].append(title)
+        documents["summaries"].append(summary)
+        documents["projects"].append(project.lower())
+        documents["timestamps"].append(timestamp[:10] if timestamp else "")
+        documents["texts"].append(f"{title}. {summary}. {body[:300]}")
+    return documents
+
+
+def _legacy_vector_source_membership(pages: list[Path]) -> list[tuple[str, str]]:
+    live = _legacy_vector_documents(pages)
+    return list(zip(live["source_paths"], live["source_sha256"], strict=True))
+
+
 def _load_or_build_vectors(pages: list[Path]) -> dict | None:
     """Load cached embeddings or build them fresh.
 
     v4.0: Uses memory-mapped .npy format for vectors (instant load) +
-    small .json for metadata. Rebuilds the cache when either file is
-    missing or the indexed page set has changed.
+    small .json for metadata. Existing artifacts are accepted only when every
+    metadata value still matches the configured model and live source bytes.
     """
-    current_paths = sorted(
-        p.relative_to(ROOT).as_posix() for p in pages if p.exists()
-    )
-
     # Try .npy format (fast, memory-mapped). Never convert mmap → Python list.
     if VECTOR_NPY.exists() and VECTOR_META.exists():
         try:
             import numpy as np
 
             cache_meta = json.loads(VECTOR_META.read_text(encoding="utf-8"))
-            paths = cache_meta.get("paths") or []
-            if sorted(paths) != current_paths:
-                return _build_vectors(pages)
-            needs_rebuild = any(
-                p.stat().st_mtime > VECTOR_NPY.stat().st_mtime
-                for p in pages if p.exists()
-            )
-            if needs_rebuild:
-                return _build_vectors(pages)
             vectors = np.load(str(VECTOR_NPY), mmap_mode="r", allow_pickle=False)
-            dims = cache_meta.get("dimensions")
-            model = cache_meta.get("model") or cache_meta.get("model_id")
-            if not isinstance(model, str) or not model:
-                return None
-            revision = cache_meta.get("model_revision") or cache_meta.get("revision")
-            if not isinstance(revision, str) or not revision:
-                return None
-            if dims is not None and (
-                not isinstance(dims, int)
+            live = _legacy_vector_documents(pages)
+            finite = bool(np.isfinite(vectors).all())
+            expected = {
+                "schema_version": "legacy-vectors/v1",
+                "model_id": EMBEDDING_MODEL,
+                "model_revision": EMBEDDING_MODEL_REVISION,
+                "dimensions": EMBEDDING_DIM,
+                "source_paths": live["source_paths"],
+                "source_sha256": live["source_sha256"],
+                "titles": live["titles"],
+                "summaries": live["summaries"],
+                "projects": live["projects"],
+                "timestamps": live["timestamps"],
+                "dtype": str(vectors.dtype),
+                "shape": list(vectors.shape),
+                "finite": finite,
+                "artifact_sha256": _artifact_descriptor(VECTOR_NPY, "vectors.npy")[
+                    "sha256"
+                ],
+            }
+            if (
+                cache_meta != expected
                 or vectors.ndim != 2
-                or vectors.shape[1] != dims
-                or vectors.shape[0] != len(paths)
+                or vectors.shape != (len(live["source_paths"]), EMBEDDING_DIM)
+                or vectors.dtype != np.dtype(np.float32)
+                or not finite
             ):
                 return None
-            if vectors.dtype != np.dtype(np.float32) and vectors.dtype.kind != "f":
-                return None
-            if not np.isfinite(vectors).all():
-                return None
-            source_hashes = cache_meta.get("source_sha256")
-            if not isinstance(source_hashes, list) or len(source_hashes) != len(paths):
-                return None
-            if any(not isinstance(item, str) or len(item) != 64 for item in source_hashes):
-                return None
-            cache_meta = dict(cache_meta)
-            cache_meta["vectors"] = vectors  # keep mmap / ndarray, not list
-            return cache_meta
+            return {**live, **cache_meta, "paths": live["source_paths"], "vectors": vectors}
         except Exception:
             return None
 
@@ -2420,62 +2462,59 @@ def _build_vectors(pages: list[Path]) -> dict | None:
 
     INDEX_DIR.mkdir(parents=True, exist_ok=True)
 
-    paths_list = []
-    texts_list = []
-    titles_list = []
-    summaries_list = []
-    projects_list = []
-    timestamps_list = []
-
-    for p in pages:
-        try:
-            content = p.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        title, summary = _extract_title_and_summary(content, p.stem)
-        body = _strip_frontmatter(content)[:500]  # truncate for embedding
-        project = _extract_frontmatter_field(content, PROJECT_FIELD_RE) or ""
-        timestamp = _extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or ""
-        timestamp = timestamp[:10] if timestamp else ""
-
-        text_for_embedding = f"{title}. {summary}. {body[:300]}"
-        paths_list.append(p.relative_to(ROOT).as_posix())
-        texts_list.append(text_for_embedding)
-        titles_list.append(title)
-        summaries_list.append(summary)
-        projects_list.append(project.lower())
-        timestamps_list.append(timestamp)
+    try:
+        live = _legacy_vector_documents(pages)
+    except (OSError, ValueError):
+        return None
+    texts_list = live.pop("texts")
 
     if not texts_list:
         return None
 
     # Embed all texts
     try:
-        vectors = embedder.encode(texts_list, show_progress_bar=False, convert_to_numpy=True)
+        import numpy as np
+
+        vectors = np.asarray(
+            embedder.encode(texts_list, show_progress_bar=False, convert_to_numpy=True)
+        )
     except Exception:
         return None
-
-    data = {
-        "paths": paths_list,
-        "titles": titles_list,
-        "summaries": summaries_list,
-        "projects": projects_list,
-        "timestamps": timestamps_list,
-        "model": EMBEDDING_MODEL,
-    }
+    if (
+        vectors.ndim != 2
+        or vectors.shape != (len(texts_list), EMBEDDING_DIM)
+        or vectors.dtype.kind not in "fiu"
+        or not np.isfinite(vectors).all()
+    ):
+        return None
+    vectors = np.ascontiguousarray(vectors, dtype=np.float32)
 
     # v4.0: Save vectors as binary .npy (memory-mapped, fast load).
     # Save metadata as small JSON (no vectors → small file).
     try:
-        import numpy as np
         INDEX_DIR.mkdir(parents=True, exist_ok=True)
-        np.save(str(VECTOR_NPY), vectors)
-        atomic_write(VECTOR_META, json.dumps(data))
+        np.save(str(VECTOR_NPY), vectors, allow_pickle=False)
+        metadata = {
+            "schema_version": "legacy-vectors/v1",
+            "model_id": EMBEDDING_MODEL,
+            "model_revision": EMBEDDING_MODEL_REVISION,
+            "dimensions": EMBEDDING_DIM,
+            **live,
+            "dtype": str(vectors.dtype),
+            "shape": list(vectors.shape),
+            "finite": bool(np.isfinite(vectors).all()),
+            "artifact_sha256": _artifact_descriptor(VECTOR_NPY, "vectors.npy")[
+                "sha256"
+            ],
+        }
+        atomic_write(
+            VECTOR_META,
+            json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        )
     except Exception:
-        pass  # best-effort cache
+        return None
 
-    data["vectors"] = vectors.tolist()
-    return data
+    return {**live, **metadata, "paths": live["source_paths"], "vectors": vectors}
 
 
 def main() -> int:
