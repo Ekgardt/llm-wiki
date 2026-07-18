@@ -392,7 +392,7 @@ def _to_context_item(compiled: CompiledItem) -> ContextItem:
         confidence="high",
         freshness="fresh",
         token_cost=len(compiled.text.encode("utf-8")),
-        mandatory=False,
+        mandatory=compiled.representation == "l2",
         representation=compiled.representation,
         parent_id=compiled.parent_id,
         priority_class="evidence" if compiled.representation != "l1" else "decision",

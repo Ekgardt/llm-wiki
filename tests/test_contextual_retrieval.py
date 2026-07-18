@@ -74,6 +74,26 @@ class TestGenerateContext:
         assert "JWT" in ctx
         assert "llm-wiki" in ctx
 
+    def test_legacy_generation_defaults_to_deterministic_and_rejects_llm_opt_in(
+        self, tmp_path, monkeypatch
+    ):
+        import contextual_retrieval
+        import llm_client
+
+        notes = tmp_path / "notes"
+        notes.mkdir()
+        (notes / "auth.md").write_text("# Auth\n\nLocal context.\n", encoding="utf-8")
+        monkeypatch.setattr(contextual_retrieval, "KNOWLEDGE_DIR", notes)
+        monkeypatch.setattr(
+            llm_client,
+            "call_llm",
+            lambda *_args, **_kwargs: pytest.fail("contextual LLM reached before ablation"),
+        )
+
+        assert contextual_retrieval.generate_context("auth") == "Topic: Auth."
+        with pytest.raises(ValueError, match="ablation"):
+            contextual_retrieval.generate_context("auth", use_llm=True)
+
     def test_context_for_missing_page(self, tmp_path, monkeypatch):
         import contextual_retrieval
 
@@ -200,6 +220,22 @@ class TestBuildAll:
         assert len(ctx_files) == 2
         assert all(not path.name.endswith("a.ctx") for path in ctx_files)
         assert all("." in path.stem for path in ctx_files)
+
+    def test_build_all_defaults_to_deterministic_and_rejects_llm_opt_in(
+        self, tmp_path, monkeypatch
+    ):
+        import contextual_retrieval
+
+        notes = tmp_path / "notes"
+        notes.mkdir()
+        (notes / "a.md").write_text("# A\n", encoding="utf-8")
+        cache = tmp_path / "ctx"
+        monkeypatch.setattr(contextual_retrieval, "KNOWLEDGE_DIR", notes)
+        monkeypatch.setattr(contextual_retrieval, "CONTEXT_DIR", cache)
+
+        assert contextual_retrieval.build_all_contexts(verbose=False)["generated"] == 1
+        with pytest.raises(ValueError, match="ablation"):
+            contextual_retrieval.build_all_contexts(use_llm=True, verbose=False)
 
     def test_duplicate_stems_write_distinct_hash_qualified_contexts(self, tmp_path, monkeypatch):
         import contextual_retrieval
@@ -448,9 +484,7 @@ class TestSnapshotContexts:
         assert contextual_retrieval.get_context(other, generation_dir=generation) is None
         assert contextual_retrieval.get_context("shared") == "legacy collision"
 
-    def test_reader_uses_full_model_descriptor_and_revision_for_llm_artifact(
-        self, tmp_path, monkeypatch
-    ):
+    def test_context_keys_include_mode_and_full_model_descriptor_revision(self):
         import contextual_retrieval
         from llm_client import ProviderDescriptor
 
@@ -463,34 +497,62 @@ class TestSnapshotContexts:
             candidate_index=2,
             fallback_from=("openai:model-b",),
         )
-        generation = tmp_path / "generation"
-        generation.mkdir()
-        monkeypatch.setenv("MEMORY_LLM_PROVIDER", "fake")
-        contextual_retrieval.build_snapshot_contexts(
-            _snapshot(source),
-            generation,
-            use_llm=True,
-            max_prompt_bytes=4096,
-            max_prompt_chars=4096,
-            disclosure_policy="local",
+        deterministic = contextual_retrieval.legacy_context_cache_path(
+            "page", source_sha256=source.record.sha256, logical_path="page.md"
+        )
+        llm = contextual_retrieval.legacy_context_cache_path(
+            "page",
+            source_sha256=source.record.sha256,
+            logical_path="page.md",
+            generation_mode="llm",
             model_descriptor=descriptor,
             model_revision="revision-1",
         )
 
-        assert "Captured" in contextual_retrieval.get_context(
-            source,
-            generation_dir=generation,
-            generation_mode="llm",
-            model_descriptor=descriptor,
-            model_revision="revision-1",
-        )
-        assert contextual_retrieval.get_context(
-            source,
-            generation_dir=generation,
+        assert deterministic != llm
+        assert llm != contextual_retrieval.legacy_context_cache_path(
+            "page",
+            source_sha256=source.record.sha256,
+            logical_path="page.md",
             generation_mode="llm",
             model_descriptor=descriptor,
             model_revision="revision-2",
-        ) is None
+        )
+        with pytest.raises(ValueError, match="source_sha256"):
+            contextual_retrieval.legacy_context_cache_path(
+                "page",
+                generation_mode="llm",
+                model_descriptor=descriptor,
+                model_revision="revision-1",
+            )
+
+    def test_snapshot_context_llm_opt_in_is_rejected_until_ablation(self, tmp_path):
+        import contextual_retrieval
+        from llm_client import ProviderDescriptor
+
+        source = _source("knowledge/notes/page.md", b"# Captured\n")
+        generation = tmp_path / "generation"
+        generation.mkdir()
+
+        with pytest.raises(ValueError, match="ablation"):
+            contextual_retrieval.build_snapshot_contexts(
+                _snapshot(source),
+                generation,
+                use_llm=True,
+                max_prompt_bytes=4096,
+                max_prompt_chars=4096,
+                disclosure_policy="local",
+                model_descriptor=ProviderDescriptor(
+                    provider="fake",
+                    model="model-a",
+                    capabilities={},
+                    inference_settings={},
+                    candidate_index=0,
+                    fallback_from=(),
+                ),
+                model_revision="revision-1",
+            )
+        assert list(generation.iterdir()) == []
 
     def test_generation_context_defaults_to_deterministic(self, monkeypatch):
         import contextual_retrieval
@@ -506,7 +568,7 @@ class TestSnapshotContexts:
 
         assert "Captured default" in contextual_retrieval.generate_context_for_source(source)
 
-    def test_llm_opt_in_requires_prompt_bounds_and_disclosure(self, monkeypatch):
+    def test_source_llm_opt_in_is_rejected_until_ablation(self, monkeypatch):
         import contextual_retrieval
         import llm_client
 
@@ -518,63 +580,8 @@ class TestSnapshotContexts:
             lambda *_args, **_kwargs: pytest.fail("invalid opt-in reached the LLM"),
         )
 
-        with pytest.raises(ValueError, match="max_prompt_bytes.*max_prompt_chars"):
+        with pytest.raises(ValueError, match="ablation"):
             contextual_retrieval.generate_context_for_source(source, use_llm=True)
-        with pytest.raises(ValueError, match="disclosure"):
-            contextual_retrieval.generate_context_for_source(
-                source,
-                use_llm=True,
-                max_prompt_bytes=4096,
-                max_prompt_chars=4096,
-            )
-
-    def test_llm_rejects_complete_oversized_prompt_without_call(self, monkeypatch):
-        import contextual_retrieval
-        import llm_client
-
-        source = _source("knowledge/notes/page.md", ("# " + "é" * 100).encode())
-        monkeypatch.delenv("MEMORY_LLM_PROVIDER", raising=False)
-        monkeypatch.setattr(
-            llm_client,
-            "call_llm",
-            lambda *_args, **_kwargs: pytest.fail("oversized prompt reached the LLM"),
-        )
-
-        with pytest.raises(ValueError, match="prompt exceeds"):
-            contextual_retrieval.generate_context_for_source(
-                source,
-                use_llm=True,
-                max_prompt_bytes=128,
-                max_prompt_chars=4096,
-                disclosure_policy="local",
-            )
-
-    def test_llm_receives_complete_bounded_captured_content(self, monkeypatch):
-        import contextual_retrieval
-        import llm_client
-
-        source = _source("knowledge/notes/page.md", b"# Secret captured phrase\n")
-        prompts = []
-
-        def fake_call(prompt, _system, max_tokens):
-            prompts.append((prompt, max_tokens))
-            return "Generated context."
-
-        monkeypatch.delenv("MEMORY_LLM_PROVIDER", raising=False)
-        monkeypatch.setattr(llm_client, "call_llm", fake_call)
-
-        assert (
-            contextual_retrieval.generate_context_for_source(
-                source,
-                use_llm=True,
-                max_prompt_bytes=4096,
-                max_prompt_chars=4096,
-                disclosure_policy="remote",
-            )
-            == "Generated context."
-        )
-        assert "Secret captured phrase" in prompts[0][0]
-
     def test_generation_read_rejects_malformed_source_object(self, tmp_path):
         import contextual_retrieval
 
@@ -720,3 +727,17 @@ class TestSnapshotContexts:
             )
 
         assert marker.read_text(encoding="utf-8") == "keep"
+
+
+def test_contextual_cli_defaults_to_deterministic_and_rejects_llm_flag(monkeypatch):
+    import contextual_retrieval
+
+    calls = []
+    monkeypatch.setattr(contextual_retrieval, "build_all_contexts", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(sys, "argv", ["contextual_retrieval.py", "--all"])
+    assert contextual_retrieval.main() == 0
+    assert calls == [{"use_llm": False}]
+
+    monkeypatch.setattr(sys, "argv", ["contextual_retrieval.py", "--all", "--llm"])
+    with pytest.raises(SystemExit):
+        contextual_retrieval.main()

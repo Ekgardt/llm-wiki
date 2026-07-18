@@ -235,6 +235,23 @@ class TestBuildAllTiers:
         assert all("." in path.stem for path in l1_files)
         assert all(not path.name.endswith("a.l1.md") for path in l1_files)
 
+    def test_build_all_defaults_to_deterministic_and_llm_mode_fails_before_write(
+        self, tmp_path, monkeypatch
+    ):
+        import build_tiers
+
+        notes = tmp_path / "notes"
+        notes.mkdir()
+        (notes / "a.md").write_text("# A\n\nBody.\n", encoding="utf-8")
+        tiers = tmp_path / "tiers"
+        monkeypatch.setattr(build_tiers, "KNOWLEDGE_DIR", notes)
+        monkeypatch.setattr(build_tiers, "TIERS_DIR", tiers)
+
+        assert build_tiers.build_all_tiers(verbose=False)["generated"] == 1
+        with pytest.raises(ValueError, match="descriptor.*revision"):
+            build_tiers.build_all_tiers(use_llm=True, verbose=False)
+        assert len(list(tiers.glob("*.l1.md"))) == 1
+
     def test_duplicate_stems_use_captured_relative_paths(self, tmp_path, monkeypatch):
         import build_tiers
 
@@ -272,6 +289,56 @@ class TestBuildAllTiers:
                     source_sha256="a" * 64,
                     logical_path=logical_path,
                 )
+
+    def test_legacy_tier_key_includes_generation_mode_and_full_model_revision(
+        self, tmp_path, monkeypatch
+    ):
+        import build_tiers
+
+        monkeypatch.setattr(build_tiers, "TIERS_DIR", tmp_path)
+        descriptor = _model_descriptor(model="model-a")
+        deterministic = build_tiers.tier_legacy_cache_path(
+            "page", source_sha256="a" * 64, logical_path="page.md"
+        )
+        generated = build_tiers.tier_legacy_cache_path(
+            "page",
+            source_sha256="a" * 64,
+            logical_path="page.md",
+            generation_mode="llm",
+            model_descriptor=descriptor,
+            model_revision="revision-1",
+        )
+
+        assert deterministic != generated
+        assert generated != build_tiers.tier_legacy_cache_path(
+            "page",
+            source_sha256="a" * 64,
+            logical_path="page.md",
+            generation_mode="llm",
+            model_descriptor=descriptor,
+            model_revision="revision-2",
+        )
+        with pytest.raises(ValueError, match="source_sha256"):
+            build_tiers.tier_legacy_cache_path(
+                "page",
+                generation_mode="llm",
+                model_descriptor=descriptor,
+                model_revision="revision-1",
+            )
+
+
+def test_tier_cli_defaults_to_deterministic_and_llm_flag_fails_closed(monkeypatch):
+    import build_tiers
+
+    calls = []
+    monkeypatch.setattr(build_tiers, "build_all_tiers", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(sys, "argv", ["build_tiers.py", "--all"])
+    assert build_tiers.main() == 0
+    assert calls == [{"use_llm": False}]
+
+    monkeypatch.setattr(sys, "argv", ["build_tiers.py", "--all", "--llm"])
+    with pytest.raises(SystemExit):
+        build_tiers.main()
 
 
 class TestCapturedSourceTiers:
