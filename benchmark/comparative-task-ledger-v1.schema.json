@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/comparative-task-ledger-v1.json",
+  "type": "object",
+  "required": ["adapter_id", "adapter_provenance", "attempt", "failure", "input_fingerprint", "inputs", "metrics", "outcome", "seed", "task_id"],
+  "properties": {
+    "adapter_id": {"enum": ["grep-read", "graphify-pinned", "llm-wiki-current", "evidence-graph-only", "hybrid-retrieval", "adaptive-context-compiler"]},
+    "adapter_provenance": {
+      "type": "object",
+      "required": ["configuration_sha256", "implementation_status", "source_revision"],
+      "properties": {
+        "configuration_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "implementation_status": {"enum": ["contract-only", "implemented-pinned"]},
+        "source_revision": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"}
+      },
+      "additionalProperties": false
+    },
+    "attempt": {"type": "integer", "minimum": 1, "maximum": 100},
+    "failure": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["category", "code", "message", "phase", "retryable"],
+          "properties": {
+            "category": {"enum": ["backend", "crash", "orchestration", "timeout", "validation"]},
+            "code": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,63}$"},
+            "message": {"type": "string", "minLength": 1, "maxLength": 500},
+            "phase": {"enum": ["evaluation", "index", "query", "setup", "smoke", "task"]},
+            "retryable": {"type": "boolean"}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "input_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "inputs": {
+      "type": "object",
+      "required": ["commit", "context_budget", "hardware", "model", "repository", "retry_policy", "task"],
+      "properties": {
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "context_budget": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "hardware": {"type": "string", "minLength": 3, "maxLength": 200},
+        "model": {"type": "string", "minLength": 3, "maxLength": 200},
+        "repository": {"type": "string", "minLength": 3, "maxLength": 500},
+        "retry_policy": {
+          "type": "object",
+          "required": ["backoff", "max_attempts"],
+          "properties": {
+            "backoff": {"enum": ["none", "fixed", "exponential"]},
+            "max_attempts": {"type": "integer", "minimum": 1, "maximum": 10}
+          },
+          "additionalProperties": false
+        },
+        "task": {"type": "string", "minLength": 1, "maxLength": 2000}
+      },
+      "additionalProperties": false
+    },
+    "metrics": {
+      "type": "object",
+      "required": ["blinded_factual_correctness", "cache_tokens", "edge_precision", "edge_recall", "executable_task_success", "freshness", "incremental_time_ms", "index_size_bytes", "indexing_time_ms", "peak_ram_bytes", "query_latency_ms", "retrieval_quality", "uncached_input_tokens", "uncached_output_tokens"],
+      "properties": {
+        "blinded_factual_correctness": {"oneOf": [{"type": "number", "minimum": 0, "maximum": 1}, {"type": "null"}]},
+        "cache_tokens": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]},
+        "edge_precision": {"oneOf": [{"type": "number", "minimum": 0, "maximum": 1}, {"type": "null"}]},
+        "edge_recall": {"oneOf": [{"type": "number", "minimum": 0, "maximum": 1}, {"type": "null"}]},
+        "executable_task_success": {"oneOf": [{"type": "boolean"}, {"type": "null"}]},
+        "freshness": {"oneOf": [{"type": "number", "minimum": 0, "maximum": 1}, {"type": "null"}]},
+        "incremental_time_ms": {"oneOf": [{"type": "number", "minimum": 0}, {"type": "null"}]},
+        "index_size_bytes": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]},
+        "indexing_time_ms": {"oneOf": [{"type": "number", "minimum": 0}, {"type": "null"}]},
+        "peak_ram_bytes": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]},
+        "query_latency_ms": {"oneOf": [{"type": "number", "minimum": 0}, {"type": "null"}]},
+        "retrieval_quality": {"oneOf": [{"type": "number", "minimum": 0, "maximum": 1}, {"type": "null"}]},
+        "uncached_input_tokens": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]},
+        "uncached_output_tokens": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]}
+      },
+      "additionalProperties": false
+    },
+    "outcome": {"enum": ["abstained", "failure", "orchestration-pass", "success"]},
+    "seed": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+    "task_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,127}$"}
+  },
+  "additionalProperties": false
+}

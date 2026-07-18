@@ -136,8 +136,26 @@
     },
     "public_claim_gate": {
       "type": "object",
-      "required": ["hard_gates", "quality_lower_bound_basis_points_strictly_greater_than", "requires_gate_f", "requires_real_evidence", "token_ratio_upper_bound_basis_points_strictly_less_than"],
+      "required": ["comparisons", "consumed_report_fields", "hard_gates", "quality_lower_bound_basis_points_strictly_greater_than", "requires_gate_f", "requires_real_evidence", "token_ratio_upper_bound_basis_points_strictly_less_than"],
       "properties": {
+        "comparisons": {
+          "type": "object",
+          "required": ["quality", "token_ratio"],
+          "properties": {
+            "quality": {"const": "10000*quality_difference_lower_confidence_bound>-200"},
+            "token_ratio": {"const": "10000*token_ratio_upper_confidence_bound<9000"}
+          },
+          "additionalProperties": false
+        },
+        "consumed_report_fields": {
+          "type": "object",
+          "required": ["quality", "token_ratio"],
+          "properties": {
+            "quality": {"const": "quality_difference_lower_confidence_bound"},
+            "token_ratio": {"const": "token_ratio_upper_confidence_bound"}
+          },
+          "additionalProperties": false
+        },
         "hard_gates": {
           "type": "array",
           "minItems": 3,
@@ -168,30 +186,126 @@
     },
     "statistics": {
       "type": "object",
-      "required": ["confidence_level_basis_points", "guidance", "interval_methods", "pairing_unit", "resamples", "seeds"],
+      "required": ["agent_seeds", "claim_gating_method", "estimands", "guidance", "interval", "missing_and_failures", "pairing", "randomization_diagnostic", "resampling", "rng"],
       "properties": {
-        "confidence_level_basis_points": {"const": 9500},
+        "agent_seeds": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 10,
+          "uniqueItems": true,
+          "items": {"type": "integer", "minimum": 0, "maximum": 2147483647}
+        },
+        "claim_gating_method": {"const": "paired-hierarchical-percentile-bootstrap"},
+        "estimands": {
+          "type": "object",
+          "required": ["quality_difference", "token_ratio"],
+          "properties": {
+            "quality_difference": {
+              "type": "object",
+              "required": ["baseline", "candidate", "formula", "scale"],
+              "properties": {
+                "baseline": {"const": "same score for pinned Graphify"},
+                "candidate": {"const": "terminal executable success when graded, otherwise blinded factual correctness"},
+                "formula": {"const": "equal-weight mean over pairing keys of matched-seed mean(candidate-baseline)"},
+                "scale": {"const": "proportion-points"}
+              },
+              "additionalProperties": false
+            },
+            "token_ratio": {
+              "type": "object",
+              "required": ["formula", "per_attempt_total", "retry_accounting", "scale"],
+              "properties": {
+                "formula": {"const": "sum(candidate attempt totals)/sum(pinned Graphify attempt totals) over the resample"},
+                "per_attempt_total": {"const": "uncached_input_tokens+uncached_output_tokens+cache_tokens"},
+                "retry_accounting": {"const": "include every attempted retry"},
+                "scale": {"const": "ratio"}
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
         "guidance": {
           "type": "array",
           "minItems": 3,
           "maxItems": 3,
           "items": {"type": "string", "pattern": "^https://"}
         },
-        "interval_methods": {
-          "type": "array",
-          "minItems": 2,
-          "maxItems": 2,
-          "uniqueItems": true,
-          "items": {"enum": ["paired-bootstrap", "paired-randomization"]}
+        "interval": {
+          "type": "object",
+          "required": ["construction", "familywise_confidence_level_basis_points", "per_estimand_one_sided_confidence_level_basis_points", "quality_quantile_basis_points", "quality_tail", "token_ratio_quantile_basis_points", "token_ratio_tail"],
+          "properties": {
+            "construction": {"const": "percentile"},
+            "familywise_confidence_level_basis_points": {"const": 9500},
+            "per_estimand_one_sided_confidence_level_basis_points": {"const": 9750},
+            "quality_quantile_basis_points": {"const": 250},
+            "quality_tail": {"const": "lower"},
+            "token_ratio_quantile_basis_points": {"const": 9750},
+            "token_ratio_tail": {"const": "upper"}
+          },
+          "additionalProperties": false
         },
-        "pairing_unit": {"const": "repository-commit-task-seed"},
-        "resamples": {"type": "integer", "minimum": 10000, "maximum": 10000},
-        "seeds": {
-          "type": "array",
-          "minItems": 3,
-          "maxItems": 10,
-          "uniqueItems": true,
-          "items": {"type": "integer", "minimum": 0, "maximum": 2147483647}
+        "missing_and_failures": {
+          "type": "object",
+          "required": ["failed_attempt_tokens", "failed_terminal_quality", "missing_expected_ledger", "missing_quality_metric", "missing_token_metric", "zero_graphify_token_denominator"],
+          "properties": {
+            "failed_attempt_tokens": {"const": "include observed consumption"},
+            "failed_terminal_quality": {"const": "zero"},
+            "missing_expected_ledger": {"const": "invalidate evidence and close public gate"},
+            "missing_quality_metric": {"const": "invalidate quality bound and close public gate"},
+            "missing_token_metric": {"const": "invalidate token bound and close public gate"},
+            "zero_graphify_token_denominator": {"const": "invalidate token bound and close public gate"}
+          },
+          "additionalProperties": false
+        },
+        "pairing": {
+          "type": "object",
+          "required": ["key", "require_identical_seed_sets", "seed_role"],
+          "properties": {
+            "key": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 3,
+              "items": {"enum": ["repository", "commit", "task"]}
+            },
+            "require_identical_seed_sets": {"const": true},
+            "seed_role": {"const": "matched-repeated-run"}
+          },
+          "additionalProperties": false
+        },
+        "randomization_diagnostic": {
+          "type": "object",
+          "required": ["confidence_set_inversion", "gating", "interpretation", "method", "tail"],
+          "properties": {
+            "confidence_set_inversion": {"const": false},
+            "gating": {"const": false},
+            "interpretation": {"const": "diagnostic-p-value-only"},
+            "method": {"const": "paired-sign-flip-on-cluster-quality-differences"},
+            "tail": {"const": "two-sided"}
+          },
+          "additionalProperties": false
+        },
+        "resampling": {
+          "type": "object",
+          "required": ["candidate_baseline_pairing", "cluster_aggregation", "cluster_level", "resamples", "within_cluster_level"],
+          "properties": {
+            "candidate_baseline_pairing": {"const": "same-cluster-occurrences-and-seed-indices"},
+            "cluster_aggregation": {"const": "equal-weight-mean"},
+            "cluster_level": {"const": "resample-pairing-keys-with-replacement"},
+            "resamples": {"const": 10000},
+            "within_cluster_level": {"const": "resample-matched-seed-indices-with-replacement"}
+          },
+          "additionalProperties": false
+        },
+        "rng": {
+          "type": "object",
+          "required": ["algorithm", "bootstrap_seed_hex", "randomization_seed_hex"],
+          "properties": {
+            "algorithm": {"const": "sha256-counter-v1"},
+            "bootstrap_seed_hex": {"const": "8f507f48dc6f8f5a73ec78f7d58f3cf4"},
+            "randomization_seed_hex": {"const": "299f31ed0b43d65e46945f85e51b9def"}
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
