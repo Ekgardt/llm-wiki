@@ -955,19 +955,21 @@ def _deduplicate_by_slug(results: list[dict]) -> list[dict]:
 
 
 def _maybe_rerank(query: str, results: list[dict], limit: int) -> list[dict]:
-    """Apply cross-encoder reranker if available, else return results as-is.
-
-    The reranker re-scores top-20 candidates by jointly encoding (query, doc)
-    pairs — much more precise than bi-encoder similarity. Optional dependency.
-    """
+    """Apply cross-encoder reranker if available, else return results as-is."""
     if not results or len(results) <= 1:
         return results[:limit]
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from reranker import rerank, reranker_available
+        from reranker import rerank, should_rerank
 
-        if reranker_available():
-            results = rerank(query, results, limit=limit)
+        apply, _reason = should_rerank(
+            profile=str(results[0].get("requested_mode") or "HYBRID"),
+            candidates=results,
+            analysis_intents=(),
+            rerank_enabled=True,
+        )
+        if apply:
+            results = rerank(query, results, limit=max(limit, len(results)))
     except Exception:
         pass
 
@@ -1570,7 +1572,7 @@ def search(
     generation_model_id: str | None = None,
     generation_model_revision: str | None = None,
 ) -> list[dict]:
-    """Compatibility wrapper over the Task 11 retrieval orchestrator."""
+    """Public search API — always routes through retrieval.retrieve()."""
     limit = _validate_search_limit(limit)
     if not query or not query.strip():
         return []
@@ -1596,6 +1598,174 @@ def search(
         generation_model_id=generation_model_id,
         generation_model_revision=generation_model_revision,
     )
+
+
+def _legacy_lexical_hits(
+    query: str,
+    *,
+    scope: str = "all",
+    limit: int = 10,
+    force_rebuild: bool = False,
+    project: str | None = None,
+    since: str | None = None,
+    as_of: str | None = None,
+    page_paths: list[Path] | None = None,
+) -> list[dict]:
+    """Independent lexical backend used by retrieve() — no dense/graph fusion."""
+    if not query or not query.strip():
+        return []
+
+    pages = page_paths if page_paths is not None else _collect_pages(scope)
+    if not pages:
+        return []
+
+    if force_rebuild or _needs_rebuild(pages):
+        _build_index(pages)
+
+    conn = sqlite3.connect(str(INDEX_FILE))
+    fts_terms = []
+    for w in query.split():
+        if not w:
+            continue
+        safe = w.replace('"', '""')
+        fts_terms.append(f'"{safe}"')
+    fts_query = " ".join(fts_terms)
+    query_word_count = len([w for w in query.split() if w])
+    fetch_multiplier = 5 if query_word_count <= 3 else 3
+    bm25_raw = conn.execute(
+        """
+        SELECT path, title, summary, project, timestamp, bm25(pages) as rank
+        FROM pages
+        WHERE pages MATCH ?
+        ORDER BY rank
+        LIMIT ?
+        """,
+        (fts_query, limit * fetch_multiplier),
+    ).fetchall()
+    conn.close()
+
+    query_lower = query.lower().strip()
+    query_words = set(query_lower.split())
+    bm25_results: list[dict] = []
+    for row in bm25_raw:
+        path, title, summary, proj, ts, rank = row
+        if since and ts:
+            try:
+                if ts[:10] < since:
+                    continue
+            except (IndexError, TypeError):
+                pass
+        if as_of and ts:
+            try:
+                if ts[:10] > as_of[:10]:
+                    continue
+            except (IndexError, TypeError):
+                pass
+        if as_of and not _valid_as_of(path, as_of):
+            continue
+        score = -rank
+        if project and proj and proj.lower() == project.lower():
+            score *= 2.0
+        title_lower = (title or "").lower().strip()
+        title_words = set(title_lower.split())
+        if title_lower == query_lower:
+            score *= 5.0
+        elif query_words and query_words.issubset(title_words):
+            score *= 3.0
+        elif title_words and title_words.issubset(query_words):
+            score *= 2.0
+        filename_slug = Path(path).stem.lower().replace("-", " ")
+        if filename_slug == query_lower:
+            score *= 10.0
+        elif query_words and query_words.issubset(set(filename_slug.split())):
+            score *= 4.0
+        if "knowledge/notes/" in path:
+            score *= 1.3
+        score *= _authority_weight(path)
+        bm25_results.append(
+            {
+                "path": path,
+                "title": title,
+                "summary": summary[:120] if summary else "",
+                "score": round(score, 2),
+                "bm25_score": round(score, 2),
+                "project": proj or "",
+                "timestamp": ts or "",
+                "candidate_id": Path(path).stem,
+                "generation": "legacy",
+            }
+        )
+    bm25_results.sort(key=lambda x: (-x["score"], x["path"]))
+    # Prefer filename exact matches first while remaining a pure ranked list.
+    query_normalized = query.lower().strip().replace(" ", "-")
+    filename_matches = [
+        r for r in bm25_results[:10] if Path(r["path"]).stem.lower() == query_normalized
+    ]
+    if filename_matches:
+        filename_matches.sort(
+            key=lambda r: (
+                0 if "knowledge/notes/" in r["path"] else 1,
+                -r["score"],
+                r["path"],
+            )
+        )
+        best = filename_matches[0]
+        rest = [x for x in bm25_results if x["path"] != best["path"]]
+        bm25_results = [best] + rest
+    return bm25_results[: max(limit * 3, limit)]
+
+
+def _legacy_dense_hits(
+    query: str,
+    *,
+    scope: str = "all",
+    limit: int = 10,
+    project: str | None = None,
+    since: str | None = None,
+    as_of: str | None = None,
+    page_paths: list[Path] | None = None,
+) -> list[dict] | None:
+    """Independent dense backend used by retrieve() — returns None if unavailable."""
+    if not query or not query.strip():
+        return None
+    if not _have_sentence_transformers():
+        return None
+    pages = page_paths if page_paths is not None else _collect_pages(scope)
+    if not pages:
+        return None
+    vector_results = None
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from lance_store import have_lancedb
+        from lance_store import vector_search as _lance_search
+
+        if have_lancedb():
+            qvecs = _embed_texts([query], is_query=True)
+            if qvecs:
+                lance_results = _lance_search(
+                    qvecs[0], limit * 3, project, since=since, as_of=as_of
+                )
+                if lance_results:
+                    vector_results = []
+                    for item in lance_results:
+                        row = dict(item)
+                        row["vector_score"] = row.get("vector_score", row.get("score"))
+                        row["candidate_id"] = Path(str(row.get("path") or "")).stem
+                        row["generation"] = "legacy"
+                        vector_results.append(row)
+    except Exception:
+        vector_results = None
+    if vector_results is None:
+        try:
+            vector_results = _vector_search(query, pages, limit * 3, project, since, as_of)
+            if vector_results is not None:
+                for row in vector_results:
+                    row["vector_score"] = row.get("score")
+                    row.setdefault("candidate_id", Path(str(row.get("path") or "")).stem)
+                    row["generation"] = "legacy"
+        except Exception:
+            return None
+    return vector_results
 
 
 def _search_backends(
@@ -1919,7 +2089,9 @@ def _legacy_search(
             if have_lancedb():
                 qvecs = _embed_texts([query], is_query=True)
                 if qvecs:
-                    lance_results = _lance_search(qvecs[0], limit * 3, project)
+                    lance_results = _lance_search(
+                        qvecs[0], limit * 3, project, since=since, as_of=as_of
+                    )
                     if lance_results:
                         vector_results = lance_results
         except Exception:

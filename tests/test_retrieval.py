@@ -26,6 +26,19 @@ PROFILES = (
     "CACHED_FULL",
 )
 
+PROFILE_EXPECTED_SIGNALS = {
+    "DIRECT": ("lexical",),
+    "EXACT": ("lexical",),
+    "BASE": ("lexical",),
+    "HYBRID": ("lexical", "dense"),
+    "GRAPH": ("lexical", "graph"),
+    "TEMPORAL": ("lexical",),
+    "REPO_MAP": ("lexical", "graph"),
+    "IMPACT": ("lexical", "graph"),
+    "GLOBAL": ("lexical", "dense", "graph"),
+    "CACHED_FULL": ("lexical",),
+}
+
 
 def _hit(
     *,
@@ -37,8 +50,9 @@ def _hit(
     byte_start: int = 0,
     byte_end: int = 10,
     parent_id: str | None = None,
+    **extra: object,
 ) -> dict[str, object]:
-    return {
+    row: dict[str, object] = {
         "candidate_id": candidate_id,
         "parent_id": parent_id or path,
         "relative_path": path,
@@ -48,6 +62,8 @@ def _hit(
         "byte_end": byte_end,
         "score": score,
     }
+    row.update(extra)
+    return row
 
 
 def test_profiles_are_closed_and_exported() -> None:
@@ -71,6 +87,14 @@ def test_profiles_are_closed_and_exported() -> None:
         ("impact of changing search_memory.py", "impact", "IMPACT"),
         ("synthesize architecture across all projects", "global_synthesis", "GLOBAL"),
         ("auth decision", None, "BASE"),
+        # RU / ZH / fullwidth question mark
+        ("Что такое auth decision?", "question", "HYBRID"),
+        ("什么是 auth decision？", "question", "HYBRID"),
+        ("auth decision？", "question", "HYBRID"),
+        # filename, sqlite path, snake_case
+        ("auth-decision.md", "exact_identifier", "EXACT"),
+        ("cache/evidence-graph/catalog.sqlite3", "exact_identifier", "EXACT"),
+        ("search_memory_rebuild", "exact_identifier", "EXACT"),
     ],
 )
 def test_analyze_query_is_deterministic(query: str, intent: str | None, profile: str) -> None:
@@ -89,23 +113,30 @@ def test_quoted_phrases_and_identifiers_are_extracted() -> None:
     import retrieval
 
     analysis = retrieval.analyze_query(
-        'Find "exact phrase" and scripts/search_memory.py plus CamelCaseSymbol'
+        'Find "exact phrase" and scripts/search_memory.py plus CamelCaseSymbol '
+        "and snake_case_id and notes/page.md and run/queue.sqlite3"
     )
     assert "exact phrase" in analysis.quoted_phrases
     assert "scripts/search_memory.py" in analysis.exact_identifiers
     assert "CamelCaseSymbol" in analysis.exact_identifiers
+    assert "snake_case_id" in analysis.exact_identifiers
+    assert "notes/page.md" in analysis.exact_identifiers
+    assert "run/queue.sqlite3" in analysis.exact_identifiers
+    assert "page.md" in analysis.exact_identifiers or any(
+        item.endswith("page.md") for item in analysis.exact_identifiers
+    )
 
 
-def test_rrf_keeps_raw_backend_scores_and_uses_larger_is_better() -> None:
+def test_rrf_is_rank_only_and_keeps_raw_backend_fields_separate() -> None:
     import retrieval
 
     lexical = [
-        _hit(candidate_id="c-a", path="a.md", score=12.5),
-        _hit(candidate_id="c-b", path="b.md", score=4.0),
+        _hit(candidate_id="c-a", path="a.md", score=12.5, bm25_score=12.5),
+        _hit(candidate_id="c-b", path="b.md", score=4.0, bm25_score=4.0),
     ]
     dense = [
-        _hit(candidate_id="c-b", path="b.md", score=0.91),
-        _hit(candidate_id="c-a", path="a.md", score=0.40),
+        _hit(candidate_id="c-b", path="b.md", score=0.91, vector_score=0.91),
+        _hit(candidate_id="c-a", path="a.md", score=0.40, vector_score=0.40),
     ]
     fused = retrieval.fuse_rrf(lexical=lexical, dense=dense, graph=None)
     assert fused[0].candidate_id == "c-a"
@@ -115,34 +146,56 @@ def test_rrf_keeps_raw_backend_scores_and_uses_larger_is_better() -> None:
     assert fused[0].vector_score == 0.40
     assert fused[0].rrf_score > fused[1].rrf_score
     assert fused[0].final_score == fused[0].rrf_score
-    assert fused[0].final_score > fused[1].final_score
+    assert not hasattr(fused[0], "vector_distance")
+    # Raw magnitudes must not change rank-only fusion vs pure ranks.
+    lexical_huge = [
+        _hit(candidate_id="c-a", path="a.md", score=9999.0),
+        _hit(candidate_id="c-b", path="b.md", score=0.001),
+    ]
+    dense_tiny = [
+        _hit(candidate_id="c-b", path="b.md", score=0.0001),
+        _hit(candidate_id="c-a", path="a.md", score=0.00001),
+    ]
+    fused2 = retrieval.fuse_rrf(lexical=lexical_huge, dense=dense_tiny, graph=None)
+    assert [item.candidate_id for item in fused2] == [item.candidate_id for item in fused]
+    assert fused2[0].rrf_score == fused[0].rrf_score
 
 
 def test_rrf_ties_are_broken_deterministically_by_candidate_id() -> None:
     import retrieval
 
-    # Zero graph boosts yield equal RRF contributions; tie-break by candidate_id.
+    # Rank-only ignores raw boost magnitudes.
     graph = [
-        {**_hit(candidate_id="c-z", path="z.md", score=0.0), "graph_boost": 0.0},
-        {**_hit(candidate_id="c-a", path="a.md", score=0.0), "graph_boost": 0.0},
+        {**_hit(candidate_id="c-z", path="z.md", score=0.0), "graph_boost": 99.0},
+        {**_hit(candidate_id="c-a", path="a.md", score=0.0), "graph_boost": 0.01},
     ]
-    fused = retrieval.fuse_rrf(lexical=None, dense=None, graph=graph)
-    assert [item.candidate_id for item in fused] == ["c-a", "c-z"]
+    by_rank = retrieval.fuse_rrf(lexical=None, dense=None, graph=graph)
+    assert [item.candidate_id for item in by_rank] == ["c-z", "c-a"]
+    assert by_rank[0].graph_score == 99.0
+    assert by_rank[1].graph_score == 0.01
+
+    # Symmetric ranks + equal weights → equal RRF; tie-break by candidate_id.
+    original_bm25 = retrieval.BM25_WEIGHT
+    original_dense = retrieval.DENSE_WEIGHT
+    try:
+        retrieval.BM25_WEIGHT = 1.0
+        retrieval.DENSE_WEIGHT = 1.0
+        fused = retrieval.fuse_rrf(
+            lexical=[
+                _hit(candidate_id="c-z", path="z.md", score=1.0),
+                _hit(candidate_id="c-a", path="a.md", score=1.0),
+            ],
+            dense=[
+                _hit(candidate_id="c-a", path="a.md", score=1.0),
+                _hit(candidate_id="c-z", path="z.md", score=1.0),
+            ],
+            graph=None,
+        )
+    finally:
+        retrieval.BM25_WEIGHT = original_bm25
+        retrieval.DENSE_WEIGHT = original_dense
     assert fused[0].rrf_score == fused[1].rrf_score
-
-
-def test_rrf_preserves_distance_field_separately_from_similarity() -> None:
-    import retrieval
-
-    dense = [
-        {
-            **_hit(candidate_id="c-a", path="a.md", score=0.8),
-            "distance": 0.2,
-        }
-    ]
-    fused = retrieval.fuse_rrf(lexical=[], dense=dense, graph=None)
-    assert fused[0].vector_score == 0.8
-    assert fused[0].vector_distance == 0.2
+    assert [item.candidate_id for item in fused] == ["c-a", "c-z"]
 
 
 def test_retrieve_reports_requested_effective_signals_fallback_and_generation() -> None:
@@ -217,6 +270,81 @@ def test_retrieve_uses_identical_hard_filters_for_lexical_and_dense() -> None:
     }
 
 
+def test_retrieve_runs_lexical_and_dense_separately() -> None:
+    import retrieval
+
+    calls: list[str] = []
+
+    def lexical(**_kwargs):
+        calls.append("lexical")
+        return [_hit(candidate_id="c-a", path="a.md", score=2.0)]
+
+    def dense(**_kwargs):
+        calls.append("dense")
+        return [_hit(candidate_id="c-b", path="b.md", score=0.9)]
+
+    def fused_backend(**_kwargs):
+        raise AssertionError("must not call a pre-fused backend")
+
+    result = retrieval.retrieve(
+        "needle",
+        requested_profile="HYBRID",
+        lexical_backend=lexical,
+        dense_backend=dense,
+        graph_backend=None,
+        corpus_generation="gen-sep",
+        rerank_enabled=False,
+    )
+    assert calls == ["lexical", "dense"]
+    assert set(result.trace.signals_used) == {"lexical", "dense"}
+    assert result.trace.effective_mode == "HYBRID"
+    assert result.trace.fallback_reason is None
+    assert {c.candidate_id for c in result.candidates} == {"c-a", "c-b"}
+
+
+@pytest.mark.parametrize("profile", PROFILES)
+def test_all_profiles_request_declared_signals_behaviorally(profile: str) -> None:
+    import retrieval
+
+    calls: list[str] = []
+
+    def lexical(**_kwargs):
+        calls.append("lexical")
+        return [_hit(candidate_id="c-lex", path="lex.md", score=3.0)]
+
+    def dense(**_kwargs):
+        calls.append("dense")
+        return [_hit(candidate_id="c-den", path="den.md", score=0.8)]
+
+    def graph(**_kwargs):
+        calls.append("graph")
+        return [
+            {
+                **_hit(candidate_id="c-g", path="g.md", score=0.0),
+                "graph_boost": 0.2,
+            }
+        ]
+
+    result = retrieval.retrieve(
+        "probe",
+        requested_profile=profile,
+        lexical_backend=lexical,
+        dense_backend=dense,
+        graph_backend=graph,
+        corpus_generation="gen-profiles",
+        graph_enabled=True,
+        rerank_enabled=False,
+    )
+    expected = PROFILE_EXPECTED_SIGNALS[profile]
+    assert result.trace.requested_mode == profile
+    assert result.trace.effective_mode == profile
+    assert result.trace.signals_used == expected
+    assert result.trace.fallback_reason is None
+    assert result.trace.corpus_generation == "gen-profiles"
+    assert tuple(calls) == expected
+    assert result.candidates
+
+
 def test_retrieve_honors_graph_disablement_even_for_graph_profile() -> None:
     import retrieval
 
@@ -241,7 +369,8 @@ def test_retrieve_honors_graph_disablement_even_for_graph_profile() -> None:
     assert result.trace.fallback_reason == "graph_disabled"
 
 
-def test_legacy_search_wrapper_preserves_dict_shape(tmp_path, monkeypatch) -> None:
+def test_public_search_goes_through_retrieve(tmp_path, monkeypatch) -> None:
+    import retrieval
     import search_memory
 
     vault = tmp_path / "vault"
@@ -258,6 +387,16 @@ def test_legacy_search_wrapper_preserves_dict_shape(tmp_path, monkeypatch) -> No
     monkeypatch.setattr(search_memory, "VECTOR_META", tmp_path / "cache" / "vectors_meta.json")
     monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: None)
 
+    seen: dict[str, object] = {}
+    real_retrieve = retrieval.retrieve
+
+    def wrapped_retrieve(*args, **kwargs):
+        seen["called"] = True
+        seen["kwargs"] = kwargs
+        return real_retrieve(*args, **kwargs)
+
+    monkeypatch.setattr(retrieval, "retrieve", wrapped_retrieve)
+
     results = search_memory.search(
         "auth decision needle",
         limit=5,
@@ -266,6 +405,7 @@ def test_legacy_search_wrapper_preserves_dict_shape(tmp_path, monkeypatch) -> No
         emit_telemetry=False,
         profile="BASE",
     )
+    assert seen.get("called") is True
     assert results
     row = results[0]
     for key in ("path", "title", "summary", "score", "project", "timestamp"):
@@ -276,6 +416,54 @@ def test_legacy_search_wrapper_preserves_dict_shape(tmp_path, monkeypatch) -> No
     assert row["generation"]
     assert row["score"] == row["final_score"]
     assert row["rrf_score"] == row["final_score"]
+    assert "vector_distance" not in row
+
+
+def test_retrieve_conditional_rerank_blends_and_reports_signal() -> None:
+    import retrieval
+
+    def lexical(**_kwargs):
+        return [
+            _hit(candidate_id="c-a", path="a.md", score=5.0),
+            _hit(candidate_id="c-b", path="b.md", score=4.9),
+        ]
+
+    def dense(**_kwargs):
+        return [
+            _hit(candidate_id="c-b", path="b.md", score=0.99),
+            _hit(candidate_id="c-a", path="a.md", score=0.10),
+        ]
+
+    def fake_scorer(pairs):
+        # Prefer the second pair document strongly.
+        return [0.0, 8.0]
+
+    import reranker
+
+    real_rerank = reranker.rerank
+
+    def wrapped(query, documents, limit=10, **kwargs):
+        kwargs.setdefault("scorer", fake_scorer)
+        return real_rerank(query, documents, limit=limit, **kwargs)
+
+    import sys
+    from unittest.mock import patch
+
+    with patch.object(sys.modules.setdefault("reranker", reranker), "rerank", wrapped):
+        # Patch via retrieval's import path
+        with patch("reranker.rerank", wrapped):
+            result = retrieval.retrieve(
+                "What is the difference?",
+                requested_profile="HYBRID",
+                lexical_backend=lexical,
+                dense_backend=dense,
+                graph_backend=None,
+                corpus_generation="gen-rr",
+                rerank_enabled=True,
+            )
+    assert "reranker" in result.trace.signals_used
+    assert result.candidates[0].rerank_score is not None
+    assert result.candidates[0].final_score != result.candidates[0].rrf_score
 
 
 def test_cli_exposes_profile_and_disable_switches() -> None:
