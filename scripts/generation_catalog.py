@@ -448,6 +448,17 @@ def _validate_generation(
         raise ValueError("vector artifacts require embedding metadata")
     normalized["vector_state"] = vector_state
 
+    if graph_schema == "evidence-graph/v1":
+        from evidence_graph import validate_generation_artifact
+
+        validate_generation_artifact(
+            generation_path,
+            normalized,
+            state_root=state_root,
+            deadline=deadline,
+            monotonic=monotonic,
+        )
+
     final_seal, actual_files = _scan_generation(
         generation_path, deadline=deadline, monotonic=monotonic
     )

@@ -7,6 +7,7 @@ import json
 import sqlite3
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
 
@@ -22,6 +23,7 @@ def _sha(data: bytes) -> str:
 
 
 def _records(source: bytes = b"def caller():\n    callee()\n# [[Decision]]\n"):
+    decision_start = source.index(b"[[Decision]]")
     return {
         "sources": [
             {
@@ -113,6 +115,15 @@ def _records(source: bytes = b"def caller():\n    callee()\n# [[Decision]]\n"):
                 "byte_start": 18,
                 "byte_end": 26,
                 "span_sha256": _sha(source[18:26]),
+            },
+            {
+                "evidence_id": "ev-documents",
+                "assertion_id": "documents",
+                "observation_id": None,
+                "source_id": "src-code",
+                "byte_start": decision_start,
+                "byte_end": decision_start + len(b"[[Decision]]"),
+                "span_sha256": _sha(b"[[Decision]]"),
             }
         ],
         "dependencies": [
@@ -138,18 +149,38 @@ def _create(tmp_path: Path, **overrides):
 
 
 def test_manifest_schema_is_closed_and_bounded():
+    from reliable_memory import validate_schema
+
     schema = json.loads((SCRIPTS / "schemas/evidence-graph-manifest-v1.json").read_text())
+    valid = {
+        "generation_id": "gen-1",
+        "schema_version": "corpus-generation/v1",
+        "collector_version": "collector/v1",
+        "extractor_version": "extractor/v1",
+        "tokenizer_version": "tokenizer/v1",
+        "tokenizer_config_sha256": "0" * 64,
+        "embedding_model_id": None,
+        "embedding_model_revision": None,
+        "vector_dimensions": None,
+        "graph_schema_version": "evidence-graph/v1",
+        "graph_extractor_version": "graph-extractor/v1",
+        "source_manifest_sha256": "1" * 64,
+        "artifacts": [{"path": "evidence.sqlite3", "size": 4096, "sha256": "2" * 64}],
+        "vector_state": "absent",
+    }
 
     assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
     assert schema["additionalProperties"] is False
-    assert set(schema["required"]) == {
-        "schema_version",
-        "generation_id",
-        "source_snapshot_sha256",
-        "sources",
-    }
-    assert schema["properties"]["sources"]["maxItems"] > 0
-    assert schema["properties"]["sources"]["items"]["additionalProperties"] is False
+    validate_schema(valid, SCRIPTS / "schemas/evidence-graph-manifest-v1.json")
+    with pytest.raises(ValueError, match="const|graph_schema_version"):
+        validate_schema(
+            {**valid, "graph_schema_version": "other/v1"},
+            SCRIPTS / "schemas/evidence-graph-manifest-v1.json",
+        )
+    with pytest.raises(ValueError, match="unknown|additional"):
+        validate_schema(
+            {**valid, "sources": []}, SCRIPTS / "schemas/evidence-graph-manifest-v1.json"
+        )
 
 
 def test_generation_database_has_canonical_tables_indexes_and_pragmas(tmp_path):
@@ -171,6 +202,7 @@ def test_generation_database_has_canonical_tables_indexes_and_pragmas(tmp_path):
         }
         assert database.execute("PRAGMA journal_mode").fetchone()[0].lower() == "delete"
         assert database.execute("PRAGMA synchronous").fetchone()[0] == 2
+        assert database.execute("PRAGMA user_version").fetchone()[0] == 1
         assert database.execute("PRAGMA foreign_key_check").fetchall() == []
 
     assert tables == {
@@ -237,6 +269,70 @@ def test_create_fails_closed_on_invalid_sources_evidence_and_records(tmp_path, d
     with pytest.raises((TypeError, ValueError), match="hash|range|unknown|closed"):
         evidence_graph.create_generation_database(tmp_path / "evidence.sqlite3", **records)
     assert not (tmp_path / "evidence.sqlite3").exists()
+
+
+def test_every_resolved_assertion_requires_nonempty_half_open_evidence(tmp_path):
+    import evidence_graph
+
+    records = _records()
+    records["evidence"] = records["evidence"][:1]
+    with pytest.raises(ValueError, match="resolved assertion.*evidence"):
+        evidence_graph.create_generation_database(tmp_path / "missing.sqlite3", **records)
+
+    records = _records()
+    records["evidence"][0].update(
+        byte_end=records["evidence"][0]["byte_start"], span_sha256=_sha(b"")
+    )
+    with pytest.raises(ValueError, match="non-empty|range"):
+        evidence_graph.create_generation_database(tmp_path / "empty.sqlite3", **records)
+
+    records = _records()
+    records["evidence"][0]["byte_end"] += 1
+    records["evidence"][0]["span_sha256"] = _sha(b"callee()\n")
+    evidence_graph.create_generation_database(tmp_path / "half-open.sqlite3", **records)
+
+
+def test_evidence_source_binding_is_verified(tmp_path):
+    import evidence_graph
+
+    records = _records()
+    other = b"XXXXXXXX"
+    records["sources"].append(
+        {
+            "source_id": "other",
+            "relative_path": "other.py",
+            "sha256": _sha(other),
+            "size": len(other),
+            "media_type": "text/x-python",
+            "language": "python",
+            "git_oid": None,
+        }
+    )
+    records["source_bytes"]["other"] = other
+    records["evidence"][0].update(source_id="other", byte_start=0, byte_end=len(other))
+    with pytest.raises(ValueError, match="source|hash"):
+        evidence_graph.create_generation_database(tmp_path / "wrong-source.sqlite3", **records)
+
+
+def test_generation_publication_is_exclusive_under_concurrent_destination_race(tmp_path):
+    import evidence_graph
+
+    destination = tmp_path / "evidence.sqlite3"
+
+    def publish():
+        try:
+            evidence_graph.create_generation_database(destination, **_records())
+        except FileExistsError:
+            return "lost"
+        return "won"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = sorted(pool.map(lambda _value: publish(), range(2)))
+
+    assert results == ["lost", "won"]
+    graph = evidence_graph.EvidenceGraph(destination, state_root=tmp_path)
+    assert graph.node("caller")["identity_key"] == "src.app:caller"
+    graph.close()
 
 
 def test_unresolved_observations_use_controlled_reasons_without_fake_nodes(tmp_path):
@@ -324,7 +420,72 @@ def test_query_limits_depth_rows_deadlines_and_closed_enums(tmp_path):
         graph.unresolved(max_rows=0)
     with pytest.raises(TimeoutError, match="deadline"):
         graph.neighbors("caller", deadline=time.monotonic() - 1)
+    with pytest.raises(ValueError, match="edge_types"):
+        graph.neighbors("caller", edge_types=[f"EDGE_{number}" for number in range(65)])
     graph.close()
+
+
+def test_recursive_traversal_is_deterministic_delimiter_safe_and_work_bounded(tmp_path):
+    import evidence_graph
+
+    records = _records()
+    records["nodes"].extend(
+        {
+            "node_id": identifier,
+            "kind": "function",
+            "identity_scheme": "test/v1",
+            "identity_key": identifier,
+            "metadata": {},
+        }
+        for identifier in ("branch-a", "branch-b", "branch-c")
+    )
+    for number, (source, target) in enumerate(
+        (
+            ("callee", "branch-c"),
+            ("caller", "branch-b"),
+            ("caller", "branch-a"),
+            ("branch-a", "caller"),
+        )
+    ):
+        assertion_id = f"edge-{number}"
+        records["assertions"].append(
+            {
+                "assertion_id": assertion_id,
+                "source_node_id": source,
+                "edge_type": "CALLS",
+                "target_node_id": target,
+                "literal": None,
+                "confidence": "high",
+                "authority": "ai-derived",
+                "resolution": "resolved",
+                "extractor": "test/v1",
+            }
+        )
+        records["evidence"].append(
+            {
+                "evidence_id": f"evidence-{number}",
+                "assertion_id": assertion_id,
+                "observation_id": None,
+                "source_id": "src-code",
+                "byte_start": 18,
+                "byte_end": 26,
+                "span_sha256": _sha(b"callee()"),
+            }
+        )
+    graph = _create(tmp_path, **records)
+
+    first = graph.neighbors("caller", max_depth=3, max_rows=10, max_work=20)
+    second = graph.neighbors("caller", max_depth=3, max_rows=10, max_work=20)
+    assert first == second
+    assert [row["node_id"] for row in first] == ["branch-a", "branch-b", "callee", "branch-c"]
+    with pytest.raises(ValueError, match="work"):
+        graph.neighbors("caller", max_depth=3, max_rows=10, max_work=2)
+    graph.close()
+
+    bad = _records()
+    bad["nodes"][0]["node_id"] = "caller,alias"
+    with pytest.raises(ValueError, match="node_id"):
+        evidence_graph.create_generation_database(tmp_path / "unsafe-id.sqlite3", **bad)
 
 
 def test_database_is_opened_query_only_and_path_must_remain_in_state_root(tmp_path):
