@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import sqlite3
 import stat
@@ -79,9 +80,7 @@ def test_sha256_is_stable_for_equal_logical_objects():
     left = canonical_json_bytes({"b": 2, "a": 1})
     right = canonical_json_bytes({"a": 1, "b": 2})
     assert sha256_bytes(left) == sha256_bytes(right)
-    assert sha256_bytes(b"") == (
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    )
+    assert sha256_bytes(b"") == ("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
 
 
 @pytest.mark.parametrize(
@@ -135,6 +134,21 @@ def test_fsync_helpers_accept_files_and_directories(tmp_path):
     path.write_bytes(b"durable")
     fsync_file(path)
     fsync_directory(tmp_path)
+
+
+def test_directory_fsync_does_not_swallow_real_io_errors(tmp_path, monkeypatch):
+    monkeypatch.setattr(reliable_memory.os, "open", lambda _path, _flags: 123)
+    monkeypatch.setattr(reliable_memory.os, "close", lambda _descriptor: None)
+    monkeypatch.setattr(
+        reliable_memory.os,
+        "fsync",
+        lambda _descriptor: (_ for _ in ()).throw(OSError(errno.EACCES, "denied")),
+    )
+
+    with pytest.raises(OSError) as exc_info:
+        fsync_directory(tmp_path)
+
+    assert exc_info.value.errno == errno.EACCES
 
 
 def test_state_root_accepts_normal_local_sqlite_locking(tmp_path):
@@ -203,7 +217,9 @@ server:/team on /Volumes/Team Share (nfs, nodev, nosuid)
 """
     monkeypatch.setattr(reliable_memory, "_platform_system", lambda: "Darwin")
     monkeypatch.setattr(reliable_memory, "_read_posix_mount_data", lambda: ("", True))
-    monkeypatch.setattr(reliable_memory, "_query_darwin_mounts", lambda: mount_output, raising=False)
+    monkeypatch.setattr(
+        reliable_memory, "_query_darwin_mounts", lambda: mount_output, raising=False
+    )
     monkeypatch.setattr(type(Path("/")), "resolve", lambda self, *, strict=False: self)
 
     assert reliable_memory._known_network_path(Path("/Volumes/Team Share/project")) is True
@@ -237,7 +253,9 @@ def test_darwin_mount_query_is_bounded(monkeypatch):
 
 
 def test_owner_permission_errors_are_not_suppressed(tmp_path, monkeypatch):
-    monkeypatch.setattr(reliable_memory, "_owner_permissions_supported", lambda path: True, raising=False)
+    monkeypatch.setattr(
+        reliable_memory, "_owner_permissions_supported", lambda path: True, raising=False
+    )
 
     def deny_chmod(self, mode):
         raise PermissionError("denied")
@@ -250,7 +268,9 @@ def test_owner_permission_errors_are_not_suppressed(tmp_path, monkeypatch):
 def test_owner_mode_must_match_after_chmod(tmp_path, monkeypatch):
     root = tmp_path / "state"
     root.mkdir(mode=0o755)
-    monkeypatch.setattr(reliable_memory, "_owner_permissions_supported", lambda path: True, raising=False)
+    monkeypatch.setattr(
+        reliable_memory, "_owner_permissions_supported", lambda path: True, raising=False
+    )
     monkeypatch.setattr(Path, "chmod", lambda self, mode: None)
     with pytest.raises(PermissionError, match="owner-only"):
         validate_state_root(root)
@@ -261,7 +281,9 @@ def test_unsupported_owner_bits_skip_chmod_explicitly(tmp_path, monkeypatch):
         reliable_memory, "_owner_permissions_supported", lambda path: False, raising=False
     )
     monkeypatch.setattr(
-        Path, "chmod", lambda self, mode: pytest.fail("chmod must not run when modes are unsupported")
+        Path,
+        "chmod",
+        lambda self, mode: pytest.fail("chmod must not run when modes are unsupported"),
     )
     monkeypatch.setattr(reliable_memory, "_sqlite_lock_probe", lambda path: True)
     validate_state_root(tmp_path / "state")

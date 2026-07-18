@@ -20,9 +20,13 @@ boundary. The builder NEVER mutates an active generation in place; on any
 failure before activation, the active pointer is unchanged and the prior
 generation remains fully readable.
 """
+
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+import hashlib
+import math
+import time
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -88,9 +92,7 @@ class BuildResult:
 
 def _validate_kill_point(kill_point: str | None) -> None:
     if kill_point is not None and kill_point not in KILL_POINTS:
-        raise ValueError(
-            f"kill_point must be one of {KILL_POINTS} or None, got {kill_point!r}"
-        )
+        raise ValueError(f"kill_point must be one of {KILL_POINTS} or None, got {kill_point!r}")
 
 
 def _shared_sources(
@@ -114,11 +116,10 @@ def _build_manifest(
     extractor_version: str,
     graph_extractor_version: str,
     source_manifest_sha256: str,
-    database_bytes: bytes,
+    database_size: int,
+    database_sha256: str,
     source_manifest_bytes: bytes,
 ) -> Mapping[str, object]:
-    import hashlib
-
     return {
         "generation_id": generation_id,
         "schema_version": CORPUS_GENERATION_SCHEMA_VERSION,
@@ -135,8 +136,8 @@ def _build_manifest(
         "artifacts": [
             {
                 "path": "evidence.sqlite3",
-                "size": len(database_bytes),
-                "sha256": hashlib.sha256(database_bytes).hexdigest(),
+                "size": database_size,
+                "sha256": database_sha256,
             },
             {
                 "path": "source-manifest.json",
@@ -149,17 +150,113 @@ def _build_manifest(
     }
 
 
-def _write_canonical_file(path: Path, payload: Mapping[str, object]) -> None:
+def _check_stop(deadline: float | None, cancelled: Callable[[], bool] | None) -> None:
+    if deadline is not None and (
+        isinstance(deadline, bool)
+        or not isinstance(deadline, (int, float))
+        or not math.isfinite(deadline)
+    ):
+        raise ValueError("deadline must be a finite monotonic timestamp")
+    if bool(cancelled and cancelled()):
+        raise TimeoutError("Evidence Graph build cancelled")
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("Evidence Graph build deadline reached")
+
+
+def _materialize(
+    records: Iterable[Mapping[str, object]],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[Mapping[str, object]]:
+    materialized: list[Mapping[str, object]] = []
+    iterator = iter(records)
+    while True:
+        _check_stop(deadline, cancelled)
+        try:
+            record = next(iterator)
+        except StopIteration:
+            break
+        materialized.append(record)
+    _check_stop(deadline, cancelled)
+    return materialized
+
+
+def _hash_bytes(
+    content: bytes,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> str:
+    digest = hashlib.sha256()
+    for offset in range(0, len(content), generation_catalog.HASH_CHUNK_BYTES):
+        _check_stop(deadline, cancelled)
+        digest.update(content[offset : offset + generation_catalog.HASH_CHUNK_BYTES])
+    _check_stop(deadline, cancelled)
+    return digest.hexdigest()
+
+
+def _verify_source_snapshot(
+    sources: list[Mapping[str, object]],
+    source_bytes: Mapping[str, bytes],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> dict[str, bytes]:
+    identifiers = {source.get("source_id") for source in sources}
+    if set(source_bytes) != identifiers:
+        raise ValueError("source_bytes must bind every captured source exactly once")
+    snapshot: dict[str, bytes] = {}
+    for source in sources:
+        _check_stop(deadline, cancelled)
+        source_id = source.get("source_id")
+        content = source_bytes[source_id]
+        if not isinstance(content, bytes):
+            raise TypeError("captured source content must be bytes")
+        if source.get("size") != len(content) or source.get("sha256") != _hash_bytes(
+            content, deadline=deadline, cancelled=cancelled
+        ):
+            raise ValueError("captured source size or hash does not match source bytes")
+        snapshot[source_id] = content
+    return snapshot
+
+
+def _hash_file(
+    path: Path,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    total = 0
+    with path.open("rb") as handle:
+        while True:
+            _check_stop(deadline, cancelled)
+            chunk = handle.read(generation_catalog.HASH_CHUNK_BYTES)
+            if not chunk:
+                break
+            total += len(chunk)
+            digest.update(chunk)
+    _check_stop(deadline, cancelled)
+    return total, digest.hexdigest()
+
+
+def _write_canonical_file(
+    path: Path,
+    payload: Mapping[str, object],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> None:
     encoded = canonical_json_bytes(payload)
     with path.open("xb") as handle:
-        handle.write(encoded)
+        for offset in range(0, len(encoded), generation_catalog.HASH_CHUNK_BYTES):
+            _check_stop(deadline, cancelled)
+            handle.write(encoded[offset : offset + generation_catalog.HASH_CHUNK_BYTES])
         handle.flush()
-        try:
-            fsync_file(path)
-        except OSError:
-            # fsync is best-effort on some filesystems; the encoded payload
-            # itself is already on disk after flush().
-            pass
+        _check_stop(deadline, cancelled)
+    fsync_file(path)
+    _check_stop(deadline, cancelled)
 
 
 def _snapshot_source_manifest(
@@ -208,6 +305,7 @@ def build_full_generation(
     activate: bool = True,
     kill_point: str | None = None,
     deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> BuildResult:
     """Atomically build one full Evidence Graph generation.
 
@@ -226,34 +324,38 @@ def build_full_generation(
     if not isinstance(catalog, generation_catalog.GenerationCatalog):
         raise TypeError("catalog must be a GenerationCatalog")
 
-    sources_list = list(sources)
-    nodes_list = list(nodes)
-    occurrences_list = list(occurrences)
-    assertions_list = list(assertions)
-    evidence_list = list(evidence)
-    observations_list = list(observations)
-    dependencies_list = list(dependencies)
+    sources_list = [
+        dict(source)
+        for source in _materialize(sources, deadline=deadline, cancelled=cancelled)
+    ]
+    source_bytes_snapshot = _verify_source_snapshot(
+        sources_list, source_bytes, deadline=deadline, cancelled=cancelled
+    )
 
     # 1. Snapshot source membership and exact source SHA-256 hashes BEFORE
     # any extraction. The hash pins the source manifest in the generation
     # manifest so post-build validation can detect drift.
-    source_manifest, source_manifest_bytes, source_manifest_sha256 = (
-        _snapshot_source_manifest(
-            sources_list,
-            policy=policy,
-            collector_version=collector_version,
-            extractor_version=extractor_version,
-        )
+    source_manifest, source_manifest_bytes, source_manifest_sha256 = _snapshot_source_manifest(
+        sources_list,
+        policy=policy,
+        collector_version=collector_version,
+        extractor_version=extractor_version,
     )
+    _check_stop(deadline, cancelled)
+
+    nodes_list = _materialize(nodes, deadline=deadline, cancelled=cancelled)
+    occurrences_list = _materialize(occurrences, deadline=deadline, cancelled=cancelled)
+    assertions_list = _materialize(assertions, deadline=deadline, cancelled=cancelled)
+    evidence_list = _materialize(evidence, deadline=deadline, cancelled=cancelled)
+    observations_list = _materialize(observations, deadline=deadline, cancelled=cancelled)
+    dependencies_list = _materialize(dependencies, deadline=deadline, cancelled=cancelled)
 
     if kill_point == "before_directory_create":
         raise KillPointError(kill_point)
 
     generation_path = catalog.generations_path / generation_id
     if generation_path.exists() or generation_path.is_symlink():
-        raise FileExistsError(
-            f"generation {generation_id!r} already exists; builder never mutates"
-        )
+        raise FileExistsError(f"generation {generation_id!r} already exists; builder never mutates")
     generation_path.mkdir(parents=True, exist_ok=False)
     fsync_directory(generation_path)
 
@@ -269,14 +371,17 @@ def build_full_generation(
         evidence_graph.create_generation_database(
             database_path,
             sources=sources_list,
-            source_bytes=source_bytes,
+            source_bytes=source_bytes_snapshot,
             nodes=nodes_list,
             occurrences=occurrences_list,
             assertions=assertions_list,
             evidence=evidence_list,
             observations=observations_list,
             dependencies=dependencies_list,
+            deadline=deadline,
+            cancelled=cancelled,
         )
+        _check_stop(deadline, cancelled)
         fsync_file(database_path)
         fsync_directory(generation_path)
 
@@ -287,9 +392,16 @@ def build_full_generation(
         # files are canonical JSON, fsynced, and the parent directory is
         # fsynced so the catalog can validate them durably.
         source_manifest_path = generation_path / "source-manifest.json"
-        _write_canonical_file(source_manifest_path, source_manifest)
+        _write_canonical_file(
+            source_manifest_path,
+            source_manifest,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
 
-        database_bytes = database_path.read_bytes()
+        database_size, database_sha256 = _hash_file(
+            database_path, deadline=deadline, cancelled=cancelled
+        )
         manifest = _build_manifest(
             generation_id=generation_id,
             parent_generation_id=parent_generation_id,
@@ -297,11 +409,12 @@ def build_full_generation(
             extractor_version=extractor_version,
             graph_extractor_version=graph_extractor_version,
             source_manifest_sha256=source_manifest_sha256,
-            database_bytes=database_bytes,
+            database_size=database_size,
+            database_sha256=database_sha256,
             source_manifest_bytes=source_manifest_bytes,
         )
         manifest_path = generation_path / "manifest.json"
-        _write_canonical_file(manifest_path, manifest)
+        _write_canonical_file(manifest_path, manifest, deadline=deadline, cancelled=cancelled)
         fsync_directory(generation_path)
 
         # 5. Validate schema, FKs, integrity_check, evidence spans, artifact
@@ -313,6 +426,7 @@ def build_full_generation(
             manifest,
             state_root=catalog.state_root,
             deadline=deadline,
+            cancelled=cancelled,
         )
 
         if kill_point == "after_validation":
@@ -321,7 +435,7 @@ def build_full_generation(
         # 6. Register the new generation. The catalog re-validates the
         # manifest and the on-disk seal before recording it; identical
         # retries are idempotent.
-        catalog.register(generation_id, deadline=deadline)
+        catalog.register(generation_id, deadline=deadline, cancelled=cancelled)
         registered = True
 
         if not activate:
@@ -340,6 +454,7 @@ def build_full_generation(
             generation_id,
             expected_active=expected_active,
             deadline=deadline,
+            cancelled=cancelled,
         )
 
         result = BuildResult(

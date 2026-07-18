@@ -330,6 +330,36 @@ def test_activation_rechecks_validation_seal_inside_cas_transaction(tmp_path, mo
     assert history == 0
 
 
+def test_activation_hash_scan_finishes_before_writer_transaction(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    catalog = _catalog(tmp_path)
+    _publish(catalog, "gen-1")
+    catalog.register("gen-1")
+    in_transaction = False
+    real_check = catalog._seal_unchanged
+    real_transaction = catalog._write_transaction
+
+    def checked_seal(*args, **kwargs):
+        assert not in_transaction
+        return real_check(*args, **kwargs)
+
+    @contextmanager
+    def tracked_transaction(deadline):
+        nonlocal in_transaction
+        with real_transaction(deadline) as database:
+            in_transaction = True
+            try:
+                yield database
+            finally:
+                in_transaction = False
+
+    monkeypatch.setattr(catalog, "_seal_unchanged", checked_seal)
+    monkeypatch.setattr(catalog, "_write_transaction", tracked_transaction)
+
+    assert catalog.activate("gen-1", expected_active=None)
+
+
 def test_get_active_falls_back_and_repairs_pointer_after_active_corruption(tmp_path):
     catalog = _catalog(tmp_path)
     _publish(catalog, "gen-1")

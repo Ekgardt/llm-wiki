@@ -15,7 +15,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 
-from reliable_memory import canonical_json_bytes, read_runtime_bytes, validate_runtime_file
+from reliable_memory import canonical_json_bytes, validate_runtime_file
 
 GRAPH_SCHEMA_VERSION = "evidence-graph/v1"
 MAX_DATABASE_BYTES = 16 * 1024 * 1024 * 1024
@@ -27,6 +27,7 @@ MAX_WORK = 100_000
 PROGRESS_OPCODES = 1000
 MAX_VALIDATION_ROWS = 1_000_000
 MAX_SOURCE_MANIFEST_BYTES = 256 * 1024 * 1024
+IO_CHUNK_BYTES = 64 * 1024
 
 _SHA256 = frozenset("0123456789abcdef")
 _NODE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/#@+\-]{0,511}")
@@ -47,9 +48,7 @@ _OBSERVATION_REASONS = frozenset(
 _SOURCE_KEYS = frozenset(
     {"source_id", "relative_path", "sha256", "size", "media_type", "language", "git_oid"}
 )
-_NODE_KEYS = frozenset(
-    {"node_id", "kind", "identity_scheme", "identity_key", "metadata"}
-)
+_NODE_KEYS = frozenset({"node_id", "kind", "identity_scheme", "identity_key", "metadata"})
 _OCCURRENCE_KEYS = frozenset(
     {
         "occurrence_id",
@@ -329,12 +328,10 @@ def _node_id(value: object, label: str = "node_id") -> str:
     return text
 
 
-def _integer(value: object, label: str, *, minimum: int = 0, maximum: int = MAX_SOURCE_BYTES) -> int:
-    if (
-        not isinstance(value, int)
-        or isinstance(value, bool)
-        or not minimum <= value <= maximum
-    ):
+def _integer(
+    value: object, label: str, *, minimum: int = 0, maximum: int = MAX_SOURCE_BYTES
+) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or not minimum <= value <= maximum:
         raise ValueError(f"{label} is outside its supported range")
     return value
 
@@ -345,7 +342,11 @@ def _relative_path(value: object) -> str:
     if "\\" in text:
         raise ValueError("relative_path must use normalized POSIX separators")
     path = PurePosixPath(text)
-    if path.is_absolute() or text != path.as_posix() or any(part in {"", ".", ".."} for part in path.parts):
+    if (
+        path.is_absolute()
+        or text != path.as_posix()
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
         raise ValueError("relative_path must remain inside the captured source root")
     return text
 
@@ -375,10 +376,54 @@ def _validate_occurrence_lines(
         raise ValueError("occurrence line range does not match its captured source bytes")
 
 
-def _ordered(records: Iterable[Mapping[str, object]], key: str, label: str) -> list[Mapping[str, object]]:
-    values = list(records)
-    if len(values) > 1_000_000:
-        raise ValueError(f"{label} row ceiling exceeded")
+def _check_build_stop(
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+    monotonic: Callable[[], float],
+) -> None:
+    if deadline is not None and (
+        isinstance(deadline, bool)
+        or not isinstance(deadline, (int, float))
+        or not math.isfinite(deadline)
+    ):
+        raise ValueError("deadline must be a finite monotonic timestamp")
+    if bool(cancelled and cancelled()):
+        raise TimeoutError("Evidence Graph construction cancelled")
+    if deadline is not None and monotonic() >= deadline:
+        raise TimeoutError("Evidence Graph construction deadline reached")
+
+
+def _hash_bytes_stopped(
+    content: bytes,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+    monotonic: Callable[[], float],
+) -> str:
+    digest = hashlib.sha256()
+    for offset in range(0, len(content), IO_CHUNK_BYTES):
+        _check_build_stop(deadline, cancelled, monotonic)
+        digest.update(content[offset : offset + IO_CHUNK_BYTES])
+    _check_build_stop(deadline, cancelled, monotonic)
+    return digest.hexdigest()
+
+
+def _ordered_stopped(
+    records: Iterable[Mapping[str, object]],
+    key: str,
+    label: str,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+    monotonic: Callable[[], float],
+) -> list[Mapping[str, object]]:
+    values: list[Mapping[str, object]] = []
+    for record in records:
+        _check_build_stop(deadline, cancelled, monotonic)
+        values.append(record)
+        if len(values) > MAX_VALIDATION_ROWS:
+            raise ValueError(f"{label} row ceiling exceeded")
+    _check_build_stop(deadline, cancelled, monotonic)
     return sorted(values, key=lambda record: str(record.get(key, "")))
 
 
@@ -403,6 +448,9 @@ def create_generation_database(
     evidence: Iterable[Mapping[str, object]],
     observations: Iterable[Mapping[str, object]],
     dependencies: Iterable[Mapping[str, object]],
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> None:
     """Create one complete graph database; existing artifacts are never replaced."""
     path = Path(database_path)
@@ -413,15 +461,26 @@ def create_generation_database(
     metadata = path.parent.lstat()
     reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
     if stat.S_ISLNK(metadata.st_mode) or getattr(metadata, "st_file_attributes", 0) & reparse:
-        raise PermissionError("Evidence Graph generation directory must not be a link or reparse point")
+        raise PermissionError(
+            "Evidence Graph generation directory must not be a link or reparse point"
+        )
     temporary = parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
     source_content: dict[str, bytes] = {}
     try:
-        source_rows = _ordered(sources, "source_id", "source")
+        _check_build_stop(deadline, cancelled, monotonic)
+        source_rows = _ordered_stopped(
+            sources,
+            "source_id",
+            "source",
+            deadline=deadline,
+            cancelled=cancelled,
+            monotonic=monotonic,
+        )
         if set(source_bytes) != {record.get("source_id") for record in source_rows}:
             raise ValueError("source_bytes must bind every captured source exactly once")
         normalized_sources = []
         for record in source_rows:
+            _check_build_stop(deadline, cancelled, monotonic)
             _closed(record, _SOURCE_KEYS, "source")
             source_id = _text(record["source_id"], "source_id", maximum=512)
             assert source_id is not None
@@ -430,7 +489,12 @@ def create_generation_database(
                 raise TypeError("captured source content must be bounded bytes")
             size = _integer(record["size"], "source size")
             digest = _digest(record["sha256"], "source hash")
-            if size != len(content) or digest != hashlib.sha256(content).hexdigest():
+            if size != len(content) or digest != _hash_bytes_stopped(
+                content,
+                deadline=deadline,
+                cancelled=cancelled,
+                monotonic=monotonic,
+            ):
                 raise ValueError("captured source size or hash does not match source bytes")
             source_content[source_id] = content
             normalized_sources.append(
@@ -447,7 +511,10 @@ def create_generation_database(
             )
 
         normalized_nodes = []
-        for record in _ordered(nodes, "node_id", "node"):
+        for record in _ordered_stopped(
+            nodes, "node_id", "node", deadline=deadline, cancelled=cancelled, monotonic=monotonic
+        ):
+            _check_build_stop(deadline, cancelled, monotonic)
             _closed(record, _NODE_KEYS, "node")
             normalized_nodes.append(
                 (
@@ -460,7 +527,15 @@ def create_generation_database(
             )
 
         normalized_occurrences = []
-        for record in _ordered(occurrences, "occurrence_id", "occurrence"):
+        for record in _ordered_stopped(
+            occurrences,
+            "occurrence_id",
+            "occurrence",
+            deadline=deadline,
+            cancelled=cancelled,
+            monotonic=monotonic,
+        ):
+            _check_build_stop(deadline, cancelled, monotonic)
             _closed(record, _OCCURRENCE_KEYS, "occurrence")
             source_id = _text(record["source_id"], "source_id", maximum=512)
             assert source_id is not None
@@ -468,15 +543,11 @@ def create_generation_database(
             end = _integer(record["byte_end"], "occurrence byte_end", minimum=start)
             if source_id not in source_content or end > len(source_content[source_id]):
                 raise ValueError("occurrence byte range is outside its captured source")
-            line_start = _integer(
-                record["line_start"], "line_start", minimum=1, maximum=2**31 - 1
-            )
+            line_start = _integer(record["line_start"], "line_start", minimum=1, maximum=2**31 - 1)
             line_end = _integer(
                 record["line_end"], "line_end", minimum=line_start, maximum=2**31 - 1
             )
-            _validate_occurrence_lines(
-                source_content[source_id], start, end, line_start, line_end
-            )
+            _validate_occurrence_lines(source_content[source_id], start, end, line_start, line_end)
             normalized_occurrences.append(
                 (
                     _text(record["occurrence_id"], "occurrence_id", maximum=512),
@@ -492,7 +563,15 @@ def create_generation_database(
 
         normalized_assertions = []
         resolved_assertions: set[str] = set()
-        for record in _ordered(assertions, "assertion_id", "assertion"):
+        for record in _ordered_stopped(
+            assertions,
+            "assertion_id",
+            "assertion",
+            deadline=deadline,
+            cancelled=cancelled,
+            monotonic=monotonic,
+        ):
+            _check_build_stop(deadline, cancelled, monotonic)
             _closed(record, _ASSERTION_KEYS, "assertion")
             resolution = record["resolution"]
             if resolution not in _RESOLUTION:
@@ -500,7 +579,9 @@ def create_generation_database(
             if resolution != "resolved":
                 raise ValueError("unresolved assertions must use a controlled observation")
             target = _text(record["target_node_id"], "target_node_id", maximum=512, optional=True)
-            literal = None if record["literal"] is None else _canonical_json(record["literal"], "literal")
+            literal = (
+                None if record["literal"] is None else _canonical_json(record["literal"], "literal")
+            )
             if (target is None) == (literal is None):
                 raise ValueError("assertion must have exactly one target node or literal")
             confidence = record["confidence"]
@@ -526,7 +607,15 @@ def create_generation_database(
             )
 
         normalized_observations = []
-        for record in _ordered(observations, "observation_id", "observation"):
+        for record in _ordered_stopped(
+            observations,
+            "observation_id",
+            "observation",
+            deadline=deadline,
+            cancelled=cancelled,
+            monotonic=monotonic,
+        ):
+            _check_build_stop(deadline, cancelled, monotonic)
             _closed(record, _OBSERVATION_KEYS, "observation")
             if record["reason"] not in _OBSERVATION_REASONS:
                 raise ValueError("observation reason is outside the controlled reason set")
@@ -545,7 +634,15 @@ def create_generation_database(
 
         normalized_evidence = []
         evidenced_assertions: set[str] = set()
-        for record in _ordered(evidence, "evidence_id", "evidence"):
+        for record in _ordered_stopped(
+            evidence,
+            "evidence_id",
+            "evidence",
+            deadline=deadline,
+            cancelled=cancelled,
+            monotonic=monotonic,
+        ):
+            _check_build_stop(deadline, cancelled, monotonic)
             _closed(record, _EVIDENCE_KEYS, "evidence")
             assertion_id = _text(record["assertion_id"], "assertion_id", maximum=512, optional=True)
             observation_id = _text(
@@ -560,7 +657,15 @@ def create_generation_database(
             if source_id not in source_content or end > len(source_content[source_id]):
                 raise ValueError("evidence byte range is outside its captured source")
             span_hash = _digest(record["span_sha256"], "evidence span hash")
-            if hashlib.sha256(source_content[source_id][start:end]).hexdigest() != span_hash:
+            if (
+                _hash_bytes_stopped(
+                    source_content[source_id][start:end],
+                    deadline=deadline,
+                    cancelled=cancelled,
+                    monotonic=monotonic,
+                )
+                != span_hash
+            ):
                 raise ValueError("evidence span hash does not match the captured source range")
             if assertion_id is not None:
                 evidenced_assertions.add(assertion_id)
@@ -582,7 +687,15 @@ def create_generation_database(
             )
 
         normalized_dependencies = []
-        for record in _ordered(dependencies, "dependency_id", "dependency"):
+        for record in _ordered_stopped(
+            dependencies,
+            "dependency_id",
+            "dependency",
+            deadline=deadline,
+            cancelled=cancelled,
+            monotonic=monotonic,
+        ):
+            _check_build_stop(deadline, cancelled, monotonic)
             _closed(record, _DEPENDENCY_KEYS, "dependency")
             normalized_dependencies.append(
                 (
@@ -597,22 +710,51 @@ def create_generation_database(
         database = sqlite3.connect(temporary)
         try:
             _configure_write(database)
+            database.set_progress_handler(
+                lambda: int(
+                    bool(cancelled and cancelled())
+                    or (deadline is not None and monotonic() >= deadline)
+                ),
+                PROGRESS_OPCODES,
+            )
             database.executescript(_SCHEMA)
-            database.executemany("INSERT INTO source VALUES (?, ?, ?, ?, ?, ?, ?, ?)", normalized_sources)
+            database.executemany(
+                "INSERT INTO source VALUES (?, ?, ?, ?, ?, ?, ?, ?)", normalized_sources
+            )
             database.executemany("INSERT INTO node VALUES (?, ?, ?, ?, ?)", normalized_nodes)
-            database.executemany("INSERT INTO occurrence VALUES (?, ?, ?, ?, ?, ?, ?, ?)", normalized_occurrences)
-            database.executemany("INSERT INTO assertion VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", normalized_assertions)
-            database.executemany("INSERT INTO observation VALUES (?, ?, ?, ?, ?, ?)", normalized_observations)
-            database.executemany("INSERT INTO evidence VALUES (?, ?, ?, ?, ?, ?, ?)", normalized_evidence)
-            database.executemany("INSERT INTO dependency VALUES (?, ?, ?, ?, ?)", normalized_dependencies)
+            database.executemany(
+                "INSERT INTO occurrence VALUES (?, ?, ?, ?, ?, ?, ?, ?)", normalized_occurrences
+            )
+            database.executemany(
+                "INSERT INTO assertion VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", normalized_assertions
+            )
+            database.executemany(
+                "INSERT INTO observation VALUES (?, ?, ?, ?, ?, ?)", normalized_observations
+            )
+            database.executemany(
+                "INSERT INTO evidence VALUES (?, ?, ?, ?, ?, ?, ?)", normalized_evidence
+            )
+            database.executemany(
+                "INSERT INTO dependency VALUES (?, ?, ?, ?, ?)", normalized_dependencies
+            )
             violations = database.execute("PRAGMA foreign_key_check").fetchone()
             if violations is not None:
                 raise ValueError("Evidence Graph records violate referential integrity")
             database.commit()
+            _check_build_stop(deadline, cancelled, monotonic)
+        except sqlite3.OperationalError as exc:
+            if bool(cancelled and cancelled()) or (
+                deadline is not None and monotonic() >= deadline
+            ):
+                raise TimeoutError(
+                    "Evidence Graph construction cancelled or deadline reached"
+                ) from exc
+            raise
         except BaseException:
             database.rollback()
             raise
         finally:
+            database.set_progress_handler(None, 0)
             database.close()
         if temporary.stat().st_size > MAX_DATABASE_BYTES:
             raise ValueError("Evidence Graph database exceeds the supported byte ceiling")
@@ -649,6 +791,7 @@ def _validation_deadline(
     database: sqlite3.Connection,
     deadline: float | None,
     monotonic: Callable[[], float],
+    cancelled: Callable[[], bool] | None = None,
 ) -> None:
     if deadline is not None and (
         isinstance(deadline, bool)
@@ -656,10 +799,13 @@ def _validation_deadline(
         or not math.isfinite(deadline)
     ):
         raise ValueError("deadline must be a finite monotonic timestamp")
-    if deadline is not None and monotonic() >= deadline:
-        raise TimeoutError("Evidence Graph validation deadline reached")
+    _check_build_stop(deadline, cancelled, monotonic)
     database.set_progress_handler(
-        None if deadline is None else lambda: int(monotonic() >= deadline),
+        None
+        if deadline is None and cancelled is None
+        else lambda: int(
+            bool(cancelled and cancelled()) or (deadline is not None and monotonic() >= deadline)
+        ),
         PROGRESS_OPCODES,
     )
 
@@ -683,10 +829,12 @@ def _validate_stored_records(
     *,
     deadline: float | None,
     monotonic: Callable[[], float],
+    cancelled: Callable[[], bool] | None = None,
 ) -> None:
     """Replay creation-time field and source-byte validation for persisted rows."""
     source_content: dict[str, bytes] = {}
     for row in database.execute("SELECT * FROM source ORDER BY source_id"):
+        _check_build_stop(deadline, cancelled, monotonic)
         source_id = _text(row["source_id"], "source_id", maximum=512)
         assert source_id is not None
         content = row["content"]
@@ -694,7 +842,12 @@ def _validate_stored_records(
             raise ValueError("captured source content must be bounded bytes")
         size = _integer(row["size"], "source size")
         digest = _digest(row["sha256"], "source hash")
-        if size != len(content) or digest != hashlib.sha256(content).hexdigest():
+        if size != len(content) or digest != _hash_bytes_stopped(
+            content,
+            deadline=deadline,
+            cancelled=cancelled,
+            monotonic=monotonic,
+        ):
             raise ValueError("captured source manifest size or hash does not match source bytes")
         _relative_path(row["relative_path"])
         _text(row["media_type"], "media_type", maximum=256)
@@ -703,6 +856,7 @@ def _validate_stored_records(
         source_content[source_id] = content
 
     for row in database.execute("SELECT * FROM node ORDER BY node_id"):
+        _check_build_stop(deadline, cancelled, monotonic)
         _node_id(row["node_id"])
         _text(row["kind"], "node kind", maximum=128)
         _text(row["identity_scheme"], "identity_scheme", maximum=256)
@@ -710,6 +864,7 @@ def _validate_stored_records(
         _stored_json(row["metadata_json"], "node metadata")
 
     for row in database.execute("SELECT * FROM occurrence ORDER BY occurrence_id"):
+        _check_build_stop(deadline, cancelled, monotonic)
         _text(row["occurrence_id"], "occurrence_id", maximum=512)
         if row["node_id"] is not None:
             _node_id(row["node_id"])
@@ -721,13 +876,12 @@ def _validate_stored_records(
         if source_id not in source_content or end > len(source_content[source_id]):
             raise ValueError("occurrence byte range is outside its captured source")
         line_start = _integer(row["line_start"], "line_start", minimum=1, maximum=2**31 - 1)
-        line_end = _integer(
-            row["line_end"], "line_end", minimum=line_start, maximum=2**31 - 1
-        )
+        line_end = _integer(row["line_end"], "line_end", minimum=line_start, maximum=2**31 - 1)
         _validate_occurrence_lines(source_content[source_id], start, end, line_start, line_end)
 
     resolved_assertions: set[str] = set()
     for row in database.execute("SELECT * FROM assertion ORDER BY assertion_id"):
+        _check_build_stop(deadline, cancelled, monotonic)
         assertion_id = _text(row["assertion_id"], "assertion_id", maximum=512)
         assert assertion_id is not None
         _node_id(row["source_node_id"], "source_node_id")
@@ -750,6 +904,7 @@ def _validate_stored_records(
             resolved_assertions.add(assertion_id)
 
     for row in database.execute("SELECT * FROM observation ORDER BY observation_id"):
+        _check_build_stop(deadline, cancelled, monotonic)
         _text(row["observation_id"], "observation_id", maximum=512)
         if row["source_node_id"] is not None:
             _node_id(row["source_node_id"], "source_node_id")
@@ -761,11 +916,10 @@ def _validate_stored_records(
 
     evidenced_assertions: set[str] = set()
     for row in database.execute("SELECT * FROM evidence ORDER BY evidence_id"):
+        _check_build_stop(deadline, cancelled, monotonic)
         _text(row["evidence_id"], "evidence_id", maximum=512)
         assertion_id = _text(row["assertion_id"], "assertion_id", maximum=512, optional=True)
-        observation_id = _text(
-            row["observation_id"], "observation_id", maximum=512, optional=True
-        )
+        observation_id = _text(row["observation_id"], "observation_id", maximum=512, optional=True)
         if (assertion_id is None) == (observation_id is None):
             raise ValueError("evidence must bind exactly one assertion or observation")
         source_id = _text(row["source_id"], "source_id", maximum=512)
@@ -775,7 +929,15 @@ def _validate_stored_records(
         if source_id not in source_content or end > len(source_content[source_id]):
             raise ValueError("evidence byte range is outside its captured source")
         span_hash = _digest(row["span_sha256"], "evidence span hash")
-        if hashlib.sha256(source_content[source_id][start:end]).hexdigest() != span_hash:
+        if (
+            _hash_bytes_stopped(
+                source_content[source_id][start:end],
+                deadline=deadline,
+                cancelled=cancelled,
+                monotonic=monotonic,
+            )
+            != span_hash
+        ):
             raise ValueError("evidence span hash does not match the captured source range")
         if assertion_id is not None:
             evidenced_assertions.add(assertion_id)
@@ -783,14 +945,14 @@ def _validate_stored_records(
         raise ValueError("every resolved assertion requires evidence")
 
     for row in database.execute("SELECT * FROM dependency ORDER BY dependency_id"):
+        _check_build_stop(deadline, cancelled, monotonic)
         _text(row["dependency_id"], "dependency_id", maximum=512)
         _node_id(row["dependent_node_id"], "dependent_node_id")
         _node_id(row["dependency_node_id"], "dependency_node_id")
         _text(row["kind"], "dependency kind", maximum=128)
         _text(row["source_id"], "source_id", maximum=512, optional=True)
 
-    if deadline is not None and monotonic() >= deadline:
-        raise TimeoutError("Evidence Graph validation deadline reached")
+    _check_build_stop(deadline, cancelled, monotonic)
 
 
 def _validate_connection(
@@ -798,9 +960,10 @@ def _validate_connection(
     *,
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    cancelled: Callable[[], bool] | None = None,
 ) -> None:
     """Validate the closed Evidence Graph file format and all stored integrity invariants."""
-    _validation_deadline(database, deadline, monotonic)
+    _validation_deadline(database, deadline, monotonic, cancelled)
     try:
         signature = _schema_signature(database)
         if signature != _expected_schema_signature():
@@ -815,10 +978,12 @@ def _validate_connection(
         if tables != set(_TABLE_COLUMNS) or indexes != _EXPLICIT_INDEXES or other:
             raise ValueError("Evidence Graph sqlite_schema is not the exact v1 contract")
         for table, expected in _TABLE_COLUMNS.items():
+            _check_build_stop(deadline, cancelled, monotonic)
             columns = tuple(row["name"] for row in database.execute(f"PRAGMA table_info({table})"))
             if columns != expected:
                 raise ValueError(f"Evidence Graph table columns differ for {table}")
         for index, expected in _INDEX_COLUMNS.items():
+            _check_build_stop(deadline, cancelled, monotonic)
             columns = tuple(row["name"] for row in database.execute(f"PRAGMA index_info({index})"))
             if columns != expected:
                 raise ValueError(f"Evidence Graph index columns differ for {index}")
@@ -833,6 +998,7 @@ def _validate_connection(
             raise ValueError("Evidence Graph integrity check failed")
 
         for table in _TABLE_COLUMNS:
+            _check_build_stop(deadline, cancelled, monotonic)
             count = database.execute(
                 f"SELECT COUNT(*) FROM (SELECT 1 FROM {table} LIMIT ?)",
                 (MAX_VALIDATION_ROWS + 1,),
@@ -881,12 +1047,21 @@ LIMIT 1
 """
         ).fetchone()
         if invalid is not None:
-            raise ValueError("Evidence Graph source, evidence, or controlled value integrity failed")
+            raise ValueError(
+                "Evidence Graph source, evidence, or controlled value integrity failed"
+            )
 
-        _validate_stored_records(database, deadline=deadline, monotonic=monotonic)
+        _validate_stored_records(
+            database,
+            deadline=deadline,
+            monotonic=monotonic,
+            cancelled=cancelled,
+        )
     except sqlite3.Error as exc:
-        if deadline is not None and (monotonic() >= deadline or "interrupt" in str(exc).casefold()):
-            raise TimeoutError("Evidence Graph validation deadline reached") from exc
+        if bool(cancelled and cancelled()) or (
+            deadline is not None and (monotonic() >= deadline or "interrupt" in str(exc).casefold())
+        ):
+            raise TimeoutError("Evidence Graph validation cancelled or deadline reached") from exc
         raise ValueError("Evidence Graph database validation failed") from exc
     finally:
         database.set_progress_handler(None, 0)
@@ -897,8 +1072,9 @@ def _stored_shared_source_membership(
     *,
     deadline: float | None,
     monotonic: Callable[[], float],
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[dict[str, str]]:
-    _validation_deadline(database, deadline, monotonic)
+    _validation_deadline(database, deadline, monotonic, cancelled)
     try:
         rows = database.execute(
             "SELECT source_id, relative_path, sha256 FROM source "
@@ -907,8 +1083,7 @@ def _stored_shared_source_membership(
         ).fetchall()
         if len(rows) > MAX_VALIDATION_ROWS:
             raise ValueError("Evidence Graph source row ceiling exceeded")
-        if deadline is not None and monotonic() >= deadline:
-            raise TimeoutError("Evidence Graph validation deadline reached")
+        _check_build_stop(deadline, cancelled, monotonic)
         return [
             {
                 "relative_path": row["relative_path"],
@@ -918,8 +1093,10 @@ def _stored_shared_source_membership(
             for row in rows
         ]
     except sqlite3.Error as exc:
-        if deadline is not None and (monotonic() >= deadline or "interrupt" in str(exc).casefold()):
-            raise TimeoutError("Evidence Graph validation deadline reached") from exc
+        if bool(cancelled and cancelled()) or (
+            deadline is not None and (monotonic() >= deadline or "interrupt" in str(exc).casefold())
+        ):
+            raise TimeoutError("Evidence Graph validation cancelled or deadline reached") from exc
         raise ValueError("Evidence Graph source manifest validation failed") from exc
     finally:
         database.set_progress_handler(None, 0)
@@ -932,8 +1109,10 @@ def validate_generation_artifact(
     state_root: Path,
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    cancelled: Callable[[], bool] | None = None,
 ) -> None:
     """Validate one graph artifact already bound by the shared generation manifest."""
+    _check_build_stop(deadline, cancelled, monotonic)
     if manifest.get("graph_schema_version") != GRAPH_SCHEMA_VERSION:
         raise ValueError("Evidence Graph manifest has the wrong graph schema version")
     graph_artifacts = [
@@ -945,13 +1124,42 @@ def validate_generation_artifact(
     if len(graph_artifacts) != 1:
         raise ValueError("Evidence Graph manifest must bind exactly one evidence.sqlite3 artifact")
     if len(source_artifacts) != 1:
-        raise ValueError("Evidence Graph manifest must bind exactly one shared source-manifest.json artifact")
+        raise ValueError(
+            "Evidence Graph manifest must bind exactly one shared source-manifest.json artifact"
+        )
     from corpus_snapshot import validate_canonical_source_manifest
 
     source_manifest_path = Path(generation_path) / "source-manifest.json"
-    source_manifest_bytes = read_runtime_bytes(
+    expected_source_manifest = validate_runtime_file(
         source_manifest_path, state_root, max_bytes=MAX_SOURCE_MANIFEST_BYTES
     )
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(source_manifest_path, flags)
+    try:
+        opened_source_manifest = os.fstat(descriptor)
+        if not os.path.samestat(expected_source_manifest, opened_source_manifest):
+            raise PermissionError("source manifest identity changed before read")
+        source_chunks: list[bytes] = []
+        source_manifest_size = 0
+        while True:
+            _check_build_stop(deadline, cancelled, monotonic)
+            chunk = os.read(descriptor, IO_CHUNK_BYTES)
+            if not chunk:
+                break
+            source_manifest_size += len(chunk)
+            if source_manifest_size > MAX_SOURCE_MANIFEST_BYTES:
+                raise ValueError("source manifest exceeds the supported byte ceiling")
+            source_chunks.append(chunk)
+        source_manifest_after = os.fstat(descriptor)
+        if not os.path.samestat(opened_source_manifest, source_manifest_after) or (
+            opened_source_manifest.st_size,
+            opened_source_manifest.st_mtime_ns,
+        ) != (source_manifest_after.st_size, source_manifest_after.st_mtime_ns):
+            raise PermissionError("source manifest changed during bounded read")
+        source_manifest_bytes = b"".join(source_chunks)
+    finally:
+        os.close(descriptor)
+    _check_build_stop(deadline, cancelled, monotonic)
     try:
         source_manifest_value = json.loads(source_manifest_bytes)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -962,14 +1170,15 @@ def validate_generation_artifact(
     source_manifest_hash = hashlib.sha256(source_manifest_bytes).hexdigest()
     if source_manifest_hash != manifest.get("source_manifest_sha256"):
         raise ValueError("shared source manifest hash does not match generation manifest")
-    if (
-        source_manifest["collector"] != manifest.get("collector_version")
-        or source_manifest["extractor"] != manifest.get("extractor_version")
-    ):
+    if source_manifest["collector"] != manifest.get("collector_version") or source_manifest[
+        "extractor"
+    ] != manifest.get("extractor_version"):
         raise ValueError("shared source manifest versions do not match generation manifest")
     artifact = Path(generation_path) / "evidence.sqlite3"
     expected = validate_runtime_file(artifact, state_root, max_bytes=MAX_DATABASE_BYTES)
-    database = sqlite3.connect(f"{artifact.resolve(strict=True).as_uri()}?mode=ro", uri=True, timeout=0)
+    database = sqlite3.connect(
+        f"{artifact.resolve(strict=True).as_uri()}?mode=ro", uri=True, timeout=0
+    )
     try:
         current = artifact.stat(follow_symlinks=False)
         if not os.path.samestat(expected, current):
@@ -977,12 +1186,21 @@ def validate_generation_artifact(
         database.row_factory = sqlite3.Row
         database.execute("PRAGMA query_only=ON")
         database.execute("PRAGMA trusted_schema=OFF")
-        _validate_connection(database, deadline=deadline, monotonic=monotonic)
+        _validate_connection(
+            database,
+            deadline=deadline,
+            monotonic=monotonic,
+            cancelled=cancelled,
+        )
         stored_sources = _stored_shared_source_membership(
-            database, deadline=deadline, monotonic=monotonic
+            database,
+            deadline=deadline,
+            monotonic=monotonic,
+            cancelled=cancelled,
         )
         if stored_sources != source_manifest["sources"]:
             raise ValueError("shared source manifest does not match graph source rows")
+        _check_build_stop(deadline, cancelled, monotonic)
     finally:
         database.close()
 
@@ -1006,7 +1224,9 @@ class EvidenceGraph:
                 self.database_path, self.state_root, max_bytes=max_database_bytes
             )
         except FileNotFoundError as exc:
-            raise PermissionError("Evidence Graph must remain inside an existing state root") from exc
+            raise PermissionError(
+                "Evidence Graph must remain inside an existing state root"
+            ) from exc
         uri = f"{self.database_path.resolve(strict=True).as_uri()}?mode=ro&immutable=1"
         database = sqlite3.connect(uri, uri=True, timeout=0)
         try:
@@ -1094,7 +1314,9 @@ class EvidenceGraph:
         try:
             rows = self._database.execute(sql, (*parameters, limit + 1)).fetchall()
         except sqlite3.OperationalError as exc:
-            if deadline is not None and (time.monotonic() >= deadline or "interrupt" in str(exc).lower()):
+            if deadline is not None and (
+                time.monotonic() >= deadline or "interrupt" in str(exc).lower()
+            ):
                 raise TimeoutError("Evidence Graph query deadline reached") from exc
             raise
         finally:
