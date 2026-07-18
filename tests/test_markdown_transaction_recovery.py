@@ -409,6 +409,49 @@ c.prepare([MarkdownChange.create('knowledge/notes/new.md', b'new')], operation_i
     assert not (vault / "knowledge/notes/new.md").exists()
 
 
+def test_recovery_promotion_persists_unsigned_64_bit_parent_identity(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    code = """
+import sys
+from pathlib import Path
+from markdown_transaction import MarkdownChange, MarkdownCoordinator
+c = MarkdownCoordinator(Path(sys.argv[1]), Path(sys.argv[2]))
+c.prepare([MarkdownChange.create('knowledge/notes/new.md', b'new')], operation_id='unsigned-recovery')
+"""
+    crashed = _crash_process(vault, state_root, "after_plan_fsynced", code)
+    assert crashed.returncode == 86, crashed.stderr
+    manifest_path = next((state_root / "run/transactions").iterdir()) / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    parent_identity = (11853635609087352826, (1 << 63) + 7)
+    manifest["operations"][0]["parent_device"] = parent_identity[0]
+    manifest["operations"][0]["parent_inode"] = parent_identity[1]
+    manifest_path.write_bytes(markdown_transaction.canonical_json_bytes(manifest))
+    coordinator = MarkdownCoordinator(vault, state_root)
+    monkeypatch.setattr(coordinator, "_parent_identity", lambda path: parent_identity)
+
+    promotion = coordinator._promote_preparing(
+        coordinator._record(manifest["transaction_id"])
+    )
+
+    assert promotion == "promoted"
+    with sqlite3.connect(coordinator.database_path) as database:
+        persisted = database.execute(
+            'SELECT parent_device, parent_inode FROM "operation" WHERE transaction_id = ?',
+            (manifest["transaction_id"],),
+        ).fetchone()
+    assert tuple(markdown_transaction._decode_filesystem_id(value) for value in persisted) == (
+        parent_identity
+    )
+
+    recovered = coordinator.recover()
+
+    assert [(record.id, record.state) for record in recovered] == [
+        (manifest["transaction_id"], "committed")
+    ]
+    assert (vault / "knowledge/notes/new.md").read_bytes() == b"new"
+
+
 @pytest.mark.parametrize("state", ["prepared", "applying"])
 def test_recover_rolls_forward_prepared_and_applying(
     vault: Path, state_root: Path, state: str
