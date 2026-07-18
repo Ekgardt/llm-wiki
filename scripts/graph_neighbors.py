@@ -13,11 +13,13 @@ Integrates into search_memory.py's _rrf_fuse_triple() as a 3rd signal.
 from __future__ import annotations
 
 import re
+import sqlite3
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT  # noqa: E402
+from memory_state import ROOT, STATE_ROOT  # noqa: E402
 
 KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
 
@@ -31,7 +33,7 @@ def _is_inactive(content: str) -> bool:
     return bool(m and m.group(1).strip().lower() in ("superseded", "archived"))
 
 
-def _build_link_graph() -> dict[str, list[str]]:
+def _build_link_graph(*, deadline: float | None = None) -> dict[str, list[str]]:
     """Build adjacency: page_path → [linked_page_paths].
 
     Scans all knowledge markdown files for [[wikilinks]].
@@ -42,7 +44,9 @@ def _build_link_graph() -> dict[str, list[str]]:
     if not KNOWLEDGE_DIR.exists():
         return graph
 
-    for md in KNOWLEDGE_DIR.rglob("*.md"):
+    for md in sorted(KNOWLEDGE_DIR.rglob("*.md")):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("graph neighbor source-scan deadline reached")
         if not md.is_file():
             continue
         try:
@@ -61,16 +65,16 @@ def _build_link_graph() -> dict[str, list[str]]:
             target = target.strip()
             if not target:
                 continue
-            resolved = _resolve_wikilink(target)
+            resolved = _resolve_wikilink(target, deadline=deadline)
             if resolved:
                 links.append(resolved)
         if links:
-            graph[rel] = list(set(links))  # dedupe
+            graph[rel] = sorted(dict.fromkeys(links))
 
     return graph
 
 
-def _resolve_wikilink(target: str) -> str | None:
+def _resolve_wikilink(target: str, *, deadline: float | None = None) -> str | None:
     """Resolve a [[wikilink]] target to a relative file path."""
     # Strip path-like targets
     t = target.strip()
@@ -84,11 +88,12 @@ def _resolve_wikilink(target: str) -> str | None:
         # Bare name: search for <name>.md in wiki + knowledge
         candidates = []
         if KNOWLEDGE_DIR.exists():
-            for found in KNOWLEDGE_DIR.rglob(f"{t}.md"):
-                candidates.append(found)
-                break
+            candidates.extend(sorted(KNOWLEDGE_DIR.rglob(f"{t}.md")))
 
+    valid: list[str] = []
     for c in candidates:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("graph neighbor source-scan deadline reached")
         resolved = c.resolve()
         if resolved.exists() and resolved.is_file():
             try:
@@ -102,32 +107,126 @@ def _resolve_wikilink(target: str) -> str | None:
                 continue
             if _is_inactive(target_content):
                 continue
-            return resolved.relative_to(ROOT).as_posix()
-    return None
+            valid.append(resolved.relative_to(ROOT).as_posix())
+    unique = sorted(dict.fromkeys(valid))
+    return unique[0] if len(unique) == 1 else None
 
 
-# Cache the graph (rebuilt on first call, reused for all queries in session)
+# Optional explicit source-scan cache populated only by rebuild_graph_cache().
 _link_graph_cache: dict[str, list[str]] | None = None
 
 
-def get_link_graph() -> dict[str, list[str]]:
-    """Get the wikilink graph, cached at module level."""
-    global _link_graph_cache
-    if _link_graph_cache is None:
-        _link_graph_cache = _build_link_graph()
-    return _link_graph_cache
+def _read_active_link_graph(
+    catalog: object | None = None,
+    *,
+    deadline: float | None = None,
+) -> dict[str, list[str]] | None:
+    """Read resolved LINKS_TO edges from the catalog-selected immutable graph."""
+    if catalog is None:
+        catalog_path = STATE_ROOT / "cache" / "evidence-graph" / "catalog.sqlite3"
+        if not catalog_path.is_file():
+            return None
+        from generation_catalog import GenerationCatalog
+
+        catalog = GenerationCatalog(STATE_ROOT, catalog_path=catalog_path)
+    from evidence_graph import EvidenceGraph
+
+    graph = None
+    try:
+        graph = EvidenceGraph.open_active(catalog, deadline=deadline)
+        if graph is None:
+            return None
+        rows = graph._execute(
+            """
+            WITH pages AS (
+              SELECT o.node_id, min(s.relative_path) AS relative_path
+              FROM occurrence o JOIN source s USING(source_id)
+              JOIN node n USING(node_id)
+              WHERE n.kind IN ('knowledge-page', 'decision', 'debugging-note')
+              GROUP BY o.node_id
+            )
+            SELECT src.relative_path AS source_path,
+                   dst.relative_path AS target_path,
+                   a.assertion_id
+            FROM assertion a
+            JOIN pages src ON src.node_id = a.source_node_id
+            JOIN pages dst ON dst.node_id = a.target_node_id
+            WHERE a.edge_type = 'LINKS_TO' AND a.resolution = 'resolved'
+            ORDER BY source_path, target_path, a.assertion_id
+            LIMIT ?
+            """,
+            (),
+            max_rows=10_000,
+            deadline=deadline,
+        )
+    except TimeoutError:
+        raise
+    except (FileNotFoundError, PermissionError, TypeError, ValueError, sqlite3.Error):
+        return None
+    finally:
+        if graph is not None:
+            graph.close()
+    adjacency: dict[str, list[str]] = {}
+    for row in rows:
+        adjacency.setdefault(str(row["source_path"]), []).append(str(row["target_path"]))
+    return {
+        source: sorted(dict.fromkeys(targets))
+        for source, targets in sorted(adjacency.items())
+    }
+
+
+def get_link_graph(
+    *,
+    catalog: object | None = None,
+    deadline: float | None = None,
+) -> dict[str, list[str]]:
+    """Prefer the active immutable graph and honestly source-scan if absent."""
+    if _link_graph_cache is not None:
+        return _link_graph_cache
+    active = _read_active_link_graph(catalog, deadline=deadline)
+    return _build_link_graph(deadline=deadline) if active is None else active
+
+
+def get_neighbor_records(
+    page_path: str,
+    *,
+    max_hops: int = 1,
+    catalog: object | None = None,
+    deadline: float | None = None,
+) -> list[dict[str, object]]:
+    """Return deterministic outbound neighbors ordered by hop then path."""
+    if not isinstance(max_hops, int) or isinstance(max_hops, bool) or not 1 <= max_hops <= 8:
+        raise ValueError("max_hops must be between 1 and 8")
+    graph = get_link_graph(catalog=catalog, deadline=deadline)
+    seen = {page_path}
+    frontier = [page_path]
+    result: list[dict[str, object]] = []
+    for hop in range(1, max_hops + 1):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("graph neighbor deadline reached")
+        next_frontier: list[str] = []
+        for source in sorted(frontier):
+            for target in sorted(graph.get(source, [])):
+                if target in seen:
+                    continue
+                seen.add(target)
+                next_frontier.append(target)
+                result.append({"path": target, "hop": hop})
+        frontier = sorted(next_frontier)
+        if not frontier:
+            break
+    return sorted(result, key=lambda item: (int(item["hop"]), str(item["path"])))
 
 
 def get_neighbors(page_path: str) -> list[str]:
     """Get pages that `page_path` links to."""
-    graph = get_link_graph()
-    return graph.get(page_path, [])
+    return [str(item["path"]) for item in get_neighbor_records(page_path)]
 
 
 def get_reverse_neighbors(page_path: str) -> list[str]:
     """Get pages that link TO `page_path`."""
     graph = get_link_graph()
-    return [src for src, targets in graph.items() if page_path in targets]
+    return sorted(src for src, targets in graph.items() if page_path in targets)
 
 
 def boost_graph_neighbors(
@@ -165,7 +264,10 @@ def boost_graph_neighbors(
                 boost = boost_weight / (1 + rank * 0.2)
                 boost_paths[neighbor] = boost_paths.get(neighbor, 0) + boost
 
-    return [{"path": p, "graph_boost": round(b, 4)} for p, b in sorted(boost_paths.items(), key=lambda x: x[1], reverse=True)]
+    return [
+        {"path": path, "graph_boost": round(boost, 4)}
+        for path, boost in sorted(boost_paths.items(), key=lambda item: (-item[1], item[0]))
+    ]
 
 
 def rebuild_graph_cache() -> int:

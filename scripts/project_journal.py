@@ -527,6 +527,43 @@ def _parse_timestamp(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def parse_journal_events(slug: str, content: bytes) -> list[dict[str, object]]:
+    """Validate and return canonical events from immutable journal bytes."""
+    _require_slug(slug)
+    if not isinstance(content, bytes):
+        raise TypeError("project journal content must be immutable bytes")
+    if len(content) > MAX_JOURNAL_BYTES:
+        raise ProjectJournalReadError(
+            "too_large", f"project journal exceeds {MAX_JOURNAL_BYTES} bytes"
+        )
+    if not content:
+        return []
+    try:
+        text = content.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ValueError("project journal must be UTF-8") from exc
+    if not text.startswith(JOURNAL_HEADER):
+        raise ValueError("project journal header is invalid")
+    lines = [line for line in text.removeprefix(JOURNAL_HEADER).splitlines() if line]
+    if len(lines) > MAX_JOURNAL_EVENTS:
+        raise ProjectJournalReadError(
+            "too_many_events",
+            f"project journal exceeds {MAX_JOURNAL_EVENTS} event lines",
+        )
+    events: list[dict[str, object]] = []
+    previous = 0
+    for line in lines:
+        event = json.loads(line)
+        if canonical_json_bytes(event).decode("utf-8") != line:
+            raise ValueError("project journal event is not canonical JSON")
+        validate_schema(event, _SCHEMA)
+        if event["project"] != slug or event["sequence"] <= previous:
+            raise ValueError("project journal sequence or slug is invalid")
+        previous = int(event["sequence"])
+        events.append(event)
+    return events
+
+
 def _is_reparse(metadata: os.stat_result) -> bool:
     attributes = getattr(metadata, "st_file_attributes", 0)
     return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
@@ -1537,32 +1574,7 @@ class ProjectStore:
         return self._receipt(refreshed)
 
     def _journal_events(self, slug: str, content: bytes) -> list[dict[str, object]]:
-        if not content:
-            return []
-        try:
-            text = content.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise ValueError("project journal must be UTF-8") from exc
-        if not text.startswith(JOURNAL_HEADER):
-            raise ValueError("project journal header is invalid")
-        lines = [line for line in text.removeprefix(JOURNAL_HEADER).splitlines() if line]
-        if len(lines) > MAX_JOURNAL_EVENTS:
-            raise ProjectJournalReadError(
-                "too_many_events",
-                f"project journal exceeds {MAX_JOURNAL_EVENTS} event lines",
-            )
-        events: list[dict[str, object]] = []
-        previous = 0
-        for line in lines:
-            event = json.loads(line)
-            if canonical_json_bytes(event).decode("utf-8") != line:
-                raise ValueError("project journal event is not canonical JSON")
-            validate_schema(event, _SCHEMA)
-            if event["project"] != slug or event["sequence"] <= previous:
-                raise ValueError("project journal sequence or slug is invalid")
-            previous = int(event["sequence"])
-            events.append(event)
-        return events
+        return parse_journal_events(slug, content)
 
     def _release(self, lease: ProjectLease) -> None:
         now = self._clock()

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -41,6 +42,23 @@ def test_resolve_wikilink_not_found(fake_graph):
     with patch.object(Path, "exists", return_value=False):
         result = fake_graph._resolve_wikilink("nonexistent")
         assert result is None
+
+
+def test_resolve_path_wikilink_uses_the_one_existing_candidate(fake_graph):
+    target = MagicMock()
+    target.resolve.return_value = target
+    target.exists.return_value = True
+    target.is_file.return_value = True
+    target.read_text.return_value = "# Active"
+    target.relative_to.return_value.as_posix.return_value = "knowledge/notes/page.md"
+    missing = MagicMock()
+    missing.resolve.return_value = missing
+    missing.exists.return_value = False
+    with patch.object(fake_graph, "ROOT") as root:
+        root.__truediv__.side_effect = [missing, target]
+        assert fake_graph._resolve_wikilink("knowledge/notes/page.md") == (
+            "knowledge/notes/page.md"
+        )
 
 
 def test_get_neighbors_returns_links(fake_graph):
@@ -106,7 +124,7 @@ def test_build_link_graph_extracts_wikilinks(fake_graph):
     fake_md.relative_to.return_value.as_posix.return_value = "page_a.md"
 
     with patch.object(fake_graph, "KNOWLEDGE_DIR") as knowledge, \
-         patch.object(fake_graph, "_resolve_wikilink", side_effect=lambda t: f"{t.lower().replace(' ', '-')}.md"), \
+         patch.object(fake_graph, "_resolve_wikilink", side_effect=lambda t, **_kwargs: f"{t.lower().replace(' ', '-')}.md"), \
          patch.object(Path, "rglob", return_value=[fake_md]):
         knowledge.exists.return_value = True
         knowledge.rglob.return_value = [fake_md]
@@ -114,3 +132,49 @@ def test_build_link_graph_extracts_wikilinks(fake_graph):
         graph = fake_graph._build_link_graph()
         assert "page_a.md" in graph
         assert len(graph["page_a.md"]) == 2
+
+
+def test_active_generation_is_preferred_and_source_scan_is_honest_fallback(fake_graph):
+    active = {"knowledge/notes/a.md": ["knowledge/notes/b.md"]}
+    with patch.object(fake_graph, "_read_active_link_graph", return_value=active), patch.object(
+        fake_graph, "_build_link_graph"
+    ) as source_scan:
+        assert fake_graph.get_link_graph(catalog=object()) == active
+        source_scan.assert_not_called()
+
+    with patch.object(fake_graph, "_read_active_link_graph", return_value=None), patch.object(
+        fake_graph, "_build_link_graph", return_value={"fallback.md": ["target.md"]}
+    ):
+        assert fake_graph.get_link_graph(catalog=object()) == {
+            "fallback.md": ["target.md"]
+        }
+
+
+def test_neighbor_records_are_ordered_by_hop_then_node(fake_graph):
+    fake_graph._link_graph_cache = {
+        "a.md": ["c.md", "b.md"],
+        "b.md": ["d.md"],
+        "c.md": ["d.md"],
+    }
+
+    assert fake_graph.get_neighbor_records("a.md", max_hops=2) == [
+        {"path": "b.md", "hop": 1},
+        {"path": "c.md", "hop": 1},
+        {"path": "d.md", "hop": 2},
+    ]
+
+
+def test_boost_ties_are_ordered_by_path(fake_graph):
+    fake_graph._link_graph_cache = {"seed.md": ["z.md", "a.md"]}
+    boosts = fake_graph.boost_graph_neighbors(
+        [{"path": "seed.md"}], None, boost_weight=0.0
+    )
+    assert [item["path"] for item in boosts] == ["a.md", "z.md"]
+
+
+def test_source_scan_fallback_honors_expired_deadline(fake_graph):
+    with patch.object(fake_graph, "_read_active_link_graph", return_value=None):
+        with pytest.raises(TimeoutError, match="deadline"):
+            fake_graph.get_link_graph(
+                catalog=object(), deadline=time.monotonic() - 1
+            )
