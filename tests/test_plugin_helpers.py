@@ -1034,7 +1034,7 @@ def test_claude_hooks_route_through_shared_adapter_and_preserve_contract():
     )
 
     expected = {
-        "SessionStart": ([15, 10], "session_start"),
+        "SessionStart": ([15], "session_start"),
         "PreCompact": ([15], "pre_compact"),
         "SessionEnd": ([15], "session_end"),
         "UserPromptSubmit": ([5], "user_prompt"),
@@ -1045,6 +1045,8 @@ def test_claude_hooks_route_through_shared_adapter_and_preserve_contract():
         assert [hook["timeout"] for hook in hooks] == timeouts
         assert all("scripts/integration_adapter.py" in hook["command"] for hook in hooks)
         assert all(f"--event {event_name}" in hook["command"] for hook in hooks)
+        if hook_name == "SessionStart":
+            assert "--delegate" not in hooks[0]["command"]
 
 
 @pytest.mark.parametrize(

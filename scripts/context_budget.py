@@ -1,9 +1,10 @@
 """Token accounting contracts used before and after LLM calls."""
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from numbers import Real
 from typing import Literal
 
@@ -223,6 +224,7 @@ class PackedContext:
     dropped: tuple[DroppedItem, ...]
     budget: ContextBudget
     truncated: bool
+    ranked_item_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -236,7 +238,9 @@ class BudgetFailure:
     required_bytes: int | None = None
     available_bytes: int | None = None
 
-    def render(self) -> str:
+    def render(self, *, max_bytes: int = 1024) -> str:
+        if not _is_nonnegative_int(max_bytes) or max_bytes == 0:
+            raise ValueError("max_bytes must be a positive integer")
         item_ids = ", ".join(self.mandatory_item_ids)
         rendered = (
             "## Context budget failure\n"
@@ -252,7 +256,33 @@ class BudgetFailure:
                 f"\n- required_bytes: `{self.required_bytes}`"
                 f"\n- available_bytes: `{self.available_bytes}`"
             )
-        return rendered
+        if len(rendered.encode("utf-8")) <= max_bytes:
+            return rendered
+        compact = json.dumps(
+            {
+                "error": self.code,
+                "mandatory_count": len(self.mandatory_item_ids),
+                "required_tokens": self.required_tokens,
+                "available_tokens": self.available_tokens,
+                "model": self.model,
+                "counter_source": self.counter_source,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if len(compact.encode("utf-8")) <= max_bytes:
+            return compact
+        minimal = json.dumps(
+            {"error": self.code, "mandatory_count": len(self.mandatory_item_ids)},
+            separators=(",", ":"),
+        )
+        if len(minimal.encode("utf-8")) <= max_bytes:
+            return minimal
+        fallback = '{"error":"budget"}'
+        if len(fallback.encode("utf-8")) <= max_bytes:
+            return fallback
+        raise ValueError("max_bytes is too small for a structured budget diagnostic")
 
 
 class BudgetExceededError(ValueError):
@@ -403,6 +433,7 @@ def pack_context(
     active_model = budget.model if model is None else model
     if model is not None and budget.model is not None and model != budget.model:
         raise ValueError("model must match budget.model")
+    effective_budget = budget if budget.model == active_model else replace(budget, model=active_model)
     costs, item_sources = _item_costs(
         normalized, model=active_model, counter=counter
     )
@@ -434,13 +465,14 @@ def pack_context(
                 code="mandatory_budget_exceeded",
                 mandatory_item_ids=tuple(item.item_id for item in mandatory),
                 required_tokens=mandatory_tokens,
-                available_tokens=budget.available_input_tokens,
+                available_tokens=effective_budget.available_input_tokens,
                 model=active_model,
                 counter_source=mandatory_render_source,
             )
         )
 
     ranked = _ranked(optional, cost_by_id)
+    ranked_item_ids = tuple(item.item_id for item in [*mandatory, *ranked])
 
     # Caps are applied after utility ranking so lower-value input order cannot win.
     section_used: dict[int, int] = {}
@@ -472,7 +504,7 @@ def pack_context(
         candidate_tokens, _ = _measure_rendered(
             _render(candidate), model=active_model, counter=counter
         )
-        if candidate_tokens > budget.available_input_tokens:
+        if candidate_tokens > effective_budget.available_input_tokens:
             dropped.append(DroppedItem(item.item_id, "budget"))
             continue
         kept_optional.append(item)
@@ -499,7 +531,7 @@ def pack_context(
                     code="mandatory_emergency_cap_exceeded",
                     mandatory_item_ids=tuple(item.item_id for item in mandatory),
                     required_tokens=required,
-                    available_tokens=budget.available_input_tokens,
+                    available_tokens=effective_budget.available_input_tokens,
                     model=active_model,
                     counter_source=source,
                     required_bytes=len(text.encode("utf-8")),
@@ -519,6 +551,7 @@ def pack_context(
         packed_tokens=packed_tokens,
         counter_source=counter_source,
         dropped=tuple(dropped),
-        budget=budget,
+        budget=effective_budget,
         truncated=truncated,
+        ranked_item_ids=ranked_item_ids,
     )

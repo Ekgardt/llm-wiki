@@ -469,7 +469,7 @@ def build_handoff(
             per_parent_cap=len(items),
         ).text + "\n"
     except BudgetExceededError as error:
-        return error.failure.render() + "\n"
+        return error.failure.render(max_bytes=max_chars)
 
 
 def recover_project_handoff(

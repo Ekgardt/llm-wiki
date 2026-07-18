@@ -1311,6 +1311,7 @@ def _append_context(context: str, handoff: str) -> str:
 
     global_text = context.rstrip()
     handoff_text = handoff.strip()
+    trailing_newline = context.endswith(("\n", "\r")) or handoff.endswith(("\n", "\r"))
     items: list[ContextItem] = []
     if global_text:
         items.append(ContextItem(
@@ -1345,9 +1346,10 @@ def _append_context(context: str, handoff: str) -> str:
     if not items:
         return ""
     try:
-        return pack_context(items, DEFAULT_CONTEXT_BUDGET).text
+        rendered = pack_context(items, DEFAULT_CONTEXT_BUDGET).text
     except BudgetExceededError as error:
-        return error.failure.render()
+        rendered = error.failure.render()
+    return rendered + ("\n" if trailing_newline else "")
 
 
 def ingest_event(
@@ -1483,7 +1485,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             result = ingest_event(envelope)
             if envelope.event_type == "session_start":
-                print(json.dumps(result, ensure_ascii=False))
+                output: dict[str, object] = result
+                if args.source == "claude":
+                    output = {
+                        "hookSpecificOutput": {
+                            "hookEventName": "SessionStart",
+                            "additionalContext": result.get("context", ""),
+                        }
+                    }
+                print(json.dumps(output, ensure_ascii=False))
     except (Exception, SystemExit):  # noqa: BLE001
         print("integration_adapter: capture skipped", file=sys.stderr)
     return 0

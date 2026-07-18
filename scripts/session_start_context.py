@@ -683,7 +683,7 @@ def _pack_session_sections(sections: list[tuple[str, str]]) -> str:
         )
         return packed.text
     except BudgetExceededError as error:
-        return error.failure.render()
+        return error.failure.render(max_bytes=MAX_CONTEXT_CHARS - 1)
 
 
 def build_context() -> str:

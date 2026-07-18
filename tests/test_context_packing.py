@@ -12,6 +12,8 @@ The packer must:
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 from context_budget import (
     BudgetExceededError,
@@ -218,6 +220,19 @@ def test_registered_tokenizer_counts_overrule_byte_estimate():
     assert packed.counter_source == "tokenizer"
 
 
+def test_model_argument_becomes_effective_budget_provenance():
+    budget = ContextBudget(None, 10, 0, 0)
+    packed = pack_context(
+        [_item("item", "many bytes", mandatory=True)],
+        budget,
+        model="tokenizer-model",
+        counter={"tokenizer-model": lambda _text: 2},
+    )
+
+    assert packed.budget.model == "tokenizer-model"
+    assert packed.packed_tokens == 2
+
+
 def test_final_rendered_separator_is_tokenized_and_budgeted():
     budget = ContextBudget("words", 3, 0, 0)
     items = [_item("a", "alpha"), _item("b", "beta")]
@@ -276,6 +291,20 @@ def test_emergency_cap_never_drops_or_slices_mandatory_item():
 
     assert raised.value.failure.code == "mandatory_emergency_cap_exceeded"
     assert raised.value.failure.mandatory_item_ids == ("safety",)
+
+
+def test_impossible_budget_diagnostic_is_complete_and_bounded():
+    budget = ContextBudget(None, 10, 0, 0)
+    mandatory = _item("mandatory-" + "x" * 1000, "content" * 100, mandatory=True)
+
+    with pytest.raises(BudgetExceededError) as raised:
+        pack_context([mandatory], budget)
+
+    rendered = raised.value.failure.render(max_bytes=160)
+    payload = json.loads(rendered)
+    assert len(rendered.encode("utf-8")) <= 160
+    assert payload["error"] == "mandatory_budget_exceeded"
+    assert payload["mandatory_count"] == 1
 
 
 def test_packed_text_joins_complete_items_with_separators():

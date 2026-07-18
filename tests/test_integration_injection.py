@@ -1525,6 +1525,45 @@ def test_claude_hooks_cover_compaction_failure_stop_and_end_signals():
     assert "--checkpoint-type significant_failure" in failure_command
 
 
+def test_claude_session_start_uses_one_outer_adapter_budget():
+    settings = json.loads(
+        (ROOT / "integrations/claude-code/settings.json").read_text(encoding="utf-8")
+    )
+    hooks = settings["hooks"]["SessionStart"][0]["hooks"]
+
+    assert len(hooks) == 1
+    command = hooks[0]["command"]
+    assert "integration_adapter.py" in command
+    assert "--event session_start" in command
+    assert "--delegate" not in command
+
+
+def test_claude_outer_session_start_preserves_hook_output_contract(
+    monkeypatch, capsys
+):
+    import io
+    import sys
+
+    import integration_adapter
+
+    monkeypatch.setattr(
+        integration_adapter,
+        "ingest_event",
+        lambda _envelope: {"context": "combined context\n"},
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO("{}"))
+
+    assert integration_adapter.main(
+        ["--source", "claude", "--event", "session_start"]
+    ) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": "combined context\n",
+        }
+    }
+
+
 def test_claude_session_end_uses_one_adapter_occurrence_for_both_side_effects(monkeypatch):
     import io
     import sys

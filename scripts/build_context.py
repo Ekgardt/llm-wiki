@@ -245,7 +245,7 @@ def _pack_project_context(parts: list[str], max_chars: int) -> str:
         )
         return packed.text
     except BudgetExceededError as error:
-        return error.failure.render()
+        return error.failure.render(max_bytes=max_chars)
 
 
 def build_context(slug: str, max_chars: int = 2000, agent: str | None = None) -> str:
