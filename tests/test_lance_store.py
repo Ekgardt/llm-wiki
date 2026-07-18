@@ -111,16 +111,16 @@ class TestGracefulDegradation:
         assert isinstance(lance_store.vector_count(), int)
         assert lance_store.vector_count() == 0
 
-    def test_upsert_returns_zero_without_lancedb(self, monkeypatch):
+    def test_upsert_refuses_destructive_live_path_without_lancedb(self, monkeypatch):
         import lance_store
 
         monkeypatch.setattr(lance_store, "_get_db", lambda: None)
-        result = lance_store.upsert_vectors(
-            paths=["test"], titles=["T"], summaries=["S"],
-            projects=["p"], timestamps=["2026-01-01"],
-            vectors=[[0.1] * 384],
-        )
-        assert result == 0
+        with pytest.raises(RuntimeError, match="immutable generation"):
+            lance_store.upsert_vectors(
+                paths=["test"], titles=["T"], summaries=["S"],
+                projects=["p"], timestamps=["2026-01-01"],
+                vectors=[[0.1] * 384],
+            )
 
 
 class TestModuleStructure:

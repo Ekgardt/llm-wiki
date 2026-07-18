@@ -822,7 +822,20 @@ def rebuild_lance(verbose: bool = True) -> dict:
 
     t0 = time.time()
     vectors = embedder.encode(texts, show_progress_bar=False, convert_to_numpy=True).tolist()
-    count = upsert_vectors(paths, titles, summaries, projects, timestamps, vectors, EMBEDDING_MODEL)
+    # Destructive live-table upsert is closed. Legacy rebuild is report-only
+    # unless an explicit generation directory is provided by generation mode.
+    try:
+        count = upsert_vectors(
+            paths, titles, summaries, projects, timestamps, vectors, EMBEDDING_MODEL
+        )
+    except RuntimeError as exc:
+        if verbose:
+            print(f"  Legacy Lance live upsert closed: {exc}")
+        return {
+            "pages": 0,
+            "error": "live_upsert_closed",
+            "hint": "use generation mode with publish_generation_vectors + catalog CAS",
+        }
     elapsed = time.time() - t0
 
     stats = {"pages": count, "elapsed_s": round(elapsed, 2)}
