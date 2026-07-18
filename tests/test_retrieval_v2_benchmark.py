@@ -1663,17 +1663,52 @@ def test_model_matrix_selection_is_exact_pinned_and_fail_closed(tmp_path):
         )
 
     matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
-    matrix["embeddings"][0]["shipping_eligible"] = False
-    matrix["embeddings"][0]["exclusion_reasons"] = ["test"]
+    gemma = next(
+        item for item in matrix["embeddings"] if item["id"] == "google/embeddinggemma-300m"
+    )
+    gemma["shipping_eligible"] = True
     changed = tmp_path / "matrix.json"
     changed.write_bytes(canonical_json_bytes(matrix) + b"\n")
-    with pytest.raises(ValueError, match="shipping eligible"):
+    with pytest.raises(ValueError, match="shipping policy"):
         runner.load_model_selection(
             changed,
             CORPUS,
             model_id=matrix["embeddings"][0]["id"],
             variant_id=matrix["embeddings"][0]["variants"][0]["variant_id"],
         )
+
+
+def test_required_candidate_specs_cover_the_closed_canonical_matrix():
+    runner = _runner_module()
+    matrix = json.loads((BENCHMARK / "model-matrix-v1.json").read_bytes())
+
+    specs = runner.required_candidate_specs(matrix)
+    embedding_variants = {
+        (candidate["id"], variant["variant_id"])
+        for candidate in matrix["embeddings"]
+        for variant in candidate["variants"]
+    }
+    rerankers = {candidate["id"] for candidate in matrix["rerankers"]}
+    observed = {
+        (
+            spec["embedding"]["id"],
+            spec["embedding"]["variant_id"],
+            spec["reranker"]["id"] if spec["reranker"] else None,
+        )
+        for spec in specs
+    }
+
+    assert len(embedding_variants) == 9
+    assert rerankers == {"BAAI/bge-reranker-v2-m3", "Qwen/Qwen3-Reranker-0.6B"}
+    assert observed == {
+        (model_id, variant_id, reranker_id)
+        for model_id, variant_id in embedding_variants
+        for reranker_id in {None, *rerankers}
+    }
+    assert len(specs) == len(observed) == 27
+    assert any(
+        spec["embedding"]["id"] == "google/embeddinggemma-300m" for spec in specs
+    )
 
 
 @pytest.mark.parametrize(
@@ -1702,7 +1737,7 @@ def test_model_matrix_runtime_rejects_unknown_nested_policy_fields(tmp_path, mut
         runner.load_model_selection(
             changed,
             CORPUS,
-            model_id="intfloat/multilingual-e5-small",
+            model_id="BAAI/bge-small-en-v1.5",
             variant_id="float32-384d",
         )
 
@@ -1750,6 +1785,73 @@ def test_embedding_adapter_applies_matrix_format_dimension_float32_and_no_gold()
     assert not hasattr(adapter, "queries") and not hasattr(adapter, "gold")
 
 
+def test_embeddinggemma_loader_uses_pinned_native_sentence_transformer(tmp_path, monkeypatch):
+    runner = _runner_module()
+    selection = runner.load_model_selection(
+        BENCHMARK / "model-matrix-v1.json",
+        CORPUS,
+        model_id="google/embeddinggemma-300m",
+        variant_id="float32-128d",
+    )
+    calls = []
+
+    class Tokenizer:
+        padding_side = None
+        truncation_side = None
+
+    class Model:
+        tokenizer = Tokenizer()
+        max_seq_length = None
+
+        def encode(self, texts, **options):
+            calls.append((list(texts), options))
+            return [[1.0] * 768 for _text in texts]
+
+    def sentence_transformer(model_id, **options):
+        calls.append((model_id, options))
+        return Model()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        type("SentenceTransformers", (), {"SentenceTransformer": sentence_transformer}),
+    )
+
+    encoder = runner._load_transformer_embedding(
+        selection,
+        cache_root=tmp_path,
+        local_files_only=True,
+        trust_remote_code=False,
+    )
+    encoded = encoder(
+        ["task: search result | query: cache"],
+        batch_size=8,
+        max_length=512,
+        pooling="mean",
+        padding_side="right",
+        truncation_side="right",
+    )
+
+    assert calls[0] == (
+        "google/embeddinggemma-300m",
+        {
+            "cache_folder": str(tmp_path),
+            "local_files_only": True,
+            "model_kwargs": {"torch_dtype": "float32"},
+            "revision": "57c266a740f537b4dc058e1b0cda161fd15afa75",
+            "trust_remote_code": False,
+        },
+    )
+    assert calls[1][1] == {
+        "batch_size": 8,
+        "convert_to_numpy": True,
+        "normalize_embeddings": False,
+        "show_progress_bar": False,
+    }
+    assert len(encoded) == 1
+    assert len(encoded[0]) == 768
+
+
 @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
 def test_embedding_adapter_rejects_nonfinite_and_invalid_vectors(bad):
     np = pytest.importorskip("numpy")
@@ -1757,7 +1859,7 @@ def test_embedding_adapter_rejects_nonfinite_and_invalid_vectors(bad):
     selection = runner.load_model_selection(
         BENCHMARK / "model-matrix-v1.json",
         CORPUS,
-        model_id="intfloat/multilingual-e5-small",
+        model_id="BAAI/bge-small-en-v1.5",
         variant_id="float32-384d",
     )
 
@@ -1813,7 +1915,7 @@ def test_reranker_runs_all_depths_from_one_frozen_candidate_list():
     selection = runner.load_model_selection(
         BENCHMARK / "model-matrix-v1.json",
         CORPUS,
-        model_id="intfloat/multilingual-e5-small",
+        model_id="BAAI/bge-small-en-v1.5",
         variant_id="float32-384d",
         reranker_id="BAAI/bge-reranker-v2-m3",
     )
@@ -1907,11 +2009,11 @@ def test_real_cli_contract_requires_every_explicit_selector(tmp_path):
     base = ["--adapter", "model-matrix"]
     for args in (
         base,
-        base + ["--model-id", "intfloat/multilingual-e5-small"],
+        base + ["--model-id", "BAAI/bge-small-en-v1.5"],
         base
         + [
             "--model-id",
-            "intfloat/multilingual-e5-small",
+            "BAAI/bge-small-en-v1.5",
             "--variant-id",
             "float32-384d",
             "--cache-root",
@@ -1926,7 +2028,7 @@ def test_real_cli_contract_requires_every_explicit_selector(tmp_path):
         base
         + [
             "--model-id",
-            "intfloat/multilingual-e5-small",
+            "BAAI/bge-small-en-v1.5",
             "--variant-id",
             "float32-384d",
             "--cache-root",
@@ -2037,7 +2139,7 @@ def test_injected_real_run_reports_provenance_but_never_quality_or_release(tmp_p
         cache_root=tmp_path / "cache",
         adapter="model-matrix",
         matrix_path=BENCHMARK / "model-matrix-v1.json",
-        model_id="intfloat/multilingual-e5-small",
+        model_id="BAAI/bge-small-en-v1.5",
         variant_id="float32-384d",
         lexical_config="L0",
         vector_backend="numpy-exact",
@@ -2052,9 +2154,9 @@ def test_injected_real_run_reports_provenance_but_never_quality_or_release(tmp_p
     }
     assert loader_calls[0][2]["HF_HUB_OFFLINE"] == "1"
     assert report["adapter_kind"] == "model-matrix"
-    assert report["model_id"] == "intfloat/multilingual-e5-small"
+    assert report["model_id"] == "BAAI/bge-small-en-v1.5"
     assert report["variant_id"] == "float32-384d"
-    assert report["revision"] == "614241f622f53c4eeff9890bdc4f31cfecc418b3"
+    assert report["revision"] == "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
     assert report["matrix_sha256"] == runner._sha256_file(BENCHMARK / "model-matrix-v1.json")
     assert report["corpus_sha256"] == runner._sha256_file(CORPUS)
     assert report["acquisition_mode"] == "offline-local-files-only"
@@ -2088,7 +2190,7 @@ def test_single_provenance_valid_run_is_quality_candidate_never_release(tmp_path
         corpus_path=CORPUS,
         cache_root=tmp_path / "cache",
         adapter="model-matrix",
-        model_id="intfloat/multilingual-e5-small",
+        model_id="BAAI/bge-small-en-v1.5",
         variant_id="float32-384d",
         lexical_config="L0",
         vector_backend="numpy-exact",
@@ -2107,7 +2209,7 @@ def test_single_provenance_valid_run_is_quality_candidate_never_release(tmp_path
         corpus_path=CORPUS,
         cache_root=tmp_path / "stdout-cache",
         adapter="model-matrix",
-        model_id="intfloat/multilingual-e5-small",
+        model_id="BAAI/bge-small-en-v1.5",
         variant_id="float32-384d",
         lexical_config="L0",
         vector_backend="numpy-exact",
@@ -2172,7 +2274,7 @@ def test_real_run_failure_cleans_workspace_and_retains_model_cache(tmp_path):
             corpus_path=CORPUS,
             cache_root=cache,
             adapter="model-matrix",
-            model_id="intfloat/multilingual-e5-small",
+            model_id="BAAI/bge-small-en-v1.5",
             variant_id="float32-384d",
             lexical_config="L0",
             vector_backend="numpy-exact",
@@ -2203,7 +2305,7 @@ def test_real_run_ignores_stale_workspace_and_rejects_symlinked_runs(tmp_path, m
         corpus_path=CORPUS,
         cache_root=cache,
         adapter="model-matrix",
-        model_id="intfloat/multilingual-e5-small",
+        model_id="BAAI/bge-small-en-v1.5",
         variant_id="float32-384d",
         lexical_config="L0",
         vector_backend="numpy-exact",
@@ -2225,7 +2327,7 @@ def test_real_run_ignores_stale_workspace_and_rejects_symlinked_runs(tmp_path, m
             corpus_path=CORPUS,
             cache_root=second_cache,
             adapter="model-matrix",
-            model_id="intfloat/multilingual-e5-small",
+            model_id="BAAI/bge-small-en-v1.5",
             variant_id="float32-384d",
             lexical_config="L0",
             vector_backend="numpy-exact",
@@ -2249,7 +2351,7 @@ def test_online_acquisition_can_never_be_quality_evidence(tmp_path, monkeypatch)
         corpus_path=CORPUS,
         cache_root=tmp_path / "cache",
         adapter="model-matrix",
-        model_id="intfloat/multilingual-e5-small",
+        model_id="BAAI/bge-small-en-v1.5",
         variant_id="float32-384d",
         lexical_config="L0",
         vector_backend="numpy-exact",
@@ -2279,7 +2381,7 @@ def test_forged_worker_environment_and_argument_never_self_attest(tmp_path, monk
         corpus_path=CORPUS,
         cache_root=tmp_path / "cache",
         adapter="model-matrix",
-        model_id="intfloat/multilingual-e5-small",
+        model_id="BAAI/bge-small-en-v1.5",
         variant_id="float32-384d",
         lexical_config="L0",
         vector_backend="numpy-exact",
@@ -2295,7 +2397,7 @@ def test_prefetch_emits_non_quality_receipt_without_running_queries(tmp_path, mo
     selection = runner.load_model_selection(
         BENCHMARK / "model-matrix-v1.json",
         CORPUS,
-        model_id="intfloat/multilingual-e5-small",
+        model_id="BAAI/bge-small-en-v1.5",
         variant_id="float32-384d",
     )
     calls = []
@@ -2392,7 +2494,7 @@ def test_injected_clock_separates_lexical_model_and_document_phases(tmp_path):
         corpus_path=CORPUS,
         cache_root=tmp_path / "cache",
         adapter="model-matrix",
-        model_id="intfloat/multilingual-e5-small",
+        model_id="BAAI/bge-small-en-v1.5",
         variant_id="float32-384d",
         lexical_config="L0",
         vector_backend="numpy-exact",
@@ -2422,7 +2524,7 @@ def test_model_load_failure_degrades_to_lexical_and_removes_semantic_artifacts(t
         corpus_path=CORPUS,
         cache_root=cache,
         adapter="model-matrix",
-        model_id="intfloat/multilingual-e5-small",
+        model_id="BAAI/bge-small-en-v1.5",
         variant_id="float32-384d",
         lexical_config="L0",
         vector_backend="numpy-exact",
@@ -2460,7 +2562,7 @@ def test_every_ordinary_model_failure_degrades_to_lexical(tmp_path, failure):
         corpus_path=CORPUS,
         cache_root=tmp_path / "cache",
         adapter="model-matrix",
-        model_id="intfloat/multilingual-e5-small",
+        model_id="BAAI/bge-small-en-v1.5",
         variant_id="float32-384d",
         lexical_config="L0",
         vector_backend="numpy-exact",
@@ -2489,7 +2591,7 @@ def test_control_flow_model_exceptions_propagate_after_cleanup(tmp_path, failure
             corpus_path=CORPUS,
             cache_root=cache,
             adapter="model-matrix",
-            model_id="intfloat/multilingual-e5-small",
+            model_id="BAAI/bge-small-en-v1.5",
             variant_id="float32-384d",
             lexical_config="L0",
             vector_backend="numpy-exact",
@@ -2521,7 +2623,7 @@ def test_real_reranker_report_contains_all_depth_metrics_from_same_fingerprint(t
         corpus_path=CORPUS,
         cache_root=tmp_path / "cache",
         adapter="model-matrix",
-        model_id="intfloat/multilingual-e5-small",
+        model_id="BAAI/bge-small-en-v1.5",
         variant_id="float32-384d",
         reranker_id="BAAI/bge-reranker-v2-m3",
         lexical_config="L0",
@@ -2587,7 +2689,7 @@ def test_embedding_is_collected_before_reranker_load_and_frozen_lists_survive(tm
         corpus_path=CORPUS,
         cache_root=tmp_path / "cache",
         adapter="model-matrix",
-        model_id="intfloat/multilingual-e5-small",
+        model_id="BAAI/bge-small-en-v1.5",
         variant_id="float32-384d",
         reranker_id="Qwen/Qwen3-Reranker-0.6B",
         lexical_config="L0",
@@ -2632,7 +2734,7 @@ def test_embedding_cache_cleanup_failure_is_not_suppressed(tmp_path, monkeypatch
             corpus_path=CORPUS,
             cache_root=tmp_path / "cache",
             adapter="model-matrix",
-            model_id="intfloat/multilingual-e5-small",
+            model_id="BAAI/bge-small-en-v1.5",
             variant_id="float32-384d",
             lexical_config="L0",
             vector_backend="numpy-exact",
@@ -2677,7 +2779,7 @@ def test_reranker_scoring_failure_degrades_whole_run_to_lexical(tmp_path):
         corpus_path=CORPUS,
         cache_root=tmp_path / "cache",
         adapter="model-matrix",
-        model_id="intfloat/multilingual-e5-small",
+        model_id="BAAI/bge-small-en-v1.5",
         variant_id="float32-384d",
         reranker_id="BAAI/bge-reranker-v2-m3",
         lexical_config="L0",
@@ -2851,7 +2953,7 @@ def test_aggregation_rejects_fabricated_trace_or_metric_evidence(tmp_path, fabri
     selection = runner.load_model_selection(
         BENCHMARK / "model-matrix-v1.json",
         CORPUS,
-        model_id="intfloat/multilingual-e5-small",
+        model_id="BAAI/bge-small-en-v1.5",
         variant_id="float32-384d",
     )
     paths = []
@@ -2883,7 +2985,7 @@ def test_aggregation_rejects_abstention_not_derived_from_normalized_confidence(t
     selection = runner.load_model_selection(
         BENCHMARK / "model-matrix-v1.json",
         CORPUS,
-        model_id="intfloat/multilingual-e5-small",
+        model_id="BAAI/bge-small-en-v1.5",
         variant_id="float32-384d",
     )
     spec = runner.required_candidate_specs(selection.matrix)[0]
@@ -2900,7 +3002,7 @@ def test_aggregation_requires_complete_reports_and_writes_canonical_selection(tm
     selection = runner.load_model_selection(
         BENCHMARK / "model-matrix-v1.json",
         CORPUS,
-        model_id="intfloat/multilingual-e5-small",
+        model_id="BAAI/bge-small-en-v1.5",
         variant_id="float32-384d",
     )
     specs = runner.required_candidate_specs(selection.matrix)
@@ -2989,7 +3091,7 @@ def test_authoritative_orchestration_attests_private_worker_payloads(tmp_path, m
     selection = runner.load_model_selection(
         BENCHMARK / "model-matrix-v1.json",
         CORPUS,
-        model_id="intfloat/multilingual-e5-small",
+        model_id="BAAI/bge-small-en-v1.5",
         variant_id="float32-384d",
     )
     repo = tmp_path / "repo"
@@ -3066,7 +3168,7 @@ def test_authoritative_degraded_error_names_requested_candidate_and_fallback(
     selection = runner.load_model_selection(
         BENCHMARK / "model-matrix-v1.json",
         CORPUS,
-        model_id="intfloat/multilingual-e5-small",
+        model_id="BAAI/bge-small-en-v1.5",
         variant_id="float32-384d",
     )
     requested = runner.required_candidate_specs(selection.matrix)[0]
@@ -3119,7 +3221,7 @@ def test_retained_report_conflict_rolls_back_new_copies_and_selection(tmp_path):
     selection = runner.load_model_selection(
         BENCHMARK / "model-matrix-v1.json",
         CORPUS,
-        model_id="intfloat/multilingual-e5-small",
+        model_id="BAAI/bge-small-en-v1.5",
         variant_id="float32-384d",
     )
     raw_paths = []
@@ -3159,7 +3261,7 @@ def test_selection_publication_failure_removes_all_new_retained_reports(tmp_path
     selection = runner.load_model_selection(
         BENCHMARK / "model-matrix-v1.json",
         CORPUS,
-        model_id="intfloat/multilingual-e5-small",
+        model_id="BAAI/bge-small-en-v1.5",
         variant_id="float32-384d",
     )
     raw_paths = []
@@ -3208,7 +3310,7 @@ def test_selection_recomputes_language_baseline_resource_material_and_shipping_g
     selection = runner.load_model_selection(
         BENCHMARK / "model-matrix-v1.json",
         CORPUS,
-        model_id="intfloat/multilingual-e5-small",
+        model_id="BAAI/bge-small-en-v1.5",
         variant_id="float32-384d",
     )
     spec = runner.required_candidate_specs(selection.matrix)[0]
