@@ -20,6 +20,8 @@ from reliable_memory import canonical_json_bytes, validate_schema  # noqa: E402
 
 DEFAULT_CONTRACT = Path(__file__).with_name("comparative-v1.json")
 DEFAULT_SCHEMA = Path(__file__).with_name("comparative-v1.schema.json")
+DEFAULT_LEDGER_SCHEMA = Path(__file__).with_name("comparative-task-ledger-v1.schema.json")
+DEFAULT_REPORT_SCHEMA = Path(__file__).with_name("comparative-smoke-report-v1.schema.json")
 MAX_CONTRACT_BYTES = 128 * 1024
 MAX_SCHEMA_BYTES = 128 * 1024
 
@@ -97,6 +99,14 @@ def load_contract(contract_path: Path | str, schema_path: Path | str) -> dict:
         raise ValueError("Graphify source or dependency lock is not pinned")
     gate = contract["public_claim_gate"]
     if gate != {
+        "comparisons": {
+            "quality": "10000*quality_difference_lower_confidence_bound>-200",
+            "token_ratio": "10000*token_ratio_upper_confidence_bound<9000",
+        },
+        "consumed_report_fields": {
+            "quality": "quality_difference_lower_confidence_bound",
+            "token_ratio": "token_ratio_upper_confidence_bound",
+        },
         "hard_gates": ["crash", "evidence", "freshness"],
         "quality_lower_bound_basis_points_strictly_greater_than": -200,
         "requires_gate_f": True,
@@ -135,11 +145,45 @@ def _fingerprint(inputs: dict) -> str:
     return hashlib.sha256(canonical_json_bytes(inputs)).hexdigest()
 
 
+def validate_ledger(ledger: dict, schema_path: Path | str = DEFAULT_LEDGER_SCHEMA) -> dict:
+    """Validate one closed task ledger and its cross-field invariants."""
+    schema_path = Path(schema_path)
+    _schema_raw, _schema = _read_bounded_json(schema_path, MAX_SCHEMA_BYTES, "ledger schema")
+    validate_schema(ledger, schema_path)
+    failed = ledger["outcome"] == "failure"
+    if failed != (ledger["failure"] is not None):
+        raise ValueError("ledger failure object must exactly match failure outcome")
+    if ledger["input_fingerprint"] != _fingerprint(ledger["inputs"]):
+        raise ValueError("ledger input fingerprint mismatch")
+    return ledger
+
+
+def validate_report(
+    report: dict,
+    report_schema_path: Path | str = DEFAULT_REPORT_SCHEMA,
+    ledger_schema_path: Path | str = DEFAULT_LEDGER_SCHEMA,
+) -> dict:
+    """Validate the closed smoke report and every embedded raw ledger."""
+    report_schema_path = Path(report_schema_path)
+    _schema_raw, _schema = _read_bounded_json(
+        report_schema_path, MAX_SCHEMA_BYTES, "smoke report schema"
+    )
+    validate_schema(report, report_schema_path)
+    for ledger in report["raw_task_ledgers"]:
+        validate_ledger(ledger, ledger_schema_path)
+    if {ledger["adapter_id"] for ledger in report["raw_task_ledgers"]} != ADAPTER_IDS:
+        raise ValueError("smoke report adapter ledger set is incomplete")
+    if len({ledger["input_fingerprint"] for ledger in report["raw_task_ledgers"]}) != 1:
+        raise ValueError("smoke report adapters did not receive identical inputs")
+    return report
+
+
 def run_smoke(contract: dict) -> dict:
     """Exercise every adapter ledger shape without running any real backend."""
     task = contract["tasks"][0]
     inputs = task["inputs"]
     fingerprint = _fingerprint(inputs)
+    bound_fields = contract["public_claim_gate"]["consumed_report_fields"]
     unavailable_metrics = {field: None for field in sorted(METRIC_FIELDS)}
     ledgers = []
     for adapter in contract["adapters"]:
@@ -147,11 +191,25 @@ def run_smoke(contract: dict) -> dict:
         ledgers.append(
             {
                 "adapter_id": adapter["id"],
+                "adapter_provenance": {
+                    "configuration_sha256": contract["provenance"]["configuration"][
+                        "sha256"
+                    ],
+                    "implementation_status": adapter["implementation_status"],
+                    "source_revision": (
+                        GRAPHIFY_COMMIT
+                        if adapter["id"] == "graphify-pinned"
+                        else contract["provenance"]["configuration"]["sha256"]
+                    ),
+                },
                 "attempt": 1,
-                "error": (
+                "failure": (
                     {
+                        "category": "orchestration",
                         "code": "real-adapter-disabled",
                         "message": "Pinned Graphify is not executed by deterministic smoke.",
+                        "phase": "smoke",
+                        "retryable": False,
                     }
                     if failed
                     else None
@@ -160,7 +218,7 @@ def run_smoke(contract: dict) -> dict:
                 "inputs": inputs,
                 "metrics": dict(unavailable_metrics),
                 "outcome": "failure" if failed else "orchestration-pass",
-                "seed": contract["statistics"]["seeds"][0],
+                "seed": contract["statistics"]["agent_seeds"][0],
                 "task_id": task["id"],
             }
         )
@@ -183,16 +241,21 @@ def run_smoke(contract: dict) -> dict:
                 "token-ratio-confidence-interval-unavailable",
                 "hard-gates-unmeasured",
             ],
+            "gate_f_passed": False,
+            "hard_gates": {"crash": None, "evidence": None, "freshness": None},
             "interpretation": "orchestration-only-no-quality-claim",
+            bound_fields["quality"]: None,
+            "real_evidence_complete": False,
+            bound_fields["token_ratio"]: None,
         },
         "quality_claim": False,
         "raw_task_ledgers": ledgers,
         "schema_version": "comparative-smoke-report/v1",
         "statistics": {
+            "agent_seeds": contract["statistics"]["agent_seeds"],
+            "claim_gating_method": contract["statistics"]["claim_gating_method"],
             "computed": False,
-            "interval_methods": contract["statistics"]["interval_methods"],
             "reason": "real paired observations unavailable",
-            "seeds_required_for_real_run": contract["statistics"]["seeds"],
         },
     }
 
@@ -217,6 +280,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         contract = load_contract(args.contract, args.schema)
         report = run_smoke(contract)
+        validate_report(report)
     except (OSError, ValueError) as exc:
         print(f"comparative smoke failed: {exc}", file=sys.stderr)
         return 2
