@@ -22,6 +22,7 @@ def _publish(
     parent: str | None = None,
     sources=None,
     source_bytes=None,
+    graph_records=None,
 ):
     import corpus_snapshot
     import evidence_graph
@@ -30,6 +31,9 @@ def _publish(
     directory = catalog.generations_path / generation_id
     directory.mkdir(parents=True)
     content = b"def f(): pass\n"
+    if graph_records is not None:
+        sources = graph_records["sources"]
+        source_bytes = graph_records["source_bytes"]
     if sources is None:
         sources = [
             {
@@ -66,12 +70,12 @@ def _publish(
         database_path,
         sources=sources,
         source_bytes=source_bytes,
-        nodes=[],
-        occurrences=[],
-        assertions=[],
-        evidence=[],
-        observations=[],
-        dependencies=[],
+        nodes=[] if graph_records is None else graph_records["nodes"],
+        occurrences=[] if graph_records is None else graph_records["occurrences"],
+        assertions=[] if graph_records is None else graph_records["assertions"],
+        evidence=[] if graph_records is None else graph_records["evidence"],
+        observations=[] if graph_records is None else graph_records["observations"],
+        dependencies=[] if graph_records is None else graph_records["dependencies"],
     )
     payload = database_path.read_bytes()
     manifest = {
@@ -105,6 +109,95 @@ def _publish(
         manifest["parent_generation_id"] = parent
     (directory / "manifest.json").write_bytes(canonical_json_bytes(manifest))
     return manifest
+
+
+def _rich_graph_records():
+    content = b"def caller():\n    callee()\n"
+    return {
+        "sources": [
+            {
+                "source_id": "source",
+                "relative_path": "app.py",
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "size": len(content),
+                "media_type": "text/x-python",
+                "language": "python",
+                "git_oid": None,
+            }
+        ],
+        "source_bytes": {"source": content},
+        "nodes": [
+            {
+                "node_id": "caller",
+                "kind": "function",
+                "identity_scheme": "python/v1",
+                "identity_key": "app:caller",
+                "metadata": {"name": "caller"},
+            },
+            {
+                "node_id": "callee",
+                "kind": "function",
+                "identity_scheme": "python/v1",
+                "identity_key": "app:callee",
+                "metadata": {"name": "callee"},
+            },
+        ],
+        "occurrences": [
+            {
+                "occurrence_id": "occurrence",
+                "node_id": "caller",
+                "source_id": "source",
+                "role": "definition",
+                "byte_start": 0,
+                "byte_end": 12,
+                "line_start": 1,
+                "line_end": 1,
+            }
+        ],
+        "assertions": [
+            {
+                "assertion_id": "assertion",
+                "source_node_id": "caller",
+                "edge_type": "CALLS",
+                "target_node_id": "callee",
+                "literal": None,
+                "confidence": "high",
+                "authority": "ai-derived",
+                "resolution": "resolved",
+                "extractor": "python/v1",
+            }
+        ],
+        "evidence": [
+            {
+                "evidence_id": "evidence",
+                "assertion_id": "assertion",
+                "observation_id": None,
+                "source_id": "source",
+                "byte_start": 18,
+                "byte_end": 26,
+                "span_sha256": hashlib.sha256(content[18:26]).hexdigest(),
+            }
+        ],
+        "observations": [
+            {
+                "observation_id": "observation",
+                "source_node_id": "caller",
+                "edge_type": "CALLS",
+                "target_text": "dynamic",
+                "reason": "dynamic_dispatch",
+                "extractor": "python/v1",
+            }
+        ],
+        "dependencies": [
+            {
+                "dependency_id": "dependency",
+                "dependent_node_id": "caller",
+                "dependency_node_id": "callee",
+                "kind": "imports",
+                "source_id": "source",
+            }
+        ],
+    }
 
 
 def test_open_active_reuses_generation_catalog_and_falls_back_from_corruption(tmp_path):
@@ -357,3 +450,51 @@ def test_source_membership_drift_falls_back_and_orphan_probe_skips_mismatch(tmp_
     orphan_path = catalog.generations_path / "orphan/manifest.json"
     orphan_path.write_bytes(canonical_json_bytes(orphan))
     assert catalog.recover_orphans() == []
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "UPDATE source SET size=size+100",
+        "UPDATE source SET content=X'00'",
+        "UPDATE source SET relative_path='../app.py'",
+        "UPDATE node SET kind='' WHERE node_id='caller'",
+        "UPDATE node SET node_id='caller,alias' WHERE node_id='caller'",
+        "UPDATE node SET metadata_json='{\"b\":1,\"a\":2}' WHERE node_id='caller'",
+        "UPDATE occurrence SET role=''",
+        "UPDATE occurrence SET byte_end=100",
+        "UPDATE assertion SET extractor=''",
+        "UPDATE assertion SET resolution='invented'",
+        "UPDATE assertion SET target_node_id=NULL, "
+        "literal_json='{\"b\":1,\"a\":2}', resolution='unresolved'",
+        "UPDATE evidence SET byte_end=100, span_sha256='" + "0" * 64 + "'",
+        "UPDATE evidence SET span_sha256='" + "0" * 64 + "'",
+        "UPDATE observation SET extractor=''",
+        "UPDATE observation SET reason='invented'",
+        "UPDATE dependency SET kind=''",
+        "DELETE FROM evidence",
+        "DELETE FROM node WHERE node_id='callee'",
+    ],
+)
+def test_hash_rebound_malformed_records_fall_back_to_prior_valid_generation(tmp_path, mutation):
+    import evidence_graph
+    from generation_catalog import GenerationCatalog
+
+    catalog = GenerationCatalog(tmp_path / "state")
+    _publish(catalog, "valid", graph_records=_rich_graph_records())
+    _publish(catalog, "tampered", parent="valid", graph_records=_rich_graph_records())
+    for generation_id in ("valid", "tampered"):
+        catalog.register(generation_id)
+    assert catalog.activate("valid", expected_active=None)
+    assert catalog.activate("tampered", expected_active="valid")
+    with sqlite3.connect(catalog.generations_path / "tampered/evidence.sqlite3") as database:
+        database.execute("PRAGMA ignore_check_constraints=ON")
+        database.execute(mutation)
+    _rebind_registered_manifest(catalog, "tampered")
+
+    graph = evidence_graph.EvidenceGraph.open_active(catalog)
+
+    assert graph is not None
+    assert graph.generation_id == "valid"
+    assert catalog.get_active()["generation_id"] == "valid"
+    graph.close()
