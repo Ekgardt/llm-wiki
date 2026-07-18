@@ -165,7 +165,10 @@ def test_manifest_schema_is_closed_and_bounded():
         "graph_schema_version": "evidence-graph/v1",
         "graph_extractor_version": "graph-extractor/v1",
         "source_manifest_sha256": "1" * 64,
-        "artifacts": [{"path": "evidence.sqlite3", "size": 4096, "sha256": "2" * 64}],
+        "artifacts": [
+            {"path": "evidence.sqlite3", "size": 4096, "sha256": "2" * 64},
+            {"path": "source-manifest.json", "size": 1024, "sha256": "1" * 64},
+        ],
         "vector_state": "absent",
     }
 
@@ -183,9 +186,8 @@ def test_manifest_schema_is_closed_and_bounded():
         )
 
 
-def test_source_membership_hash_is_closed_canonical_and_order_independent():
-    import evidence_graph
-    from reliable_memory import canonical_json_bytes
+def test_graph_source_rows_use_shared_corpus_manifest_contract():
+    import corpus_snapshot
 
     sources = _records()["sources"]
     second = {
@@ -197,17 +199,20 @@ def test_source_membership_hash_is_closed_canonical_and_order_independent():
         "language": "markdown",
         "git_oid": "abc123",
     }
-    expected = {
-        "schema_version": "evidence-graph-sources/v1",
-        "sources": sorted([*sources, second], key=lambda row: row["source_id"]),
-    }
+    shared = [
+        {
+            "logical_id": source["source_id"],
+            "relative_path": source["relative_path"],
+            "sha256": source["sha256"],
+        }
+        for source in [second, *sources]
+    ]
+    policy = {"daily_paths": [], "code_roots": [], "include_historical": False, "as_of": None}
 
-    forward = evidence_graph.source_manifest_sha256([*sources, second])
-    reverse = evidence_graph.source_manifest_sha256([second, *sources])
+    forward = corpus_snapshot.canonical_source_manifest_sha256(shared, policy)
+    reverse = corpus_snapshot.canonical_source_manifest_sha256(reversed(shared), policy)
 
-    assert forward == reverse == _sha(canonical_json_bytes(expected))
-    with pytest.raises(ValueError, match="closed|unknown"):
-        evidence_graph.source_manifest_sha256([{**second, "unknown": True}])
+    assert forward == reverse
 
 
 def test_generation_database_has_canonical_tables_indexes_and_pragmas(tmp_path):

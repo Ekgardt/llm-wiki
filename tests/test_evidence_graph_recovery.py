@@ -23,6 +23,7 @@ def _publish(
     sources=None,
     source_bytes=None,
 ):
+    import corpus_snapshot
     import evidence_graph
     from reliable_memory import canonical_json_bytes
 
@@ -43,6 +44,23 @@ def _publish(
         ]
     if source_bytes is None:
         source_bytes = {"source": content}
+    policy = {
+        "daily_paths": [],
+        "code_roots": [],
+        "include_historical": False,
+        "as_of": None,
+    }
+    shared_sources = [
+        {
+            "logical_id": source["source_id"],
+            "relative_path": source["relative_path"],
+            "sha256": source["sha256"],
+        }
+        for source in sources
+    ]
+    source_manifest = corpus_snapshot.canonical_source_manifest(shared_sources, policy)
+    source_manifest_bytes = canonical_json_bytes(source_manifest)
+    (directory / "source-manifest.json").write_bytes(source_manifest_bytes)
     database_path = directory / "evidence.sqlite3"
     evidence_graph.create_generation_database(
         database_path,
@@ -59,8 +77,8 @@ def _publish(
     manifest = {
         "generation_id": generation_id,
         "schema_version": "corpus-generation/v1",
-        "collector_version": "collector/v1",
-        "extractor_version": "extractor/v1",
+        "collector_version": corpus_snapshot.COLLECTOR_VERSION,
+        "extractor_version": corpus_snapshot.EXTRACTOR_VERSION,
         "tokenizer_version": "tokenizer/v1",
         "tokenizer_config_sha256": hashlib.sha256(b"config").hexdigest(),
         "embedding_model_id": None,
@@ -68,13 +86,18 @@ def _publish(
         "vector_dimensions": None,
         "graph_schema_version": "evidence-graph/v1",
         "graph_extractor_version": "graph-extractor/v1",
-        "source_manifest_sha256": evidence_graph.source_manifest_sha256(sources),
+        "source_manifest_sha256": hashlib.sha256(source_manifest_bytes).hexdigest(),
         "artifacts": [
             {
                 "path": "evidence.sqlite3",
                 "size": len(payload),
                 "sha256": hashlib.sha256(payload).hexdigest(),
-            }
+            },
+            {
+                "path": "source-manifest.json",
+                "size": len(source_manifest_bytes),
+                "sha256": hashlib.sha256(source_manifest_bytes).hexdigest(),
+            },
         ],
         "vector_state": "absent",
     }
@@ -132,7 +155,10 @@ def _rebind_registered_manifest(catalog, generation_id: str) -> None:
     manifest = json.loads(manifest_path.read_bytes())
     artifact = directory / "evidence.sqlite3"
     payload = artifact.read_bytes()
-    manifest["artifacts"][0].update(size=len(payload), sha256=hashlib.sha256(payload).hexdigest())
+    graph_artifact = next(
+        item for item in manifest["artifacts"] if item["path"] == "evidence.sqlite3"
+    )
+    graph_artifact.update(size=len(payload), sha256=hashlib.sha256(payload).hexdigest())
     encoded = canonical_json_bytes(manifest)
     manifest_path.write_bytes(encoded)
     with sqlite3.connect(catalog.catalog_path) as database:
@@ -206,7 +232,31 @@ def test_registration_rejects_wrong_index_definition_with_expected_name(tmp_path
         catalog.register("wrong-index")
 
 
+def test_graph_extra_source_fields_remain_independently_validated(tmp_path):
+    from generation_catalog import GenerationCatalog
+
+    catalog = GenerationCatalog(tmp_path / "state")
+    _publish(catalog, "bad-extra")
+    with sqlite3.connect(catalog.generations_path / "bad-extra/evidence.sqlite3") as database:
+        database.execute("UPDATE source SET media_type='' ")
+    directory = catalog.generations_path / "bad-extra"
+    manifest = json.loads((directory / "manifest.json").read_bytes())
+    artifact = directory / "evidence.sqlite3"
+    payload = artifact.read_bytes()
+    graph_artifact = next(
+        item for item in manifest["artifacts"] if item["path"] == "evidence.sqlite3"
+    )
+    graph_artifact.update(size=len(payload), sha256=hashlib.sha256(payload).hexdigest())
+    from reliable_memory import canonical_json_bytes
+
+    (directory / "manifest.json").write_bytes(canonical_json_bytes(manifest))
+
+    with pytest.raises(ValueError, match="source|controlled"):
+        catalog.register("bad-extra")
+
+
 def test_registration_accepts_canonical_multi_source_membership_and_rejects_mismatch(tmp_path):
+    import corpus_snapshot
     from generation_catalog import GenerationCatalog
     from reliable_memory import canonical_json_bytes
 
@@ -238,6 +288,23 @@ def test_registration_accepts_canonical_multi_source_membership_and_rejects_mism
         "multi",
         sources=list(reversed(sources)),
         source_bytes={"z-source": first, "a-source": second},
+    )
+    shared_sources = [
+        {
+            "logical_id": source["source_id"],
+            "relative_path": source["relative_path"],
+            "sha256": source["sha256"],
+        }
+        for source in sources
+    ]
+    shared_policy = {
+        "daily_paths": [],
+        "code_roots": [],
+        "include_historical": False,
+        "as_of": None,
+    }
+    assert manifest["source_manifest_sha256"] == corpus_snapshot.canonical_source_manifest_sha256(
+        shared_sources, shared_policy
     )
     assert catalog.register("multi") == manifest
 
