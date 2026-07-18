@@ -11,7 +11,6 @@ import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from types import MappingProxyType
 from typing import Protocol
 
 
@@ -28,6 +27,7 @@ class _CapturedSource(Protocol):
     content: bytes
 
 EXTRACTOR_VERSION = "code-extractor/v1"
+SCIP_DEFINITION_ROLE = 0x1
 _GRAMMARS = {
     "bash": ("tree_sitter_bash", "language"),
     "c": ("tree_sitter_c", "language"),
@@ -79,6 +79,7 @@ class ScipSymbol:
     byte_start: int
     byte_end: int
     symbol: str
+    roles: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,9 +123,32 @@ class CodeExtraction:
     observations: tuple[Mapping[str, object], ...]
 
 
+class _FrozenDict(dict):
+    def _immutable(self, *_args: object, **_kwargs: object) -> None:
+        raise TypeError("extraction records are immutable")
+
+    __delitem__ = _immutable
+    __setitem__ = _immutable
+    clear = _immutable
+    pop = _immutable
+    popitem = _immutable
+    setdefault = _immutable
+    update = _immutable
+
+
+def _deep_freeze(value: object) -> object:
+    if isinstance(value, Mapping):
+        return _FrozenDict({key: _deep_freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_deep_freeze(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_deep_freeze(item) for item in value)
+    return value
+
+
 def _frozen(records: list[dict[str, object]], key: str) -> tuple[Mapping[str, object], ...]:
     records.sort(key=lambda item: str(item[key]))
-    return tuple(MappingProxyType(record) for record in records)
+    return tuple(_deep_freeze(record) for record in records)
 
 
 def _identifier(prefix: str, *parts: object) -> str:
@@ -154,6 +178,26 @@ def _span(node: ast.AST, offsets: tuple[int, ...], content: bytes) -> tuple[int,
     start = offsets[min(line - 1, len(offsets) - 1)] + column
     end = offsets[min(end_line - 1, len(offsets) - 1)] + end_column
     return start, min(end, len(content)), line, end_line
+
+
+def _python_name_span(
+    node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef,
+    offsets: tuple[int, ...],
+    content: bytes,
+) -> tuple[int, int]:
+    line_start = offsets[node.lineno - 1]
+    declaration_end = content.find(b"\n", line_start)
+    if declaration_end < 0:
+        declaration_end = len(content)
+    match = re.search(
+        rb"\b(?:class|def|async\s+def)\s+" + re.escape(node.name.encode()) + rb"\b",
+        content[line_start:declaration_end],
+    )
+    if match is None:
+        return -1, -1
+    name_offset = match.group(0).rfind(node.name.encode())
+    start = line_start + match.start() + name_offset
+    return start, start + len(node.name.encode())
 
 
 def _signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
@@ -195,8 +239,15 @@ class _Collector:
         self.files: dict[str, str] = {}
         self.tables: dict[str, str] = {}
         self.definitions: dict[tuple[str, str], list[str]] = {}
+        self.python_scopes: dict[tuple[str, str, str], list[str]] = {}
+        self.function_body_scope: dict[str, str] = {}
+        self.function_parent_scope: dict[str, str] = {}
+        self.scope_parent: dict[str, str] = {}
+        self.route_receivers: dict[str, set[str]] = {}
+        self.sqlite_modules: dict[str, set[str]] = {}
+        self.python_entry_names: dict[str, set[str]] = {}
         self.node_ast: dict[int, str] = {}
-        self.syntax_definitions: dict[str, list[tuple[object, str]]] = {}
+        self.syntax_definitions: dict[tuple[str, str, str], list[tuple[object, str]]] = {}
         self.syntax_functions: dict[str, list[tuple[object, str]]] = {}
 
     def check(self, records: object, maximum: int, label: str) -> None:
@@ -334,23 +385,22 @@ class _Collector:
         self,
         source: _CapturedSource,
         span: tuple[int, int, int, int],
+        name_span: tuple[int, int],
         language: str,
         owner: str,
         name: str,
         signature: str,
     ) -> tuple[str, str]:
-        start, end, _, _ = span
+        name_start, name_end = name_span
         candidates = sorted(
-            (symbol.byte_end - symbol.byte_start, symbol.symbol)
+            symbol.symbol
             for symbol in self.scip_symbols
             if symbol.source_id == source.record.logical_id
-            and (
-                start <= symbol.byte_start < end
-                or symbol.byte_start <= start < symbol.byte_end
-            )
+            and symbol.roles & SCIP_DEFINITION_ROLE
+            and (symbol.byte_start, symbol.byte_end) == (name_start, name_end)
         )
         if candidates:
-            return "scip/v1", candidates[0][1]
+            return "scip/v1", candidates[0]
         key = "\x1f".join((
             self.repository_id, language, source.record.relative_path,
             owner, name, signature,
@@ -404,29 +454,54 @@ class _Collector:
         offsets = _line_offsets(source.content)
         module_name = _module_name(source.record.relative_path)
         module_id = self.modules[module_name]
+        self.route_receivers[source.record.logical_id] = self._python_route_receivers(tree)
+        self.sqlite_modules[source.record.logical_id] = {
+            alias.asname or alias.name
+            for statement in tree.body
+            if isinstance(statement, ast.Import)
+            for alias in statement.names
+            if alias.name == "sqlite3"
+        }
+        self.python_entry_names[source.record.logical_id] = self._python_entry_names(tree)
 
-        def walk(body: list[ast.stmt], owner_name: str, owner_id: str, in_class: bool) -> None:
+        def walk(
+            body: list[ast.stmt],
+            owner_name: str,
+            owner_id: str,
+            in_class: bool,
+            lexical_scope: str,
+        ) -> None:
             for node in body:
                 if isinstance(node, ast.ClassDef):
                     span = _span(node, offsets, source.content)
+                    name_span = _python_name_span(node, offsets, source.content)
                     scheme, key = self.symbol_identity(
-                        source, span, "python", owner_name, node.name, node.name,
+                        source, span, name_span, "python", owner_name, node.name, node.name,
                     )
                     node_id = self.add_node(
                         "class", scheme, key,
                         {"name": node.name, "owner": owner_name, "path": source.record.relative_path},
                     )
                     self.node_ast[id(node)] = node_id
-                    self.definitions.setdefault((module_name, node.name), []).append(node_id)
+                    definition_scope = owner_name if in_class else lexical_scope
+                    self.python_scopes.setdefault(
+                        (module_name, definition_scope, node.name), []
+                    ).append(node_id)
+                    if not in_class and lexical_scope == module_name:
+                        self.definitions.setdefault((module_name, node.name), []).append(node_id)
                     self.add_occurrence(node_id, source, "definition", span)
                     self.add_assertion(owner_id, "DEFINES", node_id, source, span)
                     self._table(node, node_id, owner_name, source, offsets)
-                    walk(node.body, f"{owner_name}.{node.name}", node_id, True)
+                    walk(
+                        node.body, f"{owner_name}.{node.name}", node_id, True,
+                        lexical_scope,
+                    )
                 elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     span = _span(node, offsets, source.content)
+                    name_span = _python_name_span(node, offsets, source.content)
                     signature = _signature(node)
                     scheme, key = self.symbol_identity(
-                        source, span, "python", owner_name, node.name, signature,
+                        source, span, name_span, "python", owner_name, node.name, signature,
                     )
                     kind = "method" if in_class else "function"
                     node_id = self.add_node(
@@ -437,14 +512,87 @@ class _Collector:
                         },
                     )
                     self.node_ast[id(node)] = node_id
-                    self.definitions.setdefault((module_name, node.name), []).append(node_id)
+                    definition_scope = owner_name if in_class else lexical_scope
+                    self.python_scopes.setdefault(
+                        (module_name, definition_scope, node.name), []
+                    ).append(node_id)
+                    if not in_class and lexical_scope == module_name:
+                        self.definitions.setdefault((module_name, node.name), []).append(node_id)
+                    body_scope = f"{owner_name}.{node.name}"
+                    self.function_body_scope[node_id] = body_scope
+                    self.function_parent_scope[node_id] = lexical_scope
+                    self.scope_parent[body_scope] = lexical_scope
                     self.add_occurrence(node_id, source, "definition", span)
                     self.add_assertion(owner_id, "DEFINES", node_id, source, span)
                     self._entry_point(node, node_id, owner_name, source, span)
                     self._routes(node, node_id, owner_name, source, offsets)
-                    walk(node.body, f"{owner_name}.{node.name}", node_id, False)
+                    walk(node.body, body_scope, node_id, False, body_scope)
 
-        walk(tree.body, module_name or "<module>", module_id, False)
+        walk(tree.body, module_name or "<module>", module_id, False, module_name)
+
+    @staticmethod
+    def _python_route_receivers(tree: ast.Module) -> set[str]:
+        supported_modules = {
+            "fastapi": {"APIRouter", "FastAPI"},
+            "flask": {"Blueprint", "Flask"},
+        }
+        constructors = set()
+        module_aliases = {}
+        for statement in tree.body:
+            if isinstance(statement, ast.ImportFrom) and statement.module in supported_modules:
+                constructors.update(
+                    alias.asname or alias.name
+                    for alias in statement.names
+                    if alias.name in supported_modules[statement.module]
+                )
+            elif isinstance(statement, ast.Import):
+                module_aliases.update({
+                    alias.asname or alias.name: alias.name
+                    for alias in statement.names
+                    if alias.name in supported_modules
+                })
+        receivers = set()
+        for statement in tree.body:
+            if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                continue
+            targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+            value = statement.value
+            if not isinstance(value, ast.Call):
+                continue
+            constructor = value.func
+            proven = isinstance(constructor, ast.Name) and constructor.id in constructors
+            if isinstance(constructor, ast.Attribute) and isinstance(constructor.value, ast.Name):
+                module = module_aliases.get(constructor.value.id)
+                proven = module is not None and constructor.attr in supported_modules[module]
+            if not proven:
+                continue
+            receivers.update(
+                target.id for target in targets if isinstance(target, ast.Name)
+            )
+        return receivers
+
+    @staticmethod
+    def _python_entry_names(tree: ast.Module) -> set[str]:
+        names = set()
+        for statement in tree.body:
+            if not isinstance(statement, ast.If):
+                continue
+            test = statement.test
+            if not (
+                isinstance(test, ast.Compare)
+                and isinstance(test.left, ast.Name)
+                and test.left.id == "__name__"
+                and len(test.ops) == 1
+                and isinstance(test.ops[0], ast.Eq)
+                and len(test.comparators) == 1
+                and isinstance(test.comparators[0], ast.Constant)
+                and test.comparators[0].value == "__main__"
+            ):
+                continue
+            for node in ast.walk(statement):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                    names.add(node.func.id)
+        return names
 
     def _table(
         self,
@@ -480,6 +628,11 @@ class _Collector:
     ) -> None:
         if node.name != "main":
             return
+        if node.name not in self.python_entry_names[source.record.logical_id]:
+            self.add_observation(
+                function_id, "EXPOSES", node.name, "unsupported_semantics", source, span
+            )
+            return
         key = f"{self.repository_id}\x1f{source.record.relative_path}\x1f{owner}\x1fmain"
         entry = self.add_node("entry-point", "code-entry-point/v1", key, {"name": "main", "kind": "main"})
         self.add_occurrence(entry, source, "definition", span)
@@ -501,11 +654,22 @@ class _Collector:
                 "delete", "get", "patch", "post", "put", "route",
             }:
                 continue
+            receiver = function.value.id if isinstance(function.value, ast.Name) else None
+            span = _span(decorator, offsets, source.content)
+            if receiver not in self.route_receivers[source.record.logical_id]:
+                self.add_observation(
+                    function_id, "EXPOSES", ast.unparse(decorator),
+                    "unsupported_semantics", source, span,
+                )
+                continue
             path = decorator.args[0]
             if not isinstance(path, ast.Constant) or not isinstance(path.value, str):
+                self.add_observation(
+                    function_id, "EXPOSES", ast.unparse(decorator),
+                    "unsupported_semantics", source, span,
+                )
                 continue
             method = function.attr.upper()
-            span = _span(decorator, offsets, source.content)
             key = f"{self.repository_id}\x1f{method}\x1f{path.value}\x1f{owner}.{node.name}"
             route = self.add_node(
                 "route", "code-route/v1", key,
@@ -547,6 +711,11 @@ class _Collector:
                             self.add_assertion(class_id, "INHERITS", target[0], source, span)
                         elif len(target) > 1:
                             self.add_observation(class_id, "INHERITS", ast.unparse(base), "ambiguous_target", source, span)
+                        else:
+                            self.add_observation(
+                                class_id, "INHERITS", ast.unparse(base),
+                                "unresolved_reference", source, span,
+                            )
             if not isinstance(node, ast.Call) or self._is_route_decorator(node, parent):
                 continue
             owner = self._enclosing_node(node, parent)
@@ -563,14 +732,15 @@ class _Collector:
                 if isinstance(node.func, ast.Name) and node.func.id in aliases:
                     reason = "missing_dependency"
                 self.add_observation(source_node_id, "CALLS", text, reason, source, span)
-            self._sql_edges(node, source_node_id, source, span)
+            self._sql_edges(node, owner, source_node_id, source, offsets)
 
     def _sql_edges(
         self,
         node: ast.Call,
+        owner: ast.AST | None,
         source_node_id: str,
         source: _CapturedSource,
-        span: tuple[int, int, int, int],
+        offsets: tuple[int, ...],
     ) -> None:
         if not node.args:
             return
@@ -578,15 +748,70 @@ class _Collector:
         if not isinstance(statement, ast.Constant) or not isinstance(statement.value, str):
             return
         sql = statement.value
+        function = node.func
+        receiver = (
+            function.value.id
+            if isinstance(function, ast.Attribute) and isinstance(function.value, ast.Name)
+            else None
+        )
+        supported_api = (
+            isinstance(function, ast.Attribute)
+            and function.attr in {"execute", "executemany"}
+            and receiver is not None
+            and self._sqlite_receiver(source, owner, receiver)
+        )
         relationships = (
             ("READS", r"\b(?:FROM|JOIN)\s+([A-Za-z_]\w*)"),
             ("WRITES", r"\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+([A-Za-z_]\w*)"),
         )
         for edge_type, pattern in relationships:
             for match in re.finditer(pattern, sql, re.IGNORECASE):
-                table = self.tables.get(match.group(1).casefold())
-                if table:
-                    self.add_assertion(source_node_id, edge_type, table, source, span)
+                table_name = match.group(1)
+                literal_span = _span(statement, offsets, source.content)
+                start = source.content.find(
+                    table_name.encode(), literal_span[0], literal_span[1]
+                )
+                if start < 0:
+                    continue
+                end = start + len(table_name.encode())
+                reference_span = (
+                    start,
+                    end,
+                    source.content.count(b"\n", 0, start) + 1,
+                    source.content.count(b"\n", 0, end) + 1,
+                )
+                table = self.tables.get(table_name.casefold())
+                if not supported_api:
+                    self.add_observation(
+                        source_node_id, edge_type, table_name,
+                        "unsupported_semantics", source, reference_span,
+                    )
+                elif table is None:
+                    self.add_observation(
+                        source_node_id, edge_type, table_name,
+                        "unresolved_reference", source, reference_span,
+                    )
+                else:
+                    self.add_assertion(
+                        source_node_id, edge_type, table, source, reference_span
+                    )
+
+    def _sqlite_receiver(
+        self, source: _CapturedSource, owner: ast.AST | None, receiver: str
+    ) -> bool:
+        if not isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return False
+        arguments = [
+            *owner.args.posonlyargs, *owner.args.args, *owner.args.kwonlyargs,
+        ]
+        return any(
+            argument.arg == receiver
+            and isinstance(argument.annotation, ast.Attribute)
+            and isinstance(argument.annotation.value, ast.Name)
+            and argument.annotation.value.id in self.sqlite_modules[source.record.logical_id]
+            and argument.annotation.attr == "Connection"
+            for argument in arguments
+        )
 
     @staticmethod
     def _syntax_span(node: object) -> tuple[int, int, int, int]:
@@ -649,13 +874,21 @@ class _Collector:
             if not name:
                 continue
             span = self._syntax_span(node)
-            scheme, key = self.symbol_identity(source, span, language, module_name, name, name)
+            named = node.child_by_field_name("name")
+            name_span = (
+                (named.start_byte, named.end_byte) if named is not None else (-1, -1)
+            )
+            scheme, key = self.symbol_identity(
+                source, span, name_span, language, module_name, name, name
+            )
             node_id = self.add_node(
                 "class", scheme, key,
                 {"name": name, "owner": module_name, "path": source.record.relative_path},
             )
             classes.append((node, node_id, name))
-            self.syntax_definitions.setdefault(name, []).append((node, node_id))
+            self.syntax_definitions.setdefault(
+                (language, module_name, name), []
+            ).append((node, node_id))
             self.add_occurrence(node_id, source, "definition", span)
             self.add_assertion(module_id, "DEFINES", node_id, source, span)
         for node in nodes:
@@ -670,7 +903,13 @@ class _Collector:
             owner_id = container[1] if container else module_id
             span = self._syntax_span(node)
             signature = self._syntax_signature(node, name, source.content)
-            scheme, key = self.symbol_identity(source, span, language, owner_name, name, signature)
+            named = node.child_by_field_name("name")
+            name_span = (
+                (named.start_byte, named.end_byte) if named is not None else (-1, -1)
+            )
+            scheme, key = self.symbol_identity(
+                source, span, name_span, language, owner_name, name, signature
+            )
             node_id = self.add_node(
                 "method" if container else "function", scheme, key,
                 {
@@ -678,21 +917,36 @@ class _Collector:
                     "path": source.record.relative_path,
                 },
             )
-            self.syntax_definitions.setdefault(name, []).append((node, node_id))
+            self.syntax_definitions.setdefault(
+                (language, module_name, name), []
+            ).append((node, node_id))
             self.syntax_functions.setdefault(source.record.logical_id, []).append((node, node_id))
             self.add_occurrence(node_id, source, "definition", span)
             self.add_assertion(owner_id, "DEFINES", node_id, source, span)
             if name == "main":
-                key = f"{self.repository_id}\x1f{source.record.relative_path}\x1f{owner_name}\x1fmain"
-                entry = self.add_node(
-                    "entry-point", "code-entry-point/v1", key,
-                    {"name": "main", "kind": "main"},
+                declaration = source.content[node.start_byte:node.end_byte].decode(
+                    "utf-8", errors="strict"
                 )
-                self.add_occurrence(entry, source, "definition", span)
-                self.add_assertion(node_id, "EXPOSES", entry, source, span)
+                supported = language in {"c", "cpp", "go", "rust"} or (
+                    language == "java" and "static" in declaration
+                )
+                if supported:
+                    key = f"{self.repository_id}\x1f{source.record.relative_path}\x1f{owner_name}\x1fmain"
+                    entry = self.add_node(
+                        "entry-point", "code-entry-point/v1", key,
+                        {"name": "main", "kind": "main"},
+                    )
+                    self.add_occurrence(entry, source, "definition", span)
+                    self.add_assertion(node_id, "EXPOSES", entry, source, span)
+                else:
+                    self.add_observation(
+                        node_id, "EXPOSES", name, "unsupported_semantics", source, span
+                    )
 
     def collect_syntax_edges(self, source: _CapturedSource, root: object) -> None:
-        module_id = self.modules[_module_name(source.record.relative_path)]
+        language = source.record.language or "unknown"
+        module_name = _module_name(source.record.relative_path)
+        module_id = self.modules[module_name]
         functions = self.syntax_functions.get(source.record.logical_id, ())
         for node in self._syntax_nodes(root, self.limits.max_occurrences * 4):
             if node.type in _CLASS_TYPES:
@@ -715,27 +969,48 @@ class _Collector:
                 continue
             text = source.content[function.start_byte:function.end_byte].decode("utf-8", errors="strict")
             name = re.split(r"\.|::|->", text)[-1]
-            candidates = self.syntax_definitions.get(name, ())
+            candidates = tuple(
+                item
+                for item in self.syntax_definitions.get((language, module_name, name), ())
+                if self.nodes[item[1]]["kind"] == "function"
+            )
             owners = [
                 item for item in functions
                 if item[0].start_byte <= node.start_byte and node.end_byte <= item[0].end_byte
             ]
-            source_node = (
-                min(owners, key=lambda item: item[0].end_byte - item[0].start_byte)[1]
-                if owners else module_id
+            owner_record = (
+                min(owners, key=lambda item: item[0].end_byte - item[0].start_byte)
+                if owners else None
+            )
+            source_node = owner_record[1] if owner_record else module_id
+            shadowed = owner_record is not None and self._syntax_shadowed(
+                owner_record[0], node, name, source.content
             )
             span = self._syntax_span(node)
-            if len(candidates) == 1 and not re.search(r"\.|::|->", text):
+            if len(candidates) == 1 and not shadowed and not re.search(r"\.|::|->", text):
                 self.add_assertion(source_node, "CALLS", candidates[0][1], source, span, confidence="medium")
-            elif len(candidates) > 1:
+            elif len(candidates) > 1 and not shadowed:
                 self.add_observation(source_node, "CALLS", text, "ambiguous_target", source, span)
             else:
                 reason = "dynamic_dispatch" if re.search(r"\.|::|->", text) else "unresolved_reference"
                 self.add_observation(source_node, "CALLS", text, reason, source, span)
 
+    @staticmethod
+    def _syntax_shadowed(owner: object, call: object, name: str, content: bytes) -> bool:
+        parameters = owner.child_by_field_name("parameters")
+        if parameters is not None and re.search(
+            rf"\b{re.escape(name)}\b",
+            content[parameters.start_byte:parameters.end_byte].decode("utf-8", errors="strict"),
+        ):
+            return True
+        prefix = content[owner.start_byte:call.start_byte].decode("utf-8", errors="strict")
+        return bool(re.search(rf"\b(?:const|let|var)\s+{re.escape(name)}\b", prefix))
+
     def _syntax_type_edges(self, node: object, source: _CapturedSource) -> None:
+        language = source.record.language or "unknown"
+        module_name = _module_name(source.record.relative_path)
         name = self._syntax_name(node, source.content)
-        owners = self.syntax_definitions.get(name or "", ())
+        owners = self.syntax_definitions.get((language, module_name, name or ""), ())
         source_node = next(
             (node_id for candidate, node_id in owners if candidate.start_byte == node.start_byte),
             None,
@@ -749,7 +1024,9 @@ class _Collector:
         )
         for edge_type, pattern in relationships:
             for match in re.finditer(pattern, declaration):
-                targets = self.syntax_definitions.get(match.group(1), ())
+                targets = self.syntax_definitions.get(
+                    (language, module_name, match.group(1)), ()
+                )
                 if len(targets) != 1:
                     reason = "ambiguous_target" if len(targets) > 1 else "unresolved_reference"
                     start = node.start_byte + match.start(1)
@@ -817,11 +1094,24 @@ class _Collector:
                 if symbol:
                     return list(self.definitions.get((module, symbol), ()))
                 return [self.modules[module]] if module in self.modules else []
-            return [
-                node_id
-                for node_id in self.definitions.get((module_name, expression.id), ())
-                if self.nodes[node_id]["kind"] != "method"
-            ]
+            if owner is None:
+                return list(
+                    self.python_scopes.get((module_name, module_name, expression.id), ())
+                )
+            owner_id = self.node_ast.get(id(owner))
+            scope = None if owner_id is None else self.function_body_scope.get(owner_id)
+            visited = set()
+            while scope is not None and scope not in visited:
+                visited.add(scope)
+                candidates = self.python_scopes.get(
+                    (module_name, scope, expression.id), ()
+                )
+                if candidates:
+                    return list(candidates)
+                scope = self.scope_parent.get(scope)
+            return list(
+                self.python_scopes.get((module_name, module_name, expression.id), ())
+            )
         if isinstance(expression, ast.Attribute):
             if isinstance(expression.value, ast.Name) and expression.value.id == "self" and owner:
                 owner_id = self.node_ast.get(id(owner))
@@ -829,7 +1119,9 @@ class _Collector:
                     self.nodes[owner_id]["metadata"].get("owner", "")
                 )
                 return [
-                    node_id for node_id in self.definitions.get((module_name, expression.attr), ())
+                    node_id for node_id in self.python_scopes.get(
+                        (module_name, owner_name, expression.attr), ()
+                    )
                     if self.nodes[node_id]["kind"] == "method"
                     and self.nodes[node_id]["metadata"].get("owner") == owner_name
                 ]
@@ -840,7 +1132,9 @@ class _Collector:
             if isinstance(expression.value, ast.Name):
                 class_targets = self.definitions.get((module_name, expression.value.id), ())
                 return [
-                    node_id for node_id in self.definitions.get((module_name, expression.attr), ())
+                    node_id for node_id in self.python_scopes.get(
+                        (module_name, f"{module_name}.{expression.value.id}", expression.attr), ()
+                    )
                     if any(self.nodes[node_id]["metadata"].get("owner", "").endswith(expression.value.id) for _ in class_targets)
                 ]
         return []
@@ -974,6 +1268,10 @@ def extract_code(
             or symbol.byte_end > len(source.content)
             or not symbol.symbol
             or len(symbol.symbol) > 4096
+            or isinstance(symbol.roles, bool)
+            or not isinstance(symbol.roles, int)
+            or symbol.roles < 0
+            or symbol.roles > 0x7F
         ):
             raise ValueError("SCIP symbols must identify a valid captured source span")
     collector = _Collector(

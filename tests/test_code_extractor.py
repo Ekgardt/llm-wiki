@@ -45,13 +45,16 @@ def test_extracts_required_python_nodes_and_honest_relationships():
 
     content = (
         b"from dep import helper\n"
+        b"from fastapi import FastAPI\n"
+        b"app = FastAPI()\n"
         b"class Base:\n    pass\n\n"
         b"class User(Base):\n"
         b"    __tablename__ = 'users'\n"
         b"    def save(self):\n        helper()\n\n"
         b"@app.get('/users')\n"
         b"def list_users():\n    return User()\n\n"
-        b"def main():\n    list_users()\n"
+        b"def main():\n    list_users()\n\n"
+        b"if __name__ == '__main__':\n    main()\n"
     )
 
     dependency = _source("dep.py", b"def helper():\n    pass\n")
@@ -87,7 +90,7 @@ def test_preserves_exact_utf8_byte_and_line_spans_for_declarations_and_edges():
 
 
 def test_uses_stable_non_line_identity_and_scip_symbol_when_supplied():
-    from code_extractor import ScipSymbol, extract_code
+    from code_extractor import SCIP_DEFINITION_ROLE, ScipSymbol, extract_code
 
     original = b"def run(value: int):\n    return value\n"
     shifted = b"\n\n" + original
@@ -95,15 +98,27 @@ def test_uses_stable_non_line_identity_and_scip_symbol_when_supplied():
     second = extract_code((_source("app.py", shifted),), repository_id="repo")
     first_run = _node(first, "function", "run")
     second_run = _node(second, "function", "run")
-    start = shifted.index(b"def run")
-    scip = ScipSymbol("source:app.py", start, len(shifted), "scip-python . repo 1 app/run().")
+    name_start = shifted.index(b"run")
+    symbols = (
+        ScipSymbol("source:app.py", shifted.index(b"def run"), len(shifted), "overlap", SCIP_DEFINITION_ROLE),
+        ScipSymbol("source:app.py", name_start, name_start + 3, "reference", 0),
+        ScipSymbol(
+            "source:app.py", name_start, name_start + 3,
+            "scip-python . repo 1 app/run().", SCIP_DEFINITION_ROLE,
+        ),
+    )
     scip_result = extract_code(
-        (_source("app.py", shifted),), repository_id="repo", scip_symbols=(scip,)
+        (_source("app.py", shifted),), repository_id="repo", scip_symbols=symbols
     )
 
     assert first_run["node_id"] == second_run["node_id"]
     assert "@L" not in first_run["identity_key"]
     assert _node(scip_result, "function", "run")["identity_scheme"] == "scip/v1"
+
+    without_exact_definition = extract_code(
+        (_source("app.py", shifted),), repository_id="repo", scip_symbols=symbols[:2]
+    )
+    assert _node(without_exact_definition, "function", "run")["identity_scheme"] == "code-symbol/v1"
 
 
 def test_unresolved_semantics_are_controlled_observations_with_evidence():
@@ -162,6 +177,78 @@ def test_tree_sitter_languages_extract_when_available_and_degrade_when_absent(mo
     assert {item["reason"] for item in degraded.observations} == {"unsupported_semantics"}
 
 
+def test_syntax_only_calls_do_not_cross_module_or_language_boundaries():
+    from code_extractor import extract_code
+
+    sources = (
+        _source("target.ts", b"function target() {}\n", language="typescript"),
+        _source("caller.ts", b"function caller() { target(); }\n", language="typescript"),
+    )
+
+    result = extract_code(sources, repository_id="repo")
+
+    assert not [item for item in result.assertions if item["edge_type"] == "CALLS"]
+    assert any(
+        item["edge_type"] == "CALLS" and item["reason"] in {"ambiguous_target", "unresolved_reference"}
+        for item in result.observations
+    )
+
+
+def test_syntax_bare_call_shadowed_by_parameter_is_unresolved():
+    from code_extractor import extract_code
+
+    source = _source(
+        "app.ts",
+        b"function target() {}\nfunction caller(target: () => void) { target(); }\n",
+        language="typescript",
+    )
+
+    result = extract_code((source,), repository_id="repo")
+
+    assert not [item for item in result.assertions if item["edge_type"] == "CALLS"]
+    assert any(
+        item["edge_type"] == "CALLS" and item["reason"] == "unresolved_reference"
+        for item in result.observations
+    )
+
+
+def test_python_nested_scope_resolution_never_leaks_to_sibling_scope():
+    from code_extractor import extract_code
+
+    source = _source(
+        "service.py",
+        b"def first():\n"
+        b"    def helper(): pass\n"
+        b"    helper()\n\n"
+        b"def second():\n"
+        b"    helper()\n",
+    )
+
+    result = extract_code((source,), repository_id="repo")
+
+    assert len([item for item in result.assertions if item["edge_type"] == "CALLS"]) == 1
+    assert len([
+        item for item in result.observations
+        if item["edge_type"] == "CALLS" and item["reason"] == "unresolved_reference"
+    ]) == 1
+
+
+def test_missing_python_base_is_an_observation():
+    from code_extractor import extract_code
+
+    result = extract_code(
+        (_source("child.py", b"class Child(MissingBase):\n    pass\n"),),
+        repository_id="repo",
+    )
+
+    assert any(
+        item["edge_type"] == "INHERITS"
+        and item["target_text"] == "MissingBase"
+        and item["reason"] == "unresolved_reference"
+        for item in result.observations
+    )
+
+
 def test_emits_only_explicit_implements_reads_and_writes_relationships():
     from code_extractor import extract_code
 
@@ -169,9 +256,10 @@ def test_emits_only_explicit_implements_reads_and_writes_relationships():
         "models.py",
         b"class User:\n"
         b"    __tablename__ = 'users'\n\n"
-        b"def load(connection):\n"
+        b"import sqlite3\n\n"
+        b"def load(connection: sqlite3.Connection):\n"
         b"    connection.execute('SELECT * FROM users')\n\n"
-        b"def save(connection):\n"
+        b"def save(connection: sqlite3.Connection):\n"
         b"    connection.execute('UPDATE users SET name = 1')\n",
     )
     typescript = _source(
@@ -186,7 +274,59 @@ def test_emits_only_explicit_implements_reads_and_writes_relationships():
 
     edges = {item["edge_type"] for item in result.assertions}
     assert {"IMPLEMENTS", "READS", "WRITES"} <= edges
-    assert "entry-point" in {item["kind"] for item in result.nodes}
+    assert "entry-point" not in {item["kind"] for item in result.nodes}
+
+    sql_evidence = [
+        evidence
+        for evidence in result.evidence
+        if evidence["assertion_id"] in {
+            item["assertion_id"] for item in result.assertions
+            if item["edge_type"] in {"READS", "WRITES"}
+        }
+    ]
+    assert {python.content[item["byte_start"]:item["byte_end"]] for item in sql_evidence} == {b"users"}
+
+
+def test_unsupported_route_entry_and_sql_semantics_are_observations():
+    from code_extractor import extract_code
+
+    source = _source(
+        "pretender.py",
+        b"class Pretender:\n"
+        b"    __tablename__ = 'users'\n\n"
+        b"@fake.get('/users')\n"
+        b"def handler(logger):\n"
+        b"    logger.execute('SELECT * FROM users')\n\n"
+        b"def main(): pass\n",
+    )
+
+    result = extract_code((source,), repository_id="repo")
+
+    assert not {"EXPOSES", "READS", "WRITES"} & {
+        item["edge_type"] for item in result.assertions
+    }
+    assert {"EXPOSES", "READS"} <= {item["edge_type"] for item in result.observations}
+
+
+def test_framework_and_database_names_without_real_imports_are_not_proof():
+    from code_extractor import extract_code
+
+    source = _source(
+        "lookalikes.py",
+        b"class FastAPI:\n"
+        b"    def get(self, path): return lambda function: function\n\n"
+        b"class User:\n"
+        b"    __tablename__ = 'users'\n\n"
+        b"app = FastAPI()\n"
+        b"@app.get('/users')\n"
+        b"def handler(connection: sqlite3.Connection):\n"
+        b"    connection.execute('SELECT * FROM users')\n",
+    )
+
+    result = extract_code((source,), repository_id="repo")
+
+    assert not {"EXPOSES", "READS"} & {item["edge_type"] for item in result.assertions}
+    assert {"EXPOSES", "READS"} <= {item["edge_type"] for item in result.observations}
 
 
 def test_static_self_method_resolves_but_dynamic_receiver_is_observed():
@@ -234,8 +374,19 @@ def test_extraction_is_deterministic_immutable_and_bounded():
     assert first == second
     with pytest.raises(FrozenInstanceError):
         first.nodes = ()
+    with pytest.raises(TypeError):
+        first.nodes[0]["metadata"]["name"] = "changed"
     with pytest.raises(ValueError, match="node ceiling"):
         extract_code((source,), repository_id="repo", limits=ExtractionLimits(max_nodes=2))
+
+
+def test_deep_freeze_recursively_freezes_metadata_containers():
+    from code_extractor import _deep_freeze
+
+    frozen = _deep_freeze({"nested": {"items": ["one"]}})
+
+    with pytest.raises(TypeError):
+        frozen["nested"]["items"][0] = "changed"
 
 
 def test_output_is_accepted_by_task18_schema(tmp_path):

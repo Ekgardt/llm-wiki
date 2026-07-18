@@ -22,6 +22,7 @@ import math
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -30,7 +31,7 @@ import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from importlib import metadata
-from pathlib import Path
+from pathlib import Path, PurePath
 
 try:
     from .import_resolver import (
@@ -837,14 +838,88 @@ def index_directory(directory: Path, verbose: bool = True) -> dict:
     return stats
 
 
-def find_callers(function_name: str, directory: Path) -> list[dict]:
+def _generation_catalog(directory: Path):
+    """Open the shared generation catalog only when it already exists."""
+    try:
+        from .generation_catalog import GenerationCatalog
+    except ImportError:
+        from generation_catalog import GenerationCatalog
+
+    state_root = Path(os.environ.get("LLM_WIKI_STATE_ROOT", str(directory.resolve())))
+    catalog_path = state_root / "cache" / "evidence-graph" / "catalog.sqlite3"
+    if not catalog_path.is_file():
+        return None
+    return GenerationCatalog(state_root, catalog_path=catalog_path)
+
+
+def _active_evidence_graph(directory: Path):
+    try:
+        from .evidence_graph import EvidenceGraph
+    except ImportError:
+        from evidence_graph import EvidenceGraph
+
+    try:
+        catalog = _generation_catalog(directory)
+        return None if catalog is None else EvidenceGraph.open_active(catalog)
+    except (OSError, TypeError, ValueError, PermissionError, sqlite3.Error):
+        return None
+
+
+def _stored_location(graph, node_id: str, directory: Path) -> tuple[str, int]:
+    occurrences = graph.occurrences(node_id, max_rows=1)
+    if not occurrences:
+        node = graph.node(node_id)
+        path = "" if node is None else str(node["metadata"].get("path", ""))
+        return (str(directory / path) if path else "", 0)
+    occurrence = occurrences[0]
+    return str(directory / occurrence["relative_path"]), occurrence["line_start"]
+
+
+def _stored_edge_location(graph, assertion_id: str, directory: Path) -> tuple[str, int]:
+    evidence = graph.evidence(assertion_id=assertion_id, max_rows=1)
+    if not evidence:
+        return "", 0
+    span = evidence[0]
+    return str(directory / span["relative_path"]), span["line_start"]
+
+
+def _stored_qualified_name(node: dict[str, object]) -> str:
+    owner = str(node["metadata"].get("owner", ""))
+    name = str(node["metadata"].get("name", node["identity_key"]))
+    return f"{owner}.{name}" if owner else name
+
+
+def _stored_architecture_node(graph, node: dict[str, object], directory: Path) -> dict:
+    location = _stored_location(graph, node["node_id"], directory)
+    return {
+        **node["metadata"],
+        "node_id": node["node_id"],
+        "file": location[0],
+        "line": location[1],
+    }
+
+
+def _stored_communities(edges: list[dict[str, object]]) -> list[list[str]]:
+    graph: dict[str, dict[str, float]] = {}
+    for edge in edges:
+        source = str(edge["source_node_id"])
+        target = str(edge["target_node_id"])
+        if source == target:
+            continue
+        graph.setdefault(source, {})[target] = graph.setdefault(source, {}).get(target, 0) + 1
+        graph.setdefault(target, {})[source] = graph.setdefault(target, {}).get(source, 0) + 1
+    return _louvain_communities(graph)
+
+
+def find_callers(function_name: str, directory: Path, *, live: bool = False) -> list[dict]:
     """Find callers using strict Python evidence or non-Python name heuristics.
 
     Unknown Python calls are excluded. Returns caller edge dictionaries.
     """
-    stored = _store_find_callers(function_name, directory)
-    if stored is not None:
-        return stored
+    if not live:
+        stored = _store_find_callers(function_name, directory)
+        if stored is not None:
+            return stored
     callers = []
     extensions = set(LANGUAGE_MAP.keys())
     registry = build_python_symbol_registry(directory)
@@ -874,22 +949,45 @@ def find_callers(function_name: str, directory: Path) -> list[dict]:
 
 
 def _store_find_callers(function_name: str, directory: Path) -> list[dict] | None:
-    """Return an active-generation answer, or None when no compatible store exists.
+    graph = _active_evidence_graph(directory)
+    if graph is None:
+        return None
+    try:
+        targets = graph.find_nodes(
+            kinds=("function", "method"), name=function_name, max_rows=10_000
+        )
+        target_ids = {item["node_id"] for item in targets}
+        edges = graph.edges(edge_types=("CALLS",), max_rows=10_000)
+        results = []
+        for edge in edges:
+            if edge["target_node_id"] not in target_ids:
+                continue
+            caller = graph.node(edge["source_node_id"])
+            if caller is None:
+                continue
+            location = _stored_edge_location(graph, edge["assertion_id"], directory)
+            results.append({
+                "file": location[0],
+                "line": location[1],
+                "function": function_name,
+                "qualified_name": _stored_qualified_name(caller),
+                "confidence": edge["confidence"],
+                "symbol_id": caller["node_id"],
+            })
+        return sorted(results, key=lambda item: (item["file"], item["line"], item["symbol_id"]))
+    finally:
+        graph.close()
 
-    Full store query modes belong to Task 25. This compatibility seam keeps the
-    established facade store-first without coupling extraction to the builder.
-    """
-    return None
 
-
-def find_callees(function_name: str, directory: Path) -> list[dict]:
+def find_callees(function_name: str, directory: Path, *, live: bool = False) -> list[dict]:
     """Find all functions called BY a function (CALLS edge, forward direction).
 
     Returns list of {file, line, callee}.
     """
-    stored = _store_find_callees(function_name, directory)
-    if stored is not None:
-        return stored
+    if not live:
+        stored = _store_find_callees(function_name, directory)
+        if stored is not None:
+            return stored
     callees = []
     extensions = set(LANGUAGE_MAP.keys())
     registry = build_python_symbol_registry(directory)
@@ -928,15 +1026,40 @@ def find_callees(function_name: str, directory: Path) -> list[dict]:
 
 
 def _store_find_callees(function_name: str, directory: Path) -> list[dict] | None:
-    """Return a compatible active-generation answer when Task 25 provides one."""
-    return None
+    graph = _active_evidence_graph(directory)
+    if graph is None:
+        return None
+    try:
+        sources = graph.find_nodes(
+            kinds=("function", "method"), name=function_name, max_rows=10_000
+        )
+        source_ids = {item["node_id"] for item in sources}
+        results = []
+        for edge in graph.edges(edge_types=("CALLS",), max_rows=10_000):
+            if edge["source_node_id"] not in source_ids:
+                continue
+            callee = graph.node(edge["target_node_id"])
+            if callee is None:
+                continue
+            location = _stored_edge_location(graph, edge["assertion_id"], directory)
+            results.append({
+                "file": location[0],
+                "line": location[1],
+                "callee": callee["metadata"].get("name", callee["identity_key"]),
+                "symbol_id": callee["node_id"],
+                "confidence": edge["confidence"],
+            })
+        return sorted(results, key=lambda item: (str(item["callee"]), item["symbol_id"]))
+    finally:
+        graph.close()
 
 
-def find_dead_code(directory: Path) -> list[dict]:
+def find_dead_code(directory: Path, *, live: bool = False) -> list[dict]:
     """Return conservative dead-code candidates from the incomplete static graph."""
-    stored = _store_find_dead_code(directory)
-    if stored is not None:
-        return stored
+    if not live:
+        stored = _store_find_dead_code(directory)
+        if stored is not None:
+            return stored
     parsed, definitions, edges = _workspace_call_graph(directory)
     incoming = {edge["target"] for edge in edges}
 
@@ -970,8 +1093,43 @@ def find_dead_code(directory: Path) -> list[dict]:
 
 
 def _store_find_dead_code(directory: Path) -> list[dict] | None:
-    """Return a compatible active-generation answer when Task 25 provides one."""
-    return None
+    graph = _active_evidence_graph(directory)
+    if graph is None:
+        return None
+    try:
+        nodes = graph.find_nodes(kinds=("function", "method"), max_rows=10_000)
+        call_edges = graph.edges(edge_types=("CALLS",), max_rows=10_000)
+        exposed = {
+            edge["source_node_id"]
+            for edge in graph.edges(edge_types=("EXPOSES",), max_rows=10_000)
+        }
+        incoming = {edge["target_node_id"] for edge in call_edges}
+        candidates = []
+        for node in nodes:
+            name = str(node["metadata"].get("name", ""))
+            path = str(node["metadata"].get("path", ""))
+            if (
+                node["node_id"] in incoming
+                or node["node_id"] in exposed
+                or name in {"main", "__init__"}
+                or name.startswith("test_")
+                or PurePath(path).name.startswith("test_")
+            ):
+                continue
+            location = _stored_location(graph, node["node_id"], directory)
+            candidates.append({
+                "name": name,
+                "symbol_id": node["node_id"],
+                "owner": node["metadata"].get("owner", ""),
+                "file": location[0],
+                "line": location[1],
+                "status": "candidate",
+                "reason": "zero_confirmed_incoming_calls",
+                "graph_complete": True,
+            })
+        return sorted(candidates, key=lambda item: (item["name"], item["file"], item["line"]))
+    finally:
+        graph.close()
 
 
 def _declared_exports(path: Path, source: str, language: str) -> set[str]:
@@ -1001,11 +1159,12 @@ def _is_framework_route(lines: list[str], definition_line: int) -> bool:
     return bool(re.search(r"(?:@\w*\.route\s*\(|@(?:GetMapping|RequestMapping)\b)", prefix))
 
 
-def get_architecture(directory: Path) -> dict:
+def get_architecture(directory: Path, *, live: bool = False) -> dict:
     """Summarize statically visible entry points, routes, hotspots, and modules."""
-    stored = _store_get_architecture(directory)
-    if stored is not None:
-        return stored
+    if not live:
+        stored = _store_get_architecture(directory)
+        if stored is not None:
+            return stored
     parsed, definitions, edges = _workspace_call_graph(directory)
     entry_points = []
     routes = []
@@ -1040,14 +1199,52 @@ def get_architecture(directory: Path) -> dict:
         "entry_points": entry_points,
         "routes": routes,
         "hotspots": hotspots,
-        "communities": detect_communities(directory),
+        "communities": (
+            _detect_live_communities(directory)
+            if live
+            else detect_communities(directory)
+        ),
         "graph_complete": False,
     }
 
 
 def _store_get_architecture(directory: Path) -> dict | None:
-    """Return a compatible active-generation answer when Task 25 provides one."""
-    return None
+    graph = _active_evidence_graph(directory)
+    if graph is None:
+        return None
+    try:
+        entries = graph.find_nodes(kinds=("entry-point",), max_rows=10_000)
+        routes = graph.find_nodes(kinds=("route",), max_rows=10_000)
+        functions = {
+            node["node_id"]: node
+            for node in graph.find_nodes(kinds=("function", "method"), max_rows=10_000)
+        }
+        calls = graph.edges(edge_types=("CALLS",), max_rows=10_000)
+        incoming = Counter(edge["target_node_id"] for edge in calls)
+        hotspots = []
+        for node_id, count in incoming.items():
+            node = functions.get(node_id)
+            if node is None:
+                continue
+            location = _stored_location(graph, node_id, directory)
+            hotspots.append({
+                "name": node["metadata"].get("name", node["identity_key"]),
+                "symbol_id": node_id,
+                "owner": node["metadata"].get("owner", ""),
+                "file": location[0],
+                "line": location[1],
+                "incoming_callers": count,
+            })
+        hotspots.sort(key=lambda item: (-item["incoming_callers"], str(item["name"]), item["file"]))
+        return {
+            "entry_points": [_stored_architecture_node(graph, node, directory) for node in entries],
+            "routes": [_stored_architecture_node(graph, node, directory) for node in routes],
+            "hotspots": hotspots,
+            "communities": _stored_communities(calls),
+            "graph_complete": True,
+        }
+    finally:
+        graph.close()
 
 
 def _listen_entry_points(path: Path, source: str) -> list[dict]:
@@ -1078,11 +1275,16 @@ def _framework_routes(path: Path, source: str) -> list[dict]:
     return routes
 
 
-def detect_communities(directory: Path) -> list[list[str]]:
+def detect_communities(directory: Path, *, live: bool = False) -> list[list[str]]:
     """Detect functional modules with deterministic weighted Louvain."""
-    stored = _store_detect_communities(directory)
-    if stored is not None:
-        return stored
+    if not live:
+        stored = _store_detect_communities(directory)
+        if stored is not None:
+            return stored
+    return _detect_live_communities(directory)
+
+
+def _detect_live_communities(directory: Path) -> list[list[str]]:
     _, _, edges = _workspace_call_graph(directory)
     graph: dict[str, dict[str, float]] = {}
     for edge in edges:
@@ -1095,8 +1297,15 @@ def detect_communities(directory: Path) -> list[list[str]]:
 
 
 def _store_detect_communities(directory: Path) -> list[list[str]] | None:
-    """Return a compatible active-generation answer when Task 25 provides one."""
-    return None
+    graph = _active_evidence_graph(directory)
+    if graph is None:
+        return None
+    try:
+        return _stored_communities(
+            graph.edges(edge_types=("CALLS",), max_rows=10_000)
+        )
+    finally:
+        graph.close()
 
 
 def _workspace_call_graph(
