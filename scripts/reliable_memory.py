@@ -7,6 +7,7 @@ import ctypes
 import errno
 import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -508,6 +509,13 @@ def validate_schema(instance: object, schema_path: Path) -> None:
         schema = json.loads(Path(schema_path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise SchemaValidationError(f"cannot load schema {schema_path}: {exc}") from exc
+    validate_schema_object(instance, schema)
+
+
+def validate_schema_object(instance: object, schema: object) -> None:
+    """Validate against an already captured and parsed closed schema."""
+    if not isinstance(schema, dict):
+        raise SchemaValidationError("schema root must be an object")
     _validate_rule(instance, schema, "$")
 
 
@@ -548,6 +556,12 @@ def _validate_rule(instance: object, rule: dict[str, Any], location: str) -> Non
     elif expected == "array":
         assert isinstance(instance, list)
         _check_bound(len(instance), rule, "minItems", "maxItems", location)
+        if rule.get("uniqueItems") is True:
+            for index, item in enumerate(instance):
+                if any(_json_equal(item, previous) for previous in instance[:index]):
+                    raise SchemaValidationError(
+                        f"{location}: expected uniqueItems, duplicate at index {index}"
+                    )
         if "items" in rule:
             for index, item in enumerate(instance):
                 _validate_rule(item, rule["items"], f"{location}[{index}]")
@@ -567,7 +581,11 @@ def _matches_type(instance: object, expected: str) -> bool:
         "array": lambda: isinstance(instance, list),
         "string": lambda: isinstance(instance, str),
         "integer": lambda: isinstance(instance, int) and not isinstance(instance, bool),
-        "number": lambda: isinstance(instance, (int, float)) and not isinstance(instance, bool),
+        "number": lambda: (
+            isinstance(instance, (int, float))
+            and not isinstance(instance, bool)
+            and (not isinstance(instance, float) or math.isfinite(instance))
+        ),
         "boolean": lambda: isinstance(instance, bool),
         "null": lambda: instance is None,
     }

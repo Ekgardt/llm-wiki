@@ -11,7 +11,28 @@
       "properties": {
         "configuration_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "implementation_status": {"enum": ["contract-only", "implemented-pinned"]},
-        "source_revision": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"}
+        "source_revision": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["kind", "value"],
+              "properties": {
+                "kind": {"const": "git-commit"},
+                "value": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": ["kind", "value"],
+              "properties": {
+                "kind": {"const": "unavailable"},
+                "value": {"const": null}
+              },
+              "additionalProperties": false
+            }
+          ]
+        }
       },
       "additionalProperties": false
     },

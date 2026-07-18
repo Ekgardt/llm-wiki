@@ -266,6 +266,7 @@
               "type": "array",
               "minItems": 3,
               "maxItems": 3,
+              "uniqueItems": true,
               "items": {"enum": ["repository", "commit", "task"]}
             },
             "require_identical_seed_sets": {"const": true},

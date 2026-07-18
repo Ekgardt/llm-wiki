@@ -8,7 +8,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
+import platform
 import sys
+import unicodedata
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -16,7 +19,8 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from reliable_memory import canonical_json_bytes, validate_schema  # noqa: E402
+from bounded_io import read_stable_bytes  # noqa: E402
+from reliable_memory import canonical_json_bytes, validate_schema_object  # noqa: E402
 
 DEFAULT_CONTRACT = Path(__file__).with_name("comparative-v1.json")
 DEFAULT_SCHEMA = Path(__file__).with_name("comparative-v1.schema.json")
@@ -63,12 +67,26 @@ GRAPHIFY_LOCK_BLOB = "088ebbbdcb17eacec5b60541f290381f6adf33e7"
 
 
 def _read_bounded_json(path: Path, maximum: int, label: str) -> tuple[bytes, dict]:
+    raw = read_stable_bytes(Path(path), maximum, label=label)
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-finite JSON constant {value}")
+
+    def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON object key {key!r}")
+            result[key] = value
+        return result
+
     try:
-        if path.stat().st_size > maximum:
-            raise ValueError(f"{label} exceeds {maximum} bytes")
-        raw = path.read_bytes()
-        value = json.loads(raw)
-    except (OSError, json.JSONDecodeError) as exc:
+        value = json.loads(
+            raw.decode("utf-8", errors="strict"),
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=reject_constant,
+        )
+    except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError(f"cannot load {label}: {exc}") from exc
     if not isinstance(value, dict):
         raise ValueError(f"{label} must be a JSON object")
@@ -80,11 +98,20 @@ def load_contract(contract_path: Path | str, schema_path: Path | str) -> dict:
     contract_path = Path(contract_path)
     schema_path = Path(schema_path)
     raw, contract = _read_bounded_json(contract_path, MAX_CONTRACT_BYTES, "comparative contract")
-    _schema_raw, _schema = _read_bounded_json(schema_path, MAX_SCHEMA_BYTES, "comparative schema")
-    validate_schema(contract, schema_path)
+    _schema_raw, schema = _read_bounded_json(
+        schema_path, MAX_SCHEMA_BYTES, "comparative schema"
+    )
+    validate_schema_object(contract, schema)
     if raw != canonical_json_bytes(contract) + b"\n":
         raise ValueError("comparative contract bytes are not canonical and frozen")
 
+    _require_unique((adapter["id"] for adapter in contract["adapters"]), "adapter ids")
+    _require_unique(contract["fairness"]["identical_inputs"], "identical inputs")
+    _require_unique(contract["metrics"]["latency_summary"], "latency summary")
+    _require_unique(contract["metrics"]["per_task_fields"], "metric fields")
+    _require_unique(contract["public_claim_gate"]["hard_gates"], "hard gates")
+    _require_unique(contract["statistics"]["agent_seeds"], "agent seeds")
+    _require_unique(contract["statistics"]["pairing"]["key"], "pairing keys")
     if {adapter["id"] for adapter in contract["adapters"]} != ADAPTER_IDS:
         raise ValueError("comparative adapter set is incomplete")
     if set(contract["fairness"]["identical_inputs"]) != FAIRNESS_KEYS:
@@ -145,17 +172,97 @@ def _fingerprint(inputs: dict) -> str:
     return hashlib.sha256(canonical_json_bytes(inputs)).hexdigest()
 
 
-def validate_ledger(ledger: dict, schema_path: Path | str = DEFAULT_LEDGER_SCHEMA) -> dict:
-    """Validate one closed task ledger and its cross-field invariants."""
-    schema_path = Path(schema_path)
-    _schema_raw, _schema = _read_bounded_json(schema_path, MAX_SCHEMA_BYTES, "ledger schema")
-    validate_schema(ledger, schema_path)
+def _require_unique(values, label: str) -> None:
+    fingerprints = []
+    for value in values:
+        fingerprint = canonical_evidence_json_bytes(value)
+        if fingerprint in fingerprints:
+            raise ValueError(f"duplicate {label}")
+        fingerprints.append(fingerprint)
+
+
+def _canonical_evidence_value(value: object) -> object:
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("canonical evidence numbers must be finite")
+        if value.is_integer() and abs(value) <= 9_007_199_254_740_991:
+            return int(value)
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        return unicodedata.normalize("NFC", value)
+    if isinstance(value, list):
+        return [_canonical_evidence_value(item) for item in value]
+    if isinstance(value, dict):
+        normalized = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("canonical evidence object keys must be strings")
+            normalized_key = unicodedata.normalize("NFC", key)
+            if normalized_key in normalized:
+                raise ValueError(f"normalized evidence-key collision: {normalized_key!r}")
+            normalized[normalized_key] = _canonical_evidence_value(item)
+        return normalized
+    raise TypeError(f"canonical evidence does not permit {type(value).__name__} values")
+
+
+def canonical_evidence_json_bytes(value: object) -> bytes:
+    """Encode finite JSON numbers deterministically under the pinned CPython runtime."""
+    normalized = _canonical_evidence_value(value)
+    return json.dumps(
+        normalized,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def evidence_sha256(value: object) -> str:
+    return hashlib.sha256(canonical_evidence_json_bytes(value)).hexdigest()
+
+
+def verify_runtime_provenance(
+    contract: dict, *, real_mode: bool, observed: dict | None = None
+) -> dict:
+    expected = dict(contract["provenance"]["python"])
+    observed = observed or {
+        "implementation": platform.python_implementation(),
+        "version": platform.python_version(),
+    }
+    matches = observed == expected
+    if real_mode and not matches:
+        raise ValueError(
+            "runtime provenance does not match declared real-comparison Python"
+        )
+    return {
+        "expected": expected,
+        "matches_expected": matches,
+        "observed": observed,
+        "verification": "verified-real" if real_mode else "observed-not-enforced-smoke",
+    }
+
+
+def _validate_ledger_object(ledger: dict, schema: dict) -> dict:
+    validate_schema_object(ledger, schema)
+    canonical_evidence_json_bytes(ledger)
     failed = ledger["outcome"] == "failure"
     if failed != (ledger["failure"] is not None):
         raise ValueError("ledger failure object must exactly match failure outcome")
     if ledger["input_fingerprint"] != _fingerprint(ledger["inputs"]):
         raise ValueError("ledger input fingerprint mismatch")
     return ledger
+
+
+def validate_ledger(ledger: dict, schema_path: Path | str = DEFAULT_LEDGER_SCHEMA) -> dict:
+    """Validate one closed task ledger and its cross-field invariants."""
+    _schema_raw, schema = _read_bounded_json(
+        Path(schema_path), MAX_SCHEMA_BYTES, "ledger schema"
+    )
+    return _validate_ledger_object(ledger, schema)
 
 
 def validate_report(
@@ -165,12 +272,21 @@ def validate_report(
 ) -> dict:
     """Validate the closed smoke report and every embedded raw ledger."""
     report_schema_path = Path(report_schema_path)
-    _schema_raw, _schema = _read_bounded_json(
+    _schema_raw, report_schema = _read_bounded_json(
         report_schema_path, MAX_SCHEMA_BYTES, "smoke report schema"
     )
-    validate_schema(report, report_schema_path)
+    _ledger_schema_raw, ledger_schema = _read_bounded_json(
+        Path(ledger_schema_path), MAX_SCHEMA_BYTES, "ledger schema"
+    )
+    validate_schema_object(report, report_schema)
+    canonical_evidence_json_bytes(report)
     for ledger in report["raw_task_ledgers"]:
-        validate_ledger(ledger, ledger_schema_path)
+        _validate_ledger_object(ledger, ledger_schema)
+    _require_unique(report["statistics"]["agent_seeds"], "report agent seeds")
+    _require_unique(
+        (ledger["adapter_id"] for ledger in report["raw_task_ledgers"]),
+        "report adapter ids",
+    )
     if {ledger["adapter_id"] for ledger in report["raw_task_ledgers"]} != ADAPTER_IDS:
         raise ValueError("smoke report adapter ledger set is incomplete")
     if len({ledger["input_fingerprint"] for ledger in report["raw_task_ledgers"]}) != 1:
@@ -184,6 +300,7 @@ def run_smoke(contract: dict) -> dict:
     inputs = task["inputs"]
     fingerprint = _fingerprint(inputs)
     bound_fields = contract["public_claim_gate"]["consumed_report_fields"]
+    runtime_provenance = verify_runtime_provenance(contract, real_mode=False)
     unavailable_metrics = {field: None for field in sorted(METRIC_FIELDS)}
     ledgers = []
     for adapter in contract["adapters"]:
@@ -197,9 +314,9 @@ def run_smoke(contract: dict) -> dict:
                     ],
                     "implementation_status": adapter["implementation_status"],
                     "source_revision": (
-                        GRAPHIFY_COMMIT
+                        {"kind": "git-commit", "value": GRAPHIFY_COMMIT}
                         if adapter["id"] == "graphify-pinned"
-                        else contract["provenance"]["configuration"]["sha256"]
+                        else {"kind": "unavailable", "value": None}
                     ),
                 },
                 "attempt": 1,
@@ -250,6 +367,7 @@ def run_smoke(contract: dict) -> dict:
         },
         "quality_claim": False,
         "raw_task_ledgers": ledgers,
+        "runtime_provenance": runtime_provenance,
         "schema_version": "comparative-smoke-report/v1",
         "statistics": {
             "agent_seeds": contract["statistics"]["agent_seeds"],
@@ -281,11 +399,17 @@ def main(argv: list[str] | None = None) -> int:
         contract = load_contract(args.contract, args.schema)
         report = run_smoke(contract)
         validate_report(report)
-    except (OSError, ValueError) as exc:
-        print(f"comparative smoke failed: {exc}", file=sys.stderr)
+        output = canonical_evidence_json_bytes(report).decode("utf-8")
+        rendered = (
+            output
+            if args.json
+            else json.dumps(report, indent=2, sort_keys=True, allow_nan=False)
+        )
+    except (OSError, TypeError, UnicodeError, ValueError, RecursionError) as exc:
+        message = " ".join(str(exc).split())[:500]
+        print(f"comparative smoke failed: {message}", file=sys.stderr)
         return 2
-    output = canonical_json_bytes(report).decode("utf-8")
-    print(output if args.json else json.dumps(report, indent=2, sort_keys=True))
+    print(rendered)
     return 0
 
 
