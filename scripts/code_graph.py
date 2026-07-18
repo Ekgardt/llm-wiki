@@ -842,6 +842,9 @@ def find_callers(function_name: str, directory: Path) -> list[dict]:
 
     Unknown Python calls are excluded. Returns caller edge dictionaries.
     """
+    stored = _store_find_callers(function_name, directory)
+    if stored is not None:
+        return stored
     callers = []
     extensions = set(LANGUAGE_MAP.keys())
     registry = build_python_symbol_registry(directory)
@@ -870,11 +873,23 @@ def find_callers(function_name: str, directory: Path) -> list[dict]:
     return callers
 
 
+def _store_find_callers(function_name: str, directory: Path) -> list[dict] | None:
+    """Return an active-generation answer, or None when no compatible store exists.
+
+    Full store query modes belong to Task 25. This compatibility seam keeps the
+    established facade store-first without coupling extraction to the builder.
+    """
+    return None
+
+
 def find_callees(function_name: str, directory: Path) -> list[dict]:
     """Find all functions called BY a function (CALLS edge, forward direction).
 
     Returns list of {file, line, callee}.
     """
+    stored = _store_find_callees(function_name, directory)
+    if stored is not None:
+        return stored
     callees = []
     extensions = set(LANGUAGE_MAP.keys())
     registry = build_python_symbol_registry(directory)
@@ -912,8 +927,16 @@ def find_callees(function_name: str, directory: Path) -> list[dict]:
     return callees
 
 
+def _store_find_callees(function_name: str, directory: Path) -> list[dict] | None:
+    """Return a compatible active-generation answer when Task 25 provides one."""
+    return None
+
+
 def find_dead_code(directory: Path) -> list[dict]:
     """Return conservative dead-code candidates from the incomplete static graph."""
+    stored = _store_find_dead_code(directory)
+    if stored is not None:
+        return stored
     parsed, definitions, edges = _workspace_call_graph(directory)
     incoming = {edge["target"] for edge in edges}
 
@@ -946,6 +969,11 @@ def find_dead_code(directory: Path) -> list[dict]:
     return sorted(candidates, key=lambda item: (item["name"], item["file"], item["line"]))
 
 
+def _store_find_dead_code(directory: Path) -> list[dict] | None:
+    """Return a compatible active-generation answer when Task 25 provides one."""
+    return None
+
+
 def _declared_exports(path: Path, source: str, language: str) -> set[str]:
     if language == "python":
         try:
@@ -975,6 +1003,9 @@ def _is_framework_route(lines: list[str], definition_line: int) -> bool:
 
 def get_architecture(directory: Path) -> dict:
     """Summarize statically visible entry points, routes, hotspots, and modules."""
+    stored = _store_get_architecture(directory)
+    if stored is not None:
+        return stored
     parsed, definitions, edges = _workspace_call_graph(directory)
     entry_points = []
     routes = []
@@ -1014,6 +1045,11 @@ def get_architecture(directory: Path) -> dict:
     }
 
 
+def _store_get_architecture(directory: Path) -> dict | None:
+    """Return a compatible active-generation answer when Task 25 provides one."""
+    return None
+
+
 def _listen_entry_points(path: Path, source: str) -> list[dict]:
     return [
         {
@@ -1044,6 +1080,9 @@ def _framework_routes(path: Path, source: str) -> list[dict]:
 
 def detect_communities(directory: Path) -> list[list[str]]:
     """Detect functional modules with deterministic weighted Louvain."""
+    stored = _store_detect_communities(directory)
+    if stored is not None:
+        return stored
     _, _, edges = _workspace_call_graph(directory)
     graph: dict[str, dict[str, float]] = {}
     for edge in edges:
@@ -1053,6 +1092,11 @@ def detect_communities(directory: Path) -> list[list[str]]:
         graph.setdefault(caller, {})[callee] = graph.setdefault(caller, {}).get(callee, 0) + 1
         graph.setdefault(callee, {})[caller] = graph.setdefault(callee, {}).get(caller, 0) + 1
     return _louvain_communities(graph)
+
+
+def _store_detect_communities(directory: Path) -> list[list[str]] | None:
+    """Return a compatible active-generation answer when Task 25 provides one."""
+    return None
 
 
 def _workspace_call_graph(

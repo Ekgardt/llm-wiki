@@ -1,0 +1,323 @@
+"""Pure code-to-Evidence-Graph extraction contracts."""
+
+from __future__ import annotations
+
+import hashlib
+import sys
+from dataclasses import FrozenInstanceError
+from pathlib import Path
+
+import pytest
+
+SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+
+from corpus_snapshot import CapturedSource, SourceMetadata, SourceRecord  # noqa: E402
+
+
+def _source(path: str, content: bytes, *, language: str = "python") -> CapturedSource:
+    return CapturedSource(
+        SourceRecord(
+            logical_id=f"source:{path}",
+            relative_path=path,
+            sha256=hashlib.sha256(content).hexdigest(),
+            size=len(content),
+            media_type="text/x-python",
+            language=language,
+            git_oid=None,
+        ),
+        SourceMetadata(type="code", language=language),
+        content,
+    )
+
+
+def _node(result, kind: str, name: str):
+    return next(
+        node
+        for node in result.nodes
+        if node["kind"] == kind and node["metadata"].get("name") == name
+    )
+
+
+def test_extracts_required_python_nodes_and_honest_relationships():
+    from code_extractor import extract_code
+
+    content = (
+        b"from dep import helper\n"
+        b"class Base:\n    pass\n\n"
+        b"class User(Base):\n"
+        b"    __tablename__ = 'users'\n"
+        b"    def save(self):\n        helper()\n\n"
+        b"@app.get('/users')\n"
+        b"def list_users():\n    return User()\n\n"
+        b"def main():\n    list_users()\n"
+    )
+
+    dependency = _source("dep.py", b"def helper():\n    pass\n")
+    result = extract_code(
+        (_source("src/app.py", content), dependency), repository_id="example/repo"
+    )
+
+    kinds = {node["kind"] for node in result.nodes}
+    assert {
+        "repository", "directory", "file", "module", "class", "method",
+        "function", "route", "table", "entry-point",
+    } <= kinds
+    edges = {assertion["edge_type"] for assertion in result.assertions}
+    assert {"CONTAINS", "DEFINES", "IMPORTS", "CALLS", "INHERITS", "EXPOSES"} <= edges
+    assert all(assertion["resolution"] == "resolved" for assertion in result.assertions)
+
+
+def test_preserves_exact_utf8_byte_and_line_spans_for_declarations_and_edges():
+    from code_extractor import extract_code
+
+    content = "# cafe\u0301 \U0001f680\ndef target(): pass\ndef caller():\n    target()\n".encode()
+    source = _source("app.py", content)
+    result = extract_code((source,), repository_id="repo")
+    caller = _node(result, "function", "caller")
+    occurrence = next(item for item in result.occurrences if item["node_id"] == caller["node_id"])
+    call = next(item for item in result.assertions if item["edge_type"] == "CALLS")
+    evidence = next(item for item in result.evidence if item["assertion_id"] == call["assertion_id"])
+
+    assert content[occurrence["byte_start"]:occurrence["byte_end"]].startswith(b"def caller")
+    assert (occurrence["line_start"], occurrence["line_end"]) == (3, 4)
+    assert content[evidence["byte_start"]:evidence["byte_end"]] == b"target()"
+    assert evidence["span_sha256"] == hashlib.sha256(b"target()").hexdigest()
+
+
+def test_uses_stable_non_line_identity_and_scip_symbol_when_supplied():
+    from code_extractor import ScipSymbol, extract_code
+
+    original = b"def run(value: int):\n    return value\n"
+    shifted = b"\n\n" + original
+    first = extract_code((_source("app.py", original),), repository_id="repo")
+    second = extract_code((_source("app.py", shifted),), repository_id="repo")
+    first_run = _node(first, "function", "run")
+    second_run = _node(second, "function", "run")
+    start = shifted.index(b"def run")
+    scip = ScipSymbol("source:app.py", start, len(shifted), "scip-python . repo 1 app/run().")
+    scip_result = extract_code(
+        (_source("app.py", shifted),), repository_id="repo", scip_symbols=(scip,)
+    )
+
+    assert first_run["node_id"] == second_run["node_id"]
+    assert "@L" not in first_run["identity_key"]
+    assert _node(scip_result, "function", "run")["identity_scheme"] == "scip/v1"
+
+
+def test_unresolved_semantics_are_controlled_observations_with_evidence():
+    from code_extractor import extract_code
+
+    content = (
+        b"from missing import absent\n"
+        b"def run(client):\n"
+        b"    client.save()\n"
+        b"    absent()\n"
+    )
+    result = extract_code((_source("app.py", content),), repository_id="repo")
+
+    reasons = {item["reason"] for item in result.observations}
+    assert {"dynamic_dispatch", "missing_dependency"} <= reasons
+    assert all(item["reason"] in {
+        "ambiguous_target", "dynamic_dispatch", "missing_dependency", "parse_error",
+        "unresolved_reference", "unsupported_semantics",
+    } for item in result.observations)
+    observed = {item["observation_id"] for item in result.observations}
+    assert observed <= {item["observation_id"] for item in result.evidence}
+
+
+def test_parse_errors_and_unsupported_languages_degrade_without_fake_edges():
+    from code_extractor import extract_code
+
+    sources = (
+        _source("broken.py", b"def broken(:\n", language="python"),
+        _source("query.xyz", b"opaque syntax\n", language="unknown"),
+    )
+    result = extract_code(sources, repository_id="repo")
+
+    assert {item["reason"] for item in result.observations} == {
+        "parse_error", "unsupported_semantics"
+    }
+    assert not {item["edge_type"] for item in result.assertions} & {
+        "CALLS", "IMPORTS", "INHERITS", "IMPLEMENTS", "READS", "WRITES"
+    }
+
+
+def test_tree_sitter_languages_extract_when_available_and_degrade_when_absent(monkeypatch):
+    import code_extractor
+
+    source = _source(
+        "app.ts",
+        b"class Service {}\nfunction target() {}\nfunction caller() { target(); }\n",
+        language="typescript",
+    )
+    available = code_extractor.extract_code((source,), repository_id="repo")
+
+    assert {node["kind"] for node in available.nodes} >= {"class", "function"}
+    assert "CALLS" in {item["edge_type"] for item in available.assertions}
+
+    monkeypatch.setattr(code_extractor, "_optional_parser", lambda language: None)
+    degraded = code_extractor.extract_code((source,), repository_id="repo")
+    assert {item["reason"] for item in degraded.observations} == {"unsupported_semantics"}
+
+
+def test_emits_only_explicit_implements_reads_and_writes_relationships():
+    from code_extractor import extract_code
+
+    python = _source(
+        "models.py",
+        b"class User:\n"
+        b"    __tablename__ = 'users'\n\n"
+        b"def load(connection):\n"
+        b"    connection.execute('SELECT * FROM users')\n\n"
+        b"def save(connection):\n"
+        b"    connection.execute('UPDATE users SET name = 1')\n",
+    )
+    typescript = _source(
+        "service.ts",
+        b"interface Service {}\n"
+        b"class Implementation implements Service {}\n"
+        b"function main() {}\n",
+        language="typescript",
+    )
+
+    result = extract_code((python, typescript), repository_id="repo")
+
+    edges = {item["edge_type"] for item in result.assertions}
+    assert {"IMPLEMENTS", "READS", "WRITES"} <= edges
+    assert "entry-point" in {item["kind"] for item in result.nodes}
+
+
+def test_static_self_method_resolves_but_dynamic_receiver_is_observed():
+    from code_extractor import extract_code
+
+    source = _source(
+        "service.py",
+        b"class Service:\n"
+        b"    def save(self): pass\n"
+        b"    def run(self, client):\n"
+        b"        self.save()\n"
+        b"        client.save()\n",
+    )
+    result = extract_code((source,), repository_id="repo")
+
+    calls = [item for item in result.assertions if item["edge_type"] == "CALLS"]
+    assert len(calls) == 1
+    assert [item["reason"] for item in result.observations] == ["dynamic_dispatch"]
+
+
+def test_bare_method_name_is_not_fabricated_from_class_scope():
+    from code_extractor import extract_code
+
+    source = _source(
+        "service.py",
+        b"class Service:\n"
+        b"    def helper(self): pass\n"
+        b"    def run(self):\n"
+        b"        helper()\n",
+    )
+
+    result = extract_code((source,), repository_id="repo")
+
+    assert not [item for item in result.assertions if item["edge_type"] == "CALLS"]
+    assert [item["reason"] for item in result.observations] == ["unresolved_reference"]
+
+
+def test_extraction_is_deterministic_immutable_and_bounded():
+    from code_extractor import ExtractionLimits, extract_code
+
+    source = _source("app.py", b"def one(): pass\ndef two(): pass\n")
+    first = extract_code((source,), repository_id="repo")
+    second = extract_code((source,), repository_id="repo")
+
+    assert first == second
+    with pytest.raises(FrozenInstanceError):
+        first.nodes = ()
+    with pytest.raises(ValueError, match="node ceiling"):
+        extract_code((source,), repository_id="repo", limits=ExtractionLimits(max_nodes=2))
+
+
+def test_output_is_accepted_by_task18_schema(tmp_path):
+    from code_extractor import extract_code
+    from evidence_graph import create_generation_database
+
+    source = _source("app.py", b"def target(): pass\ndef caller(): target()\n")
+    result = extract_code((source,), repository_id="repo")
+    create_generation_database(
+        tmp_path / "evidence.sqlite3",
+        sources=[{
+            "source_id": source.record.logical_id,
+            "relative_path": source.record.relative_path,
+            "sha256": source.record.sha256,
+            "size": source.record.size,
+            "media_type": source.record.media_type,
+            "language": source.record.language,
+            "git_oid": source.record.git_oid,
+        }],
+        source_bytes={source.record.logical_id: source.content},
+        nodes=result.nodes,
+        occurrences=result.occurrences,
+        assertions=result.assertions,
+        evidence=result.evidence,
+        observations=result.observations,
+        dependencies=(),
+    )
+
+    assert (tmp_path / "evidence.sqlite3").is_file()
+
+
+def test_co_change_requires_explicit_captured_history_evidence():
+    from code_extractor import CoChange, extract_code
+
+    first = _source("a.py", b"def a(): pass\n")
+    second = _source("b.py", b"def b(): pass\n")
+    history = _source("history.log", b"commit abc: a.py b.py\n", language="unknown")
+    proven = CoChange(
+        "a.py", "b.py", 0.8, history.record.logical_id, 0, len(history.content)
+    )
+    unproven = CoChange("b.py", "a.py", 0.8)
+
+    result = extract_code(
+        (first, second, history), repository_id="repo", co_changes=(unproven, proven)
+    )
+
+    edges = [item for item in result.assertions if item["edge_type"] == "CO_CHANGED_WITH"]
+    assert len(edges) == 1
+    evidence = next(item for item in result.evidence if item["assertion_id"] == edges[0]["assertion_id"])
+    assert evidence["source_id"] == history.record.logical_id
+
+
+def test_facade_prefers_store_and_falls_back_to_live_extraction(tmp_path, monkeypatch):
+    import code_graph
+
+    (tmp_path / "a.py").write_text("def target(): pass\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text(
+        "from a import target\ndef caller(): target()\n", encoding="utf-8"
+    )
+    stored = [{"file": "stored.py", "line": 7, "function": "target"}]
+    monkeypatch.setattr(code_graph, "_store_find_callers", lambda name, root: stored)
+
+    assert code_graph.find_callers("target", tmp_path) is stored
+    monkeypatch.setattr(code_graph, "_store_find_callers", lambda name, root: None)
+    assert any(Path(item["file"]).name == "b.py" for item in code_graph.find_callers("target", tmp_path))
+
+
+def test_remaining_graph_queries_are_store_first_facades(tmp_path, monkeypatch):
+    import code_graph
+
+    expected = {
+        "callees": [{"callee": "stored"}],
+        "dead": [{"name": "stored"}],
+        "architecture": {"entry_points": ["stored"]},
+        "communities": [["stored"]],
+    }
+    monkeypatch.setattr(code_graph, "_store_find_callees", lambda name, root: expected["callees"])
+    monkeypatch.setattr(code_graph, "_store_find_dead_code", lambda root: expected["dead"])
+    monkeypatch.setattr(code_graph, "_store_get_architecture", lambda root: expected["architecture"])
+    monkeypatch.setattr(code_graph, "_store_detect_communities", lambda root: expected["communities"])
+
+    assert code_graph.find_callees("target", tmp_path) == expected["callees"]
+    assert code_graph.find_dead_code(tmp_path) == expected["dead"]
+    assert code_graph.get_architecture(tmp_path) == expected["architecture"]
+    assert code_graph.detect_communities(tmp_path) == expected["communities"]

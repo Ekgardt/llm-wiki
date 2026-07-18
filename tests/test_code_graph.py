@@ -49,6 +49,18 @@ def test_code_graph_importable_as_package():
     assert result.returncode == 0, result.stderr
 
 
+def test_code_extractor_importable_as_package():
+    result = subprocess.run(
+        [sys.executable, "-c", "import scripts.code_extractor"],
+        cwd=Path(__file__).resolve().parent.parent,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 class TestDetectLanguage:
     """Test language detection from file extension."""
 

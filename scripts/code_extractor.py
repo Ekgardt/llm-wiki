@@ -1,0 +1,1029 @@
+"""Pure, deterministic code extraction for Evidence Graph generations."""
+
+from __future__ import annotations
+
+import ast
+import hashlib
+import importlib
+import json
+import math
+import re
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from pathlib import PurePosixPath
+from types import MappingProxyType
+from typing import Protocol
+
+
+class _SourceRecord(Protocol):
+    logical_id: str
+    relative_path: str
+    sha256: str
+    size: int
+    language: str | None
+
+
+class _CapturedSource(Protocol):
+    record: _SourceRecord
+    content: bytes
+
+EXTRACTOR_VERSION = "code-extractor/v1"
+_GRAMMARS = {
+    "bash": ("tree_sitter_bash", "language"),
+    "c": ("tree_sitter_c", "language"),
+    "c_sharp": ("tree_sitter_c_sharp", "language"),
+    "cpp": ("tree_sitter_cpp", "language"),
+    "go": ("tree_sitter_go", "language"),
+    "java": ("tree_sitter_java", "language"),
+    "javascript": ("tree_sitter_javascript", "language"),
+    "php": ("tree_sitter_php", "language_php"),
+    "ruby": ("tree_sitter_ruby", "language"),
+    "rust": ("tree_sitter_rust", "language"),
+    "typescript": ("tree_sitter_typescript", "language_typescript"),
+}
+_CLASS_TYPES = {
+    "class_declaration", "class_definition", "enum_declaration", "interface_declaration",
+    "struct_item", "struct_specifier", "trait_item", "type_declaration",
+}
+_FUNCTION_TYPES = {
+    "function_declaration", "function_definition", "function_item", "method_declaration",
+    "method_definition", "method", "singleton_method",
+}
+_CALL_TYPES = {"call", "call_expression", "command", "function_call", "invocation_expression"}
+_IMPORT_TYPES = {
+    "import_declaration", "import_from_statement", "import_header", "import_statement",
+    "include_expression", "preproc_include", "require", "use_declaration",
+}
+
+
+def _optional_parser(language: str):
+    """Build an isolated optional parser; absence is a normal degraded state."""
+    specification = _GRAMMARS.get(language)
+    if specification is None:
+        return None
+    try:
+        import tree_sitter as ts
+
+        module_name, factory_name = specification
+        grammar = importlib.import_module(module_name)
+        return ts.Parser(ts.Language(getattr(grammar, factory_name)()))
+    except (ImportError, AttributeError, TypeError, ValueError):
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class ScipSymbol:
+    """A compiler-backed symbol covering one source declaration."""
+
+    source_id: str
+    byte_start: int
+    byte_end: int
+    symbol: str
+
+
+@dataclass(frozen=True, slots=True)
+class CoChange:
+    """A precomputed, bounded repository co-change relationship."""
+
+    source_path: str
+    target_path: str
+    weight: float
+    evidence_source_id: str | None = None
+    byte_start: int = 0
+    byte_end: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ExtractionLimits:
+    max_sources: int = 10_000
+    max_source_bytes: int = 16 * 1024 * 1024
+    max_total_bytes: int = 512 * 1024 * 1024
+    max_nodes: int = 250_000
+    max_occurrences: int = 500_000
+    max_assertions: int = 500_000
+    max_evidence: int = 500_000
+    max_observations: int = 250_000
+    max_scip_symbols: int = 500_000
+    max_co_changes: int = 100_000
+
+    def __post_init__(self) -> None:
+        for name in self.__dataclass_fields__:
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+
+
+@dataclass(frozen=True, slots=True)
+class CodeExtraction:
+    nodes: tuple[Mapping[str, object], ...]
+    occurrences: tuple[Mapping[str, object], ...]
+    assertions: tuple[Mapping[str, object], ...]
+    evidence: tuple[Mapping[str, object], ...]
+    observations: tuple[Mapping[str, object], ...]
+
+
+def _frozen(records: list[dict[str, object]], key: str) -> tuple[Mapping[str, object], ...]:
+    records.sort(key=lambda item: str(item[key]))
+    return tuple(MappingProxyType(record) for record in records)
+
+
+def _identifier(prefix: str, *parts: object) -> str:
+    payload = json.dumps(parts, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    return f"code:{prefix}:{hashlib.sha256(payload.encode()).hexdigest()[:32]}"
+
+
+def _module_name(path: str) -> str:
+    pure = PurePosixPath(path)
+    parts = list(pure.with_suffix("").parts)
+    if parts and parts[-1] == "__init__":
+        parts.pop()
+    return ".".join(parts)
+
+
+def _line_offsets(content: bytes) -> tuple[int, ...]:
+    offsets = [0]
+    offsets.extend(index + 1 for index, byte in enumerate(content) if byte == 10)
+    return tuple(offsets)
+
+
+def _span(node: ast.AST, offsets: tuple[int, ...], content: bytes) -> tuple[int, int, int, int]:
+    line = getattr(node, "lineno", 1)
+    end_line = getattr(node, "end_lineno", line)
+    column = getattr(node, "col_offset", 0)
+    end_column = getattr(node, "end_col_offset", column)
+    start = offsets[min(line - 1, len(offsets) - 1)] + column
+    end = offsets[min(end_line - 1, len(offsets) - 1)] + end_column
+    return start, min(end, len(content)), line, end_line
+
+
+def _signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+    arguments = [*node.args.posonlyargs, *node.args.args]
+    if node.args.vararg:
+        arguments.append(node.args.vararg)
+    arguments.extend(node.args.kwonlyargs)
+    if node.args.kwarg:
+        arguments.append(node.args.kwarg)
+    rendered = []
+    for argument in arguments:
+        annotation = ""
+        if argument.annotation is not None:
+            annotation = f":{ast.unparse(argument.annotation)}"
+        rendered.append(f"{argument.arg}{annotation}")
+    return f"{node.name}({','.join(rendered)})"
+
+
+class _Collector:
+    def __init__(
+        self,
+        sources: tuple[_CapturedSource, ...],
+        repository_id: str,
+        scip_symbols: tuple[ScipSymbol, ...],
+        limits: ExtractionLimits,
+    ) -> None:
+        self.sources = sources
+        self.repository_id = repository_id
+        self.scip_symbols = scip_symbols
+        self.limits = limits
+        self.nodes: dict[str, dict[str, object]] = {}
+        self.occurrences: list[dict[str, object]] = []
+        self.assertions: list[dict[str, object]] = []
+        self.evidence: list[dict[str, object]] = []
+        self.observations: list[dict[str, object]] = []
+        self.assertion_ids: set[str] = set()
+        self.observation_ids: set[str] = set()
+        self.modules: dict[str, str] = {}
+        self.files: dict[str, str] = {}
+        self.tables: dict[str, str] = {}
+        self.definitions: dict[tuple[str, str], list[str]] = {}
+        self.node_ast: dict[int, str] = {}
+        self.syntax_definitions: dict[str, list[tuple[object, str]]] = {}
+        self.syntax_functions: dict[str, list[tuple[object, str]]] = {}
+
+    def check(self, records: object, maximum: int, label: str) -> None:
+        if len(records) > maximum:  # type: ignore[arg-type]
+            raise ValueError(f"code extraction {label} ceiling exceeded")
+
+    def add_node(
+        self,
+        kind: str,
+        scheme: str,
+        key: str,
+        metadata: Mapping[str, object],
+    ) -> str:
+        node_id = _identifier("node", scheme, key)
+        self.nodes.setdefault(node_id, {
+            "node_id": node_id,
+            "kind": kind,
+            "identity_scheme": scheme,
+            "identity_key": key,
+            "metadata": dict(metadata),
+        })
+        self.check(self.nodes, self.limits.max_nodes, "node")
+        return node_id
+
+    def add_occurrence(
+        self,
+        node_id: str,
+        source: _CapturedSource,
+        role: str,
+        span: tuple[int, int, int, int],
+    ) -> None:
+        start, end, line_start, line_end = span
+        if end <= start:
+            return
+        occurrence_id = _identifier("occurrence", node_id, source.record.logical_id, role, start, end)
+        self.occurrences.append({
+            "occurrence_id": occurrence_id,
+            "node_id": node_id,
+            "source_id": source.record.logical_id,
+            "role": role,
+            "byte_start": start,
+            "byte_end": end,
+            "line_start": line_start,
+            "line_end": line_end,
+        })
+        self.check(self.occurrences, self.limits.max_occurrences, "occurrence")
+
+    def add_assertion(
+        self,
+        source_node_id: str,
+        edge_type: str,
+        target_node_id: str,
+        source: _CapturedSource,
+        span: tuple[int, int, int, int],
+        *,
+        confidence: str = "high",
+    ) -> None:
+        start, end, _, _ = span
+        if end <= start:
+            return
+        assertion_id = _identifier(
+            "assertion", source_node_id, edge_type, target_node_id,
+            source.record.logical_id, start, end,
+        )
+        if assertion_id in self.assertion_ids:
+            return
+        self.assertion_ids.add(assertion_id)
+        self.assertions.append({
+            "assertion_id": assertion_id,
+            "source_node_id": source_node_id,
+            "edge_type": edge_type,
+            "target_node_id": target_node_id,
+            "literal": None,
+            "confidence": confidence,
+            "authority": "ai-derived",
+            "resolution": "resolved",
+            "extractor": EXTRACTOR_VERSION,
+        })
+        self._add_evidence(source, start, end, assertion_id=assertion_id)
+        self.check(self.assertions, self.limits.max_assertions, "assertion")
+
+    def add_observation(
+        self,
+        source_node_id: str | None,
+        edge_type: str,
+        target_text: str | None,
+        reason: str,
+        source: _CapturedSource,
+        span: tuple[int, int, int, int],
+    ) -> None:
+        start, end, _, _ = span
+        if end <= start:
+            return
+        observation_id = _identifier(
+            "observation", source_node_id, edge_type, target_text, reason,
+            source.record.logical_id, start, end,
+        )
+        if observation_id in self.observation_ids:
+            return
+        self.observation_ids.add(observation_id)
+        self.observations.append({
+            "observation_id": observation_id,
+            "source_node_id": source_node_id,
+            "edge_type": edge_type,
+            "target_text": target_text,
+            "reason": reason,
+            "extractor": EXTRACTOR_VERSION,
+        })
+        self._add_evidence(source, start, end, observation_id=observation_id)
+        self.check(self.observations, self.limits.max_observations, "observation")
+
+    def _add_evidence(
+        self,
+        source: _CapturedSource,
+        start: int,
+        end: int,
+        *,
+        assertion_id: str | None = None,
+        observation_id: str | None = None,
+    ) -> None:
+        span = source.content[start:end]
+        evidence_id = _identifier("evidence", assertion_id, observation_id)
+        self.evidence.append({
+            "evidence_id": evidence_id,
+            "assertion_id": assertion_id,
+            "observation_id": observation_id,
+            "source_id": source.record.logical_id,
+            "byte_start": start,
+            "byte_end": end,
+            "span_sha256": hashlib.sha256(span).hexdigest(),
+        })
+        self.check(self.evidence, self.limits.max_evidence, "evidence")
+
+    def symbol_identity(
+        self,
+        source: _CapturedSource,
+        span: tuple[int, int, int, int],
+        language: str,
+        owner: str,
+        name: str,
+        signature: str,
+    ) -> tuple[str, str]:
+        start, end, _, _ = span
+        candidates = sorted(
+            (symbol.byte_end - symbol.byte_start, symbol.symbol)
+            for symbol in self.scip_symbols
+            if symbol.source_id == source.record.logical_id
+            and (
+                start <= symbol.byte_start < end
+                or symbol.byte_start <= start < symbol.byte_end
+            )
+        )
+        if candidates:
+            return "scip/v1", candidates[0][1]
+        key = "\x1f".join((
+            self.repository_id, language, source.record.relative_path,
+            owner, name, signature,
+        ))
+        return "code-symbol/v1", key
+
+    def structural_nodes(self) -> str:
+        repository = self.add_node(
+            "repository", "repository/v1", self.repository_id,
+            {"name": self.repository_id},
+        )
+        directories: dict[str, str] = {"": repository}
+        for source in self.sources:
+            path = PurePosixPath(source.record.relative_path)
+            parent = repository
+            accumulated: list[str] = []
+            whole = (0, len(source.content), 1, max(1, source.content.count(b"\n") + 1))
+            for part in path.parts[:-1]:
+                accumulated.append(part)
+                directory_path = "/".join(accumulated)
+                directory = directories.get(directory_path)
+                if directory is None:
+                    directory = self.add_node(
+                        "directory", "repository-path/v1",
+                        f"{self.repository_id}\x1f{directory_path}",
+                        {"name": part, "path": directory_path},
+                    )
+                    directories[directory_path] = directory
+                    self.add_assertion(parent, "CONTAINS", directory, source, whole)
+                parent = directory
+            file_node = self.add_node(
+                "file", "repository-path/v1",
+                f"{self.repository_id}\x1f{source.record.relative_path}",
+                {"name": path.name, "path": source.record.relative_path},
+            )
+            self.files[source.record.relative_path] = file_node
+            self.add_occurrence(file_node, source, "definition", whole)
+            self.add_assertion(parent, "CONTAINS", file_node, source, whole)
+            module_name = _module_name(source.record.relative_path)
+            module = self.add_node(
+                "module", "code-module/v1",
+                f"{self.repository_id}\x1f{source.record.language or 'unknown'}\x1f{module_name}",
+                {"name": module_name, "path": source.record.relative_path},
+            )
+            self.modules[module_name] = module
+            self.add_occurrence(module, source, "definition", whole)
+            self.add_assertion(file_node, "DEFINES", module, source, whole)
+        return repository
+
+    def collect_python_definitions(self, source: _CapturedSource, tree: ast.Module) -> None:
+        offsets = _line_offsets(source.content)
+        module_name = _module_name(source.record.relative_path)
+        module_id = self.modules[module_name]
+
+        def walk(body: list[ast.stmt], owner_name: str, owner_id: str, in_class: bool) -> None:
+            for node in body:
+                if isinstance(node, ast.ClassDef):
+                    span = _span(node, offsets, source.content)
+                    scheme, key = self.symbol_identity(
+                        source, span, "python", owner_name, node.name, node.name,
+                    )
+                    node_id = self.add_node(
+                        "class", scheme, key,
+                        {"name": node.name, "owner": owner_name, "path": source.record.relative_path},
+                    )
+                    self.node_ast[id(node)] = node_id
+                    self.definitions.setdefault((module_name, node.name), []).append(node_id)
+                    self.add_occurrence(node_id, source, "definition", span)
+                    self.add_assertion(owner_id, "DEFINES", node_id, source, span)
+                    self._table(node, node_id, owner_name, source, offsets)
+                    walk(node.body, f"{owner_name}.{node.name}", node_id, True)
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    span = _span(node, offsets, source.content)
+                    signature = _signature(node)
+                    scheme, key = self.symbol_identity(
+                        source, span, "python", owner_name, node.name, signature,
+                    )
+                    kind = "method" if in_class else "function"
+                    node_id = self.add_node(
+                        kind, scheme, key,
+                        {
+                            "name": node.name, "owner": owner_name,
+                            "signature": signature, "path": source.record.relative_path,
+                        },
+                    )
+                    self.node_ast[id(node)] = node_id
+                    self.definitions.setdefault((module_name, node.name), []).append(node_id)
+                    self.add_occurrence(node_id, source, "definition", span)
+                    self.add_assertion(owner_id, "DEFINES", node_id, source, span)
+                    self._entry_point(node, node_id, owner_name, source, span)
+                    self._routes(node, node_id, owner_name, source, offsets)
+                    walk(node.body, f"{owner_name}.{node.name}", node_id, False)
+
+        walk(tree.body, module_name or "<module>", module_id, False)
+
+    def _table(
+        self,
+        node: ast.ClassDef,
+        class_id: str,
+        owner: str,
+        source: _CapturedSource,
+        offsets: tuple[int, ...],
+    ) -> None:
+        for statement in node.body:
+            if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                continue
+            targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+            value = statement.value
+            if not any(isinstance(target, ast.Name) and target.id == "__tablename__" for target in targets):
+                continue
+            if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+                continue
+            span = _span(statement, offsets, source.content)
+            key = f"{self.repository_id}\x1f{value.value}"
+            table = self.add_node("table", "database-table/v1", key, {"name": value.value, "owner": owner})
+            self.tables[value.value.casefold()] = table
+            self.add_occurrence(table, source, "definition", span)
+            self.add_assertion(class_id, "DEFINES", table, source, span)
+
+    def _entry_point(
+        self,
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+        function_id: str,
+        owner: str,
+        source: _CapturedSource,
+        span: tuple[int, int, int, int],
+    ) -> None:
+        if node.name != "main":
+            return
+        key = f"{self.repository_id}\x1f{source.record.relative_path}\x1f{owner}\x1fmain"
+        entry = self.add_node("entry-point", "code-entry-point/v1", key, {"name": "main", "kind": "main"})
+        self.add_occurrence(entry, source, "definition", span)
+        self.add_assertion(function_id, "EXPOSES", entry, source, span)
+
+    def _routes(
+        self,
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+        function_id: str,
+        owner: str,
+        source: _CapturedSource,
+        offsets: tuple[int, ...],
+    ) -> None:
+        for decorator in node.decorator_list:
+            if not isinstance(decorator, ast.Call) or not decorator.args:
+                continue
+            function = decorator.func
+            if not isinstance(function, ast.Attribute) or function.attr.lower() not in {
+                "delete", "get", "patch", "post", "put", "route",
+            }:
+                continue
+            path = decorator.args[0]
+            if not isinstance(path, ast.Constant) or not isinstance(path.value, str):
+                continue
+            method = function.attr.upper()
+            span = _span(decorator, offsets, source.content)
+            key = f"{self.repository_id}\x1f{method}\x1f{path.value}\x1f{owner}.{node.name}"
+            route = self.add_node(
+                "route", "code-route/v1", key,
+                {"name": f"{method} {path.value}", "method": method, "path": path.value},
+            )
+            self.add_occurrence(route, source, "definition", span)
+            self.add_assertion(function_id, "EXPOSES", route, source, span)
+
+    def collect_python_edges(self, source: _CapturedSource, tree: ast.Module) -> None:
+        offsets = _line_offsets(source.content)
+        module_name = _module_name(source.record.relative_path)
+        module_id = self.modules[module_name]
+        aliases: dict[str, tuple[str, str]] = {}
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    aliases[alias.asname or alias.name.split(".")[0]] = (alias.name, "")
+                    self._import_edge(module_id, alias.name, source, _span(node, offsets, source.content))
+            elif isinstance(node, ast.ImportFrom):
+                imported_module = self._absolute_import(module_name, node.module or "", node.level)
+                self._import_edge(module_id, imported_module, source, _span(node, offsets, source.content))
+                for alias in node.names:
+                    aliases[alias.asname or alias.name] = (imported_module, alias.name)
+
+        parent: dict[int, ast.AST] = {}
+        for candidate in ast.walk(tree):
+            for child in ast.iter_child_nodes(candidate):
+                parent[id(child)] = candidate
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                class_id = self.node_ast.get(id(node))
+                if class_id:
+                    for base in node.bases:
+                        target = self._resolve_expression(base, module_name, aliases)
+                        span = _span(base, offsets, source.content)
+                        if len(target) == 1:
+                            self.add_assertion(class_id, "INHERITS", target[0], source, span)
+                        elif len(target) > 1:
+                            self.add_observation(class_id, "INHERITS", ast.unparse(base), "ambiguous_target", source, span)
+            if not isinstance(node, ast.Call) or self._is_route_decorator(node, parent):
+                continue
+            owner = self._enclosing_node(node, parent)
+            source_node_id = self.node_ast.get(id(owner), module_id) if owner else module_id
+            span = _span(node, offsets, source.content)
+            targets = self._resolve_expression(node.func, module_name, aliases, owner)
+            text = ast.unparse(node.func)
+            if len(targets) == 1:
+                self.add_assertion(source_node_id, "CALLS", targets[0], source, span)
+            elif len(targets) > 1:
+                self.add_observation(source_node_id, "CALLS", text, "ambiguous_target", source, span)
+            else:
+                reason = "dynamic_dispatch" if isinstance(node.func, ast.Attribute) else "unresolved_reference"
+                if isinstance(node.func, ast.Name) and node.func.id in aliases:
+                    reason = "missing_dependency"
+                self.add_observation(source_node_id, "CALLS", text, reason, source, span)
+            self._sql_edges(node, source_node_id, source, span)
+
+    def _sql_edges(
+        self,
+        node: ast.Call,
+        source_node_id: str,
+        source: _CapturedSource,
+        span: tuple[int, int, int, int],
+    ) -> None:
+        if not node.args:
+            return
+        statement = node.args[0]
+        if not isinstance(statement, ast.Constant) or not isinstance(statement.value, str):
+            return
+        sql = statement.value
+        relationships = (
+            ("READS", r"\b(?:FROM|JOIN)\s+([A-Za-z_]\w*)"),
+            ("WRITES", r"\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+([A-Za-z_]\w*)"),
+        )
+        for edge_type, pattern in relationships:
+            for match in re.finditer(pattern, sql, re.IGNORECASE):
+                table = self.tables.get(match.group(1).casefold())
+                if table:
+                    self.add_assertion(source_node_id, edge_type, table, source, span)
+
+    @staticmethod
+    def _syntax_span(node: object) -> tuple[int, int, int, int]:
+        return (
+            node.start_byte,
+            node.end_byte,
+            node.start_point[0] + 1,
+            node.end_point[0] + 1,
+        )
+
+    @staticmethod
+    def _syntax_nodes(root: object, maximum: int) -> list[object]:
+        nodes: list[object] = []
+        pending = [root]
+        while pending:
+            node = pending.pop()
+            nodes.append(node)
+            if len(nodes) > maximum:
+                raise ValueError("code extraction syntax node ceiling exceeded")
+            pending.extend(reversed(node.named_children))
+        return nodes
+
+    @staticmethod
+    def _syntax_name(node: object, content: bytes) -> str | None:
+        named = node.child_by_field_name("name")
+        if named is None and node.type in {"method", "singleton_method"}:
+            named = next((child for child in node.named_children if child.type in {"identifier", "constant"}), None)
+        if named is None:
+            return None
+        return content[named.start_byte:named.end_byte].decode("utf-8", errors="strict")
+
+    @staticmethod
+    def _syntax_signature(node: object, name: str, content: bytes) -> str:
+        declaration = content[node.start_byte:node.end_byte].decode("utf-8", errors="strict")
+        match = re.search(rf"\b{re.escape(name)}\s*\(", declaration)
+        if match is None:
+            return name
+        start = declaration.find("(", match.start())
+        depth = 0
+        for index in range(start, len(declaration)):
+            if declaration[index] == "(":
+                depth += 1
+            elif declaration[index] == ")":
+                depth -= 1
+                if depth == 0:
+                    parameters = re.sub(r"\s+", " ", declaration[start:index + 1])
+                    return f"{name}{parameters}"
+        return name
+
+    def collect_syntax_definitions(self, source: _CapturedSource, root: object) -> None:
+        language = source.record.language or "unknown"
+        module_name = _module_name(source.record.relative_path)
+        module_id = self.modules[module_name]
+        nodes = self._syntax_nodes(root, self.limits.max_occurrences * 4)
+        classes: list[tuple[object, str, str]] = []
+        for node in nodes:
+            if node.type not in _CLASS_TYPES:
+                continue
+            name = self._syntax_name(node, source.content)
+            if not name:
+                continue
+            span = self._syntax_span(node)
+            scheme, key = self.symbol_identity(source, span, language, module_name, name, name)
+            node_id = self.add_node(
+                "class", scheme, key,
+                {"name": name, "owner": module_name, "path": source.record.relative_path},
+            )
+            classes.append((node, node_id, name))
+            self.syntax_definitions.setdefault(name, []).append((node, node_id))
+            self.add_occurrence(node_id, source, "definition", span)
+            self.add_assertion(module_id, "DEFINES", node_id, source, span)
+        for node in nodes:
+            if node.type not in _FUNCTION_TYPES:
+                continue
+            name = self._syntax_name(node, source.content)
+            if not name:
+                continue
+            containers = [item for item in classes if item[0].start_byte <= node.start_byte and node.end_byte <= item[0].end_byte]
+            container = min(containers, key=lambda item: item[0].end_byte - item[0].start_byte) if containers else None
+            owner_name = f"{module_name}.{container[2]}" if container else module_name
+            owner_id = container[1] if container else module_id
+            span = self._syntax_span(node)
+            signature = self._syntax_signature(node, name, source.content)
+            scheme, key = self.symbol_identity(source, span, language, owner_name, name, signature)
+            node_id = self.add_node(
+                "method" if container else "function", scheme, key,
+                {
+                    "name": name, "owner": owner_name, "signature": signature,
+                    "path": source.record.relative_path,
+                },
+            )
+            self.syntax_definitions.setdefault(name, []).append((node, node_id))
+            self.syntax_functions.setdefault(source.record.logical_id, []).append((node, node_id))
+            self.add_occurrence(node_id, source, "definition", span)
+            self.add_assertion(owner_id, "DEFINES", node_id, source, span)
+            if name == "main":
+                key = f"{self.repository_id}\x1f{source.record.relative_path}\x1f{owner_name}\x1fmain"
+                entry = self.add_node(
+                    "entry-point", "code-entry-point/v1", key,
+                    {"name": "main", "kind": "main"},
+                )
+                self.add_occurrence(entry, source, "definition", span)
+                self.add_assertion(node_id, "EXPOSES", entry, source, span)
+
+    def collect_syntax_edges(self, source: _CapturedSource, root: object) -> None:
+        module_id = self.modules[_module_name(source.record.relative_path)]
+        functions = self.syntax_functions.get(source.record.logical_id, ())
+        for node in self._syntax_nodes(root, self.limits.max_occurrences * 4):
+            if node.type in _CLASS_TYPES:
+                self._syntax_type_edges(node, source)
+            if node.type in _IMPORT_TYPES:
+                text = source.content[node.start_byte:node.end_byte].decode("utf-8", errors="strict")
+                target_text = self._import_target(text)
+                target = self.modules.get(target_text)
+                span = self._syntax_span(node)
+                if target:
+                    self.add_assertion(module_id, "IMPORTS", target, source, span, confidence="medium")
+                else:
+                    self.add_observation(module_id, "IMPORTS", target_text or text, "missing_dependency", source, span)
+            if node.type not in _CALL_TYPES:
+                continue
+            function = node.child_by_field_name("function") or node.child_by_field_name("name")
+            if function is None:
+                function = next(iter(node.named_children), None)
+            if function is None:
+                continue
+            text = source.content[function.start_byte:function.end_byte].decode("utf-8", errors="strict")
+            name = re.split(r"\.|::|->", text)[-1]
+            candidates = self.syntax_definitions.get(name, ())
+            owners = [
+                item for item in functions
+                if item[0].start_byte <= node.start_byte and node.end_byte <= item[0].end_byte
+            ]
+            source_node = (
+                min(owners, key=lambda item: item[0].end_byte - item[0].start_byte)[1]
+                if owners else module_id
+            )
+            span = self._syntax_span(node)
+            if len(candidates) == 1 and not re.search(r"\.|::|->", text):
+                self.add_assertion(source_node, "CALLS", candidates[0][1], source, span, confidence="medium")
+            elif len(candidates) > 1:
+                self.add_observation(source_node, "CALLS", text, "ambiguous_target", source, span)
+            else:
+                reason = "dynamic_dispatch" if re.search(r"\.|::|->", text) else "unresolved_reference"
+                self.add_observation(source_node, "CALLS", text, reason, source, span)
+
+    def _syntax_type_edges(self, node: object, source: _CapturedSource) -> None:
+        name = self._syntax_name(node, source.content)
+        owners = self.syntax_definitions.get(name or "", ())
+        source_node = next(
+            (node_id for candidate, node_id in owners if candidate.start_byte == node.start_byte),
+            None,
+        )
+        if source_node is None:
+            return
+        declaration = source.content[node.start_byte:node.end_byte].decode("utf-8", errors="strict")
+        relationships = (
+            ("IMPLEMENTS", r"\bimplements\s+([A-Za-z_]\w*)"),
+            ("INHERITS", r"\bextends\s+([A-Za-z_]\w*)"),
+        )
+        for edge_type, pattern in relationships:
+            for match in re.finditer(pattern, declaration):
+                targets = self.syntax_definitions.get(match.group(1), ())
+                if len(targets) != 1:
+                    reason = "ambiguous_target" if len(targets) > 1 else "unresolved_reference"
+                    start = node.start_byte + match.start(1)
+                    end = node.start_byte + match.end(1)
+                    self.add_observation(
+                        source_node, edge_type, match.group(1), reason, source,
+                        (
+                            start, end,
+                            source.content.count(b"\n", 0, start) + 1,
+                            source.content.count(b"\n", 0, end) + 1,
+                        ),
+                    )
+                    continue
+                start = node.start_byte + match.start(1)
+                end = node.start_byte + match.end(1)
+                self.add_assertion(
+                    source_node, edge_type, targets[0][1], source,
+                    (
+                        start, end,
+                        source.content.count(b"\n", 0, start) + 1,
+                        source.content.count(b"\n", 0, end) + 1,
+                    ),
+                    confidence="medium",
+                )
+
+    @staticmethod
+    def _import_target(text: str) -> str:
+        quoted = re.search(r"['\"]([^'\"]+)['\"]", text)
+        if quoted:
+            return quoted.group(1).removeprefix("./").replace("/", ".").removesuffix(".js")
+        match = re.search(r"\b(?:import|use|using)\s+([\w.:]+)", text)
+        return "" if match is None else match.group(1).replace("::", ".").rstrip(";")
+
+    @staticmethod
+    def _absolute_import(module_name: str, imported: str, level: int) -> str:
+        if level == 0:
+            return imported
+        package = module_name.split(".")[:-1]
+        keep = max(0, len(package) - level + 1)
+        return ".".join([*package[:keep], *([imported] if imported else [])])
+
+    def _import_edge(
+        self,
+        module_id: str,
+        imported: str,
+        source: _CapturedSource,
+        span: tuple[int, int, int, int],
+    ) -> None:
+        target = self.modules.get(imported)
+        if target:
+            self.add_assertion(module_id, "IMPORTS", target, source, span)
+        else:
+            self.add_observation(module_id, "IMPORTS", imported, "missing_dependency", source, span)
+
+    def _resolve_expression(
+        self,
+        expression: ast.AST,
+        module_name: str,
+        aliases: Mapping[str, tuple[str, str]],
+        owner: ast.AST | None = None,
+    ) -> list[str]:
+        if isinstance(expression, ast.Name):
+            if expression.id in aliases:
+                module, symbol = aliases[expression.id]
+                if symbol:
+                    return list(self.definitions.get((module, symbol), ()))
+                return [self.modules[module]] if module in self.modules else []
+            return [
+                node_id
+                for node_id in self.definitions.get((module_name, expression.id), ())
+                if self.nodes[node_id]["kind"] != "method"
+            ]
+        if isinstance(expression, ast.Attribute):
+            if isinstance(expression.value, ast.Name) and expression.value.id == "self" and owner:
+                owner_id = self.node_ast.get(id(owner))
+                owner_name = "" if owner_id is None else str(
+                    self.nodes[owner_id]["metadata"].get("owner", "")
+                )
+                return [
+                    node_id for node_id in self.definitions.get((module_name, expression.attr), ())
+                    if self.nodes[node_id]["kind"] == "method"
+                    and self.nodes[node_id]["metadata"].get("owner") == owner_name
+                ]
+            if isinstance(expression.value, ast.Name) and expression.value.id in aliases:
+                module, symbol = aliases[expression.value.id]
+                target_module = f"{module}.{symbol}" if symbol else module
+                return list(self.definitions.get((target_module, expression.attr), ()))
+            if isinstance(expression.value, ast.Name):
+                class_targets = self.definitions.get((module_name, expression.value.id), ())
+                return [
+                    node_id for node_id in self.definitions.get((module_name, expression.attr), ())
+                    if any(self.nodes[node_id]["metadata"].get("owner", "").endswith(expression.value.id) for _ in class_targets)
+                ]
+        return []
+
+    @staticmethod
+    def _enclosing_node(node: ast.AST, parent: Mapping[int, ast.AST]) -> ast.AST | None:
+        current = parent.get(id(node))
+        while current is not None:
+            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return current
+            current = parent.get(id(current))
+        return None
+
+    @staticmethod
+    def _is_route_decorator(node: ast.Call, parent: Mapping[int, ast.AST]) -> bool:
+        current = parent.get(id(node))
+        return isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)) and node in current.decorator_list
+
+    def extract(self) -> CodeExtraction:
+        self.structural_nodes()
+        parsed: list[tuple[_CapturedSource, ast.Module]] = []
+        syntax_trees: list[tuple[_CapturedSource, object]] = []
+        for source in self.sources:
+            language = source.record.language
+            whole = (0, len(source.content), 1, max(1, source.content.count(b"\n") + 1))
+            if language != "python":
+                parser = _optional_parser(language or "")
+                if parser is not None:
+                    tree = parser.parse(source.content)
+                    if tree.root_node.has_error:
+                        self.add_observation(
+                            self.modules[_module_name(source.record.relative_path)],
+                            "PARSES", language, "parse_error", source, whole,
+                        )
+                    else:
+                        syntax_trees.append((source, tree.root_node))
+                        self.collect_syntax_definitions(source, tree.root_node)
+                    continue
+                self.add_observation(
+                    self.modules[_module_name(source.record.relative_path)],
+                    "PARSES", language, "unsupported_semantics", source, whole,
+                )
+                continue
+            try:
+                tree = ast.parse(source.content, filename=source.record.relative_path)
+            except (SyntaxError, ValueError, UnicodeError) as exc:
+                self.add_observation(
+                    self.modules[_module_name(source.record.relative_path)],
+                    "PARSES", str(exc), "parse_error", source, whole,
+                )
+                continue
+            parsed.append((source, tree))
+            self.collect_python_definitions(source, tree)
+        for source, tree in parsed:
+            self.collect_python_edges(source, tree)
+        for source, root in syntax_trees:
+            self.collect_syntax_edges(source, root)
+        return CodeExtraction(
+            _frozen(list(self.nodes.values()), "node_id"),
+            _frozen(self.occurrences, "occurrence_id"),
+            _frozen(self.assertions, "assertion_id"),
+            _frozen(self.evidence, "evidence_id"),
+            _frozen(self.observations, "observation_id"),
+        )
+
+
+def extract_code(
+    sources: Iterable[_CapturedSource],
+    *,
+    repository_id: str,
+    scip_symbols: Iterable[ScipSymbol] = (),
+    co_changes: Iterable[CoChange] = (),
+    limits: ExtractionLimits | None = None,
+) -> CodeExtraction:
+    """Extract immutable source snapshots without filesystem or store access."""
+    if not isinstance(repository_id, str) or not repository_id or len(repository_id) > 512:
+        raise ValueError("repository_id must be a bounded non-empty string")
+    captured = tuple(sources)
+    bounds = limits or ExtractionLimits()
+    if len(captured) > bounds.max_sources:
+        raise ValueError("code extraction source ceiling exceeded")
+    required_record_fields = ("logical_id", "relative_path", "sha256", "size", "language")
+    if any(
+        not hasattr(source, "record")
+        or not hasattr(source, "content")
+        or any(not hasattr(source.record, field) for field in required_record_fields)
+        for source in captured
+    ):
+        raise TypeError("sources must contain immutable captured source values")
+    selected = tuple(sorted(captured, key=lambda item: item.record.relative_path))
+    if len({source.record.relative_path for source in selected}) != len(selected):
+        raise ValueError("code extraction source paths must be unique")
+    if len({source.record.logical_id for source in selected}) != len(selected):
+        raise ValueError("code extraction source IDs must be unique")
+    total = 0
+    for source in selected:
+        if not isinstance(source.content, bytes):
+            raise TypeError("captured source content must be bytes")
+        relative = source.record.relative_path
+        pure = PurePosixPath(relative) if isinstance(relative, str) else None
+        if (
+            pure is None
+            or not relative
+            or len(relative) > 4096
+            or "\\" in relative
+            or pure.is_absolute()
+            or any(part in {"", ".", ".."} for part in pure.parts)
+        ):
+            raise ValueError("captured source path must be canonical and repository-relative")
+        total += len(source.content)
+        if len(source.content) > bounds.max_source_bytes or total > bounds.max_total_bytes:
+            raise ValueError("code extraction source byte ceiling exceeded")
+        if source.record.size != len(source.content):
+            raise ValueError("captured source size does not match content")
+        if source.record.sha256 != hashlib.sha256(source.content).hexdigest():
+            raise ValueError("captured source hash does not match content")
+    symbols = tuple(scip_symbols)
+    if len(symbols) > bounds.max_scip_symbols:
+        raise ValueError("code extraction SCIP symbol ceiling exceeded")
+    sources_by_id = {source.record.logical_id: source for source in selected}
+    for symbol in symbols:
+        source = sources_by_id.get(getattr(symbol, "source_id", None))
+        if (
+            not isinstance(symbol, ScipSymbol)
+            or source is None
+            or isinstance(symbol.byte_start, bool)
+            or not isinstance(symbol.byte_start, int)
+            or not isinstance(symbol.byte_end, int)
+            or symbol.byte_start < 0
+            or symbol.byte_end <= symbol.byte_start
+            or symbol.byte_end > len(source.content)
+            or not symbol.symbol
+            or len(symbol.symbol) > 4096
+        ):
+            raise ValueError("SCIP symbols must identify a valid captured source span")
+    collector = _Collector(
+        selected, repository_id, tuple(sorted(symbols, key=lambda item: item.symbol)), bounds
+    )
+    result = collector.extract()
+    changes = tuple(co_changes)
+    if len(changes) > bounds.max_co_changes:
+        raise ValueError("code extraction co-change ceiling exceeded")
+    if any(
+        not isinstance(change, CoChange)
+        or not math.isfinite(change.weight)
+        or not 0.0 <= change.weight <= 1.0
+        or not change.source_path
+        or not change.target_path
+        or len(change.source_path) > 4096
+        or len(change.target_path) > 4096
+        for change in changes
+    ):
+        raise ValueError("co-change records must use bounded finite values")
+    if not changes:
+        return result
+    for change in sorted(changes, key=lambda item: (item.source_path, item.target_path)):
+        evidence_source = next(
+            (source for source in selected if source.record.logical_id == change.evidence_source_id),
+            None,
+        )
+        source_node = collector.files.get(change.source_path)
+        target_node = collector.files.get(change.target_path)
+        if (
+            evidence_source is None
+            or source_node is None
+            or target_node is None
+            or not 0 <= change.byte_start < change.byte_end <= len(evidence_source.content)
+            or not 0.0 <= change.weight <= 1.0
+        ):
+            continue
+        line_start = evidence_source.content.count(b"\n", 0, change.byte_start) + 1
+        line_end = evidence_source.content.count(b"\n", 0, change.byte_end) + 1
+        collector.add_assertion(
+            source_node, "CO_CHANGED_WITH", target_node, evidence_source,
+            (change.byte_start, change.byte_end, line_start, line_end), confidence="medium",
+        )
+    return CodeExtraction(
+        _frozen(list(collector.nodes.values()), "node_id"),
+        _frozen(collector.occurrences, "occurrence_id"),
+        _frozen(collector.assertions, "assertion_id"),
+        _frozen(collector.evidence, "evidence_id"),
+        _frozen(collector.observations, "observation_id"),
+    )
+
+
+extract_sources = extract_code
