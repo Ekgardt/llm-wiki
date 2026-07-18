@@ -4487,7 +4487,7 @@ def _orchestrate_selection_impl(
         return artifact
 
     artifact["schema_version"] = "retrieval-selection/v1"
-    artifact["quality_claim"] = True
+    artifact["quality_claim"] = artifact["selected"] is not None
     artifact["release_evidence"] = True
     serialized = canonical_json_bytes(artifact) + b"\n"
     repo = Path(repo_root).resolve(strict=True)
