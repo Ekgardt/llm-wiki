@@ -360,6 +360,21 @@ def _canonical_json(value: object, label: str) -> str:
     return encoded.decode("utf-8")
 
 
+def _validate_occurrence_lines(
+    content: bytes,
+    start: int,
+    end: int,
+    line_start: int,
+    line_end: int,
+) -> None:
+    if end <= start:
+        raise ValueError("occurrence byte range must be non-empty")
+    expected_start = content.count(b"\n", 0, start) + 1
+    expected_end = content.count(b"\n", 0, end) + 1
+    if (line_start, line_end) != (expected_start, expected_end):
+        raise ValueError("occurrence line range does not match its captured source bytes")
+
+
 def _ordered(records: Iterable[Mapping[str, object]], key: str, label: str) -> list[Mapping[str, object]]:
     values = list(records)
     if len(values) > 1_000_000:
@@ -453,6 +468,15 @@ def create_generation_database(
             end = _integer(record["byte_end"], "occurrence byte_end", minimum=start)
             if source_id not in source_content or end > len(source_content[source_id]):
                 raise ValueError("occurrence byte range is outside its captured source")
+            line_start = _integer(
+                record["line_start"], "line_start", minimum=1, maximum=2**31 - 1
+            )
+            line_end = _integer(
+                record["line_end"], "line_end", minimum=line_start, maximum=2**31 - 1
+            )
+            _validate_occurrence_lines(
+                source_content[source_id], start, end, line_start, line_end
+            )
             normalized_occurrences.append(
                 (
                     _text(record["occurrence_id"], "occurrence_id", maximum=512),
@@ -461,8 +485,8 @@ def create_generation_database(
                     _text(record["role"], "occurrence role", maximum=128),
                     start,
                     end,
-                    _integer(record["line_start"], "line_start", minimum=1, maximum=2**31 - 1),
-                    _integer(record["line_end"], "line_end", minimum=1, maximum=2**31 - 1),
+                    line_start,
+                    line_end,
                 )
             )
 
@@ -470,17 +494,19 @@ def create_generation_database(
         resolved_assertions: set[str] = set()
         for record in _ordered(assertions, "assertion_id", "assertion"):
             _closed(record, _ASSERTION_KEYS, "assertion")
+            resolution = record["resolution"]
+            if resolution not in _RESOLUTION:
+                raise ValueError("assertion resolution is outside the closed contract")
+            if resolution != "resolved":
+                raise ValueError("unresolved assertions must use a controlled observation")
             target = _text(record["target_node_id"], "target_node_id", maximum=512, optional=True)
             literal = None if record["literal"] is None else _canonical_json(record["literal"], "literal")
             if (target is None) == (literal is None):
                 raise ValueError("assertion must have exactly one target node or literal")
             confidence = record["confidence"]
             authority = record["authority"]
-            resolution = record["resolution"]
             if confidence not in _CONFIDENCE or authority not in _AUTHORITY:
                 raise ValueError("assertion confidence or authority is outside the closed contract")
-            if resolution not in _RESOLUTION or (resolution == "resolved" and target is None):
-                raise ValueError("assertion resolution is outside the closed contract")
             assertion_id = _text(record["assertion_id"], "assertion_id", maximum=512)
             assert assertion_id is not None
             if resolution == "resolved":
@@ -695,7 +721,10 @@ def _validate_stored_records(
         if source_id not in source_content or end > len(source_content[source_id]):
             raise ValueError("occurrence byte range is outside its captured source")
         line_start = _integer(row["line_start"], "line_start", minimum=1, maximum=2**31 - 1)
-        _integer(row["line_end"], "line_end", minimum=line_start, maximum=2**31 - 1)
+        line_end = _integer(
+            row["line_end"], "line_end", minimum=line_start, maximum=2**31 - 1
+        )
+        _validate_occurrence_lines(source_content[source_id], start, end, line_start, line_end)
 
     resolved_assertions: set[str] = set()
     for row in database.execute("SELECT * FROM assertion ORDER BY assertion_id"):
@@ -703,6 +732,11 @@ def _validate_stored_records(
         assert assertion_id is not None
         _node_id(row["source_node_id"], "source_node_id")
         _text(row["edge_type"], "edge_type", maximum=128)
+        resolution = row["resolution"]
+        if resolution not in _RESOLUTION:
+            raise ValueError("assertion resolution is outside the closed contract")
+        if resolution != "resolved":
+            raise ValueError("unresolved assertions must use a controlled observation")
         target = row["target_node_id"]
         if target is not None:
             _node_id(target, "target_node_id")
@@ -711,9 +745,6 @@ def _validate_stored_records(
             raise ValueError("assertion must have exactly one target node or literal")
         if row["confidence"] not in _CONFIDENCE or row["authority"] not in _AUTHORITY:
             raise ValueError("assertion confidence or authority is outside the closed contract")
-        resolution = row["resolution"]
-        if resolution not in _RESOLUTION or (resolution == "resolved" and target is None):
-            raise ValueError("assertion resolution is outside the closed contract")
         _text(row["extractor"], "extractor", maximum=256)
         if resolution == "resolved":
             resolved_assertions.add(assertion_id)
@@ -830,7 +861,7 @@ UNION ALL
 SELECT 1 FROM assertion
 WHERE confidence NOT IN ('high','medium','low')
    OR authority NOT IN ('user','web','ai-derived','inferred')
-   OR resolution NOT IN ('resolved','unresolved','ambiguous')
+   OR resolution != 'resolved'
    OR (target_node_id IS NULL) = (literal_json IS NULL)
    OR (literal_json IS NOT NULL AND NOT json_valid(literal_json))
 UNION ALL
@@ -994,20 +1025,41 @@ class EvidenceGraph:
     @classmethod
     def open_active(cls, catalog: object, *, deadline: float | None = None) -> EvidenceGraph | None:
         options = {} if deadline is None else {"deadline": deadline}
-        manifest = catalog.get_active(**options)
-        if manifest is None:
-            return None
-        if manifest.get("graph_schema_version") != GRAPH_SCHEMA_VERSION:
-            raise ValueError("active generation does not use the Evidence Graph schema")
-        generation_id = manifest["generation_id"]
-        artifacts = {item["path"] for item in manifest["artifacts"]}
-        if "evidence.sqlite3" not in artifacts:
-            raise ValueError("active graph generation has no evidence.sqlite3 artifact")
-        return cls(
-            catalog.generations_path / generation_id / "evidence.sqlite3",
-            state_root=catalog.state_root,
-            generation_id=generation_id,
-        )
+        for _attempt in range(3):
+            manifest = catalog.get_active(**options)
+            if manifest is None:
+                return None
+            if manifest.get("graph_schema_version") != GRAPH_SCHEMA_VERSION:
+                raise ValueError("active generation does not use the Evidence Graph schema")
+            generation_id = manifest["generation_id"]
+            artifacts = {item["path"] for item in manifest["artifacts"]}
+            if "evidence.sqlite3" not in artifacts:
+                raise ValueError("active graph generation has no evidence.sqlite3 artifact")
+            graph = None
+            try:
+                validated, seal = catalog._registered_generation(generation_id, **options)
+                if validated != manifest:
+                    continue
+                generation_path = catalog.generations_path / generation_id
+                graph = cls(
+                    generation_path / "evidence.sqlite3",
+                    state_root=catalog.state_root,
+                    generation_id=generation_id,
+                )
+                if not catalog._deadline_seal_unchanged(generation_path, seal, deadline):
+                    graph.close()
+                    graph = None
+                    continue
+                if catalog.get_active(**options) != manifest:
+                    graph.close()
+                    graph = None
+                    continue
+                return graph
+            except (FileNotFoundError, PermissionError, TypeError, ValueError, sqlite3.Error):
+                if graph is not None:
+                    graph.close()
+                continue
+        raise PermissionError("active Evidence Graph changed while opening")
 
     def close(self) -> None:
         self._database.close()

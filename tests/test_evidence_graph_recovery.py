@@ -221,6 +221,78 @@ def test_open_active_reuses_generation_catalog_and_falls_back_from_corruption(tm
     graph.close()
 
 
+@pytest.mark.parametrize("member", ["evidence.sqlite3", "source-manifest.json"])
+def test_open_active_rechecks_exact_catalog_seal_after_database_open(
+    tmp_path, monkeypatch, member
+):
+    import evidence_graph
+    from generation_catalog import GenerationCatalog
+
+    catalog = GenerationCatalog(tmp_path / "state")
+    _publish(catalog, "gen-1")
+    _publish(catalog, "gen-2", parent="gen-1", graph_records=_rich_graph_records())
+    for identifier in ("gen-1", "gen-2"):
+        catalog.register(identifier)
+    assert catalog.activate("gen-1", expected_active=None)
+    assert catalog.activate("gen-2", expected_active="gen-1")
+    replacement = (catalog.generations_path / "gen-1" / member).read_bytes()
+    target = catalog.generations_path / "gen-2" / member
+    real_init = evidence_graph.EvidenceGraph.__init__
+    mutated = False
+
+    def mutate_between_validation_and_open(graph, *args, **kwargs):
+        nonlocal mutated
+        if kwargs.get("generation_id") == "gen-2" and not mutated:
+            mutated = True
+            target.write_bytes(replacement)
+        real_init(graph, *args, **kwargs)
+
+    monkeypatch.setattr(evidence_graph.EvidenceGraph, "__init__", mutate_between_validation_and_open)
+
+    graph = evidence_graph.EvidenceGraph.open_active(catalog)
+
+    assert mutated
+    assert graph is not None
+    assert graph.generation_id == "gen-1"
+    assert catalog.get_active()["generation_id"] == "gen-1"
+    graph.close()
+
+
+def test_open_active_rechecks_catalog_pointer_after_database_open(tmp_path, monkeypatch):
+    import evidence_graph
+    from generation_catalog import GenerationCatalog
+
+    catalog = GenerationCatalog(tmp_path / "state")
+    _publish(catalog, "gen-1")
+    _publish(catalog, "gen-2", parent="gen-1", graph_records=_rich_graph_records())
+    for identifier in ("gen-1", "gen-2"):
+        catalog.register(identifier)
+    assert catalog.activate("gen-1", expected_active=None)
+    assert catalog.activate("gen-2", expected_active="gen-1")
+    real_init = evidence_graph.EvidenceGraph.__init__
+    changed = False
+
+    def change_active_between_validation_and_open(graph, *args, **kwargs):
+        nonlocal changed
+        if kwargs.get("generation_id") == "gen-2" and not changed:
+            changed = True
+            assert catalog.activate("gen-1", expected_active="gen-2")
+        real_init(graph, *args, **kwargs)
+
+    monkeypatch.setattr(
+        evidence_graph.EvidenceGraph,
+        "__init__",
+        change_active_between_validation_and_open,
+    )
+
+    graph = evidence_graph.EvidenceGraph.open_active(catalog)
+
+    assert changed
+    assert graph is not None
+    assert graph.generation_id == "gen-1"
+    graph.close()
+
+
 def test_open_active_returns_none_without_pointer_and_rejects_wrong_graph_contract(tmp_path):
     import evidence_graph
     from generation_catalog import GenerationCatalog
@@ -463,7 +535,9 @@ def test_source_membership_drift_falls_back_and_orphan_probe_skips_mismatch(tmp_
         "UPDATE node SET metadata_json='{\"b\":1,\"a\":2}' WHERE node_id='caller'",
         "UPDATE occurrence SET role=''",
         "UPDATE occurrence SET byte_end=100",
+        "UPDATE occurrence SET line_start=2, line_end=2",
         "UPDATE assertion SET extractor=''",
+        "UPDATE assertion SET resolution='unresolved'",
         "UPDATE assertion SET resolution='invented'",
         "UPDATE assertion SET target_node_id=NULL, "
         "literal_json='{\"b\":1,\"a\":2}', resolution='unresolved'",
