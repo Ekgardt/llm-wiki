@@ -517,6 +517,14 @@ def _check_deadline(deadline_monotonic: float | None) -> None:
         raise TimeoutError("retrieval deadline exceeded")
 
 
+def _check_stopped(
+    deadline_monotonic: float | None, cancelled: Callable[[], bool] | None
+) -> None:
+    _check_deadline(deadline_monotonic)
+    if cancelled is not None and cancelled():
+        raise TimeoutError("retrieval cancelled")
+
+
 def retrieve(
     query: str,
     *,
@@ -542,9 +550,7 @@ def retrieve(
     Lexical and dense backends are invoked independently with identical hard
     filters. Fusion is rank-only RRF. Raw backend scores stay on candidates.
     """
-    _check_deadline(deadline_monotonic)
-    if cancelled is not None and cancelled():
-        raise TimeoutError("retrieval cancelled")
+    _check_stopped(deadline_monotonic, cancelled)
     analysis = analyze_query(query)
     requested = _normalize_profile(requested_profile) or analysis.recommended_profile
     if max_candidates is not None and int(max_candidates) > 0:
@@ -572,31 +578,25 @@ def retrieve(
     graph_available: bool | None = None
 
     if lexical_backend is not None and "lexical" in wanted:
-        _check_deadline(deadline_monotonic)
-        if cancelled is not None and cancelled():
-            raise TimeoutError("retrieval cancelled")
+        _check_stopped(deadline_monotonic, cancelled)
         lexical_hits = lexical_backend(**filters) or ()
         ran_lexical = True
-        _check_deadline(deadline_monotonic)
+        _check_stopped(deadline_monotonic, cancelled)
 
     if dense_backend is not None and "dense" in wanted:
-        _check_deadline(deadline_monotonic)
-        if cancelled is not None and cancelled():
-            raise TimeoutError("retrieval cancelled")
+        _check_stopped(deadline_monotonic, cancelled)
         dense_hits = dense_backend(**filters)
         ran_dense = True
         # None ⇒ backend unavailable; empty sequence ⇒ available but no hits.
         dense_available = dense_hits is not None
-        _check_deadline(deadline_monotonic)
+        _check_stopped(deadline_monotonic, cancelled)
 
     if graph_backend is not None and "graph" in wanted and graph_enabled:
-        _check_deadline(deadline_monotonic)
-        if cancelled is not None and cancelled():
-            raise TimeoutError("retrieval cancelled")
+        _check_stopped(deadline_monotonic, cancelled)
         graph_hits = graph_backend(**filters)
         ran_graph = True
         graph_available = graph_hits is not None
-        _check_deadline(deadline_monotonic)
+        _check_stopped(deadline_monotonic, cancelled)
     elif "graph" in wanted and not graph_enabled:
         graph_available = False
 
@@ -617,6 +617,9 @@ def retrieve(
     candidates, display_meta = fuse_rrf(
         lexical=fuse_lexical, dense=fuse_dense, graph=fuse_graph
     )
+    _check_stopped(deadline_monotonic, cancelled)
+    if max_candidates is not None and int(max_candidates) > 0:
+        candidates = candidates[: int(max_candidates)]
 
     # Conditional reranking (Task 13).
     signal_list = list(signals)
@@ -627,6 +630,7 @@ def retrieve(
     reranker_duration_ms: int | None = None
     reranker_fallback_reason: str | None = None
     if candidates and rerank_enabled:
+        _check_stopped(deadline_monotonic, cancelled)
         try:
             from reranker import rerank as _rerank
             from reranker import should_rerank
@@ -696,11 +700,15 @@ def retrieve(
                 reranker_fallback_reason = skip_reason
             else:
                 pool_limit = max(limit, 20) if limit > 0 else 20
+                if max_candidates is not None and int(max_candidates) > 0:
+                    pool_limit = min(pool_limit, int(max_candidates))
                 reranked = _rerank(
                     analysis.normalized_query or analysis.query,
                     legacy_rows[:pool_limit],
                     limit=pool_limit,
+                    text_field="content",
                 )
+                _check_stopped(deadline_monotonic, cancelled)
                 if reranked and reranked[0].get("reranker_applied"):
                     signal_list.append("reranker")
                     reranker_applied = True
@@ -758,9 +766,12 @@ def retrieve(
                     reranker_model_revision = reranked[0].get("reranker_model_revision")
                     reranker_depth = reranked[0].get("reranker_depth")
                     reranker_duration_ms = reranked[0].get("reranker_duration_ms")
+        except TimeoutError:
+            raise
         except Exception:
             reranker_fallback_reason = "reranker_error"
 
+    _check_stopped(deadline_monotonic, cancelled)
     if limit > 0:
         candidates = candidates[:limit]
 
@@ -950,9 +961,17 @@ def retrieve_via_search_memory(
     generation_embedder: object | None = None,
     generation_model_id: str | None = None,
     generation_model_revision: str | None = None,
+    deadline_monotonic: float | None = None,
+    max_candidates: int | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[dict[str, Any]]:
     """Public search path: independent backends → retrieve() → legacy rows."""
     import search_memory
+
+    _check_stopped(deadline_monotonic, cancelled)
+
+    class _GenerationSealChanged(Exception):
+        pass
 
     analysis = analyze_query(query)
     requested = _normalize_profile(profile)
@@ -1022,7 +1041,7 @@ def retrieve_via_search_memory(
         generation_fallback = "generation_unavailable"
 
     def lexical_backend(**filters: Any) -> Sequence[Mapping[str, Any]]:
-        nonlocal generation_fallback
+        nonlocal generation_fallback, use_generation
         if use_generation:
             try:
                 if not search_memory._generation_consumption_unchanged(
@@ -1032,7 +1051,7 @@ def retrieve_via_search_memory(
                     generation_ctx["seal"],
                 ):
                     generation_fallback = "generation_seal_changed"
-                    use = False
+                    raise _GenerationSealChanged
                 else:
                     use = True
                 if use:
@@ -1053,6 +1072,7 @@ def retrieve_via_search_memory(
                         generation_ctx["seal"],
                     ):
                         generation_fallback = "generation_seal_changed"
+                        raise _GenerationSealChanged
                     else:
                         hits = [_backend_hit_from_legacy(row) for row in rows]
                         return search_memory.apply_hard_filters(
@@ -1062,8 +1082,11 @@ def retrieve_via_search_memory(
                             as_of=filters.get("as_of"),
                             scope=filters.get("scope", "all"),
                         )
+            except _GenerationSealChanged:
+                raise
             except Exception:
                 generation_fallback = generation_fallback or "generation_corrupt"
+                raise _GenerationSealChanged
         rows = search_memory._legacy_lexical_hits(
             filters["query"],
             scope=filters["scope"],
@@ -1111,7 +1134,7 @@ def retrieve_via_search_memory(
                 ):
                     generation_ctx["dense_fallback"] = "generation_seal_changed"
                     generation_fallback = "generation_seal_changed"
-                    return None
+                    raise _GenerationSealChanged
                 rows = search_memory._generation_vectors_search(
                     filters["query"],
                     selected_catalog,
@@ -1127,6 +1150,15 @@ def retrieve_via_search_memory(
                     as_of=filters["as_of"],
                 )
                 if rows is None:
+                    if not search_memory._generation_consumption_unchanged(
+                        selected_catalog,
+                        generation_ctx["manifest"],
+                        generation_ctx["artifact_names"],
+                        generation_ctx["seal"],
+                    ):
+                        generation_ctx["dense_fallback"] = "generation_seal_changed"
+                        generation_fallback = "generation_seal_changed"
+                        raise _GenerationSealChanged
                     generation_ctx["dense_fallback"] = "generation_vectors_unavailable"
                     return None
                 if not search_memory._generation_consumption_unchanged(
@@ -1137,7 +1169,7 @@ def retrieve_via_search_memory(
                 ):
                     generation_ctx["dense_fallback"] = "generation_seal_changed"
                     generation_fallback = "generation_seal_changed"
-                    return None
+                    raise _GenerationSealChanged
                 hits = [
                     _backend_hit_from_legacy({**row, "vector_score": row.get("score")})
                     for row in rows
@@ -1149,7 +1181,18 @@ def retrieve_via_search_memory(
                     as_of=filters.get("as_of"),
                     scope=filters.get("scope", "all"),
                 )
+            except _GenerationSealChanged:
+                raise
             except Exception:
+                if not search_memory._generation_consumption_unchanged(
+                    selected_catalog,
+                    generation_ctx["manifest"],
+                    generation_ctx["artifact_names"],
+                    generation_ctx["seal"],
+                ):
+                    generation_ctx["dense_fallback"] = "generation_seal_changed"
+                    generation_fallback = "generation_seal_changed"
+                    raise _GenerationSealChanged
                 generation_ctx["dense_fallback"] = "generation_vectors_unavailable"
                 return None
         # semantic=False / BASE: dense backend not requested via wanted_tuple.
@@ -1204,8 +1247,8 @@ def retrieve_via_search_memory(
         except Exception:
             return None
 
-    try:
-        result = retrieve(
+    def run_retrieval() -> RetrievalResult:
+        return retrieve(
             query,
             requested_profile=requested,
             scope=scope,
@@ -1219,7 +1262,26 @@ def retrieve_via_search_memory(
             corpus_generation=corpus_generation,
             graph_enabled=graph and not use_generation,
             rerank_enabled=rerank,
+            deadline_monotonic=deadline_monotonic,
+            max_candidates=max_candidates,
+            cancelled=cancelled,
         )
+
+    try:
+        try:
+            result = run_retrieval()
+            if use_generation and not search_memory._generation_consumption_unchanged(
+                selected_catalog,
+                generation_ctx["manifest"],
+                generation_ctx["artifact_names"],
+                generation_ctx["seal"],
+            ):
+                generation_fallback = "generation_seal_changed"
+                raise _GenerationSealChanged
+        except _GenerationSealChanged:
+            use_generation = False
+            corpus_generation = "legacy"
+            result = run_retrieval()
     finally:
         connection = generation_ctx.get("connection")
         if connection is not None:

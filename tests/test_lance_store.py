@@ -751,3 +751,126 @@ class TestSearchIntegration:
         from search_memory import search
         results = search("test", limit=5, semantic=True)
         assert isinstance(results, list)
+
+    def test_filters_are_applied_before_effective_top_k(self, monkeypatch):
+        import lance_store
+
+        calls = []
+
+        class Query:
+            def where(self, expression):
+                calls.append(("where", expression))
+                return self
+
+            def limit(self, value):
+                calls.append(("limit", value))
+                return self
+
+            def to_list(self):
+                calls.append(("to_list", None))
+                return [
+                    {
+                        "path": "keep.md",
+                        "project": "demo",
+                        "status": "active",
+                        "timestamp": "2026-01-01",
+                        "valid_from": "2026-01-01",
+                        "valid_to": "",
+                        "model": lance_store.EMBEDDING_MODEL,
+                        "model_revision": lance_store.EMBEDDING_MODEL_REVISION,
+                        "source_sha256": "a" * 64,
+                        "_distance": 0.1,
+                    }
+                ]
+
+        class Table:
+            def query(self):
+                class Membership:
+                    def select(self, _columns):
+                        return self
+
+                    def to_list(self):
+                        return [
+                            {
+                                "path": "keep.md",
+                                "source_sha256": "a" * 64,
+                                "model": lance_store.EMBEDDING_MODEL,
+                                "model_revision": lance_store.EMBEDDING_MODEL_REVISION,
+                            }
+                        ]
+
+                return Membership()
+
+            def search(self, _vector):
+                calls.append(("search", None))
+                return Query()
+
+        class DB:
+            def open_table(self, _name):
+                return Table()
+
+        monkeypatch.setattr(lance_store, "_get_db", lambda: DB())
+        rows = lance_store.vector_search(
+            [0.1] * lance_store.EMBEDDING_DIM,
+            limit=1,
+            project="demo",
+            since="2025-01-01",
+            expected_sources=[("keep.md", "a" * 64)],
+        )
+
+        assert [name for name, _value in calls] == [
+            "search",
+            "where",
+            "limit",
+            "to_list",
+        ]
+        assert [row["candidate_id"] for row in rows] == ["keep"]
+
+    def test_filter_failure_makes_lance_unavailable_without_unfiltered_query(
+        self, monkeypatch
+    ):
+        import lance_store
+
+        queried = False
+
+        class Query:
+            def where(self, _expression):
+                raise RuntimeError("filter unavailable")
+
+            def to_list(self):
+                nonlocal queried
+                queried = True
+                return []
+
+        class Table:
+            def query(self):
+                class Membership:
+                    def select(self, _columns):
+                        return self
+
+                    def to_list(self):
+                        return [
+                            {
+                                "path": "keep.md",
+                                "source_sha256": "a" * 64,
+                                "model": lance_store.EMBEDDING_MODEL,
+                                "model_revision": lance_store.EMBEDDING_MODEL_REVISION,
+                            }
+                        ]
+
+                return Membership()
+
+            def search(self, _vector):
+                return Query()
+
+        class DB:
+            def open_table(self, _name):
+                return Table()
+
+        monkeypatch.setattr(lance_store, "_get_db", lambda: DB())
+        assert lance_store.vector_search(
+            [0.1] * lance_store.EMBEDDING_DIM,
+            project="demo",
+            expected_sources=[("keep.md", "a" * 64)],
+        ) == []
+        assert queried is False

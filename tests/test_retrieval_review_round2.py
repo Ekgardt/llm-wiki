@@ -1,6 +1,7 @@
 """Second-pass review blockers for retrieval orchestration."""
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import time
@@ -228,9 +229,11 @@ def test_reranker_receives_full_chunk_content(monkeypatch):
     import retrieval
 
     seen = []
+    options = []
 
     def fake_rerank(query, documents, limit=10, **kwargs):
         seen.extend([d.get("content") for d in documents])
+        options.append(kwargs)
         for d in documents:
             d["reranker_applied"] = True
             d["rerank_score"] = 1.0
@@ -260,6 +263,7 @@ def test_reranker_receives_full_chunk_content(monkeypatch):
         corpus_generation="g",
     )
     assert any(body in (c or "") for c in seen)
+    assert options == [{"text_field": "content"}]
 
 
 def test_lance_distance_kept_separate_from_similarity():
@@ -386,3 +390,256 @@ def test_resource_limit_caps_backend_limit():
         corpus_generation="g",
     )
     assert seen == [25]
+
+
+def test_resource_limit_is_global_before_rerank(monkeypatch):
+    import reranker
+    import retrieval
+
+    rerank_sizes = []
+
+    def backend(prefix):
+        return lambda **kwargs: [
+            _hit(f"{prefix}-{index}", f"{prefix}-{index}.md", 10.0 - index)
+            for index in range(kwargs["limit"])
+        ]
+
+    def fake_rerank(_query, documents, **_kwargs):
+        rerank_sizes.append(len(documents))
+        return documents
+
+    monkeypatch.setattr(reranker, "should_rerank", lambda **_kwargs: (True, None))
+    monkeypatch.setattr(reranker, "rerank", fake_rerank)
+    result = retrieval.retrieve(
+        "x",
+        requested_profile="GLOBAL",
+        limit=10,
+        max_candidates=3,
+        lexical_backend=backend("lex"),
+        dense_backend=backend("dense"),
+        graph_backend=backend("graph"),
+        rerank_enabled=True,
+        corpus_generation="g",
+    )
+
+    assert rerank_sizes == [3]
+    assert len(result.candidates) == 3
+
+
+def test_public_search_propagates_resource_controls(monkeypatch):
+    import retrieval
+    import search_memory
+
+    seen = {}
+
+    def cancelled():
+        return False
+
+    deadline = time.monotonic() + 30
+
+    def fake_retrieve(_query, **kwargs):
+        seen.update(kwargs)
+        return retrieval.RetrievalResult(
+            candidates=(),
+            trace=retrieval.RetrievalTrace(
+                requested_mode="BASE",
+                effective_mode="BASE",
+                signals_used=("lexical",),
+                fallback_reason=None,
+                corpus_generation="legacy",
+                partial=False,
+            ),
+            analysis=retrieval.analyze_query("needle"),
+        )
+
+    monkeypatch.setattr(retrieval, "retrieve", fake_retrieve)
+    search_memory.search(
+        "needle",
+        deadline_monotonic=deadline,
+        max_candidates=7,
+        cancelled=cancelled,
+        emit_telemetry=False,
+    )
+
+    assert seen["deadline_monotonic"] == deadline
+    assert seen["max_candidates"] == 7
+    assert seen["cancelled"] is cancelled
+
+
+def test_cancellation_is_checked_after_fusion_before_rerank(monkeypatch):
+    import retrieval
+
+    stopped = False
+    real_fuse = retrieval.fuse_rrf
+
+    def fuse_then_cancel(**kwargs):
+        nonlocal stopped
+        result = real_fuse(**kwargs)
+        stopped = True
+        return result
+
+    monkeypatch.setattr(retrieval, "fuse_rrf", fuse_then_cancel)
+    with pytest.raises(TimeoutError, match="cancelled"):
+        retrieval.retrieve(
+            "needle",
+            requested_profile="BASE",
+            lexical_backend=lambda **_kwargs: [_hit("a", "a.md", 1.0)],
+            rerank_enabled=True,
+            cancelled=lambda: stopped,
+        )
+
+
+@pytest.mark.parametrize("vectors_returned", [True, False])
+def test_late_vector_seal_change_discards_generation_lexical(
+    monkeypatch, vectors_returned
+):
+    import retrieval
+    import search_memory
+
+    checks = iter((True, True, True, False))
+    monkeypatch.setattr(
+        search_memory,
+        "_generation_consumption_unchanged",
+        lambda *_args, **_kwargs: next(checks),
+    )
+    monkeypatch.setattr(
+        search_memory,
+        "_generation_consumption_seal",
+        lambda *_args, **_kwargs: ("sealed",),
+    )
+
+    class Connection:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        search_memory, "_generation_connection", lambda *_args, **_kwargs: Connection()
+    )
+    monkeypatch.setattr(
+        search_memory,
+        "_generation_fts_search",
+        lambda *_args, **_kwargs: [_hit("generation", "generation.md", 10.0)],
+    )
+    monkeypatch.setattr(
+        search_memory,
+        "_generation_vectors_search",
+        lambda *_args, **_kwargs: (
+            [_hit("generation", "generation.md", 0.9)] if vectors_returned else None
+        ),
+    )
+    monkeypatch.setattr(
+        search_memory,
+        "_legacy_lexical_hits",
+        lambda *_args, **_kwargs: [_hit("legacy", "legacy.md", 1.0)],
+    )
+    monkeypatch.setattr(search_memory, "_legacy_dense_hits", lambda *_args, **_kwargs: None)
+
+    class Catalog:
+        generations_path = Path(".")
+
+        def get_active(self):
+            return {
+                "generation_id": "gen-v",
+                "vector_state": "complete",
+                "embedding_model_id": "m",
+                "embedding_model_revision": "r",
+                "artifacts": [
+                    {"path": "search.sqlite3", "size": 1, "sha256": "0" * 64},
+                    {"path": "vectors.npy", "size": 1, "sha256": "1" * 64},
+                    {"path": "vectors.json", "size": 1, "sha256": "2" * 64},
+                ],
+                "source_manifest_sha256": "a" * 64,
+                "collector_version": "c",
+                "extractor_version": "e",
+                "tokenizer_version": search_memory.GENERATION_TOKENIZER_VERSION,
+                "tokenizer_config_sha256": search_memory.GENERATION_TOKENIZER_CONFIG_SHA256,
+                "schema_version": "corpus-generation/v1",
+            }
+
+    rows = retrieval.retrieve_via_search_memory(
+        "needle",
+        catalog=Catalog(),
+        semantic=True,
+        generation_embedder=lambda texts: [[1.0, 0.0]],
+        generation_model_id="m",
+        generation_model_revision="r",
+        graph=False,
+        rerank=False,
+        emit_telemetry=False,
+        profile="HYBRID",
+    )
+
+    assert [row["candidate_id"] for row in rows] == ["legacy"]
+    assert rows[0]["generation"] == "legacy"
+    assert rows[0]["fallback_reason"] == "generation_seal_changed"
+
+
+def test_legacy_numpy_writer_and_loader_share_closed_contract(tmp_path, monkeypatch):
+    np = pytest.importorskip("numpy")
+    import search_memory
+
+    page = tmp_path / "knowledge" / "notes" / "p.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("# P\nbody\n", encoding="utf-8")
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
+    monkeypatch.setattr(search_memory, "INDEX_DIR", cache)
+    monkeypatch.setattr(search_memory, "VECTOR_NPY", cache / "vectors.npy")
+    monkeypatch.setattr(search_memory, "VECTOR_META", cache / "vectors_meta.json")
+    monkeypatch.setattr(search_memory, "EMBEDDING_DIM", 2)
+    monkeypatch.setattr(search_memory, "EMBEDDING_MODEL_REVISION", "revision-1")
+
+    class Embedder:
+        def encode(self, texts, **_kwargs):
+            return np.ones((len(texts), 2), dtype=np.float32)
+
+    monkeypatch.setattr(search_memory, "_get_embedder", lambda: Embedder())
+    built = search_memory._build_vectors([page])
+    metadata = json.loads((cache / "vectors_meta.json").read_text(encoding="utf-8"))
+
+    assert isinstance(built["vectors"], np.ndarray)
+    assert metadata["model_id"] == search_memory.EMBEDDING_MODEL
+    assert metadata["model_revision"] == "revision-1"
+    assert metadata["dimensions"] == 2
+    assert metadata["source_paths"] == ["knowledge/notes/p.md"]
+    assert metadata["source_sha256"] == [hashlib.sha256(page.read_bytes()).hexdigest()]
+    assert metadata["dtype"] == "float32"
+    assert metadata["shape"] == [1, 2]
+    assert metadata["finite"] is True
+    assert metadata["artifact_sha256"] == hashlib.sha256(
+        (cache / "vectors.npy").read_bytes()
+    ).hexdigest()
+
+    loaded = search_memory._load_or_build_vectors([page])
+    assert isinstance(loaded["vectors"], np.memmap)
+
+
+def test_legacy_numpy_loader_rejects_changed_live_source(tmp_path, monkeypatch):
+    np = pytest.importorskip("numpy")
+    import search_memory
+
+    page = tmp_path / "knowledge" / "notes" / "p.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("# P\nbefore\n", encoding="utf-8")
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
+    monkeypatch.setattr(search_memory, "INDEX_DIR", cache)
+    monkeypatch.setattr(search_memory, "VECTOR_NPY", cache / "vectors.npy")
+    monkeypatch.setattr(search_memory, "VECTOR_META", cache / "vectors_meta.json")
+    monkeypatch.setattr(search_memory, "EMBEDDING_DIM", 2)
+    monkeypatch.setattr(search_memory, "EMBEDDING_MODEL_REVISION", "revision-1")
+
+    class Embedder:
+        def encode(self, texts, **_kwargs):
+            return np.ones((len(texts), 2), dtype=np.float32)
+
+    monkeypatch.setattr(search_memory, "_get_embedder", lambda: Embedder())
+    assert search_memory._build_vectors([page]) is not None
+    page.write_text("# P\nafter with preserved metadata\n", encoding="utf-8")
+    monkeypatch.setattr(
+        search_memory,
+        "_build_vectors",
+        lambda _pages: pytest.fail("invalid cache must be unavailable, not silently rebuilt"),
+    )
+
+    assert search_memory._load_or_build_vectors([page]) is None

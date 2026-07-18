@@ -25,6 +25,8 @@ LANCEDB_DIR = STATE_ROOT / "cache" / "lancedb"
 TABLE_NAME = "pages_vec"
 STAGING_TABLE_NAME = "pages_vec_staging"
 EMBEDDING_DIM = 384
+EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
+EMBEDDING_MODEL_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
 
 _lancedb: object | None = None  # lazy connection
 _PROJECT_SAFE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -93,6 +95,12 @@ def _rows_from_lance_hits(raw_rows: list[dict[str, Any]]) -> list[dict[str, Any]
                 "valid_from": item.get("valid_from", "") or "",
                 "valid_to": item.get("valid_to", "") or "",
                 "authority": item.get("authority", "") or "",
+                "candidate_id": item.get("candidate_id")
+                or item.get("chunk_id")
+                or Path(str(item.get("path", ""))).stem,
+                "source_sha256": item.get("source_sha256", "") or "",
+                "model": item.get("model", "") or "",
+                "model_revision": item.get("model_revision", "") or "",
                 "lance_distance": round(distance, 6),
                 "vector_score": similarity,
                 "score": similarity,
@@ -112,25 +120,61 @@ def apply_vector_filters(
     authority: str | None = None,
 ) -> list[dict[str, Any]]:
     """Apply the shared hard-filter contract (parity with lexical/NumPy)."""
-    try:
-        from search_memory import apply_hard_filters
+    from search_memory import apply_hard_filters
 
-        return apply_hard_filters(
-            rows,
-            project=project,
-            since=since,
-            as_of=as_of,
-            scope=scope,
-            authority=authority,
+    return apply_hard_filters(
+        rows,
+        project=project,
+        since=since,
+        as_of=as_of,
+        scope=scope,
+        authority=authority,
+    )
+
+
+def _sql_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _lance_filter(
+    *,
+    project: str | None,
+    since: str | None,
+    as_of: str | None,
+    scope: str,
+    authority: str | None,
+    model_id: str,
+    model_revision: str,
+) -> str:
+    clauses = [
+        f"model = {_sql_literal(model_id)}",
+        f"model_revision = {_sql_literal(model_revision)}",
+    ]
+    if project:
+        clauses.append(f"lower(project) = lower({_sql_literal(project)})")
+    if scope in {"wiki", "memory", "knowledge"}:
+        clauses.append("path LIKE 'knowledge/notes/%'")
+    if authority:
+        clauses.append(f"lower(authority) = lower({_sql_literal(authority)})")
+    if as_of:
+        date = _sql_literal(as_of[:10])
+        clauses.extend(
+            (
+                f"(timestamp IS NULL OR timestamp = '' OR substr(timestamp, 1, 10) <= {date})",
+                f"(valid_from IS NULL OR valid_from = '' OR substr(valid_from, 1, 10) <= {date})",
+                f"(valid_to IS NULL OR valid_to = '' OR substr(valid_to, 1, 10) > {date})",
+            )
         )
-    except Exception:
-        # Minimal local fallback if search_memory is unavailable.
-        filtered: list[dict[str, Any]] = []
-        for row in rows:
-            if project and str(row.get("project") or "").casefold() != project.casefold():
-                continue
-            filtered.append(row)
-        return filtered
+    else:
+        clauses.append("(status IS NULL OR status = '' OR lower(status) = 'active')")
+    if since:
+        date = _sql_literal(since[:10])
+        clauses.append(
+            "(coalesce(nullif(timestamp, ''), valid_from) IS NULL OR "
+            "coalesce(nullif(timestamp, ''), valid_from) = '' OR "
+            f"substr(coalesce(nullif(timestamp, ''), valid_from), 1, 10) >= {date})"
+        )
+    return " AND ".join(clauses)
 
 
 def upsert_vectors(
@@ -219,6 +263,12 @@ def vector_search(
     project: str | None = None,
     since: str | None = None,
     as_of: str | None = None,
+    *,
+    scope: str = "all",
+    authority: str | None = None,
+    expected_model_id: str = EMBEDDING_MODEL,
+    expected_model_revision: str = EMBEDDING_MODEL_REVISION,
+    expected_sources: list[tuple[str, str]] | None = None,
 ) -> list[dict]:
     """Search vectors via LanceDB. Returns ranked larger-is-better similarities."""
     db = _get_db()
@@ -226,20 +276,52 @@ def vector_search(
         return []
 
     try:
+        if expected_sources is None or (project and not _PROJECT_SAFE.fullmatch(project)):
+            return []
         table = db.open_table(TABLE_NAME)
-        query = table.search(query_vec).limit(max(limit * 3, limit))
-
-        if project:
-            if not _PROJECT_SAFE.match(project):
-                return []
-            query = query.where(f"project = '{project}'")
-
+        membership = (
+            table.query()
+            .select(["path", "source_sha256", "model", "model_revision"])
+            .to_list()
+        )
+        actual_sources = [
+            (str(row.get("path") or ""), str(row.get("source_sha256") or ""))
+            for row in membership
+        ]
+        if (
+            len(actual_sources) != len(expected_sources)
+            or len(dict(actual_sources)) != len(actual_sources)
+            or dict(actual_sources) != dict(expected_sources)
+            or any(row.get("model") != expected_model_id for row in membership)
+            or any(
+                row.get("model_revision") != expected_model_revision
+                for row in membership
+            )
+        ):
+            return []
+        query = table.search(query_vec)
+        query = query.where(
+            _lance_filter(
+                project=project,
+                since=since,
+                as_of=as_of,
+                scope=scope,
+                authority=authority,
+                model_id=expected_model_id,
+                model_revision=expected_model_revision,
+            )
+        )
+        query = query.limit(limit)
         raw = query.to_list()
         rows = _rows_from_lance_hits(raw)
-        rows = apply_vector_filters(rows, project=None, since=since, as_of=as_of)
-        # project already applied in Lance where possible; re-apply for parity.
-        if project:
-            rows = apply_vector_filters(rows, project=project, since=None, as_of=None)
+        rows = apply_vector_filters(
+            rows,
+            project=project,
+            since=since,
+            as_of=as_of,
+            scope=scope,
+            authority=authority,
+        )
         return rows[:limit]
     except Exception:
         return []

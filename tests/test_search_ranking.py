@@ -701,6 +701,34 @@ def _refresh_artifact_descriptor(manifest, path):
     ]
 
 
+def _orchestrated_legacy_marker(monkeypatch, search_memory):
+    marker = {
+        "path": "legacy.md",
+        "title": "Legacy",
+        "summary": "legacy fallback",
+        "score": 1.0,
+        "candidate_id": "legacy",
+    }
+    monkeypatch.setattr(
+        search_memory, "_legacy_lexical_hits", lambda *args, **kwargs: [marker]
+    )
+    monkeypatch.setattr(
+        search_memory, "_legacy_dense_hits", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        search_memory,
+        "_legacy_search",
+        lambda *args, **kwargs: pytest.fail("public search bypassed retrieve()"),
+    )
+
+
+def _assert_orchestrated_legacy_fallback(results, expected_reasons):
+    assert [result["candidate_id"] for result in results] == ["legacy"]
+    assert results[0]["generation"] == "legacy"
+    assert results[0]["fallback_reason"] in expected_reasons
+    assert results[0]["signals_used"] == ["lexical"]
+
+
 def test_generation_fts_preserves_exact_snapshot_chunks_and_typed_duplicate_paths(tmp_path):
     import search_memory
 
@@ -1323,7 +1351,6 @@ def test_corrupt_active_generation_falls_back_without_querying_it(tmp_path, monk
     # Provide a real legacy lexical path for recovery.
     vault = tmp_path / "vault"
     if not (vault / "knowledge" / "notes").exists():
-        notes = tmp_path / "knowledge" / "notes"
         # snapshot already created vault layout via helper
         pass
     results = search_memory.search(
@@ -1465,10 +1492,13 @@ def test_malformed_generation_fts_falls_back_legacy(
     with sqlite3.connect(artifact) as database:
         database.execute(statement, parameters)
     _refresh_artifact_descriptor(manifest, artifact)
-    marker = [{"path": "legacy", "title": "Legacy", "summary": "", "score": 1}]
-    monkeypatch.setattr(search_memory, "_legacy_search", lambda *args, **kwargs: marker)
+    _orchestrated_legacy_marker(monkeypatch, search_memory)
 
-    assert search_memory.search("semantic", catalog=catalog) is marker, damage
+    results = search_memory.search("semantic", catalog=catalog, emit_telemetry=False)
+    _assert_orchestrated_legacy_fallback(
+        results,
+        {"generation_unavailable", "generation_corrupt", "generation_seal_invalid"},
+    )
 
 
 @pytest.mark.parametrize(
@@ -1519,10 +1549,13 @@ def test_generation_fts_rejects_inexact_schema(tmp_path, monkeypatch, schema_dam
         )
     os.replace(replacement, artifact)
     _refresh_artifact_descriptor(manifest, artifact)
-    marker = [{"path": "legacy", "title": "Legacy", "summary": "", "score": 1}]
-    monkeypatch.setattr(search_memory, "_legacy_search", lambda *args, **kwargs: marker)
+    _orchestrated_legacy_marker(monkeypatch, search_memory)
 
-    assert search_memory.search("semantic", catalog=catalog) is marker
+    results = search_memory.search("semantic", catalog=catalog, emit_telemetry=False)
+    _assert_orchestrated_legacy_fallback(
+        results,
+        {"generation_unavailable", "generation_corrupt", "generation_seal_invalid"},
+    )
 
 
 def test_generation_results_discarded_when_active_manifest_changes_after_read(
@@ -1544,10 +1577,12 @@ def test_generation_results_discarded_when_active_manifest_changes_after_read(
             changed["source_manifest_sha256"] = "0" * 64
             return changed
 
-    marker = [{"path": "legacy", "title": "Legacy", "summary": "", "score": 1}]
-    monkeypatch.setattr(search_memory, "_legacy_search", lambda *args, **kwargs: marker)
+    _orchestrated_legacy_marker(monkeypatch, search_memory)
 
-    assert search_memory.search("semantic", catalog=Catalog()) is marker
+    results = search_memory.search("semantic", catalog=Catalog(), emit_telemetry=False)
+    _assert_orchestrated_legacy_fallback(
+        results, {"generation_unavailable", "generation_seal_changed"}
+    )
 
 
 def test_generation_results_discarded_when_fts_corrupts_after_query(
@@ -1565,11 +1600,11 @@ def test_generation_results_discarded_when_fts_corrupts_after_query(
             output.write(b"corrupt-after-query")
         return results
 
-    marker = [{"path": "legacy", "title": "Legacy", "summary": "", "score": 1}]
     monkeypatch.setattr(search_memory, "_generation_fts_search", corrupt_after_query)
-    monkeypatch.setattr(search_memory, "_legacy_search", lambda *args, **kwargs: marker)
+    _orchestrated_legacy_marker(monkeypatch, search_memory)
 
-    assert search_memory.search("semantic", catalog=catalog) is marker
+    results = search_memory.search("semantic", catalog=catalog, emit_telemetry=False)
+    _assert_orchestrated_legacy_fallback(results, {"generation_seal_changed"})
 
 
 def test_generation_hybrid_discarded_when_vector_artifact_changes_after_use(
@@ -1588,15 +1623,14 @@ def test_generation_hybrid_discarded_when_vector_artifact_changes_after_use(
             output.write(b" ")
         return results
 
-    marker = [{"path": "legacy", "title": "Legacy", "summary": "", "score": 1}]
     monkeypatch.setattr(
         search_memory,
         "_generation_vectors_search",
         corrupt_after_vector_use,
     )
-    monkeypatch.setattr(search_memory, "_legacy_search", lambda *args, **kwargs: marker)
+    _orchestrated_legacy_marker(monkeypatch, search_memory)
 
-    assert search_memory.search(
+    results = search_memory.search(
         "semantic",
         semantic=True,
         catalog=catalog,
@@ -1606,7 +1640,8 @@ def test_generation_hybrid_discarded_when_vector_artifact_changes_after_use(
         graph=False,
         rerank=False,
         emit_telemetry=False,
-    ) is marker
+    )
+    _assert_orchestrated_legacy_fallback(results, {"generation_seal_changed"})
 
 
 def test_generation_hybrid_discarded_after_same_byte_vector_replacement(
@@ -1626,15 +1661,14 @@ def test_generation_hybrid_discarded_after_same_byte_vector_replacement(
         os.replace(replacement, metadata_path)
         return results
 
-    marker = [{"path": "legacy", "title": "Legacy", "summary": "", "score": 1}]
     monkeypatch.setattr(
         search_memory,
         "_generation_vectors_search",
         replace_after_vector_use,
     )
-    monkeypatch.setattr(search_memory, "_legacy_search", lambda *args, **kwargs: marker)
+    _orchestrated_legacy_marker(monkeypatch, search_memory)
 
-    assert search_memory.search(
+    results = search_memory.search(
         "semantic",
         semantic=True,
         catalog=catalog,
@@ -1644,7 +1678,8 @@ def test_generation_hybrid_discarded_after_same_byte_vector_replacement(
         graph=False,
         rerank=False,
         emit_telemetry=False,
-    ) is marker
+    )
+    _assert_orchestrated_legacy_fallback(results, {"generation_seal_changed"})
 
 
 def test_publication_fence_rejects_preserved_mtime_drift_before_catalog_calls(tmp_path):
