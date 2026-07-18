@@ -9,7 +9,6 @@ import sys
 from contextlib import closing
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
@@ -147,7 +146,12 @@ def _source_membership(snapshot) -> list[tuple[str, str, str]]:
     ]
 
 
-def test_all_generation_consumers_publish_one_closed_snapshot(tmp_path: Path):
+@pytest.fixture
+def numpy_module():
+    return pytest.importorskip("numpy")
+
+
+def test_all_generation_consumers_publish_one_closed_snapshot(tmp_path: Path, numpy_module):
     vault, _source = _write_snapshot_vault(tmp_path)
     snapshot = collect_corpus(vault)
     catalog = GenerationCatalog(tmp_path / "state")
@@ -206,7 +210,7 @@ def test_all_generation_consumers_publish_one_closed_snapshot(tmp_path: Path):
     assert [tuple(row[1:]) for row in fts_chunks] == expected_chunk_sources
 
     vector_metadata = json.loads((generation / "vectors.json").read_bytes())
-    vectors = np.load(generation / "vectors.npy", allow_pickle=False)
+    vectors = numpy_module.load(generation / "vectors.npy", allow_pickle=False)
     assert vector_metadata["corpus_sha256"] == snapshot.corpus_sha256
     assert vector_metadata["chunk_ids"] == expected_chunk_ids
     assert list(
@@ -260,6 +264,7 @@ def test_all_generation_consumers_publish_one_closed_snapshot(tmp_path: Path):
 
 def test_publication_fence_preserves_prior_active_generation_on_hash_drift(
     tmp_path: Path,
+    numpy_module,
 ):
     vault, source = _write_snapshot_vault(tmp_path)
     catalog = GenerationCatalog(tmp_path / "state")

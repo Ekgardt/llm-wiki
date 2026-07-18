@@ -3833,15 +3833,18 @@ def _verified_baseline_metrics(matrix: dict, report: dict, *, corpus_path: Path 
     return overall, slices
 
 
-def _select_lexical_winner(reports: Sequence[dict]) -> dict:
+def _select_lexical_winner(
+    reports: Sequence[dict], *, configurations: dict | None = None
+) -> dict:
+    configurations = LEXICAL_CONFIGURATIONS if configurations is None else configurations
     by_id = {}
     provenance = None
     for report in reports:
         configuration = report.get("methodology", {}).get("lexical_configuration")
         lexical = configuration.get("id") if isinstance(configuration, dict) else None
-        if lexical not in LEXICAL_CONFIGURATIONS or lexical in by_id:
+        if lexical not in configurations or lexical in by_id:
             raise ValueError("lexical evidence must contain each L0 through L4 exactly once")
-        if configuration != LEXICAL_CONFIGURATIONS[lexical]:
+        if configuration != configurations[lexical]:
             raise ValueError("lexical evidence configuration differs from the frozen matrix")
         comparable = tuple(
             report.get(field)
@@ -3878,7 +3881,7 @@ def _select_lexical_winner(reports: Sequence[dict]) -> dict:
             "quality": sum(float(value) for value in values) / len(values),
             "warm_latency_p95_ms": float(latency),
         }
-    if set(by_id) != set(LEXICAL_CONFIGURATIONS):
+    if set(by_id) != set(configurations):
         raise ValueError("lexical evidence requires the complete L0 through L4 ablation set")
     return min(
         by_id.values(),
@@ -4390,11 +4393,53 @@ def _orchestrate_selection_impl(
     deadline_seconds: float | None = None,
     _trusted_worker=None,
     _trusted_process_runner=None,
+    _trusted_candidate_enumerator=None,
+    _trusted_lexical_arguments=None,
+    _trusted_lexical_selector=None,
+    _trusted_candidate_arguments=None,
+    _trusted_candidate_key=None,
+    _trusted_aggregator=None,
+    _trusted_lexical_contract_sha256=None,
+    _trusted_lexical_levels=None,
+    _trusted_candidate_count=None,
 ) -> dict:
-    if _trusted_worker is None or _trusted_process_runner is None:
+    if any(
+        item is None
+        for item in (
+            _trusted_worker,
+            _trusted_process_runner,
+            _trusted_candidate_enumerator,
+            _trusted_lexical_arguments,
+            _trusted_lexical_selector,
+            _trusted_candidate_arguments,
+            _trusted_candidate_key,
+            _trusted_aggregator,
+            _trusted_lexical_contract_sha256,
+            _trusted_lexical_levels,
+            _trusted_candidate_count,
+        )
+    ):
         raise TypeError("authoritative orchestration requires its bound subprocess transport")
+    if (
+        required_candidate_specs is not _trusted_candidate_enumerator
+        or _lexical_ablation_worker_arguments is not _trusted_lexical_arguments
+        or _select_lexical_winner is not _trusted_lexical_selector
+        or _candidate_worker_arguments is not _trusted_candidate_arguments
+        or _candidate_key is not _trusted_candidate_key
+        or _aggregate_reports is not _trusted_aggregator
+        or _sha256_json(LEXICAL_CONFIGURATIONS) != _trusted_lexical_contract_sha256
+    ):
+        raise ValueError("authoritative completeness contract was modified")
     matrix = json.loads(read_stable_bytes(Path(matrix_path), MAX_CORPUS_BYTES, label="model matrix"))
-    specs = required_candidate_specs(matrix)
+    lexical_configurations = json.loads(json.dumps(LEXICAL_CONFIGURATIONS))
+    if tuple(lexical_configurations) != _trusted_lexical_levels:
+        raise ValueError("authoritative selection requires exact L0 through L4 configurations")
+    specs = json.loads(json.dumps(_trusted_candidate_enumerator(matrix)))
+    if (
+        len(specs) != _trusted_candidate_count
+        or len({_trusted_candidate_key(spec) for spec in specs}) != _trusted_candidate_count
+    ):
+        raise ValueError("authoritative selection requires exactly 27 unique matrix candidates")
     if cache_root is None or deadline_seconds is None:
         raise ValueError("authoritative orchestration requires cache root and deadline")
     requested_cache = Path(cache_root).expanduser()
@@ -4434,7 +4479,9 @@ def _orchestrate_selection_impl(
 
     lexical_results = []
     execution_bound = True
-    for argv in _lexical_ablation_worker_arguments(cache_root, deadline_seconds):
+    for argv in _trusted_lexical_arguments(
+        cache_root, deadline_seconds, levels=_trusted_lexical_levels
+    ):
         lexical_config = argv[argv.index("--lexical-config") + 1]
         expected = {"candidate": None, "lexical_configuration": lexical_config}
         payload = run_worker(argv, expected)
@@ -4443,10 +4490,12 @@ def _orchestrate_selection_impl(
         _validate_lexical_worker_payload(payload, matrix=matrix, corpus_path=corpus_path)
         execution_bound &= consume_worker(payload, argv, expected)
         lexical_results.append(payload)
-    lexical_config = _select_lexical_winner([item.report for item in lexical_results])["id"]
+    lexical_config = _trusted_lexical_selector(
+        [item.report for item in lexical_results], configurations=lexical_configurations
+    )["id"]
     candidate_payloads = []
     for spec in specs:
-        argv = _candidate_worker_arguments(
+        argv = _trusted_candidate_arguments(
             spec, cache_root, deadline_seconds, lexical_config=lexical_config
         )
         expected = {"candidate": spec, "lexical_configuration": lexical_config}
@@ -4473,7 +4522,17 @@ def _orchestrate_selection_impl(
             path = Path(temporary) / f"candidate-{index}.json"
             _write_new_bytes(path, result.canonical_bytes)
             paths.append(path)
-        artifact = _aggregate_reports(
+        if (
+            len(lexical_results) != len(_trusted_lexical_levels)
+            or {
+                item.report["methodology"]["lexical_configuration"]["id"]
+                for item in lexical_results
+            }
+            != set(_trusted_lexical_levels)
+            or len(candidate_payloads) != _trusted_candidate_count
+        ):
+            raise ValueError("authoritative selection evidence is incomplete")
+        artifact = _trusted_aggregator(
             paths,
             matrix_path=matrix_path,
             corpus_path=corpus_path,
@@ -4528,7 +4587,13 @@ def _orchestrate_selection_impl(
     return artifact
 
 
-def _lexical_ablation_worker_arguments(cache_root: Path, deadline_seconds: float) -> list[list[str]]:
+def _lexical_ablation_worker_arguments(
+    cache_root: Path,
+    deadline_seconds: float,
+    *,
+    levels: Sequence[str] | None = None,
+) -> list[list[str]]:
+    levels = tuple(LEXICAL_CONFIGURATIONS) if levels is None else levels
     return [
         [
             "--adapter",
@@ -4540,7 +4605,7 @@ def _lexical_ablation_worker_arguments(cache_root: Path, deadline_seconds: float
             "--deadline-seconds",
             str(deadline_seconds),
         ]
-        for level in LEXICAL_CONFIGURATIONS
+        for level in levels
     ]
 
 
@@ -4828,7 +4893,20 @@ def _run_bounded_model_worker(
         return _WorkerPayload(report, raw)
 
 
-def _bind_orchestrator(implementation, trusted_worker, trusted_process_runner):
+def _bind_orchestrator(
+    implementation,
+    trusted_worker,
+    trusted_process_runner,
+    trusted_candidate_enumerator,
+    trusted_lexical_arguments,
+    trusted_lexical_selector,
+    trusted_candidate_arguments,
+    trusted_candidate_key,
+    trusted_aggregator,
+    trusted_lexical_contract_sha256,
+    trusted_lexical_levels,
+    trusted_candidate_count,
+):
     def orchestrate_selection(
         *,
         matrix_path: Path | str,
@@ -4849,13 +4927,33 @@ def _bind_orchestrator(implementation, trusted_worker, trusted_process_runner):
             deadline_seconds=deadline_seconds,
             _trusted_worker=trusted_worker,
             _trusted_process_runner=trusted_process_runner,
+            _trusted_candidate_enumerator=trusted_candidate_enumerator,
+            _trusted_lexical_arguments=trusted_lexical_arguments,
+            _trusted_lexical_selector=trusted_lexical_selector,
+            _trusted_candidate_arguments=trusted_candidate_arguments,
+            _trusted_candidate_key=trusted_candidate_key,
+            _trusted_aggregator=trusted_aggregator,
+            _trusted_lexical_contract_sha256=trusted_lexical_contract_sha256,
+            _trusted_lexical_levels=trusted_lexical_levels,
+            _trusted_candidate_count=trusted_candidate_count,
         )
 
     return orchestrate_selection
 
 
 orchestrate_selection = _bind_orchestrator(
-    _orchestrate_selection_impl, _run_bounded_model_worker, _run_process_tree
+    _orchestrate_selection_impl,
+    _run_bounded_model_worker,
+    _run_process_tree,
+    required_candidate_specs,
+    _lexical_ablation_worker_arguments,
+    _select_lexical_winner,
+    _candidate_worker_arguments,
+    _candidate_key,
+    _aggregate_reports,
+    _sha256_json(LEXICAL_CONFIGURATIONS),
+    ("L0", "L1", "L2", "L3", "L4"),
+    27,
 )
 del _bind_orchestrator
 del _orchestrate_selection_impl
