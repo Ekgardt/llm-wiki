@@ -516,20 +516,46 @@ def validate_schema_object(instance: object, schema: object) -> None:
     """Validate against an already captured and parsed closed schema."""
     if not isinstance(schema, dict):
         raise SchemaValidationError("schema root must be an object")
-    _validate_rule(instance, schema, "$")
+    _validate_rule(instance, schema, "$", root=schema)
 
 
-def _validate_rule(instance: object, rule: dict[str, Any], location: str) -> None:
+def _validate_rule(
+    instance: object,
+    rule: dict[str, Any],
+    location: str,
+    *,
+    root: dict[str, Any] | None = None,
+) -> None:
+    if root is None:
+        root = rule
+    reference = rule.get("$ref")
+    if reference is not None:
+        if not isinstance(reference, str) or not reference.startswith("#/"):
+            raise SchemaValidationError(
+                f"{location}: only internal JSON Pointer refs are supported"
+            )
+        target: object = root
+        for raw_part in reference[2:].split("/"):
+            part = raw_part.replace("~1", "/").replace("~0", "~")
+            if not isinstance(target, dict) or part not in target:
+                raise SchemaValidationError(f"{location}: unresolved schema ref {reference}")
+            target = target[part]
+        if not isinstance(target, dict):
+            raise SchemaValidationError(f"{location}: schema ref {reference} is not an object")
+        _validate_rule(instance, target, location, root=root)
+        return
     if "oneOf" in rule:
         matches = 0
         for option in rule["oneOf"]:
             try:
-                _validate_rule(instance, option, location)
+                _validate_rule(instance, option, location, root=root)
             except SchemaValidationError:
                 continue
             matches += 1
         if matches != 1:
-            raise SchemaValidationError(f"{location}: expected exactly one oneOf match, got {matches}")
+            raise SchemaValidationError(
+                f"{location}: expected exactly one oneOf match, got {matches}"
+            )
     if "const" in rule and not _json_equal(instance, rule["const"]):
         raise SchemaValidationError(f"{location}: expected const {rule['const']!r}")
     if "enum" in rule and not any(_json_equal(instance, candidate) for candidate in rule["enum"]):
@@ -552,7 +578,7 @@ def _validate_rule(instance: object, rule: dict[str, Any], location: str) -> Non
                 raise SchemaValidationError(f"{location}: unknown properties {unknown}")
         for key, value in instance.items():
             if key in properties:
-                _validate_rule(value, properties[key], f"{location}.{key}")
+                _validate_rule(value, properties[key], f"{location}.{key}", root=root)
     elif expected == "array":
         assert isinstance(instance, list)
         _check_bound(len(instance), rule, "minItems", "maxItems", location)
@@ -564,7 +590,7 @@ def _validate_rule(instance: object, rule: dict[str, Any], location: str) -> Non
                     )
         if "items" in rule:
             for index, item in enumerate(instance):
-                _validate_rule(item, rule["items"], f"{location}[{index}]")
+                _validate_rule(item, rule["items"], f"{location}[{index}]", root=root)
     elif expected == "string":
         assert isinstance(instance, str)
         _check_bound(len(instance), rule, "minLength", "maxLength", location)
@@ -573,6 +599,10 @@ def _validate_rule(instance: object, rule: dict[str, Any], location: str) -> Non
     elif expected in {"integer", "number"}:
         assert isinstance(instance, (int, float)) and not isinstance(instance, bool)
         _check_bound(instance, rule, "minimum", "maximum", location)
+        if "exclusiveMinimum" in rule and instance <= rule["exclusiveMinimum"]:
+            raise SchemaValidationError(f"{location}: below exclusiveMinimum")
+        if "exclusiveMaximum" in rule and instance >= rule["exclusiveMaximum"]:
+            raise SchemaValidationError(f"{location}: above exclusiveMaximum")
 
 
 def _matches_type(instance: object, expected: str) -> bool:
