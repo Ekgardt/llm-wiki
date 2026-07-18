@@ -23,6 +23,12 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from context_budget import (  # noqa: E402
+    BudgetExceededError,
+    ContextBudget,
+    ContextItem,
+    pack_context,
+)
 from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
 from memory_state import ROOT, load_state  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
@@ -189,12 +195,66 @@ def _detect_agent_strengths(agent: str) -> list[str] | None:
     return [t for t, _ in ranked[:5]]
 
 
+def _project_context_item(index: int, text: str, *, total: int) -> ContextItem | None:
+    """Build a ContextItem from one project-context section."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return None
+    # Earlier sections are more important (title is index 0).
+    priority = min(index + 1, 7)
+    return ContextItem(
+        item_id=f"project:{index:03d}",
+        text=stripped,
+        source=f"build_context:section-{index:03d}",
+        priority=priority,
+        relevance=1.0 if index == 0 else max(0.1, 1.0 - (index / max(total, 1))),
+        confidence="medium",
+        freshness="fresh",
+        token_cost=len(stripped.encode("utf-8")),
+        mandatory=index == 0,
+        representation="l1",
+    )
+
+
+def _pack_project_context(parts: list[str], max_chars: int) -> str:
+    """Pack project-context sections under one shared token budget.
+
+    Replaces the independent character cap with a shared budget; the legacy
+    character limit survives as the emergency_byte_cap failure guard so
+    Markdown is never sliced mid-item.
+    """
+    items = [
+        item
+        for item in (
+            _project_context_item(index, text, total=len(parts))
+            for index, text in enumerate(parts)
+        )
+        if item is not None
+    ]
+    if not items:
+        return ""
+    budget = ContextBudget(
+        model=None,
+        max_input_tokens=max(8192, max_chars * 4),
+        reserved_output_tokens=0,
+        safety_margin_tokens=0,
+    )
+    try:
+        packed = pack_context(items, budget, emergency_byte_cap=max(0, max_chars - 2))
+        return packed.text
+    except BudgetExceededError:
+        text = "\n".join(parts).rstrip()
+        if len(text) > max_chars:
+            text = text[: max_chars - 20].rstrip() + "\n… (truncated)\n"
+        return text
+
+
 def build_context(slug: str, max_chars: int = 2000, agent: str | None = None) -> str:
     """Build the project-context injection block.
 
     Args:
         slug: Project slug to scope the context.
-        max_chars: Maximum output length.
+        max_chars: Emergency byte cap; packed output never exceeds this.
         agent: Agent name. Context is auto-tailored based on the agent's
                demonstrated strengths (derived from feedback history),
                NOT hardcoded assumptions about which tool is "better at X".
@@ -256,10 +316,7 @@ def build_context(slug: str, max_chars: int = 2000, agent: str | None = None) ->
     except Exception:
         pass
 
-    text = "\n".join(parts).strip()
-    if len(text) > max_chars:
-        text = text[:max_chars - 20].rstrip() + "\n… (truncated)\n"
-    return text
+    return _pack_project_context(parts, max_chars)
 
 
 def main() -> int:

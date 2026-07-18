@@ -15,6 +15,7 @@ Inspired by:
 """
 from __future__ import annotations
 
+import hashlib
 import re
 import sys
 from datetime import datetime
@@ -82,6 +83,10 @@ def _find_last_decision(slug: str | None = None) -> dict | None:
     The compiler writes decisions FLAT under knowledge/notes/ (not in a
     decisions/ subdir), so we scan all .md files and filter by
     frontmatter `type: decision`.
+
+    The returned dict carries ``slug`` and ``source_sha256`` so downstream
+    callers (e.g. L1 tier lookup) can key caches by source hash per the
+    Task 15 cache contract.
     """
     if not KNOWLEDGE.exists():
         return None
@@ -107,11 +112,17 @@ def _find_last_decision(slug: str | None = None) -> dict | None:
         title = title_match.group(1).strip() if title_match else md.stem
         summary_match = SUMMARY_RE.search(content)
         summary = summary_match.group(1).strip()[:100] if summary_match else ""
+        try:
+            source_sha256 = hashlib.sha256(md.read_bytes()).hexdigest()
+        except OSError:
+            source_sha256 = None
         candidates.append({
             "title": title,
             "summary": summary,
             "timestamp": ts[:10],
             "path": md.relative_to(ROOT).as_posix(),
+            "slug": md.stem,
+            "source_sha256": source_sha256,
         })
     if not candidates:
         return None
@@ -307,9 +318,14 @@ def _build_rule_based_advisory(slug: str | None, max_chars: int) -> str:
     if last:
         parts.append(f"**Last decision** ({last['timestamp']}):")
         # v4.0: Use L1 overview if available (progressive disclosure).
+        # Task 15: cache key includes source SHA-256 so stale L1 overviews
+        # cannot survive a content change.
         try:
             from build_tiers import get_l1
-            l1 = get_l1(last["slug"])
+            l1 = get_l1(
+                last["slug"],
+                source_sha256=last.get("source_sha256"),
+            )
             if l1:
                 parts.append(f"- {l1[:200]}")
             else:

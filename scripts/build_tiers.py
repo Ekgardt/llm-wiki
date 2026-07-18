@@ -378,15 +378,51 @@ def get_l0(slug: str) -> str:
     return slug.replace("-", " ")
 
 
-def get_l1(slug: str) -> str | None:
+def get_l1(
+    slug: str,
+    source_sha256: str | None = None,
+    *,
+    extractor_version: str = TIER_EXTRACTOR_VERSION,
+) -> str | None:
     """Get L1 (structured overview) for a page. ~500-1000 tokens.
 
-    Reads from cache/tiers/<slug>.l1.md. Returns None if not generated.
+    When ``source_sha256`` is provided, prefer a hash-suffixed cache file so
+    stale L1 overviews cannot be served after the source bytes change. Falls
+    back to the legacy ``<slug>.l1.md`` path for migration compatibility.
+
+    The hash suffix is derived from the source SHA-256 and extractor version
+    so cache invalidation honors Task 15's logical-path-plus-source-hash
+    contract.
     """
-    l1_path = TIERS_DIR / f"{slug}.l1.md"
-    if not l1_path.exists():
+    if source_sha256:
+        hashed_path = tier_legacy_cache_path(
+            slug, source_sha256=source_sha256, extractor_version=extractor_version
+        )
+        if hashed_path.exists():
+            return hashed_path.read_text(encoding="utf-8", errors="ignore")
+    legacy_path = TIERS_DIR / f"{slug}.l1.md"
+    if not legacy_path.exists():
         return None
-    return l1_path.read_text(encoding="utf-8", errors="ignore")
+    return legacy_path.read_text(encoding="utf-8", errors="ignore")
+
+
+def tier_legacy_cache_path(
+    slug: str,
+    *,
+    source_sha256: str | None = None,
+    extractor_version: str = TIER_EXTRACTOR_VERSION,
+) -> Path:
+    """Return the legacy mutable-cache path for an L1 overview.
+
+    When ``source_sha256`` is provided the path is suffixed with a short hash
+    of (source SHA-256, extractor version) so stale caches invalidate on
+    content or extractor changes.
+    """
+    if not source_sha256:
+        return TIERS_DIR / f"{slug}.l1.md"
+    digest_input = f"{source_sha256}:{extractor_version}".encode()
+    suffix = hashlib.sha256(digest_input).hexdigest()[:12]
+    return TIERS_DIR / f"{slug}.{suffix}.l1.md"
 
 
 def get_l2(slug: str) -> str:
@@ -397,10 +433,25 @@ def get_l2(slug: str) -> str:
     return page_path.read_text(encoding="utf-8", errors="ignore")
 
 
-def _needs_l1_regeneration(slug: str, page_path: Path) -> bool:
+def _needs_l1_regeneration(
+    slug: str,
+    page_path: Path,
+    source_sha256: str | None = None,
+    *,
+    extractor_version: str = TIER_EXTRACTOR_VERSION,
+) -> bool:
     """Check if L1 needs to be (re)generated for this page."""
-    l1_path = TIERS_DIR / f"{slug}.l1.md"
+    l1_path = tier_legacy_cache_path(
+        slug, source_sha256=source_sha256, extractor_version=extractor_version
+    )
     if not l1_path.exists():
+        # Fall back to the un-suffixed legacy cache during migration.
+        legacy_path = TIERS_DIR / f"{slug}.l1.md"
+        if legacy_path.exists():
+            try:
+                return page_path.stat().st_mtime > legacy_path.stat().st_mtime
+            except OSError:
+                return True
         return True
     # Check if page changed since L1 was generated.
     try:
@@ -409,11 +460,20 @@ def _needs_l1_regeneration(slug: str, page_path: Path) -> bool:
         return True
 
 
-def generate_l1(slug: str, use_llm: bool = True) -> str | None:
+def generate_l1(
+    slug: str,
+    use_llm: bool = True,
+    source_sha256: str | None = None,
+    *,
+    extractor_version: str = TIER_EXTRACTOR_VERSION,
+) -> str | None:
     """Generate L1 overview for a page.
 
     If use_llm=True and LLM available: LLM generates a structured overview.
     If use_llm=False or no LLM: deterministic extraction (first N paragraphs).
+
+    When ``source_sha256`` is supplied, the cache file is hash-suffixed so
+    stale overviews cannot survive a content change (Task 15 contract).
     """
     page_path = KNOWLEDGE_DIR / f"{slug}.md"
     if not page_path.exists():
@@ -457,6 +517,21 @@ Return ONLY the overview markdown (no title, no commentary).
     return result.strip()
 
 
+def write_l1(
+    slug: str,
+    l1_text: str,
+    *,
+    source_sha256: str | None = None,
+    extractor_version: str = TIER_EXTRACTOR_VERSION,
+) -> Path:
+    """Persist an L1 overview to the (optionally hash-suffixed) legacy cache."""
+    target = tier_legacy_cache_path(
+        slug, source_sha256=source_sha256, extractor_version=extractor_version
+    )
+    atomic_write(target, l1_text)
+    return target
+
+
 def _deterministic_l1(slug: str, body: str, l0: str) -> str:
     """Generate L1 without LLM — extract first sections."""
     lines = body.splitlines()
@@ -494,6 +569,9 @@ def build_all_tiers(use_llm: bool = True, verbose: bool = True) -> dict:
     """Generate L1 overviews for all pages that need it.
 
     Returns stats: {generated, skipped, errors}
+
+    Each cache entry is keyed by source SHA-256 + extractor version when
+    the source can be hashed, satisfying Task 15's cache-key contract.
     """
     TIERS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -517,16 +595,19 @@ def build_all_tiers(use_llm: bool = True, verbose: bool = True) -> dict:
             continue
 
         slug = md.stem
+        try:
+            source_sha256 = hashlib.sha256(md.read_bytes()).hexdigest()
+        except OSError:
+            source_sha256 = None
 
-        if not _needs_l1_regeneration(slug, md):
+        if not _needs_l1_regeneration(slug, md, source_sha256):
             stats["skipped"] += 1
             continue
 
         try:
-            l1 = generate_l1(slug, use_llm=use_llm)
+            l1 = generate_l1(slug, use_llm=use_llm, source_sha256=source_sha256)
             if l1:
-                l1_path = TIERS_DIR / f"{slug}.l1.md"
-                atomic_write(l1_path, l1)
+                write_l1(slug, l1, source_sha256=source_sha256)
                 stats["generated"] += 1
                 if verbose:
                     print(f"  Generated L1: {slug}")
@@ -597,9 +678,7 @@ def main() -> int:
     if args.slug:
         l1 = generate_l1(args.slug, use_llm=not args.no_llm)
         if l1:
-            l1_path = TIERS_DIR / f"{args.slug}.l1.md"
-            TIERS_DIR.mkdir(parents=True, exist_ok=True)
-            atomic_write(l1_path, l1)
+            write_l1(args.slug, l1)
             print(f"Generated L1 for {args.slug}: {len(l1)} chars.")
         else:
             print(f"Failed to generate L1 for {args.slug}.")
