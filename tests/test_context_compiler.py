@@ -329,6 +329,35 @@ def test_small_parent_pages_expand_in_full():
     )
 
 
+def test_small_parent_l2_prefix_uses_matched_ancestry_and_valid_to_without_valid_from():
+    page = _page(
+        "small.md",
+        "Small",
+        "Small summary.",
+        "## Evidence\n\nmatched proof\n",
+        valid_to="2026-12-31",
+    )
+    start = page.content.index(b"## Evidence")
+    chunk = _chunk(
+        page,
+        chunk_id="small#evidence",
+        heading_ancestry=("Small", "Evidence"),
+        byte_start=start,
+        byte_end=len(page.content),
+        text=page.content[start:].decode(),
+    )
+
+    compiled = compile_context(
+        _snapshot((page,), (chunk,)),
+        evidence_chunk_ids=(chunk.id,),
+        small_parent_chars=len(page.content) + 1,
+    )
+
+    l2 = next(item for item in compiled.items if item.representation == "l2")
+    assert "heading=Small > Evidence" in l2.text
+    assert "valid_to=2026-12-31" in l2.text
+
+
 def test_large_parent_pages_expand_to_matched_heading_subtree():
     body = (
         "## Decision\n\nWe chose JWT.\n\n"

@@ -1346,7 +1346,11 @@ def _append_context(context: str, handoff: str) -> str:
     if not items:
         return ""
     try:
-        rendered = pack_context(items, DEFAULT_CONTEXT_BUDGET).text
+        rendered = pack_context(
+            items,
+            DEFAULT_CONTEXT_BUDGET,
+            emergency_byte_cap=DEFAULT_CONTEXT_BUDGET.available_input_tokens,
+        ).text
     except BudgetExceededError as error:
         rendered = error.failure.render()
     return rendered + ("\n" if trailing_newline else "")

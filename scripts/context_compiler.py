@@ -242,10 +242,9 @@ def _metadata_prefix(parent: _Parent, heading_path: tuple[str, ...] = ()) -> str
     parts.append(f"type={meta.type}")
     parts.append(f"status={meta.status}")
     if meta.valid_from:
-        bound = meta.valid_from
-        if meta.valid_to:
-            bound = f"{bound}..{meta.valid_to}"
-        parts.append(f"valid={bound}")
+        parts.append(f"valid_from={meta.valid_from}")
+    if meta.valid_to:
+        parts.append(f"valid_to={meta.valid_to}")
     if meta.confidence:
         parts.append(f"confidence={meta.confidence}")
     if meta.authority:
@@ -290,9 +289,9 @@ def _l1_text(parent: _Parent) -> str:
     return f"{_metadata_prefix(parent)}\n" + "\n".join(overview_lines)
 
 
-def _l2_text_small_parent(parent: _Parent) -> str:
+def _l2_text_small_parent(parent: _Parent, heading_path: tuple[str, ...]) -> str:
     body = parent.source.content.decode("utf-8", errors="strict")
-    return f"{_metadata_prefix(parent, (parent.title,))}\n{body}"
+    return f"{_metadata_prefix(parent, heading_path)}\n{body}"
 
 
 def _l2_text_heading_subtree(
@@ -445,7 +444,7 @@ def _build_l2_item(
         item = _make_compiled_item(
             parent=parent,
             representation="l2",
-            text=_l2_text_small_parent(parent),
+            text=_l2_text_small_parent(parent, cited_headings),
             heading_path=cited_headings,
             byte_start=0,
             byte_end=body_bytes,
@@ -459,7 +458,7 @@ def _build_l2_item(
         item = _make_compiled_item(
             parent=parent,
             representation="l2",
-            text=_l2_text_small_parent(parent),
+            text=_l2_text_small_parent(parent, cited_headings),
             heading_path=cited_headings,
             byte_start=cited_start,
             byte_end=cited_end,
