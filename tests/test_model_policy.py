@@ -468,6 +468,7 @@ def test_matrix_is_closed_at_every_policy_object_level():
         {
             "overall_basis_points",
             "parent_recall_at_10_basis_points",
+            "policy_sha256",
             "raw_report_path",
             "raw_report_sha256",
         },
@@ -896,6 +897,7 @@ def test_selection_requires_all_gates_pareto_and_raw_result_evidence():
     assert selection["baseline"] == {
         "overall_basis_points": 9348,
         "parent_recall_at_10_basis_points": 10000,
+        "policy_sha256": "98730a79f843c6d54041bcdbf6dcb8234b832c3a7000e097765afa50a02c472a",
         "raw_report_path": "benchmark/baseline-2026-07-16-retrieval.json",
         "raw_report_sha256": "15367e69907ed7dfee6a96ddd47c85b8eef348c5c5e0012c8b311d063b11dfd6",
     }

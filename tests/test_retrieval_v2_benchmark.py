@@ -1863,6 +1863,28 @@ def test_bound_baseline_is_a_recomputable_retrieval_v2_bge_small_report():
     assert matrix["selection"]["baseline"]["parent_recall_at_10_basis_points"] == round(
         overall["parent_recall_at_10"] * 10_000
     )
+    assert matrix["selection"]["baseline"]["policy_sha256"] == runner._baseline_policy_sha256(
+        baseline
+    )
+
+    evolved = json.loads(json.dumps(matrix))
+    evolved["embeddings"][-1]["variants"][-1]["quality"]["status"] = "measured"
+    runner._verified_baseline_metrics(evolved, baseline, corpus_path=CORPUS)
+
+
+def test_baseline_policy_fingerprint_rejects_mismatched_provenance():
+    runner = _runner_module()
+    matrix = json.loads((BENCHMARK / "model-matrix-v1.json").read_bytes())
+    baseline = json.loads((BENCHMARK / "baseline-2026-07-16-retrieval.json").read_bytes())
+
+    matrix["selection"]["baseline"]["policy_sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="policy fingerprint"):
+        runner._verified_baseline_metrics(matrix, baseline, corpus_path=CORPUS)
+
+    matrix = json.loads((BENCHMARK / "model-matrix-v1.json").read_bytes())
+    baseline["benchmark_runner_sha256"] = "1" * 64
+    with pytest.raises(ValueError, match="policy fingerprint"):
+        runner._verified_baseline_metrics(matrix, baseline, corpus_path=CORPUS)
 
 
 def test_lexical_winner_requires_complete_comparable_l0_through_l4_evidence():
@@ -3433,40 +3455,16 @@ def test_complete_no_winner_writes_canonical_nonrelease_evidence(tmp_path, monke
     assert artifact["measurements"] is None
     assert output.read_bytes() == canonical_json_bytes(artifact) + b"\n"
 
-    authoritative_repo = tmp_path / "authoritative-repo"
-    authoritative_repo.mkdir()
-    authoritative_baseline = (
-        authoritative_repo / selection.matrix["selection"]["baseline"]["raw_report_path"]
-    )
-    authoritative_baseline.parent.mkdir(parents=True)
-    authoritative_baseline.write_bytes(
-        (BENCHMARK / "baseline-2026-07-16-retrieval.json").read_bytes()
-    )
-    attested = [
-        runner._ParentAttestedResult(
-            json.loads(path.read_bytes()),
-            path.read_bytes(),
-            _capability=runner._ATTESTATION_CAPABILITY,
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        runner._aggregate_reports(
+            raw_paths,
+            matrix_path=BENCHMARK / "model-matrix-v1.json",
+            corpus_path=CORPUS,
+            repo_root=tmp_path / "forged-repo",
+            output_path=tmp_path / "forged-repo/benchmark/results/no-winner.json",
+            measured_at="2026-07-17T12:00:00Z",
+            _attested_results=[object() for _path in raw_paths],
         )
-        for path in raw_paths
-    ]
-    authoritative = runner._aggregate_reports(
-        raw_paths,
-        matrix_path=BENCHMARK / "model-matrix-v1.json",
-        corpus_path=CORPUS,
-        repo_root=authoritative_repo,
-        output_path=authoritative_repo / "benchmark/results/no-winner.json",
-        measured_at="2026-07-17T12:00:00Z",
-        _attested_results=attested,
-    )
-    assert authoritative["schema_version"] == "retrieval-selection/v1"
-    assert authoritative["selected"] is None
-    assert authoritative["quality_claim"] is True
-    assert authoritative["release_evidence"] is True
-    assert authoritative["gates"] == {
-        "fallback": "current-bm25",
-        "outcome": "no-winner",
-    }
 
 
 def test_mocked_orchestration_is_plumbing_only_and_uses_retained_lexical_winner(
@@ -3634,8 +3632,11 @@ def test_authoritative_orchestration_has_no_public_callback_or_forgeable_result(
     runner = _runner_module()
     assert "worker" not in inspect.signature(runner.orchestrate_selection).parameters
     assert not hasattr(runner, "ParentAttestedResult")
-    with pytest.raises(TypeError, match="private attestation"):
-        runner._ParentAttestedResult({}, b"{}\n")
+    assert not hasattr(runner, "_ParentAttestedResult")
+    assert not hasattr(runner, "_ATTESTATION_CAPABILITY")
+    assert not hasattr(runner, "_orchestrate_selection_impl")
+    synthetic = runner._WorkerPayload({}, b"{}\n")
+    assert runner._consume_execution_bound_payload(synthetic) is False
     with pytest.raises(TypeError):
         runner.orchestrate_selection(
             matrix_path=BENCHMARK / "model-matrix-v1.json",

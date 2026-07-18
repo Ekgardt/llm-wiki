@@ -261,25 +261,6 @@ class ModelSelection:
 class _WorkerPayload:
     report: dict
     canonical_bytes: bytes
-    _capability: object | None = None
-
-
-_ATTESTATION_CAPABILITY = object()
-_SUBPROCESS_PAYLOAD_CAPABILITY = object()
-
-
-@dataclass(frozen=True, init=False)
-class _ParentAttestedResult:
-    report: dict
-    canonical_bytes: bytes
-    _capability: object
-
-    def __init__(self, report: dict, canonical_bytes: bytes, *, _capability=None) -> None:
-        if _capability is not _ATTESTATION_CAPABILITY:
-            raise TypeError("ParentAttestedResult requires private attestation capability")
-        object.__setattr__(self, "report", report)
-        object.__setattr__(self, "canonical_bytes", canonical_bytes)
-        object.__setattr__(self, "_capability", _capability)
 
 
 def _require_exact_keys(value: dict, expected: set[str], label: str) -> None:
@@ -502,6 +483,7 @@ def load_model_selection(
         {
             "overall_basis_points",
             "parent_recall_at_10_basis_points",
+            "policy_sha256",
             "raw_report_path",
             "raw_report_sha256",
         },
@@ -3704,6 +3686,32 @@ def _recompute_report_metrics(
     return overall, slices
 
 
+def _baseline_policy_sha256(report: dict) -> str:
+    return _sha256_json(
+        {
+            "acquisition_mode": report.get("acquisition_mode"),
+            "artifact_kind": "retrieval-baseline-policy",
+            "benchmark_contract_sha256": report.get("benchmark_contract_sha256"),
+            "benchmark_runner_sha256": report.get("benchmark_runner_sha256"),
+            "candidate": report.get("candidate"),
+            "corpus_sha256": report.get("corpus_sha256"),
+            "environment_provenance": report.get("methodology", {}).get(
+                "environment_provenance"
+            ),
+            "lexical_configuration": report.get("methodology", {}).get(
+                "lexical_configuration"
+            ),
+            "matrix_sha256": report.get("matrix_sha256"),
+            "schema_version": 1,
+            "thresholds_basis_points": {
+                name: round(float(value) * 10_000)
+                for name, value in (report.get("thresholds") or {}).items()
+            },
+            "vector_backend": report.get("vector_backend"),
+        }
+    )
+
+
 def _verified_baseline_metrics(matrix: dict, report: dict, *, corpus_path: Path | str):
     baseline_target = {
         "embedding": {
@@ -3718,6 +3726,12 @@ def _verified_baseline_metrics(matrix: dict, report: dict, *, corpus_path: Path 
     comparable_environment = dict(environment) if isinstance(environment, dict) else environment
     if isinstance(comparable_environment, dict):
         comparable_environment.pop("verified_lock", None)
+    expected_environment = _environment_provenance("numpy-exact")
+    expected_environment["runner_sha256"] = report.get("benchmark_runner_sha256")
+    if matrix["selection"]["baseline"].get("policy_sha256") != _baseline_policy_sha256(
+        report
+    ):
+        raise ValueError("bound baseline policy fingerprint mismatch")
     if (
         set(report) != REPORT_FIELDS
         or report.get("schema_version") != "retrieval-report/v2"
@@ -3730,14 +3744,13 @@ def _verified_baseline_metrics(matrix: dict, report: dict, *, corpus_path: Path 
         or report.get("fallback_reason") is not None
         or report.get("corpus_sha256") != matrix["benchmark_contract"]["corpus"]["sha256"]
         or report.get("benchmark_contract_sha256") != _sha256_json(matrix["benchmark_contract"])
-        or report.get("benchmark_runner_sha256") != _sha256_file(Path(__file__))
         or report.get("acquisition_mode") != "offline-local-files-only"
         or report.get("vector_backend") != "numpy-exact"
         or report.get("release_evidence") is not False
         or report.get("thresholds") != THRESHOLDS
         or report.get("methodology", {}).get("lexical_configuration")
         != LEXICAL_CONFIGURATIONS["L4"]
-        or comparable_environment != _environment_provenance("numpy-exact")
+        or comparable_environment != expected_environment
         or not isinstance(environment, dict)
         or not isinstance(environment.get("verified_lock"), dict)
     ):
@@ -4012,19 +4025,9 @@ def _aggregate_reports(
     repo_root: Path | str,
     output_path: Path | str,
     measured_at: str,
-    _attested_results: Sequence[_ParentAttestedResult] | None = None,
     _lexical_results: Sequence[_WorkerPayload] | None = None,
+    _write_analysis: bool = True,
 ) -> dict:
-    authoritative = _attested_results is not None
-    if authoritative and (
-        len(_attested_results) != len(raw_report_paths)
-        or not all(
-            isinstance(item, _ParentAttestedResult)
-            and item._capability is _ATTESTATION_CAPABILITY
-            for item in _attested_results
-        )
-    ):
-        raise TypeError("authoritative aggregation requires parent-attested in-memory results")
     matrix_raw = read_stable_bytes(Path(matrix_path), MAX_CORPUS_BYTES, label="model matrix")
     matrix = json.loads(matrix_raw)
     first = matrix["embeddings"][0]
@@ -4214,11 +4217,9 @@ def _aggregate_reports(
         else None
     )
     artifact = {
-        "schema_version": (
-            "retrieval-selection/v1" if authoritative else "retrieval-comparison/v1"
-        ),
-        "quality_claim": authoritative,
-        "release_evidence": authoritative,
+        "schema_version": "retrieval-comparison/v1",
+        "quality_claim": False,
+        "release_evidence": False,
         "measured_at": measured_at,
         "matrix_sha256": validated.matrix_sha256,
         "matrix_policy_sha256": matrix_policy_fingerprint(matrix),
@@ -4260,6 +4261,8 @@ def _aggregate_reports(
     }
     if set(artifact) != set(matrix["selection"]["aggregation_evidence_contract"]["required_fields"]):
         raise ValueError("selection artifact does not match matrix evidence contract")
+    if not _write_analysis:
+        return artifact
     serialized = (canonical_json_bytes(artifact) + b"\n").decode("utf-8")
     output.parent.mkdir(parents=True, exist_ok=True)
     resolved_parent = output.parent.resolve(strict=True)
@@ -4318,7 +4321,7 @@ def aggregate_selection(
     )
 
 
-def orchestrate_selection(
+def _orchestrate_selection_impl(
     *,
     matrix_path: Path | str,
     corpus_path: Path | str,
@@ -4327,7 +4330,10 @@ def orchestrate_selection(
     measured_at: str,
     cache_root: Path | str | None = None,
     deadline_seconds: float | None = None,
+    _execution_consumer=None,
 ) -> dict:
+    if _execution_consumer is None:
+        raise TypeError("authoritative orchestration requires its bound execution consumer")
     matrix = json.loads(read_stable_bytes(Path(matrix_path), MAX_CORPUS_BYTES, label="model matrix"))
     specs = required_candidate_specs(matrix)
     if cache_root is None or deadline_seconds is None:
@@ -4340,16 +4346,15 @@ def orchestrate_selection(
     if _is_reparse_point(cache_root):
         raise ValueError("model cache root must not be a symlink or reparse point")
     lexical_results = []
-    subprocess_observed = True
+    execution_bound = True
     for argv in _lexical_ablation_worker_arguments(cache_root, deadline_seconds):
         payload = _run_bounded_model_worker(argv, deadline_seconds=deadline_seconds)
         if not isinstance(payload, _WorkerPayload):
             raise TypeError("lexical worker transport returned an invalid payload")
         _validate_lexical_worker_payload(payload, matrix=matrix, corpus_path=corpus_path)
-        subprocess_observed &= payload._capability is _SUBPROCESS_PAYLOAD_CAPABILITY
+        execution_bound &= _execution_consumer(payload)
         lexical_results.append(payload)
     lexical_config = _select_lexical_winner([item.report for item in lexical_results])["id"]
-    attested = []
     candidate_payloads = []
     for spec in specs:
         argv = _candidate_worker_arguments(
@@ -4367,36 +4372,70 @@ def orchestrate_selection(
             "id"
         ) != lexical_config:
             raise ValueError("candidate report does not use the frozen lexical winner")
-        subprocess_observed &= payload._capability is _SUBPROCESS_PAYLOAD_CAPABILITY
+        execution_bound &= _execution_consumer(payload)
         candidate_payloads.append(payload)
-        result = _attest_worker_payload(payload.report, payload.canonical_bytes)
-        if (
-            not isinstance(result, _ParentAttestedResult)
-            or result._capability is not _ATTESTATION_CAPABILITY
-        ):
-            raise TypeError("authoritative parent attestation failed")
-        if result.report.get("candidate") != spec or result.report.get("quality_claim") is not True:
-            raise ValueError("parent-attested result does not match requested matrix candidate")
-        if result.canonical_bytes != _canonical_report_bytes(result.report):
-            raise ValueError("parent-attested result bytes are not canonical")
-        attested.append(result)
+        _validate_worker_payload(payload.report, payload.canonical_bytes)
+        if payload.report.get("candidate") != spec:
+            raise ValueError("worker result does not match requested matrix candidate")
     with tempfile.TemporaryDirectory(prefix="llm-wiki-authoritative-selection-") as temporary:
         paths = []
-        retained_candidates = attested if subprocess_observed else candidate_payloads
-        for index, result in enumerate(retained_candidates):
+        for index, result in enumerate(candidate_payloads):
             path = Path(temporary) / f"candidate-{index}.json"
             _write_new_bytes(path, result.canonical_bytes)
             paths.append(path)
-        return _aggregate_reports(
+        artifact = _aggregate_reports(
             paths,
             matrix_path=matrix_path,
             corpus_path=corpus_path,
             repo_root=repo_root,
             output_path=output_path,
             measured_at=measured_at,
-            _attested_results=attested if subprocess_observed else None,
             _lexical_results=lexical_results,
+            _write_analysis=not execution_bound,
         )
+    if not execution_bound:
+        return artifact
+
+    artifact["schema_version"] = "retrieval-selection/v1"
+    artifact["quality_claim"] = True
+    artifact["release_evidence"] = True
+    serialized = canonical_json_bytes(artifact) + b"\n"
+    repo = Path(repo_root).resolve(strict=True)
+    requested_output = Path(output_path)
+    if not requested_output.is_absolute():
+        requested_output = repo / requested_output
+    output = requested_output.parent.resolve() / requested_output.name
+    if output.exists() or output.is_symlink():
+        raise ValueError("selection output already exists")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    resolved_parent = output.parent.resolve(strict=True)
+    if resolved_parent != repo and repo not in resolved_parent.parents:
+        raise ValueError("selection output parent escaped benchmark/results")
+    current = output.parent
+    while current != repo:
+        if _is_reparse_point(current):
+            raise ValueError("selection output path must not contain symlinks or reparse points")
+        current = current.parent
+    retained_root = repo / "benchmark" / "results" / "reports"
+    retained_root.mkdir(parents=True, exist_ok=True)
+    resolved_retained_root = retained_root.resolve(strict=True)
+    if resolved_retained_root != retained_root or _is_reparse_point(retained_root):
+        raise ValueError("retained report path must not contain symlinks or reparse points")
+    created_reports = []
+    try:
+        for payload in [*candidate_payloads, *lexical_results]:
+            digest = hashlib.sha256(payload.canonical_bytes).hexdigest()
+            retained = retained_root / f"{digest}.json"
+            identity = _write_new_bytes(retained, payload.canonical_bytes)
+            created_reports.append((retained, identity))
+        _write_new_output(resolved_parent / output.name, serialized.decode("utf-8"))
+    except BaseException:
+        for retained, identity in reversed(created_reports):
+            with contextlib.suppress(FileNotFoundError):
+                if os.path.samestat(identity, retained.stat(follow_symlinks=False)):
+                    retained.unlink()
+        raise
+    return artifact
 
 
 def _lexical_ablation_worker_arguments(cache_root: Path, deadline_seconds: float) -> list[list[str]]:
@@ -4611,7 +4650,7 @@ def _worker_arguments(argv: Sequence[str], output: Path) -> list[str]:
     return [*cleaned, "--output", str(output), "--internal-worker"]
 
 
-def _attest_worker_payload(report: dict, raw: bytes) -> _ParentAttestedResult:
+def _validate_worker_payload(report: dict, raw: bytes) -> None:
     if raw != _canonical_report_bytes(report):
         raise ValueError("worker report is not canonical")
     _require_exact_keys(report, REPORT_FIELDS, "worker report")
@@ -4654,22 +4693,10 @@ def _attest_worker_payload(report: dict, raw: bytes) -> _ParentAttestedResult:
     _recompute_report_metrics(corpus, report)
     _recompute_reranker_depth_metrics(corpus, report)
     lexical = report["methodology"].get("lexical_configuration", {}).get("id")
-    verified_lock = _verify_locked_environment(
-        report["vector_backend"], lexical_config=lexical
-    )
-    attested = json.loads(json.dumps(report))
-    attested["quality_claim"] = True
-    attested["gates"]["interpretation"] = "parent-attested-real-model-quality"
-    attested["methodology"]["environment_provenance"]["verified_lock"] = verified_lock
-    canonical = _canonical_report_bytes(attested)
-    return _ParentAttestedResult(
-        attested,
-        canonical,
-        _capability=_ATTESTATION_CAPABILITY,
-    )
+    _verify_locked_environment(report["vector_backend"], lexical_config=lexical)
 
 
-def _run_bounded_model_worker(
+def _run_bounded_model_worker_impl(
     argv: Sequence[str], *, deadline_seconds: float
 ) -> _WorkerPayload | dict:
     with tempfile.TemporaryDirectory(prefix="llm-wiki-retrieval-worker-") as temporary:
@@ -4708,7 +4735,69 @@ def _run_bounded_model_worker(
             raise ValueError("worker report is not canonical")
         if report.get("quality_claim") is not False or report.get("release_evidence") is not False:
             raise ValueError("worker transport received a self-attested payload")
-        return _WorkerPayload(report, raw, _SUBPROCESS_PAYLOAD_CAPABILITY)
+        return _WorkerPayload(report, raw)
+
+
+def _make_execution_bound_worker(worker, process_runner):
+    registry = {}
+
+    def run(argv: Sequence[str], *, deadline_seconds: float):
+        execution_bound = _run_process_tree is process_runner
+        result = worker(argv, deadline_seconds=deadline_seconds)
+        if execution_bound and isinstance(result, _WorkerPayload):
+            registry[id(result)] = (
+                result,
+                hashlib.sha256(result.canonical_bytes).digest(),
+            )
+        return result
+
+    def consume(payload: _WorkerPayload) -> bool:
+        registered = registry.pop(id(payload), None)
+        return (
+            registered is not None
+            and registered[0] is payload
+            and registered[1] == hashlib.sha256(payload.canonical_bytes).digest()
+        )
+
+    return run, consume
+
+
+_run_bounded_model_worker, _consume_execution_bound_payload = _make_execution_bound_worker(
+    _run_bounded_model_worker_impl, _run_process_tree
+)
+del _make_execution_bound_worker
+
+
+def _bind_orchestrator(implementation, execution_consumer):
+    def orchestrate_selection(
+        *,
+        matrix_path: Path | str,
+        corpus_path: Path | str,
+        repo_root: Path | str,
+        output_path: Path | str,
+        measured_at: str,
+        cache_root: Path | str | None = None,
+        deadline_seconds: float | None = None,
+    ) -> dict:
+        return implementation(
+            matrix_path=matrix_path,
+            corpus_path=corpus_path,
+            repo_root=repo_root,
+            output_path=output_path,
+            measured_at=measured_at,
+            cache_root=cache_root,
+            deadline_seconds=deadline_seconds,
+            _execution_consumer=execution_consumer,
+        )
+
+    return orchestrate_selection
+
+
+orchestrate_selection = _bind_orchestrator(
+    _orchestrate_selection_impl, _consume_execution_bound_payload
+)
+del _bind_orchestrator
+del _orchestrate_selection_impl
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -4735,7 +4824,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.json:
                 print(serialized, end="")
             else:
-                print("retrieval-v2 authoritative selection complete; release_evidence=true")
+                print(
+                    "retrieval-v2 authoritative selection complete; "
+                    f"release_evidence={str(artifact['release_evidence']).lower()}"
+                )
             return 0
         if args.adapter == SELECTION_AGGREGATION_ADAPTER_KIND:
             artifact = aggregate_selection(
@@ -4791,10 +4883,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             if not isinstance(payload, _WorkerPayload):
                 raise ValueError("benchmark worker did not return a worker payload")
-            attested = _attest_worker_payload(payload.report, payload.canonical_bytes)
-            report = attested.report
+            _consume_execution_bound_payload(payload)
+            _validate_worker_payload(payload.report, payload.canonical_bytes)
+            report = json.loads(json.dumps(payload.report))
             if args.output is None:
-                report["quality_claim"] = False
                 report["gates"]["interpretation"] = "stdout-only-non-quality"
         corpus = load_corpus(args.corpus, args.schema)
         run_options = {
