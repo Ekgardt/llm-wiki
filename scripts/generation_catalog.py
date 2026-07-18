@@ -177,6 +177,11 @@ def _check_deadline(deadline: float | None, monotonic: Callable[[], float]) -> N
         raise TimeoutError("generation catalog deadline reached")
 
 
+def _check_cancelled(cancelled: Callable[[], bool] | None) -> None:
+    if bool(cancelled and cancelled()):
+        raise TimeoutError("generation catalog operation cancelled")
+
+
 def _bounded_scandir(
     path: Path,
     limit: int,
@@ -184,11 +189,14 @@ def _bounded_scandir(
     *,
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[os.DirEntry[str]]:
     entries: list[os.DirEntry[str]] = []
+    _check_cancelled(cancelled)
     _check_deadline(deadline, monotonic)
     with os.scandir(path) as iterator:
         for entry in iterator:
+            _check_cancelled(cancelled)
             _check_deadline(deadline, monotonic)
             if len(entries) >= limit:
                 raise ValueError(message)
@@ -203,7 +211,9 @@ def _scan_generation(
     *,
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple[tuple[_EntrySeal, ...], set[str]]:
+    _check_cancelled(cancelled)
     _check_deadline(deadline, monotonic)
     files: set[str] = set()
     pending = [directory]
@@ -218,8 +228,10 @@ def _scan_generation(
             "generation contains too many filesystem entries",
             deadline=deadline,
             monotonic=monotonic,
+            cancelled=cancelled,
         )
         for entry in ordered:
+            _check_cancelled(cancelled)
             _check_deadline(deadline, monotonic)
             visited += 1
             path = Path(entry.path)
@@ -257,7 +269,9 @@ def _hash_artifact(
     *,
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple[int, str]:
+    _check_cancelled(cancelled)
     _check_deadline(deadline, monotonic)
     expected = validate_runtime_file(path, state_root, max_bytes=max_bytes)
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -269,6 +283,7 @@ def _hash_artifact(
         digest = hashlib.sha256()
         total = 0
         while True:
+            _check_cancelled(cancelled)
             _check_deadline(deadline, monotonic)
             chunk = os.read(descriptor, HASH_CHUNK_BYTES)
             _check_deadline(deadline, monotonic)
@@ -290,6 +305,7 @@ def _hash_artifact(
     if _is_link_or_reparse(path) or not os.path.samestat(after, current):
         raise PermissionError("artifact identity changed after hashing")
     _check_deadline(deadline, monotonic)
+    _check_cancelled(cancelled)
     return total, digest.hexdigest()
 
 
@@ -299,13 +315,18 @@ def _validate_generation(
     *,
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple[dict[str, object], tuple[_EntrySeal, ...]]:
+    _check_cancelled(cancelled)
     generation_path = Path(generation_path)
     state_root = Path(state_root)
     _check_deadline(deadline, monotonic)
     _validate_directory(generation_path, state_root)
     initial_seal, initial_files = _scan_generation(
-        generation_path, deadline=deadline, monotonic=monotonic
+        generation_path,
+        deadline=deadline,
+        monotonic=monotonic,
+        cancelled=cancelled,
     )
     expected_id = _generation_id(generation_path.name)
     manifest_path = generation_path / "manifest.json"
@@ -420,6 +441,7 @@ def _validate_generation(
             size,
             deadline=deadline,
             monotonic=monotonic,
+            cancelled=cancelled,
         )
         if actual_size != size:
             raise ValueError(f"artifact has wrong size: {path_text}")
@@ -457,10 +479,14 @@ def _validate_generation(
             state_root=state_root,
             deadline=deadline,
             monotonic=monotonic,
+            cancelled=cancelled,
         )
 
     final_seal, actual_files = _scan_generation(
-        generation_path, deadline=deadline, monotonic=monotonic
+        generation_path,
+        deadline=deadline,
+        monotonic=monotonic,
+        cancelled=cancelled,
     )
     if final_seal != initial_seal:
         raise PermissionError("generation changed during validation")
@@ -601,7 +627,11 @@ class GenerationCatalog:
         )
 
     def _validate(
-        self, generation_id: str, *, deadline: float | None = None
+        self,
+        generation_id: str,
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> tuple[dict[str, object], bytes, tuple[_EntrySeal, ...]]:
         identifier = _generation_id(generation_id)
         manifest, seal = _validate_generation(
@@ -609,26 +639,37 @@ class GenerationCatalog:
             state_root=self.state_root,
             deadline=deadline,
             monotonic=self._monotonic,
+            cancelled=cancelled,
         )
         return manifest, canonical_json_bytes(manifest), seal
 
-    def register(self, generation_id: str, *, deadline: float | None = None) -> dict[str, object]:
+    def register(
+        self,
+        generation_id: str,
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> dict[str, object]:
         """Register a complete generation; identical retries are idempotent."""
         self._check_deadline(deadline)
-        manifest, encoded, seal = self._validate(generation_id, deadline=deadline)
+        _check_cancelled(cancelled)
+        manifest, encoded, seal = self._validate(
+            generation_id, deadline=deadline, cancelled=cancelled
+        )
         digest = sha256_bytes(encoded)
         timestamp = _utc_timestamp(self._clock)
+        if not self._deadline_seal_unchanged(
+            self.generations_path / generation_id, seal, deadline, cancelled=cancelled
+        ):
+            raise ValueError("generation changed after validation seal")
         with self._write_transaction(deadline) as database:
+            _check_cancelled(cancelled)
             row = database.execute(
                 "SELECT manifest_json, manifest_sha256 FROM generations WHERE generation_id = ?",
                 (generation_id,),
             ).fetchone()
             if row is None:
                 self._require_capacity(database, "generations", MAX_GENERATIONS, "generation")
-                if not self._deadline_seal_unchanged(
-                    self.generations_path / generation_id, seal, deadline
-                ):
-                    raise ValueError("generation changed after validation seal")
                 database.execute(
                     "INSERT INTO generations "
                     "(generation_id, parent_generation_id, manifest_json, "
@@ -648,9 +689,16 @@ class GenerationCatalog:
         return manifest
 
     def _registered_generation(
-        self, generation_id: str, *, deadline: float | None = None
+        self,
+        generation_id: str,
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> tuple[dict[str, object], tuple[_EntrySeal, ...]]:
-        manifest, encoded, seal = self._validate(generation_id, deadline=deadline)
+        _check_cancelled(cancelled)
+        manifest, encoded, seal = self._validate(
+            generation_id, deadline=deadline, cancelled=cancelled
+        )
         self._check_deadline(deadline)
         with closing(self._readonly()) as database:
             row = database.execute(
@@ -676,10 +724,18 @@ class GenerationCatalog:
         generation_path: Path,
         expected: tuple[_EntrySeal, ...],
         deadline: float | None,
+        *,
+        cancelled: Callable[[], bool] | None = None,
     ) -> bool:
-        if deadline is None:
+        if deadline is None and cancelled is None:
             return self._seal_unchanged(generation_path, expected)
-        return self._seal_unchanged(generation_path, expected, deadline=deadline)
+        if deadline is None:
+            return self._seal_unchanged(generation_path, expected, cancelled=cancelled)
+        if cancelled is None:
+            return self._seal_unchanged(generation_path, expected, deadline=deadline)
+        return self._seal_unchanged(
+            generation_path, expected, deadline=deadline, cancelled=cancelled
+        )
 
     def _seal_unchanged(
         self,
@@ -687,10 +743,14 @@ class GenerationCatalog:
         expected: tuple[_EntrySeal, ...],
         *,
         deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> bool:
         """Recheck bounded metadata and content immediately before catalog mutation."""
         current, files = _scan_generation(
-            generation_path, deadline=deadline, monotonic=self._monotonic
+            generation_path,
+            deadline=deadline,
+            monotonic=self._monotonic,
+            cancelled=cancelled,
         )
         expected_metadata = tuple(replace(entry, sha256=None) for entry in expected)
         if current != expected_metadata:
@@ -699,6 +759,7 @@ class GenerationCatalog:
         if files != set(expected_files):
             return False
         for relative, entry in expected_files.items():
+            _check_cancelled(cancelled)
             self._check_deadline(deadline)
             _size, digest = _hash_artifact(
                 generation_path.joinpath(*relative.split("/")),
@@ -706,6 +767,7 @@ class GenerationCatalog:
                 entry.size,
                 deadline=deadline,
                 monotonic=self._monotonic,
+                cancelled=cancelled,
             )
             if digest != entry.sha256:
                 return False
@@ -756,18 +818,32 @@ class GenerationCatalog:
         *,
         expected_active: str | None,
         deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> bool:
         """Atomically activate a validated generation if the pointer matches."""
         self._check_deadline(deadline)
+        _check_cancelled(cancelled)
         identifier = _generation_id(generation_id)
         if expected_active is not None:
             expected_active = _generation_id(expected_active)
         if deadline is None:
-            _manifest, seal = self._registered_generation(identifier)
+            manifest, seal = self._registered_generation(identifier, cancelled=cancelled)
         else:
-            _manifest, seal = self._registered_generation(identifier, deadline=deadline)
+            manifest, seal = self._registered_generation(
+                identifier, deadline=deadline, cancelled=cancelled
+            )
+        encoded = canonical_json_bytes(manifest)
+        registration_token = (encoded, sha256_bytes(encoded))
+        if not self._deadline_seal_unchanged(
+            self.generations_path / identifier,
+            seal,
+            deadline,
+            cancelled=cancelled,
+        ):
+            raise ValueError("generation changed after validation seal")
         timestamp = _utc_timestamp(self._clock)
         with self._write_transaction(deadline) as database:
+            _check_cancelled(cancelled)
             row = database.execute(
                 "SELECT active_generation_id FROM catalog_state WHERE singleton = 1"
             ).fetchone()
@@ -775,10 +851,16 @@ class GenerationCatalog:
                 self._check_deadline(deadline)
                 return False
             registered = database.execute(
-                "SELECT 1 FROM generations WHERE generation_id = ?", (identifier,)
+                "SELECT manifest_json, manifest_sha256 FROM generations WHERE generation_id = ?",
+                (identifier,),
             ).fetchone()
             if registered is None:
                 raise ValueError("generation registration disappeared")
+            if (
+                bytes(registered["manifest_json"]),
+                registered["manifest_sha256"],
+            ) != registration_token:
+                raise ValueError("generation registration changed after validation")
             if identifier != expected_active:
                 self._require_capacity(
                     database,
@@ -786,10 +868,6 @@ class GenerationCatalog:
                     MAX_ACTIVATION_HISTORY,
                     "history",
                 )
-            if not self._deadline_seal_unchanged(
-                self.generations_path / identifier, seal, deadline
-            ):
-                raise ValueError("generation changed after validation seal")
             self._check_deadline(deadline)
             if identifier == expected_active:
                 return True
@@ -875,6 +953,14 @@ class GenerationCatalog:
             if selected_id == active:
                 self._check_deadline(deadline)
                 return selected
+            selected_token: tuple[bytes, str] | None = None
+            if selected_id is not None:
+                if selected_seal is None or not self._deadline_seal_unchanged(
+                    self.generations_path / selected_id, selected_seal, deadline
+                ):
+                    raise ValueError("fallback generation changed after validation seal")
+                selected_encoded = canonical_json_bytes(selected)
+                selected_token = (selected_encoded, sha256_bytes(selected_encoded))
             timestamp = _utc_timestamp(self._clock)
             with self._write_transaction(deadline) as database:
                 current = database.execute(
@@ -891,13 +977,16 @@ class GenerationCatalog:
                         MAX_ACTIVATION_HISTORY,
                         "history",
                     )
-                if selected_id is not None and (
-                    selected_seal is None
-                    or not self._deadline_seal_unchanged(
-                        self.generations_path / selected_id, selected_seal, deadline
-                    )
-                ):
-                    raise ValueError("fallback generation changed after validation seal")
+                    registered = database.execute(
+                        "SELECT manifest_json, manifest_sha256 FROM generations "
+                        "WHERE generation_id = ?",
+                        (selected_id,),
+                    ).fetchone()
+                    if registered is None or (
+                        bytes(registered["manifest_json"]),
+                        registered["manifest_sha256"],
+                    ) != selected_token:
+                        raise ValueError("fallback registration changed after validation")
                 database.execute(
                     "UPDATE catalog_state SET active_generation_id = ? WHERE singleton = 1",
                     (selected_id,),

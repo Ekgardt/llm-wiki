@@ -124,7 +124,7 @@ def _records(source: bytes = b"def caller():\n    callee()\n# [[Decision]]\n"):
                 "byte_start": decision_start,
                 "byte_end": decision_start + len(b"[[Decision]]"),
                 "span_sha256": _sha(b"[[Decision]]"),
-            }
+            },
         ],
         "dependencies": [
             {
@@ -146,6 +146,25 @@ def _create(tmp_path: Path, **overrides):
     path = tmp_path / "evidence.sqlite3"
     evidence_graph.create_generation_database(path, **records)
     return evidence_graph.EvidenceGraph(path, state_root=tmp_path)
+
+
+def test_database_construction_cancellation_stops_lazy_records_without_publish(tmp_path):
+    import evidence_graph
+
+    records = _records()
+    checks = 0
+
+    def cancelled():
+        nonlocal checks
+        checks += 1
+        return checks >= 3
+
+    with pytest.raises(TimeoutError, match="cancel"):
+        evidence_graph.create_generation_database(
+            tmp_path / "evidence.sqlite3", **records, cancelled=cancelled
+        )
+
+    assert not (tmp_path / "evidence.sqlite3").exists()
 
 
 def test_manifest_schema_is_closed_and_bounded():
@@ -379,9 +398,7 @@ def test_unresolved_or_ambiguous_assertions_use_observations_instead(tmp_path):
             literal=None,
         )
         with pytest.raises(ValueError, match="observation|resolved"):
-            evidence_graph.create_generation_database(
-                tmp_path / f"{resolution}.sqlite3", **records
-            )
+            evidence_graph.create_generation_database(tmp_path / f"{resolution}.sqlite3", **records)
 
 
 @pytest.mark.parametrize(
@@ -490,12 +507,8 @@ def test_unresolved_observations_use_controlled_reasons_without_fake_nodes(tmp_p
 def test_bounded_queries_cover_both_directions_paths_dependencies_and_evidence(tmp_path):
     graph = _create(tmp_path)
 
-    assert [row["node_id"] for row in graph.neighbors("caller", direction="out")] == [
-        "callee"
-    ]
-    assert [row["node_id"] for row in graph.neighbors("callee", direction="in")] == [
-        "caller"
-    ]
+    assert [row["node_id"] for row in graph.neighbors("caller", direction="out")] == ["callee"]
+    assert [row["node_id"] for row in graph.neighbors("callee", direction="in")] == ["caller"]
     assert graph.path("caller", "callee")[0]["assertion_ids"] == ["call"]
     assert [row["node_id"] for row in graph.callers("callee")] == ["caller"]
     assert [row["node_id"] for row in graph.callees("caller")] == ["callee"]
@@ -528,9 +541,7 @@ def test_dependencies_walk_transitively_with_a_depth_bound(tmp_path):
     )
     graph = _create(tmp_path, **records)
 
-    assert [row["node_id"] for row in graph.dependencies("decision", max_depth=1)] == [
-        "caller"
-    ]
+    assert [row["node_id"] for row in graph.dependencies("decision", max_depth=1)] == ["caller"]
     assert [row["node_id"] for row in graph.dependencies("decision", max_depth=2)] == [
         "caller",
         "package",

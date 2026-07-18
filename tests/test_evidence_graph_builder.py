@@ -18,6 +18,7 @@ The builder must:
   after_database_commit, after_validation, before_activation,
   after_activation.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -378,10 +379,7 @@ def test_build_writes_manifest_with_source_manifest_sha256_and_artifact_hashes(t
     source_manifest_bytes = source_manifest_path.read_bytes()
     # Manifest must be canonical JSON and bind exact artifact hashes.
     assert canonical_json_bytes(manifest) == manifest_path.read_bytes()
-    assert (
-        manifest["source_manifest_sha256"]
-        == hashlib.sha256(source_manifest_bytes).hexdigest()
-    )
+    assert manifest["source_manifest_sha256"] == hashlib.sha256(source_manifest_bytes).hexdigest()
     # Every artifact descriptor matches the bytes on disk.
     by_path = {item["path"]: item for item in manifest["artifacts"]}
     for path, descriptor in by_path.items():
@@ -563,9 +561,7 @@ def test_builder_never_mutates_active_generation_in_place(tmp_path):
     catalog = _catalog(tmp_path)
     _publish_baseline(catalog)
 
-    active_before = (
-        catalog.generations_path / "gen-1" / "evidence.sqlite3"
-    ).stat().st_mtime_ns
+    active_before = (catalog.generations_path / "gen-1" / "evidence.sqlite3").stat().st_mtime_ns
 
     records = _basic_records()
     build_full_generation(
@@ -583,9 +579,7 @@ def test_builder_never_mutates_active_generation_in_place(tmp_path):
         expected_active="gen-1",
     )
 
-    active_after = (
-        catalog.generations_path / "gen-1" / "evidence.sqlite3"
-    ).stat().st_mtime_ns
+    active_after = (catalog.generations_path / "gen-1" / "evidence.sqlite3").stat().st_mtime_ns
     assert active_before == active_after
 
 
@@ -673,9 +667,7 @@ def test_builder_snapshot_source_hash_is_pinned_in_manifest(tmp_path):
         "include_historical": False,
         "as_of": None,
     }
-    expected_hash = corpus_snapshot.canonical_source_manifest_sha256(
-        shared_sources, policy
-    )
+    expected_hash = corpus_snapshot.canonical_source_manifest_sha256(shared_sources, policy)
 
     result = build_full_generation(
         catalog,
@@ -766,3 +758,229 @@ def test_kill_point_after_validation_leaves_generation_artifacts_on_disk(tmp_pat
     assert (catalog.generations_path / "gen-2" / "manifest.json").exists()
     catalog.register("gen-2")
     assert catalog.activate("gen-2", expected_active="gen-1")
+
+
+def test_builder_snapshots_and_hashes_sources_before_consuming_extractor_iterables(tmp_path):
+    from evidence_graph_builder import build_full_generation
+
+    catalog = _catalog(tmp_path)
+    records = _basic_records()
+    state = {"sources_complete": False, "extractor_consumed": False}
+
+    def lazy_sources():
+        yield records["sources"][0]
+        state["sources_complete"] = True
+
+    def lazy_nodes():
+        state["extractor_consumed"] = True
+        assert state["sources_complete"]
+        yield from records["nodes"]
+
+    build_full_generation(
+        catalog,
+        generation_id="gen-1",
+        sources=lazy_sources(),
+        source_bytes=records["source_bytes"],
+        nodes=lazy_nodes(),
+        occurrences=records["occurrences"],
+        assertions=records["assertions"],
+        evidence=records["evidence"],
+        observations=records["observations"],
+        dependencies=records["dependencies"],
+        expected_active=None,
+    )
+
+    assert state == {"sources_complete": True, "extractor_consumed": True}
+
+
+def test_builder_rejects_source_hash_before_consuming_extractor_iterables(tmp_path):
+    from evidence_graph_builder import build_full_generation
+
+    catalog = _catalog(tmp_path)
+    records = _basic_records()
+    records["sources"][0]["sha256"] = "0" * 64
+
+    def forbidden_nodes():
+        pytest.fail("extractor iterable consumed before source snapshot verification")
+        yield
+
+    with pytest.raises(ValueError, match="source.*hash|hash.*source"):
+        build_full_generation(
+            catalog,
+            generation_id="gen-1",
+            sources=iter(records["sources"]),
+            source_bytes=records["source_bytes"],
+            nodes=forbidden_nodes(),
+            occurrences=records["occurrences"],
+            assertions=records["assertions"],
+            evidence=records["evidence"],
+            observations=records["observations"],
+            dependencies=records["dependencies"],
+            expected_active=None,
+        )
+
+
+def test_builder_source_snapshot_is_immutable_while_lazy_extractor_runs(tmp_path):
+    import sqlite3
+
+    from evidence_graph_builder import build_full_generation
+
+    catalog = _catalog(tmp_path)
+    records = _basic_records()
+
+    def mutating_nodes():
+        records["sources"][0]["relative_path"] = "changed.py"
+        records["source_bytes"]["source"] = b"changed"
+        yield from records["nodes"]
+
+    result = build_full_generation(
+        catalog,
+        generation_id="gen-1",
+        sources=records["sources"],
+        source_bytes=records["source_bytes"],
+        nodes=mutating_nodes(),
+        occurrences=records["occurrences"],
+        assertions=records["assertions"],
+        evidence=records["evidence"],
+        observations=records["observations"],
+        dependencies=records["dependencies"],
+        expected_active=None,
+    )
+
+    with sqlite3.connect(result.generation_path / "evidence.sqlite3") as database:
+        relative_path, content = database.execute(
+            "SELECT relative_path, content FROM source"
+        ).fetchone()
+    assert relative_path == "app.py"
+    assert content == b"def caller():\n    callee()\n"
+
+
+def test_builder_cancellation_stops_lazy_iterable_materialization_before_disk_write(tmp_path):
+    from evidence_graph_builder import build_full_generation
+
+    catalog = _catalog(tmp_path)
+    records = _basic_records()
+    checks = 0
+
+    def cancelled():
+        nonlocal checks
+        checks += 1
+        return checks >= 4
+
+    with pytest.raises(TimeoutError, match="cancel"):
+        build_full_generation(
+            catalog,
+            generation_id="gen-1",
+            sources=iter(records["sources"]),
+            source_bytes=records["source_bytes"],
+            nodes=iter(records["nodes"]),
+            occurrences=records["occurrences"],
+            assertions=records["assertions"],
+            evidence=records["evidence"],
+            observations=records["observations"],
+            dependencies=records["dependencies"],
+            expected_active=None,
+            cancelled=cancelled,
+        )
+
+    assert not (catalog.generations_path / "gen-1").exists()
+
+
+def test_builder_propagates_real_file_fsync_failure(tmp_path, monkeypatch):
+    import evidence_graph_builder
+
+    catalog = _catalog(tmp_path)
+    records = _basic_records()
+    real_fsync = evidence_graph_builder.fsync_file
+
+    def fail_fsync(path):
+        if Path(path).name == "source-manifest.json":
+            raise OSError("durability failure")
+        return real_fsync(path)
+
+    monkeypatch.setattr(evidence_graph_builder, "fsync_file", fail_fsync)
+
+    with pytest.raises(OSError, match="durability failure"):
+        evidence_graph_builder.build_full_generation(
+            catalog,
+            generation_id="gen-1",
+            sources=records["sources"],
+            source_bytes=records["source_bytes"],
+            nodes=records["nodes"],
+            occurrences=records["occurrences"],
+            assertions=records["assertions"],
+            evidence=records["evidence"],
+            observations=records["observations"],
+            dependencies=records["dependencies"],
+            expected_active=None,
+        )
+
+
+def test_builder_deadline_stops_lazy_materialization_before_generation_create(
+    tmp_path, monkeypatch
+):
+    import evidence_graph_builder
+
+    catalog = _catalog(tmp_path)
+    records = _basic_records()
+    ticks = iter((0.0, 0.0, 2.0))
+    monkeypatch.setattr(evidence_graph_builder.time, "monotonic", lambda: next(ticks, 2.0))
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        evidence_graph_builder.build_full_generation(
+            catalog,
+            generation_id="gen-1",
+            sources=iter(records["sources"]),
+            source_bytes=records["source_bytes"],
+            nodes=iter(records["nodes"]),
+            occurrences=records["occurrences"],
+            assertions=records["assertions"],
+            evidence=records["evidence"],
+            observations=records["observations"],
+            dependencies=records["dependencies"],
+            expected_active=None,
+            deadline=1.0,
+        )
+
+    assert not (catalog.generations_path / "gen-1").exists()
+
+
+def test_builder_cancellation_after_directory_create_cleans_unpublished_generation(
+    tmp_path, monkeypatch
+):
+    import evidence_graph_builder
+
+    catalog = _catalog(tmp_path)
+    records = _basic_records()
+    cancelled = False
+    real_create = evidence_graph_builder.evidence_graph.create_generation_database
+
+    def cancel_during_database(*args, **kwargs):
+        nonlocal cancelled
+        cancelled = True
+        return real_create(*args, **kwargs)
+
+    monkeypatch.setattr(
+        evidence_graph_builder.evidence_graph,
+        "create_generation_database",
+        cancel_during_database,
+    )
+
+    with pytest.raises(TimeoutError, match="cancel"):
+        evidence_graph_builder.build_full_generation(
+            catalog,
+            generation_id="gen-1",
+            sources=records["sources"],
+            source_bytes=records["source_bytes"],
+            nodes=records["nodes"],
+            occurrences=records["occurrences"],
+            assertions=records["assertions"],
+            evidence=records["evidence"],
+            observations=records["observations"],
+            dependencies=records["dependencies"],
+            expected_active=None,
+            cancelled=lambda: cancelled,
+        )
+
+    assert catalog.get_active() is None
+    assert not (catalog.generations_path / "gen-1").exists()

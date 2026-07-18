@@ -220,9 +220,7 @@ def _windows_reparse_point(path: Path) -> bool:
     return False
 
 
-def _sqlite_lock_probe(
-    root: Path, *, deadline: float = float("inf")
-) -> bool | None:
+def _sqlite_lock_probe(root: Path, *, deadline: float = float("inf")) -> bool | None:
     """Return lock support, or ``None`` when a bounded probe cannot complete."""
     probe = root / f".llm-wiki-lock-probe-{secrets.token_hex(16)}.sqlite3"
     first: sqlite3.Connection | None = None
@@ -404,9 +402,7 @@ def open_readonly_operational_db(
     owner_only: bool = False,
 ) -> sqlite3.Connection:
     """Open a validated runtime SQLite database read-only and fail on path races."""
-    expected = validate_runtime_file(
-        path, state_root, max_bytes=max_bytes, owner_only=owner_only
-    )
+    expected = validate_runtime_file(path, state_root, max_bytes=max_bytes, owner_only=owner_only)
     database = sqlite3.connect(
         f"{Path(path).resolve(strict=True).as_uri()}?mode=ro", uri=True, timeout=0
     )
@@ -430,9 +426,7 @@ def read_runtime_bytes(
     owner_only: bool = False,
 ) -> bytes:
     """Read stable bounded runtime bytes through a no-follow descriptor."""
-    expected = validate_runtime_file(
-        path, state_root, max_bytes=max_bytes, owner_only=owner_only
-    )
+    expected = validate_runtime_file(path, state_root, max_bytes=max_bytes, owner_only=owner_only)
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
     try:
@@ -443,8 +437,7 @@ def read_runtime_bytes(
         after = os.fstat(descriptor)
         if (
             not os.path.samestat(opened, after)
-            or (opened.st_size, opened.st_mtime_ns)
-            != (after.st_size, after.st_mtime_ns)
+            or (opened.st_size, opened.st_mtime_ns) != (after.st_size, after.st_mtime_ns)
             or len(data) > max_bytes
         ):
             raise PermissionError("runtime file changed during bounded read")
@@ -476,14 +469,17 @@ def fsync_directory(path: Path) -> None:
     try:
         descriptor = os.open(Path(path), flags)
     except OSError as exc:
-        if exc.errno in {errno.EACCES, errno.EINVAL, errno.ENOTSUP, errno.EPERM}:
+        unsupported = {errno.EINVAL, errno.ENOTSUP}
+        if os.name == "nt":
+            unsupported.update({errno.EACCES, errno.EPERM})
+        if exc.errno in unsupported:
             return
         raise
     try:
         try:
             os.fsync(descriptor)
         except OSError as exc:
-            if exc.errno not in {errno.EACCES, errno.EBADF, errno.EINVAL, errno.ENOTSUP, errno.EPERM}:
+            if exc.errno not in {errno.EBADF, errno.EINVAL, errno.ENOTSUP}:
                 raise
     finally:
         os.close(descriptor)
@@ -495,7 +491,11 @@ def restricted_relative_path(value: str, allowed_roots: tuple[str, ...]) -> Pure
     if re.match(r"^[A-Za-z]:", value):
         raise ValueError("drive-qualified paths are forbidden")
     path = PurePosixPath(value)
-    if path.is_absolute() or str(path) != value or any(part in {"", ".", ".."} for part in path.parts):
+    if (
+        path.is_absolute()
+        or str(path) != value
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
         raise ValueError("path must be normalized and relative")
     roots = tuple(PurePosixPath(root) for root in allowed_roots)
     if not roots or not any(path == root or root in path.parents for root in roots):
