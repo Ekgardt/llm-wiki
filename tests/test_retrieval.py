@@ -138,7 +138,7 @@ def test_rrf_is_rank_only_and_keeps_raw_backend_fields_separate() -> None:
         _hit(candidate_id="c-b", path="b.md", score=0.91, vector_score=0.91),
         _hit(candidate_id="c-a", path="a.md", score=0.40, vector_score=0.40),
     ]
-    fused = retrieval.fuse_rrf(lexical=lexical, dense=dense, graph=None)
+    fused, _meta = retrieval.fuse_rrf(lexical=lexical, dense=dense, graph=None)
     assert fused[0].candidate_id == "c-a"
     assert fused[0].bm25_rank == 1
     assert fused[0].bm25_score == 12.5
@@ -156,7 +156,7 @@ def test_rrf_is_rank_only_and_keeps_raw_backend_fields_separate() -> None:
         _hit(candidate_id="c-b", path="b.md", score=0.0001),
         _hit(candidate_id="c-a", path="a.md", score=0.00001),
     ]
-    fused2 = retrieval.fuse_rrf(lexical=lexical_huge, dense=dense_tiny, graph=None)
+    fused2, _ = retrieval.fuse_rrf(lexical=lexical_huge, dense=dense_tiny, graph=None)
     assert [item.candidate_id for item in fused2] == [item.candidate_id for item in fused]
     assert fused2[0].rrf_score == fused[0].rrf_score
 
@@ -169,7 +169,7 @@ def test_rrf_ties_are_broken_deterministically_by_candidate_id() -> None:
         {**_hit(candidate_id="c-z", path="z.md", score=0.0), "graph_boost": 99.0},
         {**_hit(candidate_id="c-a", path="a.md", score=0.0), "graph_boost": 0.01},
     ]
-    by_rank = retrieval.fuse_rrf(lexical=None, dense=None, graph=graph)
+    by_rank, _ = retrieval.fuse_rrf(lexical=None, dense=None, graph=graph)
     assert [item.candidate_id for item in by_rank] == ["c-z", "c-a"]
     assert by_rank[0].graph_score == 99.0
     assert by_rank[1].graph_score == 0.01
@@ -180,7 +180,7 @@ def test_rrf_ties_are_broken_deterministically_by_candidate_id() -> None:
     try:
         retrieval.BM25_WEIGHT = 1.0
         retrieval.DENSE_WEIGHT = 1.0
-        fused = retrieval.fuse_rrf(
+        fused, _ = retrieval.fuse_rrf(
             lexical=[
                 _hit(candidate_id="c-z", path="z.md", score=1.0),
                 _hit(candidate_id="c-a", path="a.md", score=1.0),
@@ -486,6 +486,12 @@ def test_retrieval_trace_schema_accepts_contract_payload() -> None:
             fallback_reason="dense_unavailable",
             corpus_generation="gen-1",
             partial=False,
+            reranker_applied=False,
+            reranker_model_id=None,
+            reranker_model_revision=None,
+            reranker_depth=None,
+            reranker_duration_ms=None,
+            reranker_fallback_reason="conditions_unmet",
         )
     )
     validate_schema(payload, SCHEMAS / "retrieval-trace-v1.json")
@@ -503,6 +509,12 @@ def test_retrieval_trace_schema_rejects_unknown_fields() -> None:
         "fallback_reason": None,
         "corpus_generation": "gen-1",
         "partial": False,
+        "reranker_applied": False,
+        "reranker_model_id": None,
+        "reranker_model_revision": None,
+        "reranker_depth": None,
+        "reranker_duration_ms": None,
+        "reranker_fallback_reason": None,
         "extra": True,
     }
     with pytest.raises(SchemaValidationError):

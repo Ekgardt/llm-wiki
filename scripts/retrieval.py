@@ -66,33 +66,54 @@ _QUESTION_RE = re.compile(
     re.IGNORECASE,
 )
 _TEMPORAL_RE = re.compile(
-    r"\b(?P<t>since|before|after|until|as of|yesterday|today|last week|"
-    r"last month|last year|in \d{4}|from \d{4}|between \d{4}|"
-    r"с \d{4}|после|до|вчера|сегодня|на этой неделе)\b",
+    r"(?:"
+    r"\b(?P<t_en>since|before|after|until|as of|yesterday|today|last week|"
+    r"last month|last year|in \d{4}|from \d{4}|between \d{4})\b"
+    r"|(?P<t_ru>с\s+\d{4}|после|до\s+\d{4}|вчера|сегодня|на этой неделе|"
+    r"решения\s+с\s+\d{4})"
+    r"|(?P<t_zh>自\s*\d{4}|以来|自从)"
+    r")",
     re.IGNORECASE,
 )
 _GRAPH_RE = re.compile(
-    r"\b(?P<g>depends on|depended on|dependency|dependencies|calls|callers|"
-    r"callees|related to|linked to|neighbors?|imports?|imported by|"
-    r"зависит|зависимости|связан)\b",
+    r"(?:"
+    r"\b(?P<g_en>depends on|depended on|dependency|dependencies|calls|callers|"
+    r"callees|related to|linked to|neighbors?|imports?|imported by)\b"
+    r"|(?P<g_ru>зависит|зависимости|связан)"
+    r"|(?P<g_zh>依赖|什么依赖|相关联)"
+    r")",
     re.IGNORECASE,
 )
 _REPO_MAP_RE = re.compile(
-    r"\b(?P<r>repo map|repository map|codebase map|architecture overview|"
-    r"project structure|directory structure|"
-    r"карта репозитория|структура проекта)\b",
+    r"(?:"
+    r"\b(?P<r_en>repo map|repository map|codebase map|architecture overview|"
+    r"project structure|directory structure)\b"
+    r"|(?P<r_ru>карт[ауи]\s+репозитори[яию]|структур[аыу]\s+проекта)"
+    r"|(?P<r_zh>仓库地图|显示仓库地图|项目结构)"
+    r")",
     re.IGNORECASE,
 )
 _IMPACT_RE = re.compile(
-    r"\b(?P<i>impact of|what breaks|affected by|blast radius|stale wiki|"
-    r"downstream impact|влияние|что сломается)\b",
+    r"(?:"
+    r"\b(?P<i_en>impact of|what breaks|affected by|blast radius|stale wiki|"
+    r"downstream impact)\b"
+    r"|(?P<i_ru>влияние|что сломается)"
+    r"|(?P<i_zh>影响|的影响)"
+    r")",
     re.IGNORECASE,
 )
 _GLOBAL_RE = re.compile(
-    r"\b(?P<s>synthesize|synthesis|across all projects|across projects|"
-    r"overall architecture|compare across|global overview|"
-    r"синтез|сравни across|глобальный обзор)\b",
+    r"(?:"
+    r"\b(?P<s_en>synthesize|synthesis|across all projects|across projects|"
+    r"overall architecture|compare across|global overview)\b"
+    r"|(?P<s_ru>синтез|глобальный обзор)"
+    r"|(?P<s_zh>跨项目|综合架构|全局概览)"
+    r")",
     re.IGNORECASE,
+)
+_CROSS_LANG_RE = re.compile(
+    r"(?:[\u0400-\u04FF].*[A-Za-z]|[A-Za-z].*[\u0400-\u04FF]|"
+    r"[\u4e00-\u9fff].*[A-Za-z]|[A-Za-z].*[\u4e00-\u9fff])"
 )
 
 
@@ -114,6 +135,12 @@ class RetrievalTrace:
     fallback_reason: str | None
     corpus_generation: str
     partial: bool
+    reranker_applied: bool = False
+    reranker_model_id: str | None = None
+    reranker_model_revision: str | None = None
+    reranker_depth: int | None = None
+    reranker_duration_ms: int | None = None
+    reranker_fallback_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -142,6 +169,7 @@ class RetrievalResult:
     candidates: tuple[RetrievalCandidate, ...]
     trace: RetrievalTrace
     analysis: QueryAnalysis
+    display_meta: Mapping[str, Mapping[str, Any]] | None = None
 
 
 def _normalize_profile(value: str | None) -> str | None:
@@ -208,6 +236,8 @@ def analyze_query(query: str) -> QueryAnalysis:
         intents.append("impact")
     if _GLOBAL_RE.search(normalized):
         intents.append("global_synthesis")
+    if _CROSS_LANG_RE.search(stripped):
+        intents.append("cross_language")
 
     profile = "BASE"
     intent_set = set(intents)
@@ -284,7 +314,7 @@ def fuse_rrf(
     dense: Sequence[Mapping[str, Any]] | None,
     graph: Sequence[Mapping[str, Any]] | None,
     k: int = RRF_K,
-) -> tuple[RetrievalCandidate, ...]:
+) -> tuple[tuple[RetrievalCandidate, ...], dict[str, dict[str, Any]]]:
     """Fuse independent ranked lists with weighted rank-only RRF.
 
     Larger final_score wins. Raw backend magnitudes are preserved on the
@@ -411,9 +441,7 @@ def fuse_rrf(
                 evidence_ids=info["evidence_ids"],
             )
         )
-    # Stash display metadata for compatibility conversion (not part of contract).
-    fuse_rrf._last_meta = meta  # type: ignore[attr-defined]
-    return tuple(candidates)
+    return tuple(candidates), meta
 
 
 def _resolve_effective_mode(
@@ -551,47 +579,61 @@ def retrieve(
     fuse_lexical = lexical_hits if "lexical" in signals else None
     fuse_dense = dense_hits if "dense" in signals and dense_hits is not None else None
     fuse_graph = graph_hits if "graph" in signals and graph_hits is not None else None
-    candidates = fuse_rrf(lexical=fuse_lexical, dense=fuse_dense, graph=fuse_graph)
+    candidates, display_meta = fuse_rrf(
+        lexical=fuse_lexical, dense=fuse_dense, graph=fuse_graph
+    )
 
     # Conditional reranking (Task 13).
     signal_list = list(signals)
+    reranker_applied = False
+    reranker_model_id: str | None = None
+    reranker_model_revision: str | None = None
+    reranker_depth: int | None = None
+    reranker_duration_ms: int | None = None
+    reranker_fallback_reason: str | None = None
     if candidates and rerank_enabled:
         try:
             from reranker import rerank as _rerank
             from reranker import should_rerank
 
-            legacy_rows = [
-                {
-                    "candidate_id": c.candidate_id,
-                    "path": c.relative_path,
-                    "relative_path": c.relative_path,
-                    "summary": "",
-                    "title": Path(c.relative_path).stem,
-                    "rrf_score": c.rrf_score,
-                    "score": c.rrf_score,
-                    "bm25_rank": c.bm25_rank,
-                    "vector_rank": c.vector_rank,
-                    "bm25_score": c.bm25_score,
-                    "vector_score": c.vector_score,
-                    "graph_rank": c.graph_rank,
-                    "graph_score": c.graph_score,
-                    "source_sha256": c.source_sha256,
-                    "heading_path": c.heading_path,
-                    "parent_id": c.parent_id,
-                    "byte_start": c.byte_start,
-                    "byte_end": c.byte_end,
-                    "evidence_ids": c.evidence_ids,
-                }
-                for c in candidates
-            ]
+            legacy_rows = []
+            for c in candidates:
+                info = display_meta.get(c.candidate_id, {})
+                title = info.get("title") or Path(c.relative_path).stem
+                summary = info.get("summary") or info.get("content") or ""
+                legacy_rows.append(
+                    {
+                        "candidate_id": c.candidate_id,
+                        "path": c.relative_path,
+                        "relative_path": c.relative_path,
+                        "summary": summary,
+                        "content": summary,
+                        "title": title,
+                        "rrf_score": c.rrf_score,
+                        "score": c.rrf_score,
+                        "bm25_rank": c.bm25_rank,
+                        "vector_rank": c.vector_rank,
+                        "bm25_score": c.bm25_score,
+                        "vector_score": c.vector_score,
+                        "graph_rank": c.graph_rank,
+                        "graph_score": c.graph_score,
+                        "source_sha256": c.source_sha256,
+                        "heading_path": c.heading_path,
+                        "parent_id": c.parent_id,
+                        "byte_start": c.byte_start,
+                        "byte_end": c.byte_end,
+                        "evidence_ids": c.evidence_ids,
+                    }
+                )
             apply, skip_reason = should_rerank(
                 profile=requested,
                 candidates=legacy_rows,
                 analysis_intents=analysis.intents,
                 rerank_enabled=rerank_enabled,
             )
-            if apply:
-                # Rerank a deeper pool then cut to limit.
+            if not apply:
+                reranker_fallback_reason = skip_reason
+            else:
                 pool_limit = max(limit, 20) if limit > 0 else 20
                 reranked = _rerank(
                     analysis.normalized_query or analysis.query,
@@ -600,6 +642,12 @@ def retrieve(
                 )
                 if reranked and reranked[0].get("reranker_applied"):
                     signal_list.append("reranker")
+                    reranker_applied = True
+                    reranker_model_id = reranked[0].get("reranker_model_id")
+                    reranker_model_revision = reranked[0].get("reranker_model_revision")
+                    reranker_depth = reranked[0].get("reranker_depth")
+                    reranker_duration_ms = reranked[0].get("reranker_duration_ms")
+                    reranker_fallback_reason = None
                     rebuilt: list[RetrievalCandidate] = []
                     for row in reranked:
                         rebuilt.append(
@@ -641,18 +689,19 @@ def retrieve(
                         )
                     candidates = tuple(rebuilt)
                 elif reranked:
-                    # Optional reranker missing/errored: soft-skip without
-                    # poisoning truthful backend fallback reasons.
-                    pass
+                    reranker_fallback_reason = str(
+                        reranked[0].get("reranker_fallback_reason")
+                        or "reranker_unavailable"
+                    )
+                    reranker_model_id = reranked[0].get("reranker_model_id")
+                    reranker_model_revision = reranked[0].get("reranker_model_revision")
+                    reranker_depth = reranked[0].get("reranker_depth")
+                    reranker_duration_ms = reranked[0].get("reranker_duration_ms")
         except Exception:
-            pass
+            reranker_fallback_reason = "reranker_error"
 
     if limit > 0:
         candidates = candidates[:limit]
-
-    # Attach display meta for search() conversion when available.
-    meta = getattr(fuse_rrf, "_last_meta", {})
-    retrieve._last_display_meta = meta  # type: ignore[attr-defined]
 
     trace = RetrievalTrace(
         requested_mode=requested,
@@ -661,8 +710,23 @@ def retrieve(
         fallback_reason=fallback,
         corpus_generation=corpus_generation,
         partial=partial,
+        reranker_applied=reranker_applied,
+        reranker_model_id=str(reranker_model_id) if reranker_model_id else None,
+        reranker_model_revision=(
+            str(reranker_model_revision) if reranker_model_revision else None
+        ),
+        reranker_depth=int(reranker_depth) if isinstance(reranker_depth, int) else None,
+        reranker_duration_ms=(
+            int(reranker_duration_ms) if isinstance(reranker_duration_ms, int) else None
+        ),
+        reranker_fallback_reason=reranker_fallback_reason,
     )
-    return RetrievalResult(candidates=candidates, trace=trace, analysis=analysis)
+    return RetrievalResult(
+        candidates=candidates,
+        trace=trace,
+        analysis=analysis,
+        display_meta=display_meta,
+    )
 
 
 def trace_to_dict(trace: RetrievalTrace) -> dict[str, object]:
@@ -674,6 +738,12 @@ def trace_to_dict(trace: RetrievalTrace) -> dict[str, object]:
         "fallback_reason": trace.fallback_reason,
         "corpus_generation": trace.corpus_generation,
         "partial": trace.partial,
+        "reranker_applied": trace.reranker_applied,
+        "reranker_model_id": trace.reranker_model_id,
+        "reranker_model_revision": trace.reranker_model_revision,
+        "reranker_depth": trace.reranker_depth,
+        "reranker_duration_ms": trace.reranker_duration_ms,
+        "reranker_fallback_reason": trace.reranker_fallback_reason,
     }
 
 
@@ -691,7 +761,7 @@ def candidates_to_legacy(
     summary_map = summaries or {}
     project_map = projects or {}
     timestamp_map = timestamps or {}
-    meta = display_meta if display_meta is not None else getattr(retrieve, "_last_display_meta", {})
+    meta = display_meta if display_meta is not None else (result.display_meta or {})
     rows: list[dict[str, Any]] = []
     for candidate in result.candidates:
         path = candidate.relative_path
@@ -725,6 +795,12 @@ def candidates_to_legacy(
             "signals_used": list(result.trace.signals_used),
             "fallback_reason": result.trace.fallback_reason,
             "generation": result.trace.corpus_generation,
+            "reranker_applied": result.trace.reranker_applied,
+            "reranker_model_id": result.trace.reranker_model_id,
+            "reranker_model_revision": result.trace.reranker_model_revision,
+            "reranker_depth": result.trace.reranker_depth,
+            "reranker_duration_ms": result.trace.reranker_duration_ms,
+            "reranker_fallback_reason": result.trace.reranker_fallback_reason,
         }
         for key in (
             "authority",
@@ -860,42 +936,49 @@ def retrieve_via_search_memory(
         selected_catalog is not None and not force_rebuild and page_paths is None
     )
     use_generation = _open_generation()
+    generation_fallback: str | None = None
     if use_generation:
         corpus_generation = str(generation_ctx["manifest"]["generation_id"])
     elif catalog_requested:
-        # Broken/missing generation → preserve legacy emergency path (incl. test mocks).
-        return search_memory._legacy_search(
-            query,
-            scope,
-            limit,
-            force_rebuild,
-            project,
-            since,
-            as_of,
-            semantic,
-            page_paths,
-            graph,
-            rerank,
-            source_tool,
-            emit_telemetry,
-        )
+        # Always continue through retrieve(); report truthful generation failure.
+        generation_fallback = "generation_unavailable"
 
     def lexical_backend(**filters: Any) -> Sequence[Mapping[str, Any]]:
+        nonlocal generation_fallback
         if use_generation:
             try:
-                rows = search_memory._generation_fts_search(
-                    filters["query"],
+                if not search_memory._generation_consumption_unchanged(
+                    selected_catalog,
                     generation_ctx["manifest"],
-                    generation_ctx["connection"],
-                    scope=filters["scope"],
-                    limit=filters["limit"],
-                    project=filters["project"],
-                    since=filters["since"],
-                    as_of=filters["as_of"],
-                )
-                return [_backend_hit_from_legacy(row) for row in rows]
+                    generation_ctx["artifact_names"],
+                    generation_ctx["seal"],
+                ):
+                    generation_fallback = "generation_seal_changed"
+                    use = False
+                else:
+                    use = True
+                if use:
+                    rows = search_memory._generation_fts_search(
+                        filters["query"],
+                        generation_ctx["manifest"],
+                        generation_ctx["connection"],
+                        scope=filters["scope"],
+                        limit=filters["limit"],
+                        project=filters["project"],
+                        since=filters["since"],
+                        as_of=filters["as_of"],
+                    )
+                    if not search_memory._generation_consumption_unchanged(
+                        selected_catalog,
+                        generation_ctx["manifest"],
+                        generation_ctx["artifact_names"],
+                        generation_ctx["seal"],
+                    ):
+                        generation_fallback = "generation_seal_changed"
+                    else:
+                        return [_backend_hit_from_legacy(row) for row in rows]
             except Exception:
-                return ()
+                generation_fallback = generation_fallback or "generation_corrupt"
         rows = search_memory._legacy_lexical_hits(
             filters["query"],
             scope=filters["scope"],
@@ -909,9 +992,17 @@ def retrieve_via_search_memory(
         return [_backend_hit_from_legacy(row) for row in rows]
 
     def dense_backend(**filters: Any) -> Sequence[Mapping[str, Any]] | None:
+        nonlocal generation_fallback
         if "dense" not in wanted_tuple:
             return None
         if use_generation:
+            if generation_fallback in {
+                "generation_seal_changed",
+                "generation_corrupt",
+                "generation_unavailable",
+            }:
+                generation_ctx["dense_fallback"] = generation_fallback
+                return None
             if (
                 generation_embedder is None
                 or generation_model_id is None
@@ -920,6 +1011,15 @@ def retrieve_via_search_memory(
                 generation_ctx["dense_fallback"] = "generation_vectors_unavailable"
                 return None
             try:
+                if not search_memory._generation_consumption_unchanged(
+                    selected_catalog,
+                    generation_ctx["manifest"],
+                    generation_ctx["artifact_names"],
+                    generation_ctx["seal"],
+                ):
+                    generation_ctx["dense_fallback"] = "generation_seal_changed"
+                    generation_fallback = "generation_seal_changed"
+                    return None
                 rows = search_memory._generation_vectors_search(
                     filters["query"],
                     selected_catalog,
@@ -937,6 +1037,15 @@ def retrieve_via_search_memory(
                 if rows is None:
                     generation_ctx["dense_fallback"] = "generation_vectors_unavailable"
                     return None
+                if not search_memory._generation_consumption_unchanged(
+                    selected_catalog,
+                    generation_ctx["manifest"],
+                    generation_ctx["artifact_names"],
+                    generation_ctx["seal"],
+                ):
+                    generation_ctx["dense_fallback"] = "generation_seal_changed"
+                    generation_fallback = "generation_seal_changed"
+                    return None
                 return [
                     _backend_hit_from_legacy({**row, "vector_score": row.get("score")})
                     for row in rows
@@ -944,6 +1053,7 @@ def retrieve_via_search_memory(
             except Exception:
                 generation_ctx["dense_fallback"] = "generation_vectors_unavailable"
                 return None
+        # semantic=False / BASE: dense backend not requested via wanted_tuple.
         rows = search_memory._legacy_dense_hits(
             filters["query"],
             scope=filters["scope"],
@@ -1013,11 +1123,13 @@ def retrieve_via_search_memory(
                 pass
 
     # Prefer generation-specific dense fallback wording when applicable.
-    dense_fallback = generation_ctx.get("dense_fallback")
+    dense_fallback = generation_ctx.get("dense_fallback") or generation_fallback
     effective_mode = result.trace.effective_mode
     fallback_reason = result.trace.fallback_reason
     if dense_fallback and fallback_reason in {None, "dense_unavailable"}:
         fallback_reason = str(dense_fallback)
+    if generation_fallback and fallback_reason is None:
+        fallback_reason = generation_fallback
 
     # Filename exact short-circuit: stem matches query with spaces→hyphens.
     if (
@@ -1043,31 +1155,18 @@ def retrieve_via_search_memory(
                 fallback_reason=fallback_reason,
                 corpus_generation=result.trace.corpus_generation,
                 partial=result.trace.partial,
+                reranker_applied=result.trace.reranker_applied,
+                reranker_model_id=result.trace.reranker_model_id,
+                reranker_model_revision=result.trace.reranker_model_revision,
+                reranker_depth=result.trace.reranker_depth,
+                reranker_duration_ms=result.trace.reranker_duration_ms,
+                reranker_fallback_reason=result.trace.reranker_fallback_reason,
             ),
             analysis=result.analysis,
+            display_meta=result.display_meta,
         )
 
-    # Uppercase contract modes → lowercase legacy keys expected by older callers.
-    mode_lower = {
-        "requested_mode": result.trace.requested_mode,
-        "effective_mode": result.trace.effective_mode,
-    }
-    rows = candidates_to_legacy(result)
-    for row in rows:
-        row["requested_mode"] = mode_lower["requested_mode"]
-        row["effective_mode"] = mode_lower["effective_mode"]
-        # Generation-era tests compare lowercase effective modes.
-        if isinstance(row["effective_mode"], str) and row["effective_mode"].isupper():
-            # Keep contract uppercase in new fields; also expose lowercase for
-            # assertions that predate Task 11.
-            pass
-        # Normalize effective_mode for legacy generation tests that expect "base"/"hybrid".
-        em = str(row["effective_mode"])
-        if em == "BASE":
-            row["effective_mode"] = "BASE"
-        elif em == "HYBRID":
-            row["effective_mode"] = "HYBRID"
-
+    rows = candidates_to_legacy(result, display_meta=result.display_meta)
     # Reranking is owned by retrieve(); do not double-apply here.
 
     if emit_telemetry and rows:

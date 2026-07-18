@@ -9,7 +9,13 @@
     "signals_used",
     "fallback_reason",
     "corpus_generation",
-    "partial"
+    "partial",
+    "reranker_applied",
+    "reranker_model_id",
+    "reranker_model_revision",
+    "reranker_depth",
+    "reranker_duration_ms",
+    "reranker_fallback_reason"
   ],
   "properties": {
     "schema_version": {"const": "retrieval-trace/v1"},
@@ -68,7 +74,43 @@
       "minLength": 1,
       "maxLength": 128
     },
-    "partial": {"type": "boolean"}
+    "partial": {"type": "boolean"},
+    "reranker_applied": {"type": "boolean"},
+    "reranker_model_id": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "minLength": 1, "maxLength": 256}
+      ]
+    },
+    "reranker_model_revision": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "minLength": 1, "maxLength": 256}
+      ]
+    },
+    "reranker_depth": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "integer", "minimum": 1, "maximum": 1000}
+      ]
+    },
+    "reranker_duration_ms": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "integer", "minimum": 0, "maximum": 3600000}
+      ]
+    },
+    "reranker_fallback_reason": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[a-z][a-z0-9_]*$"
+        }
+      ]
+    }
   },
   "additionalProperties": false
 }

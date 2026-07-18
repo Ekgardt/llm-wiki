@@ -168,6 +168,14 @@ class TestShouldRerank:
             profile="GLOBAL",
             candidates=[{"rrf_score": 1.0}, {"rrf_score": 0.1}],
         )[0] is True
+        # Profile alone is not enough without an explicit trigger.
+        assert should_rerank(
+            profile="HYBRID",
+            candidates=[
+                {"rrf_score": 1.0, "bm25_rank": 1, "vector_rank": 1},
+                {"rrf_score": 0.1, "bm25_rank": 2, "vector_rank": 2},
+            ],
+        )[0] is False
 
 
 class TestSigmoid:
