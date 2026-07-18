@@ -1,0 +1,174 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/scale-matrix-full-report-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "mode", "ground_truth", "ann_default_claimed", "selected_default_backend", "declared_corpus_sizes", "executed_corpus_sizes", "declared_selectivity", "heavy_parallel", "generated_at", "seed", "dimensions", "queries", "cells", "crash_matrix", "adoption_policy", "provenance"],
+  "properties": {
+    "schema_version": {"const": "scale-matrix-full/v1"},
+    "mode": {"const": "full"},
+    "ground_truth": {"const": "exact-numpy"},
+    "ann_default_claimed": {"const": false},
+    "selected_default_backend": {"const": "exact-numpy"},
+    "declared_corpus_sizes": {"const": [1000, 5000, 20000, 50000, 100000], "type": "array", "minItems": 5, "maxItems": 5, "uniqueItems": true, "items": {"type": "integer", "minimum": 1}},
+    "executed_corpus_sizes": {"const": [1000, 5000, 20000, 50000, 100000], "type": "array", "minItems": 5, "maxItems": 5, "uniqueItems": true, "items": {"type": "integer", "minimum": 1}},
+    "declared_selectivity": {"const": [1.0, 0.1, 0.01, 0.001], "type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}},
+    "heavy_parallel": {"const": false},
+    "generated_at": {"type": "string", "minLength": 1},
+    "seed": {"type": "integer"},
+    "dimensions": {"type": "integer", "minimum": 1},
+    "queries": {"type": "integer", "minimum": 1},
+    "cells": {"type": "array", "minItems": 100, "maxItems": 100, "items": {"$ref": "#/$defs/cell"}},
+    "crash_matrix": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["before_fsync", "before_activation", "after_activation"],
+      "properties": {
+        "before_fsync": {"$ref": "#/$defs/crash_outcome"},
+        "before_activation": {"$ref": "#/$defs/crash_outcome"},
+        "after_activation": {"$ref": "#/$defs/crash_outcome"}
+      }
+    },
+    "adoption_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["recall_floor", "latency_speedup_floor", "product_p95_target_ms", "material_exceed_ratio", "default_backend", "ann_requires_measurement"],
+      "properties": {
+        "recall_floor": {"const": 0.98},
+        "latency_speedup_floor": {"const": 2.0},
+        "product_p95_target_ms": {"const": 100.0},
+        "material_exceed_ratio": {"const": 1.2},
+        "default_backend": {"const": "exact-numpy"},
+        "ann_requires_measurement": {"const": true}
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platform", "python", "harness", "measurement_status"],
+      "properties": {
+        "platform": {"type": "string", "minLength": 1},
+        "python": {"type": "string", "minLength": 1},
+        "harness": {"const": "benchmark/run_scale_matrix.py"},
+        "measurement_status": {"type": "string", "enum": ["measured", "unavailable"]}
+      }
+    }
+  },
+  "$defs": {
+    "nullable_number": {"oneOf": [{"type": "number"}, {"type": "null"}]},
+    "nullable_integer": {"oneOf": [{"type": "integer"}, {"type": "null"}]},
+    "nullable_recall": {"oneOf": [{"type": "number", "minimum": 0, "maximum": 1}, {"type": "null"}]},
+    "cell": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["adapter", "corpus_size", "selectivity", "status", "reason", "metrics", "metric_provenance", "latency_profiles", "adoption", "filter_methodology", "index"],
+      "properties": {
+        "adapter": {"type": "string", "enum": ["exact-numpy", "sqlite-vec", "usearch", "lancedb-flat", "lancedb-ann"]},
+        "corpus_size": {"type": "integer", "minimum": 1},
+        "selectivity": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "status": {"type": "string", "enum": ["ok", "skipped", "failed"]},
+        "reason": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
+        "metrics": {"$ref": "#/$defs/metrics"},
+        "metric_provenance": {"$ref": "#/$defs/metric_provenance"},
+        "latency_profiles": {"$ref": "#/$defs/latency_profiles"},
+        "adoption": {"$ref": "#/$defs/adoption"},
+        "filter_methodology": {"$ref": "#/$defs/filter_methodology"},
+        "index": {"$ref": "#/$defs/index_status"}
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["latency_ms", "rss_bytes", "disk_bytes", "build_ms", "update_ms", "delete_ms", "startup_ms", "concurrent_reader_p95_ms", "recall_at_10", "recall_at_50", "batch_throughput_qps"],
+      "properties": {
+        "latency_ms": {"$ref": "#/$defs/nullable_number"},
+        "rss_bytes": {"$ref": "#/$defs/nullable_integer"},
+        "disk_bytes": {"$ref": "#/$defs/nullable_integer"},
+        "build_ms": {"$ref": "#/$defs/nullable_number"},
+        "update_ms": {"$ref": "#/$defs/nullable_number"},
+        "delete_ms": {"$ref": "#/$defs/nullable_number"},
+        "startup_ms": {"$ref": "#/$defs/nullable_number"},
+        "concurrent_reader_p95_ms": {"$ref": "#/$defs/nullable_number"},
+        "recall_at_10": {"$ref": "#/$defs/nullable_recall"},
+        "recall_at_50": {"$ref": "#/$defs/nullable_recall"},
+        "batch_throughput_qps": {"$ref": "#/$defs/nullable_number"}
+      }
+    },
+    "metric_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["latency_ms", "rss_bytes", "disk_bytes", "build_ms", "update_ms", "delete_ms", "startup_ms", "concurrent_reader_p95_ms", "recall_at_10", "recall_at_50", "batch_throughput_qps"],
+      "properties": {
+        "latency_ms": {"$ref": "#/$defs/metric_status"},
+        "rss_bytes": {"$ref": "#/$defs/metric_status"},
+        "disk_bytes": {"$ref": "#/$defs/metric_status"},
+        "build_ms": {"$ref": "#/$defs/metric_status"},
+        "update_ms": {"$ref": "#/$defs/metric_status"},
+        "delete_ms": {"$ref": "#/$defs/metric_status"},
+        "startup_ms": {"$ref": "#/$defs/metric_status"},
+        "concurrent_reader_p95_ms": {"$ref": "#/$defs/metric_status"},
+        "recall_at_10": {"$ref": "#/$defs/metric_status"},
+        "recall_at_50": {"$ref": "#/$defs/metric_status"},
+        "batch_throughput_qps": {"$ref": "#/$defs/metric_status"}
+      }
+    },
+    "metric_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "source", "reason"],
+      "properties": {
+        "status": {"type": "string", "enum": ["measured", "unavailable"]},
+        "source": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
+        "reason": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "null"}]}
+      }
+    },
+    "latency_profiles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cold", "warm"],
+      "properties": {"cold": {"$ref": "#/$defs/latency_profile"}, "warm": {"$ref": "#/$defs/latency_profile"}}
+    },
+    "latency_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["p50_ms", "p95_ms", "p99_ms"],
+      "properties": {"p50_ms": {"$ref": "#/$defs/nullable_number"}, "p95_ms": {"$ref": "#/$defs/nullable_number"}, "p99_ms": {"$ref": "#/$defs/nullable_number"}}
+    },
+    "adoption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["adopt", "becomes_default", "requires_measurement", "reasons"],
+      "properties": {"adopt": {"type": "boolean"}, "becomes_default": {"const": false}, "requires_measurement": {"type": "boolean"}, "reasons": {"type": "array", "items": {"type": "string", "minLength": 1}}}
+    },
+    "filter_methodology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["indexed_corpus_size", "selected_corpus_size", "application", "equivalent_predicate", "implementation"],
+      "properties": {"indexed_corpus_size": {"type": "integer", "minimum": 1}, "selected_corpus_size": {"type": "integer", "minimum": 1}, "application": {"const": "query_time"}, "equivalent_predicate": {"const": "selected = true"}, "implementation": {"type": "string", "enum": ["numpy-mask", "postfilter", "lancedb-prefilter"]}}
+    },
+    "index_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requested", "status", "type", "verified_by", "reason"],
+      "properties": {"requested": {"type": "string", "enum": ["exact", "flat", "ann", "optional"]}, "status": {"type": "string", "enum": ["flat", "ann", "unavailable"]}, "type": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "null"}]}, "verified_by": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "null"}]}, "reason": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "null"}]}}
+    },
+    "crash_outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["injected", "worker_returncode", "recovered_cleanly", "partial_activation", "status", "platform", "filesystem", "file_fsync", "directory_fsync", "recovery_directory_fsync", "detail"],
+      "properties": {
+        "injected": {"type": "boolean"},
+        "worker_returncode": {"oneOf": [{"type": "integer"}, {"type": "null"}]},
+        "recovered_cleanly": {"type": "boolean"},
+        "partial_activation": {"type": "boolean"},
+        "status": {"type": "string", "enum": ["passed", "failed", "unavailable"]},
+        "platform": {"type": "string", "minLength": 1},
+        "filesystem": {"type": "string", "minLength": 1},
+        "file_fsync": {"type": "string", "enum": ["performed", "not_reached", "unavailable"]},
+        "directory_fsync": {"type": "string", "enum": ["performed", "not_reached", "unavailable"]},
+        "recovery_directory_fsync": {"type": "string", "enum": ["performed", "not_reached", "unavailable"]},
+        "detail": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "null"}]}
+      }
+    }
+  }
+}
