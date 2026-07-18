@@ -2,29 +2,37 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://llm-wiki.local/schemas/evidence-graph-manifest-v1.json",
   "type": "object",
-  "required": ["schema_version", "generation_id", "source_snapshot_sha256", "sources"],
+  "required": ["generation_id", "schema_version", "collector_version", "extractor_version", "tokenizer_version", "tokenizer_config_sha256", "embedding_model_id", "embedding_model_revision", "vector_dimensions", "graph_schema_version", "graph_extractor_version", "source_manifest_sha256", "artifacts", "vector_state"],
   "properties": {
-    "schema_version": {"const": "evidence-graph-manifest/v1"},
     "generation_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
-    "source_snapshot_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "sources": {
+    "parent_generation_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+    "schema_version": {"type": "string", "minLength": 1, "maxLength": 128},
+    "collector_version": {"type": "string", "minLength": 1, "maxLength": 128},
+    "extractor_version": {"type": "string", "minLength": 1, "maxLength": 128},
+    "tokenizer_version": {"type": "string", "minLength": 1, "maxLength": 128},
+    "tokenizer_config_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "embedding_model_id": {"oneOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 128}]},
+    "embedding_model_revision": {"oneOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 128}]},
+    "vector_dimensions": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 1, "maximum": 65536}]},
+    "graph_schema_version": {"const": "evidence-graph/v1"},
+    "graph_extractor_version": {"type": "string", "minLength": 1, "maxLength": 128},
+    "source_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "artifacts": {
       "type": "array",
-      "maxItems": 1000000,
+      "minItems": 1,
+      "maxItems": 1024,
       "items": {
         "type": "object",
-        "required": ["source_id", "relative_path", "sha256", "size", "media_type", "language", "git_oid"],
+        "required": ["path", "size", "sha256"],
         "properties": {
-          "source_id": {"type": "string", "minLength": 1, "maxLength": 512},
-          "relative_path": {"type": "string", "minLength": 1, "maxLength": 4096},
-          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "path": {"type": "string", "minLength": 1, "maxLength": 4096},
           "size": {"type": "integer", "minimum": 0, "maximum": 17179869184},
-          "media_type": {"type": "string", "minLength": 1, "maxLength": 256},
-          "language": {"oneOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 128}]},
-          "git_oid": {"oneOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 128}]}
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
         },
         "additionalProperties": false
       }
-    }
+    },
+    "vector_state": {"enum": ["absent", "complete", "stale"]}
   },
   "additionalProperties": false
 }

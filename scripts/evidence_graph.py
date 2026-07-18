@@ -6,11 +6,13 @@ import hashlib
 import json
 import math
 import os
+import re
 import sqlite3
 import stat
 import time
 import uuid
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 
 from reliable_memory import canonical_json_bytes, validate_runtime_file
@@ -20,9 +22,13 @@ MAX_DATABASE_BYTES = 16 * 1024 * 1024 * 1024
 MAX_SOURCE_BYTES = 16 * 1024 * 1024 * 1024
 MAX_ROWS = 10_000
 MAX_DEPTH = 32
+MAX_EDGE_TYPES = 64
+MAX_WORK = 100_000
 PROGRESS_OPCODES = 1000
+MAX_VALIDATION_ROWS = 1_000_000
 
 _SHA256 = frozenset("0123456789abcdef")
+_NODE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/#@+\-]{0,511}")
 _CONFIDENCE = frozenset({"high", "medium", "low"})
 _AUTHORITY = frozenset({"user", "web", "ai-derived", "inferred"})
 _RESOLUTION = frozenset({"resolved", "unresolved", "ambiguous"})
@@ -85,6 +91,108 @@ _OBSERVATION_KEYS = frozenset(
 _DEPENDENCY_KEYS = frozenset(
     {"dependency_id", "dependent_node_id", "dependency_node_id", "kind", "source_id"}
 )
+
+_TABLE_COLUMNS = {
+    "source": (
+        "source_id",
+        "relative_path",
+        "sha256",
+        "size",
+        "media_type",
+        "language",
+        "git_oid",
+    ),
+    "node": ("node_id", "kind", "identity_scheme", "identity_key", "metadata_json"),
+    "occurrence": (
+        "occurrence_id",
+        "node_id",
+        "source_id",
+        "role",
+        "byte_start",
+        "byte_end",
+        "line_start",
+        "line_end",
+    ),
+    "assertion": (
+        "assertion_id",
+        "source_node_id",
+        "edge_type",
+        "target_node_id",
+        "literal_json",
+        "confidence",
+        "authority",
+        "resolution",
+        "extractor",
+    ),
+    "observation": (
+        "observation_id",
+        "source_node_id",
+        "edge_type",
+        "target_text",
+        "reason",
+        "extractor",
+    ),
+    "evidence": (
+        "evidence_id",
+        "assertion_id",
+        "observation_id",
+        "source_id",
+        "byte_start",
+        "byte_end",
+        "span_sha256",
+    ),
+    "dependency": (
+        "dependency_id",
+        "dependent_node_id",
+        "dependency_node_id",
+        "kind",
+        "source_id",
+    ),
+}
+_EXPLICIT_INDEXES = frozenset(
+    {
+        "node_kind",
+        "occurrence_source_span",
+        "assertion_traversal",
+        "assertion_reverse",
+        "assertion_resolution",
+        "evidence_source_span",
+        "observation_resolution",
+        "dependency_invalidation",
+        "dependency_reverse",
+    }
+)
+_INDEX_COLUMNS = {
+    "node_kind": ("kind", "identity_key", "node_id"),
+    "occurrence_source_span": ("source_id", "byte_start", "byte_end", "occurrence_id"),
+    "assertion_traversal": (
+        "source_node_id",
+        "edge_type",
+        "target_node_id",
+        "assertion_id",
+    ),
+    "assertion_reverse": (
+        "target_node_id",
+        "edge_type",
+        "source_node_id",
+        "assertion_id",
+    ),
+    "assertion_resolution": ("resolution", "edge_type", "assertion_id"),
+    "evidence_source_span": ("source_id", "byte_start", "byte_end", "evidence_id"),
+    "observation_resolution": ("reason", "edge_type", "observation_id"),
+    "dependency_invalidation": (
+        "dependency_node_id",
+        "kind",
+        "dependent_node_id",
+        "dependency_id",
+    ),
+    "dependency_reverse": (
+        "dependent_node_id",
+        "kind",
+        "dependency_node_id",
+        "dependency_id",
+    ),
+}
 
 _SCHEMA = """
 CREATE TABLE source (
@@ -164,6 +272,26 @@ CREATE INDEX dependency_reverse ON dependency(dependent_node_id, kind, dependenc
 """
 
 
+def _schema_signature(database: sqlite3.Connection) -> tuple[tuple[object, ...], ...]:
+    return tuple(
+        tuple(row)
+        for row in database.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_schema "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        )
+    )
+
+
+@lru_cache(maxsize=1)
+def _expected_schema_signature() -> tuple[tuple[object, ...], ...]:
+    database = sqlite3.connect(":memory:")
+    try:
+        database.executescript(_SCHEMA)
+        return _schema_signature(database)
+    finally:
+        database.close()
+
+
 def _closed(record: Mapping[str, object], expected: frozenset[str], label: str) -> None:
     if not isinstance(record, Mapping):
         raise TypeError(f"{label} must be an object")
@@ -188,6 +316,14 @@ def _digest(value: object, label: str) -> str:
     if not isinstance(value, str) or len(value) != 64 or any(c not in _SHA256 for c in value):
         raise ValueError(f"{label} must be a lowercase SHA-256 hash")
     return value
+
+
+def _node_id(value: object, label: str = "node_id") -> str:
+    text = _text(value, label, maximum=512)
+    assert text is not None
+    if _NODE_ID.fullmatch(text) is None:
+        raise ValueError(f"{label} must use the closed delimiter-safe identifier syntax")
+    return text
 
 
 def _integer(value: object, label: str, *, minimum: int = 0, maximum: int = MAX_SOURCE_BYTES) -> int:
@@ -235,6 +371,7 @@ def _configure_write(database: sqlite3.Connection) -> None:
     database.execute("PRAGMA synchronous=FULL")
     database.execute("PRAGMA foreign_keys=ON")
     database.execute("PRAGMA trusted_schema=OFF")
+    database.execute("PRAGMA user_version=1")
 
 
 def create_generation_database(
@@ -295,7 +432,7 @@ def create_generation_database(
             _closed(record, _NODE_KEYS, "node")
             normalized_nodes.append(
                 (
-                    _text(record["node_id"], "node_id", maximum=512),
+                    _node_id(record["node_id"]),
                     _text(record["kind"], "node kind", maximum=128),
                     _text(record["identity_scheme"], "identity_scheme", maximum=256),
                     _text(record["identity_key"], "identity_key", maximum=4096),
@@ -315,7 +452,7 @@ def create_generation_database(
             normalized_occurrences.append(
                 (
                     _text(record["occurrence_id"], "occurrence_id", maximum=512),
-                    _text(record["node_id"], "node_id", maximum=512, optional=True),
+                    None if record["node_id"] is None else _node_id(record["node_id"]),
                     source_id,
                     _text(record["role"], "occurrence role", maximum=128),
                     start,
@@ -326,6 +463,7 @@ def create_generation_database(
             )
 
         normalized_assertions = []
+        resolved_assertions: set[str] = set()
         for record in _ordered(assertions, "assertion_id", "assertion"):
             _closed(record, _ASSERTION_KEYS, "assertion")
             target = _text(record["target_node_id"], "target_node_id", maximum=512, optional=True)
@@ -339,12 +477,16 @@ def create_generation_database(
                 raise ValueError("assertion confidence or authority is outside the closed contract")
             if resolution not in _RESOLUTION or (resolution == "resolved" and target is None):
                 raise ValueError("assertion resolution is outside the closed contract")
+            assertion_id = _text(record["assertion_id"], "assertion_id", maximum=512)
+            assert assertion_id is not None
+            if resolution == "resolved":
+                resolved_assertions.add(assertion_id)
             normalized_assertions.append(
                 (
-                    _text(record["assertion_id"], "assertion_id", maximum=512),
-                    _text(record["source_node_id"], "source_node_id", maximum=512),
+                    assertion_id,
+                    _node_id(record["source_node_id"], "source_node_id"),
                     _text(record["edge_type"], "edge_type", maximum=128),
-                    target,
+                    None if target is None else _node_id(target, "target_node_id"),
                     literal,
                     confidence,
                     authority,
@@ -361,7 +503,9 @@ def create_generation_database(
             normalized_observations.append(
                 (
                     _text(record["observation_id"], "observation_id", maximum=512),
-                    _text(record["source_node_id"], "source_node_id", maximum=512, optional=True),
+                    None
+                    if record["source_node_id"] is None
+                    else _node_id(record["source_node_id"], "source_node_id"),
                     _text(record["edge_type"], "edge_type", maximum=128),
                     _text(record["target_text"], "target_text", optional=True),
                     record["reason"],
@@ -370,6 +514,7 @@ def create_generation_database(
             )
 
         normalized_evidence = []
+        evidenced_assertions: set[str] = set()
         for record in _ordered(evidence, "evidence_id", "evidence"):
             _closed(record, _EVIDENCE_KEYS, "evidence")
             assertion_id = _text(record["assertion_id"], "assertion_id", maximum=512, optional=True)
@@ -381,12 +526,14 @@ def create_generation_database(
             source_id = _text(record["source_id"], "source_id", maximum=512)
             assert source_id is not None
             start = _integer(record["byte_start"], "evidence byte_start")
-            end = _integer(record["byte_end"], "evidence byte_end", minimum=start)
+            end = _integer(record["byte_end"], "evidence byte_end", minimum=start + 1)
             if source_id not in source_content or end > len(source_content[source_id]):
                 raise ValueError("evidence byte range is outside its captured source")
             span_hash = _digest(record["span_sha256"], "evidence span hash")
             if hashlib.sha256(source_content[source_id][start:end]).hexdigest() != span_hash:
                 raise ValueError("evidence span hash does not match the captured source range")
+            if assertion_id is not None:
+                evidenced_assertions.add(assertion_id)
             normalized_evidence.append(
                 (
                     _text(record["evidence_id"], "evidence_id", maximum=512),
@@ -399,14 +546,19 @@ def create_generation_database(
                 )
             )
 
+        if missing := resolved_assertions - evidenced_assertions:
+            raise ValueError(
+                f"every resolved assertion requires evidence; missing: {sorted(missing)!r}"
+            )
+
         normalized_dependencies = []
         for record in _ordered(dependencies, "dependency_id", "dependency"):
             _closed(record, _DEPENDENCY_KEYS, "dependency")
             normalized_dependencies.append(
                 (
                     _text(record["dependency_id"], "dependency_id", maximum=512),
-                    _text(record["dependent_node_id"], "dependent_node_id", maximum=512),
-                    _text(record["dependency_node_id"], "dependency_node_id", maximum=512),
+                    _node_id(record["dependent_node_id"], "dependent_node_id"),
+                    _node_id(record["dependency_node_id"], "dependency_node_id"),
                     _text(record["kind"], "dependency kind", maximum=128),
                     _text(record["source_id"], "source_id", maximum=512, optional=True),
                 )
@@ -434,7 +586,11 @@ def create_generation_database(
             database.close()
         if temporary.stat().st_size > MAX_DATABASE_BYTES:
             raise ValueError("Evidence Graph database exceeds the supported byte ceiling")
-        os.replace(temporary, path)
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            raise FileExistsError("Evidence Graph generation artifacts are immutable") from None
+        temporary.unlink()
     except BaseException:
         try:
             temporary.unlink()
@@ -447,6 +603,170 @@ def _bound(value: object, label: str, maximum: int) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= maximum:
         raise ValueError(f"{label} must be between 1 and {maximum}")
     return value
+
+
+def _edge_type_values(edge_types: Sequence[str] | None) -> tuple[str, ...]:
+    if edge_types is None:
+        return ()
+    if isinstance(edge_types, (str, bytes)) or not isinstance(edge_types, Sequence):
+        raise ValueError("edge_types must be a bounded sequence")
+    if len(edge_types) > MAX_EDGE_TYPES:
+        raise ValueError(f"edge_types cannot contain more than {MAX_EDGE_TYPES} values")
+    return tuple(sorted({_text(value, "edge_type", maximum=128) for value in edge_types}))
+
+
+def _validation_deadline(
+    database: sqlite3.Connection,
+    deadline: float | None,
+    monotonic: Callable[[], float],
+) -> None:
+    if deadline is not None and (
+        isinstance(deadline, bool)
+        or not isinstance(deadline, (int, float))
+        or not math.isfinite(deadline)
+    ):
+        raise ValueError("deadline must be a finite monotonic timestamp")
+    if deadline is not None and monotonic() >= deadline:
+        raise TimeoutError("Evidence Graph validation deadline reached")
+    database.set_progress_handler(
+        None if deadline is None else lambda: int(monotonic() >= deadline),
+        PROGRESS_OPCODES,
+    )
+
+
+def _validate_connection(
+    database: sqlite3.Connection,
+    *,
+    deadline: float | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> None:
+    """Validate the closed Evidence Graph file format and all stored integrity invariants."""
+    _validation_deadline(database, deadline, monotonic)
+    try:
+        signature = _schema_signature(database)
+        if signature != _expected_schema_signature():
+            raise ValueError("Evidence Graph sqlite_schema is not the exact v1 contract")
+        schema_rows = database.execute(
+            "SELECT type, name, tbl_name, sql FROM sqlite_schema "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+        tables = {row["name"] for row in schema_rows if row["type"] == "table"}
+        indexes = {row["name"] for row in schema_rows if row["type"] == "index"}
+        other = {row["type"] for row in schema_rows if row["type"] not in {"table", "index"}}
+        if tables != set(_TABLE_COLUMNS) or indexes != _EXPLICIT_INDEXES or other:
+            raise ValueError("Evidence Graph sqlite_schema is not the exact v1 contract")
+        for table, expected in _TABLE_COLUMNS.items():
+            columns = tuple(row["name"] for row in database.execute(f"PRAGMA table_info({table})"))
+            if columns != expected:
+                raise ValueError(f"Evidence Graph table columns differ for {table}")
+        for index, expected in _INDEX_COLUMNS.items():
+            columns = tuple(row["name"] for row in database.execute(f"PRAGMA index_info({index})"))
+            if columns != expected:
+                raise ValueError(f"Evidence Graph index columns differ for {index}")
+        if database.execute("PRAGMA user_version").fetchone()[0] != 1:
+            raise ValueError("Evidence Graph schema version is not v1")
+        if str(database.execute("PRAGMA journal_mode").fetchone()[0]).casefold() != "delete":
+            raise ValueError("Evidence Graph must use rollback-journal DELETE mode")
+        if database.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise ValueError("Evidence Graph foreign key integrity check failed")
+        integrity = database.execute("PRAGMA integrity_check(1)").fetchone()
+        if integrity is None or integrity[0] != "ok":
+            raise ValueError("Evidence Graph integrity check failed")
+
+        for table in _TABLE_COLUMNS:
+            count = database.execute(
+                f"SELECT COUNT(*) FROM (SELECT 1 FROM {table} LIMIT ?)",
+                (MAX_VALIDATION_ROWS + 1,),
+            ).fetchone()[0]
+            if count > MAX_VALIDATION_ROWS:
+                raise ValueError(f"Evidence Graph {table} row ceiling exceeded")
+
+        invalid = database.execute(
+            """
+SELECT 1 FROM source
+WHERE length(sha256) != 64 OR sha256 GLOB '*[^0-9a-f]*' OR size < 0
+   OR relative_path = '' OR relative_path LIKE '/%' OR relative_path LIKE '%\\%'
+   OR relative_path = '..' OR relative_path LIKE '../%' OR relative_path LIKE '%/../%'
+UNION ALL
+SELECT 1 FROM node
+WHERE node_id = '' OR length(node_id) > 512 OR metadata_json IS NULL OR NOT json_valid(metadata_json)
+UNION ALL
+SELECT 1 FROM occurrence o JOIN source s USING(source_id)
+WHERE o.byte_start < 0 OR o.byte_end < o.byte_start OR o.byte_end > s.size
+   OR o.line_start < 1 OR o.line_end < o.line_start
+UNION ALL
+SELECT 1 FROM assertion
+WHERE confidence NOT IN ('high','medium','low')
+   OR authority NOT IN ('user','web','ai-derived','inferred')
+   OR resolution NOT IN ('resolved','unresolved','ambiguous')
+   OR (target_node_id IS NULL) = (literal_json IS NULL)
+   OR (literal_json IS NOT NULL AND NOT json_valid(literal_json))
+UNION ALL
+SELECT 1 FROM observation
+WHERE reason NOT IN ('ambiguous_target','dynamic_dispatch','missing_dependency',
+                     'parse_error','unresolved_reference','unsupported_semantics')
+UNION ALL
+SELECT 1 FROM evidence e JOIN source s USING(source_id)
+WHERE e.byte_start < 0 OR e.byte_end <= e.byte_start OR e.byte_end > s.size
+   OR length(e.span_sha256) != 64 OR e.span_sha256 GLOB '*[^0-9a-f]*'
+   OR (e.assertion_id IS NULL) = (e.observation_id IS NULL)
+UNION ALL
+SELECT 1 FROM assertion a
+WHERE a.resolution='resolved'
+  AND NOT EXISTS (SELECT 1 FROM evidence e WHERE e.assertion_id=a.assertion_id)
+LIMIT 1
+"""
+        ).fetchone()
+        if invalid is not None:
+            raise ValueError("Evidence Graph source, evidence, or controlled value integrity failed")
+
+        source_rows = database.execute(
+            "SELECT source_id, relative_path FROM source ORDER BY source_id LIMIT ?",
+            (MAX_VALIDATION_ROWS + 1,),
+        ).fetchall()
+        for row in source_rows:
+            _text(row["source_id"], "source_id", maximum=512)
+            _relative_path(row["relative_path"])
+        node_rows = database.execute(
+            "SELECT node_id FROM node ORDER BY node_id LIMIT ?", (MAX_VALIDATION_ROWS + 1,)
+        ).fetchall()
+        for row in node_rows:
+            _node_id(row["node_id"])
+    except sqlite3.Error as exc:
+        if deadline is not None and (monotonic() >= deadline or "interrupt" in str(exc).casefold()):
+            raise TimeoutError("Evidence Graph validation deadline reached") from exc
+        raise ValueError("Evidence Graph database validation failed") from exc
+    finally:
+        database.set_progress_handler(None, 0)
+
+
+def validate_generation_artifact(
+    generation_path: Path,
+    manifest: Mapping[str, object],
+    *,
+    state_root: Path,
+    deadline: float | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> None:
+    """Validate one graph artifact already bound by the shared generation manifest."""
+    if manifest.get("graph_schema_version") != GRAPH_SCHEMA_VERSION:
+        raise ValueError("Evidence Graph manifest has the wrong graph schema version")
+    artifacts = [item for item in manifest.get("artifacts", []) if item.get("path") == "evidence.sqlite3"]
+    if len(artifacts) != 1:
+        raise ValueError("Evidence Graph manifest must bind exactly one evidence.sqlite3 artifact")
+    artifact = Path(generation_path) / "evidence.sqlite3"
+    expected = validate_runtime_file(artifact, state_root, max_bytes=MAX_DATABASE_BYTES)
+    database = sqlite3.connect(f"{artifact.resolve(strict=True).as_uri()}?mode=ro", uri=True, timeout=0)
+    try:
+        current = artifact.stat(follow_symlinks=False)
+        if not os.path.samestat(expected, current):
+            raise PermissionError("Evidence Graph identity changed while validating")
+        database.row_factory = sqlite3.Row
+        database.execute("PRAGMA query_only=ON")
+        database.execute("PRAGMA trusted_schema=OFF")
+        _validate_connection(database, deadline=deadline, monotonic=monotonic)
+    finally:
+        database.close()
 
 
 class EvidenceGraph:
@@ -478,6 +798,7 @@ class EvidenceGraph:
             database.row_factory = sqlite3.Row
             database.execute("PRAGMA query_only=ON")
             database.execute("PRAGMA trusted_schema=OFF")
+            _validate_connection(database)
             self._database = database
         except BaseException:
             database.close()
@@ -554,7 +875,7 @@ class EvidenceGraph:
         }
 
     def node(self, node_id: str) -> dict[str, object] | None:
-        identifier = _text(node_id, "node_id", maximum=512)
+        identifier = _node_id(node_id)
         row = self._database.execute(
             "SELECT node_id, kind, identity_scheme, identity_key, metadata_json "
             "FROM node WHERE node_id = ?",
@@ -580,14 +901,16 @@ class EvidenceGraph:
         edge_types: Sequence[str] | None,
         max_depth: int,
         max_rows: int,
+        max_work: int,
         deadline: float | None,
     ) -> list[dict[str, object]]:
         if direction not in {"in", "out"}:
             raise ValueError("direction must be in or out")
         depth = _bound(max_depth, "max_depth", MAX_DEPTH)
-        edge_values = tuple(sorted({_text(value, "edge_type", maximum=128) for value in edge_types or ()}))
+        edge_values = _edge_type_values(edge_types)
+        work_limit = _bound(max_work, "max_work", MAX_WORK)
         filter_sql = ""
-        parameters: list[object] = [_text(node_id, "node_id", maximum=512), depth]
+        parameters: list[object] = [_node_id(node_id), depth]
         if edge_values:
             filter_sql = f" AND a.edge_type IN ({','.join('?' for _ in edge_values)})"
             parameters.extend(edge_values)
@@ -597,22 +920,26 @@ class EvidenceGraph:
             else ("target_node_id", "source_node_id")
         )
         sql = f"""
-WITH RECURSIVE walk(node_id, depth, seen) AS (
-  SELECT ?, 0, ',' || ? || ','
+WITH RECURSIVE walk(node_id, depth, seen, edge_order) AS (
+  SELECT ?, 0, ',' || ? || ',', ''
   UNION ALL
-  SELECT a.{target_column}, walk.depth + 1, walk.seen || a.{target_column} || ','
+  SELECT a.{target_column}, walk.depth + 1, walk.seen || a.{target_column} || ',', a.assertion_id
   FROM walk JOIN assertion a ON a.{source_column} = walk.node_id
   WHERE walk.depth < ? AND a.resolution = 'resolved' AND a.target_node_id IS NOT NULL
     AND instr(walk.seen, ',' || a.{target_column} || ',') = 0{filter_sql}
+  ORDER BY 2, 1, 4
   LIMIT ?
 )
-SELECT n.node_id, n.kind, n.identity_scheme, n.identity_key, n.metadata_json, min(w.depth) AS depth
+SELECT n.node_id, n.kind, n.identity_scheme, n.identity_key, n.metadata_json,
+       min(w.depth) AS depth, (SELECT count(*) FROM walk) AS work_count
 FROM walk w JOIN node n USING(node_id) WHERE w.depth > 0
 GROUP BY n.node_id ORDER BY depth, n.kind, n.identity_key, n.node_id LIMIT ?
 """
         parameters.insert(1, parameters[0])
-        parameters.append(_bound(max_rows, "max_rows", MAX_ROWS) + 1)
+        parameters.append(work_limit + 2)
         rows = self._execute(sql, parameters, max_rows=max_rows, deadline=deadline)
+        if rows and rows[0]["work_count"] - 1 > work_limit:
+            raise ValueError("Evidence Graph recursive work ceiling exceeded")
         result = []
         for row in rows:
             item = self._node(row)
@@ -628,6 +955,7 @@ GROUP BY n.node_id ORDER BY depth, n.kind, n.identity_key, n.node_id LIMIT ?
         edge_types: Sequence[str] | None = None,
         max_depth: int = 1,
         max_rows: int = 100,
+        max_work: int = 1000,
         deadline: float | None = None,
     ):
         return self._traverse(
@@ -636,6 +964,7 @@ GROUP BY n.node_id ORDER BY depth, n.kind, n.identity_key, n.node_id LIMIT ?
             edge_types=edge_types,
             max_depth=max_depth,
             max_rows=max_rows,
+            max_work=max_work,
             deadline=deadline,
         )
 
@@ -652,11 +981,13 @@ GROUP BY n.node_id ORDER BY depth, n.kind, n.identity_key, n.node_id LIMIT ?
         reverse: bool = False,
         max_depth: int = 8,
         max_rows: int = 100,
+        max_work: int = 1000,
         deadline: float | None = None,
     ):
         if not isinstance(reverse, bool):
             raise ValueError("reverse must be boolean")
         depth = _bound(max_depth, "max_depth", MAX_DEPTH)
+        work_limit = _bound(max_work, "max_work", MAX_WORK)
         start, target = (
             ("dependency_node_id", "dependent_node_id")
             if reverse
@@ -664,28 +995,31 @@ GROUP BY n.node_id ORDER BY depth, n.kind, n.identity_key, n.node_id LIMIT ?
         )
         rows = self._execute(
             f"""
-WITH RECURSIVE walk(node_id, depth, seen) AS (
-  SELECT ?, 0, ',' || ? || ','
+WITH RECURSIVE walk(node_id, depth, seen, edge_order) AS (
+  SELECT ?, 0, ',' || ? || ',', ''
   UNION ALL
-  SELECT d.{target}, w.depth + 1, w.seen || d.{target} || ','
+  SELECT d.{target}, w.depth + 1, w.seen || d.{target} || ',', d.dependency_id
   FROM walk w JOIN dependency d ON d.{start}=w.node_id
   WHERE w.depth < ? AND instr(w.seen, ',' || d.{target} || ',') = 0
+  ORDER BY 2, 1, 4
   LIMIT ?
 )
 SELECT n.node_id, n.kind, n.identity_scheme, n.identity_key, n.metadata_json,
-       min(w.depth) AS depth
+       min(w.depth) AS depth, (SELECT count(*) FROM walk) AS work_count
 FROM walk w JOIN node n USING(node_id) WHERE w.depth > 0
 GROUP BY n.node_id ORDER BY depth, n.kind, n.identity_key, n.node_id LIMIT ?
 """,
             (
-                _text(node_id, "node_id", maximum=512),
-                _text(node_id, "node_id", maximum=512),
+                _node_id(node_id),
+                _node_id(node_id),
                 depth,
-                _bound(max_rows, "max_rows", MAX_ROWS) + 1,
+                work_limit + 2,
             ),
             max_rows=max_rows,
             deadline=deadline,
         )
+        if rows and rows[0]["work_count"] - 1 > work_limit:
+            raise ValueError("Evidence Graph recursive work ceiling exceeded")
         result = []
         for row in rows:
             item = self._node(row)
@@ -706,26 +1040,30 @@ GROUP BY n.node_id ORDER BY depth, n.kind, n.identity_key, n.node_id LIMIT ?
         *,
         max_depth: int = 8,
         max_rows: int = 10,
+        max_work: int = 1000,
         deadline: float | None = None,
     ):
         depth = _bound(max_depth, "max_depth", MAX_DEPTH)
-        source_id = _text(source_node_id, "source_node_id", maximum=512)
-        target_id = _text(target_node_id, "target_node_id", maximum=512)
+        work_limit = _bound(max_work, "max_work", MAX_WORK)
+        source_id = _node_id(source_node_id, "source_node_id")
+        target_id = _node_id(target_node_id, "target_node_id")
         rows = self._execute(
             """
-WITH RECURSIVE walk(node_id, depth, node_ids, assertion_ids, seen) AS (
-  SELECT ?, 0, json_array(?), json_array(), ',' || ? || ','
+WITH RECURSIVE walk(node_id, depth, node_ids, assertion_ids, seen, edge_order) AS (
+  SELECT ?, 0, json_array(?), json_array(), ',' || ? || ',', ''
   UNION ALL
   SELECT a.target_node_id, w.depth + 1,
          json_insert(w.node_ids, '$[#]', a.target_node_id),
          json_insert(w.assertion_ids, '$[#]', a.assertion_id),
-         w.seen || a.target_node_id || ','
+         w.seen || a.target_node_id || ',', a.assertion_id
   FROM walk w JOIN assertion a ON a.source_node_id = w.node_id
   WHERE w.depth < ? AND a.resolution='resolved' AND a.target_node_id IS NOT NULL
     AND instr(w.seen, ',' || a.target_node_id || ',') = 0
+  ORDER BY 2, 1, 6
   LIMIT ?
 )
-SELECT node_ids, assertion_ids, depth FROM walk WHERE node_id=? AND depth > 0
+SELECT node_ids, assertion_ids, depth, (SELECT count(*) FROM walk) AS work_count
+FROM walk WHERE node_id=? AND depth > 0
 ORDER BY depth, assertion_ids LIMIT ?
 """,
             (
@@ -733,12 +1071,14 @@ ORDER BY depth, assertion_ids LIMIT ?
                 source_id,
                 source_id,
                 depth,
-                _bound(max_rows, "max_rows", MAX_ROWS) + 1,
+                work_limit + 2,
                 target_id,
             ),
             max_rows=max_rows,
             deadline=deadline,
         )
+        if rows and rows[0]["work_count"] - 1 > work_limit:
+            raise ValueError("Evidence Graph recursive work ceiling exceeded")
         return [
             {
                 "node_ids": json.loads(row["node_ids"]),
