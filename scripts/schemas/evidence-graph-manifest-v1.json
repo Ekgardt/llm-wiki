@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/evidence-graph-manifest-v1.json",
+  "type": "object",
+  "required": ["schema_version", "generation_id", "source_snapshot_sha256", "sources"],
+  "properties": {
+    "schema_version": {"const": "evidence-graph-manifest/v1"},
+    "generation_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+    "source_snapshot_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sources": {
+      "type": "array",
+      "maxItems": 1000000,
+      "items": {
+        "type": "object",
+        "required": ["source_id", "relative_path", "sha256", "size", "media_type", "language", "git_oid"],
+        "properties": {
+          "source_id": {"type": "string", "minLength": 1, "maxLength": 512},
+          "relative_path": {"type": "string", "minLength": 1, "maxLength": 4096},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "size": {"type": "integer", "minimum": 0, "maximum": 17179869184},
+          "media_type": {"type": "string", "minLength": 1, "maxLength": 256},
+          "language": {"oneOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 128}]},
+          "git_oid": {"oneOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 128}]}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}
