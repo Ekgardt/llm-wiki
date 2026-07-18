@@ -237,6 +237,11 @@ TOOL_INPUT_SCHEMAS = {
                 "type": "string",
                 "description": "Project directory to analyze",
             },
+            "live": {
+                "type": "boolean",
+                "default": False,
+                "description": "Bypass the active generation and run live extraction",
+            },
         },
         "required": ["directory"],
     },
@@ -260,6 +265,11 @@ TOOL_INPUT_SCHEMAS = {
             "base": {"type": "string", "maxLength": 1024},
             "target": {"type": "string", "maxLength": 1024},
             "branch": {"type": "string", "maxLength": 1024},
+            "live": {
+                "type": "boolean",
+                "default": False,
+                "description": "Bypass the active generation and run live extraction",
+            },
         },
         "required": ["directory"],
     },
@@ -556,24 +566,45 @@ def _trigger_compile() -> dict:
     return {"spawned": spawned, "reason": reason}
 
 
-def _find_dead_code(directory: str) -> dict:
+def _find_dead_code(directory: str, *, live: bool = False) -> dict:
     """Find conservative dead-code candidates in a project directory."""
     from code_graph import find_dead_code
 
     resolved, error = _validated_code_directory(directory)
     if error:
         return {"error": error}
-    return {"directory": str(resolved), "candidates": find_dead_code(resolved)}
+    result = find_dead_code(resolved, live=live, with_report=True)
+    if isinstance(result, list):
+        return {
+            "directory": str(resolved),
+            "candidates": result,
+            "source_generation": None,
+            "graph_complete": False,
+            "unresolved_count": None,
+            "fallback": True,
+        }
+    return {"directory": str(resolved), **result}
 
 
-def _get_architecture(directory: str) -> dict:
+def _get_architecture(directory: str, *, live: bool = False) -> dict:
     """Summarize the statically visible architecture of a project directory."""
     from code_graph import get_architecture
 
     resolved, error = _validated_code_directory(directory)
     if error:
         return {"error": error}
-    return {"directory": str(resolved), "architecture": get_architecture(resolved)}
+    architecture = get_architecture(resolved, live=live, with_report=True)
+    report = {
+        "source_generation": architecture.get("source_generation"),
+        "graph_complete": architecture.get("graph_complete", False),
+        "unresolved_count": architecture.get("unresolved_count"),
+        "fallback": architecture.get("fallback", True),
+    }
+    return {
+        "directory": str(resolved),
+        "architecture": architecture,
+        **report,
+    }
 
 
 def _analyze_impact(
@@ -1113,11 +1144,31 @@ def _quality_for(
             "warnings": list(data.get("warnings", [])) or ["Impact analysis is unresolved."],
         }
     if name in {"find_dead_code", "get_architecture"}:
+        if isinstance(data, dict) and data.get("fallback") is False:
+            unresolved = data.get("unresolved_count")
+            if data.get("graph_complete") is True and unresolved == 0:
+                return {
+                    "coverage": 0.95,
+                    "confidence": 0.9,
+                    "fallback": False,
+                    "partial": False,
+                    "warnings": [],
+                }
+            return {
+                "coverage": 0.8,
+                "confidence": 0.75,
+                "fallback": False,
+                "partial": True,
+                "warnings": [
+                    f"Active code graph has {unresolved} unresolved observations."
+                ],
+            }
         return {
             "coverage": 0.6,
             "confidence": 0.55,
+            "fallback": True,
             "partial": True,
-            "warnings": ["Static code graph is incomplete."],
+            "warnings": ["Live static extraction fallback is incomplete."],
         }
     if name == "doctor":
         overall = data.get("overall_status") if isinstance(data, dict) else None
@@ -1263,7 +1314,9 @@ async def _handle_tool_call(name: str, arguments) -> str:
             elif name == "compile":
                 data = _trigger_compile()
             elif name == "find_dead_code":
-                data = _find_dead_code(arguments["directory"])
+                data = _find_dead_code(
+                    arguments["directory"], live=arguments.get("live", False)
+                )
             elif name == "get_architecture":
                 if arguments.get("mode", "summary") == "impact":
                     data = _analyze_impact(
@@ -1274,7 +1327,9 @@ async def _handle_tool_call(name: str, arguments) -> str:
                         branch=arguments.get("branch"),
                     )
                 elif arguments.get("mode", "summary") == "summary":
-                    data = _get_architecture(arguments["directory"])
+                    data = _get_architecture(
+                        arguments["directory"], live=arguments.get("live", False)
+                    )
                 else:
                     data = {"error": "get_architecture mode must be summary or impact"}
             else:

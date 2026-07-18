@@ -204,6 +204,17 @@ class TestToolDefinitions:
             assert tool.inputSchema["required"] == ["directory"]
             assert tool.inputSchema["properties"]["directory"]["type"] == "string"
 
+    def test_code_tools_allow_explicit_live_fallback_without_adding_tools(self):
+        import mcp_server
+
+        for name in ("find_dead_code", "get_architecture"):
+            live = mcp_server.TOOL_INPUT_SCHEMAS[name]["properties"]["live"]
+            assert live == {
+                "type": "boolean",
+                "default": False,
+                "description": "Bypass the active generation and run live extraction",
+            }
+
     def test_tools_advertise_the_envelope_schema_when_supported(self):
         import mcp_server
 
@@ -777,6 +788,52 @@ class TestHelperFunctions:
         assert "error" in result
         assert called == []
 
+    def test_code_tool_helpers_forward_store_report(self, tmp_path, monkeypatch):
+        import mcp_server
+
+        report = {
+            "source_generation": "gen-25",
+            "graph_complete": False,
+            "unresolved_count": 2,
+            "fallback": False,
+        }
+        monkeypatch.setattr(
+            "code_graph.find_dead_code",
+            lambda directory, **options: {"candidates": [{"name": "unused"}], **report},
+        )
+        monkeypatch.setattr(
+            "code_graph.get_architecture",
+            lambda directory, **options: {
+                "entry_points": [],
+                "routes": [],
+                "hotspots": [],
+                "communities": [],
+                **report,
+            },
+        )
+
+        dead = mcp_server._find_dead_code(str(tmp_path))
+        architecture = mcp_server._get_architecture(str(tmp_path))
+
+        assert dead["source_generation"] == "gen-25"
+        assert dead["unresolved_count"] == 2
+        assert dead["candidates"] == [{"name": "unused"}]
+        assert architecture["source_generation"] == "gen-25"
+        assert architecture["architecture"]["graph_complete"] is False
+
+    def test_code_tool_helpers_forward_explicit_live_fallback(self, tmp_path, monkeypatch):
+        import mcp_server
+
+        seen = []
+        monkeypatch.setattr(
+            "code_graph.find_dead_code",
+            lambda directory, **options: seen.append(options) or [],
+        )
+
+        mcp_server._find_dead_code(str(tmp_path), live=True)
+
+        assert seen == [{"live": True, "with_report": True}]
+
 
 class TestHandleToolCall:
     """Test the _handle_tool_call async function."""
@@ -788,9 +845,7 @@ class TestHandleToolCall:
         from mcp_server import _handle_tool_call
         if args is self._MISSING:
             args = {}
-        return asyncio.get_event_loop().run_until_complete(
-            _handle_tool_call(name, args)
-        )
+        return asyncio.run(_handle_tool_call(name, args))
 
     def _data(self, name, args=None):
         envelope = json.loads(self._run(name, args))
@@ -1142,7 +1197,7 @@ class TestHandleToolCall:
 
     def test_find_dead_code_returns_candidates(self, tmp_path, monkeypatch):
         expected = [{"name": "unused", "status": "candidate", "graph_complete": False}]
-        monkeypatch.setattr("code_graph.find_dead_code", lambda directory: expected)
+        monkeypatch.setattr("code_graph.find_dead_code", lambda directory, **options: expected)
 
         envelope = json.loads(self._run("find_dead_code", {"directory": str(tmp_path)}))
         data = envelope["data"]
@@ -1161,7 +1216,7 @@ class TestHandleToolCall:
             "communities": [],
             "graph_complete": False,
         }
-        monkeypatch.setattr("code_graph.get_architecture", lambda directory: expected)
+        monkeypatch.setattr("code_graph.get_architecture", lambda directory, **options: expected)
 
         envelope = json.loads(self._run("get_architecture", {"directory": str(tmp_path)}))
         data = envelope["data"]
@@ -1171,6 +1226,35 @@ class TestHandleToolCall:
         assert envelope["coverage"] < 1
         assert envelope["confidence"] < 1
         assert envelope["warnings"]
+
+    def test_code_tool_envelope_uses_generation_report(self, tmp_path, monkeypatch):
+        import mcp_server
+
+        monkeypatch.setattr(
+            mcp_server,
+            "_find_dead_code",
+            lambda directory, **options: {
+                "directory": directory,
+                "candidates": [],
+                "source_generation": "gen-25",
+                "graph_complete": True,
+                "unresolved_count": 0,
+                "fallback": False,
+            },
+        )
+
+        envelope = json.loads(
+            asyncio.run(
+                mcp_server._handle_tool_call(
+                    "find_dead_code", {"directory": str(tmp_path)}
+                )
+            )
+        )
+
+        assert envelope["fallback"] is False
+        assert envelope["partial"] is False
+        assert envelope["coverage"] >= 0.9
+        assert envelope["data"]["source_generation"] == "gen-25"
 
     def test_doctor_returns_uniform_conservative_envelope(self, monkeypatch):
         import mcp_server
