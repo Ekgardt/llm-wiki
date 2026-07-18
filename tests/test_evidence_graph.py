@@ -1,0 +1,340 @@
+"""Evidence Graph generation schema, validation, and query contracts."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import sqlite3
+import sys
+import time
+from contextlib import closing
+from pathlib import Path
+
+import pytest
+
+SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+
+
+def _sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _records(source: bytes = b"def caller():\n    callee()\n# [[Decision]]\n"):
+    return {
+        "sources": [
+            {
+                "source_id": "src-code",
+                "relative_path": "src/app.py",
+                "sha256": _sha(source),
+                "size": len(source),
+                "media_type": "text/x-python",
+                "language": "python",
+                "git_oid": None,
+            }
+        ],
+        "source_bytes": {"src-code": source},
+        "nodes": [
+            {
+                "node_id": "caller",
+                "kind": "function",
+                "identity_scheme": "python-qualified-name/v1",
+                "identity_key": "src.app:caller",
+                "metadata": {"name": "caller"},
+            },
+            {
+                "node_id": "callee",
+                "kind": "function",
+                "identity_scheme": "python-qualified-name/v1",
+                "identity_key": "src.app:callee",
+                "metadata": {"name": "callee"},
+            },
+            {
+                "node_id": "decision",
+                "kind": "decision",
+                "identity_scheme": "wiki-slug/v1",
+                "identity_key": "decision",
+                "metadata": {},
+            },
+        ],
+        "occurrences": [
+            {
+                "occurrence_id": "occ-caller",
+                "node_id": "caller",
+                "source_id": "src-code",
+                "role": "definition",
+                "byte_start": 0,
+                "byte_end": 13,
+                "line_start": 1,
+                "line_end": 1,
+            }
+        ],
+        "assertions": [
+            {
+                "assertion_id": "call",
+                "source_node_id": "caller",
+                "edge_type": "CALLS",
+                "target_node_id": "callee",
+                "literal": None,
+                "confidence": "high",
+                "authority": "ai-derived",
+                "resolution": "resolved",
+                "extractor": "python/v1",
+            },
+            {
+                "assertion_id": "documents",
+                "source_node_id": "decision",
+                "edge_type": "DOCUMENTS",
+                "target_node_id": "caller",
+                "literal": None,
+                "confidence": "high",
+                "authority": "user",
+                "resolution": "resolved",
+                "extractor": "wiki/v1",
+            },
+        ],
+        "observations": [
+            {
+                "observation_id": "dynamic-call",
+                "source_node_id": "caller",
+                "edge_type": "CALLS",
+                "target_text": "runtime_target",
+                "reason": "dynamic_dispatch",
+                "extractor": "python/v1",
+            }
+        ],
+        "evidence": [
+            {
+                "evidence_id": "ev-call",
+                "assertion_id": "call",
+                "observation_id": None,
+                "source_id": "src-code",
+                "byte_start": 18,
+                "byte_end": 26,
+                "span_sha256": _sha(source[18:26]),
+            }
+        ],
+        "dependencies": [
+            {
+                "dependency_id": "dep-code",
+                "dependent_node_id": "decision",
+                "dependency_node_id": "caller",
+                "kind": "documents",
+                "source_id": "src-code",
+            }
+        ],
+    }
+
+
+def _create(tmp_path: Path, **overrides):
+    import evidence_graph
+
+    records = _records()
+    records.update(overrides)
+    path = tmp_path / "evidence.sqlite3"
+    evidence_graph.create_generation_database(path, **records)
+    return evidence_graph.EvidenceGraph(path, state_root=tmp_path)
+
+
+def test_manifest_schema_is_closed_and_bounded():
+    schema = json.loads((SCRIPTS / "schemas/evidence-graph-manifest-v1.json").read_text())
+
+    assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+    assert schema["additionalProperties"] is False
+    assert set(schema["required"]) == {
+        "schema_version",
+        "generation_id",
+        "source_snapshot_sha256",
+        "sources",
+    }
+    assert schema["properties"]["sources"]["maxItems"] > 0
+    assert schema["properties"]["sources"]["items"]["additionalProperties"] is False
+
+
+def test_generation_database_has_canonical_tables_indexes_and_pragmas(tmp_path):
+    graph = _create(tmp_path)
+    graph.close()
+
+    with closing(sqlite3.connect(tmp_path / "evidence.sqlite3")) as database:
+        tables = {
+            row[0]
+            for row in database.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+            )
+        }
+        indexes = {
+            row[0]
+            for row in database.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' ORDER BY name"
+            )
+        }
+        assert database.execute("PRAGMA journal_mode").fetchone()[0].lower() == "delete"
+        assert database.execute("PRAGMA synchronous").fetchone()[0] == 2
+        assert database.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    assert tables == {
+        "assertion",
+        "dependency",
+        "evidence",
+        "node",
+        "observation",
+        "occurrence",
+        "source",
+    }
+    assert {
+        "assertion_reverse",
+        "assertion_resolution",
+        "assertion_traversal",
+        "dependency_invalidation",
+        "dependency_reverse",
+        "evidence_source_span",
+        "node_kind",
+        "observation_resolution",
+        "occurrence_source_span",
+    } <= indexes
+    assert not (tmp_path / "evidence.sqlite3-wal").exists()
+
+
+def test_logical_nodes_are_separate_from_occurrences_and_metadata_is_canonical(tmp_path):
+    graph = _create(tmp_path)
+
+    node = graph.node("caller")
+    occurrences = graph.occurrences("caller")
+
+    assert node["identity_key"] == "src.app:caller"
+    assert node["metadata"] == {"name": "caller"}
+    assert occurrences == [
+        {
+            "occurrence_id": "occ-caller",
+            "node_id": "caller",
+            "source_id": "src-code",
+            "relative_path": "src/app.py",
+            "role": "definition",
+            "byte_start": 0,
+            "byte_end": 13,
+            "line_start": 1,
+            "line_end": 1,
+        }
+    ]
+    graph.close()
+
+
+@pytest.mark.parametrize("damage", ["source_hash", "range", "span_hash", "unknown_field"])
+def test_create_fails_closed_on_invalid_sources_evidence_and_records(tmp_path, damage):
+    import evidence_graph
+
+    records = _records()
+    if damage == "source_hash":
+        records["sources"][0]["sha256"] = "0" * 64
+    elif damage == "range":
+        records["evidence"][0]["byte_end"] = len(records["source_bytes"]["src-code"]) + 1
+    elif damage == "span_hash":
+        records["evidence"][0]["span_sha256"] = "0" * 64
+    else:
+        records["nodes"][0]["unknown"] = True
+
+    with pytest.raises((TypeError, ValueError), match="hash|range|unknown|closed"):
+        evidence_graph.create_generation_database(tmp_path / "evidence.sqlite3", **records)
+    assert not (tmp_path / "evidence.sqlite3").exists()
+
+
+def test_unresolved_observations_use_controlled_reasons_without_fake_nodes(tmp_path):
+    graph = _create(tmp_path)
+
+    assert graph.unresolved() == [
+        {
+            "observation_id": "dynamic-call",
+            "source_node_id": "caller",
+            "edge_type": "CALLS",
+            "target_text": "runtime_target",
+            "reason": "dynamic_dispatch",
+            "extractor": "python/v1",
+        }
+    ]
+    graph.close()
+
+    records = _records()
+    records["observations"][0]["reason"] = "made_up"
+    with pytest.raises(ValueError, match="reason"):
+        import evidence_graph
+
+        evidence_graph.create_generation_database(tmp_path / "bad.sqlite3", **records)
+
+
+def test_bounded_queries_cover_both_directions_paths_dependencies_and_evidence(tmp_path):
+    graph = _create(tmp_path)
+
+    assert [row["node_id"] for row in graph.neighbors("caller", direction="out")] == [
+        "callee"
+    ]
+    assert [row["node_id"] for row in graph.neighbors("callee", direction="in")] == [
+        "caller"
+    ]
+    assert graph.path("caller", "callee")[0]["assertion_ids"] == ["call"]
+    assert [row["node_id"] for row in graph.callers("callee")] == ["caller"]
+    assert [row["node_id"] for row in graph.callees("caller")] == ["callee"]
+    assert [row["node_id"] for row in graph.dependencies("decision")] == ["caller"]
+    assert [row["node_id"] for row in graph.code_to_doc("caller")] == ["decision"]
+    assert [row["node_id"] for row in graph.doc_to_code("decision")] == ["caller"]
+    assert graph.evidence(assertion_id="call")[0]["span_sha256"] == _sha(b"callee()")
+    graph.close()
+
+
+def test_dependencies_walk_transitively_with_a_depth_bound(tmp_path):
+    records = _records()
+    records["nodes"].append(
+        {
+            "node_id": "package",
+            "kind": "package",
+            "identity_scheme": "package/v1",
+            "identity_key": "runtime",
+            "metadata": {},
+        }
+    )
+    records["dependencies"].append(
+        {
+            "dependency_id": "dep-runtime",
+            "dependent_node_id": "caller",
+            "dependency_node_id": "package",
+            "kind": "imports",
+            "source_id": "src-code",
+        }
+    )
+    graph = _create(tmp_path, **records)
+
+    assert [row["node_id"] for row in graph.dependencies("decision", max_depth=1)] == [
+        "caller"
+    ]
+    assert [row["node_id"] for row in graph.dependencies("decision", max_depth=2)] == [
+        "caller",
+        "package",
+    ]
+    graph.close()
+
+
+def test_query_limits_depth_rows_deadlines_and_closed_enums(tmp_path):
+    graph = _create(tmp_path)
+
+    with pytest.raises(ValueError, match="direction"):
+        graph.neighbors("caller", direction="sideways")
+    with pytest.raises(ValueError, match="max_depth"):
+        graph.path("caller", "callee", max_depth=0)
+    with pytest.raises(ValueError, match="max_rows"):
+        graph.unresolved(max_rows=0)
+    with pytest.raises(TimeoutError, match="deadline"):
+        graph.neighbors("caller", deadline=time.monotonic() - 1)
+    graph.close()
+
+
+def test_database_is_opened_query_only_and_path_must_remain_in_state_root(tmp_path):
+    graph = _create(tmp_path)
+    assert graph._database.execute("PRAGMA query_only").fetchone()[0] == 1
+    with pytest.raises(sqlite3.OperationalError):
+        graph._database.execute("DELETE FROM node")
+    graph.close()
+
+    import evidence_graph
+
+    with pytest.raises((PermissionError, ValueError)):
+        evidence_graph.EvidenceGraph(tmp_path / "evidence.sqlite3", state_root=tmp_path / "other")
