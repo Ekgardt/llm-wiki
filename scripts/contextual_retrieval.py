@@ -458,11 +458,31 @@ def build_snapshot_contexts(
     return descriptors
 
 
-def generate_context(slug: str, use_llm: bool = True) -> str:
+def legacy_context_cache_path(slug: str, *, source_sha256: str | None = None) -> Path:
+    """Return the legacy mutable-cache path for a contextual entry.
+
+    When ``source_sha256`` is provided the path is hash-suffixed so stale
+    contextual entries invalidate on content changes (Task 15 contract).
+    """
+    if not source_sha256:
+        return CONTEXT_DIR / f"{slug}.ctx"
+    digest_input = f"{source_sha256}:{CONTEXT_EXTRACTOR_VERSION}".encode()
+    suffix = hashlib.sha256(digest_input).hexdigest()[:12]
+    return CONTEXT_DIR / f"{slug}.{suffix}.ctx"
+
+
+def generate_context(
+    slug: str,
+    use_llm: bool = True,
+    source_sha256: str | None = None,
+) -> str:
     """Legacy path-based context generation compatibility wrapper.
 
     If use_llm and LLM available: LLM generates context.
     Otherwise: deterministic extraction from title + summary + project.
+
+    When ``source_sha256`` is provided, the cache file is hash-suffixed so
+    stale entries cannot survive a content change (Task 15 contract).
     """
     slug = _legacy_slug(slug)
     knowledge_root = Path(os.path.abspath(KNOWLEDGE_DIR))
@@ -539,9 +559,15 @@ def build_all_contexts(use_llm: bool = True, verbose: bool = True) -> dict:
             continue
 
         slug = md.stem
-        ctx_file = context_root / f"{slug}.ctx"
+        try:
+            source_sha256 = hashlib.sha256(md.read_bytes()).hexdigest()
+        except OSError:
+            source_sha256 = None
+        ctx_file = legacy_context_cache_path(slug, source_sha256=source_sha256)
+        legacy_file = legacy_context_cache_path(slug)
 
-        # Skip if context exists and page hasn't changed.
+        # Skip if hash-keyed context exists and page hasn't changed; fall
+        # back to legacy un-suffixed cache for migration compatibility.
         if ctx_file.exists():
             try:
                 if md.stat().st_mtime <= ctx_file.stat().st_mtime:
@@ -549,9 +575,16 @@ def build_all_contexts(use_llm: bool = True, verbose: bool = True) -> dict:
                     continue
             except OSError:
                 pass
+        elif legacy_file.exists():
+            try:
+                if md.stat().st_mtime <= legacy_file.stat().st_mtime:
+                    stats["skipped"] += 1
+                    continue
+            except OSError:
+                pass
 
         try:
-            ctx = generate_context(slug, use_llm=use_llm)
+            ctx = generate_context(slug, use_llm=use_llm, source_sha256=source_sha256)
             if ctx:
                 atomic_write(ctx_file, ctx)
                 stats["generated"] += 1

@@ -32,6 +32,12 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from context_budget import (  # noqa: E402
+    BudgetExceededError,
+    ContextBudget,
+    ContextItem,
+    pack_context,
+)
 from memory_state import (  # noqa: E402
     REPORTS_DIR,
     ROOT,
@@ -52,7 +58,39 @@ DEBUG_DIR = REPORTS_DIR
 DEBUG_FILE = DEBUG_DIR / "session-start-last.txt"
 
 MAX_CONTEXT_CHARS = 2200
+# Shared SessionStart token budget. The character cap below remains as the
+# emergency failure guard (never slices Markdown mid-item) so existing
+# callers and tests continue to observe the same upper bound.
+DEFAULT_CONTEXT_BUDGET = ContextBudget(
+    model=None,
+    max_input_tokens=8192,
+    reserved_output_tokens=0,
+    safety_margin_tokens=512,
+)
+# Priority classes (low number = high importance, packed first):
+#   1 safety       — guardrails (always mandatory)
+#   2 health       — degraded doctor findings, self-awareness (mandatory)
+#   3 orientation  — knowledge index (structural navigation)
+#   4 handoff      — advisory / open threads
+#   5 impact       — stale-page impact (contextual)
+#   6 changes      — recent knowledge log entries
+#   7 history      — latest daily-log excerpt
+SECTION_PRIORITIES: dict[str, int] = {
+    "title": 1,
+    "guardrails": 1,
+    "metacognitive": 2,
+    "health": 2,
+    "index_header": 3,
+    "index": 3,
+    "advisory": 4,
+    "impact": 5,
+    "log_header": 6,
+    "log": 6,
+    "daily_header": 7,
+    "daily": 7,
+}
 INDEX_KNOWLEDGE_SECTIONS = 3
+INDEX_MAX_CHARS = 1200
 INDEX_BULLET_MAX = 140
 LOG_ENTRY_MAX = 200
 DAILY_EXCERPT_LINES = 6
@@ -176,14 +214,19 @@ def clip(line: str, limit: int) -> str:
     return line[: limit - 1].rstrip() + "…"
 
 
-def trim_index(index_txt: str) -> str:
+def trim_index(index_txt: str, *, max_chars: int = INDEX_MAX_CHARS) -> str:
     """Keep H1, Entry points, and the first N non-empty knowledge sections.
 
     Each bullet line is clipped to INDEX_BULLET_MAX chars so descriptions
     don't blow up the startup context. Editorial-note sections are dropped.
+    Output is bounded by ``max_chars`` so the index fits a per-section
+    budget without slicing bullets in half — whole bullets/sections are
+    dropped once the bound is reached.
     """
     if not index_txt:
         return ""
+    if not isinstance(max_chars, int) or max_chars <= 0:
+        raise ValueError("max_chars must be a positive integer")
 
     out: list[str] = []
     sections_kept = 0
@@ -192,24 +235,42 @@ def trim_index(index_txt: str) -> str:
     is_entry = False
     has_bullet = False
     stopped = False
+    budget_used = 0
+
+    def _bounded_extend(lines: list[str]) -> bool:
+        nonlocal budget_used
+        for raw_line in lines:
+            line_size = len(raw_line.encode("utf-8")) + 1
+            if budget_used + line_size > max_chars:
+                return False
+            out.append(raw_line)
+            budget_used += line_size
+        return True
 
     def flush() -> None:
-        nonlocal sections_kept
+        nonlocal sections_kept, stopped, budget_used
         if not buf or stopped:
             return
         if is_entry or (has_bullet and sections_kept < INDEX_KNOWLEDGE_SECTIONS):
-            out.extend(buf)
-            out.append("")
+            if not _bounded_extend(buf):
+                stopped = True
+                return
+            if budget_used + 1 <= max_chars:
+                out.append("")
+                budget_used += 1
             if not is_entry:
                 sections_kept += 1
 
     for raw in index_txt.splitlines():
+        if stopped:
+            break
         ln = raw.rstrip()
         stripped = ln.strip()
 
         if stripped.startswith("# ") and not in_section:
-            out.append(ln)
-            out.append("")
+            if not _bounded_extend([ln, ""]):
+                stopped = True
+                continue
             continue
 
         if stripped.startswith("## "):
@@ -580,6 +641,52 @@ def _recover_transactions() -> None:
         pass
 
 
+def _section_item(name: str, text: str) -> ContextItem | None:
+    """Build a ContextItem from one SessionStart section, or None if empty."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return None
+    priority = SECTION_PRIORITIES.get(name, 5)
+    mandatory = priority <= 2
+    return ContextItem(
+        item_id=f"session:{name}",
+        text=stripped,
+        source=f"session_start:{name}",
+        priority=priority,
+        relevance=1.0 if mandatory else 0.6,
+        confidence="high" if mandatory else "medium",
+        freshness="fresh",
+        token_cost=len(stripped.encode("utf-8")),
+        mandatory=mandatory,
+        representation="l1",
+    )
+
+
+def _pack_session_sections(sections: list[tuple[str, str]]) -> str:
+    """Pack sections under the shared SessionStart budget without mid-item slicing."""
+    items = [
+        item
+        for item in (_section_item(name, text) for name, text in sections)
+        if item is not None
+    ]
+    if not items:
+        return ""
+    try:
+        packed = pack_context(
+            items,
+            DEFAULT_CONTEXT_BUDGET,
+            emergency_byte_cap=max(0, MAX_CONTEXT_CHARS - 2),
+        )
+        return packed.text
+    except BudgetExceededError:
+        # Extremely unlikely: mandatory sections alone overflow the budget.
+        # Fall back to the legacy hard truncation so SessionStart stays usable.
+        text = "\n\n".join(item.text for item in items).rstrip()
+        if len(text) > MAX_CONTEXT_CHARS:
+            text = text[: MAX_CONTEXT_CHARS - 20].rstrip() + "\n… (truncated)\n"
+        return text
+
+
 def build_context() -> str:
     index_txt = (
         MEMORY_INDEX.read_text(encoding="utf-8", errors="replace")
@@ -593,27 +700,21 @@ def build_context() -> str:
 
     log_tail = last_log_entries(3) or "(no log entries)"
 
-    parts = [
-        "# Project memory context",
-        "",
-        guardrails_block(),
-        metacognitive_block(),
-        health_block(),
-        advisory_block(),
-        _impact_block(),
-        "## knowledge/index.md (trimmed)",
-        index_trimmed,
-        "",
-        f"## Latest daily log: {daily_name}",
-        daily_block,
-        "",
-        "## Recent knowledge/log.md",
-        log_tail,
+    sections = [
+        ("title", "# Project memory context"),
+        ("guardrails", guardrails_block()),
+        ("metacognitive", metacognitive_block()),
+        ("health", health_block()),
+        ("advisory", advisory_block()),
+        ("impact", _impact_block()),
+        ("index_header", "## knowledge/index.md (trimmed)"),
+        ("index", index_trimmed),
+        ("daily_header", f"## Latest daily log: {daily_name}"),
+        ("daily", daily_block),
+        ("log_header", "## Recent knowledge/log.md"),
+        ("log", log_tail),
     ]
-    text = "\n".join(parts).rstrip() + "\n"
-    if len(text) > MAX_CONTEXT_CHARS:
-        text = text[: MAX_CONTEXT_CHARS - 20].rstrip() + "\n… (truncated)\n"
-    return text
+    return _pack_session_sections(sections) + "\n"
 
 
 def write_debug(additional: str, daily_name: str) -> None:

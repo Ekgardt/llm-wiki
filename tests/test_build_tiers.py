@@ -229,8 +229,11 @@ class TestBuildAllTiers:
 
         stats = build_tiers.build_all_tiers(use_llm=False, verbose=False)
         assert stats["generated"] == 2
-        assert (tmp_path / "tiers" / "a.l1.md").exists()
-        assert (tmp_path / "tiers" / "b.l1.md").exists()
+        # Task 15: cache files are hash-suffixed by source SHA-256 + extractor.
+        l1_files = sorted((tmp_path / "tiers").glob("*.l1.md"))
+        assert len(l1_files) == 2
+        assert all("." in path.stem for path in l1_files)
+        assert all(not path.name.endswith("a.l1.md") for path in l1_files)
 
 
 class TestCapturedSourceTiers:

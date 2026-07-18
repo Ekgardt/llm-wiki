@@ -195,8 +195,11 @@ class TestBuildAll:
 
         stats = contextual_retrieval.build_all_contexts(use_llm=False, verbose=False)
         assert stats["generated"] == 2
-        assert (tmp_path / "ctx" / "a.ctx").exists()
-        assert (tmp_path / "ctx" / "b.ctx").exists()
+        # Task 15: cache files are hash-suffixed by source SHA-256.
+        ctx_files = sorted((tmp_path / "ctx").glob("*.ctx"))
+        assert len(ctx_files) == 2
+        assert all(not path.name.endswith("a.ctx") for path in ctx_files)
+        assert all("." in path.stem for path in ctx_files)
 
     def test_build_all_rejects_reparse_cache_before_write(self, tmp_path, monkeypatch):
         import contextual_retrieval

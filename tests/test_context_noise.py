@@ -70,11 +70,24 @@ def test_no_session_uuid(injected_context: str):
 
 
 def test_useful_signal_preserved(injected_context: str):
-    """Context should still carry navigable links and index header."""
-    # index-derived content
-    assert "Session Memory Index" in injected_context
-    # at least one wikilink into the knowledge tree
-    assert "[[knowledge/notes/" in injected_context
+    """Useful signal must survive the shared-budget pack.
+
+    Task 14 contract: SessionStart packs sections by priority under one
+    shared ContextBudget. In a bloated checkout (many guardrails, many
+    stale-page impact entries) the lower-priority sections (index/daily/log)
+    may be dropped whole. The test asserts the bare minimum that must
+    ALWAYS survive: the title header plus at least one substantive block
+    (guardrails, metacognitive, health, or — when budget allows — the
+    knowledge index).
+    """
+    assert "# Project memory context" in injected_context
+    substantive = (
+        "## Guard rails" in injected_context
+        or "## Your knowledge state" in injected_context
+        or "## Health" in injected_context
+        or "Session Memory Index" in injected_context
+    )
+    assert substantive, "no substantive SessionStart block survived packing"
 
 
 def test_context_size_reasonable(injected_context: str):
@@ -242,6 +255,45 @@ def test_session_start_injects_bounded_health_only_when_degraded(monkeypatch):
     context = session_start_context.build_context()
     assert "## Health" in context
     assert len(context) <= session_start_context.MAX_CONTEXT_CHARS
+
+
+def test_session_start_pack_respects_shared_budget_and_never_slices_items(monkeypatch):
+    """Task 14: build_context routes through the shared ContextBudget.
+
+    A section larger than the emergency cap must be dropped whole — its
+    tail must not appear truncated mid-item.
+    """
+    import session_start_context
+
+    large = "X" * (session_start_context.MAX_CONTEXT_CHARS * 3)
+    monkeypatch.setattr(session_start_context, "guardrails_block", lambda: "")
+    monkeypatch.setattr(session_start_context, "metacognitive_block", lambda: "")
+    monkeypatch.setattr(session_start_context, "advisory_block", lambda: large)
+    monkeypatch.setattr(session_start_context, "_impact_block", lambda: "")
+    monkeypatch.setattr(session_start_context, "health_block", lambda: "")
+    # Force the index/daily/log to be tiny so the advisory alone is the
+    # dominating section.
+    monkeypatch.setattr(session_start_context, "trim_index", lambda *_: "")
+    monkeypatch.setattr(session_start_context, "latest_daily", lambda: None)
+    monkeypatch.setattr(session_start_context, "last_log_entries", lambda *_: "")
+
+    context = session_start_context.build_context()
+
+    assert len(context) <= session_start_context.MAX_CONTEXT_CHARS
+    # The over-large advisory must NOT be present at all (dropped whole),
+    # never partially sliced into the output.
+    assert "X" * 100 not in context
+    assert "… (truncated)" not in context
+
+
+def test_session_start_budget_constant_is_a_context_budget():
+    import session_start_context
+    from context_budget import ContextBudget
+
+    assert isinstance(
+        session_start_context.DEFAULT_CONTEXT_BUDGET, ContextBudget
+    )
+    assert session_start_context.DEFAULT_CONTEXT_BUDGET.available_input_tokens > 0
 
 
 def test_session_start_health_fails_open(monkeypatch):
