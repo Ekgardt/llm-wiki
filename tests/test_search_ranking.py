@@ -788,6 +788,7 @@ def test_generation_numpy_uses_same_order_and_is_a_real_matrix(tmp_path):
 
 
 def test_generation_numpy_failure_leaves_both_artifacts_absent(tmp_path):
+    pytest.importorskip("numpy")
     import search_memory
 
     _vault, snapshot = _generation_snapshot(
@@ -890,7 +891,7 @@ def test_search_prefers_valid_generation_without_rereading_live_markdown(
         "knowledge/notes/pattern/same.md",
     ]
     assert all(result["generation"] == "gen-search" for result in results)
-    assert all(result["effective_mode"] == "base" for result in results)
+    assert all(result["effective_mode"] == "BASE" for result in results)
 
 
 def test_generation_search_reports_generation_to_telemetry(tmp_path, monkeypatch):
@@ -1026,7 +1027,7 @@ def test_semantic_generation_never_mixes_legacy_vectors_or_graph(tmp_path, monke
         emit_telemetry=False,
     )
 
-    assert results[0]["effective_mode"] == "base"
+    assert results[0]["effective_mode"] == "BASE"
     assert results[0]["fallback_reason"] == "generation_vectors_unavailable"
     assert results[0]["generation"] == "gen-search"
 
@@ -1087,7 +1088,7 @@ def test_semantic_search_uses_complete_matching_generation_numpy_vectors(tmp_pat
 
     assert results[0]["path"] == "knowledge/notes/a.md"
     assert all(result["generation"] == "gen-search" for result in results)
-    assert all(result["effective_mode"] == "hybrid" for result in results)
+    assert all(result["effective_mode"] == "HYBRID" for result in results)
     assert all(result["fallback_reason"] is None for result in results)
 
 
@@ -1193,7 +1194,7 @@ def test_generation_numpy_metadata_mismatch_falls_back_to_base(
     )
 
     assert results
-    assert all(result["effective_mode"] == "base" for result in results)
+    assert all(result["effective_mode"] == "BASE" for result in results)
     assert all(
         result["fallback_reason"] == "generation_vectors_unavailable"
         for result in results
@@ -1237,7 +1238,7 @@ def test_generation_numpy_rejects_invalid_matrix_and_falls_back_base(
     )
 
     assert results
-    assert all(result["effective_mode"] == "base" for result in results)
+    assert all(result["effective_mode"] == "BASE" for result in results)
     assert all(
         result["fallback_reason"] == "generation_vectors_unavailable"
         for result in results
@@ -1266,7 +1267,7 @@ def test_generation_numpy_rejects_non_finite_query_vector(tmp_path, bad_value):
     )
 
     assert results
-    assert all(result["effective_mode"] == "base" for result in results)
+    assert all(result["effective_mode"] == "BASE" for result in results)
     assert all(
         result["fallback_reason"] == "generation_vectors_unavailable"
         for result in results

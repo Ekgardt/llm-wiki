@@ -987,6 +987,12 @@ def _finalize_results(
 ) -> list[dict]:
     """Finalize one returned list and best-effort record its impressions once."""
     final = _deduplicate_by_slug(results)[:limit]
+    mode = str(retrieval_mode or "bm25").lower()
+    for result in final:
+        result.setdefault("generation", "legacy")
+        result["requested_mode"] = mode
+        result["effective_mode"] = mode
+        result.setdefault("fallback_reason", None)
     if not final or not emit_telemetry:
         return final
     try:
@@ -1001,10 +1007,10 @@ def _finalize_results(
             event = best_effort_make_event(
                 event_kind="impression",
                 query=query,
-                retrieval_mode=retrieval_mode,
+                retrieval_mode=mode,
                 candidate_id=candidate_id,
                 rank=rank,
-                generation="legacy",
+                generation=str(result.get("generation") or "legacy"),
                 source_tool=source_tool,
             )
             if event is not None:
@@ -1544,6 +1550,55 @@ def _finalize_generation_results(
 
 
 def search(
+    query: str,
+    scope: str = "all",
+    limit: int = 10,
+    force_rebuild: bool = False,
+    project: str | None = None,
+    since: str | None = None,
+    as_of: str | None = None,
+    semantic: bool = False,
+    page_paths: list[Path] | None = None,
+    graph: bool = True,
+    rerank: bool = True,
+    source_tool: str = "search_memory",
+    emit_telemetry: bool = True,
+    *,
+    profile: str | None = None,
+    catalog: GenerationCatalog | None = None,
+    generation_embedder: object | None = None,
+    generation_model_id: str | None = None,
+    generation_model_revision: str | None = None,
+) -> list[dict]:
+    """Compatibility wrapper over the Task 11 retrieval orchestrator."""
+    limit = _validate_search_limit(limit)
+    if not query or not query.strip():
+        return []
+    from retrieval import retrieve_via_search_memory
+
+    return retrieve_via_search_memory(
+        query,
+        scope=scope,
+        limit=limit,
+        force_rebuild=force_rebuild,
+        project=project,
+        since=since,
+        as_of=as_of,
+        semantic=semantic,
+        page_paths=page_paths,
+        graph=graph,
+        rerank=rerank,
+        source_tool=source_tool,
+        emit_telemetry=emit_telemetry,
+        profile=profile,
+        catalog=catalog,
+        generation_embedder=generation_embedder,
+        generation_model_id=generation_model_id,
+        generation_model_revision=generation_model_revision,
+    )
+
+
+def _search_backends(
     query: str,
     scope: str = "all",
     limit: int = 10,
@@ -2154,6 +2209,25 @@ def main() -> int:
     p.add_argument("--since", default=None, help="Only results since YYYY-MM-DD")
     p.add_argument("--as-of", dest="as_of", default=None, help="Only results valid on YYYY-MM-DD")
     p.add_argument("--semantic", action="store_true", help="Enable vector search (needs sentence-transformers)")
+    p.add_argument(
+        "--profile",
+        choices=[
+            "DIRECT",
+            "EXACT",
+            "BASE",
+            "HYBRID",
+            "GRAPH",
+            "TEMPORAL",
+            "REPO_MAP",
+            "IMPACT",
+            "GLOBAL",
+            "CACHED_FULL",
+        ],
+        default=None,
+        help="Requested retrieval profile (Task 11 planner)",
+    )
+    p.add_argument("--no-graph", action="store_true", help="Disable graph-neighbor signal")
+    p.add_argument("--no-rerank", action="store_true", help="Disable cross-encoder reranker")
     p.add_argument("--rebuild", action="store_true", help="Force index rebuild")
     p.add_argument("--status", action="store_true", help="Show index stats")
     p.add_argument("--stdin", action="store_true", help="Read query from stdin (injection-safe)")
@@ -2197,6 +2271,9 @@ def main() -> int:
         since=args.since,
         as_of=args.as_of,
         semantic=args.semantic,
+        profile=args.profile,
+        graph=not args.no_graph,
+        rerank=not args.no_rerank,
     )
     elapsed = time.time() - t0
 

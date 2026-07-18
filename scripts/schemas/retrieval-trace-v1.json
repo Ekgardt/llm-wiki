@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/retrieval-trace-v1.json",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "requested_mode",
+    "effective_mode",
+    "signals_used",
+    "fallback_reason",
+    "corpus_generation",
+    "partial"
+  ],
+  "properties": {
+    "schema_version": {"const": "retrieval-trace/v1"},
+    "requested_mode": {
+      "type": "string",
+      "enum": [
+        "DIRECT",
+        "EXACT",
+        "BASE",
+        "HYBRID",
+        "GRAPH",
+        "TEMPORAL",
+        "REPO_MAP",
+        "IMPACT",
+        "GLOBAL",
+        "CACHED_FULL"
+      ]
+    },
+    "effective_mode": {
+      "type": "string",
+      "enum": [
+        "DIRECT",
+        "EXACT",
+        "BASE",
+        "HYBRID",
+        "GRAPH",
+        "TEMPORAL",
+        "REPO_MAP",
+        "IMPACT",
+        "GLOBAL",
+        "CACHED_FULL"
+      ]
+    },
+    "signals_used": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "string",
+        "enum": ["lexical", "dense", "graph", "reranker"]
+      },
+      "uniqueItems": true
+    },
+    "fallback_reason": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[a-z][a-z0-9_]*$"
+        }
+      ]
+    },
+    "corpus_generation": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "partial": {"type": "boolean"}
+  },
+  "additionalProperties": false
+}
