@@ -72,57 +72,6 @@ def test_prepare_and_apply_create_replace_delete(vault: Path, state_root: Path):
     assert not old.exists()
 
 
-@pytest.mark.parametrize(
-    "identity",
-    [0, (1 << 63) - 1, 1 << 63, 11853635609087352826, (1 << 64) - 1],
-)
-def test_sqlite_filesystem_identity_encoding_round_trips_without_collisions(identity: int):
-    encoded = markdown_transaction._encode_filesystem_id(identity)
-
-    assert -(1 << 63) <= encoded < 1 << 63
-    assert markdown_transaction._decode_filesystem_id(encoded) == identity
-    assert len(
-        {
-            markdown_transaction._encode_filesystem_id(0),
-            markdown_transaction._encode_filesystem_id(1 << 63),
-        }
-    ) == 2
-
-
-def test_prepare_persists_unsigned_64_bit_parent_identity(
-    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
-):
-    target = vault / "knowledge/notes/page.md"
-    target.write_bytes(b"before")
-    coordinator = MarkdownCoordinator(vault, state_root)
-    parent_identity = (11853635609087352826, (1 << 63) + 7)
-
-    def capture_with_unsigned_identity(path: Path, *, max_before_bytes: int | None = None):
-        return path.read_bytes(), parent_identity
-
-    monkeypatch.setattr(coordinator, "_capture_target", capture_with_unsigned_identity)
-
-    transaction = coordinator.prepare(
-        [MarkdownChange.replace("knowledge/notes/page.md", b"after")],
-        operation_id="unsigned-parent-identity",
-    )
-
-    with sqlite3.connect(coordinator.database_path) as database:
-        persisted = database.execute(
-            'SELECT parent_device, parent_inode FROM "operation" WHERE transaction_id = ?',
-            (transaction.id,),
-        ).fetchone()
-    assert persisted == tuple(
-        markdown_transaction._encode_filesystem_id(value) for value in parent_identity
-    )
-
-    monkeypatch.setattr(coordinator, "_parent_identity", lambda path: parent_identity)
-    committed = coordinator.apply(transaction.id)
-
-    assert committed.state == "committed"
-    assert target.read_bytes() == b"after"
-
-
 def test_prepare_requires_keyword_only_operation_id():
     parameter = inspect.signature(MarkdownCoordinator.prepare).parameters["operation_id"]
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
@@ -1167,7 +1116,4 @@ def test_schema_migration_validates_and_recaptures_prepared_parent_identity(
             "WHERE transaction_id = 'legacy-tx'"
         ).fetchone()
     metadata = target.parent.stat()
-    assert tuple(markdown_transaction._decode_filesystem_id(value) for value in identity) == (
-        metadata.st_dev,
-        metadata.st_ino,
-    )
+    assert identity == (metadata.st_dev, metadata.st_ino)

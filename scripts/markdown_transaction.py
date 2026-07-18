@@ -81,34 +81,6 @@ _BLACKBOARD_JSONL_RE = re.compile(
     r"knowledge/projects/[A-Za-z0-9._-]+/\.blackboard/"
     r"(?:tasks|completed|signals|conflicts)\.jsonl"
 )
-_SQLITE_INT64_MIN = -(1 << 63)
-_SQLITE_INT64_MAX = (1 << 63) - 1
-_UINT64_MODULUS = 1 << 64
-
-
-def _encode_filesystem_id(value: object) -> int:
-    """Map an unsigned filesystem ID bijectively onto SQLite's signed int64."""
-    if type(value) is not int or not 0 <= value < _UINT64_MODULUS:
-        raise ValueError("filesystem identity must be an unsigned 64-bit integer")
-    return value if value <= _SQLITE_INT64_MAX else value - _UINT64_MODULUS
-
-
-def _decode_filesystem_id(value: object) -> int:
-    """Restore an unsigned filesystem ID from its SQLite int64 encoding."""
-    if type(value) is not int or not _SQLITE_INT64_MIN <= value <= _SQLITE_INT64_MAX:
-        raise ValueError("persisted filesystem identity is not a signed 64-bit integer")
-    return value if value >= 0 else value + _UINT64_MODULUS
-
-
-def _encode_parent_identity(identity: tuple[object, object]) -> tuple[int, int]:
-    return (_encode_filesystem_id(identity[0]), _encode_filesystem_id(identity[1]))
-
-
-def _decode_parent_identity(identity: tuple[object, object]) -> tuple[int, int]:
-    return (
-        _decode_filesystem_id(identity[0]),
-        _decode_filesystem_id(identity[1]),
-    )
 
 
 @dataclass(frozen=True)
@@ -1267,7 +1239,7 @@ class MarkdownCoordinator:
             database.execute(
                 'UPDATE "operation" SET parent_device = ?, parent_inode = ? '
                 "WHERE transaction_id = ? AND position = ?",
-                (*_encode_parent_identity(identity), row["transaction_id"], row["position"]),
+                (identity[0], identity[1], row["transaction_id"], row["position"]),
             )
 
     def prepare(
@@ -1456,7 +1428,8 @@ class MarkdownCoordinator:
                                 operation.path,
                                 operation.before_hash,
                                 operation.after_hash,
-                                *_encode_parent_identity(parent_identities[position]),
+                                parent_identities[position][0],
+                                parent_identities[position][1],
                             )
                             for position, operation in enumerate(operations)
                         ],
@@ -1983,13 +1956,9 @@ class MarkdownCoordinator:
                     type(persisted["position"]) is not int
                     or type(persisted["parent_device"]) is not int
                     or type(persisted["parent_inode"]) is not int
+                    or persisted["parent_device"] < 0
+                    or persisted["parent_inode"] < 0
                 ):
-                    return "invalid"
-                try:
-                    encoded_parent_identity = _encode_parent_identity(
-                        (persisted["parent_device"], persisted["parent_inode"])
-                    )
-                except ValueError:
                     return "invalid"
                 path = str(operation["path"])
                 try:
@@ -2031,7 +2000,8 @@ class MarkdownCoordinator:
                         path,
                         before_hash,
                         after_hash,
-                        *encoded_parent_identity,
+                        parent_identity[0],
+                        parent_identity[1],
                         0,
                     )
                 )
@@ -3016,10 +2986,9 @@ class MarkdownCoordinator:
     @contextlib.contextmanager
     def _stable_parent(self, row: sqlite3.Row) -> Iterator[tuple[Path, int | None]]:
         target = self._target(row["path"])
-        persisted = (row["parent_device"], row["parent_inode"])
-        if None in persisted:
+        expected = (row["parent_device"], row["parent_inode"])
+        if None in expected:
             raise RuntimeError(f"transaction lacks parent identity for {row['path']}")
-        expected = _decode_parent_identity(persisted)
         if not _use_posix_dir_fd():
             with self._hold_windows_parent(target.parent):
                 if self._parent_identity(target.parent) != expected:
