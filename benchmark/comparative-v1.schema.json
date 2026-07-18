@@ -1,0 +1,236 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/comparative-v1.json",
+  "type": "object",
+  "required": ["adapters", "availability", "fairness", "metrics", "provenance", "public_claim_gate", "schema_version", "smoke", "statistics", "tasks"],
+  "properties": {
+    "adapters": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "required": ["id", "implementation_status", "input_contract", "output_contract"],
+        "properties": {
+          "id": {"enum": ["grep-read", "graphify-pinned", "llm-wiki-current", "evidence-graph-only", "hybrid-retrieval", "adaptive-context-compiler"]},
+          "implementation_status": {"const": "contract-only"},
+          "input_contract": {"const": "comparative-adapter-input/v1"},
+          "output_contract": {"const": "comparative-task-ledger/v1"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "availability": {
+      "type": "object",
+      "required": ["gate_f_passed", "heavy_comparison_available", "reason"],
+      "properties": {
+        "gate_f_passed": {"const": false},
+        "heavy_comparison_available": {"const": false},
+        "reason": {"type": "string", "minLength": 20, "maxLength": 300}
+      },
+      "additionalProperties": false
+    },
+    "fairness": {
+      "type": "object",
+      "required": ["enforcement", "identical_inputs"],
+      "properties": {
+        "enforcement": {"const": "reject-run-on-any-mismatch"},
+        "identical_inputs": {
+          "type": "array",
+          "minItems": 7,
+          "maxItems": 7,
+          "uniqueItems": true,
+          "items": {"enum": ["repository", "commit", "hardware", "task", "model", "context_budget", "retry_policy"]}
+        }
+      },
+      "additionalProperties": false
+    },
+    "metrics": {
+      "type": "object",
+      "required": ["latency_summary", "per_task_fields", "unavailable_value"],
+      "properties": {
+        "latency_summary": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {"enum": ["p50", "p95"]}
+        },
+        "per_task_fields": {
+          "type": "array",
+          "minItems": 14,
+          "maxItems": 14,
+          "uniqueItems": true,
+          "items": {"enum": ["executable_task_success", "blinded_factual_correctness", "retrieval_quality", "uncached_input_tokens", "uncached_output_tokens", "cache_tokens", "indexing_time_ms", "incremental_time_ms", "query_latency_ms", "peak_ram_bytes", "index_size_bytes", "edge_precision", "edge_recall", "freshness"]}
+        },
+        "unavailable_value": {"const": null}
+      },
+      "additionalProperties": false
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["configuration", "dependencies", "graphify", "model", "python", "tokenizer"],
+      "properties": {
+        "configuration": {
+          "type": "object",
+          "required": ["id", "sha256"],
+          "properties": {
+            "id": {"const": "comparative-smoke-v1"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          },
+          "additionalProperties": false
+        },
+        "dependencies": {
+          "type": "array",
+          "maxItems": 0,
+          "items": {"type": "string"}
+        },
+        "graphify": {
+          "type": "object",
+          "required": ["commit", "dependency_lock", "repository"],
+          "properties": {
+            "commit": {"const": "cb96bdaa0c367bec8d5c5aee5d7c9ebb727e9780"},
+            "dependency_lock": {
+              "type": "object",
+              "required": ["git_blob_sha1", "path"],
+              "properties": {
+                "git_blob_sha1": {"const": "088ebbbdcb17eacec5b60541f290381f6adf33e7"},
+                "path": {"const": "uv.lock"}
+              },
+              "additionalProperties": false
+            },
+            "repository": {"const": "https://github.com/Graphify-Labs/graphify"}
+          },
+          "additionalProperties": false
+        },
+        "model": {
+          "type": "object",
+          "required": ["id", "provider", "revision"],
+          "properties": {
+            "id": {"const": "deterministic-fake/comparative-v1"},
+            "provider": {"const": "offline-fake"},
+            "revision": {"const": "comparative-smoke-v1"}
+          },
+          "additionalProperties": false
+        },
+        "python": {
+          "type": "object",
+          "required": ["implementation", "version"],
+          "properties": {
+            "implementation": {"const": "CPython"},
+            "version": {"const": "3.12.10"}
+          },
+          "additionalProperties": false
+        },
+        "tokenizer": {
+          "type": "object",
+          "required": ["id", "revision"],
+          "properties": {
+            "id": {"const": "utf8-bytes/v1"},
+            "revision": {"const": "comparative-smoke-v1"}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "public_claim_gate": {
+      "type": "object",
+      "required": ["hard_gates", "quality_lower_bound_basis_points_strictly_greater_than", "requires_gate_f", "requires_real_evidence", "token_ratio_upper_bound_basis_points_strictly_less_than"],
+      "properties": {
+        "hard_gates": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {"enum": ["evidence", "freshness", "crash"]}
+        },
+        "quality_lower_bound_basis_points_strictly_greater_than": {"const": -200},
+        "requires_gate_f": {"const": true},
+        "requires_real_evidence": {"const": true},
+        "token_ratio_upper_bound_basis_points_strictly_less_than": {"const": 9000}
+      },
+      "additionalProperties": false
+    },
+    "schema_version": {"const": "comparative-contract/v1"},
+    "smoke": {
+      "type": "object",
+      "required": ["adapter_kind", "attempts_per_adapter", "intentional_failure_adapter", "max_adapters", "max_tasks", "network_access"],
+      "properties": {
+        "adapter_kind": {"const": "deterministic-fake"},
+        "attempts_per_adapter": {"const": 1},
+        "intentional_failure_adapter": {"const": "graphify-pinned"},
+        "max_adapters": {"const": 6},
+        "max_tasks": {"const": 1},
+        "network_access": {"const": false}
+      },
+      "additionalProperties": false
+    },
+    "statistics": {
+      "type": "object",
+      "required": ["confidence_level_basis_points", "guidance", "interval_methods", "pairing_unit", "resamples", "seeds"],
+      "properties": {
+        "confidence_level_basis_points": {"const": 9500},
+        "guidance": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {"type": "string", "pattern": "^https://"}
+        },
+        "interval_methods": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {"enum": ["paired-bootstrap", "paired-randomization"]}
+        },
+        "pairing_unit": {"const": "repository-commit-task-seed"},
+        "resamples": {"type": "integer", "minimum": 10000, "maximum": 10000},
+        "seeds": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 10,
+          "uniqueItems": true,
+          "items": {"type": "integer", "minimum": 0, "maximum": 2147483647}
+        }
+      },
+      "additionalProperties": false
+    },
+    "tasks": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "inputs"],
+        "properties": {
+          "id": {"const": "smoke-contract-001"},
+          "inputs": {
+            "type": "object",
+            "required": ["commit", "context_budget", "hardware", "model", "repository", "retry_policy", "task"],
+            "properties": {
+              "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+              "context_budget": {"type": "integer", "minimum": 1, "maximum": 1000000},
+              "hardware": {"type": "string", "minLength": 3, "maxLength": 100},
+              "model": {"const": "deterministic-fake/comparative-v1@comparative-smoke-v1"},
+              "repository": {"const": "synthetic://comparative-smoke-v1"},
+              "retry_policy": {
+                "type": "object",
+                "required": ["backoff", "max_attempts"],
+                "properties": {
+                  "backoff": {"const": "none"},
+                  "max_attempts": {"const": 1}
+                },
+                "additionalProperties": false
+              },
+              "task": {"type": "string", "minLength": 20, "maxLength": 300}
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}
