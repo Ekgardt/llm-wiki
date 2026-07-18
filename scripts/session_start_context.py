@@ -10,8 +10,8 @@ containing a trimmed view of project memory:
     a one-line note.
   - `knowledge/log.md` — last 3 dated entries, each clipped.
 
-Total additionalContext is capped around 2.2 KB. A debug dump of the payload
-is written to `$LLM_WIKI_STATE_ROOT/logs/session-start-last.txt`
+All complete sections are packed under the shared token budget. A debug dump
+of the payload is written to `$LLM_WIKI_STATE_ROOT/logs/session-start-last.txt`
 (default: ``$LLM_WIKI_ROOT/logs/`` — inside the vault, gitignored) on every run.
 """
 from __future__ import annotations
@@ -57,10 +57,6 @@ GAPS_DIR = KNOWLEDGE_DIR / "gaps"
 DEBUG_DIR = REPORTS_DIR
 DEBUG_FILE = DEBUG_DIR / "session-start-last.txt"
 
-MAX_CONTEXT_CHARS = 2200
-# Shared SessionStart token budget. The character cap below remains as the
-# emergency failure guard (never slices Markdown mid-item) so existing
-# callers and tests continue to observe the same upper bound.
 # Priority classes (low number = high importance, packed first):
 #   1 safety       — guardrails (always mandatory)
 #   2 health       — degraded doctor findings, self-awareness (mandatory)
@@ -679,11 +675,10 @@ def _pack_session_sections(sections: list[tuple[str, str]]) -> str:
         packed = pack_context(
             items,
             DEFAULT_CONTEXT_BUDGET,
-            emergency_byte_cap=max(0, MAX_CONTEXT_CHARS - 2),
         )
         return packed.text
     except BudgetExceededError as error:
-        return error.failure.render(max_bytes=MAX_CONTEXT_CHARS - 1)
+        return error.failure.render()
 
 
 def build_context() -> str:

@@ -254,21 +254,19 @@ def test_session_start_injects_bounded_health_only_when_degraded(monkeypatch):
     assert session_start_context.health_block() == "## Health\n\nindex: stale\n\n"
     context = session_start_context.build_context()
     assert "## Health" in context
-    assert len(context) <= session_start_context.MAX_CONTEXT_CHARS
+    assert len(context.encode("utf-8")) <= (
+        session_start_context.DEFAULT_CONTEXT_BUDGET.available_input_tokens
+    )
 
 
-def test_session_start_pack_respects_shared_budget_and_never_slices_items(monkeypatch):
-    """Task 14: build_context routes through the shared ContextBudget.
-
-    A section larger than the emergency cap must be dropped whole — its
-    tail must not appear truncated mid-item.
-    """
+def test_session_start_retains_3035_byte_advisory_under_shared_token_budget(monkeypatch):
+    """A legacy byte cap must not discard context that fits the token budget."""
     import session_start_context
 
-    large = "X" * (session_start_context.MAX_CONTEXT_CHARS * 3)
+    advisory = "A" * 3035
     monkeypatch.setattr(session_start_context, "guardrails_block", lambda: "")
     monkeypatch.setattr(session_start_context, "metacognitive_block", lambda: "")
-    monkeypatch.setattr(session_start_context, "advisory_block", lambda: large)
+    monkeypatch.setattr(session_start_context, "advisory_block", lambda: advisory)
     monkeypatch.setattr(session_start_context, "_impact_block", lambda: "")
     monkeypatch.setattr(session_start_context, "health_block", lambda: "")
     # Force the index/daily/log to be tiny so the advisory alone is the
@@ -279,10 +277,8 @@ def test_session_start_pack_respects_shared_budget_and_never_slices_items(monkey
 
     context = session_start_context.build_context()
 
-    assert len(context) <= session_start_context.MAX_CONTEXT_CHARS
-    # The over-large advisory must NOT be present at all (dropped whole),
-    # never partially sliced into the output.
-    assert "X" * 100 not in context
+    assert advisory in context
+    assert len(context.encode("utf-8")) <= 7680
     assert "… (truncated)" not in context
 
 
