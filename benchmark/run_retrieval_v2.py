@@ -82,6 +82,9 @@ JIEBA_VERSION = "0.42.1"
 JIEBA_DEFAULT_DICTIONARY_SHA256 = (
     "7197c3211ddd98962b036cdf40324d1ea2bfaa12bd028e68faa70111a88e12a8"
 )
+BGE_M3_SPARSE_LINEAR_SHA256 = (
+    "45c93804d2142b8f6d7ec6914ae23a1eee9c6a1d27d83d908a20d2afb3595ad9"
+)
 THRESHOLDS = {
     "parent_recall_at_10": 0.95,
     "all_required_evidence_recall_at_20": 0.85,
@@ -258,9 +261,11 @@ class ModelSelection:
 class _WorkerPayload:
     report: dict
     canonical_bytes: bytes
+    _capability: object | None = None
 
 
 _ATTESTATION_CAPABILITY = object()
+_SUBPROCESS_PAYLOAD_CAPABILITY = object()
 
 
 @dataclass(frozen=True, init=False)
@@ -1585,9 +1590,13 @@ class ModelEmbeddingAdapter:
         self._candidate_ids: tuple[str, ...] | None = None
         self._candidate_by_id: dict[str, Candidate] = {}
         self._query_vectors = {}
+        self._query_sparse = {}
         self.document_vectors = None
+        self.document_sparse = None
+        self.learned_sparse_bytes = 0
+        self.last_trace: dict | None = None
 
-    def _encode(self, texts: Sequence[str]):
+    def _encode_signals(self, texts: Sequence[str]):
         model = self.selection.embedding
         inference = model["inference"]
         raw = self._encoder(
@@ -1598,12 +1607,37 @@ class ModelEmbeddingAdapter:
             padding_side=inference["padding_side"],
             truncation_side=inference["truncation_side"],
         )
-        return _prepare_embedding_vectors(
+        sparse = None
+        if isinstance(raw, dict):
+            if set(raw) != {"dense_vecs", "lexical_weights"}:
+                raise ValueError("encoder returned unknown embedding signals")
+            sparse = raw["lexical_weights"]
+            raw = raw["dense_vecs"]
+        vectors = _prepare_embedding_vectors(
             raw,
             rows=len(texts),
             dimensions=self.selection.variant["dimensions"],
             allow_truncation=self.selection.variant["mrl"]["enabled"],
         )
+        if sparse is not None:
+            if model["id"] != "BAAI/bge-m3" or not isinstance(sparse, list) or len(sparse) != len(texts):
+                raise ValueError("learned sparse output is not valid for this embedding")
+            normalized = []
+            for row in sparse:
+                if not isinstance(row, dict):
+                    raise ValueError("learned sparse output must contain token-weight mappings")
+                values = {}
+                for token, weight in row.items():
+                    value = float(weight)
+                    if not isinstance(token, str) or not token or not math.isfinite(value) or value <= 0:
+                        raise ValueError("learned sparse token weights must be finite and positive")
+                    values[token] = value
+                normalized.append(values)
+            sparse = normalized
+        return vectors, sparse
+
+    def _encode(self, texts: Sequence[str]):
+        return self._encode_signals(texts)[0]
 
     def _format(self, text: str, field: str) -> str:
         formatting = self.selection.embedding["formatting"]
@@ -1615,14 +1649,22 @@ class ModelEmbeddingAdapter:
             self._candidate_ids = ids
             self._candidate_by_id = {candidate.evidence_id: candidate for candidate in candidates}
             documents = [self._format(_candidate_text(candidate), "document") for candidate in candidates]
-            self.document_vectors = self._encode(documents)
+            self.document_vectors, self.document_sparse = self._encode_signals(documents)
+            if self.document_sparse is not None:
+                self.learned_sparse_bytes = sum(
+                    len(token.encode("utf-8")) + 8
+                    for row in self.document_sparse
+                    for token in row
+                )
         elif ids != self._candidate_ids:
             raise ValueError("dense candidate universe mismatch")
 
     def prepare_queries(self, query_texts: Sequence[str]) -> None:
         formatted = [self._format(text, "query") for text in query_texts]
-        vectors = self._encode(formatted)
+        vectors, sparse = self._encode_signals(formatted)
         self._query_vectors.update(zip(formatted, vectors))
+        if sparse is not None:
+            self._query_sparse.update(zip(formatted, sparse))
 
     def rank(
         self,
@@ -1638,8 +1680,11 @@ class ModelEmbeddingAdapter:
         assert self._candidate_ids is not None and self.document_vectors is not None
         formatted_query = self._format(query_text, "query")
         query_vector = self._query_vectors.get(formatted_query)
+        query_sparse = self._query_sparse.get(formatted_query)
         if query_vector is None:
-            query_vector = self._encode([formatted_query])[0]
+            vectors, sparse = self._encode_signals([formatted_query])
+            query_vector = vectors[0]
+            query_sparse = sparse[0] if sparse is not None else None
         eligible_ids = {item.evidence_id for item in filter_candidates(candidates, scope)}
         indexes = np.asarray(
             [index for index, evidence_id in enumerate(self._candidate_ids) if evidence_id in eligible_ids],
@@ -1655,10 +1700,31 @@ class ModelEmbeddingAdapter:
             backend=self.vector_backend,
             usearch_search=self._usearch_search,
         )
-        return [
+        dense = [
             ScoredCandidate(self._candidate_by_id[evidence_id], score)
             for evidence_id, score in zip(ranked_ids, scores)
         ]
+        if self.document_sparse is None:
+            return dense
+        if query_sparse is None:
+            raise ValueError("BGE-M3 query omitted learned sparse output")
+        sparse_ranked = []
+        for index, evidence_id in zip(indexes, ids):
+            document = self.document_sparse[int(index)]
+            score = sum(weight * document.get(token, 0.0) for token, weight in query_sparse.items())
+            if score > 0:
+                sparse_ranked.append(ScoredCandidate(self._candidate_by_id[evidence_id], score))
+        sparse_ranked.sort(key=lambda item: (-item.score, item.evidence_id))
+        sparse_ranked = sparse_ranked[:limit]
+        fused = _fuse_rankings(
+            (dense, sparse_ranked), list(self._candidate_by_id.values()), limit=limit
+        )
+        self.last_trace = {
+            "dense_candidate_ids": [item.evidence_id for item in dense],
+            "learned_sparse_candidate_ids": [item.evidence_id for item in sparse_ranked],
+            "fusion": {"method": "reciprocal-rank-fusion", "k": 60},
+        }
+        return fused
 
 
 class ModelRerankerAdapter:
@@ -2364,6 +2430,34 @@ def _load_transformer_embedding(
     tokenizer = AutoTokenizer.from_pretrained(model_spec["id"], **common)
     model = AutoModel.from_pretrained(model_spec["id"], torch_dtype=torch.float32, **common)
     model.eval()
+    sparse_linear = None
+    if model_spec["id"] == "BAAI/bge-m3":
+        from huggingface_hub import hf_hub_download
+
+        asset = Path(
+            hf_hub_download(
+                repo_id=model_spec["id"],
+                filename="sparse_linear.pt",
+                revision=model_spec["revision"],
+                cache_dir=str(cache_root),
+                local_files_only=local_files_only,
+            )
+        )
+        resolved_asset = asset.resolve(strict=True)
+        resolved_cache = cache_root.resolve(strict=True)
+        if resolved_asset != resolved_cache and resolved_cache not in resolved_asset.parents:
+            raise ValueError("BGE-M3 sparse asset escaped the model cache")
+        if _sha256_file(resolved_asset) != BGE_M3_SPARSE_LINEAR_SHA256:
+            raise ValueError("BGE-M3 sparse_linear.pt SHA256 mismatch")
+        state = torch.load(resolved_asset, map_location="cpu", weights_only=True)
+        if not isinstance(state, dict) or set(state) != {"weight"}:
+            raise ValueError("BGE-M3 sparse_linear.pt has an invalid state dictionary")
+        weight = state["weight"]
+        if tuple(weight.shape) != (1, selection.variant["dimensions"]):
+            raise ValueError("BGE-M3 sparse_linear.pt has an invalid shape")
+        sparse_linear = torch.nn.Linear(selection.variant["dimensions"], 1, bias=False)
+        sparse_linear.load_state_dict(state, strict=True)
+        sparse_linear.eval()
 
     def encode(texts, *, batch_size, max_length, pooling, padding_side, truncation_side):
         import numpy as np
@@ -2371,6 +2465,7 @@ def _load_transformer_embedding(
         tokenizer.padding_side = padding_side
         tokenizer.truncation_side = truncation_side
         chunks = []
+        sparse_rows = []
         for offset in range(0, len(texts), batch_size):
             batch = tokenizer(
                 list(texts[offset : offset + batch_size]),
@@ -2394,7 +2489,26 @@ def _load_transformer_embedding(
             else:
                 raise ValueError(f"unsupported matrix pooling: {pooling}")
             chunks.append(values.float().cpu().numpy())
-        return np.concatenate(chunks, axis=0)
+            if sparse_linear is not None:
+                with torch.inference_mode():
+                    token_weights = torch.relu(sparse_linear(hidden)).squeeze(-1).float().cpu()
+                unused = {
+                    tokenizer.cls_token_id,
+                    tokenizer.eos_token_id,
+                    tokenizer.pad_token_id,
+                    tokenizer.unk_token_id,
+                }
+                for token_ids, weights in zip(batch["input_ids"].cpu().tolist(), token_weights.tolist()):
+                    row = {}
+                    for token_id, weight in zip(token_ids, weights):
+                        if token_id not in unused and weight > 0:
+                            key = str(token_id)
+                            row[key] = max(row.get(key, 0.0), float(weight))
+                    sparse_rows.append(row)
+        dense = np.concatenate(chunks, axis=0)
+        if sparse_linear is not None:
+            return {"dense_vecs": dense, "lexical_weights": sparse_rows}
+        return dense
 
     return encode
 
@@ -2842,6 +2956,7 @@ def _run_benchmark_once(
     model_load_ms = None
     document_encoding_ms = None
     vector_bytes = None
+    learned_sparse_bytes = None
     reranker_model_load_ms = None
     materialized_retrieval = None
     cache_context = None
@@ -2913,7 +3028,8 @@ def _run_benchmark_once(
             embedding._ensure_documents(candidates)
             document_encoding_ms = (phase_clock() - document_started) * 1000
             vector_bytes = int(embedding.document_vectors.nbytes)
-            index_size += vector_bytes
+            learned_sparse_bytes = embedding.learned_sparse_bytes
+            index_size += vector_bytes + learned_sparse_bytes
         except Exception as exc:
             if cache_context is not None:
                 cache_context.__exit__(*sys.exc_info())
@@ -2972,6 +3088,7 @@ def _run_benchmark_once(
                         "scores": np.asarray(
                             [item.score for item in fused], dtype=np.float32
                         ),
+                        "embedding_signals": json.loads(json.dumps(embedding.last_trace)),
                         "duration_ms": (time.perf_counter() - started) * 1000,
                     }
                 )
@@ -3075,6 +3192,7 @@ def _run_benchmark_once(
                 ]
                 retrieval_duration_ms = frozen["duration_ms"]
                 pre_rerank_ids = list(frozen["candidate_ids"])
+                embedding_signals = frozen["embedding_signals"]
                 try:
                     if reranker is not None:
                         reranking_started = time.perf_counter()
@@ -3170,6 +3288,7 @@ def _run_benchmark_once(
             if real_mode:
                 trace["pre_rerank_candidate_ids"] = pre_rerank_ids
                 trace["reranker"] = reranker_trace
+                trace["embedding_signals"] = embedding_signals if effective_real_mode else None
             traces.append(trace)
         lexical_run_succeeded = True
     finally:
@@ -3204,6 +3323,7 @@ def _run_benchmark_once(
         measurements["reranker_model_load_ms"] = reranker_model_load_ms
         measurements["document_encoding_index_build_ms"] = document_encoding_ms
         measurements["vector_bytes"] = vector_bytes
+        measurements["learned_sparse_bytes"] = learned_sparse_bytes
         measurements["vector_bytes_per_document"] = (
             vector_bytes / len(candidates) if candidates else 0
         )
@@ -3216,6 +3336,9 @@ def _run_benchmark_once(
                 "measured" if document_encoding_ms is not None else "unavailable"
             ),
             vector_bytes="measured",
+            learned_sparse_bytes=(
+                "measured" if learned_sparse_bytes is not None else "not-applicable"
+            ),
             vector_bytes_per_document="measured",
         )
     methodology = {
@@ -3319,6 +3442,14 @@ def _run_benchmark_once(
                 )["warm_latency_p95_ms"],
                 "shared_resources": ["peak_rss_bytes", "index_size_bytes", "vector_bytes"],
             }
+    lexical_matrix = None
+    if lexical_config is not None and not real_mode:
+        matrix_raw = read_stable_bytes(Path(matrix_path), MAX_CORPUS_BYTES, label="model matrix")
+        lexical_matrix = json.loads(matrix_raw)
+        if canonical_json_bytes(lexical_matrix) + b"\n" != matrix_raw:
+            raise ValueError("model matrix bytes are not canonical and frozen")
+        if _sha256_file(Path(corpus_path)) != lexical_matrix["benchmark_contract"]["corpus"]["sha256"]:
+            raise ValueError("lexical ablation corpus does not match the benchmark contract")
     return {
         "schema_version": "retrieval-report/v2",
         "corpus_id": corpus["corpus_id"],
@@ -3337,8 +3468,16 @@ def _run_benchmark_once(
         "model_id": selection.embedding["id"] if real_mode else None,
         "variant_id": selection.variant["variant_id"] if real_mode else None,
         "revision": selection.embedding["revision"] if real_mode else None,
-        "matrix_sha256": selection.matrix_sha256 if real_mode else None,
-        "corpus_sha256": selection.corpus_sha256 if real_mode else None,
+        "matrix_sha256": (
+            selection.matrix_sha256
+            if real_mode
+            else _sha256_file(Path(matrix_path)) if lexical_matrix is not None else None
+        ),
+        "corpus_sha256": (
+            selection.corpus_sha256
+            if real_mode
+            else _sha256_file(Path(corpus_path)) if lexical_matrix is not None else None
+        ),
         "acquisition_mode": acquisition_mode,
         "vector_backend": vector_backend if real_mode else None,
         "reranker": (
@@ -3362,9 +3501,15 @@ def _run_benchmark_once(
         ),
         "fallback_reason": fallback_reason,
         "benchmark_contract_sha256": (
-            _sha256_json(selection.matrix["benchmark_contract"]) if real_mode else None
+            _sha256_json(selection.matrix["benchmark_contract"])
+            if real_mode
+            else _sha256_json(lexical_matrix["benchmark_contract"])
+            if lexical_matrix is not None
+            else None
         ),
-        "benchmark_runner_sha256": _sha256_file(Path(__file__)) if real_mode else None,
+        "benchmark_runner_sha256": (
+            _sha256_file(Path(__file__)) if real_mode or lexical_matrix is not None else None
+        ),
         "candidate": (
             {
                 "embedding": _matrix_target(selection.embedding, selection.variant),
@@ -3447,7 +3592,13 @@ def _metrics_match(claimed: object, recomputed: object, path: str) -> None:
         raise ValueError(f"candidate metric mismatch at {path}")
 
 
-def _recompute_report_metrics(corpus: dict, report: dict) -> tuple[dict, dict]:
+def _recompute_report_metrics(
+    corpus: dict,
+    report: dict,
+    *,
+    require_complete_rankings: bool = True,
+    require_normalized_confidence: bool = True,
+) -> tuple[dict, dict]:
     queries = {query["query_id"]: query for query in corpus["queries"]}
     traces = report["traces"]
     if not isinstance(traces, list) or len(traces) != len(queries):
@@ -3506,9 +3657,13 @@ def _recompute_report_metrics(corpus: dict, report: dict) -> tuple[dict, dict]:
             item.evidence_id
             for item in filter_candidates(candidates, _query_scope(query))
         }
-        if len(ranked_ids) != len(set(ranked_ids)) or set(ranked_ids) != eligible:
+        if len(ranked_ids) != len(set(ranked_ids)) or (
+            set(ranked_ids) != eligible
+            if require_complete_rankings
+            else not set(ranked_ids) <= eligible
+        ):
             raise ValueError("candidate trace does not contain exact eligible candidate IDs")
-        if any(
+        if require_normalized_confidence and any(
             not isinstance(item["score"], (int, float))
             or not math.isfinite(float(item["score"]))
             or not 0 <= float(item["score"]) <= 1
@@ -3525,12 +3680,13 @@ def _recompute_report_metrics(corpus: dict, report: dict) -> tuple[dict, dict]:
         }
         if type(answer["abstained"]) is not bool:
             raise ValueError("candidate trace abstention is invalid")
-        expected_abstained = not ranked_evidence or ranked_evidence[0]["score"] < 0.54
-        if answer["abstained"] is not expected_abstained:
-            raise ValueError("candidate trace abstention differs from normalized confidence")
-        expected_reason = "not-in-corpus" if expected_abstained else None
-        if answer["reason"] != expected_reason:
-            raise ValueError("candidate trace abstention reason differs from calibration")
+        if require_normalized_confidence:
+            expected_abstained = not ranked_evidence or ranked_evidence[0]["score"] < 0.54
+            if answer["abstained"] is not expected_abstained:
+                raise ValueError("candidate trace abstention differs from normalized confidence")
+            expected_reason = "not-in-corpus" if expected_abstained else None
+            if answer["reason"] != expected_reason:
+                raise ValueError("candidate trace abstention reason differs from calibration")
         row = _evaluation_row(query, ranked, answer)
         if trace.get("abstention_contract_valid") is not row["abstention_contract_valid"]:
             raise ValueError("candidate trace abstention contract mismatch")
@@ -3546,6 +3702,120 @@ def _recompute_report_metrics(corpus: dict, report: dict) -> tuple[dict, dict]:
     macro = {metric: macro_average(slices, metric) for metric in EFFECTIVENESS_FIELDS}
     _metrics_match(report["macro_average"], macro, "macro_average")
     return overall, slices
+
+
+def _verified_baseline_metrics(matrix: dict, report: dict, *, corpus_path: Path | str):
+    baseline_target = {
+        "embedding": {
+            "dimensions": 384,
+            "id": "BAAI/bge-small-en-v1.5",
+            "revision": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+            "variant_id": "float32-384d",
+        },
+        "reranker": None,
+    }
+    environment = report.get("methodology", {}).get("environment_provenance")
+    comparable_environment = dict(environment) if isinstance(environment, dict) else environment
+    if isinstance(comparable_environment, dict):
+        comparable_environment.pop("verified_lock", None)
+    if (
+        set(report) != REPORT_FIELDS
+        or report.get("schema_version") != "retrieval-report/v2"
+        or report.get("corpus_id") != "public-synthetic-retrieval-v2"
+        or report.get("adapter_kind") != MODEL_MATRIX_ADAPTER_KIND
+        or report.get("quality_claim") is not True
+        or report.get("requested_mode") != MODEL_MATRIX_ADAPTER_KIND
+        or report.get("candidate") != baseline_target
+        or report.get("effective_mode") != MODEL_MATRIX_ADAPTER_KIND
+        or report.get("fallback_reason") is not None
+        or report.get("corpus_sha256") != matrix["benchmark_contract"]["corpus"]["sha256"]
+        or report.get("benchmark_contract_sha256") != _sha256_json(matrix["benchmark_contract"])
+        or report.get("benchmark_runner_sha256") != _sha256_file(Path(__file__))
+        or report.get("acquisition_mode") != "offline-local-files-only"
+        or report.get("vector_backend") != "numpy-exact"
+        or report.get("release_evidence") is not False
+        or report.get("thresholds") != THRESHOLDS
+        or report.get("methodology", {}).get("lexical_configuration")
+        != LEXICAL_CONFIGURATIONS["L4"]
+        or comparable_environment != _environment_provenance("numpy-exact")
+        or not isinstance(environment, dict)
+        or not isinstance(environment.get("verified_lock"), dict)
+    ):
+        raise ValueError("bound baseline is not comparable retrieval-v2 BGE-small evidence")
+    corpus = load_corpus(corpus_path, Path(corpus_path).with_name(DEFAULT_SCHEMA.name))
+    overall, slices = _recompute_report_metrics(corpus, report)
+    quality = round(
+        sum(
+            float(overall[name])
+            for name in (
+                "parent_recall_at_10",
+                "all_required_evidence_recall_at_20",
+                "ndcg_at_10",
+                "mrr_at_10",
+            )
+        )
+        / 4
+        * 10_000
+    )
+    baseline = matrix["selection"]["baseline"]
+    if baseline["overall_basis_points"] != quality or baseline[
+        "parent_recall_at_10_basis_points"
+    ] != round(float(overall["parent_recall_at_10"]) * 10_000):
+        raise ValueError("selection baseline metrics do not match bound raw evidence")
+    return overall, slices
+
+
+def _select_lexical_winner(reports: Sequence[dict]) -> dict:
+    by_id = {}
+    provenance = None
+    for report in reports:
+        configuration = report.get("methodology", {}).get("lexical_configuration")
+        lexical = configuration.get("id") if isinstance(configuration, dict) else None
+        if lexical not in LEXICAL_CONFIGURATIONS or lexical in by_id:
+            raise ValueError("lexical evidence must contain each L0 through L4 exactly once")
+        if configuration != LEXICAL_CONFIGURATIONS[lexical]:
+            raise ValueError("lexical evidence configuration differs from the frozen matrix")
+        comparable = tuple(
+            report.get(field)
+            for field in (
+                "schema_version",
+                "corpus_sha256",
+                "benchmark_contract_sha256",
+                "benchmark_runner_sha256",
+                "adapter_kind",
+                "effective_mode",
+            )
+        )
+        if provenance is None:
+            provenance = comparable
+        elif comparable != provenance:
+            raise ValueError("lexical ablation evidence is not comparable")
+        overall = report.get("overall", {})
+        values = [
+            overall.get(name)
+            for name in (
+                "parent_recall_at_10",
+                "all_required_evidence_recall_at_20",
+                "ndcg_at_10",
+                "mrr_at_10",
+            )
+        ]
+        latency = report.get("measurements", {}).get("warm_latency_p95_ms")
+        if not all(isinstance(value, (int, float)) and math.isfinite(value) for value in values) or not (
+            isinstance(latency, (int, float)) and math.isfinite(latency) and latency >= 0
+        ):
+            raise ValueError("lexical ablation evidence is incomplete or nonfinite")
+        by_id[lexical] = {
+            "id": lexical,
+            "quality": sum(float(value) for value in values) / len(values),
+            "warm_latency_p95_ms": float(latency),
+        }
+    if set(by_id) != set(LEXICAL_CONFIGURATIONS):
+        raise ValueError("lexical evidence requires the complete L0 through L4 ablation set")
+    return min(
+        by_id.values(),
+        key=lambda item: (-item["quality"], item["warm_latency_p95_ms"], item["id"]),
+    )
 
 
 def _recompute_reranker_depth_metrics(corpus: dict, report: dict) -> dict[str, tuple[dict, dict]]:
@@ -3743,6 +4013,7 @@ def _aggregate_reports(
     output_path: Path | str,
     measured_at: str,
     _attested_results: Sequence[_ParentAttestedResult] | None = None,
+    _lexical_results: Sequence[_WorkerPayload] | None = None,
 ) -> dict:
     authoritative = _attested_results is not None
     if authoritative and (
@@ -3794,8 +4065,16 @@ def _aggregate_reports(
 
     baseline = matrix["selection"]["baseline"]
     baseline_path = repo / Path(*PurePosixPath(baseline["raw_report_path"]).parts)
-    if _sha256_file(baseline_path) != baseline["raw_report_sha256"]:
+    baseline_raw = read_stable_bytes(baseline_path, MAX_CORPUS_BYTES, label="baseline raw report")
+    if hashlib.sha256(baseline_raw).hexdigest() != baseline["raw_report_sha256"]:
         raise ValueError("bound baseline raw report SHA256 mismatch")
+    try:
+        baseline_report = json.loads(baseline_raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("bound baseline raw report is invalid") from exc
+    if baseline_raw != _canonical_report_bytes(baseline_report):
+        raise ValueError("bound baseline raw report must use canonical JSON bytes")
+    _verified_baseline_metrics(matrix, baseline_report, corpus_path=corpus_path)
     corpus = load_corpus(corpus_path, Path(corpus_path).with_name(DEFAULT_SCHEMA.name))
     expected = {_candidate_key(spec): spec for spec in required_candidate_specs(matrix)}
     reports = {}
@@ -3907,8 +4186,6 @@ def _aggregate_reports(
                 }
             )
     passing = [item for item in evaluated if item["gates"]["overall"]]
-    if not passing:
-        raise ValueError("no complete candidate report passes selection policy")
     frontier = [
         item
         for item in passing
@@ -3922,15 +4199,19 @@ def _aggregate_reports(
             for other in passing
         )
     ]
-    selected = min(
-        frontier,
-        key=lambda item: (
-            -item["objective_values"]["overall"],
-            item["objective_values"]["warm_p95_ms"],
-            item["objective_values"]["peak_rss_bytes"],
-            item["objective_values"]["index_bytes"],
-            _candidate_key(item["candidate"]),
-        ),
+    selected = (
+        min(
+            frontier,
+            key=lambda item: (
+                -item["objective_values"]["overall"],
+                item["objective_values"]["warm_p95_ms"],
+                item["objective_values"]["peak_rss_bytes"],
+                item["objective_values"]["index_bytes"],
+                _candidate_key(item["candidate"]),
+            ),
+        )
+        if frontier
+        else None
     )
     artifact = {
         "schema_version": (
@@ -3954,11 +4235,28 @@ def _aggregate_reports(
                 ),
             }
             for key in sorted(reports)
+        ]
+        + [
+            {
+                "lexical_configuration": item.report["methodology"]["lexical_configuration"][
+                    "id"
+                ],
+                "raw_report_sha256": hashlib.sha256(item.canonical_bytes).hexdigest(),
+                "retained_path": (
+                    "benchmark/results/reports/"
+                    f"{hashlib.sha256(item.canonical_bytes).hexdigest()}.json"
+                ),
+            }
+            for item in (_lexical_results or ())
         ],
         "pareto": frontier,
-        "selected": selected["candidate"],
-        "gates": selected["gates"],
-        "measurements": selected["objective_values"],
+        "selected": selected["candidate"] if selected is not None else None,
+        "gates": (
+            selected["gates"]
+            if selected is not None
+            else {"outcome": "no-winner", "fallback": "current-bm25"}
+        ),
+        "measurements": selected["objective_values"] if selected is not None else None,
     }
     if set(artifact) != set(matrix["selection"]["aggregation_evidence_contract"]["required_fields"]):
         raise ValueError("selection artifact does not match matrix evidence contract")
@@ -3984,6 +4282,11 @@ def _aggregate_reports(
         for key in sorted(reports):
             retained = retained_root / f"{report_hashes[key]}.json"
             identity = _write_new_bytes(retained, report_bytes[key])
+            created_reports.append((retained, identity))
+        for item in _lexical_results or ():
+            digest = hashlib.sha256(item.canonical_bytes).hexdigest()
+            retained = retained_root / f"{digest}.json"
+            identity = _write_new_bytes(retained, item.canonical_bytes)
             created_reports.append((retained, identity))
         _write_new_output(output, serialized)
     except BaseException:
@@ -4036,26 +4339,22 @@ def orchestrate_selection(
     cache_root = _validate_cache_root(requested_cache).resolve(strict=True)
     if _is_reparse_point(cache_root):
         raise ValueError("model cache root must not be a symlink or reparse point")
+    lexical_results = []
+    subprocess_observed = True
+    for argv in _lexical_ablation_worker_arguments(cache_root, deadline_seconds):
+        payload = _run_bounded_model_worker(argv, deadline_seconds=deadline_seconds)
+        if not isinstance(payload, _WorkerPayload):
+            raise TypeError("lexical worker transport returned an invalid payload")
+        _validate_lexical_worker_payload(payload, matrix=matrix, corpus_path=corpus_path)
+        subprocess_observed &= payload._capability is _SUBPROCESS_PAYLOAD_CAPABILITY
+        lexical_results.append(payload)
+    lexical_config = _select_lexical_winner([item.report for item in lexical_results])["id"]
     attested = []
+    candidate_payloads = []
     for spec in specs:
-        argv = [
-            "--adapter",
-            MODEL_MATRIX_ADAPTER_KIND,
-            "--model-id",
-            spec["embedding"]["id"],
-            "--variant-id",
-            spec["embedding"]["variant_id"],
-            "--cache-root",
-            str(cache_root),
-            "--lexical-config",
-            "L0",
-            "--vector-backend",
-            "numpy-exact",
-            "--deadline-seconds",
-            str(deadline_seconds),
-        ]
-        if spec["reranker"] is not None:
-            argv.extend(("--reranker-id", spec["reranker"]["id"]))
+        argv = _candidate_worker_arguments(
+            spec, cache_root, deadline_seconds, lexical_config=lexical_config
+        )
         payload = _run_bounded_model_worker(argv, deadline_seconds=deadline_seconds)
         if not isinstance(payload, _WorkerPayload):
             raise TypeError("authoritative worker transport returned an invalid payload")
@@ -4064,6 +4363,12 @@ def orchestrate_selection(
                 f"authoritative candidate {_candidate_key(spec)} degraded: "
                 f"fallback_reason={payload.report.get('fallback_reason')!s}"
             )
+        if payload.report.get("methodology", {}).get("lexical_configuration", {}).get(
+            "id"
+        ) != lexical_config:
+            raise ValueError("candidate report does not use the frozen lexical winner")
+        subprocess_observed &= payload._capability is _SUBPROCESS_PAYLOAD_CAPABILITY
+        candidate_payloads.append(payload)
         result = _attest_worker_payload(payload.report, payload.canonical_bytes)
         if (
             not isinstance(result, _ParentAttestedResult)
@@ -4077,7 +4382,8 @@ def orchestrate_selection(
         attested.append(result)
     with tempfile.TemporaryDirectory(prefix="llm-wiki-authoritative-selection-") as temporary:
         paths = []
-        for index, result in enumerate(attested):
+        retained_candidates = attested if subprocess_observed else candidate_payloads
+        for index, result in enumerate(retained_candidates):
             path = Path(temporary) / f"candidate-{index}.json"
             _write_new_bytes(path, result.canonical_bytes)
             paths.append(path)
@@ -4088,8 +4394,86 @@ def orchestrate_selection(
             repo_root=repo_root,
             output_path=output_path,
             measured_at=measured_at,
-            _attested_results=attested,
+            _attested_results=attested if subprocess_observed else None,
+            _lexical_results=lexical_results,
         )
+
+
+def _lexical_ablation_worker_arguments(cache_root: Path, deadline_seconds: float) -> list[list[str]]:
+    return [
+        [
+            "--adapter",
+            ADAPTER_KIND,
+            "--cache-root",
+            str(cache_root),
+            "--lexical-config",
+            level,
+            "--deadline-seconds",
+            str(deadline_seconds),
+        ]
+        for level in LEXICAL_CONFIGURATIONS
+    ]
+
+
+def _validate_lexical_worker_payload(
+    payload: _WorkerPayload, *, matrix: dict, corpus_path: Path | str
+) -> None:
+    report = payload.report
+    if payload.canonical_bytes != _canonical_report_bytes(report):
+        raise ValueError("lexical worker report is not canonical")
+    _require_exact_keys(report, REPORT_FIELDS, "lexical worker report")
+    lexical = report.get("methodology", {}).get("lexical_configuration", {}).get("id")
+    if (
+        lexical not in LEXICAL_CONFIGURATIONS
+        or report["methodology"]["lexical_configuration"] != LEXICAL_CONFIGURATIONS[lexical]
+        or report["quality_claim"] is not False
+        or report["release_evidence"] is not False
+        or report["candidate"] is not None
+        or report["model_id"] is not None
+        or report["fallback_reason"] is not None
+        or report["corpus_sha256"] != matrix["benchmark_contract"]["corpus"]["sha256"]
+        or report["matrix_sha256"]
+        != hashlib.sha256(canonical_json_bytes(matrix) + b"\n").hexdigest()
+        or report["benchmark_contract_sha256"] != _sha256_json(matrix["benchmark_contract"])
+        or report["benchmark_runner_sha256"] != _sha256_file(Path(__file__))
+        or report["methodology"].get("environment_provenance") != _environment_provenance(None)
+    ):
+        raise ValueError("lexical worker provenance is incomplete or incomparable")
+    corpus = load_corpus(corpus_path, Path(corpus_path).with_name(DEFAULT_SCHEMA.name))
+    _recompute_report_metrics(
+        corpus,
+        report,
+        require_complete_rankings=False,
+        require_normalized_confidence=False,
+    )
+
+
+def _candidate_worker_arguments(
+    spec: dict,
+    cache_root: Path,
+    deadline_seconds: float,
+    *,
+    lexical_config: str,
+) -> list[str]:
+    argv = [
+        "--adapter",
+        MODEL_MATRIX_ADAPTER_KIND,
+        "--model-id",
+        spec["embedding"]["id"],
+        "--variant-id",
+        spec["embedding"]["variant_id"],
+        "--cache-root",
+        str(cache_root),
+        "--lexical-config",
+        lexical_config,
+        "--vector-backend",
+        "numpy-exact",
+        "--deadline-seconds",
+        str(deadline_seconds),
+    ]
+    if spec["reranker"] is not None:
+        argv.extend(("--reranker-id", spec["reranker"]["id"]))
+    return argv
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -4324,7 +4708,7 @@ def _run_bounded_model_worker(
             raise ValueError("worker report is not canonical")
         if report.get("quality_claim") is not False or report.get("release_evidence") is not False:
             raise ValueError("worker transport received a self-attested payload")
-        return _WorkerPayload(report, raw)
+        return _WorkerPayload(report, raw, _SUBPROCESS_PAYLOAD_CAPABILITY)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
