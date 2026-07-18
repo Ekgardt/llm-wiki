@@ -102,6 +102,7 @@ _TABLE_COLUMNS = {
         "media_type",
         "language",
         "git_oid",
+        "content",
     ),
     "node": ("node_id", "kind", "identity_scheme", "identity_key", "metadata_json"),
     "occurrence": (
@@ -203,7 +204,8 @@ CREATE TABLE source (
   size INTEGER NOT NULL CHECK (size >= 0),
   media_type TEXT NOT NULL,
   language TEXT,
-  git_oid TEXT
+  git_oid TEXT,
+  content BLOB NOT NULL
 ) WITHOUT ROWID;
 CREATE TABLE node (
   node_id TEXT PRIMARY KEY,
@@ -425,6 +427,7 @@ def create_generation_database(
                     _text(record["media_type"], "media_type", maximum=256),
                     _text(record["language"], "language", maximum=128, optional=True),
                     _text(record["git_oid"], "git_oid", maximum=128, optional=True),
+                    content,
                 )
             )
 
@@ -569,7 +572,7 @@ def create_generation_database(
         try:
             _configure_write(database)
             database.executescript(_SCHEMA)
-            database.executemany("INSERT INTO source VALUES (?, ?, ?, ?, ?, ?, ?)", normalized_sources)
+            database.executemany("INSERT INTO source VALUES (?, ?, ?, ?, ?, ?, ?, ?)", normalized_sources)
             database.executemany("INSERT INTO node VALUES (?, ?, ?, ?, ?)", normalized_nodes)
             database.executemany("INSERT INTO occurrence VALUES (?, ?, ?, ?, ?, ?, ?, ?)", normalized_occurrences)
             database.executemany("INSERT INTO assertion VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", normalized_assertions)
@@ -633,6 +636,130 @@ def _validation_deadline(
         None if deadline is None else lambda: int(monotonic() >= deadline),
         PROGRESS_OPCODES,
     )
+
+
+def _stored_json(value: object, label: str, *, optional: bool = False) -> object:
+    if value is None and optional:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be canonical JSON text")
+    try:
+        decoded = json.loads(value)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{label} must be canonical JSON text") from exc
+    if _canonical_json(decoded, label) != value:
+        raise ValueError(f"{label} must be canonical JSON text")
+    return decoded
+
+
+def _validate_stored_records(
+    database: sqlite3.Connection,
+    *,
+    deadline: float | None,
+    monotonic: Callable[[], float],
+) -> None:
+    """Replay creation-time field and source-byte validation for persisted rows."""
+    source_content: dict[str, bytes] = {}
+    for row in database.execute("SELECT * FROM source ORDER BY source_id"):
+        source_id = _text(row["source_id"], "source_id", maximum=512)
+        assert source_id is not None
+        content = row["content"]
+        if not isinstance(content, bytes) or len(content) > MAX_SOURCE_BYTES:
+            raise ValueError("captured source content must be bounded bytes")
+        size = _integer(row["size"], "source size")
+        digest = _digest(row["sha256"], "source hash")
+        if size != len(content) or digest != hashlib.sha256(content).hexdigest():
+            raise ValueError("captured source manifest size or hash does not match source bytes")
+        _relative_path(row["relative_path"])
+        _text(row["media_type"], "media_type", maximum=256)
+        _text(row["language"], "language", maximum=128, optional=True)
+        _text(row["git_oid"], "git_oid", maximum=128, optional=True)
+        source_content[source_id] = content
+
+    for row in database.execute("SELECT * FROM node ORDER BY node_id"):
+        _node_id(row["node_id"])
+        _text(row["kind"], "node kind", maximum=128)
+        _text(row["identity_scheme"], "identity_scheme", maximum=256)
+        _text(row["identity_key"], "identity_key", maximum=4096)
+        _stored_json(row["metadata_json"], "node metadata")
+
+    for row in database.execute("SELECT * FROM occurrence ORDER BY occurrence_id"):
+        _text(row["occurrence_id"], "occurrence_id", maximum=512)
+        if row["node_id"] is not None:
+            _node_id(row["node_id"])
+        source_id = _text(row["source_id"], "source_id", maximum=512)
+        assert source_id is not None
+        _text(row["role"], "occurrence role", maximum=128)
+        start = _integer(row["byte_start"], "occurrence byte_start")
+        end = _integer(row["byte_end"], "occurrence byte_end", minimum=start)
+        if source_id not in source_content or end > len(source_content[source_id]):
+            raise ValueError("occurrence byte range is outside its captured source")
+        line_start = _integer(row["line_start"], "line_start", minimum=1, maximum=2**31 - 1)
+        _integer(row["line_end"], "line_end", minimum=line_start, maximum=2**31 - 1)
+
+    resolved_assertions: set[str] = set()
+    for row in database.execute("SELECT * FROM assertion ORDER BY assertion_id"):
+        assertion_id = _text(row["assertion_id"], "assertion_id", maximum=512)
+        assert assertion_id is not None
+        _node_id(row["source_node_id"], "source_node_id")
+        _text(row["edge_type"], "edge_type", maximum=128)
+        target = row["target_node_id"]
+        if target is not None:
+            _node_id(target, "target_node_id")
+        literal = _stored_json(row["literal_json"], "literal", optional=True)
+        if (target is None) == (literal is None):
+            raise ValueError("assertion must have exactly one target node or literal")
+        if row["confidence"] not in _CONFIDENCE or row["authority"] not in _AUTHORITY:
+            raise ValueError("assertion confidence or authority is outside the closed contract")
+        resolution = row["resolution"]
+        if resolution not in _RESOLUTION or (resolution == "resolved" and target is None):
+            raise ValueError("assertion resolution is outside the closed contract")
+        _text(row["extractor"], "extractor", maximum=256)
+        if resolution == "resolved":
+            resolved_assertions.add(assertion_id)
+
+    for row in database.execute("SELECT * FROM observation ORDER BY observation_id"):
+        _text(row["observation_id"], "observation_id", maximum=512)
+        if row["source_node_id"] is not None:
+            _node_id(row["source_node_id"], "source_node_id")
+        _text(row["edge_type"], "edge_type", maximum=128)
+        _text(row["target_text"], "target_text", optional=True)
+        if row["reason"] not in _OBSERVATION_REASONS:
+            raise ValueError("observation reason is outside the controlled reason set")
+        _text(row["extractor"], "extractor", maximum=256)
+
+    evidenced_assertions: set[str] = set()
+    for row in database.execute("SELECT * FROM evidence ORDER BY evidence_id"):
+        _text(row["evidence_id"], "evidence_id", maximum=512)
+        assertion_id = _text(row["assertion_id"], "assertion_id", maximum=512, optional=True)
+        observation_id = _text(
+            row["observation_id"], "observation_id", maximum=512, optional=True
+        )
+        if (assertion_id is None) == (observation_id is None):
+            raise ValueError("evidence must bind exactly one assertion or observation")
+        source_id = _text(row["source_id"], "source_id", maximum=512)
+        assert source_id is not None
+        start = _integer(row["byte_start"], "evidence byte_start")
+        end = _integer(row["byte_end"], "evidence byte_end", minimum=start + 1)
+        if source_id not in source_content or end > len(source_content[source_id]):
+            raise ValueError("evidence byte range is outside its captured source")
+        span_hash = _digest(row["span_sha256"], "evidence span hash")
+        if hashlib.sha256(source_content[source_id][start:end]).hexdigest() != span_hash:
+            raise ValueError("evidence span hash does not match the captured source range")
+        if assertion_id is not None:
+            evidenced_assertions.add(assertion_id)
+    if resolved_assertions - evidenced_assertions:
+        raise ValueError("every resolved assertion requires evidence")
+
+    for row in database.execute("SELECT * FROM dependency ORDER BY dependency_id"):
+        _text(row["dependency_id"], "dependency_id", maximum=512)
+        _node_id(row["dependent_node_id"], "dependent_node_id")
+        _node_id(row["dependency_node_id"], "dependency_node_id")
+        _text(row["kind"], "dependency kind", maximum=128)
+        _text(row["source_id"], "source_id", maximum=512, optional=True)
+
+    if deadline is not None and monotonic() >= deadline:
+        raise TimeoutError("Evidence Graph validation deadline reached")
 
 
 def _validate_connection(
@@ -725,18 +852,7 @@ LIMIT 1
         if invalid is not None:
             raise ValueError("Evidence Graph source, evidence, or controlled value integrity failed")
 
-        source_rows = database.execute(
-            "SELECT source_id, relative_path FROM source ORDER BY source_id LIMIT ?",
-            (MAX_VALIDATION_ROWS + 1,),
-        ).fetchall()
-        for row in source_rows:
-            _text(row["source_id"], "source_id", maximum=512)
-            _relative_path(row["relative_path"])
-        node_rows = database.execute(
-            "SELECT node_id FROM node ORDER BY node_id LIMIT ?", (MAX_VALIDATION_ROWS + 1,)
-        ).fetchall()
-        for row in node_rows:
-            _node_id(row["node_id"])
+        _validate_stored_records(database, deadline=deadline, monotonic=monotonic)
     except sqlite3.Error as exc:
         if deadline is not None and (monotonic() >= deadline or "interrupt" in str(exc).casefold()):
             raise TimeoutError("Evidence Graph validation deadline reached") from exc
