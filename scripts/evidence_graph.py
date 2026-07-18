@@ -1344,6 +1344,65 @@ class EvidenceGraph:
         ).fetchone()
         return None if row is None else self._node(row)
 
+    def find_nodes(
+        self,
+        *,
+        kinds: Sequence[str] | None = None,
+        name: str | None = None,
+        path: str | None = None,
+        max_rows: int = 100,
+        deadline: float | None = None,
+    ) -> list[dict[str, object]]:
+        """Find bounded nodes by indexed kind and exact metadata fields."""
+        clauses = []
+        parameters: list[object] = []
+        if kinds is not None:
+            values = tuple(sorted({_text(kind, "node kind", maximum=128) for kind in kinds}))
+            if not values or len(values) > MAX_EDGE_TYPES:
+                raise ValueError("kinds must contain between 1 and 64 values")
+            clauses.append(f"kind IN ({','.join('?' for _ in values)})")
+            parameters.extend(values)
+        if name is not None:
+            clauses.append("json_extract(metadata_json, '$.name') = ?")
+            parameters.append(_text(name, "node name", maximum=1024))
+        if path is not None:
+            clauses.append("json_extract(metadata_json, '$.path') = ?")
+            parameters.append(_text(path, "node path", maximum=4096))
+        where = "" if not clauses else " WHERE " + " AND ".join(clauses)
+        rows = self._execute(
+            "SELECT node_id, kind, identity_scheme, identity_key, metadata_json "
+            f"FROM node{where} ORDER BY kind, identity_key, node_id LIMIT ?",
+            parameters,
+            max_rows=max_rows,
+            deadline=deadline,
+        )
+        return [self._node(row) for row in rows]
+
+    def edges(
+        self,
+        *,
+        edge_types: Sequence[str] | None = None,
+        max_rows: int = 100,
+        deadline: float | None = None,
+    ) -> list[dict[str, object]]:
+        """Return bounded resolved node-to-node assertions for store facades."""
+        values = _edge_type_values(edge_types)
+        filter_sql = ""
+        parameters: list[object] = []
+        if values:
+            filter_sql = f" AND edge_type IN ({','.join('?' for _ in values)})"
+            parameters.extend(values)
+        rows = self._execute(
+            "SELECT assertion_id, source_node_id, edge_type, target_node_id, "
+            "confidence, authority, resolution, extractor FROM assertion "
+            "WHERE resolution='resolved' AND target_node_id IS NOT NULL"
+            f"{filter_sql} ORDER BY edge_type, source_node_id, target_node_id, assertion_id LIMIT ?",
+            parameters,
+            max_rows=max_rows,
+            deadline=deadline,
+        )
+        return [dict(row) for row in rows]
+
     def occurrences(self, node_id: str, *, max_rows: int = 100, deadline: float | None = None):
         rows = self._execute(
             "SELECT o.*, s.relative_path FROM occurrence o JOIN source s USING(source_id) "
@@ -1565,14 +1624,21 @@ ORDER BY depth, assertion_ids LIMIT ?
             else ("observation_id", observation_id)
         )
         rows = self._execute(
-            f"SELECT e.*, s.relative_path, s.sha256 AS source_sha256 FROM evidence e "
+            f"SELECT e.*, s.relative_path, s.sha256 AS source_sha256, s.content AS source_content FROM evidence e "
             f"JOIN source s USING(source_id) WHERE e.{column}=? "
             "ORDER BY s.relative_path, e.byte_start, e.evidence_id LIMIT ?",
             (_text(value, column, maximum=512),),
             max_rows=max_rows,
             deadline=deadline,
         )
-        return [dict(row) for row in rows]
+        result = []
+        for row in rows:
+            item = dict(row)
+            content = item.pop("source_content")
+            item["line_start"] = content.count(b"\n", 0, item["byte_start"]) + 1
+            item["line_end"] = content.count(b"\n", 0, item["byte_end"]) + 1
+            result.append(item)
+        return result
 
     def unresolved(
         self,

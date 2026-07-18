@@ -167,6 +167,17 @@ def test_database_construction_cancellation_stops_lazy_records_without_publish(t
     assert not (tmp_path / "evidence.sqlite3").exists()
 
 
+def test_bounded_node_and_edge_lookup_supports_store_facades(tmp_path):
+    graph = _create(tmp_path)
+
+    assert [item["node_id"] for item in graph.find_nodes(kinds=("function",), name="caller")] == [
+        "caller"
+    ]
+    assert [item["assertion_id"] for item in graph.edges(edge_types=("CALLS",))] == ["call"]
+    assert graph.find_nodes(kinds=("function",), name="missing") == []
+    assert graph.evidence(assertion_id="call")[0]["line_start"] == 2
+
+
 def test_manifest_schema_is_closed_and_bounded():
     from reliable_memory import validate_schema
 

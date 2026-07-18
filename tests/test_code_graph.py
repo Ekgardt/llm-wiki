@@ -37,6 +37,18 @@ from import_resolver import (  # noqa: E402
 )
 
 
+def _activate_graph(tmp_path):
+    from generation_catalog import GenerationCatalog
+
+    from tests.test_evidence_graph_recovery import _publish, _rich_graph_records
+
+    catalog = GenerationCatalog(tmp_path / "state")
+    _publish(catalog, "active", graph_records=_rich_graph_records())
+    catalog.register("active")
+    catalog.activate("active", expected_active=None)
+    return catalog
+
+
 def test_code_graph_importable_as_package():
     result = subprocess.run(
         [sys.executable, "-c", "import scripts.code_graph"],
@@ -59,6 +71,66 @@ def test_code_extractor_importable_as_package():
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_public_facades_query_active_evidence_graph_before_live_scan(tmp_path, monkeypatch):
+    import code_graph
+
+    catalog = _activate_graph(tmp_path)
+    monkeypatch.setattr(code_graph, "_generation_catalog", lambda directory: catalog)
+    monkeypatch.setattr(
+        code_graph,
+        "_workspace_call_graph",
+        lambda directory: (_ for _ in ()).throw(AssertionError("live scan used")),
+    )
+
+    callers = code_graph.find_callers("callee", tmp_path)
+    assert [(Path(item["file"]).name, item["line"]) for item in callers] == [("app.py", 2)]
+    assert code_graph.find_callers("missing", tmp_path) == []
+    assert code_graph.find_callees("caller", tmp_path)[0]["callee"] == "callee"
+    assert code_graph.find_dead_code(tmp_path)
+    assert code_graph.get_architecture(tmp_path)["graph_complete"] is True
+    assert isinstance(code_graph.detect_communities(tmp_path), list)
+
+
+def test_explicit_live_request_bypasses_active_store(tmp_path, monkeypatch):
+    import code_graph
+
+    catalog = _activate_graph(tmp_path)
+    monkeypatch.setattr(code_graph, "_generation_catalog", lambda directory: catalog)
+    (tmp_path / "live.py").write_text(
+        "def target(): pass\ndef caller(): target()\n", encoding="utf-8"
+    )
+    for name in (
+        "_store_find_callers", "_store_find_callees", "_store_find_dead_code",
+        "_store_get_architecture", "_store_detect_communities",
+    ):
+        monkeypatch.setattr(
+            code_graph,
+            name,
+            lambda *_args: (_ for _ in ()).throw(AssertionError("store used")),
+        )
+
+    assert code_graph.find_callers("target", tmp_path, live=True)
+    assert code_graph.find_callees("caller", tmp_path, live=True)
+    assert code_graph.find_dead_code(tmp_path, live=True)
+    assert code_graph.get_architecture(tmp_path, live=True)["graph_complete"] is False
+    assert isinstance(code_graph.detect_communities(tmp_path, live=True), list)
+
+
+def test_invalid_active_store_uses_live_fallback(tmp_path, monkeypatch):
+    import sqlite3
+
+    import code_graph
+
+    monkeypatch.setattr(
+        code_graph,
+        "_generation_catalog",
+        lambda directory: (_ for _ in ()).throw(sqlite3.DatabaseError("invalid")),
+    )
+    (tmp_path / "live.py").write_text("def target(): pass\ntarget()\n", encoding="utf-8")
+
+    assert code_graph.find_callers("target", tmp_path)
 
 
 class TestDetectLanguage:
