@@ -90,6 +90,8 @@ LANGUAGE_MAP = {
     ".bash": "bash",
 }
 
+MAX_DERIVED_COMMUNITY_CACHE = 4
+
 CO_CHANGE_EDGE = "CO_CHANGED_WITH"
 CODE_TOOLS_SCHEMA_VERSION = 1
 _MANIFEST_WRITE_LOCK = threading.Lock()
@@ -899,7 +901,14 @@ def _stored_architecture_node(graph, node: dict[str, object], directory: Path) -
     }
 
 
-def _stored_communities(edges: list[dict[str, object]]) -> list[list[str]]:
+def _stored_communities(graph_reader, edges: list[dict[str, object]]) -> list[list[str]]:
+    cache = getattr(graph_reader, "_derived_code_graph_cache", None)
+    if cache is None:
+        cache = {}
+        graph_reader._derived_code_graph_cache = cache
+    cache_key = "communities/calls/v1"
+    if cache_key in cache:
+        return cache[cache_key]
     graph: dict[str, dict[str, float]] = {}
     for edge in edges:
         source = str(edge["source_node_id"])
@@ -908,16 +917,70 @@ def _stored_communities(edges: list[dict[str, object]]) -> list[list[str]]:
             continue
         graph.setdefault(source, {})[target] = graph.setdefault(source, {}).get(target, 0) + 1
         graph.setdefault(target, {})[source] = graph.setdefault(target, {}).get(source, 0) + 1
-    return _louvain_communities(graph)
+    communities = _louvain_communities(graph)
+    if len(cache) >= MAX_DERIVED_COMMUNITY_CACHE:
+        cache.pop(next(iter(cache)))
+    cache[cache_key] = communities
+    return communities
 
 
-def find_callers(function_name: str, directory: Path, *, live: bool = False) -> list[dict]:
+def _store_report(graph) -> dict[str, object]:
+    unresolved_count = graph._database.execute(
+        "SELECT count(*) FROM observation"
+    ).fetchone()[0]
+    return {
+        "source_generation": graph.generation_id,
+        "graph_complete": unresolved_count == 0,
+        "unresolved_count": unresolved_count,
+        "fallback": False,
+    }
+
+
+def _live_unresolved_count(
+    directory: Path, parsed: list[tuple[Path, dict]] | None = None
+) -> int:
+    if parsed is None:
+        parsed, _definitions, _edges = _workspace_call_graph(directory)
+    return sum(
+        1
+        for _path, result in parsed
+        for call in result["calls"]
+        if call.get("confidence") not in {"confirmed", "heuristic"}
+    )
+
+
+def _live_report(
+    directory: Path, parsed: list[tuple[Path, dict]] | None = None
+) -> dict[str, object]:
+    return {
+        "source_generation": None,
+        "graph_complete": False,
+        "unresolved_count": _live_unresolved_count(directory, parsed),
+        "fallback": True,
+    }
+
+
+def _with_report(key: str, value, report: dict[str, object], enabled: bool):
+    return {key: value, **report} if enabled else value
+
+
+def find_callers(
+    function_name: str,
+    directory: Path,
+    *,
+    live: bool = False,
+    with_report: bool = False,
+) -> list[dict] | dict:
     """Find callers using strict Python evidence or non-Python name heuristics.
 
     Unknown Python calls are excluded. Returns caller edge dictionaries.
     """
     if not live:
-        stored = _store_find_callers(function_name, directory)
+        stored = (
+            _store_find_callers(function_name, directory, with_report=True)
+            if with_report
+            else _store_find_callers(function_name, directory)
+        )
         if stored is not None:
             return stored
     callers = []
@@ -945,10 +1008,12 @@ def find_callers(function_name: str, directory: Path, *, live: bool = False) -> 
                     "confidence": call.get("confidence", "heuristic"),
                 })
 
-    return callers
+    return _with_report("callers", callers, _live_report(directory), with_report)
 
 
-def _store_find_callers(function_name: str, directory: Path) -> list[dict] | None:
+def _store_find_callers(
+    function_name: str, directory: Path, *, with_report: bool = False
+) -> list[dict] | dict | None:
     graph = _active_evidence_graph(directory)
     if graph is None:
         return None
@@ -974,18 +1039,29 @@ def _store_find_callers(function_name: str, directory: Path) -> list[dict] | Non
                 "confidence": edge["confidence"],
                 "symbol_id": caller["node_id"],
             })
-        return sorted(results, key=lambda item: (item["file"], item["line"], item["symbol_id"]))
+        results = sorted(results, key=lambda item: (item["file"], item["line"], item["symbol_id"]))
+        return _with_report("callers", results, _store_report(graph), with_report)
     finally:
         graph.close()
 
 
-def find_callees(function_name: str, directory: Path, *, live: bool = False) -> list[dict]:
+def find_callees(
+    function_name: str,
+    directory: Path,
+    *,
+    live: bool = False,
+    with_report: bool = False,
+) -> list[dict] | dict:
     """Find all functions called BY a function (CALLS edge, forward direction).
 
     Returns list of {file, line, callee}.
     """
     if not live:
-        stored = _store_find_callees(function_name, directory)
+        stored = (
+            _store_find_callees(function_name, directory, with_report=True)
+            if with_report
+            else _store_find_callees(function_name, directory)
+        )
         if stored is not None:
             return stored
     callees = []
@@ -1022,10 +1098,12 @@ def find_callees(function_name: str, directory: Path, *, live: bool = False) -> 
                     "callee": call["name"],
                 })
 
-    return callees
+    return _with_report("callees", callees, _live_report(directory), with_report)
 
 
-def _store_find_callees(function_name: str, directory: Path) -> list[dict] | None:
+def _store_find_callees(
+    function_name: str, directory: Path, *, with_report: bool = False
+) -> list[dict] | dict | None:
     graph = _active_evidence_graph(directory)
     if graph is None:
         return None
@@ -1049,15 +1127,22 @@ def _store_find_callees(function_name: str, directory: Path) -> list[dict] | Non
                 "symbol_id": callee["node_id"],
                 "confidence": edge["confidence"],
             })
-        return sorted(results, key=lambda item: (str(item["callee"]), item["symbol_id"]))
+        results = sorted(results, key=lambda item: (str(item["callee"]), item["symbol_id"]))
+        return _with_report("callees", results, _store_report(graph), with_report)
     finally:
         graph.close()
 
 
-def find_dead_code(directory: Path, *, live: bool = False) -> list[dict]:
+def find_dead_code(
+    directory: Path, *, live: bool = False, with_report: bool = False
+) -> list[dict] | dict:
     """Return conservative dead-code candidates from the incomplete static graph."""
     if not live:
-        stored = _store_find_dead_code(directory)
+        stored = (
+            _store_find_dead_code(directory, with_report=True)
+            if with_report
+            else _store_find_dead_code(directory)
+        )
         if stored is not None:
             return stored
     parsed, definitions, edges = _workspace_call_graph(directory)
@@ -1089,10 +1174,15 @@ def find_dead_code(directory: Path, *, live: bool = False) -> list[dict]:
                 "reason": "zero_confirmed_incoming_calls",
                 "graph_complete": False,
             })
-    return sorted(candidates, key=lambda item: (item["name"], item["file"], item["line"]))
+    candidates = sorted(candidates, key=lambda item: (item["name"], item["file"], item["line"]))
+    return _with_report(
+        "candidates", candidates, _live_report(directory, parsed), with_report
+    )
 
 
-def _store_find_dead_code(directory: Path) -> list[dict] | None:
+def _store_find_dead_code(
+    directory: Path, *, with_report: bool = False
+) -> list[dict] | dict | None:
     graph = _active_evidence_graph(directory)
     if graph is None:
         return None
@@ -1125,9 +1215,13 @@ def _store_find_dead_code(directory: Path) -> list[dict] | None:
                 "line": location[1],
                 "status": "candidate",
                 "reason": "zero_confirmed_incoming_calls",
-                "graph_complete": True,
+                "graph_complete": False,
             })
-        return sorted(candidates, key=lambda item: (item["name"], item["file"], item["line"]))
+        report = _store_report(graph)
+        for candidate in candidates:
+            candidate["graph_complete"] = report["graph_complete"]
+        candidates = sorted(candidates, key=lambda item: (item["name"], item["file"], item["line"]))
+        return _with_report("candidates", candidates, report, with_report)
     finally:
         graph.close()
 
@@ -1159,7 +1253,9 @@ def _is_framework_route(lines: list[str], definition_line: int) -> bool:
     return bool(re.search(r"(?:@\w*\.route\s*\(|@(?:GetMapping|RequestMapping)\b)", prefix))
 
 
-def get_architecture(directory: Path, *, live: bool = False) -> dict:
+def get_architecture(
+    directory: Path, *, live: bool = False, with_report: bool = False
+) -> dict:
     """Summarize statically visible entry points, routes, hotspots, and modules."""
     if not live:
         stored = _store_get_architecture(directory)
@@ -1195,17 +1291,14 @@ def get_architecture(directory: Path, *, live: bool = False) -> dict:
         if symbol_id in definitions
     ]
     hotspots.sort(key=lambda item: (-item["incoming_callers"], item["name"], item["file"]))
-    return {
+    architecture = {
         "entry_points": entry_points,
         "routes": routes,
         "hotspots": hotspots,
-        "communities": (
-            _detect_live_communities(directory)
-            if live
-            else detect_communities(directory)
-        ),
+        "communities": _communities_from_edges(edges),
         "graph_complete": False,
     }
+    return {**architecture, **_live_report(directory, parsed)}
 
 
 def _store_get_architecture(directory: Path) -> dict | None:
@@ -1220,9 +1313,13 @@ def _store_get_architecture(directory: Path) -> dict | None:
             for node in graph.find_nodes(kinds=("function", "method"), max_rows=10_000)
         }
         calls = graph.edges(edge_types=("CALLS",), max_rows=10_000)
-        incoming = Counter(edge["target_node_id"] for edge in calls)
+        incoming: dict[str, set[str]] = {}
+        for edge in calls:
+            incoming.setdefault(edge["target_node_id"], set()).add(
+                edge["source_node_id"]
+            )
         hotspots = []
-        for node_id, count in incoming.items():
+        for node_id, callers in incoming.items():
             node = functions.get(node_id)
             if node is None:
                 continue
@@ -1233,15 +1330,16 @@ def _store_get_architecture(directory: Path) -> dict | None:
                 "owner": node["metadata"].get("owner", ""),
                 "file": location[0],
                 "line": location[1],
-                "incoming_callers": count,
+                "incoming_callers": len(callers),
             })
         hotspots.sort(key=lambda item: (-item["incoming_callers"], str(item["name"]), item["file"]))
+        report = _store_report(graph)
         return {
             "entry_points": [_stored_architecture_node(graph, node, directory) for node in entries],
             "routes": [_stored_architecture_node(graph, node, directory) for node in routes],
             "hotspots": hotspots,
-            "communities": _stored_communities(calls),
-            "graph_complete": True,
+            "communities": _stored_communities(graph, calls),
+            **report,
         }
     finally:
         graph.close()
@@ -1275,17 +1373,28 @@ def _framework_routes(path: Path, source: str) -> list[dict]:
     return routes
 
 
-def detect_communities(directory: Path, *, live: bool = False) -> list[list[str]]:
+def detect_communities(
+    directory: Path, *, live: bool = False, with_report: bool = False
+) -> list[list[str]] | dict:
     """Detect functional modules with deterministic weighted Louvain."""
     if not live:
-        stored = _store_detect_communities(directory)
+        stored = (
+            _store_detect_communities(directory, with_report=True)
+            if with_report
+            else _store_detect_communities(directory)
+        )
         if stored is not None:
             return stored
-    return _detect_live_communities(directory)
+    communities = _detect_live_communities(directory)
+    return _with_report("communities", communities, _live_report(directory), with_report)
 
 
 def _detect_live_communities(directory: Path) -> list[list[str]]:
     _, _, edges = _workspace_call_graph(directory)
+    return _communities_from_edges(edges)
+
+
+def _communities_from_edges(edges: list[dict]) -> list[list[str]]:
     graph: dict[str, dict[str, float]] = {}
     for edge in edges:
         caller, callee = edge["source"], edge["target"]
@@ -1296,16 +1405,163 @@ def _detect_live_communities(directory: Path) -> list[list[str]]:
     return _louvain_communities(graph)
 
 
-def _store_detect_communities(directory: Path) -> list[list[str]] | None:
+def _store_detect_communities(
+    directory: Path, *, with_report: bool = False
+) -> list[list[str]] | dict | None:
     graph = _active_evidence_graph(directory)
     if graph is None:
         return None
     try:
-        return _stored_communities(
-            graph.edges(edge_types=("CALLS",), max_rows=10_000)
+        communities = _stored_communities(
+            graph, graph.edges(edge_types=("CALLS",), max_rows=10_000)
         )
+        return _with_report("communities", communities, _store_report(graph), with_report)
     finally:
         graph.close()
+
+
+def find_dependencies(
+    node_id: str,
+    directory: Path,
+    *,
+    reverse: bool = False,
+    live: bool = False,
+    with_report: bool = False,
+) -> list[dict] | dict:
+    """Find bounded canonical dependencies, preferring the active generation."""
+    if not live:
+        graph = _active_evidence_graph(directory)
+        if graph is not None:
+            try:
+                dependencies = graph.dependencies(
+                    node_id, reverse=reverse, max_depth=8, max_rows=10_000
+                )
+                return _with_report(
+                    "dependencies", dependencies, _store_report(graph), with_report
+                )
+            finally:
+                graph.close()
+    parsed, definitions, edges = _workspace_call_graph(directory)
+    dependencies = _find_live_dependencies(
+        node_id, definitions, edges, reverse=reverse
+    )
+    return _with_report(
+        "dependencies", dependencies, _live_report(directory, parsed), with_report
+    )
+
+
+def find_paths(
+    source_node_id: str,
+    target_node_id: str,
+    directory: Path,
+    *,
+    live: bool = False,
+    with_report: bool = False,
+) -> list[dict] | dict:
+    """Find bounded canonical graph paths, preferring the active generation."""
+    if not live:
+        graph = _active_evidence_graph(directory)
+        if graph is not None:
+            try:
+                paths = graph.path(
+                    source_node_id,
+                    target_node_id,
+                    max_depth=8,
+                    max_rows=10,
+                    max_work=10_000,
+                )
+                return _with_report("paths", paths, _store_report(graph), with_report)
+            finally:
+                graph.close()
+    parsed, definitions, edges = _workspace_call_graph(directory)
+    paths = _find_live_paths(source_node_id, target_node_id, definitions, edges)
+    return _with_report(
+        "paths", paths, _live_report(directory, parsed), with_report
+    )
+
+
+def _live_node_ids(value: str, definitions: dict[str, dict]) -> list[str]:
+    if value in definitions:
+        return [value]
+    by_name: dict[str, list[str]] = {}
+    for identifier, definition in definitions.items():
+        by_name.setdefault(str(definition["name"]), []).append(identifier)
+    return sorted(by_name.get(value, []))
+
+
+def _find_live_dependencies(
+    node_id: str,
+    definitions: dict[str, dict],
+    edges: list[dict],
+    *,
+    reverse: bool,
+) -> list[dict]:
+    start_key, target_key = (
+        ("target", "source") if reverse else ("source", "target")
+    )
+    adjacency: dict[str, list[str]] = {}
+    for edge in edges:
+        adjacency.setdefault(edge[start_key], []).append(edge[target_key])
+    pending = [(identifier, 0) for identifier in _live_node_ids(node_id, definitions)]
+    seen = {identifier for identifier, _depth in pending}
+    results = []
+    work = 0
+    while pending and len(results) < 10_000 and work < 10_000:
+        current, depth = pending.pop(0)
+        work += 1
+        if depth >= 8:
+            continue
+        for target in sorted(adjacency.get(current, [])):
+            if target in seen:
+                continue
+            seen.add(target)
+            target_depth = depth + 1
+            definition = definitions.get(target)
+            if definition is not None:
+                results.append(
+                    {
+                        "node_id": target,
+                        "kind": "function",
+                        "identity_scheme": "live-code/v1",
+                        "identity_key": target,
+                        "metadata": {
+                            "name": definition["name"],
+                            "owner": definition.get("owner", ""),
+                            "path": definition.get("file", ""),
+                        },
+                        "depth": target_depth,
+                    }
+                )
+            pending.append((target, target_depth))
+    return results
+
+
+def _find_live_paths(
+    source_node_id: str,
+    target_node_id: str,
+    definitions: dict[str, dict],
+    edges: list[dict],
+) -> list[dict]:
+    sources = _live_node_ids(source_node_id, definitions)
+    targets = set(_live_node_ids(target_node_id, definitions))
+    outgoing: dict[str, list[str]] = {}
+    for edge in edges:
+        outgoing.setdefault(edge["source"], []).append(edge["target"])
+    pending = [(source, [source]) for source in sorted(sources)]
+    paths = []
+    work = 0
+    while pending and len(paths) < 10 and work < 10_000:
+        node, path = pending.pop(0)
+        work += 1
+        if node in targets and len(path) > 1:
+            paths.append({"node_ids": path, "assertion_ids": [], "depth": len(path) - 1})
+            continue
+        if len(path) > 8:
+            continue
+        for target in sorted(outgoing.get(node, [])):
+            if target not in path:
+                pending.append((target, [*path, target]))
+    return paths
 
 
 def _workspace_call_graph(

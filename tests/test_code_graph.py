@@ -89,8 +89,180 @@ def test_public_facades_query_active_evidence_graph_before_live_scan(tmp_path, m
     assert code_graph.find_callers("missing", tmp_path) == []
     assert code_graph.find_callees("caller", tmp_path)[0]["callee"] == "callee"
     assert code_graph.find_dead_code(tmp_path)
-    assert code_graph.get_architecture(tmp_path)["graph_complete"] is True
+    architecture = code_graph.get_architecture(tmp_path)
+    assert architecture["graph_complete"] is False
+    assert architecture["unresolved_count"] == 1
     assert isinstance(code_graph.detect_communities(tmp_path), list)
+
+
+def test_store_first_reports_generation_completeness_and_unresolved_count(
+    tmp_path, monkeypatch
+):
+    import code_graph
+
+    catalog = _activate_graph(tmp_path)
+    monkeypatch.setattr(code_graph, "_generation_catalog", lambda directory: catalog)
+
+    callers = code_graph.find_callers("callee", tmp_path, with_report=True)
+    architecture = code_graph.get_architecture(tmp_path, with_report=True)
+
+    assert callers["callers"][0]["qualified_name"] == "caller"
+    assert callers["source_generation"] == "active"
+    assert callers["graph_complete"] is False
+    assert callers["unresolved_count"] == 1
+    assert callers["fallback"] is False
+    assert architecture["source_generation"] == "active"
+    assert architecture["unresolved_count"] == 1
+
+
+def test_dependency_and_path_facades_prefer_active_generation(tmp_path, monkeypatch):
+    import code_graph
+
+    catalog = _activate_graph(tmp_path)
+    monkeypatch.setattr(code_graph, "_generation_catalog", lambda directory: catalog)
+    monkeypatch.setattr(
+        code_graph,
+        "_workspace_call_graph",
+        lambda directory: (_ for _ in ()).throw(AssertionError("live scan used")),
+    )
+
+    dependencies = code_graph.find_dependencies("caller", tmp_path, with_report=True)
+    paths = code_graph.find_paths("caller", "callee", tmp_path, with_report=True)
+
+    assert [item["node_id"] for item in dependencies["dependencies"]] == ["callee"]
+    assert paths["paths"] == [
+        {"node_ids": ["caller", "callee"], "assertion_ids": ["assertion"], "depth": 1}
+    ]
+    assert dependencies["source_generation"] == paths["source_generation"] == "active"
+    assert dependencies["fallback"] is paths["fallback"] is False
+
+
+def test_live_fallback_report_is_explicit_when_generation_is_missing(tmp_path):
+    import code_graph
+
+    (tmp_path / "live.py").write_text(
+        "def target(): pass\ndef caller(): target()\n", encoding="utf-8"
+    )
+
+    result = code_graph.find_callers("target", tmp_path, with_report=True)
+
+    assert result["callers"]
+    assert result["source_generation"] is None
+    assert result["graph_complete"] is False
+    assert isinstance(result["unresolved_count"], int)
+    assert result["fallback"] is True
+
+
+def test_dependency_and_path_facades_use_bounded_live_fallback_without_generation(
+    tmp_path,
+):
+    import code_graph
+
+    (tmp_path / "live.py").write_text(
+        "def target(): pass\ndef caller(): target()\n", encoding="utf-8"
+    )
+
+    dependencies = code_graph.find_dependencies("caller", tmp_path, with_report=True)
+    paths = code_graph.find_paths("caller", "target", tmp_path, with_report=True)
+
+    assert [item["metadata"]["name"] for item in dependencies["dependencies"]] == [
+        "target"
+    ]
+    assert paths["paths"][0]["depth"] == 1
+    assert dependencies["fallback"] is paths["fallback"] is True
+
+
+def test_community_cache_is_bounded_and_scoped_to_pinned_generation(
+    tmp_path, monkeypatch
+):
+    import code_graph
+
+    catalog = _activate_graph(tmp_path)
+    monkeypatch.setattr(code_graph, "_generation_catalog", lambda directory: catalog)
+    graph = code_graph._active_evidence_graph(tmp_path)
+    calls = graph.edges(edge_types=("CALLS",), max_rows=10_000)
+    computed = []
+    monkeypatch.setattr(
+        code_graph,
+        "_louvain_communities",
+        lambda value: computed.append(value) or [["caller", "callee"]],
+    )
+
+    try:
+        assert code_graph._stored_communities(graph, calls) == [["caller", "callee"]]
+        assert code_graph._stored_communities(graph, calls) == [["caller", "callee"]]
+        assert len(computed) == 1
+        assert len(graph._derived_code_graph_cache) <= code_graph.MAX_DERIVED_COMMUNITY_CACHE
+    finally:
+        graph.close()
+
+
+def test_store_facades_switch_only_after_generation_activation(tmp_path, monkeypatch):
+    import code_graph
+    from evidence_graph import EvidenceGraph
+    from generation_catalog import GenerationCatalog
+
+    from tests.test_evidence_graph_recovery import _publish, _rich_graph_records
+
+    catalog = GenerationCatalog(tmp_path / "state")
+    _publish(catalog, "prior", graph_records=_rich_graph_records())
+    catalog.register("prior")
+    catalog.activate("prior", expected_active=None)
+    monkeypatch.setattr(code_graph, "_generation_catalog", lambda directory: catalog)
+
+    _publish(catalog, "next", parent="prior", graph_records=_rich_graph_records())
+    catalog.register("next")
+    entered = threading.Event()
+    release = threading.Event()
+    real_edges = EvidenceGraph.edges
+
+    def paused_edges(graph, **options):
+        if graph.generation_id == "prior":
+            entered.set()
+            assert release.wait(5)
+        return real_edges(graph, **options)
+
+    monkeypatch.setattr(EvidenceGraph, "edges", paused_edges)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        reader = pool.submit(
+            code_graph.find_callers, "callee", tmp_path, with_report=True
+        )
+        assert entered.wait(5)
+        catalog.activate("next", expected_active="prior")
+        release.set()
+        during = reader.result(timeout=5)
+
+    assert during["source_generation"] == "prior"
+    after = code_graph.find_callers("callee", tmp_path, with_report=True)
+    assert after["source_generation"] == "next"
+
+
+def test_store_hotspots_count_distinct_callers_not_call_sites(tmp_path, monkeypatch):
+    import code_graph
+    from generation_catalog import GenerationCatalog
+
+    from tests.test_evidence_graph_recovery import _publish, _rich_graph_records
+
+    records = _rich_graph_records()
+    records["assertions"].append(
+        {**records["assertions"][0], "assertion_id": "assertion-2"}
+    )
+    records["evidence"].append(
+        {
+            **records["evidence"][0],
+            "evidence_id": "evidence-2",
+            "assertion_id": "assertion-2",
+        }
+    )
+    catalog = GenerationCatalog(tmp_path / "state")
+    _publish(catalog, "active", graph_records=records)
+    catalog.register("active")
+    catalog.activate("active", expected_active=None)
+    monkeypatch.setattr(code_graph, "_generation_catalog", lambda directory: catalog)
+
+    hotspots = code_graph.get_architecture(tmp_path)["hotspots"]
+
+    assert hotspots[0]["incoming_callers"] == 1
 
 
 def test_explicit_live_request_bypasses_active_store(tmp_path, monkeypatch):
@@ -977,7 +1149,7 @@ class TestGetArchitecture:
             encoding="utf-8",
         )
         monkeypatch.setattr(
-            "code_graph.detect_communities", lambda directory: [["first", "shared"]]
+            "code_graph._communities_from_edges", lambda edges: [["first", "shared"]]
         )
 
         architecture = get_architecture(tmp_path)
