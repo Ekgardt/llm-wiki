@@ -894,10 +894,10 @@ def test_real_retrieval_benchmark_extra_is_optional_and_locked():
 def test_selection_requires_all_gates_pareto_and_raw_result_evidence():
     selection = _load()["selection"]
     assert selection["baseline"] == {
-        "overall_basis_points": 8700,
+        "overall_basis_points": 9348,
         "parent_recall_at_10_basis_points": 10000,
         "raw_report_path": "benchmark/baseline-2026-07-16-retrieval.json",
-        "raw_report_sha256": "3af2868a76c03752e881b639ef21dfc83dca9a24c1a508b4bf3a444b395ef167",
+        "raw_report_sha256": "15367e69907ed7dfee6a96ddd47c85b8eef348c5c5e0012c8b311d063b11dfd6",
     }
     assert selection["limits"] == {
         "peak_rss_bytes": 4 * 1024**3,
