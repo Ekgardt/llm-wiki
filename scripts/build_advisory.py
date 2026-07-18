@@ -84,7 +84,7 @@ def _find_last_decision(slug: str | None = None) -> dict | None:
     decisions/ subdir), so we scan all .md files and filter by
     frontmatter `type: decision`.
 
-    The returned dict carries ``slug`` and ``source_sha256`` so downstream
+    The returned dict carries ``slug``, ``logical_path``, and ``source_sha256`` so downstream
     callers (e.g. L1 tier lookup) can key caches by source hash per the
     Task 15 cache contract.
     """
@@ -122,6 +122,7 @@ def _find_last_decision(slug: str | None = None) -> dict | None:
             "timestamp": ts[:10],
             "path": md.relative_to(ROOT).as_posix(),
             "slug": md.stem,
+            "logical_path": md.relative_to(KNOWLEDGE).as_posix(),
             "source_sha256": source_sha256,
         })
     if not candidates:
@@ -325,6 +326,7 @@ def _build_rule_based_advisory(slug: str | None, max_chars: int) -> str:
             l1 = get_l1(
                 last["slug"],
                 source_sha256=last.get("source_sha256"),
+                logical_path=last.get("logical_path"),
             )
             if l1:
                 parts.append(f"- {l1[:200]}")

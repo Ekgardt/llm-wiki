@@ -13,7 +13,7 @@ The context is stored in cache/contextual/ and merged into the search
 index at build time. No changes to Markdown source files.
 
 Usage:
-    uv run python scripts/contextual_retrieval.py --all     # generate for all
+    uv run python scripts/contextual_retrieval.py --all     # deterministic for all
     uv run python scripts/contextual_retrieval.py --status   # show stats
 """
 
@@ -84,6 +84,9 @@ def get_context(
             source_sha256=source_sha256,
             logical_path=logical_path,
             extractor_version=extractor_version,
+            generation_mode=generation_mode,
+            model_descriptor=model_descriptor,
+            model_revision=model_revision,
         )
         try:
             artifact_metadata = ctx_file.lstat()
@@ -287,6 +290,32 @@ def _validate_llm_options(
             raise TypeError("model_descriptor must be a ProviderDescriptor")
 
 
+def _reject_contextual_llm(use_llm: bool) -> None:
+    if use_llm:
+        raise ValueError("LLM-generated contextual text is unavailable pending frozen ablation")
+
+
+def _generation_model_identity(
+    generation_mode: str,
+    model_descriptor: object | None,
+    model_revision: str | None,
+) -> dict[str, object] | None:
+    if generation_mode not in {"deterministic", "llm"}:
+        raise ValueError("generation_mode must be 'deterministic' or 'llm'")
+    if generation_mode == "deterministic":
+        if model_descriptor is not None or model_revision is not None:
+            raise ValueError("deterministic cache identity cannot include a model")
+        return None
+    if model_descriptor is None or not model_revision:
+        raise ValueError("LLM cache identity requires a model descriptor and revision")
+
+    from llm_client import ProviderDescriptor
+
+    if not isinstance(model_descriptor, ProviderDescriptor):
+        raise TypeError("model_descriptor must be a ProviderDescriptor")
+    return {**model_descriptor.canonical(), "revision": model_revision}
+
+
 def context_artifact_key(
     source: CapturedSource,
     *,
@@ -298,23 +327,7 @@ def context_artifact_key(
     """Return the stable key for one exact captured source and extractor."""
     source = _validate_source(source)
     version = _extractor_version(extractor_version)
-    if generation_mode not in {"deterministic", "llm"}:
-        raise ValueError("generation_mode must be 'deterministic' or 'llm'")
-    if generation_mode == "llm" and model_descriptor is None:
-        raise ValueError("LLM cache identity requires a model descriptor and revision")
-    if generation_mode == "deterministic" and (
-        model_descriptor is not None or model_revision is not None
-    ):
-        raise ValueError("deterministic cache identity cannot include a model")
-    model = None
-    if model_descriptor is not None:
-        from llm_client import ProviderDescriptor
-
-        if not isinstance(model_descriptor, ProviderDescriptor):
-            raise TypeError("model_descriptor must be a ProviderDescriptor")
-        if not model_revision:
-            raise ValueError("model_revision is required with a model descriptor")
-        model = {**model_descriptor.canonical(), "revision": model_revision}
+    model = _generation_model_identity(generation_mode, model_descriptor, model_revision)
     identity = json.dumps(
         [source.record.relative_path, source.record.sha256, version, generation_mode, model],
         ensure_ascii=False,
@@ -336,6 +349,7 @@ def generate_context_for_source(
     """Generate context exclusively from an immutable captured source."""
     source = _validate_source(source)
     _extractor_version(extractor_version)
+    _reject_contextual_llm(use_llm)
     content = source.content.decode("utf-8", errors="strict")
     title, summary = _context_fields(content, source.record.relative_path)
     project = source.metadata.project or ""
@@ -447,6 +461,7 @@ def build_snapshot_contexts(
         raise TypeError("snapshot must be a CorpusSnapshot")
     if len(snapshot.sources) > MAX_CONTEXT_SOURCES:
         raise ValueError("snapshot has too many sources for contextual artifacts")
+    _reject_contextual_llm(use_llm)
     version = _extractor_version(extractor_version)
     sources = _validate_snapshot_sources(snapshot)
     if use_llm:
@@ -534,7 +549,7 @@ def legacy_context_cache_path(
     logical_path: str | None = None,
     extractor_version: str = CONTEXT_EXTRACTOR_VERSION,
     generation_mode: str = "deterministic",
-    model_descriptor: Mapping[str, object] | None = None,
+    model_descriptor: object | None = None,
     model_revision: str | None = None,
 ) -> Path:
     """Return the legacy mutable-cache path for a contextual entry.
@@ -543,7 +558,10 @@ def legacy_context_cache_path(
     contextual entries invalidate on content changes (Task 15 contract).
     """
     safe_slug = _legacy_slug(slug)
+    model = _generation_model_identity(generation_mode, model_descriptor, model_revision)
     if not source_sha256:
+        if generation_mode == "llm":
+            raise ValueError("LLM cache identity requires source_sha256")
         return CONTEXT_DIR / f"{safe_slug}.ctx"
     logical = _safe_logical_path(logical_path or f"{slug}.md")
     identity = json.dumps(
@@ -552,8 +570,7 @@ def legacy_context_cache_path(
             source_sha256,
             extractor_version,
             generation_mode,
-            model_descriptor,
-            model_revision,
+            model,
         ],
         ensure_ascii=False,
         sort_keys=True,
@@ -586,20 +603,21 @@ def _safe_logical_path(value: str) -> str:
 
 def generate_context(
     slug: str,
-    use_llm: bool = True,
+    use_llm: bool = False,
     source_sha256: str | None = None,
     logical_path: str | None = None,
     captured_bytes: bytes | None = None,
 ) -> str:
     """Legacy path-based context generation compatibility wrapper.
 
-    If use_llm and LLM available: LLM generates context.
-    Otherwise: deterministic extraction from title + summary + project.
+    Context is extracted deterministically from title, summary, and project.
+    ``use_llm=True`` is rejected until the frozen ablation permits generation.
 
     When ``source_sha256`` is provided, the cache file is hash-suffixed so
     stale entries cannot survive a content change (Task 15 contract).
     """
     slug = _legacy_slug(slug)
+    _reject_contextual_llm(use_llm)
     knowledge_root = Path(os.path.abspath(KNOWLEDGE_DIR))
     _validate_existing_ancestors(knowledge_root, "legacy knowledge directory")
     logical = _safe_logical_path(logical_path or f"{slug}.md")
@@ -657,8 +675,9 @@ Return ONLY the context sentence. No preamble."""
     return f"Topic: {title}. {summary}"
 
 
-def build_all_contexts(use_llm: bool = True, verbose: bool = True) -> dict:
+def build_all_contexts(use_llm: bool = False, verbose: bool = True) -> dict:
     """Build the legacy mutable cache when no generation is supplied."""
+    _reject_contextual_llm(use_llm)
     stats = {"generated": 0, "skipped": 0, "errors": 0}
     knowledge_root = Path(os.path.abspath(KNOWLEDGE_DIR))
     context_root = Path(os.path.abspath(CONTEXT_DIR))
@@ -731,9 +750,12 @@ def main() -> int:
     p = argparse.ArgumentParser(description="Contextual Retrieval — page context generation.")
     p.add_argument("--all", action="store_true", help="Generate for all pages.")
     p.add_argument("--slug", type=str, default=None, help="Generate for one page.")
-    p.add_argument("--no-llm", action="store_true", help="Use deterministic extraction.")
+    p.add_argument("--llm", action="store_true", help="Unavailable until contextual ablation passes.")
     p.add_argument("--status", action="store_true", help="Show cache stats.")
     args = p.parse_args()
+
+    if args.llm:
+        p.error("--llm is unavailable until contextual ablation passes")
 
     if args.status:
         if not CONTEXT_DIR.exists():
@@ -744,11 +766,11 @@ def main() -> int:
         return 0
 
     if args.slug:
-        ctx = generate_context(args.slug, use_llm=not args.no_llm)
+        ctx = generate_context(args.slug, use_llm=False)
         print(ctx)
         return 0
 
-    build_all_contexts(use_llm=not args.no_llm)
+    build_all_contexts(use_llm=False)
     return 0
 
 

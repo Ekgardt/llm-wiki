@@ -31,7 +31,6 @@ import stat
 import sys
 import tempfile
 import unicodedata
-from collections.abc import Mapping
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING
 
@@ -421,7 +420,8 @@ def tier_legacy_cache_path(
     extractor_version: str = TIER_EXTRACTOR_VERSION,
     logical_path: str | None = None,
     generation_mode: str = "deterministic",
-    model_provenance: Mapping[str, object] | None = None,
+    model_descriptor: object | None = None,
+    model_revision: str | None = None,
 ) -> Path:
     """Return the legacy mutable-cache path for an L1 overview.
 
@@ -430,11 +430,18 @@ def tier_legacy_cache_path(
     content or extractor changes.
     """
     safe_slug = _safe_cache_slug(slug)
+    if generation_mode not in {"deterministic", "llm"}:
+        raise ValueError("generation_mode must be 'deterministic' or 'llm'")
+    model = _model_provenance(
+        generation_mode == "llm", model_descriptor, model_revision
+    )
     if not source_sha256:
+        if generation_mode == "llm":
+            raise ValueError("LLM cache identity requires source_sha256")
         return TIERS_DIR / f"{safe_slug}.l1.md"
     logical = _safe_logical_path(logical_path or f"{slug}.md")
     identity = json.dumps(
-        [logical, source_sha256, extractor_version, generation_mode, model_provenance],
+        [logical, source_sha256, extractor_version, generation_mode, model],
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -612,14 +619,21 @@ def os_env_fake() -> bool:
     return os.environ.get("MEMORY_LLM_PROVIDER", "").lower() == "fake"
 
 
-def build_all_tiers(use_llm: bool = True, verbose: bool = True) -> dict:
-    """Generate L1 overviews for all pages that need it.
+def build_all_tiers(use_llm: bool = False, verbose: bool = True) -> dict:
+    """Generate deterministic L1 overviews for all pages that need it.
 
     Returns stats: {generated, skipped, errors}
 
-    Each cache entry is keyed by source SHA-256 + extractor version when
-    the source can be hashed, satisfying Task 15's cache-key contract.
+    Each cache entry is keyed by source SHA-256 + extractor version. Legacy
+    batch LLM generation fails closed because it cannot accept complete model
+    provenance; snapshot generation remains the provenance-aware interface.
     """
+    if use_llm:
+        raise ValueError(
+            "LLM generation requires an explicit model descriptor and revision; "
+            "legacy tier batch generation is unavailable"
+        )
+
     TIERS_DIR.mkdir(parents=True, exist_ok=True)
 
     stats = {"generated": 0, "skipped": 0, "errors": 0}
@@ -720,10 +734,13 @@ def main() -> int:
     p = argparse.ArgumentParser(description="L0/L1/L2 tiered knowledge loading.")
     p.add_argument("--slug", type=str, default=None, help="Generate L1 for one page.")
     p.add_argument("--all", action="store_true", help="Generate L1 for all pages.")
-    p.add_argument("--no-llm", action="store_true", help="Use deterministic extraction (no LLM).")
+    p.add_argument("--llm", action="store_true", help="Unavailable without explicit model provenance.")
     p.add_argument("--status", action="store_true", help="Show cache statistics.")
     p.add_argument("--get", type=str, default=None, help="Get content at tier level.")
     args = p.parse_args()
+
+    if args.llm:
+        p.error("--llm is unavailable without explicit model descriptor and revision")
 
     if args.status:
         if not TIERS_DIR.exists():
@@ -736,7 +753,7 @@ def main() -> int:
         return 0
 
     if args.slug:
-        l1 = generate_l1(args.slug, use_llm=not args.no_llm)
+        l1 = generate_l1(args.slug, use_llm=False)
         if l1:
             write_l1(args.slug, l1)
             print(f"Generated L1 for {args.slug}: {len(l1)} chars.")
@@ -753,7 +770,7 @@ def main() -> int:
         return 0
 
     if args.all or True:  # Default: build all
-        build_all_tiers(use_llm=not args.no_llm)
+        build_all_tiers(use_llm=False)
         return 0
 
 

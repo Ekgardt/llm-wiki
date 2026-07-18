@@ -507,6 +507,47 @@ def test_budget_packs_compiled_items_under_shared_token_limit():
     assert compiled.packed_tokens <= budget.available_input_tokens
 
 
+def test_requested_l2_evidence_outranks_l1_orientation_under_constrained_budget():
+    page = _page(
+        "priority.md",
+        "Priority",
+        "Orientation summary.",
+        "## Evidence\n\nrequested proof\n\n## More\n\norientation details\n",
+    )
+    start = page.content.index(b"## Evidence")
+    end = page.content.index(b"## More")
+    chunk = _chunk(
+        page,
+        chunk_id="requested-evidence",
+        heading_ancestry=("Priority", "Evidence"),
+        byte_start=start,
+        byte_end=end,
+        text=page.content[start:end].decode(),
+    )
+    snapshot = _snapshot((page,), (chunk,))
+    unconstrained = compile_context(
+        snapshot,
+        shortlist=(page.record.logical_id,),
+        evidence_chunk_ids=(chunk.id,),
+        small_parent_chars=1,
+    )
+    l1 = next(item for item in unconstrained.items if item.representation == "l1")
+    l2 = next(item for item in unconstrained.items if item.representation == "l2")
+    one_item_budget = max(len(l1.text.encode()), len(l2.text.encode()))
+
+    constrained = compile_context(
+        snapshot,
+        shortlist=(page.record.logical_id,),
+        evidence_chunk_ids=(chunk.id,),
+        small_parent_chars=1,
+        budget=ContextBudget(None, one_item_budget, 0, 0),
+    )
+
+    assert any(item.representation == "l2" for item in constrained.items)
+    assert not any(item.representation == "l1" for item in constrained.items)
+    assert constrained.trace.retrieval.evidence_chunk_ids == (chunk.id,)
+
+
 def test_compiler_enforces_default_budget_even_when_budget_omitted(monkeypatch):
     import context_compiler
 
@@ -655,6 +696,44 @@ def test_build_advisory_last_decision_returns_slug_and_source_hash(tmp_path, mon
     assert last is not None
     assert last["slug"] == "auth"
     assert last["source_sha256"] == hashlib.sha256(decision.read_bytes()).hexdigest()
+
+
+def test_build_advisory_passes_logical_path_to_hash_qualified_l1_reader(
+    tmp_path, monkeypatch
+):
+    import build_advisory
+    import build_tiers
+
+    notes = tmp_path / "knowledge" / "notes"
+    nested = notes / "decisions"
+    nested.mkdir(parents=True)
+    decision = nested / "auth.md"
+    decision.write_text(
+        "---\ntype: decision\ntimestamp: 2026-07-15\n---\n# Auth\n"
+        "One-sentence summary: Chose JWT.\n",
+        encoding="utf-8",
+    )
+    calls = []
+    monkeypatch.setattr(build_advisory, "ROOT", tmp_path)
+    monkeypatch.setattr(build_advisory, "KNOWLEDGE", notes)
+    monkeypatch.setattr(build_advisory, "_find_contradictions", lambda: [])
+    monkeypatch.setattr(build_advisory, "_find_stale_pages", lambda: 0)
+    monkeypatch.setattr(
+        build_tiers,
+        "get_l1",
+        lambda slug, **kwargs: calls.append((slug, kwargs)) or "NESTED L1",
+    )
+
+    assert "NESTED L1" in build_advisory._build_rule_based_advisory(None, 800)
+    assert calls == [
+        (
+            "auth",
+            {
+                "source_sha256": hashlib.sha256(decision.read_bytes()).hexdigest(),
+                "logical_path": "decisions/auth.md",
+            },
+        )
+    ]
 
 
 def test_contextual_retrieval_legacy_cache_path_is_hash_suffixed():
