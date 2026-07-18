@@ -315,14 +315,20 @@ def _validate_matrix_candidate(candidate: dict, *, kind: str, contract: dict) ->
         raise ValueError(f"matrix {kind} cache policy mismatch")
     if candidate["batch_size"] != contract["batch_size"]:
         raise ValueError(f"matrix {kind} batch size mismatch")
-    if candidate["license"] not in {"Apache-2.0", "MIT"}:
-        raise ValueError(f"matrix {kind} license is not shipping eligible")
-    if not candidate["shipping_eligible"] or candidate["exclusion_reasons"]:
-        raise ValueError(f"matrix {kind} is not shipping eligible")
-    if candidate["languages"] != contract["languages"]:
-        raise ValueError(f"matrix {kind} language coverage mismatch")
+    if candidate["license"] not in {"Apache-2.0", "Gemma", "MIT"}:
+        raise ValueError(f"matrix {kind} license is unknown")
+    if candidate["shipping_eligible"]:
+        if candidate["license"] not in {"Apache-2.0", "MIT"} or candidate["exclusion_reasons"]:
+            raise ValueError(f"matrix {kind} shipping policy is inconsistent")
+    elif not candidate["exclusion_reasons"]:
+        raise ValueError(f"matrix {kind} exclusion lacks a reason")
+    if not candidate["languages"] or not set(candidate["languages"]) <= set(contract["languages"]):
+        raise ValueError(f"matrix {kind} language coverage is invalid")
     _require_exact_keys(candidate["native_library"], {"name", "support"}, "native library")
-    if candidate["native_library"]["support"] != "native":
+    if (
+        candidate["native_library"]["name"] not in {"sentence-transformers", "transformers"}
+        or candidate["native_library"]["support"] != "native"
+    ):
         raise ValueError(f"matrix {kind} lacks native library support")
     if candidate["source_url"] != (
         f"https://huggingface.co/{candidate['id']}/tree/{candidate['revision']}"
@@ -589,12 +595,10 @@ def required_candidate_specs(matrix: dict) -> list[dict]:
     rerankers = [
         _matrix_target(candidate, candidate["variants"][0])
         for candidate in matrix["rerankers"]
-        if candidate["shipping_eligible"]
     ]
     return [
         {"embedding": _matrix_target(candidate, variant), "reranker": reranker}
         for candidate in matrix["embeddings"]
-        if candidate["shipping_eligible"]
         for variant in candidate["variants"]
         for reranker in [None, *rerankers]
     ]
@@ -2312,14 +2316,45 @@ def _load_transformer_embedding(
     local_files_only: bool,
     trust_remote_code: bool,
 ):
+    if trust_remote_code:
+        raise ValueError("remote model code is forbidden")
+    model_spec = selection.embedding
+    if model_spec["native_library"]["name"] == "sentence-transformers":
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as exc:
+            raise ValueError(
+                "model-matrix adapter requires the retrieval-benchmark extra"
+            ) from exc
+        model = SentenceTransformer(
+            model_spec["id"],
+            revision=model_spec["revision"],
+            cache_folder=str(cache_root),
+            local_files_only=local_files_only,
+            trust_remote_code=False,
+            model_kwargs={"torch_dtype": "float32"},
+        )
+
+        def encode(texts, *, batch_size, max_length, pooling, padding_side, truncation_side):
+            if pooling != model_spec["inference"]["pooling"]:
+                raise ValueError(f"unsupported native pooling: {pooling}")
+            model.max_seq_length = max_length
+            model.tokenizer.padding_side = padding_side
+            model.tokenizer.truncation_side = truncation_side
+            return model.encode(
+                list(texts),
+                batch_size=batch_size,
+                convert_to_numpy=True,
+                normalize_embeddings=False,
+                show_progress_bar=False,
+            )
+
+        return encode
     try:
         import torch
         from transformers import AutoModel, AutoTokenizer
     except ImportError as exc:
         raise ValueError("model-matrix adapter requires the retrieval-benchmark extra") from exc
-    if trust_remote_code:
-        raise ValueError("remote model code is forbidden")
-    model_spec = selection.embedding
     common = {
         "revision": model_spec["revision"],
         "cache_dir": str(cache_root),

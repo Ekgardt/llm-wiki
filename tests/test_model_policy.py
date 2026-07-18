@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 MATRIX = ROOT / "benchmark" / "model-matrix-v1.json"
 RUNNER = ROOT / "benchmark" / "run_retrieval_v2.py"
 MODEL_KINDS = {"embedding", "reranker"}
-PERMISSIVE_LICENSES = {"Apache-2.0", "MIT"}
+KNOWN_LICENSES = {"Apache-2.0", "Gemma", "MIT"}
 TARGET_LANGUAGES = {"EN", "RU", "ZH"}
 RESOURCE_MEASUREMENT_FIELDS = {
     "cold_first_query_ms",
@@ -294,11 +294,11 @@ def _synthetic_measured_matrix() -> tuple[dict, dict[str, bytes]]:
             offset = model_index * 10 + variant_index
             item_variant["quality"] = {
                 "claim": None,
-                "overall": 0.7 + offset / 100,
+                "overall": 0.7 + offset / 1000,
                 "per_language": {
-                    "EN": 0.71 + offset / 100,
-                    "RU": 0.69 + offset / 100,
-                    "ZH": 0.7 + offset / 100,
+                    "EN": 0.71 + offset / 1000,
+                    "RU": 0.69 + offset / 1000,
+                    "ZH": 0.7 + offset / 1000,
                 },
                 "status": "measured",
             }
@@ -441,7 +441,7 @@ def test_matrix_is_closed_at_every_policy_object_level():
     assert matrix["selection"]["aggregation_evidence_contract"] == {
         "artifact_schema": "retrieval-selection/v1",
         "complete_candidate_set": (
-            "all shipping embedding variants crossed with no reranker and every shipping reranker"
+            "all required embedding variants crossed with no reranker and every required reranker"
         ),
         "output_path_policy": "normalized_repo_relative_json_under_benchmark_results",
         "required_fields": [
@@ -618,7 +618,7 @@ def test_models_have_unique_normalized_ids_and_immutable_sources():
         assert model["source_url"] == (
             f"https://huggingface.co/{model['id']}/tree/{model['revision']}"
         )
-        assert model["license"] in PERMISSIVE_LICENSES
+        assert model["license"] in KNOWN_LICENSES
         assert model["trust_remote_code"] is False
         assert model["native_library"]["name"] in {
             "sentence-transformers",
@@ -644,22 +644,54 @@ def test_required_embedding_pins_and_formatting_are_exact():
     embeddings = {model["id"]: model for model in _load()["embeddings"]}
     assert set(embeddings) == {
         "BAAI/bge-m3",
+        "BAAI/bge-small-en-v1.5",
         "Qwen/Qwen3-Embedding-0.6B",
-        "intfloat/multilingual-e5-small",
+        "google/embeddinggemma-300m",
+        "intfloat/multilingual-e5-large-instruct",
     }
 
-    e5 = embeddings["intfloat/multilingual-e5-small"]
-    assert e5["revision"] == "614241f622f53c4eeff9890bdc4f31cfecc418b3"
+    e5 = embeddings["intfloat/multilingual-e5-large-instruct"]
+    assert e5["revision"] == "274baa43b0e13e37fafa6428dbc7938e62e5c439"
     assert e5["license"] == "MIT"
     assert e5["formatting"] == {
-        "document": "passage: {text}",
-        "instruction": None,
-        "query": "query: {text}",
+        "document": "{text}",
+        "instruction": "Given a web search query, retrieve relevant passages that answer the query",
+        "query": "Instruct: {instruction}\nQuery: {text}",
     }
     assert [(item["variant_id"], item["dimensions"]) for item in e5["variants"]] == [
-        ("float32-384d", 384)
+        ("float32-1024d", 1024)
     ]
     assert (e5["benchmark_max_tokens"], e5["native_max_tokens"]) == (512, 512)
+
+    small = embeddings["BAAI/bge-small-en-v1.5"]
+    assert small["revision"] == "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
+    assert small["license"] == "MIT"
+    assert small["languages"] == ["EN"]
+    assert small["formatting"] == {
+        "document": "{text}",
+        "instruction": "Represent this sentence for searching relevant passages:",
+        "query": "{instruction} {text}",
+    }
+    assert [(item["variant_id"], item["dimensions"]) for item in small["variants"]] == [
+        ("float32-384d", 384)
+    ]
+
+    gemma = embeddings["google/embeddinggemma-300m"]
+    assert gemma["revision"] == "57c266a740f537b4dc058e1b0cda161fd15afa75"
+    assert gemma["license"] == "Gemma"
+    assert gemma["shipping_eligible"] is False
+    assert gemma["exclusion_reasons"] == ["license_requires_separate_acceptance"]
+    assert gemma["formatting"] == {
+        "document": "title: none | text: {text}",
+        "instruction": "task: search result | query:",
+        "query": "{instruction} {text}",
+    }
+    assert [(item["variant_id"], item["dimensions"]) for item in gemma["variants"]] == [
+        ("float32-128d", 128),
+        ("float32-256d", 256),
+        ("float32-512d", 512),
+        ("float32-768d", 768),
+    ]
 
     bge = embeddings["BAAI/bge-m3"]
     assert bge["revision"] == "5617a9f61b028005a4858fdac845db406aefb181"
@@ -714,7 +746,8 @@ def test_reranker_pins_depths_and_multilingual_shipping_coverage():
                 ("float32", None)
             ]
         if model["shipping_eligible"]:
-            assert TARGET_LANGUAGES <= set(model["languages"])
+            assert set(model["languages"]) <= TARGET_LANGUAGES
+            assert model["languages"]
             assert model["exclusion_reasons"] == []
 
 
@@ -736,7 +769,7 @@ def test_inference_and_offline_policy_is_bound_to_every_model():
 
 def test_embedding_inference_and_mrl_contracts_are_exact():
     embeddings = {model["id"]: model for model in _load()["embeddings"]}
-    assert embeddings["intfloat/multilingual-e5-small"]["inference"] == {
+    assert embeddings["intfloat/multilingual-e5-large-instruct"]["inference"] == {
         "l2_normalize": True,
         "max_length_tokens": 512,
         "padding_side": "right",
@@ -760,7 +793,7 @@ def test_embedding_inference_and_mrl_contracts_are_exact():
     for model in embeddings.values():
         for variant in model["variants"]:
             mrl = variant["mrl"]
-            if model["id"].startswith("Qwen/"):
+            if model["id"] in {"Qwen/Qwen3-Embedding-0.6B", "google/embeddinggemma-300m"}:
                 assert mrl == {
                     "enabled": True,
                     "renormalize_after_truncation": True,
@@ -864,7 +897,7 @@ def test_selection_requires_all_gates_pareto_and_raw_result_evidence():
         "overall_basis_points": 8700,
         "parent_recall_at_10_basis_points": 10000,
         "raw_report_path": "benchmark/baseline-2026-07-16-retrieval.json",
-        "raw_report_sha256": "684e2f909e42732bbda0bbc0dd96c65f8de6f39e56610a3f1d00e98a2d94a2a0",
+        "raw_report_sha256": "3af2868a76c03752e881b639ef21dfc83dca9a24c1a508b4bf3a444b395ef167",
     }
     assert selection["limits"] == {
         "peak_rss_bytes": 4 * 1024**3,
