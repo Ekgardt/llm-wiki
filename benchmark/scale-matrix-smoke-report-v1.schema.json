@@ -1,0 +1,221 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-wiki.local/schemas/scale-matrix-smoke-report-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "mode",
+    "ground_truth",
+    "ann_default_claimed",
+    "selected_default_backend",
+    "declared_corpus_sizes",
+    "executed_corpus_sizes",
+    "declared_selectivity",
+    "heavy_parallel",
+    "cells",
+    "crash_matrix",
+    "adoption_policy"
+  ],
+  "properties": {
+    "schema_version": {"const": "scale-matrix-smoke/v1"},
+    "mode": {"const": "smoke"},
+    "ground_truth": {"const": "exact-numpy"},
+    "ann_default_claimed": {"const": false},
+    "selected_default_backend": {"const": "exact-numpy"},
+    "declared_corpus_sizes": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "items": {"type": "integer", "minimum": 1},
+      "uniqueItems": true
+    },
+    "executed_corpus_sizes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "integer", "minimum": 1}
+    },
+    "declared_selectivity": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}
+    },
+    "heavy_parallel": {"const": false},
+    "generated_at": {"type": "string", "minLength": 1},
+    "seed": {"type": "integer"},
+    "dimensions": {"type": "integer", "minimum": 1},
+    "queries": {"type": "integer", "minimum": 1},
+    "cells": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "adapter",
+          "corpus_size",
+          "selectivity",
+          "status",
+          "metrics",
+          "latency_profiles",
+          "adoption"
+        ],
+        "properties": {
+          "adapter": {
+            "type": "string",
+            "enum": [
+              "exact-numpy",
+              "sqlite-vec",
+              "usearch",
+              "lancedb-flat",
+              "lancedb-ann"
+            ]
+          },
+          "corpus_size": {"type": "integer", "minimum": 1},
+          "selectivity": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+          "status": {"type": "string", "enum": ["ok", "skipped", "failed"]},
+          "reason": {
+            "oneOf": [
+              {"type": "string", "minLength": 1},
+              {"type": "null"}
+            ]
+          },
+          "metrics": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "latency_ms",
+              "rss_bytes",
+              "disk_bytes",
+              "build_ms",
+              "update_ms",
+              "delete_ms",
+              "startup_ms",
+              "concurrent_reader_p95_ms",
+              "recall_at_10",
+              "recall_at_50",
+              "batch_throughput_qps"
+            ],
+            "properties": {
+              "latency_ms": {"$ref": "#/$defs/nullable_number"},
+              "rss_bytes": {"$ref": "#/$defs/nullable_integer"},
+              "disk_bytes": {"$ref": "#/$defs/nullable_integer"},
+              "build_ms": {"$ref": "#/$defs/nullable_number"},
+              "update_ms": {"$ref": "#/$defs/nullable_number"},
+              "delete_ms": {"$ref": "#/$defs/nullable_number"},
+              "startup_ms": {"$ref": "#/$defs/nullable_number"},
+              "concurrent_reader_p95_ms": {"$ref": "#/$defs/nullable_number"},
+              "recall_at_10": {"$ref": "#/$defs/nullable_number"},
+              "recall_at_50": {"$ref": "#/$defs/nullable_number"},
+              "batch_throughput_qps": {"$ref": "#/$defs/nullable_number"}
+            }
+          },
+          "latency_profiles": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["cold", "warm"],
+            "properties": {
+              "cold": {"$ref": "#/$defs/latency_profile"},
+              "warm": {"$ref": "#/$defs/latency_profile"}
+            }
+          },
+          "adoption": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "adopt",
+              "becomes_default",
+              "requires_measurement",
+              "reasons"
+            ],
+            "properties": {
+              "adopt": {"type": "boolean"},
+              "becomes_default": {"const": false},
+              "requires_measurement": {"type": "boolean"},
+              "reasons": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1}
+              }
+            }
+          }
+        }
+      }
+    },
+    "crash_matrix": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["before_fsync", "before_activation", "after_activation"],
+      "properties": {
+        "before_fsync": {"$ref": "#/$defs/crash_outcome"},
+        "before_activation": {"$ref": "#/$defs/crash_outcome"},
+        "after_activation": {"$ref": "#/$defs/crash_outcome"}
+      }
+    },
+    "adoption_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recall_floor",
+        "latency_speedup_floor",
+        "default_backend",
+        "ann_requires_measurement"
+      ],
+      "properties": {
+        "recall_floor": {"const": 0.98},
+        "latency_speedup_floor": {"const": 2.0},
+        "default_backend": {"const": "exact-numpy"},
+        "ann_requires_measurement": {"const": true}
+      }
+    }
+  },
+  "$defs": {
+    "nullable_number": {
+      "oneOf": [
+        {"type": "number"},
+        {"type": "null"}
+      ]
+    },
+    "nullable_integer": {
+      "oneOf": [
+        {"type": "integer"},
+        {"type": "null"}
+      ]
+    },
+    "latency_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["p50_ms", "p95_ms", "p99_ms"],
+      "properties": {
+        "p50_ms": {"$ref": "#/$defs/nullable_number"},
+        "p95_ms": {"$ref": "#/$defs/nullable_number"},
+        "p99_ms": {"$ref": "#/$defs/nullable_number"}
+      }
+    },
+    "crash_outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "injected",
+        "recovered_cleanly",
+        "partial_activation",
+        "status"
+      ],
+      "properties": {
+        "injected": {"type": "boolean"},
+        "recovered_cleanly": {"type": "boolean"},
+        "partial_activation": {"type": "boolean"},
+        "status": {
+          "type": "string",
+          "enum": ["passed", "failed", "skipped_platform"]
+        },
+        "detail": {
+          "oneOf": [
+            {"type": "string", "minLength": 1},
+            {"type": "null"}
+          ]
+        }
+      }
+    }
+  }
+}
