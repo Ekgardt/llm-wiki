@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
-from reliable_memory import SchemaValidationError, canonical_json_bytes, validate_schema
+import reliable_memory
+from reliable_memory import (
+    SchemaValidationError,
+    canonical_json_bytes,
+    validate_schema,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 BENCHMARK = ROOT / "benchmark"
@@ -93,6 +99,31 @@ def test_contract_is_canonical_schema_valid_and_semantically_closed():
     validate_schema(contract, SCHEMA)
     assert raw == canonical_json_bytes(contract) + b"\n"
     assert runner.load_contract(CONTRACT, SCHEMA) == contract
+
+
+def test_contract_and_schema_are_each_read_once_from_stable_captured_bytes(tmp_path, monkeypatch):
+    runner = _runner_module()
+    contract_path = tmp_path / "contract.json"
+    schema_path = tmp_path / "schema.json"
+    contract_path.write_bytes(CONTRACT.read_bytes())
+    schema_path.write_bytes(SCHEMA.read_bytes())
+    real_read = runner.read_stable_bytes
+    calls = []
+
+    def capture_then_remove(path, maximum, *, label):
+        path = Path(path)
+        calls.append(path)
+        raw = real_read(path, maximum, label=label)
+        if path == schema_path:
+            path.unlink()
+        return raw
+
+    monkeypatch.setattr(runner, "read_stable_bytes", capture_then_remove)
+
+    assert runner.load_contract(contract_path, schema_path)["schema_version"] == (
+        "comparative-contract/v1"
+    )
+    assert calls == [contract_path, schema_path]
 
 
 def test_graphify_and_execution_provenance_are_fully_pinned():
@@ -209,6 +240,69 @@ def test_contract_freezes_complete_paired_claim_gating_statistics():
     }
 
 
+@pytest.mark.parametrize(
+    ("label", "mutate"),
+    [
+        ("agent seeds", lambda value: value["statistics"].update(agent_seeds=[1729, 1729, 31415])),
+        (
+            "pairing keys",
+            lambda value: value["statistics"]["pairing"].update(
+                key=["repository", "commit", "commit"]
+            ),
+        ),
+        ("latency summary", lambda value: value["metrics"].update(latency_summary=["p50", "p50"])),
+        (
+            "identical inputs",
+            lambda value: value["fairness"].update(
+                identical_inputs=[
+                    "commit",
+                    "context_budget",
+                    "hardware",
+                    "model",
+                    "repository",
+                    "retry_policy",
+                    "commit",
+                ]
+            ),
+        ),
+        (
+            "metric fields",
+            lambda value: value["metrics"].update(
+                per_task_fields=value["metrics"]["per_task_fields"][:-1]
+                + [value["metrics"]["per_task_fields"][0]]
+            ),
+        ),
+        (
+            "hard gates",
+            lambda value: value["public_claim_gate"].update(
+                hard_gates=["crash", "evidence", "evidence"]
+            ),
+        ),
+    ],
+)
+def test_load_contract_rejects_every_duplicate_uniqueness_invariant(
+    tmp_path, label, mutate
+):
+    runner = _runner_module()
+    contract = json.loads(CONTRACT.read_text(encoding="utf-8"))
+    mutate(contract)
+    contract["provenance"]["configuration"]["sha256"] = runner.configuration_fingerprint(
+        contract
+    )
+    path = tmp_path / "duplicate.json"
+    path.write_bytes(canonical_json_bytes(contract) + b"\n")
+
+    with pytest.raises((SchemaValidationError, ValueError), match="duplicate|unique"):
+        runner.load_contract(path, SCHEMA)
+
+
+def test_schema_object_validator_enforces_unique_items():
+    schema = {"type": "array", "uniqueItems": True, "items": {"type": "integer"}}
+
+    with pytest.raises(SchemaValidationError, match="uniqueItems"):
+        reliable_memory.validate_schema_object([7, 7], schema)
+
+
 def test_loader_rejects_input_inequality_and_claim_gate_relaxation(tmp_path):
     runner = _runner_module()
     contract = json.loads(CONTRACT.read_text(encoding="utf-8"))
@@ -263,6 +357,43 @@ def test_smoke_is_deterministic_bounded_and_keeps_raw_failures():
                 "phase",
                 "retryable",
             }
+
+
+def test_smoke_reports_expected_and_observed_runtime_without_claiming_match():
+    runner = _runner_module()
+    contract = runner.load_contract(CONTRACT, SCHEMA)
+    report = runner.run_smoke(contract)
+    runtime = report["runtime_provenance"]
+
+    assert runtime["expected"] == contract["provenance"]["python"]
+    assert runtime["observed"]["implementation"]
+    assert runtime["observed"]["version"]
+    assert runtime["matches_expected"] == (
+        runtime["expected"] == runtime["observed"]
+    )
+    assert runtime["verification"] == "observed-not-enforced-smoke"
+    for ledger in report["raw_task_ledgers"]:
+        revision = ledger["adapter_provenance"]["source_revision"]
+        if ledger["adapter_id"] == "graphify-pinned":
+            assert revision == {"kind": "git-commit", "value": runner.GRAPHIFY_COMMIT}
+        else:
+            assert revision == {"kind": "unavailable", "value": None}
+
+
+def test_real_runtime_provenance_must_match_declared_python():
+    runner = _runner_module()
+    contract = runner.load_contract(CONTRACT, SCHEMA)
+    expected = contract["provenance"]["python"]
+
+    assert runner.verify_runtime_provenance(
+        contract, real_mode=True, observed=dict(expected)
+    )["matches_expected"] is True
+    with pytest.raises(ValueError, match="runtime provenance"):
+        runner.verify_runtime_provenance(
+            contract,
+            real_mode=True,
+            observed={"implementation": expected["implementation"], "version": "0.0.0"},
+        )
 
 
 def test_smoke_uses_identical_inputs_and_fail_closed_public_gate():
@@ -366,6 +497,31 @@ def test_ledger_schema_accepts_typed_task27_measurements():
 
     assert runner.validate_ledger(ledger, LEDGER_SCHEMA) == ledger
 
+    first = runner.canonical_evidence_json_bytes(ledger)
+    second = runner.canonical_evidence_json_bytes(dict(reversed(list(ledger.items()))))
+    assert first == second
+    assert json.loads(first)["metrics"]["query_latency_ms"] == 3.25
+    assert runner.evidence_sha256(ledger) == runner.evidence_sha256(
+        dict(reversed(list(ledger.items())))
+    )
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+def test_evidence_canonicalization_rejects_non_finite_metrics(value):
+    runner = _runner_module()
+
+    with pytest.raises(ValueError, match="finite"):
+        runner.canonical_evidence_json_bytes({"metric": value})
+
+
+def test_evidence_canonicalization_normalizes_integral_float_and_negative_zero():
+    runner = _runner_module()
+
+    assert runner.canonical_evidence_json_bytes({"metric": 1.0}) == (
+        runner.canonical_evidence_json_bytes({"metric": 1})
+    )
+    assert runner.canonical_evidence_json_bytes({"metric": -0.0}) == b'{"metric":0}'
+
 
 def test_main_validates_generated_report_before_output(monkeypatch, capsys):
     runner = _runner_module()
@@ -375,6 +531,27 @@ def test_main_validates_generated_report_before_output(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "failed" in captured.err
+
+
+def test_cli_override_and_serialization_errors_are_concise(tmp_path, monkeypatch, capsys):
+    runner = _runner_module()
+    invalid_schema = tmp_path / "invalid-schema.json"
+    invalid_schema.write_bytes(b"\xff")
+
+    assert runner.main(["--smoke", "--schema", str(invalid_schema), "--json"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Traceback" not in captured.err
+    assert len(captured.err.splitlines()) == 1
+
+    monkeypatch.setattr(runner, "load_contract", lambda *args: {})
+    monkeypatch.setattr(runner, "run_smoke", lambda contract: {"bad": object()})
+    monkeypatch.setattr(runner, "validate_report", lambda report: report)
+    assert runner.main(["--smoke", "--json"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Traceback" not in captured.err
+    assert len(captured.err.splitlines()) == 1
 
 
 def test_cli_smoke_is_json_offline_and_real_mode_is_unavailable():
