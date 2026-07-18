@@ -388,6 +388,7 @@ def get_l1(
     source_sha256: str | None = None,
     *,
     extractor_version: str = TIER_EXTRACTOR_VERSION,
+    logical_path: str | None = None,
 ) -> str | None:
     """Get L1 (structured overview) for a page. ~500-1000 tokens.
 
@@ -399,7 +400,10 @@ def get_l1(
     """
     if source_sha256:
         hashed_path = tier_legacy_cache_path(
-            slug, source_sha256=source_sha256, extractor_version=extractor_version
+            slug,
+            source_sha256=source_sha256,
+            extractor_version=extractor_version,
+            logical_path=logical_path,
         )
         if hashed_path.exists():
             return hashed_path.read_text(encoding="utf-8", errors="ignore")

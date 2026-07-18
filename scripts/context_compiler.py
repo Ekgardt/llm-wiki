@@ -24,7 +24,6 @@ Design contract (from docs/superpowers/plans/2026-07-16-unified-evidence-retriev
 """
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,9 +32,16 @@ from typing import Literal
 from context_budget import (
     ContextBudget,
     ContextItem,
+    DroppedItem,
     pack_context,
 )
-from corpus_snapshot import CapturedSource, CorpusSnapshot, RetrievalChunk
+from corpus_snapshot import (
+    CapturedSource,
+    CorpusSnapshot,
+    RetrievalChunk,
+    _frontmatter,
+    _markdown_headings,
+)
 
 DEFAULT_BUDGET = ContextBudget(
     model=None,
@@ -97,15 +103,22 @@ class RetrievalTrace:
     candidate_parent_ids: tuple[str, ...]
     shortlisted_parent_ids: tuple[str, ...]
     evidence_chunk_ids: tuple[str, ...]
+    missed_parent_ids: tuple[str, ...]
+    missed_evidence_chunk_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
 class PackingTrace:
     packed_item_ids: tuple[str, ...]
-    dropped_item_ids: tuple[str, ...]
+    dropped: tuple[DroppedItem, ...]
+    ranked_item_ids: tuple[str, ...]
     packed_tokens: int
     counter_source: str
     budget_model: str | None
+
+    @property
+    def dropped_item_ids(self) -> tuple[str, ...]:
+        return tuple(item.item_id for item in self.dropped)
 
 
 @dataclass(frozen=True)
@@ -291,10 +304,12 @@ def _l2_text_heading_subtree(
     content = parent.source.content
     if not 0 <= chunk.byte_start <= chunk.byte_end <= len(content):
         raise ValueError("evidence chunk byte span is outside its captured source")
-    headings = list(re.finditer(rb"(?m)^[ ]{0,3}(#{1,6})[ \t]+[^\r\n]+", content))
+    _metadata, searchable_start = _frontmatter(content)
+    headings = _markdown_headings(content, searchable_start)
     target = next((match for match in headings if match.start() == chunk.byte_start), None)
     section_start = chunk.byte_start
     section_end = chunk.byte_end
+    within_subtree_budget = True
     if target is not None:
         level = len(target.group(1))
         section_end = len(content)
@@ -306,6 +321,19 @@ def _l2_text_heading_subtree(
                 break
     if section_end - section_start > subtree_char_budget:
         section_end = chunk.byte_end
+        within_subtree_budget = False
+    if within_subtree_budget:
+        adjacent_start = section_end
+        adjacent_end = next(
+            (heading.start() for heading in headings if heading.start() > adjacent_start),
+            len(content),
+        )
+        adjacent_size = adjacent_end - adjacent_start
+        if (
+            0 < adjacent_size <= ADJACENT_CONTEXT_CHARS
+            and adjacent_end - section_start <= subtree_char_budget
+        ):
+            section_end = adjacent_end
     span = content[section_start:section_end]
     text = span.decode("utf-8", errors="strict")
     prefix = _metadata_prefix(parent, chunk.heading_ancestry)
@@ -481,10 +509,21 @@ def compile_context(
 
     parents = _build_parents(snapshot)
     shortlist_set = {str(s) for s in shortlist}
-    evidence_ids = tuple(sorted({str(c) for c in evidence_chunk_ids}))
+    requested_evidence_ids = tuple(sorted({str(c) for c in evidence_chunk_ids}))
     chunks_by_id: dict[str, RetrievalChunk] = {}
     for chunk in snapshot.chunks:
         chunks_by_id[chunk.id] = chunk
+    parents_by_logical_id = {
+        parent.source.record.logical_id: parent for parent in parents
+    }
+    missed_parent_ids = tuple(sorted(shortlist_set - parents_by_logical_id.keys()))
+    parent_paths = {parent.source.record.relative_path for parent in parents}
+    missed_evidence_ids = tuple(
+        chunk_id
+        for chunk_id in requested_evidence_ids
+        if chunk_id not in chunks_by_id
+        or chunks_by_id[chunk_id].parent_page not in parent_paths
+    )
 
     compiled_items: list[CompiledItem] = []
     materializations: list[MaterializationTrace] = []
@@ -520,7 +559,16 @@ def compile_context(
         )
 
     # 3. Final L2/source evidence.
-    for chunk_id in evidence_ids:
+    l1_parent_by_item_id: dict[str, str] = {}
+    evidence_by_item_id: dict[str, str] = {}
+    for item in compiled_items:
+        if item.representation == "l1":
+            owner = next(
+                parent for parent in parents if parent.source.record.relative_path == item.parent_id
+            )
+            l1_parent_by_item_id[item.item_id] = owner.source.record.logical_id
+
+    for chunk_id in requested_evidence_ids:
         chunk = chunks_by_id.get(chunk_id)
         if chunk is None:
             continue
@@ -537,6 +585,7 @@ def compile_context(
             large_parent_subtree_chars=large_parent_subtree_chars,
         )
         compiled_items.append(item)
+        evidence_by_item_id[item.item_id] = chunk_id
         materializations.append(
             MaterializationTrace(
                 parent_id=owner.source.record.relative_path,
@@ -565,6 +614,31 @@ def compile_context(
     }
     packed_items = [compiled_by_id[item.item_id] for item in packed.items]
     materializations = [trace_by_id[item.item_id] for item in packed.items]
+    packed_l0_parent_ids = tuple(
+        sorted(
+            parent.source.record.logical_id
+            for parent in parents
+            if any(
+                item.representation == "l0"
+                and item.parent_id == parent.source.record.relative_path
+                for item in packed_items
+            )
+        )
+    )
+    packed_shortlist_ids = tuple(
+        sorted(
+            l1_parent_by_item_id[item.item_id]
+            for item in packed_items
+            if item.item_id in l1_parent_by_item_id
+        )
+    )
+    packed_evidence_ids = tuple(
+        sorted(
+            evidence_by_item_id[item.item_id]
+            for item in packed_items
+            if item.item_id in evidence_by_item_id
+        )
+    )
 
     trace = CompilationTrace(
         candidate_count=len(parents),
@@ -575,18 +649,19 @@ def compile_context(
         generated_context_enabled=bool(generated_context),
         duplicate_stems=duplicate_stems,
         retrieval=RetrievalTrace(
-            candidate_parent_ids=tuple(
-                sorted(parent.source.record.logical_id for parent in parents)
-            ),
-            shortlisted_parent_ids=tuple(sorted(shortlist_set)),
-            evidence_chunk_ids=evidence_ids,
+            candidate_parent_ids=packed_l0_parent_ids,
+            shortlisted_parent_ids=packed_shortlist_ids,
+            evidence_chunk_ids=packed_evidence_ids,
+            missed_parent_ids=missed_parent_ids,
+            missed_evidence_chunk_ids=missed_evidence_ids,
         ),
         packing=PackingTrace(
             packed_item_ids=tuple(item.item_id for item in packed_items),
-            dropped_item_ids=tuple(drop.item_id for drop in packed.dropped),
+            dropped=packed.dropped,
+            ranked_item_ids=packed.ranked_item_ids,
             packed_tokens=packed.packed_tokens,
             counter_source=packed.counter_source,
-            budget_model=active_budget.model,
+            budget_model=packed.budget.model,
         ),
     )
     return CompiledContext(

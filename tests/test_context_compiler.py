@@ -393,9 +393,44 @@ def test_l2_materialization_uses_utf8_byte_spans_and_heading_level_subtree():
     l2 = next(item for item in compiled.items if item.representation == "l2")
     assert "heading=Unicode > Parent > Child" in l2.text
     assert "😀 evidence" in l2.text
-    assert "keep sibling out" not in l2.text
+    assert "keep sibling out" in l2.text
+    assert "## Next" not in l2.text
     assert page.content[l2.byte_start:l2.byte_end].decode() in l2.text
-    assert (l2.byte_start, l2.byte_end) == (start, end)
+    assert (l2.byte_start, l2.byte_end) == (start, content.index(b"## Next"))
+
+
+def test_l2_uses_fence_aware_headings_and_one_bounded_adjacent_section():
+    page = _page(
+        "fences.md",
+        "Fences",
+        "Summary.",
+        "## Target\n\nbefore\n\n```md\n## Not a boundary\n```\n\nafter fence\n\n"
+        "## Neighbor\n\nadjacent context\n\n## Stop\n\nnot adjacent\n",
+    )
+    start = page.content.index(b"## Target")
+    neighbor = page.content.index(b"## Neighbor")
+    chunk = _chunk(
+        page,
+        chunk_id="target",
+        heading_ancestry=("Fences", "Target"),
+        byte_start=start,
+        byte_end=neighbor,
+        text=page.content[start:neighbor].decode(),
+    )
+
+    compiled = compile_context(
+        _snapshot((page,), (chunk,)),
+        evidence_chunk_ids=(chunk.id,),
+        small_parent_chars=1,
+        large_parent_subtree_chars=10_000,
+    )
+
+    l2 = next(item for item in compiled.items if item.representation == "l2")
+    assert "## Not a boundary" in l2.text
+    assert "after fence" in l2.text
+    assert "## Neighbor" in l2.text
+    assert "adjacent context" in l2.text
+    assert "## Stop" not in l2.text
 
 
 def test_multiple_evidence_chunks_have_unique_ids_and_sorted_trace():
@@ -412,6 +447,35 @@ def test_multiple_evidence_chunks_have_unique_ids_and_sorted_trace():
     l2 = [item for item in compiled.items if item.representation == "l2"]
     assert len({item.item_id for item in l2}) == 2
     assert compiled.trace.retrieval.evidence_chunk_ids == ("a", "z")
+
+
+def test_traces_report_only_packed_resolved_ids_and_unknown_misses():
+    page = _page("trace.md", "Trace", "Summary.", "## Evidence\n\nproof\n")
+    start = page.content.index(b"## Evidence")
+    chunk = _chunk(
+        page,
+        chunk_id="known-evidence",
+        heading_ancestry=("Trace", "Evidence"),
+        byte_start=start,
+        byte_end=len(page.content),
+        text=page.content[start:].decode(),
+    )
+
+    compiled = compile_context(
+        _snapshot((page,), (chunk,)),
+        shortlist=(page.record.logical_id, "missing-parent"),
+        evidence_chunk_ids=(chunk.id, "missing-evidence"),
+    )
+
+    assert compiled.trace.retrieval.shortlisted_parent_ids == (page.record.logical_id,)
+    assert compiled.trace.retrieval.evidence_chunk_ids == (chunk.id,)
+    assert compiled.trace.retrieval.missed_parent_ids == ("missing-parent",)
+    assert compiled.trace.retrieval.missed_evidence_chunk_ids == ("missing-evidence",)
+    assert compiled.trace.packing.ranked_item_ids
+    assert all(
+        dropped.reason in {"budget", "section", "diversity", "emergency_cap"}
+        for dropped in compiled.trace.packing.dropped
+    )
 
 
 def test_compilation_returns_retrieval_and_materialization_trace():
@@ -453,6 +517,8 @@ def test_compiler_enforces_default_budget_even_when_budget_omitted(monkeypatch):
 
     assert compiled.packed_tokens <= 10
     assert compiled.trace.packing.dropped_item_ids
+    assert compiled.trace.packing.dropped
+    assert compiled.trace.packing.counter_source == "estimated"
 
 
 def test_aliases_propagated_into_prefix_when_present():
@@ -532,6 +598,35 @@ def test_build_tiers_get_l1_keys_legacy_cache_by_source_hash(tmp_path, monkeypat
     assert build_tiers.get_l1("auth", source_sha256=second_hash) is None
     assert build_tiers.get_l1("auth", source_sha256=first_hash) == "FIRST L1"
 
+
+def test_hash_qualified_tier_reader_uses_logical_path_for_duplicate_stems(
+    tmp_path, monkeypatch
+):
+    import build_tiers
+
+    tiers = tmp_path / "tiers"
+    monkeypatch.setattr(build_tiers, "TIERS_DIR", tiers)
+    digest = "a" * 64
+    build_tiers.write_l1(
+        "shared",
+        "CONCEPT",
+        source_sha256=digest,
+        logical_path="concepts/shared.md",
+    )
+    build_tiers.write_l1(
+        "shared",
+        "DECISION",
+        source_sha256=digest,
+        logical_path="decisions/shared.md",
+    )
+    (tiers / "shared.l1.md").write_text("STALE", encoding="utf-8")
+
+    assert build_tiers.get_l1(
+        "shared", source_sha256=digest, logical_path="concepts/shared.md"
+    ) == "CONCEPT"
+    assert build_tiers.get_l1(
+        "shared", source_sha256=digest, logical_path="decisions/shared.md"
+    ) == "DECISION"
 
 def test_build_advisory_last_decision_returns_slug_and_source_hash(tmp_path, monkeypatch):
     """Task 15: build_advisory must surface slug + source_sha256 so L1 cache

@@ -319,11 +319,14 @@ def test_session_start_impossible_mandatory_budget_is_visible_not_sliced(monkeyp
 
 
 def test_project_state_impossible_cap_is_visible_not_character_sliced():
+    import json
+
     import session_start_project_state
 
     result = session_start_project_state._clip("project-state-" * 100, 20)
 
-    assert "mandatory_emergency_cap_exceeded" in result
+    assert json.loads(result) == {"error": "budget"}
+    assert len(result.encode("utf-8")) <= 20
     assert "project-state-project" not in result
     assert "truncated for hook injection" not in result
 
@@ -341,6 +344,14 @@ def test_project_handoff_alone_still_uses_shared_budget(monkeypatch):
 
     assert "mandatory_budget_exceeded" in result
     assert "handoff-content-too-large" not in result
+
+
+def test_integration_context_preserves_trailing_newline():
+    import integration_adapter
+
+    result = integration_adapter._append_context("global\n", "handoff\n")
+
+    assert result == "global\n\nhandoff\n"
 
 
 def test_session_start_health_fails_open(monkeypatch):

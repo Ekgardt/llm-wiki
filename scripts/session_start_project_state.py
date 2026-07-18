@@ -394,7 +394,7 @@ def _clip(text: str, limit: int) -> str:
             [item], DEFAULT_CONTEXT_BUDGET, emergency_byte_cap=limit
         ).text
     except BudgetExceededError as error:
-        return error.failure.render()
+        return error.failure.render(max_bytes=limit)
 
 
 def _build_context(state_path: Path, slug: str, is_new: bool) -> str:
