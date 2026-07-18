@@ -1,6 +1,7 @@
 """Deterministic retrieval contract: query analysis, profiles, RRF fusion."""
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -39,7 +40,65 @@ BM25_WEIGHT = 2.0
 DENSE_WEIGHT = 1.0
 GRAPH_WEIGHT = 0.5
 
+GRAPH_MAX_HOPS = 1
+GRAPH_SEED_LIMIT = 5
+GRAPH_PER_SEED_LIMIT = 4
+GRAPH_GLOBAL_LIMIT = 12
+GRAPH_EDGE_DECAY: dict[str, float] = {
+    "BELONGS_TO_PROJECT": 0.65,
+    "CALLS": 0.85,
+    "CHECKPOINT_CHANGED_FILE": 0.75,
+    "CHECKPOINT_EVIDENCED_BY_EVENT": 0.65,
+    "CHECKPOINT_HAS_BLOCKER": 0.75,
+    "CHECKPOINT_RECORDED_DECISION": 0.75,
+    "CO_CHANGED_WITH": 0.45,
+    "CONTAINS": 0.70,
+    "DEFINES": 0.80,
+    "EVIDENCED_BY": 0.70,
+    "EXPOSES": 0.80,
+    "IMPLEMENTS": 0.80,
+    "IMPORTS": 0.80,
+    "INHERITS": 0.80,
+    "LINKS_TO": 0.65,
+    "PROJECT_HAS_CHECKPOINT": 0.70,
+    "READS": 0.75,
+    "REFERENCES_SYMBOL": 0.75,
+    "SUPERSEDES": 0.70,
+    "WRITES": 0.75,
+}
+GRAPH_PROFILE_DIRECTIONS: dict[str, tuple[str, ...]] = {
+    "GRAPH": ("in", "out"),
+    "REPO_MAP": ("out",),
+    "IMPACT": ("in",),
+    "GLOBAL": ("in", "out"),
+}
+GRAPH_PROFILE_EDGE_TYPES: dict[str, tuple[str, ...]] = {
+    "GRAPH": tuple(GRAPH_EDGE_DECAY),
+    "REPO_MAP": (
+        "CONTAINS",
+        "DEFINES",
+        "EXPOSES",
+        "IMPLEMENTS",
+        "IMPORTS",
+        "INHERITS",
+    ),
+    "IMPACT": (
+        "CALLS",
+        "CHECKPOINT_CHANGED_FILE",
+        "CO_CHANGED_WITH",
+        "IMPORTS",
+        "READS",
+        "REFERENCES_SYMBOL",
+        "WRITES",
+    ),
+    "GLOBAL": tuple(GRAPH_EDGE_DECAY),
+}
+
 BackendFn = Callable[..., Sequence[Mapping[str, Any]] | None]
+
+
+class GenerationSealChanged(RuntimeError):
+    """The active immutable generation changed during one retrieval."""
 
 _QUOTE_RE = re.compile(r'"([^"\n]{1,256})"')
 _PATH_RE = re.compile(
@@ -308,6 +367,303 @@ def _hit_path(row: Mapping[str, Any]) -> str:
     return _candidate_key(row)
 
 
+def _graph_seeds(
+    lexical: Sequence[Mapping[str, Any]] | None,
+    dense: Sequence[Mapping[str, Any]] | None,
+) -> tuple[Mapping[str, Any], ...]:
+    """Select rank-qualified seeds without comparing backend score magnitudes."""
+    selected: dict[str, Mapping[str, Any]] = {}
+    for rows in (lexical or (), dense or ()):
+        for rank, row in enumerate(rows, start=1):
+            confidence = row.get("retrieval_confidence")
+            if confidence is not None and str(confidence).casefold() != "high":
+                continue
+            if confidence is None and rank > GRAPH_SEED_LIMIT:
+                continue
+            selected.setdefault(_candidate_key(row), row)
+    return tuple(selected.values())[:GRAPH_SEED_LIMIT]
+
+
+def _query_terms(text: str) -> frozenset[str]:
+    return frozenset(re.findall(r"[\w-]+", text.casefold(), flags=re.UNICODE))
+
+
+def _graph_text_relevance(query: str, row: Mapping[str, Any]) -> tuple[int, int]:
+    terms = _query_terms(query)
+    text = " ".join(
+        str(row.get(field) or "")
+        for field in ("title", "summary", "content", "relative_path", "path")
+    )
+    row_terms = _query_terms(text)
+    return len(terms & row_terms), int(bool(terms) and terms.issubset(row_terms))
+
+
+def _assertion_path(row: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
+    raw_path = row.get("assertion_path")
+    if not isinstance(raw_path, (list, tuple)) or not raw_path:
+        return ()
+    path: list[dict[str, Any]] = []
+    for raw_step in raw_path:
+        if not isinstance(raw_step, Mapping):
+            return ()
+        assertion_id = raw_step.get("assertion_id")
+        raw_evidence = raw_step.get("evidence_ids")
+        if not isinstance(assertion_id, str) or not assertion_id:
+            return ()
+        if not isinstance(raw_evidence, (list, tuple)) or not raw_evidence:
+            return ()
+        evidence_ids = tuple(
+            str(item) for item in raw_evidence if isinstance(item, str) and item
+        )
+        if not evidence_ids:
+            return ()
+        step = dict(raw_step)
+        step["evidence_ids"] = evidence_ids
+        path.append(step)
+    return tuple(path)
+
+
+def _prepare_graph_hits(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    query: str,
+    requested_profile: str,
+    seeds: Sequence[Mapping[str, Any]],
+    directions: Sequence[str],
+    edge_types: Sequence[str],
+    per_seed_limit: int,
+    global_limit: int,
+) -> tuple[Mapping[str, Any], ...]:
+    """Validate, text-rerank, decay, and cap graph expansions deterministically."""
+    seed_ids = {_candidate_key(seed) for seed in seeds}
+    allowed_directions = set(directions)
+    allowed_edges = set(edge_types)
+    direct_graph_query = requested_profile == "GRAPH"
+    prepared: list[tuple[tuple[object, ...], dict[str, Any]]] = []
+    for backend_rank, raw in enumerate(rows, start=1):
+        row = dict(raw)
+        seed_id = row.get("seed_id")
+        if seed_id is None:
+            # Independent pre-Task22 graph retrievers remain rank-only inputs.
+            prepared.append(((0, 0, 0, backend_rank, _candidate_key(row)), row))
+            continue
+        if not isinstance(seed_id, str) or seed_id not in seed_ids:
+            continue
+        hop = _as_int(row.get("hop"), 0)
+        direction = row.get("direction")
+        edge_type = row.get("edge_type")
+        path = _assertion_path(row)
+        if (
+            not 1 <= hop <= GRAPH_MAX_HOPS
+            or direction not in allowed_directions
+            or edge_type not in allowed_edges
+            or not path
+        ):
+            continue
+        evidence_ids = tuple(
+            dict.fromkeys(
+                evidence_id
+                for step in path
+                for evidence_id in step["evidence_ids"]
+            )
+        )
+        overlap, full_match = _graph_text_relevance(query, row)
+        if overlap == 0 and not direct_graph_query:
+            continue
+        decay = GRAPH_EDGE_DECAY[str(edge_type)] ** hop
+        row.update(
+            assertion_path=path,
+            evidence_ids=evidence_ids,
+            graph_boost=decay,
+            graph_text_overlap=overlap,
+        )
+        prepared.append(
+            (
+                (
+                    -full_match,
+                    -overlap,
+                    hop,
+                    -decay,
+                    seed_id,
+                    _candidate_key(row),
+                ),
+                row,
+            )
+        )
+
+    selected: dict[str, dict[str, Any]] = {}
+    per_seed: dict[str, int] = {}
+    for _key, row in sorted(prepared, key=lambda item: item[0]):
+        seed_id = str(row.get("seed_id") or "")
+        if seed_id and per_seed.get(seed_id, 0) >= per_seed_limit:
+            continue
+        candidate_id = _candidate_key(row)
+        existing = selected.get(candidate_id)
+        if existing is None:
+            if len(selected) >= global_limit:
+                continue
+            selected[candidate_id] = dict(row)
+        else:
+            existing_path = list(existing.get("assertion_path") or ())
+            for step in row.get("assertion_path") or ():
+                if step not in existing_path:
+                    existing_path.append(step)
+            existing["assertion_path"] = tuple(existing_path)
+            existing["evidence_ids"] = tuple(
+                dict.fromkeys(
+                    (*existing.get("evidence_ids", ()), *row.get("evidence_ids", ()))
+                )
+            )
+            existing["graph_boost"] = max(
+                float(existing.get("graph_boost") or 0.0),
+                float(row.get("graph_boost") or 0.0),
+            )
+        if seed_id:
+            per_seed[seed_id] = per_seed.get(seed_id, 0) + 1
+    return tuple(selected.values())
+
+
+def expand_evidence_graph(
+    graph: Any,
+    *,
+    seeds: Sequence[Mapping[str, Any]],
+    directions: Sequence[str],
+    edge_types: Sequence[str],
+    per_seed_limit: int = GRAPH_PER_SEED_LIMIT,
+    global_limit: int = GRAPH_GLOBAL_LIMIT,
+    deadline_monotonic: float | None = None,
+) -> tuple[Mapping[str, Any], ...]:
+    """Read one evidenced typed hop from a sealed ``EvidenceGraph`` handle."""
+    if not 1 <= per_seed_limit <= 100 or not 1 <= global_limit <= 1000:
+        raise ValueError("graph expansion caps are outside supported bounds")
+    normalized_directions = tuple(dict.fromkeys(str(item) for item in directions))
+    if not normalized_directions or any(item not in {"in", "out"} for item in normalized_directions):
+        raise ValueError("graph directions must contain only in or out")
+    normalized_edges = tuple(sorted(dict.fromkeys(str(item) for item in edge_types)))
+    if not normalized_edges or len(normalized_edges) > 64:
+        raise ValueError("graph edge types must contain between 1 and 64 values")
+
+    results: list[Mapping[str, Any]] = []
+    edge_placeholders = ",".join("?" for _ in normalized_edges)
+    for seed in seeds:
+        _check_deadline(deadline_monotonic)
+        seed_id = _candidate_key(seed)
+        seed_path = _hit_path(seed)
+        seed_results: list[Mapping[str, Any]] = []
+        for direction in normalized_directions:
+            source_column, target_column = (
+                ("source_node_id", "target_node_id")
+                if direction == "out"
+                else ("target_node_id", "source_node_id")
+            )
+            rows = graph._execute(
+                f"""
+                SELECT a.assertion_id, a.source_node_id, a.target_node_id,
+                       a.edge_type, a.confidence, a.authority, a.extractor,
+                       neighbor.node_id, neighbor.kind, neighbor.metadata_json,
+                       target_occ.byte_start, target_occ.byte_end,
+                       target_source.relative_path, target_source.sha256,
+                       target_source.content,
+                       e.evidence_id, e.source_id AS evidence_source_id,
+                       e.byte_start AS evidence_byte_start,
+                       e.byte_end AS evidence_byte_end, e.span_sha256,
+                       evidence_source.relative_path AS evidence_relative_path
+                FROM occurrence seed_occ
+                JOIN source seed_source ON seed_source.source_id = seed_occ.source_id
+                JOIN assertion a ON a.{source_column} = seed_occ.node_id
+                JOIN node neighbor ON neighbor.node_id = a.{target_column}
+                JOIN occurrence target_occ ON target_occ.node_id = neighbor.node_id
+                JOIN source target_source ON target_source.source_id = target_occ.source_id
+                JOIN evidence e ON e.assertion_id = a.assertion_id
+                JOIN source evidence_source ON evidence_source.source_id = e.source_id
+                WHERE seed_source.relative_path = ?
+                  AND a.resolution = 'resolved'
+                  AND a.target_node_id IS NOT NULL
+                  AND a.edge_type IN ({edge_placeholders})
+                  AND target_occ.occurrence_id = (
+                    SELECT min(chosen.occurrence_id) FROM occurrence chosen
+                    WHERE chosen.node_id = neighbor.node_id
+                  )
+                ORDER BY a.edge_type, neighbor.node_id, a.assertion_id, e.evidence_id
+                LIMIT ?
+                """,
+                (seed_path, *normalized_edges),
+                max_rows=min(1000, max(32, per_seed_limit * 16)),
+                deadline=deadline_monotonic,
+            )
+            grouped: dict[tuple[str, str], dict[str, Any]] = {}
+            for row in rows:
+                key = (str(row["assertion_id"]), str(row["node_id"]))
+                item = grouped.get(key)
+                evidence = {
+                    "evidence_id": str(row["evidence_id"]),
+                    "source_id": str(row["evidence_source_id"]),
+                    "relative_path": str(row["evidence_relative_path"]),
+                    "byte_start": int(row["evidence_byte_start"]),
+                    "byte_end": int(row["evidence_byte_end"]),
+                    "span_sha256": str(row["span_sha256"]),
+                }
+                if item is None:
+                    metadata = json.loads(str(row["metadata_json"]))
+                    content = row["content"]
+                    if isinstance(content, bytes):
+                        content = content.decode("utf-8", errors="replace")
+                    item = {
+                        "candidate_id": str(row["node_id"]),
+                        "parent_id": str(row["relative_path"]),
+                        "relative_path": str(row["relative_path"]),
+                        "source_sha256": str(row["sha256"]),
+                        "byte_start": int(row["byte_start"]),
+                        "byte_end": int(row["byte_end"]),
+                        "title": metadata.get("name") or Path(str(row["relative_path"])).stem,
+                        "content": str(content),
+                        "seed_id": seed_id,
+                        "hop": 1,
+                        "direction": direction,
+                        "edge_type": str(row["edge_type"]),
+                        "assertion_path": [
+                            {
+                                "assertion_id": str(row["assertion_id"]),
+                                "source_node_id": str(row["source_node_id"]),
+                                "target_node_id": str(row["target_node_id"]),
+                                "edge_type": str(row["edge_type"]),
+                                "direction": direction,
+                                "confidence": str(row["confidence"]),
+                                "authority": str(row["authority"]),
+                                "extractor": str(row["extractor"]),
+                                "evidence_ids": [],
+                                "evidence": [],
+                            }
+                        ],
+                        "evidence_ids": [],
+                        "generation": getattr(graph, "generation_id", None),
+                    }
+                    grouped[key] = item
+                step = item["assertion_path"][0]
+                step["evidence_ids"].append(evidence["evidence_id"])
+                step["evidence"].append(evidence)
+                item["evidence_ids"].append(evidence["evidence_id"])
+            for item in grouped.values():
+                step = item["assertion_path"][0]
+                step["evidence_ids"] = tuple(step["evidence_ids"])
+                step["evidence"] = tuple(step["evidence"])
+                item["assertion_path"] = tuple(item["assertion_path"])
+                item["evidence_ids"] = tuple(item["evidence_ids"])
+                seed_results.append(item)
+        seed_results.sort(
+            key=lambda item: (
+                str(item["edge_type"]),
+                str(item["candidate_id"]),
+                str(item["direction"]),
+                str(item["assertion_path"][0]["assertion_id"]),
+            )
+        )
+        results.extend(seed_results[:per_seed_limit])
+        if len(results) >= global_limit:
+            break
+    return tuple(results[:global_limit])
+
+
 def fuse_rrf(
     *,
     lexical: Sequence[Mapping[str, Any]] | None,
@@ -367,8 +723,32 @@ def fuse_rrf(
                 "language": row.get("language"),
                 "source_id": row.get("source_id"),
                 "lance_distance": row.get("lance_distance"),
+                "graph_seed_id": row.get("seed_id"),
+                "graph_direction": row.get("direction"),
+                "graph_edge_type": row.get("edge_type"),
+                "assertion_path": _assertion_path(row),
+                "graph_text_overlap": row.get("graph_text_overlap"),
             }
         else:
+            graph_fields = {
+                "graph_seed_id": row.get("seed_id"),
+                "graph_direction": row.get("direction"),
+                "graph_edge_type": row.get("edge_type"),
+                "assertion_path": _assertion_path(row),
+                "graph_text_overlap": row.get("graph_text_overlap"),
+            }
+            for field, value in graph_fields.items():
+                if meta[key].get(field) in (None, "", ()) and value not in (None, "", ()):
+                    meta[key][field] = value
+            incoming_evidence = tuple(
+                str(item)
+                for item in (row.get("evidence_ids") or ())
+                if isinstance(item, str) and item
+            )
+            if incoming_evidence:
+                meta[key]["evidence_ids"] = tuple(
+                    dict.fromkeys((*meta[key]["evidence_ids"], *incoming_evidence))
+                )
             # Prefer first non-empty display fields from any backend.
             for field in (
                 "title",
@@ -386,6 +766,11 @@ def fuse_rrf(
                 "language",
                 "source_id",
                 "lance_distance",
+                "graph_seed_id",
+                "graph_direction",
+                "graph_edge_type",
+                "assertion_path",
+                "graph_text_overlap",
             ):
                 if meta[key].get(field) in (None, "") and row.get(field) not in (None, ""):
                     meta[key][field] = row.get(field)
@@ -544,6 +929,9 @@ def retrieve(
     deadline_monotonic: float | None = None,
     max_candidates: int | None = None,
     cancelled: Callable[[], bool] | None = None,
+    graph_per_seed_limit: int = GRAPH_PER_SEED_LIMIT,
+    graph_global_limit: int = GRAPH_GLOBAL_LIMIT,
+    graph_edge_families: Mapping[str, bool] | None = None,
 ) -> RetrievalResult:
     """Plan and execute retrieval with truthful mode/signal reporting.
 
@@ -567,6 +955,24 @@ def retrieve(
     }
 
     wanted = PROFILE_SIGNALS[requested]
+    if (
+        isinstance(graph_per_seed_limit, bool)
+        or not isinstance(graph_per_seed_limit, int)
+        or not 1 <= graph_per_seed_limit <= 100
+    ):
+        raise ValueError("graph_per_seed_limit must be between 1 and 100")
+    if (
+        isinstance(graph_global_limit, bool)
+        or not isinstance(graph_global_limit, int)
+        or not 1 <= graph_global_limit <= 1000
+    ):
+        raise ValueError("graph_global_limit must be between 1 and 1000")
+    if graph_edge_families is not None:
+        if not isinstance(graph_edge_families, Mapping) or any(
+            edge not in GRAPH_EDGE_DECAY or not isinstance(enabled, bool)
+            for edge, enabled in graph_edge_families.items()
+        ):
+            raise ValueError("graph_edge_families must map known edge types to booleans")
     lexical_hits: Sequence[Mapping[str, Any]] | None = None
     dense_hits: Sequence[Mapping[str, Any]] | None = None
     graph_hits: Sequence[Mapping[str, Any]] | None = None
@@ -576,6 +982,7 @@ def retrieve(
     ran_graph = False
     dense_available: bool | None = None
     graph_available: bool | None = None
+    graph_failure: str | None = None
 
     if lexical_backend is not None and "lexical" in wanted:
         _check_stopped(deadline_monotonic, cancelled)
@@ -593,9 +1000,52 @@ def retrieve(
 
     if graph_backend is not None and "graph" in wanted and graph_enabled:
         _check_stopped(deadline_monotonic, cancelled)
-        graph_hits = graph_backend(**filters)
-        ran_graph = True
-        graph_available = graph_hits is not None
+        directions = GRAPH_PROFILE_DIRECTIONS.get(requested, ("out",))
+        edge_types = GRAPH_PROFILE_EDGE_TYPES.get(requested, tuple(GRAPH_EDGE_DECAY))
+        if graph_edge_families:
+            edge_types = tuple(
+                edge_type
+                for edge_type in edge_types
+                if graph_edge_families.get(edge_type, True)
+            )
+        seeds = _graph_seeds(lexical_hits, dense_hits)
+        try:
+            raw_graph_hits = graph_backend(
+                **filters,
+                seeds=seeds,
+                max_hops=GRAPH_MAX_HOPS,
+                directions=directions,
+                edge_types=edge_types,
+                edge_decay={edge: GRAPH_EDGE_DECAY[edge] for edge in edge_types},
+                per_seed_limit=graph_per_seed_limit,
+                global_limit=graph_global_limit,
+                deadline_monotonic=deadline_monotonic,
+                corpus_generation=corpus_generation,
+            )
+            graph_hits = (
+                None
+                if raw_graph_hits is None
+                else _prepare_graph_hits(
+                    raw_graph_hits,
+                    query=analysis.normalized_query or analysis.query,
+                    requested_profile=requested,
+                    seeds=seeds,
+                    directions=directions,
+                    edge_types=edge_types,
+                    per_seed_limit=graph_per_seed_limit,
+                    global_limit=graph_global_limit,
+                )
+            )
+            ran_graph = True
+            graph_available = graph_hits is not None
+        except TimeoutError:
+            raise
+        except GenerationSealChanged:
+            raise
+        except Exception:
+            graph_hits = None
+            graph_available = False
+            graph_failure = "graph_error"
         _check_stopped(deadline_monotonic, cancelled)
     elif "graph" in wanted and not graph_enabled:
         graph_available = False
@@ -610,6 +1060,7 @@ def retrieve(
         graph_available=graph_available,
         graph_enabled=graph_enabled,
     )
+    fallback = graph_failure or fallback
 
     fuse_lexical = lexical_hits if "lexical" in signals else None
     fuse_dense = dense_hits if "dense" in signals and dense_hits is not None else None
@@ -885,9 +1336,24 @@ def candidates_to_legacy(
             "source_id",
             "content",
             "lance_distance",
+            "graph_seed_id",
+            "graph_direction",
+            "graph_edge_type",
+            "graph_text_overlap",
         ):
             if info.get(key) not in (None, ""):
                 row[key] = info[key]
+        assertion_path = info.get("assertion_path")
+        if assertion_path:
+            row["assertion_path"] = [
+                {
+                    **dict(step),
+                    "evidence_ids": list(step.get("evidence_ids") or ()),
+                }
+                for step in assertion_path
+            ]
+        if candidate.evidence_ids:
+            row["evidence_ids"] = list(candidate.evidence_ids)
         rows.append(row)
     return rows
 
@@ -933,6 +1399,12 @@ def _backend_hit_from_legacy(row: Mapping[str, Any], *, score_key: str = "score"
         "generation",
         "content",
         "lance_distance",
+        "seed_id",
+        "hop",
+        "direction",
+        "edge_type",
+        "assertion_path",
+        "retrieval_confidence",
     ):
         if key in row:
             hit[key] = row[key]
@@ -970,8 +1442,7 @@ def retrieve_via_search_memory(
 
     _check_stopped(deadline_monotonic, cancelled)
 
-    class _GenerationSealChanged(Exception):
-        pass
+    _GenerationSealChanged = GenerationSealChanged
 
     analysis = analyze_query(query)
     requested = _normalize_profile(profile)
@@ -992,6 +1463,7 @@ def retrieve_via_search_memory(
     generation_ctx: dict[str, Any] = {
         "manifest": None,
         "connection": None,
+        "graph": None,
         "seal": None,
         "dense_fallback": None,
     }
@@ -1000,6 +1472,10 @@ def retrieve_via_search_memory(
         names: list[str] = [search_memory.GENERATION_FTS_ARTIFACT]
         if want_vectors and manifest.get("vector_state") == "complete":
             names.extend(search_memory.GENERATION_VECTOR_ARTIFACTS)
+        if "graph" in wanted_tuple and search_memory._generation_artifact(
+            manifest, "evidence.sqlite3"
+        ):
+            names.append("evidence.sqlite3")
         return tuple(names)
 
     def _open_generation(*, want_vectors: bool) -> bool:
@@ -1026,6 +1502,22 @@ def retrieve_via_search_memory(
         generation_ctx["connection"] = connection
         generation_ctx["seal"] = seal
         generation_ctx["artifact_names"] = artifact_names
+        if "evidence.sqlite3" in artifact_names:
+            try:
+                from evidence_graph import EvidenceGraph
+
+                generation_ctx["graph"] = EvidenceGraph(
+                    selected_catalog.generations_path
+                    / str(manifest["generation_id"])
+                    / "evidence.sqlite3",
+                    state_root=selected_catalog.state_root,
+                    generation_id=str(manifest["generation_id"]),
+                )
+            except Exception:
+                connection.close()
+                generation_ctx["connection"] = None
+                generation_ctx["graph"] = None
+                return False
         return True
 
     catalog_requested = (
@@ -1222,11 +1714,40 @@ def retrieve_via_search_memory(
     def graph_backend(**filters: Any) -> Sequence[Mapping[str, Any]] | None:
         if not graph or "graph" not in wanted_tuple:
             return None
-        # Generation path does not mix legacy graph (Task 12 isolation).
         if use_generation:
-            return None
+            active_graph = generation_ctx.get("graph")
+            if active_graph is None:
+                return None
+            if not search_memory._generation_consumption_unchanged(
+                selected_catalog,
+                generation_ctx["manifest"],
+                generation_ctx["artifact_names"],
+                generation_ctx["seal"],
+            ):
+                raise _GenerationSealChanged
+            rows = expand_evidence_graph(
+                active_graph,
+                seeds=filters["seeds"],
+                directions=filters["directions"],
+                edge_types=filters["edge_types"],
+                per_seed_limit=filters["per_seed_limit"],
+                global_limit=filters["global_limit"],
+                deadline_monotonic=filters["deadline_monotonic"],
+            )
+            if not search_memory._generation_consumption_unchanged(
+                selected_catalog,
+                generation_ctx["manifest"],
+                generation_ctx["artifact_names"],
+                generation_ctx["seal"],
+            ):
+                raise _GenerationSealChanged
+            return rows
         try:
-            seeds = list(lexical_backend(**filters))
+            seed_filters = {
+                key: filters[key]
+                for key in ("query", "scope", "limit", "project", "since", "as_of")
+            }
+            seeds = list(lexical_backend(**seed_filters))
             from graph_neighbors import boost_graph_neighbors
 
             boosts = boost_graph_neighbors(
@@ -1260,7 +1781,7 @@ def retrieve_via_search_memory(
             dense_backend=dense_backend if ("dense" in wanted_tuple and semantic) else None,
             graph_backend=graph_backend if ("graph" in wanted_tuple and graph) else None,
             corpus_generation=corpus_generation,
-            graph_enabled=graph and not use_generation,
+            graph_enabled=graph,
             rerank_enabled=rerank,
             deadline_monotonic=deadline_monotonic,
             max_candidates=max_candidates,
@@ -1284,6 +1805,12 @@ def retrieve_via_search_memory(
             result = run_retrieval()
     finally:
         connection = generation_ctx.get("connection")
+        active_graph = generation_ctx.get("graph")
+        if active_graph is not None:
+            try:
+                active_graph.close()
+            except Exception:
+                pass
         if connection is not None:
             try:
                 connection.close()

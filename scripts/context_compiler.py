@@ -108,6 +108,14 @@ class RetrievalTrace:
 
 
 @dataclass(frozen=True)
+class GraphExpansionTrace:
+    candidate_id: str
+    seed_id: str
+    assertion_path: tuple[Mapping[str, object], ...]
+    evidence_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class PackingTrace:
     packed_item_ids: tuple[str, ...]
     dropped: tuple[DroppedItem, ...]
@@ -132,6 +140,7 @@ class CompilationTrace:
     duplicate_stems: tuple[str, ...]
     retrieval: RetrievalTrace
     packing: PackingTrace
+    graph_expansions: tuple[GraphExpansionTrace, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -490,6 +499,7 @@ def compile_context(
     small_parent_chars: int = DEFAULT_SMALL_PARENT_CHARS,
     large_parent_subtree_chars: int = DEFAULT_LARGE_PARENT_SUBTREE_CHARS,
     generated_context: bool = LLM_GENERATED_CONTEXT_DEFAULT,
+    graph_expansions: Iterable[Mapping[str, object]] = (),
 ) -> CompiledContext:
     """Compile L0/L1/L2 representations for every parent in ``snapshot``.
 
@@ -505,6 +515,57 @@ def compile_context(
         raise ValueError("large_parent_subtree_chars must be nonnegative")
     if generated_context:
         raise ValueError("generated_context=True requires a successful frozen ablation")
+
+    graph_trace: list[GraphExpansionTrace] = []
+    for expansion in graph_expansions:
+        candidate_id = expansion.get("candidate_id")
+        seed_id = expansion.get("seed_id")
+        assertion_path = expansion.get("assertion_path")
+        evidence_ids = expansion.get("evidence_ids")
+        if (
+            not isinstance(candidate_id, str)
+            or not candidate_id
+            or not isinstance(seed_id, str)
+            or not seed_id
+            or not isinstance(assertion_path, (list, tuple))
+            or not assertion_path
+            or not all(isinstance(step, Mapping) for step in assertion_path)
+            or not isinstance(evidence_ids, (list, tuple))
+            or not evidence_ids
+        ):
+            raise ValueError("graph expansion provenance is incomplete")
+        normalized_evidence = tuple(
+            str(item) for item in evidence_ids if isinstance(item, str) and item
+        )
+        normalized_path: list[Mapping[str, object]] = []
+        for step in assertion_path:
+            assertion_id = step.get("assertion_id")
+            step_evidence = step.get("evidence_ids")
+            if (
+                not isinstance(assertion_id, str)
+                or not assertion_id
+                or not isinstance(step_evidence, (list, tuple))
+                or not step_evidence
+            ):
+                raise ValueError("graph expansion provenance is incomplete")
+            normalized_step = dict(step)
+            normalized_step["evidence_ids"] = tuple(
+                str(item) for item in step_evidence if isinstance(item, str) and item
+            )
+            if not normalized_step["evidence_ids"]:
+                raise ValueError("graph expansion provenance is incomplete")
+            normalized_path.append(normalized_step)
+        if not normalized_evidence:
+            raise ValueError("graph expansion provenance is incomplete")
+        graph_trace.append(
+            GraphExpansionTrace(
+                candidate_id=candidate_id,
+                seed_id=seed_id,
+                assertion_path=tuple(normalized_path),
+                evidence_ids=normalized_evidence,
+            )
+        )
+    graph_trace.sort(key=lambda item: (item.candidate_id, item.seed_id))
 
     parents = _build_parents(snapshot)
     shortlist_set = {str(s) for s in shortlist}
@@ -662,6 +723,7 @@ def compile_context(
             counter_source=packed.counter_source,
             budget_model=packed.budget.model,
         ),
+        graph_expansions=tuple(graph_trace),
     )
     return CompiledContext(
         items=tuple(packed_items),
