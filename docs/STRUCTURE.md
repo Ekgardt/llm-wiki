@@ -209,11 +209,36 @@ cache/evidence-graph/generations/<generation-id>/
   used. `cache/evidence-graph/` can be deleted and regenerated from authoritative
   Markdown, Git, and project journals. No generation database belongs under `run/`;
   `run/` remains operational state only.
+- Activation is register-then-CAS: manifest/schema, source membership, artifact
+  hashes, SQLite integrity, and evidence spans validate before a short catalog
+  transaction changes the active pointer. A failed build cannot replace the prior
+  active generation. Recovery may register complete orphan generations without
+  activating them. A corrupt active generation is replaced only by a revalidated
+  prior generation from activation history/parent lineage.
 - Legacy `cache/index.sqlite`, `cache/vectors.npy`, `cache/vectors_meta.json`, and
   `cache/lancedb/` remain readable during migration. They are disposable derived
   caches retained as fallback, not members of a generation. They must not be removed
   until installed-vault migration evidence makes that safe. The new reader switches
   only after a validated generation is active.
+
+### Evidence-cache migration and rollback
+
+There is no automatic legacy-cache deletion and no supported end-user migration CLI
+yet. The current generation builder/catalog APIs are integrated, while operator CLI
+evidence is **evidence pending**. Migration therefore preserves both layouts:
+
+1. Keep authoritative `knowledge/`, Git history, and project journals unchanged.
+2. Keep all four legacy cache paths while a candidate generation is built and
+   validated.
+3. Switch readers only through catalog CAS activation.
+4. Verify returned generation/fallback fields before treating migration as complete.
+5. Retain legacy caches until installed-vault evidence authorizes their removal.
+
+For safe rollback, stop active commands and remove only the derived
+`cache/evidence-graph/` tree, or reactivate a previously validated generation through
+the catalog API. Do not delete `knowledge/`, project journals, Git data, or `run/`.
+With legacy caches retained, readers fall back to legacy FTS/vector/Lance paths;
+graph-dependent code tools use bounded live extraction and label it incomplete.
 - `logs/` — `lint-YYYY-MM-DD.md`, `compile-last.log`, `session-start-last.txt`.
 - `run/` — `state.json`, `compile.pid`, `run/markdown-transactions.sqlite3`,
   `run/transactions/`, `run/queue.sqlite3`, `run/queue-results/`, receipts, and

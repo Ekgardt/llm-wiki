@@ -70,9 +70,9 @@ The slug system (5-step collision resolution) lets a single vault track unlimite
                                ↓
 ┌──────────────────────────────────────────────────────────────────────┐
 │  LOCAL SEARCH + INTELLIGENCE                                        │
-│  SQLite FTS5 BM25 + wikilink graph (baseline local retrieval)        │
-│  optional vectors/LanceDB + reranker                                 │
-│  code_graph.py + impact_analysis.py + proactive SessionStart context │
+│  validated immutable generation: FTS + Evidence Graph + evidence     │
+│  optional generation vectors; legacy FTS/vector/Lance compatibility  │
+│  retrieval planner + context compiler + grounded QA                  │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -99,7 +99,25 @@ valid and lint covers them equally.
 
 ---
 
-## Search Architecture (v4.0)
+## Unified evidence retrieval architecture
+
+Markdown, Git, and append-only project journals are authoritative. The generation
+catalog, Evidence Graph, FTS, vectors, L0/L1/L2 tiers, contextual artifacts,
+telemetry, and model caches are derived runtime state. A derived record may guide
+retrieval, but it cannot override its captured source bytes.
+
+`cache/evidence-graph/catalog.sqlite3` is the single active pointer. A generation
+captures source membership and hashes, then seals its artifacts in `manifest.json`.
+Registration verifies the manifest, artifact hashes, SQLite integrity and schema,
+source membership, and evidence byte ranges/hashes. Compare-and-swap activation is
+the only publication point. Readers seal the catalog pointer and artifacts before
+use and recheck them after opening so a concurrent activation cannot mix generations.
+
+Interrupted candidates are not active. Recovery can register a complete immediate
+child orphan without activating it. If the active generation is corrupt or missing,
+the catalog walks activation history and parent links, validates candidates again,
+and repairs the pointer to the newest usable prior generation. If none is usable,
+consumers fall back honestly to legacy retrieval or bounded live extraction.
 
 Three local tiers share the same Markdown corpus:
 
@@ -116,17 +134,55 @@ No embedding model, vector cache, or optional package is required in this tier.
 
 ### Hybrid tier (`uv sync --extra hybrid`)
 1. **BM25 (weight=2.0)**: SQLite FTS5 (same as base — 25 years battle-tested).
-2. **Vector (weight=1.0)**: LanceDB HNSW (embedded, no daemon, Apache-2.0). Sub-ms at any scale.
+2. **Vector (weight=1.0)**: LanceDB HNSW compatibility backend (embedded, no daemon, Apache-2.0).
 3. **Graph-neighbor (weight=0.5)**: wikilink adjacency boost.
 4. **Cross-encoder reranker**: bge-reranker-base (ONNX INT8, optional), re-scores top-20.
 
-**RRF formula**: `score = 2.0/(60+bm25_rank) + 1.0/(60+vector_rank) + 0.5*graph_boost/(120+graph_rank)`
+**RRF formula**: `score = 2.0/(60+bm25_rank) + 1.0/(60+vector_rank) + 0.5/(60+graph_rank)` for signals that actually return a ranked candidate.
 
-**v4.0 embedding**: BAAI/bge-small-en-v1.5 (MIT, MTEB 62.17, +25% over all-MiniLM-L6-v2).
-Query instruction prefix for retrieval optimization.
+The legacy optional vector path remains pinned to `BAAI/bge-small-en-v1.5` for
+compatibility. `benchmark/model-matrix-v1.json` defines pinned multilingual embedding
+and reranker candidates, but its default embedding and reranker are both `null` and
+its status is `awaiting_raw_benchmark`. No new default or superiority claim is
+allowed until raw EN/RU/ZH quality, latency, RAM, license, regression, and Pareto
+evidence passes the selection contract. **Evidence pending.**
 
 **Why no PostgreSQL?** PostgreSQL requires a daemon, which violates Axiom #1.
-SQLite + LanceDB gives the same hybrid quality without any server process.
+SQLite + optional LanceDB preserves a local, zero-daemon deployment shape. This is
+not a measured quality-equivalence claim against PostgreSQL or another service.
+
+### Context and token contract
+
+SessionStart, project context, compiled context, and grounded QA use complete-item
+packing under a shared budget. Safety, health, handoff, blocker, decision, evidence,
+and history priority classes are ordered before relevance-per-token utility. Mandatory
+items fail closed when they cannot fit; arbitrary string truncation is not used as a
+substitute for preserving evidence boundaries.
+
+Token values carry a source label: `reported` means the provider reported usage;
+`tokenizer` means a model-specific adapter counted it; `estimated` currently means a
+UTF-8 byte estimate; `mixed` combines count sources; `unknown` carries no numeric
+claim. Monetary cost has a separate `reported|estimated|unknown` label. The byte
+estimate is conservative planning data, not a universal token upper bound.
+
+### Grounded-answer contract
+
+QA retrieves child chunks, groups them by authoritative parent source, and sends only
+captured spans as untrusted data. Each usable citation includes an ID, repository-
+relative path, source hash, revision, byte and line ranges, span hash, and supplied
+text. Deterministic verification checks root containment, all hashes/ranges, and that
+every claim cites supplied evidence. Generated summaries and a measured small-vault
+cached index are orientation only. Valid statuses are `answered`,
+`insufficient_evidence`, `conflicting_evidence`, and `unsupported_time_scope`.
+Generation is read-only; `--file-back` crosses the recoverable Markdown transaction
+boundary only after verification.
+
+### Comparison evidence
+
+The pinned Graphify contract and deterministic comparative smoke exist. The smoke
+does not execute Graphify and explicitly reports no quality claim, no token-ratio
+claim, and unavailable hard gates. Real paired Graphify evidence is **evidence
+pending**. No architecture or model superiority follows from the smoke.
 
 ---
 
@@ -146,7 +202,7 @@ For most teams and most use cases, **you should**. Those tools are mature, suppo
 - **No cloud sync** — your memory stays on your disk. Use git for remote backup.
 - **No canonical frontend** — Obsidian is an optional Markdown viewer; any editor or `cat` works.
 - **No multi-user** — solo developer only.
-- **No per-prompt RAG** — compile-not-retrieve pattern; session-start + session-end injection suffices.
+- **No unbounded full-vault prompt dump** — ordinary QA retrieves and verifies bounded evidence; only a measured genuinely small vault may use the `CACHED_FULL` orientation profile.
 
 ## Reliable mutation architecture
 

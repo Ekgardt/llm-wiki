@@ -8,6 +8,24 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Documented the integrated Tasks 1-29 unified evidence contracts: Markdown/Git/
+  project-journal authority, immutable derived generations, register-then-CAS
+  activation, seal validation, prior-generation recovery, cache deletion, truthful
+  retrieval fallback, token-source labels, and verified grounded-answer citations.
+- Added a non-destructive legacy FTS/NumPy/Lance migration and rollback guide. Legacy
+  caches remain readable and must be retained until installed-vault migration evidence
+  proves removal safe; rollback never removes knowledge, Git history, journals, or
+  operational `run/` state.
+- Recorded the exact unchanged 12-tool MCP surface and current behavior. `recall`
+  exposes retrieval trace fields; evidence reads fail closed; contradiction checks are
+  structured; code/dead-code/architecture/impact paths are store-first with explicit
+  live fallback; `doctor` retains nine closed operator actions. Planned token-budgeted
+  MCP context, expanded architecture modes, and per-component envelope freshness are
+  labelled **evidence pending** rather than shipped.
+- Recorded truthful release-evidence limits: the model matrix currently selects no
+  new embedding or reranker, deterministic comparative smoke does not execute
+  Graphify, and no model-superiority, Graphify-parity, quality, or token-ratio claim is
+  made. Real paired evidence remains pending.
 - Documented Stage 2 reliable memory operations: Markdown-authoritative recoverable
   transactions and undo, fenced project journals, rollback-journal SQLite queue
   migration/work/redrive/export-first purge, content-addressed compile receipts,
@@ -33,7 +51,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   search, embedded (no daemon). Replaces PostgreSQL. `--extra hybrid` to enable.
 - **Memory-mapped vector cache** — `vectors.npy` replaces `vectors.json`. Binary
   numpy format loads instantly via mmap instead of JSON parsing.
-- **bge-small-en-v1.5 embedding** — MTEB 62.17 (+25% over all-MiniLM-L6-v2).
+- **bge-small-en-v1.5 embedding** — pinned legacy optional-vector compatibility model.
 - **Cross-encoder reranker** (`scripts/reranker.py`) — bge-reranker ONNX INT8,
   re-ranks top-20 results. `--extra reranker`.
 - **Access tracking + Ebbinghaus forgetting** (`scripts/access_tracking.py`) —

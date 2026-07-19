@@ -22,6 +22,7 @@ LLM Wiki даёт каждому AI-агенту, которым вы польз
 - [Быстрый старт](#быстрый-старт)
 - [Подключение агентов](#подключение-агентов)
 - [Архитектура](#архитектура)
+- [Поколения evidence и миграция](#поколения-evidence-и-миграция)
 - [Бенчмарк](#бенчмарк)
 - [Сравнение](#сравнение)
 - [Участие в разработке](#участие-в-разработке)
@@ -65,18 +66,21 @@ LLM Wiki даёт каждому AI-агенту, которым вы польз
 ### Пайплайн компиляции
 - **JSON-протокол компиляции** — не требует tool-use агента, работает с любым LLM-бэкендом
 - **VERIFY-BEFORE-WRITE** — детерминированная проверка цитат на стороне Python; LLM не может сфабриковать улики
-- **Семантический дедуп** — update предпочтительнее create; авто-supersede при противоречии
+- **Семантический дедуп с quarantine** — update предпочтительнее create; неуверенные или спорные противоречия помещаются в quarantine, а automatic semantic supersession остаётся отключённым
 - **Инкрементальность** — SHA-256 хеширование; рекомпилируются только изменённые daily-логи
 - **Concurrency-safe** — PID-лок с обнаружением stale; одновременно выполняется только одна компиляция
 - **Персистентная очередь задач** — устойчивость к офлайну; отложенные LLM-задачи выполняются на следующей сессии
 
 ### Поиск и извлечение
-- **Triple-fusion search**: BM25 (FTS5) + Vector (sentence-transformers) + Graph-neighbor (wikilink RRF)
+- **Generation-consistent retrieval**: одно проверенное неизменяемое поколение связывает FTS, vectors, graph, tiers и evidence с одним source snapshot
+- **Правдивые retrieval traces**: результаты сообщают requested/effective mode, реально использованные signals, generation, состояние reranker и причину fallback
+- **Triple-fusion при доступности**: BM25 (FTS5) + Vector (sentence-transformers) + evidence-backed Graph-neighbor RRF
 - **Взвешенный RRF**: BM25=2.0, Vector=1.0, Graph=0.5 — предотвращает регрессию на known-item запросах
 - **Title + filename boost** — точное совпадение имени файла даёт rank 1 сразу
 - **Typed-provenance ранжирование** — `source_authority: user` выше, чем `ai-derived` / `inferred`
 - **Темпоральные запросы** — `--as-of YYYY-MM-DD` фильтрует по `valid_to` frontmatter
 - **Локальные режимы retrieval** — прямое чтение страниц на малом масштабе, всегда доступный SQLite FTS5 BM25 и опциональный hybrid с vectors/LanceDB + graph + reranker
+- **Grounded QA** — извлечённые source spans содержат citation ID, пути, хеши source/span, revision и byte/line ranges; при недостаточных, конфликтующих или не соответствующих времени данных система воздерживается от ответа
 
 ### Проактивный интеллект
 - **Guardrails** — авто-инжекция выученных корректировок на SessionStart (предотвращает повторение ошибок)
@@ -205,10 +209,25 @@ RUNTIME       cache/  logs/  run/  cache/cognee/   (gitignored, внутри vau
 - **CODE** — отслеживается в git. Пайплайн, тесты, документация, навыки, правила, интеграции.
 - **KNOWLEDGE** — отслеживается в git (публичные примеры). Полные пользовательские данные живут в установленном vault. Daily-логи и персональные страницы gitignored.
 - **RUNTIME** — gitignored. Search-индексы и логи одноразовые; транзакции, состояние очереди и undo-образы в `run/` являются операционным состоянием.
+- **Граница авторитетности** — Markdown, Git history и append-only project journals авторитетны. FTS, vectors, базы Evidence Graph, tiers, telemetry и model caches производны и пересоздаваемы.
 
 Полное обоснование дизайна (7 аксиом, диаграмма архитектуры, таксономия памяти, архитектура поиска) — в [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Канонический reference структуры (что где живёт, env-контракты, запрещённые layout'ы) — в [docs/STRUCTURE.md](docs/STRUCTURE.md).
+
+---
+
+## Поколения evidence и миграция
+
+`cache/evidence-graph/catalog.sqlite3` выбирает одно неизменяемое активное поколение в `cache/evidence-graph/generations/<generation-id>/`. Candidate регистрируется только после проверки manifest, состава source, хешей artifacts, целостности базы и evidence spans. Активация меняет указатель через compare-and-swap. Сбой или прерывание до активации оставляет предыдущее поколение активным; повреждённое активное поколение пропускается в пользу последнего проверенного предыдущего. Полные orphan generations могут быть зарегистрированы при recovery, но автоматически не активируются.
+
+Удаление `cache/evidence-graph/` удаляет только производное состояние. Сначала остановите активные команды, сохраните `run/` и перестройте cache прежде, чем ожидать generation-backed retrieval. Пока evidence миграции установленных vault отсутствует, сохраняйте legacy `cache/index.sqlite`, `cache/vectors.npy`, `cache/vectors_meta.json` и `cache/lancedb/`. Если проверенное поколение открыть нельзя, retrieval откатывается к этим legacy-путям либо к lexical/live extraction и сообщает fallback. Безопасный rollback никогда не удаляет `knowledge/`, Git history, project journals или `run/`.
+
+Model matrix фиксирует revisions кандидатов и требует EN/RU/ZH quality, resource, license и Pareto gates перед выбором defaults. Новая embedding model или reranker пока не выбраны: **evidence pending**. Существующая опциональная vector-совместимость продолжает использовать закреплённую legacy model. Token counts помечаются как `reported`, `tokenizer`, `estimated`, `mixed` или `unknown`; денежная стоимость отдельно помечается как `reported`, `estimated` или `unknown`. Оценка по UTF-8 bytes предназначена для консервативного планирования и не является независимой от tokenizer гарантией.
+
+Реальное сравнение Graphify и evidence превосходства моделей отсутствуют: **evidence pending**. Детерминированный comparative smoke проверяет только orchestration и не подтверждает claims о качестве или token ratio.
+
+Активация, recovery, rollback, citations и точное поведение MCP описаны в [docs/USER-GUIDE.md](docs/USER-GUIDE.md).
 
 ---
 
