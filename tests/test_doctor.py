@@ -1395,11 +1395,11 @@ def test_cli_repair_json_is_idempotent(tmp_path):
 
     first_report = json.loads(first.stdout)
     second_report = json.loads(second.stdout)
-    assert first.returncode == 1
+    assert first.returncode == 0
     assert first_report["repaired"]
-    assert first_report["overall_status"] == "degraded"
-    assert second.returncode == 1
-    assert second_report["overall_status"] == "degraded"
+    assert first_report["overall_status"] == "ok"
+    assert second.returncode == 0
+    assert second_report["overall_status"] == "ok"
     assert second_report["repaired"] == []
     assert set(_snapshot(state_root)) == set(after_first)
 

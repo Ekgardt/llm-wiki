@@ -1386,11 +1386,12 @@ def _generation_check(
     kind, catalog_info = _safe_kind(catalog_path, state_root)
     if kind == "missing":
         return _generation_result(
-            "degraded",
-            "Evidence generation catalog is missing.",
+            "ok",
+            "Evidence generation has not been built; legacy retrieval remains available.",
             catalog="missing",
             freshness="missing",
             repairable=True,
+            recommended_action="rebuild_generation",
         )
     if kind != "regular":
         return _generation_result(
@@ -1417,12 +1418,13 @@ def _generation_check(
             active = None if state is None else state[0]
             if not isinstance(active, str) or not active:
                 return _generation_result(
-                    "degraded",
-                    "No active evidence generation is selected.",
+                    "ok",
+                    "Evidence generation has not been activated; legacy retrieval remains available.",
                     catalog="valid",
                     catalog_schema="valid",
                     freshness="missing",
                     repairable=True,
+                    recommended_action="rebuild_generation",
                 )
             registered = database.execute(
                 "SELECT 1 FROM generations WHERE generation_id=?",

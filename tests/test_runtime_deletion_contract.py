@@ -457,6 +457,8 @@ def test_policy_retention_blocks_deletion_without_degrading_health(tmp_path, mon
     assert checks["transactions"]["status"] == "ok"
     assert checks["queue"]["status"] == "ok", checks["queue"]
     assert checks["run_deletion"]["status"] == "ok"
+    assert checks["generation"]["status"] == "ok"
+    assert checks["generation"]["details"]["recommended_action"] == "rebuild_generation"
     assert report["overall_status"] == "ok"
     assert doctor.degraded_summary(report) == ""
     monkeypatch.setattr(doctor, "run_doctor", lambda **kwargs: report)
