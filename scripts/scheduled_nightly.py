@@ -3,15 +3,15 @@
 What it does:
 1. Work any pending queue tasks (deferred LLM work).
 2. Force-spawn compile to process all uncompiled daily logs.
-3. Run lint and append to a rolling log file.
+3. Run lint and bounded immutable generation maintenance.
 
 Designed to be invoked by Task Scheduler; never requires user interaction.
 All output goes to $LLM_WIKI_STATE_ROOT/logs/nightly-YYYY-MM-DD.md.
 """
+
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
 import time
 from datetime import datetime
@@ -19,6 +19,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import maybe_compile  # noqa: E402
+from doctor import (  # noqa: E402
+    DEFAULT_GENERATION_SOURCE_LIMIT,
+    run_generation_maintenance,
+)
 from maintenance_helpers import run_step as _run_step  # noqa: E402
 from maintenance_helpers import wait_for_compile_idle as _wait_for_compile_idle
 from memory_state import (  # noqa: E402
@@ -28,6 +32,20 @@ from memory_state import (  # noqa: E402
     _is_pid_alive,
     update_state,
 )
+
+
+def _refresh_generation(log) -> int:
+    """Run the shared bounded builder under its fenced maintenance owner."""
+    result = run_generation_maintenance(
+        root=ROOT,
+        state_root=STATE_ROOT,
+        time_budget_seconds=60,
+        max_sources=DEFAULT_GENERATION_SOURCE_LIMIT,
+    )
+    status = result["status"]
+    generation = result.get("generation_id") or "none"
+    log(f"  generation: {status} (id={generation}, partial={bool(result.get('partial'))})")
+    return 1 if status == "error" else 0
 
 
 def _record_nightly_result(today: str, failures: int, error: str | None = None) -> None:
@@ -138,7 +156,9 @@ def main() -> int:
         log("Step 1: working deferred memory queue...")
         rc = _run_step(
             [sys.executable, str(ROOT / "scripts" / "memory_queue.py"), "work"],
-            log, "work", timeout=600,
+            log,
+            "work",
+            timeout=600,
         )
         if rc:
             failures += 1
@@ -148,7 +168,9 @@ def main() -> int:
         log("Step 2: triggering compile (if needed)...")
         rc = _run_step(
             [sys.executable, str(ROOT / "scripts" / "maybe_compile.py")],
-            log, "maybe_compile", timeout=60,
+            log,
+            "maybe_compile",
+            timeout=60,
         )
         if rc:
             failures += 1
@@ -176,7 +198,9 @@ def main() -> int:
             log("Step 3: structural lint...")
             rc = _run_step(
                 [sys.executable, str(ROOT / "scripts" / "lint_memory.py")],
-                log, "lint", timeout=120,
+                log,
+                "lint",
+                timeout=120,
             )
             if rc:
                 failures += 1
@@ -185,52 +209,26 @@ def main() -> int:
             log("Step 3b: rebuilding FTS5 search index...")
             rc = _run_step(
                 [sys.executable, str(ROOT / "scripts" / "search_memory.py"), "--rebuild"],
-                log, "search", timeout=60,
+                log,
+                "search",
+                timeout=60,
             )
             if rc:
                 failures += 1
 
-            # Step 3c: rebuild graph-neighbor link cache (for 3rd retrieval signal).
-            log("Step 3c: rebuilding wikilink graph cache...")
-            try:
-                env = dict(os.environ)
-                env["PYTHONPATH"] = str(ROOT / "scripts")
-                r = subprocess.run(
-                    [sys.executable, "-c",
-                     "from graph_neighbors import rebuild_graph_cache; "
-                     "print(rebuild_graph_cache())"],
-                    cwd=str(ROOT), capture_output=True, text=True, timeout=60,
-                    encoding="utf-8", errors="replace", env=env,
-                )
-                if r.returncode == 0:
-                    log(f"  graph: {r.stdout.strip()} edges cached")
-                else:
-                    log(f"  graph: failed (rc={r.returncode}: {r.stderr.strip()[:200]})")
-                    failures += 1
-            except subprocess.TimeoutExpired:
-                log("  graph: TIMEOUT after 60s — skipping, continuing")
-                failures += 1
-            except OSError as e:
-                log(f"  graph: OS error ({e}) — skipping, continuing")
-                failures += 1
+            # Step 3c: refresh one immutable generation under the shared fence.
+            log("Step 3c: refreshing immutable evidence generation...")
+            failures += _refresh_generation(log)
 
             # Step 3d: compact disposable telemetry without touching knowledge.
             log("Step 3d: compacting retrieval telemetry...")
             try:
                 from retrieval_telemetry import compact
+
                 compacted = compact()
                 log(f"  telemetry: compacted {compacted} event(s)")
             except Exception as e:
                 log(f"  telemetry: failed ({e}) — skipping")
-
-            # Step 3e: index code graph (v4.0, best-effort).
-            log("Step 3e: indexing code graph...")
-            try:
-                from code_graph import index_directory
-                stats = index_directory(ROOT, verbose=False)
-                log(f"  code graph: {stats['files']} files, {stats['functions']} functions")
-            except Exception as e:
-                log(f"  code graph: failed ({e}) — skipping")
 
         # Step 4: prune old nightly logs (>30 days).
         log("Step 4: pruning old nightly reports...")
