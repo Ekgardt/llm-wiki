@@ -19,6 +19,14 @@ def test_frozen_corpus_is_closed_canonical_and_has_required_coverage():
     corpus = json.loads(raw)
     validate_schema(corpus, SCHEMA)
     assert canonical_json_bytes(corpus) + b"\n" == raw
+    interval_values = [
+        interval[bound]
+        for case in corpus["cases"]
+        for claim_key in ("new_extraction", "expected_new_claim", "existing_claim")
+        for interval in (case[claim_key]["validity"],)
+        for bound in ("from", "to")
+    ]
+    assert {type(value) for value in interval_values} == {str, type(None)}
     assert len(corpus["cases"]) >= 240
     categories = Counter(case["category"] for case in corpus["cases"])
     assert all(categories[name] >= 40 for name in corpus["categories"])

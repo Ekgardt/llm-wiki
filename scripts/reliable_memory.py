@@ -562,10 +562,13 @@ def _validate_rule(
         raise SchemaValidationError(f"{location}: value is not in enum")
 
     expected = rule.get("type")
-    if expected is not None and not _matches_type(instance, expected):
-        raise SchemaValidationError(f"{location}: expected {expected}")
+    expected_types: tuple[str, ...] = ()
+    if expected is not None:
+        expected_types = _schema_types(expected)
+        if not _matches_type(instance, expected):
+            raise SchemaValidationError(f"{location}: expected {expected}")
 
-    if expected == "object":
+    if "object" in expected_types and isinstance(instance, dict):
         assert isinstance(instance, dict)
         required = rule.get("required", [])
         missing = [key for key in required if key not in instance]
@@ -579,7 +582,7 @@ def _validate_rule(
         for key, value in instance.items():
             if key in properties:
                 _validate_rule(value, properties[key], f"{location}.{key}", root=root)
-    elif expected == "array":
+    elif "array" in expected_types and isinstance(instance, list):
         assert isinstance(instance, list)
         _check_bound(len(instance), rule, "minItems", "maxItems", location)
         if rule.get("uniqueItems") is True:
@@ -591,12 +594,16 @@ def _validate_rule(
         if "items" in rule:
             for index, item in enumerate(instance):
                 _validate_rule(item, rule["items"], f"{location}[{index}]", root=root)
-    elif expected == "string":
+    elif "string" in expected_types and isinstance(instance, str):
         assert isinstance(instance, str)
         _check_bound(len(instance), rule, "minLength", "maxLength", location)
         if "pattern" in rule and re.search(rule["pattern"], instance) is None:
             raise SchemaValidationError(f"{location}: string does not match pattern")
-    elif expected in {"integer", "number"}:
+    elif (
+        {"integer", "number"}.intersection(expected_types)
+        and isinstance(instance, (int, float))
+        and not isinstance(instance, bool)
+    ):
         assert isinstance(instance, (int, float)) and not isinstance(instance, bool)
         _check_bound(instance, rule, "minimum", "maximum", location)
         if "exclusiveMinimum" in rule and instance <= rule["exclusiveMinimum"]:
@@ -605,23 +612,47 @@ def _validate_rule(
             raise SchemaValidationError(f"{location}: above exclusiveMaximum")
 
 
-def _matches_type(instance: object, expected: str) -> bool:
-    checks = {
-        "object": lambda: isinstance(instance, dict),
-        "array": lambda: isinstance(instance, list),
-        "string": lambda: isinstance(instance, str),
-        "integer": lambda: isinstance(instance, int) and not isinstance(instance, bool),
-        "number": lambda: (
-            isinstance(instance, (int, float))
-            and not isinstance(instance, bool)
-            and (not isinstance(instance, float) or math.isfinite(instance))
-        ),
-        "boolean": lambda: isinstance(instance, bool),
-        "null": lambda: instance is None,
-    }
-    if expected not in checks:
-        raise SchemaValidationError(f"unsupported schema type: {expected}")
-    return checks[expected]()
+def _schema_types(expected: object) -> tuple[str, ...]:
+    if isinstance(expected, str):
+        values = (expected,)
+    elif isinstance(expected, list):
+        if not expected:
+            raise SchemaValidationError("schema type array must not be empty")
+        if not all(isinstance(value, str) for value in expected):
+            raise SchemaValidationError("schema type array must contain only strings")
+        if len(set(expected)) != len(expected):
+            raise SchemaValidationError("schema type array must contain unique values")
+        values = tuple(expected)
+    else:
+        raise SchemaValidationError("schema type must be a string or array of strings")
+
+    unknown = [value for value in values if value not in _SCHEMA_TYPE_CHECKS]
+    if unknown:
+        raise SchemaValidationError(f"unsupported schema type: {unknown[0]}")
+    return values
+
+
+def _matches_type(instance: object, expected: object) -> bool:
+    return _matches_types(instance, _schema_types(expected))
+
+
+def _matches_types(instance: object, expected: tuple[str, ...]) -> bool:
+    return any(_SCHEMA_TYPE_CHECKS[value](instance) for value in expected)
+
+
+_SCHEMA_TYPE_CHECKS = {
+    "object": lambda value: isinstance(value, dict),
+    "array": lambda value: isinstance(value, list),
+    "string": lambda value: isinstance(value, str),
+    "integer": lambda value: isinstance(value, int) and not isinstance(value, bool),
+    "number": lambda value: (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and (not isinstance(value, float) or math.isfinite(value))
+    ),
+    "boolean": lambda value: isinstance(value, bool),
+    "null": lambda value: value is None,
+}
 
 
 def _json_equal(left: object, right: object) -> bool:

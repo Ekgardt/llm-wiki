@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
-from reliable_memory import SchemaValidationError, validate_schema
+from reliable_memory import SchemaValidationError, validate_schema, validate_schema_object
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_DIR = ROOT / "scripts" / "schemas"
@@ -368,3 +368,29 @@ def test_validate_schema_does_not_treat_boolean_as_numeric_const(tmp_path):
     schema_path.write_text(json.dumps({"const": 1}), encoding="utf-8")
     with pytest.raises(SchemaValidationError):
         validate_schema(True, schema_path)
+
+
+def test_validate_schema_supports_strict_closed_type_unions():
+    nullable_string = {"type": ["string", "null"], "minLength": 2, "maxLength": 4}
+    validate_schema_object(None, nullable_string)
+    validate_schema_object("okay", nullable_string)
+    with pytest.raises(SchemaValidationError):
+        validate_schema_object("x", nullable_string)
+
+    nullable_number = {"type": ["number", "null"], "minimum": 1, "maximum": 2}
+    for value in (None, 1, 1.5, 2):
+        validate_schema_object(value, nullable_number)
+    for value in (True, float("inf"), float("nan")):
+        with pytest.raises(SchemaValidationError):
+            validate_schema_object(value, nullable_number)
+
+    for invalid_type in (
+        [],
+        ["string", "string"],
+        ["string", "unknown"],
+        ["string", 1],
+        "unknown",
+        1,
+    ):
+        with pytest.raises(SchemaValidationError, match="schema type"):
+            validate_schema_object(None, {"type": invalid_type})
