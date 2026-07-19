@@ -1364,6 +1364,7 @@ def _generation_result(
         "unindexed_delta": None,
         "unresolved_observations": None,
         "age_seconds": None,
+        "age_source": None,
         "repairable": status == "degraded",
     }
     baseline.update(details)
@@ -1382,7 +1383,7 @@ def _generation_check(
     if isinstance(max_sources, bool) or not isinstance(max_sources, int) or max_sources < 1:
         raise ValueError("max_sources must be a positive integer")
     catalog_path = state_root / "cache" / "evidence-graph" / "catalog.sqlite3"
-    kind, _info = _safe_kind(catalog_path, state_root)
+    kind, catalog_info = _safe_kind(catalog_path, state_root)
     if kind == "missing":
         return _generation_result(
             "degraded",
@@ -1424,19 +1425,18 @@ def _generation_check(
                     repairable=True,
                 )
             registered = database.execute(
-                "SELECT registered_at FROM generations WHERE generation_id=?",
+                "SELECT 1 FROM generations WHERE generation_id=?",
                 (active,),
             ).fetchone()
             if registered is None:
                 raise sqlite3.DatabaseError("active generation is not registered")
-            registered_at = _parse_utc(registered[0])
         if _deadline_reached(deadline):
             raise TimeoutError("generation check deadline")
 
         import generation_catalog
 
         generation_path = state_root / "cache" / "evidence-graph" / "generations" / active
-        manifest, _seal = generation_catalog._validate_generation(  # noqa: SLF001
+        manifest, seal = generation_catalog._validate_generation(  # noqa: SLF001
             generation_path,
             state_root,
             deadline=deadline,
@@ -1472,8 +1472,18 @@ def _generation_check(
                 "SELECT COUNT(*) FROM (SELECT 1 FROM observation LIMIT ?)",
                 (MAX_OPERATIONAL_ROWS + 1,),
             ).fetchone()[0]
-        age = None if registered_at is None else max(0, int((now - registered_at).total_seconds()))
-        stale_age = age is not None and age > GENERATION_FRESH_SECONDS
+        manifest_seal = next((entry for entry in seal if entry.path == "manifest.json"), None)
+        if manifest_seal is not None:
+            age_timestamp_ns = manifest_seal.mtime_ns
+            age_source = "manifest_mtime"
+        elif catalog_info is not None:
+            age_timestamp_ns = catalog_info.st_mtime_ns
+            age_source = "catalog_mtime"
+        else:
+            raise OSError("generation age timestamp is unavailable")
+        now_ns = int(_as_utc(now).timestamp() * 1_000_000_000)
+        age = max(0, (now_ns - age_timestamp_ns) // 1_000_000_000)
+        stale_age = age > GENERATION_FRESH_SECONDS
         vector_state = str(manifest["vector_state"])
         status = "degraded" if delta or stale_age or vector_state == "stale" or unresolved else "ok"
         return _generation_result(
@@ -1494,6 +1504,7 @@ def _generation_check(
             unindexed_delta=delta,
             unresolved_observations=unresolved,
             age_seconds=age,
+            age_source=age_source,
             repairable=status == "degraded",
         )
     except TimeoutError:

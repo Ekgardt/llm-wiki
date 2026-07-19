@@ -68,6 +68,7 @@ def test_generation_check_validates_active_artifacts_and_reports_source_delta(tm
         == healthy["details"]
     )
     assert healthy["details"]["age_seconds"] >= 0
+    assert healthy["details"]["age_source"] == "manifest_mtime"
 
     (root / "knowledge" / "notes" / "new.md").write_text(
         "---\ntype: concept\n---\n# New\n", encoding="utf-8"
@@ -97,6 +98,8 @@ def test_generation_check_is_read_only_when_catalog_is_missing(tmp_path):
 
     assert check["status"] == "degraded"
     assert check["details"]["catalog"] == "missing"
+    assert check["details"]["age_seconds"] is None
+    assert check["details"]["age_source"] is None
     assert {path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*")} == before
 
 
