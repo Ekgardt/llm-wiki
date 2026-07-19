@@ -636,6 +636,48 @@ class TestHelperFunctions:
         results = _search_vault("test")
         assert isinstance(results, list)
 
+    def test_search_vault_degrades_after_delayed_optional_initialization(self, monkeypatch):
+        import mcp_server
+        import search_memory
+
+        calls = []
+
+        def delayed_search(query, **kwargs):
+            calls.append((query, kwargs))
+            if len(calls) == 1:
+                time.sleep(0.01)
+                raise TimeoutError("retrieval deadline exceeded")
+            return [
+                {
+                    "path": "knowledge/notes/test.md",
+                    "requested_mode": "BASE",
+                    "effective_mode": "BASE",
+                    "signals_used": ["lexical"],
+                    "fallback_reason": None,
+                    "generation": "legacy",
+                    "partial": False,
+                }
+            ]
+
+        monkeypatch.setattr(search_memory, "search", delayed_search)
+
+        results = mcp_server._search_vault("test")
+
+        assert len(calls) == 2
+        assert calls[0][1]["semantic"] is True
+        assert calls[1][1]["semantic"] is False
+        assert calls[1][1]["graph"] is False
+        assert calls[1][1]["rerank"] is False
+        assert calls[1][1]["deadline_monotonic"] > calls[0][1]["deadline_monotonic"]
+        assert results[0]["requested_mode"] == "HYBRID"
+        assert results[0]["effective_mode"] == "BASE"
+        assert results[0]["signals_used"] == ["lexical"]
+        assert results[0]["fallback_reason"] == "retrieval_deadline_exceeded"
+        assert results[0]["partial"] is True
+        trace = mcp_server._retrieval_trace("test", results)
+        assert trace["fallback_reason"] == "retrieval_deadline_exceeded"
+        assert trace["partial"] is True
+
     def test_get_context_batch(self):
         from mcp_server import _get_context
         result = _get_context(["nonexistent-1", "nonexistent-2"])

@@ -307,14 +307,35 @@ def _search_vault(query: str, limit: int = 8) -> list[dict]:
     if not isinstance(query, str) or len(query) > MAX_MCP_QUERY_LENGTH:
         raise ValueError("query exceeds the MCP retrieval bound")
     from search_memory import search
-    return search(
-        query,
-        limit=limit,
-        semantic=True,
-        source_tool="mcp.recall",
-        deadline_monotonic=time.monotonic() + MCP_OPERATION_SECONDS,
-        max_candidates=limit,
-    )
+
+    def run_search(*, semantic: bool, graph: bool = True, rerank: bool = True) -> list[dict]:
+        return search(
+            query,
+            limit=limit,
+            semantic=semantic,
+            graph=graph,
+            rerank=rerank,
+            source_tool="mcp.recall",
+            deadline_monotonic=time.monotonic() + MCP_OPERATION_SECONDS,
+            max_candidates=limit,
+        )
+
+    try:
+        return run_search(semantic=True)
+    except TimeoutError:
+        try:
+            lexical = run_search(semantic=False, graph=False, rerank=False)
+        except TimeoutError:
+            return []
+        return [
+            {
+                **row,
+                "requested_mode": "HYBRID",
+                "fallback_reason": "retrieval_deadline_exceeded",
+                "partial": True,
+            }
+            for row in lexical
+        ]
 
 
 def _retrieval_trace(query: str, results: list[dict]) -> dict[str, object]:
