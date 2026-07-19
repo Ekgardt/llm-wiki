@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import sys
 import time
+from dataclasses import asdict
 from pathlib import Path, PureWindowsPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -49,6 +50,11 @@ MAX_MCP_SLUG_LENGTH = 255
 MAX_MCP_CONTEXT_SLUGS = 20
 MAX_MCP_CONTEXT_INCLUDE = 10
 MAX_MCP_INCLUDE_LENGTH = 64
+MAX_MCP_CONTEXT_TOKENS = 32_768
+MCP_OPERATION_SECONDS = 10.0
+RETRIEVAL_TRACE_SCHEMA = (
+    Path(__file__).resolve().parent / "schemas" / "retrieval-trace-v1.json"
+)
 
 MCP_AVAILABLE = False
 MCP_RESOURCES_AVAILABLE = False
@@ -57,6 +63,7 @@ MCP_CALL_TOOL_RESULT_AVAILABLE = False
 Resource = None
 TextResourceContents = None
 CallToolResult = None
+TextContent = None
 try:
     from mcp.server import Server
     from mcp.server.stdio import stdio_server
@@ -208,6 +215,12 @@ TOOL_INPUT_SCHEMAS = {
                 "items": {"type": "string", "maxLength": MAX_MCP_INCLUDE_LENGTH},
                 "description": "Optional strings; 'frontmatter' adds content_preview for backward compatibility",
             },
+            "token_budget": {
+                "type": "integer",
+                "minimum": 256,
+                "maximum": MAX_MCP_CONTEXT_TOKENS,
+                "default": 8192,
+            },
         },
         "required": ["slugs"],
     },
@@ -255,15 +268,27 @@ TOOL_INPUT_SCHEMAS = {
             "mode": {
                 "type": "string",
                 "maxLength": 32,
-                "description": "Architecture summary (default) or impact analysis",
+                "enum": [
+                    "summary",
+                    "symbol",
+                    "callers",
+                    "callees",
+                    "dependencies",
+                    "path",
+                    "community",
+                    "impact",
+                ],
+                "description": "Bounded architecture query mode",
             },
+            "symbol": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "reverse": {"type": "boolean", "default": False},
             "comparison": {
                 "type": "string",
                 "maxLength": 32,
                 "description": "Impact endpoint comparison: dirty, worktree-index, index-HEAD, two-commits, or merge-base-branch",
             },
             "base": {"type": "string", "maxLength": 1024},
-            "target": {"type": "string", "maxLength": 1024},
+            "target": {"type": "string", "minLength": 1, "maxLength": 1024},
             "branch": {"type": "string", "maxLength": 1024},
             "live": {
                 "type": "boolean",
@@ -282,7 +307,61 @@ def _search_vault(query: str, limit: int = 8) -> list[dict]:
     if not isinstance(query, str) or len(query) > MAX_MCP_QUERY_LENGTH:
         raise ValueError("query exceeds the MCP retrieval bound")
     from search_memory import search
-    return search(query, limit=limit, source_tool="mcp.recall")
+    return search(
+        query,
+        limit=limit,
+        semantic=True,
+        source_tool="mcp.recall",
+        deadline_monotonic=time.monotonic() + MCP_OPERATION_SECONDS,
+        max_candidates=limit,
+    )
+
+
+def _retrieval_trace(query: str, results: list[dict]) -> dict[str, object]:
+    """Recover the planner trace from compatibility rows and validate it closed."""
+    if results and all(
+        key in results[0]
+        for key in ("requested_mode", "effective_mode", "signals_used", "generation")
+    ):
+        first = results[0]
+        trace: dict[str, object] = {
+            "schema_version": "retrieval-trace/v1",
+            "requested_mode": first.get("requested_mode"),
+            "effective_mode": first.get("effective_mode"),
+            "signals_used": first.get("signals_used", []),
+            "fallback_reason": first.get("fallback_reason"),
+            "corpus_generation": first.get("generation", "legacy"),
+            "partial": bool(first.get("partial", False)),
+            "reranker_applied": bool(first.get("reranker_applied", False)),
+            "reranker_model_id": first.get("reranker_model_id"),
+            "reranker_model_revision": first.get("reranker_model_revision"),
+            "reranker_depth": first.get("reranker_depth"),
+            "reranker_duration_ms": first.get("reranker_duration_ms"),
+            "reranker_fallback_reason": first.get("reranker_fallback_reason"),
+        }
+    else:
+        from retrieval import analyze_query
+
+        requested = analyze_query(query).recommended_profile
+        trace = {
+            "schema_version": "retrieval-trace/v1",
+            "requested_mode": requested,
+            "effective_mode": "BASE",
+            "signals_used": [],
+            "fallback_reason": "trace_unavailable",
+            "corpus_generation": "legacy",
+            "partial": True,
+            "reranker_applied": False,
+            "reranker_model_id": None,
+            "reranker_model_revision": None,
+            "reranker_depth": None,
+            "reranker_duration_ms": None,
+            "reranker_fallback_reason": None,
+        }
+    from reliable_memory import validate_schema
+
+    validate_schema(trace, RETRIEVAL_TRACE_SCHEMA)
+    return trace
 
 
 def _read_page(
@@ -470,8 +549,13 @@ def _get_decisions(query: str | None = None, limit: int = 10) -> list[dict]:
     return results
 
 
-def _get_context(slugs: list[str], include: list[str] | None = None) -> dict:
-    """Batch page context; ``frontmatter`` retains the legacy content preview."""
+def _get_context(
+    slugs: list[str],
+    include: list[str] | None = None,
+    *,
+    token_budget: int = 8192,
+) -> dict:
+    """Return one compiler package under one shared token budget."""
     if not isinstance(slugs, list) or not 1 <= len(slugs) <= MAX_MCP_CONTEXT_SLUGS:
         raise ValueError("slugs exceed the MCP context bound")
     if any(
@@ -489,15 +573,93 @@ def _get_context(slugs: list[str], include: list[str] | None = None) -> dict:
         raise ValueError("include item exceeds the MCP context bound")
     slugs = list(dict.fromkeys(slugs))
     include = list(dict.fromkeys(include))
-    result = {}
-    for slug in slugs:
-        page = _read_page(slug, emit_telemetry=False, resolve_evidence=False)
-        if "error" not in page:
-            entry = {"slug": slug, "title": slug}
-            if "content" in page and "frontmatter" in (include or []):
-                entry["content_preview"] = page["content"][:500]
-            result[slug] = entry
-    if result:
+    if (
+        isinstance(token_budget, bool)
+        or not isinstance(token_budget, int)
+        or not 256 <= token_budget <= MAX_MCP_CONTEXT_TOKENS
+    ):
+        raise ValueError("token_budget exceeds the MCP context bound")
+
+    from context_budget import BudgetExceededError, ContextBudget
+    from context_compiler import compile_context
+    from corpus_snapshot import CorpusSnapshot, collect_corpus
+    from memory_state import ROOT
+
+    snapshot = collect_corpus(
+        ROOT, deadline=time.monotonic() + MCP_OPERATION_SECONDS
+    )
+    requested = set(slugs)
+    sources = tuple(
+        source
+        for source in snapshot.sources
+        if Path(source.record.relative_path).stem in requested
+        or source.record.logical_id in requested
+        or source.record.relative_path in requested
+    )
+    selected_paths = {source.record.relative_path for source in sources}
+    found_requested = {
+        requested_slug
+        for requested_slug in requested
+        for source in sources
+        if requested_slug
+        in {
+            Path(source.record.relative_path).stem,
+            source.record.logical_id,
+            source.record.relative_path,
+        }
+    }
+    chunks = tuple(
+        chunk for chunk in snapshot.chunks if chunk.parent_page in selected_paths
+    )
+    narrow = CorpusSnapshot(
+        sources,
+        chunks,
+        snapshot.corpus_sha256,
+        snapshot.policy,
+        snapshot.collector_version,
+        snapshot.extractor_version,
+    )
+    budget = ContextBudget(None, token_budget, 0, 0)
+    shortlist = tuple(source.record.logical_id for source in sources)
+    try:
+        compiled = compile_context(
+            narrow,
+            shortlist=shortlist,
+            evidence_chunk_ids=(chunk.id for chunk in chunks),
+            budget=budget,
+        )
+    except BudgetExceededError:
+        compiled = compile_context(
+            narrow,
+            shortlist=shortlist,
+            evidence_chunk_ids=(),
+            budget=budget,
+        )
+    items = [asdict(item) for item in compiled.items]
+    pages = [item for item in items if item["source"].endswith(".md")]
+    result = {
+        "text": compiled.text,
+        "packed_tokens": compiled.packed_tokens,
+        "token_budget": token_budget,
+        "corpus_generation": snapshot.corpus_sha256,
+        "repo_map": sorted(selected_paths),
+        "pages": pages,
+        "symbols": [item for item in items if not item["source"].endswith(".md")],
+        "decisions": [item for item in items if item["type"] == "decision"],
+        "incidents": [
+            item for item in items if item["type"] in {"debugging", "incident"}
+        ],
+        "active_task": [item for item in items if item["type"] == "project-state"],
+        "evidence": [item for item in items if item["representation"] == "l2"],
+        "retrieval_trace": asdict(compiled.trace.retrieval),
+        "materialization_trace": [
+            asdict(item) for item in compiled.trace.materializations
+        ],
+        "packing_trace": asdict(compiled.trace.packing),
+        "missing_slugs": sorted(requested - found_requested),
+        "include": include,
+    }
+    if sources:
         try:
             from retrieval_telemetry import (
                 best_effort_make_event,
@@ -506,7 +668,7 @@ def _get_context(slugs: list[str], include: list[str] | None = None) -> dict:
 
             events = [
                 event
-                for slug in result
+                for slug in sorted({Path(path).stem for path in selected_paths})
                 if (
                     event := best_effort_make_event(
                         event_kind="context_injected",
@@ -602,6 +764,86 @@ def _get_architecture(directory: str, *, live: bool = False) -> dict:
     }
     return {
         "directory": str(resolved),
+        "mode": "summary",
+        "architecture": architecture,
+        **report,
+    }
+
+
+def _get_architecture_mode(
+    directory: str,
+    *,
+    mode: str,
+    symbol: str | None = None,
+    target: str | None = None,
+    reverse: bool = False,
+    live: bool = False,
+) -> dict:
+    """Dispatch bounded graph queries while retaining live/store reports."""
+    from code_graph import (
+        detect_communities,
+        find_callees,
+        find_callers,
+        find_dependencies,
+        find_paths,
+    )
+
+    resolved, error = _validated_code_directory(directory)
+    if error:
+        return {"error": error}
+    if mode in {"symbol", "callers", "callees", "dependencies"} and not symbol:
+        return {"error": f"symbol is required for {mode} mode"}
+    if mode == "path" and (not symbol or not target):
+        return {"error": "symbol and target are required for path mode"}
+
+    if mode == "callers":
+        architecture = find_callers(symbol, resolved, live=live, with_report=True)
+    elif mode == "callees":
+        architecture = find_callees(symbol, resolved, live=live, with_report=True)
+    elif mode == "dependencies":
+        architecture = find_dependencies(
+            symbol, resolved, reverse=reverse, live=live, with_report=True
+        )
+    elif mode == "path":
+        architecture = find_paths(
+            symbol, target, resolved, live=live, with_report=True
+        )
+    elif mode == "community":
+        architecture = detect_communities(resolved, live=live, with_report=True)
+    else:
+        callers = find_callers(symbol, resolved, live=live, with_report=True)
+        callees = find_callees(symbol, resolved, live=live, with_report=True)
+        dependencies = find_dependencies(
+            symbol, resolved, live=live, with_report=True
+        )
+        architecture = {
+            "symbol": symbol,
+            "callers": callers.get("callers", []),
+            "callees": callees.get("callees", []),
+            "dependencies": dependencies.get("dependencies", []),
+            **{
+                key: callers.get(key)
+                for key in (
+                    "source_generation",
+                    "graph_complete",
+                    "unresolved_count",
+                    "fallback",
+                )
+            },
+        }
+    report = {
+        key: architecture.get(key)
+        for key in (
+            "source_generation",
+            "graph_complete",
+            "unresolved_count",
+            "fallback",
+        )
+        if isinstance(architecture, dict) and key in architecture
+    }
+    return {
+        "directory": str(resolved),
+        "mode": mode,
         "architecture": architecture,
         **report,
     }
@@ -948,7 +1190,20 @@ def _validate_tool_arguments(name: str, arguments) -> str | None:
         if sum(error is None for error in errors) == 1:
             return None
         return "arguments do not match exactly one allowed action"
-    return _validate_object_schema(schema, arguments, reject_unknown=False)
+    error = _validate_object_schema(schema, arguments, reject_unknown=False)
+    if error is not None:
+        return error
+    if name == "get_architecture":
+        mode = arguments.get("mode", "summary")
+        if mode in {"symbol", "callers", "callees", "dependencies"} and not arguments.get(
+            "symbol"
+        ):
+            return f"required argument is missing for {mode}: symbol"
+        if mode == "path" and (
+            not arguments.get("symbol") or not arguments.get("target")
+        ):
+            return "required arguments are missing for path: symbol and target"
+    return None
 
 
 def _validate_object_schema(
@@ -998,6 +1253,8 @@ def _validate_object_schema(
         if "maxLength" in field and len(value) > field["maxLength"]:
             return f"argument '{key}' is too long"
         if "const" in field and value != field["const"]:
+            return f"argument '{key}' has an invalid value"
+        if "enum" in field and value not in field["enum"]:
             return f"argument '{key}' has an invalid value"
     return None
 
@@ -1207,8 +1464,9 @@ def _quality_for(
         }
     if name == "get_context" and arguments:
         requested = arguments.get("slugs", [])
-        if requested and isinstance(data, dict) and len(data) < len(requested):
-            ratio = len(data) / len(requested)
+        missing = data.get("missing_slugs", []) if isinstance(data, dict) else []
+        if requested and missing:
+            ratio = max(0.0, (len(requested) - len(missing)) / len(requested))
             return {
                 "coverage": ratio,
                 "confidence": 0.8,
@@ -1255,18 +1513,64 @@ def _build_operation_envelope(
     data,
     quality: dict | None = None,
     *,
-    freshness_sensitive: bool = False,
+    components: dict[str, dict[str, object]] | None = None,
 ) -> dict:
-    envelope = build_envelope(data, **(quality or {}))
-    if freshness_sensitive and envelope["freshness"] != "fresh":
+    envelope = build_envelope(data, components=components, **(quality or {}))
+    if components and envelope["freshness"] == "stale":
         limit = 0.6 if envelope["freshness"] == "stale" else 0.4
         envelope["coverage"] = min(envelope["coverage"], limit)
         envelope["confidence"] = min(envelope["confidence"], limit)
         envelope["partial"] = True
-        warning = f"Search index freshness is {envelope['freshness']}."
+        warning = "One or more response components are stale."
         if warning not in envelope["warnings"]:
             envelope["warnings"].append(warning)
     return envelope
+
+
+def _components_for(name: str, data) -> dict[str, dict[str, object]]:
+    if name == "recall" and isinstance(data, dict):
+        trace = data.get("retrieval_trace")
+        if isinstance(trace, dict):
+            generation = trace.get("corpus_generation")
+            signals = set(trace.get("signals_used", []))
+            components = {
+                signal: {
+                    "generation": generation,
+                    "freshness": "fresh" if signal in signals else "missing",
+                }
+                for signal in ("lexical", "dense", "graph")
+            }
+            components["reranker"] = {
+                "generation": generation,
+                "freshness": "fresh"
+                if trace.get("reranker_applied")
+                else "missing"
+                if trace.get("reranker_fallback_reason")
+                else "unknown",
+            }
+            return components
+    if name == "get_context" and isinstance(data, dict) and "packing_trace" in data:
+        return {
+            "context_compiler": {
+                "generation": data.get("corpus_generation"),
+                "freshness": "fresh",
+            }
+        }
+    if (
+        name in {"get_architecture", "find_dead_code"}
+        and isinstance(data, dict)
+        and any(
+            key in data
+            for key in ("source_generation", "graph_complete", "fallback")
+        )
+    ):
+        return {
+            "graph": {
+                "generation": data.get("source_generation"),
+                "freshness": "fresh" if "error" not in data else "unknown",
+            }
+        }
+    return {}
 
 
 async def _handle_tool_call(name: str, arguments) -> str:
@@ -1287,7 +1591,11 @@ async def _handle_tool_call(name: str, arguments) -> str:
                 results = _search_vault(
                     arguments["query"], limit=effective_limit
                 )
-                data = {"results": results, "_meta": _meta()}
+                data = {
+                    "results": results,
+                    "retrieval_trace": _retrieval_trace(arguments["query"], results),
+                    "_meta": _meta(),
+                }
             elif name == "read_page":
                 data = _read_page(arguments["slug"])
             elif name == "wiki_overview":
@@ -1304,7 +1612,14 @@ async def _handle_tool_call(name: str, arguments) -> str:
                     limit=effective_limit,
                 )
             elif name == "get_context":
-                data = _get_context(arguments["slugs"], arguments.get("include"))
+                context_options = (
+                    {"token_budget": arguments["token_budget"]}
+                    if "token_budget" in arguments
+                    else {}
+                )
+                data = _get_context(
+                    arguments["slugs"], arguments.get("include"), **context_options
+                )
             elif name == "check_contradiction":
                 data = _check_contradiction(arguments["claim"])
             elif name == "log_decision":
@@ -1331,7 +1646,14 @@ async def _handle_tool_call(name: str, arguments) -> str:
                         arguments["directory"], live=arguments.get("live", False)
                     )
                 else:
-                    data = {"error": "get_architecture mode must be summary or impact"}
+                    data = _get_architecture_mode(
+                        arguments["directory"],
+                        mode=arguments["mode"],
+                        symbol=arguments.get("symbol"),
+                        target=arguments.get("target"),
+                        reverse=arguments.get("reverse", False),
+                        live=arguments.get("live", False),
+                    )
             else:
                 data = _doctor(**arguments)
         except Exception as e:
@@ -1346,8 +1668,7 @@ async def _handle_tool_call(name: str, arguments) -> str:
     envelope = _build_operation_envelope(
         data,
         quality,
-        freshness_sensitive=name
-        in {"recall", "get_decisions", "check_contradiction"},
+        components=_components_for(name, data),
     )
     return json.dumps(envelope, indent=2, ensure_ascii=False, allow_nan=False)
 
@@ -1385,9 +1706,7 @@ def _handle_resource_read(uri: str) -> str:
             data = {"error": f"Unknown resource: {uri}"}
     except Exception as e:
         data = {"error": str(e)}
-    envelope = _build_operation_envelope(
-        data, _resource_quality(data), freshness_sensitive=True
-    )
+    envelope = _build_operation_envelope(data, _resource_quality(data))
     return json.dumps(envelope, indent=2, ensure_ascii=False, allow_nan=False)
 
 

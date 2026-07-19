@@ -260,9 +260,11 @@ def test_mcp_exposes_impact_as_get_architecture_mode_without_a_thirteenth_tool(m
     )))
 
     assert response["data"] == expected
+    assert response["components"] == {}
     assert set(response) == {
         "schema_version", "generated_at", "index_timestamp", "source_commit",
-        "freshness", "coverage", "confidence", "fallback", "partial", "warnings", "data",
+        "freshness", "coverage", "confidence", "fallback", "partial", "warnings",
+        "components", "data",
     }
 
 

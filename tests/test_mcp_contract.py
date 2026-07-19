@@ -23,6 +23,7 @@ MANDATORY_FIELDS = {
     "fallback",
     "partial",
     "warnings",
+    "components",
     "data",
 }
 
@@ -74,7 +75,7 @@ def test_build_envelope_rejects_unbounded_quality_values(tmp_path, coverage, con
         )
 
 
-def test_freshness_uses_available_index_timestamp(tmp_path):
+def test_freshness_uses_explicit_component_generations_not_fts_mtime(tmp_path):
     from mcp_contract import build_envelope
 
     now = datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc)
@@ -88,13 +89,25 @@ def test_freshness_uses_available_index_timestamp(tmp_path):
 
     os.utime(index, (timestamp, timestamp))
 
-    envelope = build_envelope({}, root=tmp_path, now=now)
+    envelope = build_envelope(
+        {},
+        root=tmp_path,
+        now=now,
+        components={
+            "lexical": {"generation": "gen-17", "freshness": "fresh"},
+            "dense": {"generation": "gen-17", "freshness": "stale"},
+        },
+    )
 
-    assert envelope["index_timestamp"] == recent.isoformat()
-    assert envelope["freshness"] == "fresh"
+    assert envelope["index_timestamp"] is None
+    assert envelope["freshness"] == "stale"
+    assert envelope["components"] == {
+        "lexical": {"generation": "gen-17", "freshness": "fresh"},
+        "dense": {"generation": "gen-17", "freshness": "stale"},
+    }
 
 
-def test_freshness_is_stale_for_old_index_and_unknown_without_one(tmp_path):
+def test_freshness_ignores_old_or_missing_legacy_index(tmp_path):
     from mcp_contract import build_envelope
 
     now = datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc)
@@ -109,10 +122,11 @@ def test_freshness_is_stale_for_old_index_and_unknown_without_one(tmp_path):
     stale = build_envelope({}, root=tmp_path, now=now)
     unknown = build_envelope({}, root=tmp_path / "missing", now=now)
 
-    assert stale["freshness"] == "stale"
+    assert stale["freshness"] == "unknown"
     assert unknown["freshness"] == "unknown"
     assert unknown["index_timestamp"] is None
-    assert any("index" in warning.lower() for warning in unknown["warnings"])
+    assert stale["components"] == {}
+    assert unknown["components"] == {}
 
 
 @pytest.mark.parametrize(
@@ -155,7 +169,7 @@ def test_source_commit_nonzero_exit_is_a_local_warning(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("failure_type", [OverflowError, OSError, ValueError])
-def test_index_timestamp_conversion_failures_are_unknown(
+def test_legacy_index_timestamp_is_not_read(
     tmp_path, monkeypatch, failure_type
 ):
     import mcp_contract
@@ -179,7 +193,7 @@ def test_index_timestamp_conversion_failures_are_unknown(
 
     assert envelope["index_timestamp"] is None
     assert envelope["freshness"] == "unknown"
-    assert any("index" in warning.lower() for warning in envelope["warnings"])
+    assert not any("index" in warning.lower() for warning in envelope["warnings"])
 
 
 def test_envelope_schema_declares_every_field_type_and_numeric_bounds():
@@ -208,6 +222,18 @@ def test_envelope_schema_declares_every_field_type_and_numeric_bounds():
     assert properties["warnings"] == {
         "type": "array",
         "items": {"type": "string"},
+    }
+    assert properties["components"]["additionalProperties"] == {
+        "type": "object",
+        "properties": {
+            "generation": {"type": ["string", "null"]},
+            "freshness": {
+                "type": "string",
+                "enum": ["fresh", "stale", "missing", "unknown"],
+            },
+        },
+        "required": ["generation", "freshness"],
+        "additionalProperties": False,
     }
     assert properties["data"] == {}
 
@@ -241,6 +267,7 @@ def test_built_envelope_values_match_declared_types_and_bounds(tmp_path):
     assert isinstance(envelope["fallback"], bool)
     assert isinstance(envelope["partial"], bool)
     assert isinstance(envelope["warnings"], list)
+    assert isinstance(envelope["components"], dict)
     assert all(isinstance(warning, str) for warning in envelope["warnings"])
     assert envelope["data"] == {"result": True}
 

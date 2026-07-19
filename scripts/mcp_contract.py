@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = "1.0"
-FRESH_AFTER_SECONDS = 24 * 60 * 60
+COMPONENT_FRESHNESS = {"fresh", "stale", "missing", "unknown"}
 
 
 def envelope_schema() -> dict[str, Any]:
@@ -30,6 +30,21 @@ def envelope_schema() -> dict[str, Any]:
             "fallback": {"type": "boolean"},
             "partial": {"type": "boolean"},
             "warnings": {"type": "array", "items": {"type": "string"}},
+            "components": {
+                "type": "object",
+                "additionalProperties": {
+                    "type": "object",
+                    "properties": {
+                        "generation": nullable_string,
+                        "freshness": {
+                            "type": "string",
+                            "enum": ["fresh", "stale", "missing", "unknown"],
+                        },
+                    },
+                    "required": ["generation", "freshness"],
+                    "additionalProperties": False,
+                },
+            },
             "data": {},
         },
         "required": [
@@ -43,6 +58,7 @@ def envelope_schema() -> dict[str, Any]:
             "fallback",
             "partial",
             "warnings",
+            "components",
             "data",
         ],
         "additionalProperties": False,
@@ -60,6 +76,7 @@ def build_envelope(
     fallback: bool = False,
     partial: bool = False,
     warnings: list[Any] | None = None,
+    components: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build one conservative response envelope from local metadata."""
     coverage = _bounded("coverage", coverage)
@@ -68,8 +85,8 @@ def build_envelope(
     vault_root, runtime_root = _roots(root, state_root)
     response_warnings = [str(item) for item in warnings or []]
 
-    index_timestamp = _index_timestamp(runtime_root, response_warnings)
-    freshness = _freshness(index_timestamp, generated_at)
+    component_details = _components(components)
+    freshness = _freshness(component_details)
     source_commit = _source_commit(str(vault_root))
     if source_commit is None:
         response_warnings.append("Source commit is unavailable.")
@@ -77,7 +94,7 @@ def build_envelope(
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at.isoformat(),
-        "index_timestamp": index_timestamp.isoformat() if index_timestamp else None,
+        "index_timestamp": None,
         "source_commit": source_commit,
         "freshness": freshness,
         "coverage": coverage,
@@ -85,6 +102,7 @@ def build_envelope(
         "fallback": bool(fallback),
         "partial": bool(partial),
         "warnings": response_warnings,
+        "components": component_details,
         "data": _json_safe(data),
     }
 
@@ -114,21 +132,36 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _index_timestamp(state_root: Path, warnings: list[str]) -> datetime | None:
-    index_path = state_root / "cache" / "index.sqlite"
-    try:
-        timestamp = index_path.stat().st_mtime
-        return datetime.fromtimestamp(timestamp, tz=timezone.utc)
-    except (OSError, OverflowError, ValueError):
-        warnings.append("Search index timestamp is unavailable.")
-        return None
+def _components(value: dict[str, dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise TypeError("components must be an object")
+    normalized: dict[str, dict[str, Any]] = {}
+    for name, detail in value.items():
+        if not isinstance(name, str) or not name or len(name) > 64:
+            raise ValueError("component names must be bounded non-empty strings")
+        if not isinstance(detail, dict) or set(detail) != {"generation", "freshness"}:
+            raise ValueError("component details must contain generation and freshness")
+        generation = detail["generation"]
+        freshness = detail["freshness"]
+        if generation is not None and (
+            not isinstance(generation, str) or not generation or len(generation) > 128
+        ):
+            raise ValueError("component generation must be null or a bounded string")
+        if freshness not in COMPONENT_FRESHNESS:
+            raise ValueError("component freshness is invalid")
+        normalized[name] = {"generation": generation, "freshness": freshness}
+    return normalized
 
 
-def _freshness(index_timestamp: datetime | None, now: datetime) -> str:
-    if index_timestamp is None:
-        return "unknown"
-    age_seconds = max(0.0, (now - index_timestamp).total_seconds())
-    return "fresh" if age_seconds <= FRESH_AFTER_SECONDS else "stale"
+def _freshness(components: dict[str, dict[str, Any]]) -> str:
+    states = {detail["freshness"] for detail in components.values()}
+    if "stale" in states:
+        return "stale"
+    if states and states == {"fresh"}:
+        return "fresh"
+    return "unknown"
 
 
 @lru_cache(maxsize=8)
