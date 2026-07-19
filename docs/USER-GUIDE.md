@@ -82,6 +82,32 @@ The installer detects your agents and wires them up automatically.
 The MCP server exposes 12 task-shaped tools, including `doctor`. All tools use
 one response envelope, and health/context are also available as MCP resources.
 
+### Exact 12-tool contract
+
+The tool count and names are unchanged. These are the implemented behaviors in the
+integrated Tasks 1-29 branch, not the broader Task 17 target:
+
+| Tool | Current behavior |
+|---|---|
+| `recall` | Routes search through the retrieval planner. Result rows expose requested/effective mode, actual signals, generation, reranker fields, and fallback reason. The requested result limit is clamped to 1-20. |
+| `read_page` | Reads one bounded slug-only Markdown page and resolves cited daily/archive evidence with source hashes. Evidence failure fails the page read closed. |
+| `wiki_overview` | Reports page count, recommended retrieval tier, and vault root. It does not yet provide per-component generation health. |
+| `vault_status` | Reports compile timestamp/status and changed-daily backlog only. |
+| `get_decisions` | Uses the same retrieval path, filters active decision results, emits bounded telemetry, and clamps limits to 1-20. |
+| `get_context` | Remains the bounded 1-20 slug batch with optional compatibility `content_preview`. The planned token-budgeted repo/symbol/evidence package is **evidence pending**. |
+| `check_contradiction` | Returns structured assessments, evidence, validity, and lifecycle recommendations; unsupported evidence is quarantined rather than treated as verified. |
+| `log_decision` | Appends through the locked daily-log writer; it does not directly publish a durable decision page. |
+| `compile` | Requests the existing non-blocking, single-lock background compile. |
+| `find_dead_code` | Queries the active Evidence Graph first and reports source generation, graph completeness, unresolved count, and fallback. `live=true` explicitly bypasses the store. |
+| `get_architecture` | Uses the active Evidence Graph first for `summary`; `mode=impact` runs bounded diff-to-graph analysis. Only `summary` and `impact` are currently exposed; the broader planned mode set is **evidence pending**. |
+| `doctor` | Exposes nine closed actions: `status`, queue inspect/cancel/redrive/dead-list, transaction recover/undo, archive status, and claim status. Mutation actions require `repair=true`. |
+
+All responses retain JSON text compatibility and the common envelope. Structured MCP
+output is used when the installed SDK supports it. The envelope still derives its
+top-level index timestamp from legacy `cache/index.sqlite`; per-component generation
+freshness in that envelope is **evidence pending**. Treat row-level generation and
+fallback fields as the current retrieval truth.
+
 ### Register scheduled maintenance
 
 **Windows (Task Scheduler):**
@@ -187,6 +213,70 @@ derived indexes, leases, and queued work. Keep `$LLM_WIKI_STATE_ROOT` on a local
 filesystem. Network filesystems are rejected. Cloud-folder detection is best-effort,
 so do not place live runtime SQLite files in a synchronized folder even if no warning
 appears. The current runtime uses rollback-journal, `synchronous=FULL`, and no WAL.
+
+### Evidence generation activation and recovery
+
+Generation publication has no in-place update. A builder captures exact source bytes
+and hashes, writes and fsyncs a new directory, validates its manifest, source
+membership, database schema/integrity, artifact hashes, and evidence spans, registers
+it, then compare-and-swap activates it against the expected prior ID. If source
+membership changes or any step fails before activation, the old generation remains
+active.
+
+Readers verify the active pointer and artifact seal around each open. A corrupt or
+missing active generation is skipped; the catalog revalidates activation history and
+parent lineage and repairs the pointer to the newest usable prior generation.
+Recovery can register a complete immediate-child orphan, but does not activate it.
+There is currently no supported end-user generation migration/status CLI: **evidence
+pending**. Use `doctor` for overall runtime health and inspect MCP retrieval rows for
+`generation`, `effective_mode`, `signals_used`, and `fallback_reason`.
+
+### Legacy cache migration and safe rollback
+
+Migration is additive and non-destructive:
+
+1. Back up or commit authoritative Markdown and Git state as you normally would.
+2. Leave `cache/index.sqlite`, `cache/vectors.npy`, `cache/vectors_meta.json`, and
+   `cache/lancedb/` in place.
+3. Build and validate a generation through the integrated builder/catalog API.
+4. Activate only with the expected active generation ID; a CAS mismatch means retry
+   from a fresh snapshot, not overwrite.
+5. Exercise lexical, optional vector, graph, code, impact, and citation reads and
+   confirm their generation/fallback fields.
+6. Keep the legacy caches until installed-vault migration evidence proves removal
+   safe. That evidence is currently pending.
+
+To roll back, stop active commands. Either reactivate a previously validated
+generation through the catalog API or delete only `cache/evidence-graph/` and rebuild
+later. Never remove `knowledge/`, `.git/`, project journals, or `run/`. With legacy
+caches retained, retrieval resumes through legacy FTS/vector/Lance paths. If graph
+state is absent, code tools use bounded live extraction and report `fallback=true`,
+`graph_complete=false`.
+
+Deleting all `cache/` is also knowledge-safe but removes every derived index and model
+cache, so retrieval is degraded until rebuild. It does not relax the separate `run/`
+deletion contract.
+
+### Model, token, and citation labels
+
+The model matrix pins candidate revisions and forbids a predetermined winner. A new
+embedding or reranker default requires complete raw EN/RU/ZH quality and resource
+measurements, license checks, no parent-recall regression, material improvement, and
+Pareto efficiency. The matrix currently selects neither: **evidence pending**. The
+legacy optional vector path remains a compatibility path, not proof of superiority.
+
+Token fields must be read with their labels. `reported` comes from a provider;
+`tokenizer` from a model adapter; `estimated` currently uses UTF-8 byte length;
+`mixed` combines sources; `unknown` has no numeric value. Cost kind is separately
+`reported`, `estimated`, or `unknown`. Do not compare estimated and reported values as
+if they were equivalent measurements.
+
+Grounded QA citations identify supplied authoritative spans by citation ID, relative
+path, source hash, revision, byte/line range, and span hash. Every answered atomic
+claim must cite supplied evidence. Invalid, duplicate, missing, changed, generated-
+summary, or out-of-root citations fail verification. The safe outcomes are a verified
+`answered` document or an explicit `insufficient_evidence`, `conflicting_evidence`,
+or `unsupported_time_scope` abstention.
 
 ### Health, recovery, undo, and retention
 

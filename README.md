@@ -22,6 +22,7 @@ Everything lives on your disk as plain markdown: readable in Obsidian, diffable 
 - [Quick Start](#quick-start)
 - [Wire up your agents](#wire-up-your-agents)
 - [Architecture](#architecture)
+- [Evidence generations and migration](#evidence-generations-and-migration)
 - [Benchmark](#benchmark)
 - [Comparison](#comparison)
 - [Contributing](#contributing)
@@ -65,18 +66,21 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 ### Compile pipeline
 - **JSON-protocol compile** — no agent tool-use required, works with any LLM backend
 - **VERIFY-BEFORE-WRITE** — Python-side deterministic citation verification; the LLM cannot fabricate evidence
-- **Semantic dedup** — update preferred over create; auto-supersede on contradiction
+- **Semantic dedup with quarantine** — update is preferred over create; uncertain or evaluator-disputed contradictions are quarantined and automatic semantic supersession remains disabled
 - **Incremental** — SHA-256 hashing; only changed daily logs are recompiled
 - **Concurrency-safe** — PID lock with stale detection; only one compile runs at a time
 - **Persistent task queue** — offline-tolerant; deferred LLM work drains on next session
 
 ### Search and retrieval
-- **Triple-fusion search**: BM25 (FTS5) + Vector (sentence-transformers) + Graph-neighbor (wikilink RRF)
+- **Generation-consistent retrieval**: one validated immutable generation can bind FTS, vectors, graph, tiers, and evidence to the same source snapshot
+- **Truthful retrieval traces**: results report requested/effective mode, signals actually used, generation, reranker state, and fallback reason
+- **Triple-fusion when available**: BM25 (FTS5) + Vector (sentence-transformers) + evidence-backed Graph-neighbor RRF
 - **Weighted RRF**: BM25=2.0, Vector=1.0, Graph=0.5 — prevents regression on known-item queries
 - **Title + filename boost** — exact filename match short-circuits to rank 1
 - **Typed-provenance ranking** — `source_authority: user` outranks `ai-derived` / `inferred`
 - **Temporal queries** — `--as-of YYYY-MM-DD` filters by `valid_to` frontmatter
 - **Local retrieval modes** — direct page reads at small scale, SQLite FTS5 BM25 as the always-available base, and optional vectors/LanceDB + graph + reranker for hybrid retrieval
+- **Grounded QA** — retrieved source spans carry citation IDs, paths, source/span hashes, revisions, and byte/line ranges; unsupported, conflicting, or out-of-scope answers abstain
 
 ### Proactive intelligence
 - **Guardrails** — auto-injects learned corrections at SessionStart (prevents repeating mistakes)
@@ -205,10 +209,25 @@ RUNTIME       cache/  logs/  run/  cache/cognee/   (gitignored, inside vault)
 - **CODE** — tracked in git. The pipeline, tests, docs, skills, rules, integrations.
 - **KNOWLEDGE** — tracked in git (public examples). Full user data lives in the installed vault. Daily logs and personal pages are gitignored.
 - **RUNTIME** — gitignored. Search indexes and logs are disposable; transactions, queue state, and undo images under `run/` are operational state.
+- **Authority boundary** — Markdown, Git history, and append-only project journals are authoritative. FTS, vectors, Evidence Graph databases, tiers, telemetry, and model caches are derived and rebuildable.
 
 Full design rationale (7 axioms, system architecture diagram, memory taxonomy, search architecture) in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 For the canonical structure reference (what lives where, env contracts, forbidden layouts), see [docs/STRUCTURE.md](docs/STRUCTURE.md).
+
+---
+
+## Evidence generations and migration
+
+`cache/evidence-graph/catalog.sqlite3` selects one immutable active generation under `cache/evidence-graph/generations/<generation-id>/`. A candidate is registered only after its manifest, source membership, artifact hashes, database integrity, and evidence spans validate. Activation is a compare-and-swap pointer update. A failed or interrupted pre-activation build leaves the previous generation active; a corrupt active generation is skipped in favor of the newest validated prior generation. Complete orphan generations may be registered during recovery but are not activated automatically.
+
+Deleting `cache/evidence-graph/` deletes only derived state. Stop active commands first, keep `run/`, and rebuild before expecting generation-backed retrieval. Until installed-vault migration evidence proves removal safe, keep legacy `cache/index.sqlite`, `cache/vectors.npy`, `cache/vectors_meta.json`, and `cache/lancedb/`. If no validated generation can be opened, retrieval falls back to those legacy paths or lexical/live extraction and reports the fallback. Safe rollback never deletes `knowledge/`, Git history, project journals, or `run/`.
+
+The model matrix pins candidate revisions and requires EN/RU/ZH quality, resource, license, and Pareto gates before selecting defaults. No new embedding model or reranker is selected yet: **evidence pending**. Existing optional vector compatibility still uses its pinned legacy model. Token counts are labelled `reported`, `tokenizer`, `estimated`, `mixed`, or `unknown`; monetary cost is separately `reported`, `estimated`, or `unknown`. A UTF-8 byte estimate is conservative planning data, not a tokenizer-independent guarantee.
+
+Real Graphify comparison and model-superiority evidence are pending. The deterministic comparative smoke validates orchestration only and supports no quality or token-ratio claim.
+
+See [docs/USER-GUIDE.md](docs/USER-GUIDE.md) for activation, recovery, rollback, citation, and exact MCP behavior details.
 
 ---
 

@@ -1,25 +1,27 @@
 # v5.0 Roadmap
 
-The v4 components are shipped, but the 2026-07-16 audit found that several of
-them are not yet connected through one generation-consistent pipeline. Code and
-wikilink graphs are process-local, vectors can be stale, query answering bypasses
-retrieval, access telemetry is not cross-process, and context limits are based on
-characters rather than tokens.
+The 2026-07-16 audit defined a 30-task generation-consistent retrieval program.
+Tasks 1-29 are integrated on the current development branch: immutable generations,
+truthful retrieval, token-aware context, grounded QA, persistent evidence/code/
+knowledge/project graphs, incremental reuse, impact analysis, security gates, and
+scale/comparative smoke contracts now exist. Task 30 is the documentation and
+migration sync represented by this change.
 
 The canonical implementation plan is:
 
 - [Unified Evidence Retrieval Implementation Plan](superpowers/plans/2026-07-16-unified-evidence-retrieval.md)
 - [Task 1 frozen baseline (2026-07-16)](../benchmark/baseline-2026-07-16.md)
 
-## Planned Critical Path
+## Integrated Critical Path
 
-1. Close the remaining Stage 1 and Stage 2 integration gaps.
-2. Freeze EN/RU/ZH quality, token, latency, and Graphify comparison baselines.
-3. Introduce coherent corpus generations and a truthful retrieval contract.
-4. Build the Adaptive Context Compiler and evidence-grounded QA.
-5. Persist code, knowledge, and project relationships in a derived Evidence Graph.
-6. Add full-rebuild-equivalent incremental indexing and graph-backed impact analysis.
-7. Publish reproducible quality, token, freshness, and failure evidence.
+1. Completed: coherent corpus generations and a truthful retrieval contract.
+2. Completed: Adaptive Context Compiler and evidence-grounded QA contracts.
+3. Completed: derived code, knowledge, and project Evidence Graph extraction.
+4. Completed: incremental reuse, graph-backed impact analysis, and store-first code tools.
+5. Completed: adversarial, scale, crash, and comparative smoke harness contracts.
+6. Evidence pending: complete raw EN/RU/ZH model-selection runs and a selected default.
+7. Evidence pending: real paired Graphify execution, confidence intervals, and public comparison claims.
+8. Evidence pending: installed-vault migration proof sufficient to remove legacy readers/caches.
 
 ## Preserved v4 Foundations
 
@@ -42,3 +44,14 @@ The canonical implementation plan is:
 
 The derived graph never replaces Markdown, Git, or project journals as sources of
 truth. No deferred feature may block the critical path above.
+
+## Release Evidence Status
+
+- No pyproject version bump is part of Task 30.
+- Existing README test counts remain unchanged until final integration collection.
+- The deterministic comparative smoke does not execute Graphify and cannot support
+  Graphify parity, quality, or token-ratio claims.
+- The model matrix has no selected embedding or reranker default; raw selection
+  evidence is pending.
+- Generation correctness and recovery are covered by integrated automated tests, but
+  installed-vault migration and legacy-cache-removal evidence is pending.

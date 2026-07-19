@@ -27,6 +27,29 @@ One-sentence summary: Session memory captures what Claude Code and the human lea
 - Atomic claim candidates that fail literal evidence or semantic agreement enter
   quarantine. The contradiction benchmark gates semantic supersession; there is no
   eager backfill or automatic semantic lifecycle mutation.
+- Markdown, Git, and append-only project journals are authoritative. Evidence Graph,
+  FTS, vectors, tiers, contextual artifacts, telemetry, and model caches are derived.
+- Derived artifacts consumed together belong to one validated immutable generation.
+  Registration validates source membership, hashes, schemas, integrity, and evidence;
+  CAS activation is the publication point. Interrupted candidates do not replace the
+  prior active generation.
+- Readers recheck generation seals. Corruption falls back to a revalidated prior
+  generation, then to labelled legacy retrieval or bounded live extraction.
+- Grounded QA sends captured authoritative spans as untrusted evidence and verifies
+  citation IDs, paths, source/span hashes, revisions, and ranges before accepting an
+  answer or filing it back.
+
+## Context and model evidence policy
+
+- Complete context items are packed by safety/health/handoff/blocker/decision/evidence/
+  history priority and relevance per token. Mandatory overflow fails closed.
+- Token count source is always one of `reported`, `tokenizer`, `estimated`, `mixed`,
+  or `unknown`. UTF-8 byte estimates are planning values, not exact model counts.
+- New embedding/reranker defaults require pinned revisions and complete EN/RU/ZH
+  quality, resource, license, regression, material-improvement, and Pareto evidence.
+  The current model selection and real Graphify comparison are **evidence pending**.
+- Deterministic comparative smoke results prove orchestration only. They do not prove
+  Graphify parity, model superiority, quality improvement, or token savings.
 
 ## Operational boundaries
 - Operational SQLite uses rollback-journal, `synchronous=FULL`, and no WAL on the

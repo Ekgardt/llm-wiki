@@ -22,6 +22,7 @@ LLM Wiki 为你使用的每一个 AI 编码智能体——OpenCode、Codex、Cla
 - [快速开始](#快速开始)
 - [接入智能体](#接入智能体)
 - [架构](#架构)
+- [Evidence generation 与迁移](#evidence-generation-与迁移)
 - [基准测试](#基准测试)
 - [对比](#对比)
 - [贡献](#贡献)
@@ -65,18 +66,21 @@ LLM Wiki 为你使用的每一个 AI 编码智能体——OpenCode、Codex、Cla
 ### 编译流水线
 - **JSON 协议编译**——无需智能体 tool-use，适用于任何 LLM 后端
 - **VERIFY-BEFORE-WRITE**——Python 端确定性引用验证；LLM 无法伪造证据
-- **语义去重**——优先 update 而非 create；矛盾时自动 supersede
+- **带 quarantine 的语义去重**——优先 update 而非 create；不确定或 evaluator 有分歧的矛盾进入 quarantine，automatic semantic supersession 保持禁用
 - **增量编译**——SHA-256 哈希；仅重新编译变更的 daily 日志
 - **并发安全**——PID 锁 + stale 检测；同时只运行一个编译
 - **持久任务队列**——离线容错；延迟 LLM 任务在下次会话时排空
 
 ### 搜索与检索
-- **Triple-fusion 搜索**：BM25（FTS5）+ Vector（sentence-transformers）+ Graph-neighbor（wikilink RRF）
+- **Generation-consistent retrieval**：一个经过验证的不可变 generation 可将 FTS、vectors、graph、tiers 和 evidence 绑定到同一 source snapshot
+- **如实的 retrieval trace**：结果报告 requested/effective mode、实际使用的 signals、generation、reranker 状态和 fallback 原因
+- **可用时进行 Triple-fusion**：BM25（FTS5）+ Vector（sentence-transformers）+ evidence-backed Graph-neighbor RRF
 - **加权 RRF**：BM25=2.0、Vector=1.0、Graph=0.5——防止已知项查询回归
 - **Title + filename 提升**——文件名精确匹配直接短路到 rank 1
 - **Typed-provenance 排序**——`source_authority: user` 高于 `ai-derived` / `inferred`
 - **时间查询**——`--as-of YYYY-MM-DD` 按 `valid_to` frontmatter 过滤
 - **本地检索模式**——小规模直接读取页面，始终可用的 SQLite FTS5 BM25，以及可选的 vectors/LanceDB + graph + reranker 混合检索
+- **Grounded QA**——检索到的 source span 带有 citation ID、路径、source/span 哈希、revision 及 byte/line 范围；证据不足、冲突或超出时间范围时会拒答
 
 ### 主动智能
 - **Guardrails**——在 SessionStart 自动注入已学习的纠正（防止重复犯错）
@@ -205,10 +209,25 @@ RUNTIME       cache/  logs/  run/  cache/cognee/   （gitignored，vault 内）
 - **CODE**——git 跟踪。流水线、测试、文档、技能、规则、集成。
 - **KNOWLEDGE**——git 跟踪（源码中仅公开示例）。完整用户数据位于已安装的 vault 中。Daily 日志和个人页面 gitignored。
 - **RUNTIME**——gitignored。搜索索引和日志可丢弃；`run/` 中的事务、队列状态和 undo 映像属于操作状态。
+- **权威边界**——Markdown、Git history 和 append-only project journal 是权威来源。FTS、vectors、Evidence Graph 数据库、tiers、telemetry 和 model cache 都是可重建的派生状态。
 
 完整设计原理（7 条公理、系统架构图、记忆分类法、搜索架构）见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
 规范结构参考（什么放在哪里、环境变量契约、禁止布局）见 [docs/STRUCTURE.md](docs/STRUCTURE.md)。
+
+---
+
+## Evidence generation 与迁移
+
+`cache/evidence-graph/catalog.sqlite3` 在 `cache/evidence-graph/generations/<generation-id>/` 中选择一个不可变的 active generation。候选 generation 只有在 manifest、source membership、artifact 哈希、数据库完整性和 evidence span 全部验证后才会注册。激活通过 compare-and-swap 更新指针。激活前构建失败或中断时，先前 generation 仍保持 active；active generation 损坏时，会跳过它并使用最新的已验证历史 generation。恢复时可注册完整的 orphan generation，但不会自动激活。
+
+删除 `cache/evidence-graph/` 只会删除派生状态。先停止活动命令，保留 `run/`，并在期望 generation-backed retrieval 前完成重建。在 installed-vault migration evidence 足以证明安全之前，必须保留 legacy `cache/index.sqlite`、`cache/vectors.npy`、`cache/vectors_meta.json` 和 `cache/lancedb/`。如果无法打开已验证 generation，retrieval 会回退到这些 legacy 路径或 lexical/live extraction，并明确报告 fallback。安全 rollback 绝不删除 `knowledge/`、Git history、project journal 或 `run/`。
+
+Model matrix 固定候选 revision，并要求 EN/RU/ZH quality、resource、license 和 Pareto gates 全部通过后才选择 defaults。目前没有选定新的 embedding model 或 reranker：**evidence pending**。现有可选 vector 兼容路径仍使用固定的 legacy model。Token count 标记为 `reported`、`tokenizer`、`estimated`、`mixed` 或 `unknown`；货币成本另行标记为 `reported`、`estimated` 或 `unknown`。UTF-8 byte 估算只用于保守规划，并非独立于 tokenizer 的保证。
+
+真实 Graphify 对比与 model superiority evidence 尚未获得：**evidence pending**。确定性 comparative smoke 只验证 orchestration，不支持质量或 token-ratio 声明。
+
+激活、恢复、rollback、citation 和准确 MCP 行为见 [docs/USER-GUIDE.md](docs/USER-GUIDE.md)。
 
 ---
 
