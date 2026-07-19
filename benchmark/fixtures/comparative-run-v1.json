@@ -1,0 +1,35 @@
+{
+  "schema_version": "comparative-run/v1",
+  "repository": {
+    "path": ".",
+    "url": "synthetic://comparative-adapter-fixture",
+    "commit": "1111111111111111111111111111111111111111"
+  },
+  "graphify": {"path": "."},
+  "hardware": "deterministic-fixture-cpu",
+  "model": {
+    "id": "fixture/model@v1",
+    "probe_command": ["python", "benchmark/fixtures/comparative_adapter_fixture.py", "probe-model"]
+  },
+  "context_budget": 4096,
+  "retry_policy": {"backoff": "none", "max_attempts": 2},
+  "tasks": [
+    {"id": "fixture-task-a", "task": "Find the alpha definition and cite it."},
+    {"id": "fixture-task-b", "task": "Find the beta definition and cite it."}
+  ],
+  "seeds": [1729, 2718, 31415],
+  "adapters": {
+    "adaptive-context-compiler": {"command": ["python", "benchmark/fixtures/comparative_adapter_fixture.py", "adaptive-context-compiler"], "required_env": []},
+    "evidence-graph-only": {"command": ["python", "benchmark/fixtures/comparative_adapter_fixture.py", "evidence-graph-only"], "required_env": []},
+    "graphify-pinned": {"command": ["python", "benchmark/fixtures/comparative_adapter_fixture.py", "graphify-pinned"], "required_env": []},
+    "grep-read": {"command": ["python", "benchmark/fixtures/comparative_adapter_fixture.py", "grep-read"], "required_env": []},
+    "hybrid-retrieval": {"command": ["python", "benchmark/fixtures/comparative_adapter_fixture.py", "hybrid-retrieval"], "required_env": []},
+    "llm-wiki-current": {"command": ["python", "benchmark/fixtures/comparative_adapter_fixture.py", "llm-wiki-current"], "required_env": []}
+  },
+  "limits": {"max_stderr_bytes": 4096, "max_stdout_bytes": 65536, "timeout_seconds": 5},
+  "gate_f": {
+    "evidence_path": "benchmark/fixtures/gate-f-fixture.json",
+    "evidence_sha256": "1ea63e7fda68e7ce49b013af8410102e9228f7591e79ef602dd23d95556d03bc",
+    "passed": true
+  }
+}
