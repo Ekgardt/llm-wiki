@@ -28,9 +28,7 @@ def _codex_hooks_fixture() -> dict:
     }
     return {
         "hooks": {
-            "SessionStart": [
-                {"matcher": "startup|resume|clear|compact", "hooks": [command]}
-            ],
+            "SessionStart": [{"matcher": "startup|resume|clear|compact", "hooks": [command]}],
             "PreCompact": [{"matcher": "manual|auto", "hooks": [command]}],
             "PostCompact": [{"matcher": "manual|auto", "hooks": [command]}],
             "Stop": [{"hooks": [command]}],
@@ -75,15 +73,31 @@ def _create_index(path: Path, paths: list[str] | None = None, manifest: bool = T
     connection.commit()
     connection.close()
     if manifest:
-        (path.parent / ".paths-manifest").write_text(
-            json.dumps(sorted(paths)), encoding="utf-8"
-        )
+        (path.parent / ".paths-manifest").write_text(json.dumps(sorted(paths)), encoding="utf-8")
 
 
 def _create_claim_index(root: Path, state_root: Path) -> None:
     from claims import ClaimIndex
 
     ClaimIndex(state_root, vault=root).rebuild([root / "knowledge" / "notes"])
+
+
+def _create_generation(state_root: Path) -> None:
+    from evidence_graph_builder import build_full_generation
+    from generation_catalog import GenerationCatalog
+
+    build_full_generation(
+        GenerationCatalog(state_root),
+        sources=(),
+        source_bytes={},
+        nodes=(),
+        occurrences=(),
+        assertions=(),
+        evidence=(),
+        observations=(),
+        dependencies=(),
+        generation_id="healthy-generation",
+    )
 
 
 def _write_lease(path: Path, *, pid: int | None, acquired_at: str) -> None:
@@ -176,6 +190,7 @@ def test_report_schema_and_all_check_classes_are_json_safe(tmp_path):
     index = state_root / "cache" / "index.sqlite"
     _create_index(index)
     _create_claim_index(root, state_root)
+    _create_generation(state_root)
     os.utime(index, (now.timestamp(), now.timestamp()))
 
     report = run_doctor(root=root, state_root=state_root, home=home, now=now)
@@ -184,8 +199,18 @@ def test_report_schema_and_all_check_classes_are_json_safe(tmp_path):
     assert report["generated_at"].endswith("+00:00")
     assert report["overall_status"] == "ok"
     assert {item["id"] for item in report["checks"]} == {
-        "environment", "runtime", "filesystem", "transactions", "queue",
-        "archives", "claims", "index", "scheduler", "mcp", "integrations",
+        "environment",
+        "runtime",
+        "filesystem",
+        "transactions",
+        "queue",
+        "archives",
+        "claims",
+        "generation",
+        "index",
+        "scheduler",
+        "mcp",
+        "integrations",
         "run_deletion",
     }
     assert set(report["counts"]) == {"ok", "degraded", "error", "skipped"}
@@ -266,14 +291,10 @@ def test_filesystem_health_rejects_network_mounts_on_supported_platforms(
     import reliable_memory
 
     monkeypatch.setattr(reliable_memory, "_platform_system", lambda: system)
-    monkeypatch.setattr(
-        reliable_memory, "_read_posix_mount_data", lambda: (mount_data, False)
-    )
+    monkeypatch.setattr(reliable_memory, "_read_posix_mount_data", lambda: (mount_data, False))
     monkeypatch.setattr(reliable_memory, "_query_darwin_mounts", lambda: darwin_data)
     if system != "Windows":
-        monkeypatch.setattr(
-            type(Path("/")), "resolve", lambda self, *, strict=False: self
-        )
+        monkeypatch.setattr(type(Path("/")), "resolve", lambda self, *, strict=False: self)
     if system == "Windows":
         monkeypatch.setattr(
             reliable_memory.ctypes,
@@ -297,9 +318,7 @@ def test_filesystem_health_rejects_network_mounts_on_supported_platforms(
     assert check["details"] == {"local": False, "locking": "unsupported"}
 
 
-def test_filesystem_health_distinguishes_broken_and_unavailable_lock_probe(
-    tmp_path, monkeypatch
-):
+def test_filesystem_health_distinguishes_broken_and_unavailable_lock_probe(tmp_path, monkeypatch):
     import doctor
     import reliable_memory
 
@@ -317,9 +336,7 @@ def test_filesystem_health_distinguishes_broken_and_unavailable_lock_probe(
     assert unavailable["details"] == {"local": True, "locking": "unknown"}
 
 
-def test_filesystem_health_runs_bounded_probe_and_leaves_no_artifacts(
-    tmp_path, monkeypatch
-):
+def test_filesystem_health_runs_bounded_probe_and_leaves_no_artifacts(tmp_path, monkeypatch):
     import doctor
     import reliable_memory
 
@@ -352,9 +369,7 @@ def test_read_only_missing_runtime_does_not_create_it(tmp_path):
     state_root = tmp_path / "absent-state"
 
     check = _check(run_doctor(root=root, state_root=state_root, home=home), "runtime")
-    environment = _check(
-        run_doctor(root=root, state_root=state_root, home=home), "environment"
-    )
+    environment = _check(run_doctor(root=root, state_root=state_root, home=home), "environment")
 
     assert check["status"] == "degraded"
     assert environment["details"]["state_root"]["status"] == "error"
@@ -393,7 +408,10 @@ def test_index_missing_stale_and_fresh_states(tmp_path):
 
     root, state_root, home = _build_root(tmp_path)
     now = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
-    assert _check(run_doctor(root=root, state_root=state_root, home=home, now=now), "index")["status"] == "degraded"
+    assert (
+        _check(run_doctor(root=root, state_root=state_root, home=home, now=now), "index")["status"]
+        == "degraded"
+    )
 
     index = state_root / "cache" / "index.sqlite"
     _create_index(index)
@@ -414,14 +432,17 @@ def test_index_missing_stale_and_fresh_states(tmp_path):
     [
         ({}, "skipped"),
         ({"last_nightly_date": "2026-07-13", "last_nightly_status": "success"}, "ok"),
-        ({
-            "last_nightly_date": "2026-07-10",
-            "last_nightly_status": "success",
-            "last_nightly_skip": {
-                "skipped_at": "2026-07-13T03:00:00",
-                "reason": "maintenance_lock_held",
+        (
+            {
+                "last_nightly_date": "2026-07-10",
+                "last_nightly_status": "success",
+                "last_nightly_skip": {
+                    "skipped_at": "2026-07-13T03:00:00",
+                    "reason": "maintenance_lock_held",
+                },
             },
-        }, "degraded"),
+            "degraded",
+        ),
         ({"last_nightly_status": "failed"}, "error"),
     ],
 )
@@ -524,9 +545,7 @@ def test_codex_doctor_prefers_trusted_runtime_hooks(tmp_path, monkeypatch):
     monkeypatch.setattr(
         doctor, "_probe_codex_hooks_list", lambda *_args, **_kwargs: _runtime_hooks(root)
     )
-    check = _check(
-        doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations"
-    )
+    check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations")
     codex = check["details"]["hosts"]["codex"]
 
     assert codex["status"] == "ok"
@@ -544,9 +563,7 @@ def test_codex_runtime_hook_health_is_decoupled_from_mcp_config(tmp_path, monkey
         doctor, "_probe_codex_hooks_list", lambda *_args, **_kwargs: _runtime_hooks(root)
     )
 
-    check = _check(
-        doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations"
-    )
+    check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations")
 
     assert check["details"]["hosts"]["codex"]["status"] == "ok"
 
@@ -565,9 +582,9 @@ def test_codex_runtime_untrusted_or_modified_is_degraded_without_capture(
         lambda *_args, **_kwargs: _runtime_hooks(root, trust=trust),
     )
 
-    codex = _check(
-        doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations"
-    )["details"]["hosts"]["codex"]
+    codex = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations")[
+        "details"
+    ]["hosts"]["codex"]
 
     assert codex["status"] == "degraded"
     assert codex["capture_mode"] == "none"
@@ -583,9 +600,9 @@ def test_codex_runtime_probe_warnings_are_degraded(tmp_path, monkeypatch):
     response["data"][0]["warnings"] = ["configuration warning"]
     monkeypatch.setattr(doctor, "_probe_codex_hooks_list", lambda *_args, **_kwargs: response)
 
-    codex = _check(
-        doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations"
-    )["details"]["hosts"]["codex"]
+    codex = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations")[
+        "details"
+    ]["hosts"]["codex"]
 
     assert codex["status"] == "degraded"
     assert codex["reason"] == "runtime_hooks_warning_or_error"
@@ -599,9 +616,9 @@ def test_codex_unavailable_probe_reports_unverified_and_no_capture(tmp_path, mon
     (home / ".codex").mkdir()
     monkeypatch.setattr(doctor, "_probe_codex_hooks_list", lambda *_args, **_kwargs: None)
 
-    codex = _check(
-        doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations"
-    )["details"]["hosts"]["codex"]
+    codex = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations")[
+        "details"
+    ]["hosts"]["codex"]
 
     assert codex["status"] == "degraded"
     assert codex["reason"] == "runtime_hooks_unverified"
@@ -624,16 +641,14 @@ def test_codex_configured_wrapper_is_reported_as_heartbeat_fallback(tmp_path, mo
     )
     monkeypatch.setattr(doctor, "_probe_codex_hooks_list", lambda *_args, **_kwargs: None)
 
-    codex = _check(
-        doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations"
-    )["details"]["hosts"]["codex"]
+    codex = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations")[
+        "details"
+    ]["hosts"]["codex"]
 
     assert codex["capture_mode"] == "wrapper-fallback-heartbeat-only"
 
 
-def test_codex_hooks_probe_skips_spawn_when_deadline_budget_is_too_small(
-    tmp_path, monkeypatch
-):
+def test_codex_hooks_probe_skips_spawn_when_deadline_budget_is_too_small(tmp_path, monkeypatch):
     import doctor
 
     root, _, home = _build_root(tmp_path)
@@ -829,13 +844,11 @@ def test_codex_doctor_rejects_runtime_disabled_hooks(tmp_path, monkeypatch):
     codex_dir = home / ".codex"
     codex_dir.mkdir(parents=True)
     (codex_dir / "config.toml").write_text(
-        '[features]\nhooks = false\n\n[mcp_servers.llm-wiki]\n'
+        "[features]\nhooks = false\n\n[mcp_servers.llm-wiki]\n"
         'command = "uv"\nargs = ["scripts/mcp_server.py"]\n',
         encoding="utf-8",
     )
-    hooks = json.loads(
-        (root / "integrations" / "codex" / "hooks.json").read_text(encoding="utf-8")
-    )
+    hooks = json.loads((root / "integrations" / "codex" / "hooks.json").read_text(encoding="utf-8"))
     hooks["hooks"]["Stop"][0]["hooks"][0]["timeout"] = 999
     (codex_dir / "hooks.json").write_text(json.dumps(hooks), encoding="utf-8")
 
@@ -844,9 +857,7 @@ def test_codex_doctor_rejects_runtime_disabled_hooks(tmp_path, monkeypatch):
         "_probe_codex_hooks_list",
         lambda *_args, **_kwargs: _runtime_hooks(root, enabled=False),
     )
-    check = _check(
-        doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations"
-    )
+    check = _check(doctor.run_doctor(root=root, state_root=state_root, home=home), "integrations")
     codex = check["details"]["hosts"]["codex"]
 
     assert codex["status"] == "degraded"
@@ -932,8 +943,7 @@ def test_codex_hook_health_does_not_use_local_toml_parser(tmp_path, monkeypatch)
     config = home / ".codex" / "config.toml"
     config.parent.mkdir(parents=True)
     config.write_text(
-        '[mcp_servers.llm-wiki]\ncommand = "uv"\n'
-        'args = ["scripts/mcp_server.py"]\n',
+        '[mcp_servers.llm-wiki]\ncommand = "uv"\nargs = ["scripts/mcp_server.py"]\n',
         encoding="utf-8",
     )
     monkeypatch.setattr(doctor, "STDLIB_TOML", None, raising=False)
@@ -953,9 +963,7 @@ def test_codex_real_parser_rejects_malformed_surrounding_toml(tmp_path):
 
     config = tmp_path / "config.toml"
     config.write_text(
-        "broken = [\n"
-        '[mcp_servers.llm-wiki]\ncommand = "uv"\n'
-        'args = ["scripts/mcp_server.py"]\n',
+        'broken = [\n[mcp_servers.llm-wiki]\ncommand = "uv"\nargs = ["scripts/mcp_server.py"]\n',
         encoding="utf-8",
     )
 
@@ -1035,9 +1043,7 @@ def test_maintenance_owner_is_exclusive_heartbeated_released_and_fenced(tmp_path
 
     doctor._heartbeat_maintenance_owner(coordinator, lease, now + timedelta(seconds=1))
     doctor._release_maintenance_owner(coordinator, lease)
-    second = doctor._acquire_maintenance_owner(
-        root, state_root, now + timedelta(seconds=2)
-    )
+    second = doctor._acquire_maintenance_owner(root, state_root, now + timedelta(seconds=2))
 
     assert second is not None
     second_coordinator, second_lease = second
@@ -1069,9 +1075,7 @@ def test_maintenance_heartbeat_runs_during_long_operation(tmp_path, monkeypatch)
     import doctor
 
     root, state_root, _ = _build_root(tmp_path)
-    acquired = doctor._acquire_maintenance_owner(
-        root, state_root, datetime.now(timezone.utc)
-    )
+    acquired = doctor._acquire_maintenance_owner(root, state_root, datetime.now(timezone.utc))
     assert acquired is not None
     coordinator, lease = acquired
     beats = []
@@ -1084,9 +1088,7 @@ def test_maintenance_heartbeat_runs_during_long_operation(tmp_path, monkeypatch)
     monkeypatch.setattr(doctor, "MAINTENANCE_HEARTBEAT_SECONDS", 0.01)
     monkeypatch.setattr(doctor, "_heartbeat_maintenance_owner", heartbeat)
 
-    with doctor._MaintenanceHeartbeat(
-        coordinator, lease, deadline=time.monotonic() + 1
-    ) as guard:
+    with doctor._MaintenanceHeartbeat(coordinator, lease, deadline=time.monotonic() + 1) as guard:
         guard.run(lambda: time.sleep(0.05))
 
     assert len(beats) >= 2
@@ -1149,9 +1151,7 @@ def test_stale_lease_with_dead_owner_is_recovered(tmp_path, monkeypatch):
     assert any(item["action"] == "recover_stale_lease" for item in report["repaired"])
 
 
-def test_lease_recovery_never_clobbers_target_appearing_concurrently(
-    tmp_path, monkeypatch
-):
+def test_lease_recovery_never_clobbers_target_appearing_concurrently(tmp_path, monkeypatch):
     import doctor
 
     root, state_root, home = _build_root(tmp_path)
@@ -1192,9 +1192,7 @@ def test_concurrent_doctors_recover_a_dead_lease_once(tmp_path, monkeypatch):
     monkeypatch.setattr(doctor, "_pid_alive", lambda pid: pid == os.getpid())
 
     def repair():
-        return doctor.run_doctor(
-            root=root, state_root=state_root, home=home, repair=True
-        )
+        return doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         reports = list(pool.map(lambda _: repair(), range(2)))
@@ -1232,7 +1230,9 @@ def test_failed_index_repair_preserves_existing_index(tmp_path, monkeypatch):
     index.write_bytes(b"valid-index")
     old = datetime.now(timezone.utc) - timedelta(days=2)
     os.utime(index, (old.timestamp(), old.timestamp()))
-    monkeypatch.setattr(doctor, "_rebuild_index", lambda root, state: (_ for _ in ()).throw(RuntimeError("failed")))
+    monkeypatch.setattr(
+        doctor, "_rebuild_index", lambda root, state: (_ for _ in ()).throw(RuntimeError("failed"))
+    )
 
     report = doctor.run_doctor(root=root, state_root=state_root, home=home, repair=True)
 
@@ -1262,9 +1262,7 @@ def test_failed_index_repair_is_attributed_only_to_index(tmp_path, monkeypatch):
     assert "repair_errors" not in queue["details"]
 
 
-def test_index_repair_that_produces_no_index_is_reported_as_index_error(
-    tmp_path, monkeypatch
-):
+def test_index_repair_that_produces_no_index_is_reported_as_index_error(tmp_path, monkeypatch):
     import doctor
 
     root, state_root, home = _build_root(tmp_path)
@@ -1274,9 +1272,7 @@ def test_index_repair_that_produces_no_index_is_reported_as_index_error(
     index = _check(report, "index")
 
     assert index["status"] == "error"
-    assert index["details"]["repair_errors"] == [
-        "Index repair failed: index was not created"
-    ]
+    assert index["details"]["repair_errors"] == ["Index repair failed: index was not created"]
 
 
 def test_degraded_summary_is_empty_for_healthy_and_bounded(tmp_path):
@@ -1331,6 +1327,7 @@ def test_cli_returns_zero_for_healthy_report(tmp_path):
     )
     _create_index(state_root / "cache" / "index.sqlite")
     _create_claim_index(root, state_root)
+    _create_generation(state_root)
     env = os.environ.copy()
     env.update(
         LLM_WIKI_ROOT=str(root),
@@ -1398,16 +1395,16 @@ def test_cli_repair_json_is_idempotent(tmp_path):
 
     first_report = json.loads(first.stdout)
     second_report = json.loads(second.stdout)
-    assert first.returncode == 0
+    assert first.returncode == 1
     assert first_report["repaired"]
-    assert second.returncode == 0
+    assert first_report["overall_status"] == "degraded"
+    assert second.returncode == 1
+    assert second_report["overall_status"] == "degraded"
     assert second_report["repaired"] == []
     assert set(_snapshot(state_root)) == set(after_first)
 
 
-def test_repair_does_not_touch_knowledge_config_network_or_subprocess(
-    tmp_path, monkeypatch
-):
+def test_repair_does_not_touch_knowledge_config_network_or_subprocess(tmp_path, monkeypatch):
     import doctor
 
     root, state_root, home = _build_root(tmp_path)
@@ -1600,9 +1597,7 @@ def test_rebuild_rejects_symlinked_knowledge_ancestor(tmp_path, monkeypatch):
     assert captured == []
 
 
-def test_rebuild_that_does_not_change_stale_index_is_not_success(
-    tmp_path, monkeypatch
-):
+def test_rebuild_that_does_not_change_stale_index_is_not_success(tmp_path, monkeypatch):
     import doctor
 
     root, state_root, home = _build_root(tmp_path)
@@ -1618,9 +1613,7 @@ def test_rebuild_that_does_not_change_stale_index_is_not_success(
     assert _check(report, "index")["status"] == "error"
 
 
-def test_existing_index_rebuild_lock_defers_without_touching_live_index(
-    tmp_path, monkeypatch
-):
+def test_existing_index_rebuild_lock_defers_without_touching_live_index(tmp_path, monkeypatch):
     import doctor
 
     root, state_root, home = _build_root(tmp_path)
@@ -1671,9 +1664,7 @@ def test_dead_index_rebuild_lock_is_reclaimed(tmp_path, monkeypatch):
     assert _check(report, "index")["status"] == "ok"
 
 
-def test_concurrent_stale_lock_reclaimers_cannot_both_acquire(
-    tmp_path, monkeypatch
-):
+def test_concurrent_stale_lock_reclaimers_cannot_both_acquire(tmp_path, monkeypatch):
     import threading
 
     import doctor
@@ -1720,9 +1711,7 @@ def test_concurrent_stale_lock_reclaimers_cannot_both_acquire(
     doctor._release_lock(lock, queue, token)
 
 
-def test_stale_lock_takeover_aborts_when_opened_file_identity_changes(
-    tmp_path, monkeypatch
-):
+def test_stale_lock_takeover_aborts_when_opened_file_identity_changes(tmp_path, monkeypatch):
     import doctor
 
     queue = tmp_path / "queue"
@@ -1982,9 +1971,7 @@ def test_unrelated_installed_configs_are_not_false_positives(tmp_path):
         ),
     ],
 )
-def test_installed_integration_requires_expected_marker(
-    tmp_path, host, relative, marker
-):
+def test_installed_integration_requires_expected_marker(tmp_path, host, relative, marker):
     from doctor import run_doctor
 
     root, state_root, home = _build_root(tmp_path)

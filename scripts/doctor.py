@@ -1,10 +1,12 @@
 """Agent-readable local health checks and conservative repairs."""
+
 from __future__ import annotations
 
 import argparse
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import secrets
@@ -43,7 +45,7 @@ PERMANENT_FAILURE_ATTEMPTS = 5
 SUMMARY_LIMIT = 600
 VALID_STATUSES = ("ok", "degraded", "error", "skipped")
 VALID_REPAIR_ACTIONS = frozenset(
-    {"runtime", "transactions", "queue", "indexes", "archives"}
+    {"runtime", "transactions", "queue", "indexes", "archives", "generations"}
 )
 RUNTIME_DIRECTORIES = ("run", "logs", "cache")
 MAX_QUEUE_FILES = 200
@@ -60,6 +62,9 @@ MAX_OPERATIONAL_ROWS = 10_000
 MAX_RUNTIME_ENTRIES = 10_000
 LOCK_STALE_SECONDS = 10 * 60
 DEFAULT_TIME_BUDGET_SECONDS = 5.0
+DEFAULT_GENERATION_TIME_BUDGET_SECONDS = 60.0
+DEFAULT_GENERATION_SOURCE_LIMIT = 10_000
+GENERATION_FRESH_SECONDS = 24 * 60 * 60
 CODEX_HOOK_PROBE_SECONDS = 2.0
 CODEX_HOOK_PROBE_STARTUP_SECONDS = 0.25
 MAX_CODEX_HOOK_PROBE_BYTES = 256 * 1024
@@ -133,7 +138,11 @@ def _environment_check(root: Path, state_root: Path) -> dict:
         "state_root": {"status": "ok" if state_parent_ok else "error"},
         "layout": layout,
     }
-    message = "Configured roots and source layout are available." if status == "ok" else "Configured environment is incomplete."
+    message = (
+        "Configured roots and source layout are available."
+        if status == "ok"
+        else "Configured environment is incomplete."
+    )
     return _result("environment", status, message, details)
 
 
@@ -302,9 +311,7 @@ def _queue_check(state_root: Path, now: datetime, deadline: float) -> dict:
     database_kind = _safe_kind(database_path, state_root)[0]
     if database_kind == "regular":
         return _queue_v2_check(state_root, now, deadline)
-    if database_kind == "missing" and _database_sidecar_present(
-        database_path, state_root
-    ):
+    if database_kind == "missing" and _database_sidecar_present(database_path, state_root):
         details = _queue_artifact_state(state_root, deadline)
         details.update(read_error=True, states={state: 0 for state in QUEUE_STATES})
         details["deletion_codes"].append("queue_state_unreadable")
@@ -354,7 +361,9 @@ def _queue_check(state_root: Path, now: datetime, deadline: float) -> dict:
                     if entry.name.endswith(".json"):
                         pending += 1
                         try:
-                            permanently_failed += int(task.get("attempts", 0)) >= PERMANENT_FAILURE_ATTEMPTS
+                            permanently_failed += (
+                                int(task.get("attempts", 0)) >= PERMANENT_FAILURE_ATTEMPTS
+                            )
                         except (ValueError, TypeError):
                             permanently_failed += 1
                     else:
@@ -381,7 +390,10 @@ def _queue_check(state_root: Path, now: datetime, deadline: float) -> dict:
     if permanently_failed:
         status, message = "error", f"Queue has {permanently_failed} permanently failed task(s)."
     elif pending or stale_leases or unsafe_entries or oversized_entries or truncated:
-        status, message = "degraded", f"Queue has {pending} pending task(s) and {stale_leases} stale lease(s)."
+        status, message = (
+            "degraded",
+            f"Queue has {pending} pending task(s) and {stale_leases} stale lease(s).",
+        )
     else:
         status, message = "ok", "Queue has no pending or stale work."
     if artifacts["deletion_codes"]:
@@ -434,9 +446,7 @@ def _bounded_runtime_entries(
     return entries, False, False
 
 
-def _tables(
-    database: sqlite3.Connection, deadline: float = float("inf")
-) -> set[str]:
+def _tables(database: sqlite3.Connection, deadline: float = float("inf")) -> set[str]:
     if _deadline_reached(deadline):
         raise TimeoutError("database schema deadline")
     rows = database.execute(
@@ -497,9 +507,7 @@ def _database_sidecar_present(path: Path, state_root: Path) -> bool:
     )
 
 
-def _transaction_artifacts(
-    state_root: Path, deadline: float
-) -> tuple[set[str], bool]:
+def _transaction_artifacts(state_root: Path, deadline: float) -> tuple[set[str], bool]:
     entries, truncated, error = _bounded_runtime_entries(
         state_root / "run" / "transactions",
         state_root,
@@ -519,9 +527,7 @@ def _transaction_artifacts(
     return identifiers, unsafe
 
 
-def _transaction_check(
-    state_root: Path, now: datetime, deadline: float = float("inf")
-) -> dict:
+def _transaction_check(state_root: Path, now: datetime, deadline: float = float("inf")) -> dict:
     path = state_root / "run" / "markdown-transactions.sqlite3"
     states = {state: 0 for state in TRANSACTION_STATES}
     details: dict[str, Any] = {
@@ -560,9 +566,7 @@ def _transaction_check(
                 raise sqlite3.DatabaseError("transaction table missing")
             transaction_columns = _columns(database, "transaction", deadline)
             operation_columns = (
-                _columns(database, "operation", deadline)
-                if "operation" in tables
-                else set()
+                _columns(database, "operation", deadline) if "operation" in tables else set()
             )
             if not TRANSACTION_REQUIRED_COLUMNS.issubset(
                 transaction_columns
@@ -576,7 +580,7 @@ def _transaction_check(
                     details,
                 )
             transaction_query = (
-                'SELECT id, operation_id, request_hash, state, preconditions_json, '
+                "SELECT id, operation_id, request_hash, state, preconditions_json, "
                 "plan_hash, created_at, updated_at, artifacts_pruned_at "
                 'FROM "transaction"'
             )
@@ -589,7 +593,7 @@ def _transaction_check(
                 transaction_rows = transaction_rows[:MAX_OPERATIONAL_ROWS]
             codes: set[str] = set()
             operation_rows = database.execute(
-                'SELECT transaction_id, position, kind, path, before_hash, '
+                "SELECT transaction_id, position, kind, path, before_hash, "
                 'after_hash, parent_device, parent_inode, applied FROM "operation" '
                 "LIMIT ?",
                 (MAX_OPERATIONAL_ROWS + 1,),
@@ -599,11 +603,7 @@ def _transaction_check(
                 details["codes"].append("transaction_operation_scan_truncated")
                 details["deletion_codes"].append("transaction_state_unknown")
                 operation_rows = operation_rows[:MAX_OPERATIONAL_ROWS]
-            known_ids = {
-                row["id"]
-                for row in transaction_rows
-                if isinstance(row["id"], str)
-            }
+            known_ids = {row["id"] for row in transaction_rows if isinstance(row["id"], str)}
             operation_positions: dict[str, list[int]] = {
                 transaction_id: [] for transaction_id in known_ids
             }
@@ -661,9 +661,13 @@ def _transaction_check(
                     continue
                 states[state] += 1
                 if state in {"conflicted", "quarantined"}:
-                    code_row = database.execute(
-                        'SELECT error_code FROM "transaction" WHERE id=?', (row["id"],)
-                    ).fetchone() if "error_code" in transaction_columns else None
+                    code_row = (
+                        database.execute(
+                            'SELECT error_code FROM "transaction" WHERE id=?', (row["id"],)
+                        ).fetchone()
+                        if "error_code" in transaction_columns
+                        else None
+                    )
                     if code_row is not None and code_row[0]:
                         codes.add(str(code_row[0]))
                 created = _parse_utc(row["created_at"])
@@ -677,9 +681,7 @@ def _transaction_check(
                     preconditions = json.loads(row["preconditions_json"])
                 except (TypeError, ValueError):
                     preconditions = None
-                valid_plan_hash = (
-                    state == "preparing" and row["plan_hash"] == ""
-                ) or (
+                valid_plan_hash = (state == "preparing" and row["plan_hash"] == "") or (
                     isinstance(row["plan_hash"], str)
                     and digest.fullmatch(row["plan_hash"]) is not None
                 )
@@ -695,10 +697,7 @@ def _transaction_check(
                     and created is not None
                     and updated is not None
                     and created <= updated
-                    and (
-                        row["artifacts_pruned_at"] is None
-                        or pruned is not None
-                    )
+                    and (row["artifacts_pruned_at"] is None or pruned is not None)
                 )
                 positions = operation_positions.get(transaction_id, [])
                 if positions != list(range(len(positions))):
@@ -762,9 +761,7 @@ def _transaction_check(
                 )
             artifacts, unsafe_artifacts = _transaction_artifacts(state_root, deadline)
             if unsafe_artifacts or artifacts - known_ids:
-                details["deletion_codes"].append(
-                    "transaction_artifact_state_unknown"
-                )
+                details["deletion_codes"].append("transaction_artifact_state_unknown")
             for row in transaction_rows:
                 transaction_id = row["id"]
                 if not isinstance(transaction_id, str) or transaction_id not in known_ids:
@@ -772,8 +769,7 @@ def _transaction_check(
                     continue
                 artifact_present = transaction_id in artifacts
                 expects_artifacts = (
-                    row["state"] != "discarded"
-                    and row["artifacts_pruned_at"] is None
+                    row["state"] != "discarded" and row["artifacts_pruned_at"] is None
                 )
                 if artifact_present != expects_artifacts:
                     corrupt = True
@@ -860,9 +856,7 @@ def _queue_v2_check(state_root: Path, now: datetime, deadline: float) -> dict:
             if "tasks" not in tables:
                 raise sqlite3.DatabaseError("tasks table missing")
             task_columns = _columns(database, "tasks", deadline)
-            if not {"state", "error_code", "blocked_capability"}.issubset(
-                task_columns
-            ):
+            if not {"state", "error_code", "blocked_capability"}.issubset(task_columns):
                 details["codes"].append("queue_metadata_missing")
                 details["deletion_codes"].append("queue_state_corrupt")
                 return _result(
@@ -933,14 +927,16 @@ def _queue_v2_check(state_root: Path, now: datetime, deadline: float) -> dict:
                     reference = str(row["result_reference"])
                     references.add(reference)
                     result_hashes[reference] = (
-                        row["result_sha256"]
-                        if "result_sha256" in row_columns
-                        else None
+                        row["result_sha256"] if "result_sha256" in row_columns else None
                     )
                 if (
                     state == "leased"
                     and "lease_expires_at" in row_columns
-                    and (_parse_utc(row["lease_expires_at"]) or datetime.min.replace(tzinfo=timezone.utc)) > now
+                    and (
+                        _parse_utc(row["lease_expires_at"])
+                        or datetime.min.replace(tzinfo=timezone.utc)
+                    )
+                    > now
                 ):
                     details["live_workers"] += 1
             details["codes"] = sorted(set(details["codes"]) | codes)
@@ -1024,7 +1020,12 @@ def _queue_v2_check(state_root: Path, now: datetime, deadline: float) -> dict:
         or details["migration"] == "conflict"
     ):
         status = "error"
-    elif states["ready"] or states["leased"] or states["blocked"] or details["migration"] == "pending":
+    elif (
+        states["ready"]
+        or states["leased"]
+        or states["blocked"]
+        or details["migration"] == "pending"
+    ):
         status = "degraded"
     else:
         status = "ok"
@@ -1042,9 +1043,7 @@ def _queue_v2_check(state_root: Path, now: datetime, deadline: float) -> dict:
     )
 
 
-def _archive_check(
-    root: Path, state_root: Path, deadline: float = float("inf")
-) -> dict:
+def _archive_check(root: Path, state_root: Path, deadline: float = float("inf")) -> dict:
     archive = _archive_path(root)
     quarantine = state_root / "run" / "archive-quarantine"
     details = {
@@ -1065,8 +1064,10 @@ def _archive_check(
     details["quarantined"] = len(quarantine_entries)
     if details["quarantined"]:
         details["deletion_codes"].append("archive_quarantine_retained")
-    if truncated or error or any(
-        _safe_kind(item, state_root)[0] != "regular" for item in quarantine_entries
+    if (
+        truncated
+        or error
+        or any(_safe_kind(item, state_root)[0] != "regular" for item in quarantine_entries)
     ):
         details["read_error"] = True
         details["deletion_codes"].append("archive_quarantine_state_unknown")
@@ -1164,7 +1165,12 @@ def _archive_check(
         details["codes"].append("archive_unreadable")
         details["read_error"] = True
         details["deletion_codes"].append("archive_state_unreadable")
-    problem = details["duplicates"] or details["quarantined"] or details["codes"] or details["index"] == "invalid"
+    problem = (
+        details["duplicates"]
+        or details["quarantined"]
+        or details["codes"]
+        or details["index"] == "invalid"
+    )
     return _result(
         "archives",
         "error" if details["codes"] else "degraded" if problem else "ok",
@@ -1173,9 +1179,7 @@ def _archive_check(
     )
 
 
-def _claim_check(
-    root: Path, state_root: Path, deadline: float = float("inf")
-) -> dict:
+def _claim_check(root: Path, state_root: Path, deadline: float = float("inf")) -> dict:
     path = state_root / "cache" / "claims.sqlite3"
     details = {
         "index": "missing",
@@ -1216,7 +1220,9 @@ def _claim_check(
     except (OSError, PermissionError, sqlite3.Error, TimeoutError, ValueError):
         details["index"] = "invalid"
         details["read_error"] = True
-    status = "error" if details["index"] == "invalid" else "degraded" if details["diagnostics"] else "ok"
+    status = (
+        "error" if details["index"] == "invalid" else "degraded" if details["diagnostics"] else "ok"
+    )
     return _result(
         "claims",
         status,
@@ -1225,9 +1231,7 @@ def _claim_check(
     )
 
 
-def _filesystem_check(
-    state_root: Path, deadline: float = float("inf")
-) -> dict:
+def _filesystem_check(state_root: Path, deadline: float = float("inf")) -> dict:
     if _deadline_reached(deadline):
         return _result(
             "filesystem",
@@ -1265,9 +1269,7 @@ def _filesystem_check(
         )
     probe_deadline = min(deadline, time.monotonic() + FILESYSTEM_PROBE_SECONDS)
     try:
-        locking = reliable_memory._sqlite_lock_probe(
-            state_root, deadline=probe_deadline
-        )
+        locking = reliable_memory._sqlite_lock_probe(state_root, deadline=probe_deadline)
     except (OSError, RuntimeError, sqlite3.Error):
         locking = None
     details = {
@@ -1343,6 +1345,183 @@ def _index_deferred(message: str, detail: str) -> dict:
     )
 
 
+def _generation_result(
+    status: str,
+    message: str,
+    **details: object,
+) -> dict:
+    baseline = {
+        "catalog": "unknown",
+        "active_generation": None,
+        "catalog_schema": "unknown",
+        "generation_schema": None,
+        "source_manifest": "unknown",
+        "evidence_integrity": "unknown",
+        "vector_state": "unknown",
+        "vector_model": None,
+        "vector_dimensions": None,
+        "freshness": "unknown",
+        "unindexed_delta": None,
+        "unresolved_observations": None,
+        "age_seconds": None,
+        "repairable": status == "degraded",
+    }
+    baseline.update(details)
+    return _result("generation", status, message, baseline)
+
+
+def _generation_check(
+    root: Path,
+    state_root: Path,
+    now: datetime,
+    deadline: float = float("inf"),
+    *,
+    max_sources: int = DEFAULT_GENERATION_SOURCE_LIMIT,
+) -> dict:
+    """Validate the catalog-selected immutable generation without writing."""
+    if isinstance(max_sources, bool) or not isinstance(max_sources, int) or max_sources < 1:
+        raise ValueError("max_sources must be a positive integer")
+    catalog_path = state_root / "cache" / "evidence-graph" / "catalog.sqlite3"
+    kind, _info = _safe_kind(catalog_path, state_root)
+    if kind == "missing":
+        return _generation_result(
+            "degraded",
+            "Evidence generation catalog is missing.",
+            catalog="missing",
+            freshness="missing",
+            repairable=True,
+        )
+    if kind != "regular":
+        return _generation_result(
+            "error",
+            "Evidence generation catalog is unsafe.",
+            catalog="invalid",
+            repairable=False,
+        )
+    try:
+        with _readonly_database(catalog_path, state_root) as database:
+            database.set_progress_handler(lambda: int(_deadline_reached(deadline)), 1000)
+            integrity = database.execute("PRAGMA integrity_check(1)").fetchone()
+            tables = _tables(database, deadline)
+            required = {"generations", "catalog_state", "activation_history"}
+            if integrity is None or integrity[0] != "ok" or not required.issubset(tables):
+                raise sqlite3.DatabaseError("catalog integrity or schema failed")
+            journal = str(database.execute("PRAGMA journal_mode").fetchone()[0]).casefold()
+            synchronous = database.execute("PRAGMA synchronous").fetchone()[0]
+            if journal != "delete" or synchronous != 2:
+                raise sqlite3.DatabaseError("catalog durability contract failed")
+            state = database.execute(
+                "SELECT active_generation_id FROM catalog_state WHERE singleton=1"
+            ).fetchone()
+            active = None if state is None else state[0]
+            if not isinstance(active, str) or not active:
+                return _generation_result(
+                    "degraded",
+                    "No active evidence generation is selected.",
+                    catalog="valid",
+                    catalog_schema="valid",
+                    freshness="missing",
+                    repairable=True,
+                )
+            registered = database.execute(
+                "SELECT registered_at FROM generations WHERE generation_id=?",
+                (active,),
+            ).fetchone()
+            if registered is None:
+                raise sqlite3.DatabaseError("active generation is not registered")
+            registered_at = _parse_utc(registered[0])
+        if _deadline_reached(deadline):
+            raise TimeoutError("generation check deadline")
+
+        import generation_catalog
+
+        generation_path = state_root / "cache" / "evidence-graph" / "generations" / active
+        manifest, _seal = generation_catalog._validate_generation(  # noqa: SLF001
+            generation_path,
+            state_root,
+            deadline=deadline,
+        )
+        source_manifest_raw = read_runtime_bytes(
+            generation_path / "source-manifest.json",
+            state_root,
+            max_bytes=MAX_MANIFEST_BYTES * 1024,
+        )
+        source_manifest = json.loads(source_manifest_raw)
+        policy = source_manifest["policy"]
+
+        from corpus_snapshot import collect_corpus
+
+        snapshot = collect_corpus(
+            root,
+            daily_paths=policy["daily_paths"],
+            code_roots=policy["code_roots"],
+            include_historical=policy["include_historical"],
+            as_of=policy["as_of"],
+            max_files=max_sources,
+            deadline=deadline,
+        )
+        indexed = {item["relative_path"]: item["sha256"] for item in source_manifest["sources"]}
+        current = {source.record.relative_path: source.record.sha256 for source in snapshot.sources}
+        delta = sum(
+            indexed.get(path) != current.get(path) for path in indexed.keys() | current.keys()
+        )
+        graph = generation_path / "evidence.sqlite3"
+        with _readonly_database(graph, state_root, max_bytes=16 * 1024 * 1024 * 1024) as database:
+            database.set_progress_handler(lambda: int(_deadline_reached(deadline)), 1000)
+            unresolved = database.execute(
+                "SELECT COUNT(*) FROM (SELECT 1 FROM observation LIMIT ?)",
+                (MAX_OPERATIONAL_ROWS + 1,),
+            ).fetchone()[0]
+        age = None if registered_at is None else max(0, int((now - registered_at).total_seconds()))
+        stale_age = age is not None and age > GENERATION_FRESH_SECONDS
+        vector_state = str(manifest["vector_state"])
+        status = "degraded" if delta or stale_age or vector_state == "stale" or unresolved else "ok"
+        return _generation_result(
+            status,
+            "Evidence generation requires refresh."
+            if status != "ok"
+            else "Evidence generation is healthy.",
+            catalog="valid",
+            active_generation=active,
+            catalog_schema="valid",
+            generation_schema=manifest["graph_schema_version"],
+            source_manifest="valid",
+            evidence_integrity="valid",
+            vector_state=vector_state,
+            vector_model=manifest["embedding_model_id"],
+            vector_dimensions=manifest["vector_dimensions"],
+            freshness="stale" if delta or stale_age else "fresh",
+            unindexed_delta=delta,
+            unresolved_observations=unresolved,
+            age_seconds=age,
+            repairable=status == "degraded",
+        )
+    except TimeoutError:
+        return _generation_result(
+            "degraded",
+            "Evidence generation check was deferred by its time bound.",
+            catalog="valid",
+            budget_exhausted=True,
+            partial=True,
+            repairable=False,
+        )
+    except (
+        KeyError,
+        OSError,
+        PermissionError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+        sqlite3.Error,
+    ):
+        return _generation_result(
+            "error",
+            "Evidence generation catalog or active artifacts are invalid.",
+            catalog="invalid",
+            repairable=True,
+        )
+
+
 def _index_check(
     state_root: Path,
     now: datetime,
@@ -1385,9 +1564,7 @@ def _index_check(
             max_bytes=MAX_INDEX_DB_BYTES,
         )
         try:
-            connection.set_progress_handler(
-                lambda: int(time.monotonic() >= deadline), 1000
-            )
+            connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
             quick_check = connection.execute("PRAGMA quick_check(1)").fetchone()
             if not quick_check or quick_check[0] != "ok":
                 raise sqlite3.DatabaseError("quick_check failed")
@@ -1435,9 +1612,7 @@ def _index_check(
                     "FTS manifest check exceeded its time budget.",
                     "budget_exhausted",
                 )
-            if manifest_error or any(
-                not isinstance(item, str) for item in (manifest_paths or [])
-            ):
+            if manifest_error or any(not isinstance(item, str) for item in (manifest_paths or [])):
                 manifest_state = "invalid"
             else:
                 manifest_state = "current"
@@ -1448,9 +1623,7 @@ def _index_check(
     except sqlite3.OperationalError as exc:
         lowered = str(exc).lower()
         if time.monotonic() >= deadline or "interrupted" in lowered:
-            return _index_deferred(
-                "FTS index check exceeded its time budget.", "budget_exhausted"
-            )
+            return _index_deferred("FTS index check exceeded its time budget.", "budget_exhausted")
         if "locked" in lowered or "busy" in lowered:
             return _index_deferred("FTS index is busy.", "database_busy")
         return _result(
@@ -1546,9 +1719,7 @@ def _read_state(state_root: Path, deadline: float) -> tuple[dict, str | None]:
     return (value or {}, problem)
 
 
-def _scheduler_check(
-    root: Path, state_root: Path, now: datetime, deadline: float
-) -> dict:
+def _scheduler_check(root: Path, state_root: Path, now: datetime, deadline: float) -> dict:
     scripts = {
         "scheduled_nightly": (root / "scripts" / "scheduled_nightly.py").is_file(),
         "search_memory": (root / "scripts" / "search_memory.py").is_file(),
@@ -1569,7 +1740,9 @@ def _scheduler_check(
             details,
         )
     if not all(scripts.values()) or state_error:
-        return _result("scheduler", "error", "Maintenance source or local state is invalid.", details)
+        return _result(
+            "scheduler", "error", "Maintenance source or local state is invalid.", details
+        )
     status = state.get("last_nightly_status")
     last_date = str(state.get("last_nightly_date", ""))[:10]
     if status == "failed":
@@ -1595,7 +1768,11 @@ def _mcp_check(root: Path) -> dict:
         "core_capture_required": False,
     }
     status = "ok" if source else "error"
-    message = "MCP source is available; package capability was detected." if source else "MCP server source is missing."
+    message = (
+        "MCP source is available; package capability was detected."
+        if source
+        else "MCP server source is missing."
+    )
     return _result("mcp", status, message, details)
 
 
@@ -1695,9 +1872,9 @@ def _probe_codex_hooks_list(
         {"method": "initialized", "params": {}},
         {"id": 2, "method": "hooks/list", "params": {"cwds": [str(root)]}},
     )
-    payload = "".join(
-        json.dumps(item, separators=(",", ":")) + "\n" for item in requests
-    ).encode("utf-8")
+    payload = "".join(json.dumps(item, separators=(",", ":")) + "\n" for item in requests).encode(
+        "utf-8"
+    )
     command = _codex_app_server_command()
     if command is None:
         return None
@@ -1843,9 +2020,7 @@ def _codex_runtime_hooks_state(
     if not isinstance(hooks, list) or any(not isinstance(item, dict) for item in hooks):
         return False, "runtime_hooks_invalid"
     try:
-        expected = _expected_codex_runtime_hooks(
-            root / "integrations" / "codex" / "hooks.json"
-        )
+        expected = _expected_codex_runtime_hooks(root / "integrations" / "codex" / "hooks.json")
     except ValueError:
         return False, "runtime_hooks_template_invalid"
     ours = [
@@ -1870,7 +2045,10 @@ def _codex_runtime_hooks_state(
             return False, "runtime_hooks_disabled"
         trust = hook.get("trustStatus")
         if trust not in {"trusted", "managed"}:
-            return False, f"runtime_hooks_{trust}" if trust in {"untrusted", "modified"} else "runtime_hooks_trust_unknown"
+            return False, f"runtime_hooks_{trust}" if trust in {
+                "untrusted",
+                "modified",
+            } else "runtime_hooks_trust_unknown"
     return True, "runtime_hooks_active"
 
 
@@ -1888,9 +2066,7 @@ def _codex_wrapper_configured(root: Path, home: Path) -> bool:
     )
 
 
-def _integration_check(
-    root: Path, home: Path, *, deadline: float = float("inf")
-) -> dict:
+def _integration_check(root: Path, home: Path, *, deadline: float = float("inf")) -> dict:
     sources = {
         "claude": root / "integrations" / "claude-code" / "settings.json",
         "opencode": root / "scripts" / "llm-wiki-memory-opencode.js",
@@ -1899,7 +2075,10 @@ def _integration_check(
         "antigravity": root / "integrations" / "antigravity" / "AGENTS.md",
     }
     host_configs = {
-        "claude": (home / ".claude", [(home / ".claude" / "settings.json", ("LLM_WIKI_ROOT", "session_start_context.py"))]),
+        "claude": (
+            home / ".claude",
+            [(home / ".claude" / "settings.json", ("LLM_WIKI_ROOT", "session_start_context.py"))],
+        ),
         "opencode": (
             home / ".config" / "opencode",
             [
@@ -1918,7 +2097,10 @@ def _integration_check(
                 )
             ],
         ),
-        "cursor": (home / ".cursor", [(home / ".cursor" / "rules" / "llm-wiki.mdc", ("LLM-Wiki", "LLM_WIKI_ROOT"))]),
+        "cursor": (
+            home / ".cursor",
+            [(home / ".cursor" / "rules" / "llm-wiki.mdc", ("LLM-Wiki", "LLM_WIKI_ROOT"))],
+        ),
         "antigravity": (
             home / ".gemini" / "antigravity",
             [(home / ".gemini" / "antigravity" / "AGENTS.md", ("LLM-Wiki", "LLM_WIKI_ROOT"))],
@@ -1931,9 +2113,7 @@ def _integration_check(
         if not host_dir.exists():
             hosts[name] = {"status": "skipped", "message": "Optional host not installed."}
         elif name == "codex":
-            hooks_active, reason = _codex_runtime_hooks_state(
-                root, home, deadline=deadline
-            )
+            hooks_active, reason = _codex_runtime_hooks_state(root, home, deadline=deadline)
             if hooks_active:
                 hosts[name] = {
                     "status": "ok",
@@ -1954,9 +2134,7 @@ def _integration_check(
                 }
                 if reason == "runtime_hooks_not_completed":
                     hosts[name]["not_completed"] = True
-        elif name != "codex" and any(
-            _contains_markers(path, markers) for path, markers in configs
-        ):
+        elif name != "codex" and any(_contains_markers(path, markers) for path, markers in configs):
             hosts[name] = {"status": "ok", "message": "User integration config detected."}
         elif name in {"cursor", "antigravity"}:
             hosts[name] = {
@@ -1965,15 +2143,19 @@ def _integration_check(
             }
         else:
             configured_missing += 1
-            hosts[name] = {"status": "degraded", "message": "Host detected without LLM-Wiki config."}
+            hosts[name] = {
+                "status": "degraded",
+                "message": "Host detected without LLM-Wiki config.",
+            }
     required_sources = {"claude", "opencode", "codex"}
-    missing_sources = sum(
-        not source_details[name] for name in required_sources
-    )
+    missing_sources = sum(not source_details[name] for name in required_sources)
     if missing_sources:
         status, message = "error", f"{missing_sources} integration source adapter(s) are missing."
     elif configured_missing:
-        status, message = "degraded", f"{configured_missing} installed host(s) lack integration config."
+        status, message = (
+            "degraded",
+            f"{configured_missing} installed host(s) lack integration config.",
+        )
     else:
         status, message = "ok", "Integration sources are available; optional hosts were checked."
     return _result("integrations", status, message, {"sources": source_details, "hosts": hosts})
@@ -2149,14 +2331,10 @@ def _acquire_lock(path: Path, root: Path, now: datetime) -> str | None:
         pid = existing.get("lock_pid")
         old_token = existing.get("lock_token")
         try:
-            acquired = datetime.fromisoformat(
-                str(existing.get("lock_acquired_at", ""))
-            )
+            acquired = datetime.fromisoformat(str(existing.get("lock_acquired_at", "")))
             if acquired.tzinfo is None:
                 acquired = acquired.replace(tzinfo=timezone.utc)
-            stale = (
-                now - acquired.astimezone(timezone.utc)
-            ).total_seconds() > LOCK_STALE_SECONDS
+            stale = (now - acquired.astimezone(timezone.utc)).total_seconds() > LOCK_STALE_SECONDS
         except (TypeError, ValueError):
             return None
         if (
@@ -2282,9 +2460,7 @@ def _rebuild_index(
                 component_info = component.lstat()
             except OSError as exc:
                 raise OSError("unsafe knowledge path") from exc
-            if stat.S_ISLNK(component_info.st_mode) or not stat.S_ISDIR(
-                component_info.st_mode
-            ):
+            if stat.S_ISLNK(component_info.st_mode) or not stat.S_ISDIR(component_info.st_mode):
                 raise OSError("unsafe knowledge path")
         notes = notes_path.resolve()
         try:
@@ -2332,9 +2508,7 @@ def _ensure_maintenance_schema(database: sqlite3.Connection) -> None:
         ("fencing_epoch", "INTEGER NOT NULL DEFAULT 1"),
     ):
         if name not in columns:
-            database.execute(
-                f"ALTER TABLE maintenance_owners ADD COLUMN {name} {declaration}"
-            )
+            database.execute(f"ALTER TABLE maintenance_owners ADD COLUMN {name} {declaration}")
 
 
 def _acquire_maintenance_owner(
@@ -2405,9 +2579,7 @@ def _heartbeat_maintenance_owner(
         database.commit()
 
 
-def _require_maintenance_owner(
-    coordinator: Any, lease: dict[str, object]
-) -> None:
+def _require_maintenance_owner(coordinator: Any, lease: dict[str, object]) -> None:
     with coordinator._connect() as database:
         row = database.execute(
             "SELECT owner_token,process_id,fencing_epoch FROM maintenance_owners "
@@ -2422,9 +2594,7 @@ def _require_maintenance_owner(
         raise RuntimeError("maintenance_owner_fence_lost")
 
 
-def _release_maintenance_owner(
-    coordinator: Any, lease: dict[str, object]
-) -> None:
+def _release_maintenance_owner(coordinator: Any, lease: dict[str, object]) -> None:
     with coordinator._connect() as database:
         database.execute("BEGIN IMMEDIATE")
         released_at = datetime.min.replace(tzinfo=timezone.utc).isoformat()
@@ -2507,6 +2677,364 @@ class _MaintenanceHeartbeat:
         return result
 
 
+def _repair_generation_catalog(
+    root: Path,
+    state_root: Path,
+    *,
+    deadline: float,
+    cancelled,
+    repaired: list[dict],
+) -> None:
+    """Recover valid generations and remove only invalid unregistered partials."""
+    del root
+    import generation_catalog
+
+    graph_root = state_root / "cache" / "evidence-graph"
+    if (
+        _safe_kind(graph_root / "catalog.sqlite3", state_root)[0] == "missing"
+        and _safe_kind(graph_root / "generations", state_root)[0] == "missing"
+    ):
+        return
+    catalog = generation_catalog.GenerationCatalog(state_root)
+    with catalog._readonly() as database:  # noqa: SLF001 - repair needs pointer comparison
+        row = database.execute(
+            "SELECT active_generation_id FROM catalog_state WHERE singleton=1"
+        ).fetchone()
+        active_before = None if row is None else row[0]
+    recovered = catalog.recover_orphans(deadline=deadline)
+    if recovered:
+        repaired.append({"action": "recover_generation_orphans", "count": len(recovered)})
+
+    active_manifest = catalog.get_active(deadline=deadline)
+    active_after = None if active_manifest is None else str(active_manifest["generation_id"])
+    if active_after != active_before:
+        repaired.append(
+            {
+                "action": "fallback_generation",
+                "from": active_before,
+                "to": active_after,
+            }
+        )
+
+    with catalog._readonly() as database:  # noqa: SLF001 - bounded catalog repair
+        rows = database.execute(
+            "SELECT generation_id FROM generations LIMIT ?",
+            (generation_catalog.MAX_GENERATIONS + 1,),
+        ).fetchall()
+    if len(rows) > generation_catalog.MAX_GENERATIONS:
+        raise ValueError("generation catalog exceeds cleanup bound")
+    registered = {str(row[0]) for row in rows}
+    removed = 0
+    children = generation_catalog._bounded_scandir(  # noqa: SLF001
+        catalog.generations_path,
+        generation_catalog.MAX_GENERATION_CHILDREN,
+        "generation child count exceeds cleanup bound",
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    for entry in children:
+        if bool(cancelled and cancelled()) or _deadline_reached(deadline):
+            raise TimeoutError("generation cleanup deadline reached")
+        path = Path(entry.path)
+        if entry.name in registered or not entry.is_dir(follow_symlinks=False):
+            continue
+        try:
+            generation_catalog._generation_id(entry.name)  # noqa: SLF001
+            if generation_catalog._is_link_or_reparse(path):  # noqa: SLF001
+                continue
+            generation_catalog._validate_generation(  # noqa: SLF001
+                path,
+                state_root,
+                deadline=deadline,
+                cancelled=cancelled,
+            )
+        except TimeoutError:
+            raise
+        except (FileNotFoundError, OSError, PermissionError, TypeError, ValueError):
+            if path.parent.resolve(strict=True) != catalog.generations_path.resolve(strict=True):
+                continue
+            shutil.rmtree(path)
+            removed += 1
+    if removed:
+        repaired.append({"action": "cleanup_generation_orphans", "count": removed})
+
+
+def _generation_source_extractor(snapshot, root: Path):
+    """Return the incremental builder adapter for one immutable snapshot."""
+    from evidence_graph_builder import SourceExtraction
+
+    by_id = {source.record.logical_id: source for source in snapshot.sources}
+
+    def extract(source, content, *, sources, source_bytes, deadline, cancelled):
+        del sources, source_bytes
+        captured = by_id[str(source["source_id"])]
+        if captured.content != content:
+            raise ValueError("incremental extraction bytes differ from snapshot")
+        path = captured.record.relative_path
+        if path.startswith("knowledge/projects/"):
+            from project_extractor import extract_projects
+
+            result = extract_projects((captured,), deadline=deadline, cancelled=cancelled)
+        elif path.startswith("knowledge/"):
+            from knowledge_extractor import extract_knowledge
+
+            result = extract_knowledge((captured,), deadline=deadline, cancelled=cancelled)
+        else:
+            from code_extractor import extract_code
+
+            result = extract_code((captured,), repository_id=root.name or "vault")
+        digest = hashlib.sha256(content).hexdigest()
+        fingerprints = {
+            key: hashlib.sha256(f"{key}:{digest}".encode("ascii")).hexdigest()
+            for key in (
+                "exports",
+                "imports",
+                "signatures",
+                "aliases",
+                "project_metadata",
+            )
+        }
+        return SourceExtraction(
+            nodes=tuple(result.nodes),
+            occurrences=tuple(result.occurrences),
+            assertions=tuple(result.assertions),
+            evidence=tuple(result.evidence),
+            observations=tuple(result.observations),
+            dependencies=tuple(getattr(result, "dependencies", ())),
+            source_dependencies=(),
+            invalidation_fingerprints=fingerprints,
+        )
+
+    return extract
+
+
+def _build_or_refresh_generation(
+    root: Path,
+    state_root: Path,
+    *,
+    deadline: float,
+    cancelled,
+    max_sources: int,
+    force_rebuild: bool,
+) -> dict:
+    from corpus_snapshot import (
+        APPROVED_CODE_ROOTS,
+        canonical_source_manifest_sha256,
+        collect_corpus,
+    )
+    from evidence_graph_builder import (
+        IncrementalReuseConfig,
+        build_incremental_generation,
+    )
+    from generation_catalog import GenerationCatalog
+    from reliable_memory import canonical_json_bytes
+
+    code_roots = tuple(
+        relative for relative in sorted(APPROVED_CODE_ROOTS) if (root / relative).is_dir()
+    )
+    snapshot = collect_corpus(
+        root,
+        code_roots=code_roots,
+        max_files=max_sources,
+        deadline=deadline,
+    )
+    if len(snapshot.sources) > max_sources:
+        raise ValueError("corpus source limit exceeded")
+    catalog = GenerationCatalog(state_root)
+    parent = catalog.get_active(deadline=deadline)
+    parent_id = None if parent is None else str(parent["generation_id"])
+    source_manifest_sha256 = canonical_source_manifest_sha256(
+        (source.record for source in snapshot.sources),
+        snapshot.policy,
+        extractor_version="maintenance-extractors/v1",
+    )
+    if (
+        parent is not None
+        and not force_rebuild
+        and parent.get("source_manifest_sha256") == source_manifest_sha256
+    ):
+        return {
+            "status": "current",
+            "generation_id": parent_id,
+            "sources": len(snapshot.sources),
+            "partial": False,
+        }
+
+    policy = {
+        "daily_paths": list(snapshot.policy.daily_paths),
+        "code_roots": list(snapshot.policy.code_roots),
+        "include_historical": snapshot.policy.include_historical,
+        "as_of": snapshot.policy.as_of,
+    }
+    policy_hash = hashlib.sha256(canonical_json_bytes(policy)).hexdigest()
+    config = IncrementalReuseConfig(
+        extractor_version="maintenance-extractors/v1",
+        grammar_version="builtin-grammars/v1",
+        compiler_version=f"python-{sys.version_info.major}.{sys.version_info.minor}",
+        resolver_config_sha256=hashlib.sha256(b"llm-wiki-maintenance-resolver/v1").hexdigest(),
+        schema_version="evidence-graph/v1",
+        workspace_manifest_sha256=policy_hash,
+    )
+    source_rows = [
+        {
+            "source_id": source.record.logical_id,
+            "relative_path": source.record.relative_path,
+            "sha256": source.record.sha256,
+            "size": source.record.size,
+            "media_type": source.record.media_type,
+            "language": source.record.language,
+            "git_oid": source.record.git_oid,
+        }
+        for source in snapshot.sources
+    ]
+    source_bytes = {source.record.logical_id: source.content for source in snapshot.sources}
+    while True:
+        generation_id = f"generation-{time.time_ns():x}-{secrets.token_hex(4)}"
+        if not (catalog.generations_path / generation_id).exists():
+            break
+    built = build_incremental_generation(
+        catalog,
+        sources=source_rows,
+        source_bytes=source_bytes,
+        extractor=_generation_source_extractor(snapshot, root),
+        reuse_config=config,
+        generation_id=generation_id,
+        parent_generation_id=None if force_rebuild else parent_id,
+        policy=policy,
+        expected_active=parent_id,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    if not built.activated:
+        return {
+            "status": "deferred",
+            "generation_id": built.generation_id,
+            "sources": len(snapshot.sources),
+            "partial": True,
+            "reason": "activation_race",
+        }
+    return {
+        "status": "built",
+        "generation_id": built.generation_id,
+        "sources": len(snapshot.sources),
+        "rebuilt_sources": len(built.rebuilt_sources),
+        "reused_sources": len(built.reused_sources),
+        "partial": False,
+    }
+
+
+def run_generation_maintenance(
+    root: Path | str | None = None,
+    state_root: Path | str | None = None,
+    *,
+    time_budget_seconds: float = DEFAULT_GENERATION_TIME_BUDGET_SECONDS,
+    max_sources: int = DEFAULT_GENERATION_SOURCE_LIMIT,
+    force_rebuild: bool = False,
+) -> dict:
+    """Run one bounded fenced generation refresh; never mutate knowledge."""
+    if (
+        isinstance(time_budget_seconds, bool)
+        or not isinstance(time_budget_seconds, (int, float))
+        or not math.isfinite(time_budget_seconds)
+        or time_budget_seconds <= 0
+    ):
+        raise ValueError("time_budget_seconds must be positive and finite")
+    if isinstance(max_sources, bool) or not isinstance(max_sources, int) or max_sources < 1:
+        raise ValueError("max_sources must be a positive integer")
+    root_path = Path(
+        root or os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent)
+    ).resolve()
+    state_path = Path(
+        os.path.abspath(state_root or os.environ.get("LLM_WIKI_STATE_ROOT", root_path))
+    )
+    deadline = time.monotonic() + float(time_budget_seconds)
+    filesystem = _filesystem_check(state_path, deadline)
+    if filesystem["status"] == "error":
+        if filesystem["details"].get("budget_exhausted"):
+            return {
+                "status": "deferred",
+                "generation_id": None,
+                "sources": 0,
+                "partial": True,
+                "reason": "time_limit",
+            }
+        return {
+            "status": "error",
+            "generation_id": None,
+            "sources": 0,
+            "partial": False,
+            "reason": "unsupported_filesystem",
+        }
+    acquired = _acquire_maintenance_owner(root_path, state_path, datetime.now(timezone.utc))
+    if acquired is None:
+        return {
+            "status": "deferred",
+            "generation_id": None,
+            "sources": 0,
+            "partial": True,
+            "reason": "maintenance_owner_busy",
+        }
+    coordinator, lease = acquired
+    repaired: list[dict] = []
+    try:
+        with _MaintenanceHeartbeat(coordinator, lease, deadline=deadline) as guard:
+            guard.run(
+                _repair_generation_catalog,
+                root_path,
+                state_path,
+                deadline=deadline,
+                cancelled=guard.cancelled,
+                repaired=repaired,
+            )
+            result = guard.run(
+                _build_or_refresh_generation,
+                root_path,
+                state_path,
+                deadline=deadline,
+                cancelled=guard.cancelled,
+                max_sources=max_sources,
+                force_rebuild=force_rebuild,
+            )
+            result["repairs"] = repaired
+            return result
+    except TimeoutError:
+        return {
+            "status": "deferred",
+            "generation_id": None,
+            "sources": 0,
+            "partial": True,
+            "reason": "time_limit",
+            "repairs": repaired,
+        }
+    except ValueError as exc:
+        if "limit" in str(exc).casefold() or "ceiling" in str(exc).casefold():
+            return {
+                "status": "deferred",
+                "generation_id": None,
+                "sources": 0,
+                "partial": True,
+                "reason": "source_limit",
+                "repairs": repaired,
+            }
+        return {
+            "status": "error",
+            "generation_id": None,
+            "sources": 0,
+            "partial": False,
+            "reason": type(exc).__name__,
+            "repairs": repaired,
+        }
+    except (OSError, PermissionError, sqlite3.Error) as exc:
+        return {
+            "status": "error",
+            "generation_id": None,
+            "sources": 0,
+            "partial": False,
+            "reason": type(exc).__name__,
+            "repairs": repaired,
+        }
+
+
 def _repair_queue_capabilities(state_root: Path) -> int:
     path = state_root / "run" / "queue.sqlite3"
     if not path.is_file():
@@ -2578,6 +3106,7 @@ def run_doctor(
     state_root: Path | str | None = None,
     home: Path | str | None = None,
     repair: bool = False,
+    rebuild_generation: bool = False,
     repair_actions: set[str] | frozenset[str] | None = None,
     now: datetime | None = None,
     time_budget_seconds: float = DEFAULT_TIME_BUDGET_SECONDS,
@@ -2587,7 +3116,9 @@ def run_doctor(
     unknown_repairs = selected_repairs - VALID_REPAIR_ACTIONS
     if unknown_repairs:
         raise ValueError(f"unknown doctor repair actions: {sorted(unknown_repairs)}")
-    root_path = Path(root or os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent)).resolve()
+    root_path = Path(
+        root or os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent)
+    ).resolve()
     state_path = Path(
         os.path.abspath(state_root or os.environ.get("LLM_WIKI_STATE_ROOT", root_path))
     )
@@ -2602,9 +3133,7 @@ def run_doctor(
         maintenance: tuple[Any, dict[str, object]] | None = None
         guard_entered = False
         try:
-            maintenance = _acquire_maintenance_owner(
-                root_path, state_path, generated_at
-            )
+            maintenance = _acquire_maintenance_owner(root_path, state_path, generated_at)
             if maintenance is None:
                 deferred_by_action = {
                     "runtime": {"runtime"},
@@ -2612,17 +3141,44 @@ def run_doctor(
                     "queue": {"queue"},
                     "indexes": {"index", "claims"},
                     "archives": {"archives"},
+                    "generations": {"generation"},
                 }
                 for action in selected_repairs:
                     repair_deferred.update(deferred_by_action[action])
             else:
                 coordinator, lease = maintenance
-                with _MaintenanceHeartbeat(
-                    coordinator, lease, deadline=deadline
-                ) as guard:
+                with _MaintenanceHeartbeat(coordinator, lease, deadline=deadline) as guard:
                     guard_entered = True
                     if "runtime" in selected_repairs:
                         guard.run(_repair_runtime, state_path, repaired)
+                    if "generations" in selected_repairs:
+                        guard.run(
+                            _repair_generation_catalog,
+                            root_path,
+                            state_path,
+                            deadline=deadline,
+                            cancelled=guard.cancelled,
+                            repaired=repaired,
+                        )
+                        if rebuild_generation:
+                            generation_result = guard.run(
+                                _build_or_refresh_generation,
+                                root_path,
+                                state_path,
+                                deadline=deadline,
+                                cancelled=guard.cancelled,
+                                max_sources=DEFAULT_GENERATION_SOURCE_LIMIT,
+                                force_rebuild=True,
+                            )
+                            if generation_result["status"] == "built":
+                                repaired.append(
+                                    {
+                                        "action": "rebuild_generation",
+                                        "generation_id": generation_result["generation_id"],
+                                    }
+                                )
+                            elif generation_result["status"] == "deferred":
+                                repair_deferred.add("generation")
                     if "transactions" in selected_repairs:
                         recovered = guard.run(
                             coordinator.recover,
@@ -2660,15 +3216,12 @@ def run_doctor(
                             else None
                         )
                         if migration is not None and (
-                            not marker_existed
-                            or migration.imported
-                            or migration.quarantined
+                            not marker_existed or migration.imported or migration.quarantined
                         ):
                             repaired.append(
                                 {
                                     "action": "migrate_queue",
-                                    "count": migration.imported
-                                    + migration.quarantined,
+                                    "count": migration.imported + migration.quarantined,
                                 }
                             )
                         marker_valid = _safe_kind(marker, state_path)[0] == "regular"
@@ -2712,13 +3265,10 @@ def run_doctor(
                                     else:
                                         message = (
                                             "Index repair failed: index was not created"
-                                            if index_after["details"].get("freshness")
-                                            == "missing"
+                                            if index_after["details"].get("freshness") == "missing"
                                             else "Index repair failed: rebuilt index did not validate as fresh"
                                         )
-                                        repair_errors.setdefault("index", []).append(
-                                            message
-                                        )
+                                        repair_errors.setdefault("index", []).append(message)
                                 except Exception as exc:  # noqa: BLE001
                                     repair_errors.setdefault("index", []).append(
                                         f"Index repair failed: {type(exc).__name__}"
@@ -2731,9 +3281,7 @@ def run_doctor(
                                         lock_token,
                                     )
                     if "archives" in selected_repairs:
-                        archive_before = _archive_check(
-                            root_path, state_path, deadline
-                        )
+                        archive_before = _archive_check(root_path, state_path, deadline)
                         archive_root = _archive_path(root_path)
                         if (
                             _safe_kind(archive_root, root_path)[0] == "directory"
@@ -2789,13 +3337,9 @@ def run_doctor(
                             else 0
                         )
                         if processed:
-                            repaired.append(
-                                {"action": "run_bounded_worker", "count": processed}
-                            )
+                            repaired.append({"action": "run_bounded_worker", "count": processed})
         except Exception as exc:  # noqa: BLE001
-            repair_errors.setdefault("runtime", []).append(
-                f"Repair failed: {type(exc).__name__}"
-            )
+            repair_errors.setdefault("runtime", []).append(f"Repair failed: {type(exc).__name__}")
         finally:
             if maintenance is not None and not guard_entered:
                 try:
@@ -2816,16 +3360,21 @@ def run_doctor(
     ]
     remaining = (
         (
-            "index",
-            lambda: _index_check(
-                state_path, generated_at, deadline, root=root_path
+            "generation",
+            lambda: _generation_check(
+                root_path,
+                state_path,
+                generated_at,
+                deadline,
             ),
         ),
         (
+            "index",
+            lambda: _index_check(state_path, generated_at, deadline, root=root_path),
+        ),
+        (
             "scheduler",
-            lambda: _scheduler_check(
-                root_path, state_path, generated_at, deadline
-            ),
+            lambda: _scheduler_check(root_path, state_path, generated_at, deadline),
         ),
         ("mcp", lambda: _mcp_check(root_path)),
         (
@@ -2857,7 +3406,9 @@ def run_doctor(
             check["status"] = "error"
             check["message"] = f"{check['id'].title()} repair failed."
             check["details"]["repair_errors"] = errors
-    counts = {status: sum(check["status"] == status for check in checks) for status in VALID_STATUSES}
+    counts = {
+        status: sum(check["status"] == status for check in checks) for status in VALID_STATUSES
+    }
     overall = "error" if counts["error"] else "degraded" if counts["degraded"] else "ok"
     collected = {check["id"]: check for check in checks}
     run_deletion = _run_deletion_check(
@@ -2870,11 +3421,15 @@ def run_doctor(
         _result(
             "run_deletion",
             "ok",
-            "Runtime history may be deleted." if run_deletion["allowed"] else "Runtime history must be retained.",
+            "Runtime history may be deleted."
+            if run_deletion["allowed"]
+            else "Runtime history must be retained.",
             run_deletion,
         )
     )
-    counts = {status: sum(check["status"] == status for check in checks) for status in VALID_STATUSES}
+    counts = {
+        status: sum(check["status"] == status for check in checks) for status in VALID_STATUSES
+    }
     overall = "error" if counts["error"] else "degraded" if counts["degraded"] else "ok"
     return {
         "schema_version": SCHEMA_VERSION,
@@ -2894,7 +3449,9 @@ def degraded_summary(report: dict) -> str:
     entries = []
     for check in report.get("checks", []):
         if check.get("status") in {"degraded", "error"}:
-            entries.append(f"{check.get('id', 'unknown')} ({check['status']}): {check.get('message', '')}")
+            entries.append(
+                f"{check.get('id', 'unknown')} ({check['status']}): {check.get('message', '')}"
+            )
     text = "; ".join(entries)
     if len(text) <= SUMMARY_LIMIT:
         return text
@@ -2904,9 +3461,17 @@ def degraded_summary(report: dict) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check local LLM-Wiki health.")
     parser.add_argument("--repair", action="store_true", help="Apply safe idempotent repairs.")
+    parser.add_argument(
+        "--rebuild-generation",
+        action="store_true",
+        help="Explicitly rebuild the immutable evidence generation under the repair fence.",
+    )
     parser.add_argument("--json", action="store_true", help="Emit the structured report as JSON.")
     args = parser.parse_args(argv)
-    report = run_doctor(repair=args.repair)
+    report = run_doctor(
+        repair=args.repair or args.rebuild_generation,
+        rebuild_generation=args.rebuild_generation,
+    )
     if args.json:
         print(json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False))
     else:

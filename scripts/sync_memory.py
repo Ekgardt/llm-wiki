@@ -1,4 +1,5 @@
 """Check or apply bounded runtime synchronization without changing knowledge."""
+
 from __future__ import annotations
 
 import argparse
@@ -47,9 +48,7 @@ def _result(action_id: str, status: str, message: str, details: dict) -> dict:
     return {"id": action_id, "status": status, "message": message, "details": details}
 
 
-def _run_uv(
-    command: list[str], *, root: Path, timeout: float
-) -> subprocess.CompletedProcess[str]:
+def _run_uv(command: list[str], *, root: Path, timeout: float) -> subprocess.CompletedProcess[str]:
     return _run_process_tree(
         command,
         cwd=root,
@@ -363,9 +362,7 @@ def _run_process_tree(
             except OSError:
                 cleanup_error = "process_group_kill_failed"
         cleanup_error = _finish_timed_out_process(process, cleanup_error)
-        raise ProcessTreeTimeout(
-            command, exc.timeout, cleanup_error=cleanup_error
-        ) from exc
+        raise ProcessTreeTimeout(command, exc.timeout, cleanup_error=cleanup_error) from exc
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
@@ -383,16 +380,27 @@ def _run_index_builder(*, root: Path, state_root: Path, timeout: float) -> dict:
         LLM_WIKI_STATE_ROOT=str(state_root),
     )
     command = [sys.executable, str(INDEX_BUILDER_SCRIPT), "--rebuild"]
+    deadline = time.monotonic() + timeout
     try:
-        completed = _run_process_tree(
-            command,
-            cwd=root,
-            env=environment,
-            timeout=timeout,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-        )
+        for attempt in range(3):
+            completed = _run_process_tree(
+                command,
+                cwd=root,
+                env=environment,
+                timeout=max(0.001, deadline - time.monotonic()),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+            )
+            sharing_violation = completed.returncode != 0 and (
+                "PermissionError" in completed.stderr or "WinError 5" in completed.stderr
+            )
+            if not sharing_violation or attempt == 2:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.2, remaining))
     except ProcessTreeTimeout as exc:
         return _result(
             "indexes",
@@ -413,6 +421,13 @@ def _run_index_builder(*, root: Path, state_root: Path, timeout: float) -> dict:
             {"error": type(exc).__name__},
         )
     if completed.returncode != 0:
+        if sharing_violation:
+            return _result(
+                "indexes",
+                "skipped",
+                "Index rebuild was deferred after a transient sharing violation.",
+                {"partial": True, "reason": "sharing_violation"},
+            )
         return _result(
             "indexes",
             "error",
@@ -427,13 +442,48 @@ def _run_index_builder(*, root: Path, state_root: Path, timeout: float) -> dict:
     )
 
 
+def _run_generation_builder(
+    *, root: Path, state_root: Path, timeout: float, max_sources: int
+) -> dict:
+    if timeout <= 0:
+        return _result(
+            "indexes",
+            "skipped",
+            "Generation refresh was not started because the sync time limit was reached.",
+            {"bounded": True, "partial": True},
+        )
+    result = doctor.run_generation_maintenance(
+        root=root,
+        state_root=state_root,
+        time_budget_seconds=timeout,
+        max_sources=max_sources,
+    )
+    status = str(result.get("status", "error"))
+    mapped = {
+        "built": "changed",
+        "current": "ok",
+        "deferred": "skipped",
+        "error": "error",
+    }.get(status, "error")
+    return _result(
+        "indexes",
+        mapped,
+        {
+            "built": "Evidence generation was refreshed.",
+            "current": "Evidence generation is current.",
+            "deferred": "Evidence generation refresh was deferred for continuation.",
+        }.get(status, "Evidence generation refresh failed."),
+        {
+            "generation": result.get("generation_id"),
+            "partial": bool(result.get("partial")),
+            **({"reason": result["reason"]} if result.get("reason") else {}),
+        },
+    )
+
+
 def _check_by_id(report: dict, check_id: str) -> dict:
     return next(
-        (
-            check
-            for check in report.get("checks", [])
-            if check.get("id") == check_id
-        ),
+        (check for check in report.get("checks", []) if check.get("id") == check_id),
         {
             "id": check_id,
             "status": "error",
@@ -456,9 +506,7 @@ def _doctor_subset_action(action_id: str, report: dict, check_ids: tuple[str, ..
     primary = checks[0]
     details = dict(primary.get("details", {}))
     if len(checks) > 1:
-        details["checks"] = {
-            check["id"]: check["status"] for check in checks
-        }
+        details["checks"] = {check["id"]: check["status"] for check in checks}
     if report.get("repaired"):
         details["repairs"] = report["repaired"]
     return _result(action_id, status, str(primary.get("message") or action_id), details)
@@ -489,12 +537,21 @@ def run_sync(
     limit = int(action_limit)
     deadline = time.monotonic() + seconds
     actions: list[dict] = []
+    doctor_cache: dict | None = None
 
     def remaining() -> float:
         return max(0.0, deadline - time.monotonic())
 
-    def doctor_report(*, repair: bool, repair_actions: set[str] | None = None) -> dict:
-        return doctor.run_doctor(
+    def doctor_report(
+        *,
+        repair: bool,
+        repair_actions: set[str] | None = None,
+        refresh: bool = False,
+    ) -> dict:
+        nonlocal doctor_cache
+        if not repair and not refresh and doctor_cache is not None:
+            return doctor_cache
+        report = doctor.run_doctor(
             root=root_path,
             state_root=state_path,
             home=home_path,
@@ -502,6 +559,9 @@ def run_sync(
             repair_actions=repair_actions,
             time_budget_seconds=remaining(),
         )
+        if not repair:
+            doctor_cache = report
+        return report
 
     for position, action_id in enumerate(ACTIONS):
         if position >= limit or remaining() <= 0:
@@ -523,6 +583,8 @@ def run_sync(
                 action = _doctor_subset_action(
                     action_id, report, ("environment", "runtime", "filesystem")
                 )
+                if apply:
+                    doctor_cache = {**report, "repaired": []}
             elif action_id == "dependencies":
                 action = _dependency_action(
                     root=root_path,
@@ -542,38 +604,103 @@ def run_sync(
                     (action_id,),
                 )
             elif action_id == "indexes":
+                report = doctor_report(repair=False)
+                generation_reported = any(
+                    check.get("id") == "generation" for check in report.get("checks", [])
+                )
                 before = _doctor_subset_action(
                     action_id,
-                    doctor_report(repair=False),
-                    ("index",),
+                    report,
+                    ("index", "generation") if generation_reported else ("index",),
                 )
-                if (
+                generation = _check_by_id(report, "generation")
+                index = _check_by_id(report, "index")
+                refreshes = []
+                index_needs_refresh = (
+                    apply and index["status"] != "ok" and index["details"].get("repairable")
+                )
+                generation_needs_refresh = (
                     apply
-                    and before["status"] == "skipped"
-                    and before["details"].get("repairable")
-                ):
-                    action = _run_index_builder(
+                    and generation_reported
+                    and generation["status"] != "ok"
+                    and generation["details"].get("repairable")
+                )
+                if generation_needs_refresh:
+                    refreshes.append(
+                        _run_generation_builder(
+                            root=root_path,
+                            state_root=state_path,
+                            timeout=remaining(),
+                            max_sources=doctor.DEFAULT_GENERATION_SOURCE_LIMIT,
+                        )
+                    )
+                if index_needs_refresh:
+                    index_action = _run_index_builder(
                         root=root_path,
                         state_root=state_path,
                         timeout=remaining(),
                     )
-                    if action["status"] == "changed":
+                    if index_action["status"] == "changed" and not generation_needs_refresh:
                         after = _doctor_subset_action(
                             action_id,
-                            doctor_report(repair=False),
+                            doctor_report(repair=False, refresh=True),
                             ("index",),
                         )
                         if after["status"] != "ok":
-                            action = _result(
+                            index_action = _result(
                                 "indexes",
                                 "error",
                                 "Rebuilt index did not pass freshness validation.",
                                 after["details"],
                             )
+                    refreshes.append(index_action)
+                if refreshes:
+                    if len(refreshes) == 1:
+                        action = refreshes[0]
+                        actions.append(action)
+                        continue
+                    statuses = {item["status"] for item in refreshes}
+                    fatal_error = any(
+                        item["status"] == "error" and not item["details"].get("timed_out")
+                        for item in refreshes
+                    )
+                    status = (
+                        "error"
+                        if fatal_error
+                        else "changed"
+                        if "changed" in statuses
+                        else "skipped"
+                        if "skipped" in statuses
+                        else "ok"
+                    )
+                    action = _result(
+                        "indexes",
+                        status,
+                        "Derived indexes were synchronized."
+                        if status in {"ok", "changed"}
+                        else "Derived index synchronization requires attention.",
+                        {
+                            "generation": next(
+                                (
+                                    item["details"].get("generation")
+                                    for item in refreshes
+                                    if "generation" in item["details"]
+                                ),
+                                None,
+                            ),
+                            "partial": any(
+                                item["details"].get("partial", False)
+                                or item["details"].get("timed_out", False)
+                                for item in refreshes
+                            ),
+                            "actions": [item["status"] for item in refreshes],
+                            "results": [item["details"] for item in refreshes],
+                        },
+                    )
                 else:
                     action = before
             else:
-                report = doctor_report(repair=False)
+                report = doctor_report(repair=False, refresh=True)
                 status = _mapped_status(str(report.get("overall_status", "error")))
                 action = _result(
                     "doctor",
@@ -593,8 +720,7 @@ def run_sync(
         actions.append(action)
 
     counts = {
-        status: sum(action["status"] == status for action in actions)
-        for status in ACTION_STATUSES
+        status: sum(action["status"] == status for action in actions) for status in ACTION_STATUSES
     }
     overall = (
         "error"
@@ -657,9 +783,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"LLM-Wiki sync ({report['mode']}): {report['overall_status']}")
         for action in report["actions"]:
             print(f"{action['id']}: {action['status']} - {action['message']}")
-    return {"ok": 0, "changed": 0, "degraded": 1, "error": 2}.get(
-        report["overall_status"], 2
-    )
+    return {"ok": 0, "changed": 0, "degraded": 1, "error": 2}.get(report["overall_status"], 2)
 
 
 if __name__ == "__main__":
