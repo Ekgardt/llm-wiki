@@ -82,13 +82,14 @@ def test_generation_check_validates_active_artifacts_and_reports_source_delta(tm
     assert stale["details"]["unindexed_delta"] == 1
 
 
-def test_generation_check_is_read_only_when_catalog_is_missing(tmp_path):
+def test_generation_check_distinguishes_not_built_from_invalid_active(tmp_path):
     import doctor
+    from generation_catalog import GenerationCatalog
 
     root, state = _vault(tmp_path)
     before = {path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*")}
 
-    check = doctor._generation_check(
+    missing = doctor._generation_check(
         root,
         state,
         datetime.now(timezone.utc),
@@ -96,11 +97,46 @@ def test_generation_check_is_read_only_when_catalog_is_missing(tmp_path):
         max_sources=10,
     )
 
-    assert check["status"] == "degraded"
-    assert check["details"]["catalog"] == "missing"
-    assert check["details"]["age_seconds"] is None
-    assert check["details"]["age_source"] is None
+    assert missing["status"] == "ok"
+    assert missing["details"]["catalog"] == "missing"
+    assert missing["details"]["freshness"] == "missing"
+    assert missing["details"]["repairable"] is True
+    assert missing["details"]["recommended_action"] == "rebuild_generation"
+    assert missing["details"]["age_seconds"] is None
+    assert missing["details"]["age_source"] is None
     assert {path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*")} == before
+
+    catalog = GenerationCatalog(state)
+    empty = doctor._generation_check(
+        root,
+        state,
+        datetime.now(timezone.utc),
+        deadline=time.monotonic() + 1,
+        max_sources=10,
+    )
+
+    assert empty["status"] == "ok"
+    assert empty["details"]["catalog"] == "valid"
+    assert empty["details"]["active_generation"] is None
+    assert empty["details"]["repairable"] is True
+    assert empty["details"]["recommended_action"] == "rebuild_generation"
+
+    with sqlite3.connect(catalog.catalog_path) as database:
+        database.execute(
+            "UPDATE catalog_state SET active_generation_id = ? WHERE singleton = 1",
+            ("missing-generation",),
+        )
+
+    invalid = doctor._generation_check(
+        root,
+        state,
+        datetime.now(timezone.utc),
+        deadline=time.monotonic() + 1,
+        max_sources=10,
+    )
+
+    assert invalid["status"] == "error"
+    assert invalid["details"]["catalog"] == "invalid"
 
 
 def test_generation_repair_recovers_valid_orphan_cleans_partial_and_falls_back(tmp_path):
