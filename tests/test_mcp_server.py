@@ -27,6 +27,7 @@ ENVELOPE_FIELDS = {
     "fallback",
     "partial",
     "warnings",
+    "components",
     "data",
 }
 
@@ -90,6 +91,24 @@ WRONG_TYPE_CALLS = [
 
 
 class TestToolDefinitions:
+    def test_tool_inventory_remains_exactly_the_canonical_twelve(self):
+        import mcp_server
+
+        assert list(mcp_server.TOOL_INPUT_SCHEMAS) == [
+            "recall",
+            "read_page",
+            "wiki_overview",
+            "vault_status",
+            "get_decisions",
+            "get_context",
+            "check_contradiction",
+            "log_decision",
+            "compile",
+            "find_dead_code",
+            "get_architecture",
+            "doctor",
+        ]
+
     """Test MCP tool definitions."""
 
     def test_build_tool_definitions_returns_list(self):
@@ -203,6 +222,18 @@ class TestToolDefinitions:
             tool = next(item for item in tools if item.name == "get_architecture")
             assert tool.inputSchema["required"] == ["directory"]
             assert tool.inputSchema["properties"]["directory"]["type"] == "string"
+
+    def test_get_architecture_declares_all_canonical_modes_without_new_tool(self):
+        import mcp_server
+
+        modes = mcp_server.TOOL_INPUT_SCHEMAS["get_architecture"]["properties"]["mode"]
+        assert modes["enum"] == [
+            "summary", "symbol", "callers", "callees", "dependencies",
+            "path", "community", "impact",
+        ]
+        tools = mcp_server._build_tool_definitions()
+        if tools:
+            assert len(tools) == 12
 
     def test_code_tools_allow_explicit_live_fallback_without_adding_tools(self):
         import mcp_server
@@ -610,6 +641,68 @@ class TestHelperFunctions:
         result = _get_context(["nonexistent-1", "nonexistent-2"])
         assert isinstance(result, dict)
 
+    def test_get_context_returns_one_bounded_compiler_package(self, tmp_path, monkeypatch):
+        import mcp_server
+        import memory_state
+
+        notes = tmp_path / "knowledge/notes"
+        projects = tmp_path / "knowledge/projects/demo"
+        notes.mkdir(parents=True)
+        projects.mkdir(parents=True)
+        (notes / "choice.md").write_text(
+            "---\ntype: decision\nstatus: active\n---\n# Choice\n\n"
+            "One-sentence summary: Keep one package.\n\n## Evidence\n\nproof\n",
+            encoding="utf-8",
+        )
+        (notes / "incident.md").write_text(
+            "---\ntype: debugging\nstatus: active\n---\n# Incident\n\n"
+            "One-sentence summary: Compiler regression.\n",
+            encoding="utf-8",
+        )
+        (projects / "state.md").write_text(
+            "---\ntype: project-state\nstatus: active\n---\n# Demo\n\n"
+            "One-sentence summary: Active Task17.\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(memory_state, "ROOT", tmp_path)
+
+        package = mcp_server._get_context(
+            ["choice", "incident", "state"], token_budget=1200
+        )
+
+        assert set(package) >= {
+            "text", "packed_tokens", "token_budget", "repo_map", "pages",
+            "symbols", "decisions", "incidents", "active_task", "evidence",
+            "retrieval_trace", "materialization_trace",
+        }
+        assert package["packed_tokens"] <= package["token_budget"] == 1200
+        assert package["decisions"]
+        assert package["incidents"]
+        assert package["active_task"]
+
+    def test_get_context_repo_map_includes_selected_pages_dropped_by_budget(
+        self, tmp_path, monkeypatch
+    ):
+        import mcp_server
+        import memory_state
+
+        notes = tmp_path / "knowledge/notes"
+        notes.mkdir(parents=True)
+        for slug in ("alpha", "beta"):
+            (notes / f"{slug}.md").write_text(
+                "---\ntype: concept\nstatus: active\n---\n"
+                f"# {slug.title()}\n\nOne-sentence summary: " + (slug * 300) + "\n",
+                encoding="utf-8",
+            )
+        monkeypatch.setattr(memory_state, "ROOT", tmp_path)
+
+        package = mcp_server._get_context(["alpha", "beta"], token_budget=256)
+
+        assert package["repo_map"] == [
+            "knowledge/notes/alpha.md",
+            "knowledge/notes/beta.md",
+        ]
+
     def test_get_context_direct_call_deduplicates_and_enforces_bounds(self, monkeypatch):
         import mcp_server
 
@@ -620,10 +713,9 @@ class TestHelperFunctions:
             lambda slug, **kwargs: reads.append(slug) or {"slug": slug, "content": ""},
         )
 
-        assert list(mcp_server._get_context(["first", "first", "second"])) == [
-            "first", "second"
-        ]
-        assert reads == ["first", "second"]
+        package = mcp_server._get_context(["first", "first", "second"])
+        assert package["missing_slugs"] == ["first", "second"]
+        assert reads == []
         with pytest.raises(ValueError, match="slugs"):
             mcp_server._get_context([f"page-{index}" for index in range(21)])
         with pytest.raises(ValueError, match="slug"):
@@ -645,6 +737,8 @@ class TestHelperFunctions:
         assert mcp_server._search_vault("secret", 2) == []
         assert mcp_server._get_decisions("choice", 3) == []
         assert calls[0][1]["source_tool"] == "mcp.recall"
+        assert calls[0][1]["semantic"] is True
+        assert calls[0][1]["deadline_monotonic"] > time.monotonic()
         assert calls[1][1]["source_tool"] == "mcp.get_decisions"
         assert calls[1][1]["emit_telemetry"] is False
 
@@ -739,7 +833,8 @@ class TestHelperFunctions:
         monkeypatch.setattr(memory_state, "STATE_ROOT", tmp_path / "state")
         monkeypatch.setattr(retrieval_telemetry, "TELEMETRY_DB", database)
 
-        assert "page" in mcp_server._get_context(["page"])
+        package = mcp_server._get_context(["page"])
+        assert "knowledge/notes/page.md" in package["repo_map"]
 
         rows = retrieval_telemetry.read_events(limit=10, db_path=database)
         assert [(row.event_kind, row.source_tool) for row in rows] == [
@@ -855,7 +950,148 @@ class TestHandleToolCall:
     def test_recall_returns_json(self):
         data = self._data("recall", {"query": "auth"})
         assert isinstance(data["results"], list)
+        assert set(data["retrieval_trace"]) == {
+            "schema_version", "requested_mode", "effective_mode", "signals_used",
+            "fallback_reason", "corpus_generation", "partial", "reranker_applied",
+            "reranker_model_id", "reranker_model_revision", "reranker_depth",
+            "reranker_duration_ms", "reranker_fallback_reason",
+        }
         assert "_meta" in data
+
+    def test_recall_exposes_validated_planner_trace_and_component_generation(self, monkeypatch):
+        import mcp_server
+
+        row = {
+            "path": "knowledge/notes/auth.md",
+            "requested_mode": "HYBRID",
+            "effective_mode": "BASE",
+            "signals_used": ["lexical"],
+            "fallback_reason": "dense_unavailable",
+            "generation": "gen-17",
+            "reranker_applied": False,
+            "reranker_model_id": None,
+            "reranker_model_revision": None,
+            "reranker_depth": None,
+            "reranker_duration_ms": None,
+            "reranker_fallback_reason": None,
+        }
+        monkeypatch.setattr(mcp_server, "_search_vault", lambda *args, **kwargs: [row])
+        monkeypatch.setattr(mcp_server, "_meta", lambda: {})
+
+        envelope = json.loads(self._run("recall", {"query": "auth"}))
+
+        trace = envelope["data"]["retrieval_trace"]
+        assert trace["requested_mode"] == "HYBRID"
+        assert trace["effective_mode"] == "BASE"
+        assert trace["corpus_generation"] == "gen-17"
+        assert envelope["components"]["lexical"] == {
+            "generation": "gen-17", "freshness": "fresh"
+        }
+
+    def test_empty_recall_does_not_claim_any_retrieval_signal(self, monkeypatch):
+        import mcp_server
+
+        monkeypatch.setattr(mcp_server, "_search_vault", lambda *args, **kwargs: [])
+        monkeypatch.setattr(mcp_server, "_meta", lambda: {})
+
+        envelope = json.loads(self._run("recall", {"query": "missing"}))
+
+        assert envelope["data"]["retrieval_trace"]["signals_used"] == []
+        assert envelope["data"]["retrieval_trace"]["fallback_reason"] == "trace_unavailable"
+        assert all(
+            detail["freshness"] != "fresh"
+            for detail in envelope["components"].values()
+        )
+
+    def test_recall_rejects_trace_outside_the_closed_schema(self, monkeypatch):
+        import mcp_server
+
+        row = {
+            "requested_mode": "HYBRID",
+            "effective_mode": "invented",
+            "signals_used": ["lexical"],
+            "generation": "gen-17",
+        }
+        monkeypatch.setattr(mcp_server, "_search_vault", lambda *args, **kwargs: [row])
+
+        envelope = json.loads(self._run("recall", {"query": "auth"}))
+
+        assert "error" in envelope["data"]
+
+    @pytest.mark.parametrize(
+        ("mode", "args", "helper", "result_key"),
+        [
+            ("callers", {"symbol": "target"}, "find_callers", "callers"),
+            ("callees", {"symbol": "target"}, "find_callees", "callees"),
+            ("dependencies", {"symbol": "target"}, "find_dependencies", "dependencies"),
+            ("path", {"symbol": "source", "target": "sink"}, "find_paths", "paths"),
+            ("community", {}, "detect_communities", "communities"),
+        ],
+    )
+    def test_get_architecture_dispatches_graph_modes(
+        self, tmp_path, monkeypatch, mode, args, helper, result_key
+    ):
+        import code_graph
+
+        calls = []
+        monkeypatch.setattr(
+            code_graph,
+            helper,
+            lambda *values, **options: calls.append((values, options))
+            or {result_key: [], "source_generation": None, "graph_complete": False,
+                "unresolved_count": 0, "fallback": True},
+        )
+
+        data = self._data(
+            "get_architecture", {"directory": str(tmp_path), "mode": mode, **args}
+        )
+
+        assert data["mode"] == mode
+        assert result_key in data["architecture"]
+        assert calls
+        assert calls[0][1]["with_report"] is True
+
+    def test_get_architecture_symbol_mode_combines_existing_graph_queries(
+        self, tmp_path, monkeypatch
+    ):
+        import code_graph
+
+        report = {
+            "source_generation": "graph-17",
+            "graph_complete": True,
+            "unresolved_count": 0,
+            "fallback": False,
+        }
+        monkeypatch.setattr(
+            code_graph, "find_callers", lambda *args, **kwargs: {"callers": [1], **report}
+        )
+        monkeypatch.setattr(
+            code_graph, "find_callees", lambda *args, **kwargs: {"callees": [2], **report}
+        )
+        monkeypatch.setattr(
+            code_graph,
+            "find_dependencies",
+            lambda *args, **kwargs: {"dependencies": [3], **report},
+        )
+
+        envelope = json.loads(
+            self._run(
+                "get_architecture",
+                {"directory": str(tmp_path), "mode": "symbol", "symbol": "target"},
+            )
+        )
+
+        assert envelope["data"]["architecture"] == {
+            "symbol": "target",
+            "callers": [1],
+            "callees": [2],
+            "dependencies": [3],
+            **report,
+        }
+        assert envelope["components"]["graph"] == {
+            "generation": "graph-17",
+            "freshness": "fresh",
+        }
 
     def test_wiki_overview_returns_json(self):
         data = self._data("wiki_overview", {})
@@ -1117,7 +1353,7 @@ class TestHandleToolCall:
 
     @pytest.mark.parametrize("tool_name", ["recall", "get_decisions", "check_contradiction"])
     @pytest.mark.parametrize("index_state", ["stale", "missing"])
-    def test_unfresh_index_degrades_index_dependent_tools(
+    def test_legacy_index_age_does_not_claim_component_freshness(
         self, monkeypatch, tmp_path, tool_name, index_state
     ):
         import mcp_contract
@@ -1144,9 +1380,12 @@ class TestHandleToolCall:
 
         envelope = json.loads(self._run(tool_name, VALID_TOOL_CALLS[tool_name]))
 
-        assert envelope["freshness"] == index_state.replace("missing", "unknown")
-        assert envelope["partial"] is True
-        assert any("freshness" in warning.lower() for warning in envelope["warnings"])
+        assert envelope["index_timestamp"] is None
+        if tool_name != "recall":
+            assert envelope["freshness"] == "unknown"
+        assert not any(
+            "index freshness" in warning.lower() for warning in envelope["warnings"]
+        )
 
     def test_get_context_accepts_unrecognized_include_strings(self, monkeypatch):
         import mcp_server
@@ -1497,7 +1736,9 @@ class TestResources:
         assert "Infinity" not in text
         assert json.loads(text)["data"]["compile_backlog"] is None
 
-    def test_stale_index_degrades_context_resource_quality(self, monkeypatch, tmp_path):
+    def test_stale_legacy_index_does_not_degrade_context_resource_quality(
+        self, monkeypatch, tmp_path
+    ):
         import mcp_contract
         import mcp_server
 
@@ -1525,10 +1766,9 @@ class TestResources:
 
         envelope = json.loads(mcp_server._handle_resource_read("llm-wiki://context"))
 
-        assert envelope["freshness"] == "stale"
-        assert envelope["partial"] is True
-        assert envelope["coverage"] < 1
-        assert envelope["warnings"]
+        assert envelope["freshness"] == "unknown"
+        assert envelope["partial"] is False
+        assert envelope["coverage"] > 0.6
 
     def test_unknown_resource_returns_enveloped_error(self):
         from mcp_server import _handle_resource_read
