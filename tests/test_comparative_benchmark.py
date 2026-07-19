@@ -22,6 +22,7 @@ SCHEMA = BENCHMARK / "comparative-v1.schema.json"
 RUNNER = BENCHMARK / "run_comparative.py"
 LEDGER_SCHEMA = BENCHMARK / "comparative-task-ledger-v1.schema.json"
 REPORT_SCHEMA = BENCHMARK / "comparative-smoke-report-v1.schema.json"
+ADAPTER_FIXTURE = BENCHMARK / "fixtures" / "comparative_adapter_fixture.py"
 
 ADAPTER_IDS = {
     "grep-read",
@@ -579,3 +580,398 @@ def test_cli_smoke_is_json_offline_and_real_mode_is_unavailable():
     assert real.returncode == 2
     assert not real.stdout
     assert "unavailable until Gate F" in real.stderr
+
+
+def _fixture_manifest(tmp_path: Path) -> dict:
+    gate_f = tmp_path / "gate-f.json"
+    gate_f.write_text('{"passed":true}\n', encoding="utf-8")
+    commands = {
+        adapter_id: [sys.executable, str(ADAPTER_FIXTURE), adapter_id]
+        for adapter_id in ADAPTER_IDS
+    }
+    return {
+        "schema_version": "comparative-run/v1",
+        "repository": {
+            "path": str(tmp_path),
+            "url": "https://example.invalid/fixture.git",
+            "commit": "1" * 40,
+        },
+        "graphify": {"path": str(tmp_path / "graphify")},
+        "hardware": "fixture-cpu",
+        "model": {
+            "id": "fixture/model@v1",
+            "probe_command": [sys.executable, str(ADAPTER_FIXTURE), "probe-model"],
+        },
+        "context_budget": 4096,
+        "retry_policy": {"backoff": "none", "max_attempts": 2},
+        "tasks": [
+            {"id": "fixture-task-a", "task": "Find the alpha definition and cite it."},
+            {"id": "fixture-task-b", "task": "Find the beta definition and cite it."},
+        ],
+        "seeds": [1729, 2718, 31415],
+        "adapters": {
+            adapter_id: {"command": command, "required_env": []}
+            for adapter_id, command in commands.items()
+        },
+        "limits": {
+            "max_stderr_bytes": 4096,
+            "max_stdout_bytes": 65536,
+            "timeout_seconds": 5,
+        },
+        "gate_f": {
+            "evidence_path": str(gate_f),
+            "evidence_sha256": runner_digest(gate_f),
+            "passed": True,
+        },
+    }
+
+
+def runner_digest(path: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_real_adapter_registry_is_complete_and_bounded():
+    runner = _runner_module()
+
+    specs = runner.real_adapter_specs()
+
+    assert set(specs) == ADAPTER_IDS
+    assert specs["grep-read"].backend == "bounded-grep-read"
+    assert specs["graphify-pinned"].backend == "pinned-graphify"
+    assert specs["llm-wiki-current"].backend == "current-search"
+    assert specs["evidence-graph-only"].profile == "GRAPH"
+    assert specs["hybrid-retrieval"].profile == "HYBRID"
+    assert specs["adaptive-context-compiler"].backend == "context-compiler"
+    assert all(spec.max_results > 0 for spec in specs.values())
+
+
+def test_deterministic_adapter_fixture_runs_all_tasks_seeds_and_attempts(tmp_path):
+    runner = _runner_module()
+    contract = runner.load_contract(CONTRACT, SCHEMA)
+    manifest = _fixture_manifest(tmp_path)
+
+    first = runner.execute_comparison(contract, manifest, fixture_mode=True)
+    second = runner.execute_comparison(contract, manifest, fixture_mode=True)
+
+    assert first == second
+    assert first["mode"] == "deterministic-adapter-integration-fixture"
+    assert first["quality_claim"] is False
+    assert first["public_claim_gate"]["eligible"] is False
+    assert first["statistics"]["computed"] is True
+    assert len(first["raw_task_ledgers"]) == 6 * 2 * 3 + 1
+    assert any(ledger["outcome"] == "failure" for ledger in first["raw_task_ledgers"])
+    identities = {
+        (ledger["adapter_id"], ledger["task_id"], ledger["seed"], ledger["attempt"])
+        for ledger in first["raw_task_ledgers"]
+    }
+    assert len(identities) == len(first["raw_task_ledgers"])
+    grouped_fingerprints = {}
+    for ledger in first["raw_task_ledgers"]:
+        grouped_fingerprints.setdefault((ledger["task_id"], ledger["seed"]), set()).add(
+            ledger["input_fingerprint"]
+        )
+    assert all(len(values) == 1 for values in grouped_fingerprints.values())
+    assert set(first["metric_summaries"]) == ADAPTER_IDS
+    for summary in first["metric_summaries"].values():
+        assert set(summary["query_latency_ms"]) == {"p50", "p95"}
+
+
+def test_run_artifacts_store_each_attempt_including_failures(tmp_path):
+    runner = _runner_module()
+    contract = runner.load_contract(CONTRACT, SCHEMA)
+    report = runner.execute_comparison(contract, _fixture_manifest(tmp_path), fixture_mode=True)
+    output = tmp_path / "evidence"
+
+    index = runner.write_run_artifacts(report, output)
+
+    ledger_files = sorted((output / "raw-task-ledgers").glob("*.json"))
+    assert len(ledger_files) == len(report["raw_task_ledgers"])
+    stored = [json.loads(path.read_text(encoding="utf-8")) for path in ledger_files]
+    assert any(item["outcome"] == "failure" for item in stored)
+    assert json.loads((output / "report.json").read_text(encoding="utf-8")) == report
+    assert index["report_sha256"] == runner_digest(output / "report.json")
+    assert len(index["ledger_sha256"]) == len(stored)
+
+
+def test_terminal_adapter_failure_is_reported_and_closes_statistics(tmp_path, monkeypatch):
+    runner = _runner_module()
+    contract = runner.load_contract(CONTRACT, SCHEMA)
+
+    def fail_graphify(command, request, limits):
+        if request["adapter"]["id"] == "graphify-pinned":
+            return runner._failure_result(
+                "fixture-terminal-failure", "unavailable", phase="query", retryable=False
+            )
+        return {
+            "failure": None,
+            "metrics": {
+                **{field: None for field in METRIC_FIELDS},
+                "blinded_factual_correctness": 0.5,
+                "cache_tokens": 0,
+                "uncached_input_tokens": 10,
+                "uncached_output_tokens": 1,
+            },
+            "outcome": "success",
+        }
+
+    monkeypatch.setattr(runner, "_invoke_adapter", fail_graphify)
+    report = runner.execute_comparison(contract, _fixture_manifest(tmp_path), fixture_mode=True)
+
+    assert report["statistics"]["computed"] is False
+    assert report["quality_claim"] is False
+    assert "statistics-unavailable" in report["public_claim_gate"]["failed_conditions"]
+    assert any(ledger["outcome"] == "failure" for ledger in report["raw_task_ledgers"])
+    runner.write_run_artifacts(report, tmp_path / "failed-evidence")
+
+
+def test_invalid_adapter_metrics_become_validation_failure_ledgers(tmp_path, monkeypatch):
+    runner = _runner_module()
+    contract = runner.load_contract(CONTRACT, SCHEMA)
+
+    def invalid_metrics(command, request, limits):
+        return {
+            "failure": None,
+            "metrics": {**{field: None for field in METRIC_FIELDS}, "retrieval_quality": 2.0},
+            "outcome": "success",
+        }
+
+    monkeypatch.setattr(runner, "_invoke_adapter", invalid_metrics)
+    report = runner.execute_comparison(contract, _fixture_manifest(tmp_path), fixture_mode=True)
+
+    assert all(ledger["outcome"] == "failure" for ledger in report["raw_task_ledgers"])
+    assert all(ledger["failure"]["code"] == "adapter-invalid-metrics" for ledger in report["raw_task_ledgers"])
+    runner.write_run_artifacts(report, tmp_path / "invalid-metric-evidence")
+
+
+def test_preflight_fails_closed_for_graphify_env_model_and_gate_f(tmp_path):
+    runner = _runner_module()
+    contract = runner.load_contract(CONTRACT, SCHEMA)
+    manifest = _fixture_manifest(tmp_path)
+    manifest["adapters"]["hybrid-retrieval"]["required_env"] = ["EMBEDDING_REVISION"]
+
+    with pytest.raises(runner.PreflightError) as missing_graphify:
+        runner.preflight_real_run(contract, manifest, environ={})
+
+    codes = {finding["code"] for finding in missing_graphify.value.findings}
+    assert "graphify-checkout-unavailable" in codes
+    assert "required-environment-unavailable" in codes
+    assert "repository-commit-unverified" in codes
+
+    manifest["gate_f"]["passed"] = False
+    with pytest.raises(runner.PreflightError) as gate_f:
+        runner.preflight_real_run(contract, manifest, environ={})
+    assert "gate-f-unavailable" in {finding["code"] for finding in gate_f.value.findings}
+
+
+def test_execution_rejects_seed_set_that_differs_from_frozen_contract(tmp_path):
+    runner = _runner_module()
+    contract = runner.load_contract(CONTRACT, SCHEMA)
+    manifest = _fixture_manifest(tmp_path)
+    manifest["seeds"] = [1, 2, 3]
+
+    with pytest.raises(ValueError, match="frozen agent seeds"):
+        runner.execute_comparison(contract, manifest, fixture_mode=True)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda value: value["tasks"].__setitem__(0, {"id": "../escape", "task": "bad"}),
+        lambda value: value.__setitem__("repository", {"path": "."}),
+        lambda value: value.__setitem__("context_budget", True),
+    ],
+)
+def test_real_manifest_rejects_malformed_nested_inputs(tmp_path, mutate):
+    runner = _runner_module()
+    manifest = _fixture_manifest(tmp_path)
+    mutate(manifest)
+
+    with pytest.raises(ValueError, match="manifest|task|repository|context"):
+        runner.execute_comparison(
+            runner.load_contract(CONTRACT, SCHEMA), manifest, fixture_mode=True
+        )
+
+
+def test_preflight_requires_exact_graphify_commit_lock_and_model_identity(tmp_path):
+    runner = _runner_module()
+    contract = runner.load_contract(CONTRACT, SCHEMA)
+    manifest = _fixture_manifest(tmp_path)
+    graphify = Path(manifest["graphify"]["path"])
+    graphify.mkdir()
+    (graphify / "uv.lock").write_text("wrong lock", encoding="utf-8")
+
+    def fake_probe(command, **kwargs):
+        cwd = Path(kwargs.get("cwd", tmp_path))
+        if command[:2] == ["git", "rev-parse"] and cwd == Path(manifest["repository"]["path"]):
+            return subprocess.CompletedProcess(command, 0, manifest["repository"]["commit"] + "\n", "")
+        if command[:2] == ["git", "rev-parse"]:
+            return subprocess.CompletedProcess(command, 0, runner.GRAPHIFY_COMMIT + "\n", "")
+        if command[:3] == ["git", "hash-object", "uv.lock"]:
+            return subprocess.CompletedProcess(command, 0, "0" * 40 + "\n", "")
+        return subprocess.CompletedProcess(command, 0, "fixture/other@v2\n", "")
+
+    with pytest.raises(runner.PreflightError) as failed:
+        runner.preflight_real_run(contract, manifest, environ={}, command_runner=fake_probe)
+
+    codes = {finding["code"] for finding in failed.value.findings}
+    assert "graphify-lock-mismatch" in codes
+    assert "model-identity-mismatch" in codes
+
+
+def test_preflight_rejects_gate_f_label_without_complete_evidence(tmp_path):
+    runner = _runner_module()
+    contract = runner.load_contract(CONTRACT, SCHEMA)
+    manifest = _fixture_manifest(tmp_path)
+    manifest["hard_gates"] = {"crash": True, "evidence": True, "freshness": True}
+
+    with pytest.raises(runner.PreflightError) as failed:
+        runner.preflight_real_run(contract, manifest, environ={})
+
+    assert "gate-f-evidence-invalid" in {finding["code"] for finding in failed.value.findings}
+
+
+def _stat_ledger(adapter_id: str, task: str, seed: int, quality: float, tokens: int) -> dict:
+    inputs = {
+        "commit": "2" * 40,
+        "context_budget": 4096,
+        "hardware": "fixture-cpu",
+        "model": "fixture/model@v1",
+        "repository": "https://example.invalid/repo.git",
+        "retry_policy": {"backoff": "none", "max_attempts": 1},
+        "task": task,
+    }
+    metrics = {field: None for field in METRIC_FIELDS}
+    metrics.update(
+        blinded_factual_correctness=quality,
+        cache_tokens=0,
+        uncached_input_tokens=tokens,
+        uncached_output_tokens=0,
+    )
+    return {
+        "adapter_id": adapter_id,
+        "adapter_provenance": {
+            "configuration_sha256": "3" * 64,
+            "implementation_status": "implemented-pinned",
+            "source_revision": {"kind": "git-commit", "value": "2" * 40},
+        },
+        "attempt": 1,
+        "failure": None,
+        "input_fingerprint": _runner_module()._fingerprint(inputs),
+        "inputs": inputs,
+        "metrics": metrics,
+        "outcome": "success",
+        "seed": seed,
+        "task_id": task,
+    }
+
+
+def test_paired_hierarchical_bootstrap_matches_frozen_estimands():
+    runner = _runner_module()
+    contract = runner.load_contract(CONTRACT, SCHEMA)
+    ledgers = []
+    for task in ("task-a", "task-b"):
+        for seed in contract["statistics"]["agent_seeds"]:
+            ledgers.append(_stat_ledger("graphify-pinned", task, seed, 0.5, 100))
+            ledgers.append(_stat_ledger("hybrid-retrieval", task, seed, 0.6, 80))
+
+    result = runner.compute_paired_statistics(
+        contract, ledgers, candidate_id="hybrid-retrieval"
+    )
+
+    assert result["quality_difference"] == pytest.approx(0.1)
+    assert result["quality_difference_lower_confidence_bound"] == pytest.approx(0.1)
+    assert result["token_ratio"] == pytest.approx(0.8)
+    assert result["token_ratio_upper_confidence_bound"] == pytest.approx(0.8)
+    assert result["resamples"] == 10000
+    assert 0 <= result["randomization_p_value"] <= 1
+
+
+def test_paired_statistics_reject_missing_seed_and_zero_baseline_tokens():
+    runner = _runner_module()
+    contract = runner.load_contract(CONTRACT, SCHEMA)
+    seeds = contract["statistics"]["agent_seeds"]
+    complete = [
+        _stat_ledger(adapter, "task-a", seed, 0.5, 100)
+        for adapter in ("graphify-pinned", "hybrid-retrieval")
+        for seed in seeds
+    ]
+
+    with pytest.raises(ValueError, match="identical seed sets"):
+        runner.compute_paired_statistics(
+            contract, complete[:-1], candidate_id="hybrid-retrieval"
+        )
+
+    for ledger in complete:
+        if ledger["adapter_id"] == "graphify-pinned":
+            ledger["metrics"]["uncached_input_tokens"] = 0
+    with pytest.raises(ValueError, match="denominator"):
+        runner.compute_paired_statistics(
+            contract, complete, candidate_id="hybrid-retrieval"
+        )
+
+
+def test_public_claim_requires_full_gate_f_real_evidence_and_hard_gates():
+    runner = _runner_module()
+    contract = runner.load_contract(CONTRACT, SCHEMA)
+    statistics = {
+        "quality_difference_lower_confidence_bound": 0.05,
+        "token_ratio_upper_confidence_bound": 0.8,
+    }
+
+    closed = runner.evaluate_public_claim_gate(
+        contract,
+        statistics,
+        gate_f_passed=False,
+        real_evidence_complete=True,
+        hard_gates={"crash": True, "evidence": True, "freshness": True},
+    )
+    assert closed["eligible"] is False
+    assert "gate-f-not-passed" in closed["failed_conditions"]
+
+    opened = runner.evaluate_public_claim_gate(
+        contract,
+        statistics,
+        gate_f_passed=True,
+        real_evidence_complete=True,
+        hard_gates={"crash": True, "evidence": True, "freshness": True},
+    )
+    assert opened["eligible"] is True
+
+
+def test_cli_fixture_runs_protocol_and_writes_evidence(tmp_path):
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps(_fixture_manifest(tmp_path)), encoding="utf-8")
+    output = tmp_path / "output"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(RUNNER),
+            "--fixture",
+            "--manifest",
+            str(manifest),
+            "--output",
+            str(output),
+            "--json",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["quality_claim"] is False
+    assert (output / "artifact-index.json").is_file()
+
+
+def test_cli_real_modes_require_manifest_and_output(capsys):
+    runner = _runner_module()
+
+    assert runner.main(["--preflight", "--json"]) == 2
+    assert "--manifest is required" in capsys.readouterr().err
+    assert runner.main(["--run", "--manifest", "missing.json", "--json"]) == 2
+    assert "--output is required" in capsys.readouterr().err
