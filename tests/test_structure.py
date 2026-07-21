@@ -181,6 +181,44 @@ def test_superset_contract_is_canonical() -> None:
         assert unimplemented_path not in implemented_checkpoint
 
 
+def test_code_kernel_target_is_approved_but_not_reported_as_current() -> None:
+    structure = (ROOT / "docs/STRUCTURE.md").read_text(encoding="utf-8")
+    current = structure.split("## Implemented corpus-generation checkpoint", 1)[
+        1
+    ].split("\n## ", 1)[0]
+    target = structure.split("## Approved code-kernel target", 1)[1].split(
+        "\n## ", 1
+    )[0]
+    decision_path = (
+        ROOT / "knowledge/notes/persistent-code-intelligence-kernel-decision.md"
+    )
+
+    assert decision_path.is_file()
+    _required_frontmatter_scalars(
+        decision_path.read_text(encoding="utf-8"),
+        {
+            "type": "decision",
+            "status": "active",
+            "confidence": "high",
+            "source_authority": "user",
+            "date": "2026-07-21",
+        },
+    )
+    assert "evidence-graph/v2" in current
+    assert "evidence-graph/v3" not in current
+    for value in (
+        "evidence-graph/v3",
+        "v2 generations remain readable",
+        "run/code-analysis-consent.sqlite3",
+        "run/analyzer-runs/<filesystem-run-id>/",
+        "exactly 12 task-shaped tools",
+        "Python 3.10",
+        "approved target",
+    ):
+        assert value in target
+    assert (ROOT / "AGENTS.md").read_bytes() == (ROOT / "CLAUDE.md").read_bytes()
+
+
 def test_agent_contract_mentions_three_zone_process_rule():
     """The contract must document the 'architecture changes require sign-off'
     rule so future agents don't improvise structural changes mid-task.

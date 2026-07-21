@@ -81,4 +81,5 @@ undo artifacts retain their existing protections.
 
 ## Related
 
+- [[persistent-code-intelligence-kernel-decision]]
 - [[solo-operator-superset-product-decision]]

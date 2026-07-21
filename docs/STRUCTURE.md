@@ -116,7 +116,8 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 
 ## Implemented corpus-generation checkpoint
 
-The current checkpoint implements one complete `corpus-generation/v2` for one
+The current checkpoint implements one complete `corpus-generation/v2` with
+`evidence-graph/v2` for one
 repository checkout or worktree. `repository_scope` is a closed
 `repository-scope/v1` object containing the repository ID, checkout ID, canonical
 checkout root, Git common directory, and captured commit. Repository identity is
@@ -153,6 +154,25 @@ Nightly maintenance invokes this same path and treats only `current` or `built` 
 success. This checkpoint does not document a native code-index kernel, multi-repo
 portfolio generation, temporal/control-plane services, or an operator console as
 implemented.
+
+## Approved code-kernel target
+
+This section records an approved target, not implemented behavior. The current
+checkpoint remains `corpus-generation/v2` with `evidence-graph/v2` until every
+implementation and verification task in Plan A passes.
+
+The approved target is `evidence-graph/v3` inside the existing immutable
+generation and existing catalog publication boundary. v2 generations remain readable
+for their structural capabilities. The target adds no second graph, catalog,
+active pointer, runtime root, persistent daemon, or MCP tool. Agent access remains
+exactly 12 task-shaped tools, and Plan A remains compatible with Python 3.10.
+
+Precise analyzer execution is gated by repository, analyzer, and exact invocation
+consent stored in `run/code-analysis-consent.sqlite3`. Each invocation receives
+sealed scratch state under `run/analyzer-runs/<filesystem-run-id>/`, not the live
+checkout. These operational databases use rollback-journal, `synchronous=FULL`,
+and no WAL. The code index remains disposable derived evidence; Markdown, Git,
+project journals, and captured source bytes remain authoritative.
 
 ## What lives where
 

@@ -128,6 +128,7 @@ The existing runtime deletion and transaction contracts remain in force.
 
 ## Related
 
+- [[persistent-code-intelligence-kernel-decision]]
 - [[derived-evidence-generation-decision]]
 - [[agent-native-mcp-foundation]]
 - [[reliable-memory-stage-2]]

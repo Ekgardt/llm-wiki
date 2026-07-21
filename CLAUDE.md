@@ -137,6 +137,18 @@ Legacy `cache/index.sqlite`, `cache/vectors.npy`, `cache/vectors_meta.json`, and
 caches, not members of a generation. They must not be removed until installed-vault
 migration evidence makes that safe.
 
+**Approved code-kernel target (not implemented):** The current checkpoint remains
+`corpus-generation/v2` with `evidence-graph/v2` until Plan A passes. The approved
+target is `evidence-graph/v3` inside the existing immutable generation and catalog;
+v2 generations remain readable for structural capabilities. It adds no second
+graph, catalog, active pointer, runtime root, persistent daemon, or MCP tool. The
+interface remains exactly 12 task-shaped tools with Python 3.10 support. Precise
+analyzer execution requires repository, analyzer, and exact invocation consent in
+`run/code-analysis-consent.sqlite3`; sealed scratch state lives under
+`run/analyzer-runs/<filesystem-run-id>/`, not the live checkout. Operational SQLite
+uses rollback-journal, `synchronous=FULL`, and no WAL. See
+`knowledge/notes/persistent-code-intelligence-kernel-decision.md`.
+
 **Forbidden at vault root:** `wiki/`, `memory/`, `outputs/`, `state/`,
 `LLM-wiki-state/` (legacy sibling layout — removed). Runtime lives **inside**
 the vault under gitignored `cache/logs/run/`.
