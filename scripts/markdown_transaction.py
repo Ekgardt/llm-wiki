@@ -278,14 +278,20 @@ def _writer_retry_delay(attempt: int, deadline: float) -> float:
     return max(0.0, min(delay, deadline - time.monotonic()))
 
 
-def _recover_initial_contention(coordinator: MarkdownCoordinator) -> None:
-    deadline = time.monotonic() + _WRITER_WAIT_SECONDS
+def _recover_initial_contention(
+    coordinator: MarkdownCoordinator,
+    *,
+    deadline: float = float("inf"),
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
+    deadline = min(deadline, time.monotonic() + _WRITER_WAIT_SECONDS)
     attempt = 0
     while True:
         try:
             coordinator.recover(
                 writer_wait_seconds=max(0.0, deadline - time.monotonic()),
                 deadline=deadline,
+                cancelled=cancelled,
             )
             return
         except (OSError, sqlite3.Error) as exc:
@@ -417,15 +423,22 @@ def mutate_knowledge(
 
 
 def _settle_operation(
-    coordinator: MarkdownCoordinator, operation_id: str
+    coordinator: MarkdownCoordinator,
+    operation_id: str,
+    *,
+    deadline: float = float("inf"),
+    cancelled: Callable[[], bool] | None = None,
 ) -> TransactionRecord | None:
-    deadline = time.monotonic() + _WRITER_WAIT_SECONDS
+    deadline = min(deadline, time.monotonic() + _WRITER_WAIT_SECONDS)
     while True:
+        coordinator._require_operation_active(deadline, cancelled)
         record = coordinator._record_for_operation_id(operation_id)
         if record is None:
             return None
         if record.state in {"prepared", "applying"}:
-            return coordinator.apply(record.id)
+            return coordinator.apply(
+                record.id, deadline=deadline, cancelled=cancelled
+            )
         if record.state != "preparing":
             return record
         with coordinator._connect() as database:
@@ -434,7 +447,7 @@ def _settle_operation(
                 (operation_id,),
             ).fetchone()
         if owner is None or owner["owner_pid"] is None or not _pid_alive(owner["owner_pid"]):
-            coordinator.recover()
+            coordinator.recover(deadline=deadline, cancelled=cancelled)
         if time.monotonic() >= deadline:
             raise TimeoutError("timed out waiting for duplicate transaction preparation")
         time.sleep(0.01)
@@ -483,6 +496,9 @@ def append_knowledge(
     operation_id: str | Path | None = None,
     path: Path | bytes | None = None,
     block: bytes | None = None,
+    *,
+    deadline: float = float("inf"),
+    cancelled: Callable[[], bool] | None = None,
 ) -> TransactionRecord:
     """CAS-append Markdown or project JSONL bytes, retrying concurrent winners."""
     if block is None and isinstance(operation_id, Path) and isinstance(path, bytes):
@@ -498,14 +514,21 @@ def append_knowledge(
         raise ValueError("operation_id must be non-empty")
     coordinator = _default_coordinator()
     relative = _relative_target(coordinator, Path(path))
-    _recover_initial_contention(coordinator)
+    _recover_initial_contention(
+        coordinator, deadline=deadline, cancelled=cancelled
+    )
     attempt = 0
     gate_timeouts = 0
     while attempt < 64:
         candidate_id = operation_id if attempt == 0 else f"{operation_id}:cas:{attempt}"
         existing = coordinator._record_for_operation_id(candidate_id)
         if existing is not None:
-            existing = _settle_operation(coordinator, candidate_id)
+            existing = _settle_operation(
+                coordinator,
+                candidate_id,
+                deadline=deadline,
+                cancelled=cancelled,
+            )
             if existing is None:
                 continue
             if not _append_request_matches(coordinator, existing, relative, block):
@@ -515,7 +538,14 @@ def append_knowledge(
             attempt += 1
             continue
         try:
-            with coordinator.writer_gate():
+            coordinator._require_operation_active(deadline, cancelled)
+            with coordinator.writer_gate(
+                wait_seconds=min(
+                    _WRITER_WAIT_SECONDS,
+                    max(0.0, deadline - time.monotonic()),
+                )
+            ):
+                coordinator._require_operation_active(deadline, cancelled)
                 before = coordinator._read_bounded_target(
                     coordinator._target(relative), MAX_KNOWLEDGE_TARGET_BYTES
                 )
@@ -542,14 +572,26 @@ def append_knowledge(
                 [change],
                 operation_id=candidate_id,
                 preconditions={relative: expected},
+                deadline=deadline,
+                cancelled=cancelled,
             )
-            settled = _settle_operation(coordinator, candidate_id)
+            settled = _settle_operation(
+                coordinator,
+                candidate_id,
+                deadline=deadline,
+                cancelled=cancelled,
+            )
             if settled is None:
                 continue
             return settled
         except (FileExistsError, FileNotFoundError, ValueError) as exc:
             if isinstance(exc, ValueError) and "operation_id is already bound" in str(exc):
-                winner = _settle_operation(coordinator, candidate_id)
+                winner = _settle_operation(
+                    coordinator,
+                    candidate_id,
+                    deadline=deadline,
+                    cancelled=cancelled,
+                )
                 if winner is None or not _append_request_matches(
                     coordinator, winner, relative, block
                 ):
@@ -1293,7 +1335,10 @@ class MarkdownCoordinator:
         validators: Sequence[Validator] = (),
         project_reservation: ProjectCheckpointReservation | None = None,
         _parent_transaction_id: str | None = None,
+        deadline: float = float("inf"),
+        cancelled: Callable[[], bool] | None = None,
     ) -> TransactionRecord:
+        self._require_operation_active(deadline, cancelled)
         if not isinstance(operation_id, str) or not operation_id:
             raise ValueError("operation_id must be a non-empty string")
         if not changes:
@@ -1311,7 +1356,8 @@ class MarkdownCoordinator:
             if "project_lease" not in persisted_preconditions:
                 raise ValueError("project reservation requires a project lease precondition")
         request_hash = self._request_hash(normalized, persisted_preconditions)
-        self.recover()
+        self.recover(deadline=deadline, cancelled=cancelled)
+        self._require_operation_active(deadline, cancelled)
         existing = self._record_for_operation_id(operation_id)
         if existing is not None:
             if self._request_hash_for_operation_id(operation_id) != request_hash:
@@ -1323,6 +1369,7 @@ class MarkdownCoordinator:
         before_root = artifact_root / "before"
         after_root = artifact_root / "after"
         try:
+            self._require_operation_active(deadline, cancelled)
             artifact_root.mkdir(parents=True)
             _harden_owner_only(artifact_root, 0o700)
             before_root.mkdir()
@@ -1336,7 +1383,13 @@ class MarkdownCoordinator:
 
         timestamp = _now()
         try:
-            with self._connect() as database, begin_immediate(database):
+            self._require_operation_active(deadline, cancelled)
+            with self._connect() as database, begin_immediate(
+                database,
+                before_commit=lambda: self._require_operation_active(
+                    deadline, cancelled
+                ),
+            ):
                 database.execute(
                     'INSERT INTO "transaction" '
                     "(id, operation_id, request_hash, state, preconditions_json, plan_hash, "
@@ -1366,6 +1419,7 @@ class MarkdownCoordinator:
         plan_operations: list[dict[str, object]] = []
         try:
             for position, change in enumerate(normalized):
+                self._require_operation_active(deadline, cancelled)
                 target = self._target(change.path)
                 before, parent_identity = self._capture_target(
                     target, max_before_bytes=change.max_before_bytes
@@ -1440,7 +1494,13 @@ class MarkdownCoordinator:
             self._killpoint("after_plan_fsynced", _parent_transaction_id)
 
             try:
-                with self._connect() as database, begin_immediate(database):
+                self._require_operation_active(deadline, cancelled)
+                with self._connect() as database, begin_immediate(
+                    database,
+                    before_commit=lambda: self._require_operation_active(
+                        deadline, cancelled
+                    ),
+                ):
                     if project_reservation is not None:
                         self._bind_project_reservation(
                             database,
@@ -1482,7 +1542,12 @@ class MarkdownCoordinator:
         except BaseException:
             record = self._record_if_present(transaction_id)
             if record is None or record.state == "preparing":
-                with self._connect() as database, begin_immediate(database):
+                with self._connect() as database, begin_immediate(
+                    database,
+                    before_commit=lambda: self._require_operation_active(
+                        deadline, cancelled
+                    ),
+                ):
                     database.execute(
                         'DELETE FROM "transaction" WHERE id = ? AND state = \'preparing\'',
                         (transaction_id,),
@@ -1543,7 +1608,9 @@ class MarkdownCoordinator:
             "project_lease"
         ]
         assert isinstance(refreshed, Mapping)
-        with self._connect() as database, begin_immediate(database):
+        with self._connect() as database, begin_immediate(
+            database, before_commit=self._require_current_operation_active
+        ):
             row = database.execute(
                 'SELECT state, preconditions_json FROM "transaction" WHERE id = ?',
                 (transaction_id,),
@@ -1613,8 +1680,16 @@ class MarkdownCoordinator:
         transaction_id: str,
         *,
         writer_wait_seconds: float | None = None,
+        deadline: float = float("inf"),
+        cancelled: Callable[[], bool] | None = None,
     ) -> TransactionRecord:
+        self._require_operation_active(deadline, cancelled)
         with self.writer_gate(wait_seconds=writer_wait_seconds):
+            self._require_operation_active(deadline, cancelled)
+            previous_deadline = getattr(self._local, "recovery_deadline", None)
+            previous_cancelled = getattr(self._local, "recovery_cancelled", None)
+            self._local.recovery_deadline = deadline
+            self._local.recovery_cancelled = cancelled
             try:
                 return self._apply_locked(transaction_id)
             except TransactionFailure as exc:
@@ -1657,6 +1732,9 @@ class MarkdownCoordinator:
                     transaction_id, failure.state, error_code=failure.code
                 )
                 raise failure from exc
+            finally:
+                self._local.recovery_deadline = previous_deadline
+                self._local.recovery_cancelled = previous_cancelled
 
     def _apply_locked(self, transaction_id: str) -> TransactionRecord:
         record = self._record(transaction_id)
@@ -1674,7 +1752,10 @@ class MarkdownCoordinator:
         self._check_preconditions(record.preconditions, operation_states)
         self._reconcile_operation_states(transaction_id, rows)
         rows = self._operation_rows(transaction_id)
-        with self._connect() as database, begin_immediate(database):
+        self._require_current_operation_active()
+        with self._connect() as database, begin_immediate(
+            database, before_commit=self._require_current_operation_active
+        ):
             database.execute(
                 'UPDATE "transaction" SET state = \'applying\', updated_at = ? WHERE id = ?',
                 (_now(), transaction_id),
@@ -1682,6 +1763,7 @@ class MarkdownCoordinator:
         self._killpoint("after_applying", record.parent_transaction_id)
 
         for row, operation_plan in zip(rows, plan["operations"], strict=True):
+            self._require_current_operation_active()
             self._check_preconditions(record.preconditions, operation_states)
             if row["applied"]:
                 self._require_operation_state(row, row["after_hash"], "after state")
@@ -1693,7 +1775,10 @@ class MarkdownCoordinator:
         for row in self._operation_rows(transaction_id):
             self._require_operation_state(row, row["after_hash"], "after state")
         self._killpoint("before_commit", record.parent_transaction_id)
-        with self._connect() as database, begin_immediate(database):
+        self._require_current_operation_active()
+        with self._connect() as database, begin_immediate(
+            database, before_commit=self._require_current_operation_active
+        ):
             database.execute(
                 'UPDATE "transaction" SET state = \'committed\', updated_at = ? WHERE id = ?',
                 (_now(), transaction_id),
@@ -1712,7 +1797,10 @@ class MarkdownCoordinator:
         self._check_preconditions(record.preconditions, operation_states)
         self._reconcile_operation_states(record.id, rows)
         rows = self._operation_rows(record.id)
-        with self._connect() as database, begin_immediate(database):
+        self._require_current_operation_active()
+        with self._connect() as database, begin_immediate(
+            database, before_commit=self._require_current_operation_active
+        ):
             self._assert_writer_ownership(database)
             database.execute(
                 'UPDATE "transaction" SET state = \'applying\', updated_at = ? '
@@ -1722,7 +1810,9 @@ class MarkdownCoordinator:
         self._killpoint("after_applying", record.parent_transaction_id)
 
         changed: list[sqlite3.Row] = []
-        with self._connect() as database, begin_immediate(database):
+        with self._connect() as database, begin_immediate(
+            database, before_commit=self._require_current_operation_active
+        ):
             self._assert_writer_ownership(database)
             self._check_preconditions(
                 record.preconditions, operation_states, database=database
@@ -1733,6 +1823,7 @@ class MarkdownCoordinator:
                 operations = plan["operations"]
                 assert isinstance(operations, list)
                 for row, operation_plan in zip(rows, operations, strict=True):
+                    self._require_current_operation_active()
                     self._check_preconditions(
                         record.preconditions, operation_states, database=database
                     )
@@ -1753,6 +1844,7 @@ class MarkdownCoordinator:
                 for row in rows:
                     self._require_operation_state(row, row["after_hash"], "after state")
                 self._killpoint("before_commit", record.parent_transaction_id)
+                self._require_current_operation_active()
                 self._check_preconditions(
                     record.preconditions, operation_states, database=database
                 )
@@ -2071,7 +2163,9 @@ class MarkdownCoordinator:
             return "invalid"
 
         try:
-            with self._connect() as database, begin_immediate(database):
+            with self._connect() as database, begin_immediate(
+                database, before_commit=self._require_current_operation_active
+            ):
                 reservation_row = database.execute(
                     "SELECT * FROM project_checkpoints WHERE operation_id = ?",
                     (record.operation_id,),
@@ -2101,7 +2195,9 @@ class MarkdownCoordinator:
             return "invalid"
         except TransactionFailure as exc:
             self._set_transaction_state(record.id, "quarantined", error_code=exc.code)
-            with self._connect() as database, begin_immediate(database):
+            with self._connect() as database, begin_immediate(
+                database, before_commit=self._require_current_operation_active
+            ):
                 database.execute(
                     "UPDATE project_checkpoints SET state = 'quarantined' "
                     "WHERE operation_id = ?",
@@ -2190,7 +2286,9 @@ class MarkdownCoordinator:
                     )
                     return
                 continue
-            with self._connect() as database, begin_immediate(database):
+            with self._connect() as database, begin_immediate(
+                database, before_commit=self._require_current_operation_active
+            ):
                 database.execute(
                     'UPDATE "operation" SET applied = 0 '
                     "WHERE transaction_id = ? AND position = ?",
@@ -2203,7 +2301,9 @@ class MarkdownCoordinator:
     def _apply_inverse_under_fence(
         self, inverse: Mapping[str, object], before_state: object
     ) -> None:
-        with self._connect() as database, begin_immediate(database):
+        with self._connect() as database, begin_immediate(
+            database, before_commit=self._require_current_operation_active
+        ):
             self._assert_writer_ownership(database)
             self._apply_operation(inverse, {"after": before_state})
 
@@ -2295,11 +2395,27 @@ class MarkdownCoordinator:
         )
         return self._record(transaction_id)
 
-    def undo(self, transaction_id: str) -> TransactionRecord:
+    def undo(
+        self,
+        transaction_id: str,
+        *,
+        deadline: float = float("inf"),
+        cancelled: Callable[[], bool] | None = None,
+    ) -> TransactionRecord:
+        self._require_operation_active(deadline, cancelled)
         with self.writer_gate():
-            return self._prepare_undo(transaction_id)
+            self._require_operation_active(deadline, cancelled)
+            return self._prepare_undo(
+                transaction_id, deadline=deadline, cancelled=cancelled
+            )
 
-    def _prepare_undo(self, transaction_id: str) -> TransactionRecord:
+    def _prepare_undo(
+        self,
+        transaction_id: str,
+        *,
+        deadline: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> TransactionRecord:
         original = self._record(transaction_id)
         if original.state != "committed":
             raise RuntimeError("only a committed transaction can be undone")
@@ -2311,12 +2427,14 @@ class MarkdownCoordinator:
             raise RuntimeError("transaction undo images are no longer retained")
         rows = self._operation_rows(transaction_id)
         for row in rows:
+            self._require_operation_active(deadline, cancelled)
             if self._operation_hash(row) != row["after_hash"]:
                 raise RuntimeError("undo precondition failed: current target changed")
 
         changes: list[MarkdownChange] = []
         preconditions: dict[str, object] = {}
         for row in rows:
+            self._require_operation_active(deadline, cancelled)
             preconditions[row["path"]] = row["after_hash"]
             if row["before_hash"] == ABSENT:
                 changes.append(MarkdownChange.delete(row["path"]))
@@ -2338,11 +2456,19 @@ class MarkdownCoordinator:
             operation_id=f"undo:{transaction_id}:{uuid.uuid4().hex}",
             preconditions=preconditions,
             _parent_transaction_id=transaction_id,
+            deadline=deadline,
+            cancelled=cancelled,
         )
 
     def prune(
-        self, *, retention_days: int = 30, now: datetime | None = None
+        self,
+        *,
+        retention_days: int = 30,
+        now: datetime | None = None,
+        deadline: float = float("inf"),
+        cancelled: Callable[[], bool] | None = None,
     ) -> int:
+        self._require_operation_active(deadline, cancelled)
         if retention_days < 30:
             raise ValueError("retention_days must be at least 30")
         current = now or datetime.now(timezone.utc)
@@ -2360,17 +2486,32 @@ class MarkdownCoordinator:
                     )
                 )
             for row in rows:
+                self._require_operation_active(deadline, cancelled)
                 if _parse_timestamp(row["updated_at"]) >= cutoff:
                     continue
                 artifact_root = self.transaction_root / row["id"]
                 if not artifact_root.exists():
                     continue
-                self._remove_artifacts(artifact_root)
-                with self._connect() as database, begin_immediate(database):
-                    database.execute(
-                        'UPDATE "transaction" SET artifacts_pruned_at = ? WHERE id = ?',
-                        (_now(), row["id"]),
-                    )
+                staged_root = self.transaction_root / (
+                    f".{row['id']}.pruning-{uuid.uuid4().hex}"
+                )
+                artifact_root.replace(staged_root)
+                try:
+                    self._require_operation_active(deadline, cancelled)
+                    with self._connect() as database, begin_immediate(
+                        database,
+                        before_commit=lambda: self._require_operation_active(
+                            deadline, cancelled
+                        ),
+                    ):
+                        database.execute(
+                            'UPDATE "transaction" SET artifacts_pruned_at = ? WHERE id = ?',
+                            (_now(), row["id"]),
+                        )
+                except BaseException:
+                    staged_root.replace(artifact_root)
+                    raise
+                self._remove_artifacts(staged_root)
                 pruned += 1
         return pruned
 
@@ -2409,7 +2550,9 @@ class MarkdownCoordinator:
     def _set_transaction_state(
         self, transaction_id: str, state: str, *, error_code: str | None = None
     ) -> None:
-        with self._connect() as database, begin_immediate(database):
+        with self._connect() as database, begin_immediate(
+            database, before_commit=self._require_current_operation_active
+        ):
             database.execute(
                 'UPDATE "transaction" SET state = ?, error_code = ?, updated_at = ? '
                 "WHERE id = ?",
@@ -2585,14 +2728,12 @@ class MarkdownCoordinator:
                     heartbeat = _now()
                     cursor = database.execute(
                         "UPDATE writer_owners SET heartbeat_at = ?, expires_at = ? "
-                        "WHERE gate_name = 'global' AND owner_token = ? AND fencing_epoch = ? "
-                        "AND expires_at > ?",
+                        "WHERE gate_name = 'global' AND owner_token = ? AND fencing_epoch = ?",
                         (
                             heartbeat,
                             _future_timestamp(_WRITER_LEASE_SECONDS),
                             owner_token,
                             fencing_epoch,
-                            heartbeat,
                         ),
                     )
                     if cursor.rowcount != 1:
@@ -3385,7 +3526,9 @@ class MarkdownCoordinator:
                 (transaction_id, position),
             )
             return
-        with self._connect() as database, begin_immediate(database):
+        with self._connect() as database, begin_immediate(
+            database, before_commit=self._require_current_operation_active
+        ):
             self._assert_writer_ownership(database)
             database.execute(
                 'UPDATE "operation" SET applied = 1 '
@@ -3406,7 +3549,9 @@ class MarkdownCoordinator:
             self._require_operation_state(row, row["after_hash"], "after state")
             self._mark_operation_applied(transaction_id, row["position"])
             return
-        with self._connect() as database, begin_immediate(database):
+        with self._connect() as database, begin_immediate(
+            database, before_commit=self._require_current_operation_active
+        ):
             self._assert_writer_ownership(database)
             self._local.mutation_database = database
             try:
@@ -3546,10 +3691,20 @@ class MarkdownCoordinator:
 
     def _before_target_mutation(self, target: Path) -> None:
         """Failure-injection boundary after parent binding and before mutation."""
+        del target
+        self._require_current_operation_active()
+
+    def _require_current_operation_active(self) -> None:
         deadline = getattr(self._local, "recovery_deadline", None)
         cancelled = getattr(self._local, "recovery_cancelled", None)
         if deadline is not None and self._recovery_stopped(deadline, cancelled):
-            raise TimeoutError("transaction recovery deadline or cancellation reached")
+            raise TimeoutError("transaction mutation deadline or cancellation reached")
+
+    def _require_operation_active(
+        self, deadline: float, cancelled: Callable[[], bool] | None
+    ) -> None:
+        if self._recovery_stopped(deadline, cancelled):
+            raise TimeoutError("transaction mutation deadline or cancellation reached")
 
     def _write_new_file_at(self, parent_descriptor: int, name: str, content: bytes) -> None:
         flags = (

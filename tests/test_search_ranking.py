@@ -159,6 +159,36 @@ def test_needs_rebuild_no_index():
         assert search_memory._needs_rebuild([]) is True
 
 
+def test_legacy_search_threads_stop_context_into_freshness_check(
+    tmp_path, monkeypatch
+):
+    import search_memory
+
+    page = tmp_path / "page.md"
+    page.write_text("# Page\nneedle\n", encoding="utf-8")
+    deadline = time.monotonic() + 30
+
+    def cancelled():
+        return False
+
+    def freshness(_pages, *, deadline=None, cancelled=None):
+        assert deadline == test_deadline
+        assert cancelled is test_cancelled
+        raise TimeoutError("freshness deadline")
+
+    test_deadline = deadline
+    test_cancelled = cancelled
+    monkeypatch.setattr(search_memory, "_needs_rebuild", freshness)
+
+    with pytest.raises(TimeoutError, match="freshness deadline"):
+        search_memory._legacy_lexical_hits(
+            "needle",
+            page_paths=[page],
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+
+
 def test_needs_rebuild_fresh_files(tmp_path):
     """Returns True when source files are newer than index."""
     import search_memory
@@ -535,6 +565,75 @@ def test_index_swap_retries_transient_windows_access_denial(tmp_path, monkeypatc
     assert not list(index_dir.glob(".index.sqlite.*.tmp"))
 
 
+def test_index_publication_reuses_caller_stop_context(tmp_path, monkeypatch):
+    import search_memory
+
+    page = tmp_path / "knowledge" / "notes" / "page.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("# Page\nBody", encoding="utf-8")
+    index_dir = tmp_path / "cache"
+    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
+    monkeypatch.setattr(search_memory, "INDEX_DIR", index_dir)
+    monkeypatch.setattr(search_memory, "INDEX_FILE", index_dir / "index.sqlite")
+    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", index_dir / "manifest.json")
+    deadline = time.monotonic() + 30
+
+    def cancelled():
+        return False
+
+    seen = []
+
+    @contextmanager
+    def lock(*, deadline=None, cancelled=None):
+        seen.append(("lock", deadline, cancelled))
+        yield
+
+    def replace(_temporary, *, deadline=None, cancelled=None):
+        seen.append(("replace", deadline, cancelled))
+
+    monkeypatch.setattr(search_memory, "_index_swap_lock", lock)
+    monkeypatch.setattr(search_memory, "_replace_live_index", replace)
+
+    search_memory._build_index([page], deadline=deadline, cancelled=cancelled)
+
+    assert seen == [("lock", deadline, cancelled), ("replace", deadline, cancelled)]
+
+
+@pytest.mark.parametrize("operation", ["lock", "replace"])
+def test_nested_index_wait_checks_cancellation_before_sleep(
+    tmp_path, monkeypatch, operation
+):
+    import search_memory
+
+    index = tmp_path / "index.sqlite"
+    monkeypatch.setattr(search_memory, "INDEX_FILE", index)
+    monkeypatch.setattr(
+        search_memory.time,
+        "sleep",
+        lambda _seconds: pytest.fail("cancelled wait must not sleep"),
+    )
+    if operation == "lock":
+        lock = index.with_suffix(index.suffix + ".swap.lock")
+        lock.write_text('{"pid": 1, "token": "live"}', encoding="utf-8")
+        monkeypatch.setattr(search_memory, "_is_pid_alive", lambda _pid: True)
+        with pytest.raises(TimeoutError, match="cancelled"):
+            with search_memory._index_swap_lock(
+                deadline=time.monotonic() + 30, cancelled=lambda: True
+            ):
+                pass
+    else:
+        error = PermissionError(13, "busy")
+        error.winerror = 5
+        monkeypatch.setattr(search_memory.sys, "platform", "win32")
+        monkeypatch.setattr(
+            search_memory.os, "replace", lambda *_args: (_ for _ in ()).throw(error)
+        )
+        with pytest.raises(TimeoutError, match="cancelled"):
+            search_memory._replace_live_index(
+                tmp_path / "temporary", deadline=time.monotonic() + 30, cancelled=lambda: True
+            )
+
+
 def test_repeated_thread_and_process_index_builds_leave_valid_index(
     tmp_path, monkeypatch
 ):
@@ -609,6 +708,7 @@ def _activate_search_generation(tmp_path, snapshot, descriptors, *, vector=None)
     import search_memory
     from generation_catalog import GenerationCatalog
     from reliable_memory import canonical_json_bytes
+    from repository_scope import resolve_repository_scope
 
     catalog = GenerationCatalog(tmp_path / "state")
     generation_id = "gen-search"
@@ -628,6 +728,7 @@ def _activate_search_generation(tmp_path, snapshot, descriptors, *, vector=None)
         "source_manifest_sha256": snapshot.corpus_sha256,
         "artifacts": sorted(descriptors, key=lambda item: item["path"]),
         "vector_state": "absent",
+        "repository_scope": resolve_repository_scope(search_memory.ROOT).as_dict(),
     }
     if vector is not None:
         manifest.update(
@@ -644,6 +745,7 @@ def _activate_search_generation(tmp_path, snapshot, descriptors, *, vector=None)
 
 def _unregistered_vector_generation(tmp_path):
     import search_memory
+    from repository_scope import resolve_repository_scope
 
     np = pytest.importorskip("numpy")
     _vault, snapshot = _generation_snapshot(
@@ -680,12 +782,13 @@ def _unregistered_vector_generation(tmp_path):
         "source_manifest_sha256": snapshot.corpus_sha256,
         "artifacts": descriptors,
         "vector_state": "complete",
+        "repository_scope": resolve_repository_scope(search_memory.ROOT).as_dict(),
     }
 
     class Catalog:
         generations_path = generation_root
 
-        def get_active(self):
+        def get_active_for_repository(self, _repository_scope, **_kwargs):
             return manifest
 
     return generation, manifest, Catalog()
@@ -719,6 +822,218 @@ def _orchestrated_legacy_marker(monkeypatch, search_memory):
         search_memory,
         "_legacy_search",
         lambda *args, **kwargs: pytest.fail("public search bypassed retrieve()"),
+    )
+
+
+def _cancel_after(checks):
+    calls = 0
+
+    def cancelled():
+        nonlocal calls
+        calls += 1
+        return calls >= checks
+
+    return cancelled
+
+
+def test_generation_seal_checks_cancellation_inside_hash_loop(tmp_path):
+    import search_memory
+
+    artifact = tmp_path / "artifact.bin"
+    artifact.write_bytes(b"x" * (128 * 1024))
+
+    with pytest.raises(TimeoutError, match="cancelled"):
+        search_memory._sealed_file(artifact, cancelled=_cancel_after(2))
+
+
+@pytest.mark.parametrize("operation", ["validation", "search", "vectors"])
+def test_generation_readers_check_cancellation_during_work(tmp_path, operation):
+    import search_memory
+
+    generation, manifest, catalog = _unregistered_vector_generation(tmp_path)
+    connection = sqlite3.connect(generation / "search.sqlite3")
+    try:
+        with pytest.raises(TimeoutError, match="cancelled"):
+            if operation == "validation":
+                search_memory._valid_generation_fts(
+                    connection, manifest, cancelled=_cancel_after(2)
+                )
+            elif operation == "search":
+                search_memory._generation_fts_search(
+                    "semantic",
+                    manifest,
+                    connection,
+                    scope="all",
+                    limit=10,
+                    project=None,
+                    since=None,
+                    as_of=None,
+                    cancelled=_cancel_after(2),
+                )
+            else:
+                search_memory._generation_vectors_search(
+                    "semantic",
+                    catalog,
+                    manifest,
+                    connection,
+                    embedder=lambda _texts: [[1.0, 0.0]],
+                    model_id="deterministic/model",
+                    model_revision="revision-1",
+                    scope="all",
+                    limit=10,
+                    project=None,
+                    since=None,
+                    as_of=None,
+                    cancelled=_cancel_after(2),
+                )
+    finally:
+        connection.close()
+
+
+def test_generation_connection_uses_remaining_deadline_as_busy_timeout(
+    tmp_path, monkeypatch
+):
+    import search_memory
+
+    artifact = tmp_path / "generation" / search_memory.GENERATION_FTS_ARTIFACT
+    artifact.parent.mkdir()
+    artifact.touch()
+    deadline = time.monotonic() + 0.25
+    captured = []
+
+    class Connection:
+        def close(self):
+            pass
+
+    def connect(*_args, **kwargs):
+        captured.append(kwargs)
+        return Connection()
+
+    monkeypatch.setattr(search_memory.sqlite3, "connect", connect)
+    monkeypatch.setattr(search_memory, "_valid_generation_fts", lambda *_a, **_k: True)
+    manifest = {
+        "generation_id": "generation",
+        "artifacts": [{"path": search_memory.GENERATION_FTS_ARTIFACT}],
+    }
+
+    connection = search_memory._generation_connection(
+        type("Catalog", (), {"generations_path": tmp_path})(),
+        manifest,
+        deadline=deadline,
+    )
+
+    assert connection is not None
+    assert captured[0]["uri"] is True
+    assert 0 <= captured[0]["timeout"] <= 0.25
+
+
+def test_generation_connection_checks_cancel_after_open_before_validation(
+    tmp_path, monkeypatch
+):
+    import search_memory
+
+    artifact = tmp_path / "generation" / search_memory.GENERATION_FTS_ARTIFACT
+    artifact.parent.mkdir()
+    artifact.touch()
+    opened = False
+    closed = False
+
+    class Connection:
+        def close(self):
+            nonlocal closed
+            closed = True
+
+    def connect(*_args, **_kwargs):
+        nonlocal opened
+        opened = True
+        return Connection()
+
+    def cancelled():
+        return opened
+
+    monkeypatch.setattr(search_memory.sqlite3, "connect", connect)
+    monkeypatch.setattr(
+        search_memory,
+        "_valid_generation_fts",
+        lambda *_a, **_k: pytest.fail("validation must not start after cancellation"),
+    )
+    manifest = {
+        "generation_id": "generation",
+        "artifacts": [{"path": search_memory.GENERATION_FTS_ARTIFACT}],
+    }
+
+    with pytest.raises(TimeoutError, match="cancelled"):
+        search_memory._generation_connection(
+            type("Catalog", (), {"generations_path": tmp_path})(),
+            manifest,
+            deadline=time.monotonic() + 30,
+            cancelled=cancelled,
+        )
+
+    assert closed is True
+
+
+def test_legacy_fts_progress_handler_interrupts_on_cancellation(
+    tmp_path, monkeypatch
+):
+    import search_memory
+
+    page = tmp_path / "page.md"
+    page.write_text("# Page\nneedle\n", encoding="utf-8")
+    class Cursor:
+        def fetchall(self):
+            return []
+
+    class Connection:
+        progress = None
+
+        def set_progress_handler(self, callback, _instructions):
+            self.progress = callback
+
+        def execute(self, *_args):
+            assert self.progress is not None
+            assert self.progress() == 1
+            raise sqlite3.DatabaseError("interrupted")
+
+        def close(self):
+            pass
+
+    connection = Connection()
+
+    def cancelled():
+        return connection.progress is not None
+
+    monkeypatch.setattr(search_memory, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        search_memory, "_needs_rebuild", lambda _pages, **_kwargs: False
+    )
+    monkeypatch.setattr(search_memory.sqlite3, "connect", lambda *_a, **_k: connection)
+
+    with pytest.raises(TimeoutError, match="SQLite"):
+        search_memory._legacy_lexical_hits(
+            "needle",
+            page_paths=[page],
+            deadline=time.monotonic() + 30,
+            cancelled=cancelled,
+        )
+
+    assert connection.progress is None
+
+
+def test_legacy_dense_skips_model_and_lance_under_hard_deadline(monkeypatch):
+    import search_memory
+
+    monkeypatch.setattr(
+        search_memory,
+        "_have_sentence_transformers",
+        lambda: pytest.fail("model availability probe must not run"),
+    )
+
+    assert (
+        search_memory._legacy_dense_hits(
+            "needle", page_paths=[], deadline=time.monotonic() + 30
+        )
+        is None
     )
 
 
@@ -837,6 +1152,28 @@ def test_generation_numpy_failure_leaves_both_artifacts_absent(tmp_path):
 
     assert not (generation / "vectors.npy").exists()
     assert not (generation / "vectors.json").exists()
+    assert not list(generation.glob(".*.tmp"))
+
+
+def test_generation_fts_failure_after_publish_removes_artifact(tmp_path, monkeypatch):
+    import search_memory
+
+    _vault, snapshot = _generation_snapshot(
+        tmp_path,
+        {"page.md": "# Page\ncleanup term"},
+    )
+    generation = tmp_path / "generation"
+    generation.mkdir()
+    monkeypatch.setattr(
+        search_memory,
+        "_artifact_descriptor",
+        lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError("descriptor cancelled")),
+    )
+
+    with pytest.raises(TimeoutError, match="descriptor cancelled"):
+        search_memory.build_generation_fts(snapshot, generation)
+
+    assert not (generation / "search.sqlite3").exists()
     assert not list(generation.glob(".*.tmp"))
 
 
@@ -1006,7 +1343,7 @@ def test_missing_or_incompatible_generation_fts_falls_back_to_legacy(
     class Catalog:
         generations_path = tmp_path / "generations"
 
-        def get_active(self):
+        def get_active_for_repository(self, _repository_scope, **_kwargs):
             return {
                 "generation_id": "missing",
                 "schema_version": "corpus-generation/v1",
@@ -1147,6 +1484,69 @@ def test_semantic_search_uses_complete_matching_generation_numpy_vectors(tmp_pat
     assert all(result["fallback_reason"] is None for result in results)
 
 
+def test_semantic_generation_vectors_run_under_a_caller_deadline(tmp_path):
+    np = pytest.importorskip("numpy")
+    import search_memory
+
+    _vault, snapshot = _generation_snapshot(
+        tmp_path,
+        {
+            "knowledge/notes/a.md": "# A\nSemantic shared term.\n",
+            "knowledge/notes/b.md": "# B\nSemantic shared term.\n",
+        },
+    )
+    catalog = search_memory.GenerationCatalog(tmp_path / "state")
+    generation = catalog.generations_path / "gen-search"
+    generation.mkdir()
+
+    def embed(texts):
+        if len(texts) == 1:
+            return np.array([[1.0, 0.0]], dtype=np.float32)
+        return np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+
+    descriptors = [search_memory.build_generation_fts(snapshot, generation)]
+    descriptors.extend(
+        search_memory.build_generation_numpy_vectors(
+            snapshot,
+            generation,
+            embedder=embed,
+            model_id="deterministic/model",
+            model_revision="revision-1",
+            dimensions=2,
+        )
+    )
+    catalog, _manifest = _activate_search_generation(
+        tmp_path,
+        snapshot,
+        descriptors,
+        vector={
+            "model_id": "deterministic/model",
+            "model_revision": "revision-1",
+            "dimensions": 2,
+        },
+    )
+    results = search_memory.search(
+        "semantic",
+        semantic=True,
+        catalog=catalog,
+        generation_embedder=embed,
+        generation_model_id="deterministic/model",
+        generation_model_revision="revision-1",
+        graph=False,
+        rerank=False,
+        emit_telemetry=False,
+        deadline_monotonic=time.monotonic() + 30,
+    )
+
+    assert results[0]["path"] == "knowledge/notes/a.md"
+    assert results[0]["fallback_reason"] is None
+    assert all(
+        result["signals_used"] == ["lexical", "dense"] for result in results
+    ), results
+    assert all(result["effective_mode"] == "HYBRID" for result in results)
+    assert all(result["fallback_reason"] is None for result in results)
+
+
 @pytest.mark.parametrize(
     "field",
     [
@@ -1167,6 +1567,7 @@ def test_generation_numpy_metadata_mismatch_falls_back_to_base(
 ):
     np = pytest.importorskip("numpy")
     import search_memory
+    from repository_scope import resolve_repository_scope
 
     _vault, snapshot = _generation_snapshot(
         tmp_path,
@@ -1213,7 +1614,7 @@ def test_generation_numpy_metadata_mismatch_falls_back_to_base(
     class Catalog:
         generations_path = generation_root
 
-        def get_active(self):
+        def get_active_for_repository(self, _repository_scope, **_kwargs):
             return {
                 "generation_id": "gen-search",
                 "schema_version": "corpus-generation/v1",
@@ -1227,6 +1628,7 @@ def test_generation_numpy_metadata_mismatch_falls_back_to_base(
                 "source_manifest_sha256": snapshot.corpus_sha256,
                 "artifacts": descriptors,
                 "vector_state": "complete",
+                "repository_scope": resolve_repository_scope(search_memory.ROOT).as_dict(),
             }
 
     query_embedder_called = False
@@ -1375,6 +1777,7 @@ def test_corrupt_active_generation_falls_back_without_querying_it(tmp_path, monk
 
 def test_generation_reader_rejects_source_hash_and_version_mismatch(tmp_path, monkeypatch):
     import search_memory
+    from repository_scope import resolve_repository_scope
 
     _vault, snapshot = _generation_snapshot(
         tmp_path, {"knowledge/notes/page.md": "# Page\nBound needle.\n"}
@@ -1392,7 +1795,7 @@ def test_generation_reader_rejects_source_hash_and_version_mismatch(tmp_path, mo
     class Catalog:
         generations_path = generation_root
 
-        def get_active(self):
+        def get_active_for_repository(self, _repository_scope, **_kwargs):
             return {
                 "generation_id": "gen-search",
                 "schema_version": "corpus-generation/v1",
@@ -1403,6 +1806,7 @@ def test_generation_reader_rejects_source_hash_and_version_mismatch(tmp_path, mo
                 "source_manifest_sha256": snapshot.corpus_sha256,
                 "artifacts": [descriptor],
                 "vector_state": "absent",
+                "repository_scope": resolve_repository_scope(search_memory.ROOT).as_dict(),
             }
 
     monkeypatch.setattr(
@@ -1569,7 +1973,7 @@ def test_generation_results_discarded_when_active_manifest_changes_after_read(
         generations_path = generation.parent
         calls = 0
 
-        def get_active(self):
+        def get_active_for_repository(self, _repository_scope, **_kwargs):
             self.calls += 1
             if self.calls == 1:
                 return manifest
@@ -1909,6 +2313,47 @@ def test_publication_forwards_absolute_deadline_without_post_commit_false_timeou
         ("register", 15.0),
         ("activate", 15.0),
     ]
+
+
+def test_publication_forwards_stop_context_to_failed_cas_cleanup(monkeypatch):
+    import search_memory
+
+    calls = []
+
+    def cancelled():
+        return False
+
+    def validate(snapshot, vault, *, coordinator=None, deadline_seconds=None, cancelled=None):
+        assert coordinator is None
+        assert deadline_seconds == 5.0
+        assert cancelled is not None
+
+    class Catalog:
+        def register(self, generation_id, *, deadline=None, cancelled=None):
+            return None
+
+        def activate(
+            self, generation_id, *, expected_active, deadline=None, cancelled=None
+        ):
+            return False
+
+        def discard_unactivated(self, generation_id, *, deadline=None, cancelled=None):
+            calls.append((generation_id, deadline, cancelled))
+            return True
+
+    monkeypatch.setattr(search_memory.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(search_memory, "validate_live_snapshot", validate)
+
+    assert search_memory.publish_generation(
+        object(),
+        Path("vault"),
+        Catalog(),
+        "gen-search",
+        expected_active=None,
+        deadline=15.0,
+        cancelled=cancelled,
+    ) is False
+    assert calls == [("gen-search", 15.0, cancelled)]
 
 
 @pytest.mark.parametrize("timeout_stage", ["register", "activate"])

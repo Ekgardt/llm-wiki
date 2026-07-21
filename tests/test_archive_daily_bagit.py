@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import stat
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -771,6 +772,72 @@ def test_recovery_finishes_identical_duplicate_after_publish_crash(archive_vault
     recovered = _archiver(root, state_root).recover()
     assert [item.state for item in recovered] == ["recovered"]
     assert not daily.exists()
+
+
+def test_recovery_passes_deadline_and_cancellation_to_source_removal(
+    archive_vault, monkeypatch
+) -> None:
+    root, state_root, daily = archive_vault
+
+    def crash(point: str) -> None:
+        if point == "after_publish_rename":
+            raise RuntimeError("crash")
+
+    with pytest.raises(RuntimeError, match="crash"):
+        _archiver(root, state_root, killpoint=crash).archive(daily.stem)
+
+    archiver = _archiver(root, state_root)
+    calls = []
+    real_prepare = archiver.coordinator.prepare
+    real_apply = archiver.coordinator.apply
+
+    def prepare(*args, **kwargs):
+        calls.append(("prepare", kwargs.get("deadline"), kwargs.get("cancelled")))
+        return real_prepare(*args, **kwargs)
+
+    def apply(*args, **kwargs):
+        calls.append(("apply", kwargs.get("deadline"), kwargs.get("cancelled")))
+        return real_apply(*args, **kwargs)
+
+    monkeypatch.setattr(archiver.coordinator, "prepare", prepare)
+    monkeypatch.setattr(archiver.coordinator, "apply", apply)
+    deadline = time.monotonic() + 5
+
+    def cancelled() -> bool:
+        return False
+
+    archiver.recover(deadline=deadline, cancelled=cancelled)
+
+    assert calls == [
+        ("prepare", deadline, cancelled),
+        ("apply", deadline, cancelled),
+    ]
+
+
+def test_archive_index_publish_stops_when_cancelled_after_write_before_replace(
+    archive_vault, monkeypatch
+) -> None:
+    import archive_daily
+
+    root, state_root, _daily = archive_vault
+    archiver = _archiver(root, state_root)
+    expired = False
+    real_fsync = archive_daily.fsync_file
+
+    def expire_after_write(path: Path) -> None:
+        nonlocal expired
+        real_fsync(path)
+        expired = True
+
+    monkeypatch.setattr(archive_daily, "fsync_file", expire_after_write)
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        archiver.rebuild_index(
+            deadline=time.monotonic() + 5,
+            cancelled=lambda: expired,
+        )
+
+    assert not (root / "knowledge/daily/archive/archive-index.json").exists()
 
 
 def test_archive_starts_with_recovery_and_reuses_exact_published_bag(

@@ -7,8 +7,10 @@ import json
 import os
 import sqlite3
 import sys
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -52,6 +54,7 @@ def _publish(
     payload: bytes = b"search-index",
     vector_state: str = "absent",
     extra_artifacts: int = 0,
+    repository_scope: dict[str, object] | None = None,
 ) -> tuple[Path, dict[str, object]]:
     from reliable_memory import canonical_json_bytes
 
@@ -83,6 +86,8 @@ def _publish(
     }
     if parent is not None:
         manifest["parent_generation_id"] = parent
+    if repository_scope is not None:
+        manifest["repository_scope"] = repository_scope
     for number in range(extra_artifacts):
         name = f"artifact-{number:04d}.bin"
         content = f"artifact-{number:04d}".encode()
@@ -97,6 +102,892 @@ def _publish(
     manifest["artifacts"].sort(key=lambda artifact: artifact["path"])
     (directory / "manifest.json").write_bytes(canonical_json_bytes(manifest))
     return directory, manifest
+
+
+def _publish_v2(catalog, generation_id: str) -> tuple[Path, dict[str, object]]:
+    import corpus_snapshot
+    import evidence_graph
+    import search_memory
+    from reliable_memory import canonical_json_bytes
+
+    vault = catalog.state_root.parent / f"vault-{generation_id}"
+    (vault / "knowledge/notes").mkdir(parents=True)
+    (vault / "knowledge/projects").mkdir(parents=True)
+    (vault / "knowledge/notes/page.md").write_text(
+        "---\n"
+        "type: concept\n"
+        "project: generation-tests\n"
+        "source_authority: user\n"
+        "confidence: high\n"
+        "status: active\n"
+        "valid_from: 2026-01-01\n"
+        "valid_to: 2027-01-01\n"
+        "language: en\n"
+        "---\n"
+        "# Bound source\nunique generation content\n",
+        encoding="utf-8",
+    )
+    snapshot = corpus_snapshot.collect_corpus(vault)
+    directory = catalog.generations_path / generation_id
+    directory.mkdir(parents=True)
+    source_manifest = corpus_snapshot.canonical_source_manifest(
+        (source.record for source in snapshot.sources), snapshot.policy
+    )
+    (directory / "source-manifest.json").write_bytes(canonical_json_bytes(source_manifest))
+    evidence_graph.create_generation_database(
+        directory / "evidence.sqlite3",
+        sources=(
+            {
+                "source_id": source.record.logical_id,
+                "relative_path": source.record.relative_path,
+                "sha256": source.record.sha256,
+                "size": source.record.size,
+                "media_type": source.record.media_type,
+                "language": source.record.language,
+                "git_oid": source.record.git_oid,
+            }
+            for source in snapshot.sources
+        ),
+        source_bytes={source.record.logical_id: source.content for source in snapshot.sources},
+        nodes=(),
+        occurrences=(),
+        assertions=(),
+        evidence=(),
+        observations=(),
+        dependencies=(),
+    )
+    search_memory.build_generation_fts(snapshot, directory)
+
+    artifacts = []
+    for name in ("evidence.sqlite3", "search.sqlite3", "source-manifest.json"):
+        payload = (directory / name).read_bytes()
+        artifacts.append(
+            {"path": name, "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
+        )
+    manifest = {
+        "generation_id": generation_id,
+        "schema_version": "corpus-generation/v2",
+        "collector_version": snapshot.collector_version,
+        "extractor_version": snapshot.extractor_version,
+        "tokenizer_version": search_memory.GENERATION_TOKENIZER_VERSION,
+        "tokenizer_config_sha256": search_memory.GENERATION_TOKENIZER_CONFIG_SHA256,
+        "embedding_model_id": None,
+        "embedding_model_revision": None,
+        "vector_dimensions": None,
+        "graph_schema_version": evidence_graph.GRAPH_SCHEMA_VERSION,
+        "graph_extractor_version": "fixture-graph/v1",
+        "source_manifest_sha256": snapshot.corpus_sha256,
+        "artifacts": sorted(artifacts, key=lambda item: item["path"]),
+        "vector_state": "absent",
+        "repository_scope": __import__("repository_scope").resolve_repository_scope(
+            vault
+        ).as_dict(),
+    }
+    (directory / "manifest.json").write_bytes(canonical_json_bytes(manifest))
+    return directory, manifest
+
+
+@pytest.mark.parametrize(
+    ("failure", "closed_handles", "closed_descriptors"),
+    [
+        ("before-transfer", [123], []),
+        ("after-transfer", [], [41]),
+        (None, [], []),
+    ],
+)
+def test_windows_read_descriptor_closes_exact_owner_on_conversion_failure(
+    tmp_path, monkeypatch, failure, closed_handles, closed_descriptors
+):
+    import generation_catalog
+
+    path = tmp_path / "artifact.bin"
+    path.write_bytes(b"artifact")
+    actual_handles = []
+    actual_descriptors = []
+
+    monkeypatch.setattr(generation_catalog, "_create_file", lambda *_args: 123)
+    monkeypatch.setattr(
+        generation_catalog, "_close_handle", lambda handle: actual_handles.append(handle)
+    )
+
+    def convert(_handle, _flags):
+        if failure == "before-transfer":
+            raise OSError("conversion failed")
+        return 41
+
+    def set_inheritable(_descriptor, _inheritable):
+        if failure == "after-transfer":
+            raise OSError("inheritability failed")
+
+    monkeypatch.setattr(generation_catalog.msvcrt, "open_osfhandle", convert)
+    monkeypatch.setattr(generation_catalog.os, "set_inheritable", set_inheritable)
+    monkeypatch.setattr(
+        generation_catalog.os,
+        "close",
+        lambda descriptor: actual_descriptors.append(descriptor),
+    )
+
+    if failure is None:
+        assert generation_catalog._open_read_descriptor(path) == 41
+    else:
+        with pytest.raises(OSError, match="failed"):
+            generation_catalog._open_read_descriptor(path)
+
+    assert actual_handles == closed_handles
+    assert actual_descriptors == closed_descriptors
+
+
+def _refresh_artifact(directory: Path, manifest: dict[str, object], name: str) -> None:
+    from reliable_memory import canonical_json_bytes
+
+    payload = (directory / name).read_bytes()
+    descriptor = next(item for item in manifest["artifacts"] if item["path"] == name)
+    descriptor.update(size=len(payload), sha256=hashlib.sha256(payload).hexdigest())
+    (directory / "manifest.json").write_bytes(canonical_json_bytes(manifest))
+
+
+def test_v2_requires_complete_exact_artifact_set(tmp_path):
+    catalog = _catalog(tmp_path)
+    directory, manifest = _publish_v2(catalog, "v2-missing-search")
+    (directory / "search.sqlite3").unlink()
+    manifest["artifacts"] = [
+        item for item in manifest["artifacts"] if item["path"] != "search.sqlite3"
+    ]
+    from reliable_memory import canonical_json_bytes
+
+    (directory / "manifest.json").write_bytes(canonical_json_bytes(manifest))
+
+    with pytest.raises(ValueError, match="v2.*artifact|artifact.*v2"):
+        catalog.register("v2-missing-search")
+
+    extra_directory, extra_manifest = _publish_v2(catalog, "v2-extra")
+    payload = b"undeclared-contract-extension"
+    (extra_directory / "extra.bin").write_bytes(payload)
+    extra_manifest["artifacts"].append(
+        {"path": "extra.bin", "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
+    )
+    extra_manifest["artifacts"].sort(key=lambda item: item["path"])
+    (extra_directory / "manifest.json").write_bytes(canonical_json_bytes(extra_manifest))
+
+    with pytest.raises(ValueError, match="v2.*artifact|artifact.*v2"):
+        catalog.register("v2-extra")
+
+
+def test_v2_rejects_semantically_invalid_search_after_hash_recomputed(tmp_path):
+    catalog = _catalog(tmp_path)
+    directory, manifest = _publish_v2(catalog, "v2-invalid-search")
+    with sqlite3.connect(directory / "search.sqlite3") as database:
+        database.execute(
+            "UPDATE generation_metadata SET value='wrong-tokenizer' "
+            "WHERE key='tokenizer_version'"
+        )
+        database.commit()
+    _refresh_artifact(directory, manifest, "search.sqlite3")
+
+    with pytest.raises(ValueError, match="FTS|search"):
+        catalog.register("v2-invalid-search")
+
+
+def test_v2_complete_generation_registers(tmp_path):
+    catalog = _catalog(tmp_path)
+    _directory, manifest = _publish_v2(catalog, "v2-complete")
+
+    assert catalog.register("v2-complete") == manifest
+
+
+@pytest.mark.parametrize("graph_schema", [None, "other-graph/v1"])
+def test_v2_requires_exact_evidence_graph_schema(tmp_path, graph_schema):
+    from reliable_memory import canonical_json_bytes
+
+    catalog = _catalog(tmp_path)
+    directory, manifest = _publish_v2(catalog, "v2-wrong-graph")
+    manifest["graph_schema_version"] = graph_schema
+    if graph_schema is None:
+        manifest["graph_extractor_version"] = None
+    (directory / "manifest.json").write_bytes(canonical_json_bytes(manifest))
+
+    with pytest.raises(ValueError, match="graph schema|Evidence Graph"):
+        catalog.register("v2-wrong-graph")
+
+
+def test_v2_always_invokes_evidence_graph_semantic_validator(tmp_path, monkeypatch):
+    import evidence_graph
+
+    catalog = _catalog(tmp_path)
+    _publish_v2(catalog, "v2-graph-validation")
+    called = {}
+    real_validate = evidence_graph.validate_generation_artifact
+
+    def validate(*args, deadline=None, monotonic=None, cancelled=None, **kwargs):
+        called.update(deadline=deadline, monotonic=monotonic, cancelled=cancelled)
+        return real_validate(
+            *args,
+            deadline=deadline,
+            monotonic=monotonic,
+            cancelled=cancelled,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(evidence_graph, "validate_generation_artifact", validate)
+
+    catalog.register("v2-graph-validation")
+
+    assert called["monotonic"] is not None
+    assert called["deadline"] is None
+    assert called["cancelled"] is None
+
+
+def test_generic_register_and_activate_still_run_real_semantic_validators(
+    tmp_path, monkeypatch
+):
+    import evidence_graph
+    import search_memory
+
+    catalog = _catalog(tmp_path)
+    _publish_v2(catalog, "generic-full-validation")
+    calls = {"evidence": 0, "fts": 0}
+    real_evidence = evidence_graph.validate_generation_artifact
+    real_fts = search_memory.validate_generation_fts_artifact
+
+    def validate_evidence(*args, **kwargs):
+        calls["evidence"] += 1
+        return real_evidence(*args, **kwargs)
+
+    def validate_fts(*args, **kwargs):
+        calls["fts"] += 1
+        return real_fts(*args, **kwargs)
+
+    monkeypatch.setattr(evidence_graph, "validate_generation_artifact", validate_evidence)
+    monkeypatch.setattr(search_memory, "validate_generation_fts_artifact", validate_fts)
+
+    catalog.register("generic-full-validation")
+    assert catalog.activate("generic-full-validation", expected_active=None)
+
+    assert calls == {"evidence": 2, "fts": 2}
+
+
+@pytest.mark.parametrize("mutation", ["content", "replacement", "manifest"])
+def test_validated_candidate_rejects_post_validation_tampering(
+    tmp_path, mutation
+):
+    catalog = _catalog(tmp_path)
+    directory, _manifest = _publish_v2(catalog, f"candidate-{mutation}")
+    candidate = catalog._validate_candidate(f"candidate-{mutation}")
+    target = directory / ("manifest.json" if mutation == "manifest" else "evidence.sqlite3")
+    original = target.read_bytes()
+
+    if mutation == "content":
+        _rewrite_preserving_metadata(target, bytes([original[0] ^ 1]) + original[1:])
+    elif mutation == "replacement":
+        replacement = directory.parent / "replacement.tmp"
+        replacement.write_bytes(original)
+        before = target.stat(follow_symlinks=False)
+        os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+        os.replace(replacement, target)
+    else:
+        changed = original.replace(b"fixture-graph/v1", b"fixture-graph/v2")
+        assert changed != original
+        _rewrite_preserving_metadata(target, changed)
+
+    with pytest.raises((PermissionError, ValueError), match="changed|identity|validation"):
+        catalog._register_validated(candidate)
+
+
+def test_validated_candidate_is_bound_to_issuing_catalog_instance(tmp_path):
+    first = _catalog(tmp_path)
+    _publish_v2(first, "instance-bound")
+    candidate = first._validate_candidate("instance-bound")
+    second = _catalog(tmp_path)
+
+    with pytest.raises(TypeError, match="issued by this catalog"):
+        second._register_validated(candidate)
+
+
+def test_validated_candidate_activation_rejects_catalog_registration_race(tmp_path):
+    catalog = _catalog(tmp_path)
+    _publish_v2(catalog, "registration-race")
+    candidate = catalog._validate_candidate("registration-race")
+    catalog._register_validated(candidate)
+    with sqlite3.connect(catalog.catalog_path) as database:
+        database.execute(
+            "UPDATE generations SET manifest_json=?, manifest_sha256=? "
+            "WHERE generation_id=?",
+            (b"{}", hashlib.sha256(b"{}").hexdigest(), "registration-race"),
+        )
+        database.commit()
+
+    with pytest.raises(ValueError, match="registration changed"):
+        catalog._activate_validated(candidate, expected_active=None)
+    assert catalog.get_active() is None
+
+
+def test_validated_candidate_activation_rejects_post_registration_replacement(
+    tmp_path,
+):
+    catalog = _catalog(tmp_path)
+    directory, _manifest = _publish_v2(catalog, "activation-replacement")
+    candidate = catalog._validate_candidate("activation-replacement")
+    catalog._register_validated(candidate)
+    target = directory / "evidence.sqlite3"
+    replacement = directory.parent / "activation-replacement.tmp"
+    replacement.write_bytes(target.read_bytes())
+    before = target.stat(follow_symlinks=False)
+    os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+    os.replace(replacement, target)
+
+    with pytest.raises((PermissionError, ValueError), match="changed|identity|validation"):
+        catalog._activate_validated(candidate, expected_active=None)
+    assert catalog.get_active() is None
+
+
+def test_validated_candidate_rejects_catalog_file_replacement(tmp_path):
+    catalog = _catalog(tmp_path)
+    _publish_v2(catalog, "catalog-replacement")
+    candidate = catalog._validate_candidate("catalog-replacement")
+    replacement = catalog.catalog_path.with_name("replacement.sqlite3")
+    replacement.write_bytes(catalog.catalog_path.read_bytes())
+    os.replace(replacement, catalog.catalog_path)
+
+    with pytest.raises(PermissionError, match="catalog|identity"):
+        catalog._register_validated(candidate)
+
+
+def test_validated_candidate_rechecks_replacement_inside_registration_transaction(
+    tmp_path, monkeypatch
+):
+    catalog = _catalog(tmp_path)
+    directory, _manifest = _publish_v2(catalog, "transaction-replacement")
+    candidate = catalog._validate_candidate("transaction-replacement")
+    target = directory / "evidence.sqlite3"
+    replacement = directory.parent / "transaction-replacement.tmp"
+    replacement.write_bytes(target.read_bytes())
+    before = target.stat(follow_symlinks=False)
+    os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+    real_transaction = catalog._write_transaction
+
+    @contextmanager
+    def replace_then_transact(deadline):
+        os.replace(replacement, target)
+        with real_transaction(deadline) as database:
+            yield database
+
+    monkeypatch.setattr(catalog, "_write_transaction", replace_then_transact)
+
+    with pytest.raises((PermissionError, ValueError)):
+        catalog._register_validated(candidate)
+    with closing(sqlite3.connect(catalog.catalog_path)) as database:
+        assert database.execute("SELECT COUNT(*) FROM generations").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    ["candidate-register", "candidate-activate", "public-register", "public-activate"],
+)
+@pytest.mark.parametrize("mutation", ["in-place", "replacement"])
+def test_catalog_mutation_boundaries_reject_metadata_preserving_tampering(
+    tmp_path, monkeypatch, boundary, mutation
+):
+    catalog = _catalog(tmp_path)
+    generation_id = boundary
+    directory, _manifest = _publish(catalog, generation_id)
+    candidate = None
+    if boundary.startswith("candidate"):
+        candidate = catalog._validate_candidate(generation_id)
+    if boundary.endswith("activate"):
+        if candidate is None:
+            catalog.register(generation_id)
+        else:
+            catalog._register_validated(candidate)
+
+    artifact = directory / "search.sqlite3"
+    before = artifact.stat(follow_symlinks=False)
+    changed = bytes([artifact.read_bytes()[0] ^ 1]) + artifact.read_bytes()[1:]
+    replacement = directory.parent / f"{boundary}-replacement.tmp"
+    replacement.write_bytes(artifact.read_bytes())
+    os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+    real_transaction = catalog._write_transaction
+
+    @contextmanager
+    def tamper_inside_transaction(deadline):
+        with real_transaction(deadline) as database:
+            if mutation == "in-place":
+                _rewrite_preserving_metadata(artifact, changed)
+            else:
+                os.replace(replacement, artifact)
+            after = artifact.stat(follow_symlinks=False)
+            assert os.path.samestat(before, after) is (mutation == "in-place")
+            assert (after.st_size, after.st_mtime_ns) == (
+                before.st_size,
+                before.st_mtime_ns,
+            )
+            yield database
+
+    monkeypatch.setattr(catalog, "_write_transaction", tamper_inside_transaction)
+
+    with pytest.raises((PermissionError, ValueError)):
+        if boundary == "candidate-register":
+            catalog._register_validated(candidate)
+        elif boundary == "candidate-activate":
+            catalog._activate_validated(candidate, expected_active=None)
+        elif boundary == "public-register":
+            catalog.register(generation_id)
+        else:
+            catalog.activate(generation_id, expected_active=None)
+
+    with closing(sqlite3.connect(catalog.catalog_path)) as database:
+        registered = database.execute(
+            "SELECT COUNT(*) FROM generations WHERE generation_id = ?", (generation_id,)
+        ).fetchone()[0]
+        active = database.execute(
+            "SELECT active_generation_id FROM catalog_state WHERE singleton = 1"
+        ).fetchone()[0]
+    assert registered == int(boundary.endswith("activate"))
+    assert active is None
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    ["candidate-register", "candidate-activate", "public-register", "public-activate"],
+)
+@pytest.mark.parametrize("mutation", ["in-place", "replacement"])
+def test_catalog_mutation_boundaries_reject_earlier_member_change_during_later_hash(
+    tmp_path, monkeypatch, boundary, mutation
+):
+    import generation_catalog
+
+    catalog = _catalog(tmp_path)
+    generation_id = f"coherent-{boundary}-{mutation}"
+    directory, _manifest = _publish(catalog, generation_id, extra_artifacts=1)
+    candidate = None
+    if boundary.startswith("candidate"):
+        candidate = catalog._validate_candidate(generation_id)
+    if boundary.endswith("activate"):
+        if candidate is None:
+            catalog.register(generation_id)
+        else:
+            catalog._register_validated(candidate)
+
+    earlier = directory / "artifact-0000.bin"
+    later = directory / "search.sqlite3"
+    before = earlier.stat(follow_symlinks=False)
+    original = earlier.read_bytes()
+    changed = bytes([original[0] ^ 1]) + original[1:]
+    replacement = directory.parent / f"{generation_id}-replacement.tmp"
+    replacement.write_bytes(original)
+    os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+    real_read = generation_catalog.os.read
+    real_acquire = catalog._acquire_seal_capability
+    acquiring = False
+    tampered = False
+
+    def read_and_tamper(descriptor, size):
+        nonlocal tampered
+        chunk = real_read(descriptor, size)
+        if (
+            acquiring
+            and chunk
+            and not tampered
+            and os.path.samestat(os.fstat(descriptor), later.stat(follow_symlinks=False))
+        ):
+            if mutation == "in-place":
+                _rewrite_preserving_metadata(earlier, changed)
+            else:
+                tampered = True
+                os.replace(replacement, earlier)
+            tampered = True
+        return chunk
+
+    def tracked_acquire(*args, **kwargs):
+        nonlocal acquiring
+        acquiring = True
+        try:
+            return real_acquire(*args, **kwargs)
+        finally:
+            acquiring = False
+
+    monkeypatch.setattr(generation_catalog.os, "read", read_and_tamper)
+    monkeypatch.setattr(catalog, "_acquire_seal_capability", tracked_acquire)
+
+    with pytest.raises((PermissionError, ValueError)):
+        if boundary == "candidate-register":
+            catalog._register_validated(candidate)
+        elif boundary == "candidate-activate":
+            catalog._activate_validated(candidate, expected_active=None)
+        elif boundary == "public-register":
+            catalog.register(generation_id)
+        else:
+            catalog.activate(generation_id, expected_active=None)
+
+    assert tampered
+
+
+def test_catalog_writer_is_not_held_while_publication_content_hash_blocks(
+    tmp_path, monkeypatch
+):
+    import generation_catalog
+
+    catalog = _catalog(tmp_path)
+    _publish(catalog, "blocked-hash")
+    other = generation_catalog.GenerationCatalog(catalog.state_root)
+    real_read = generation_catalog.os.read
+    real_acquire = catalog._acquire_seal_capability
+    acquiring = False
+    reads = 0
+    hashing = threading.Event()
+    release_hash = threading.Event()
+    errors = []
+
+    def blocking_read(descriptor, size):
+        nonlocal reads
+        chunk = real_read(descriptor, size)
+        if acquiring and chunk:
+            reads += 1
+            if reads == 1:
+                hashing.set()
+                assert release_hash.wait(timeout=5)
+        return chunk
+
+    def tracked_acquire(*args, **kwargs):
+        nonlocal acquiring
+        acquiring = True
+        try:
+            return real_acquire(*args, **kwargs)
+        finally:
+            acquiring = False
+
+    def register():
+        try:
+            catalog.register("blocked-hash")
+        except BaseException as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(generation_catalog.os, "read", blocking_read)
+    monkeypatch.setattr(catalog, "_acquire_seal_capability", tracked_acquire)
+    worker = threading.Thread(target=register)
+    worker.start()
+    assert hashing.wait(timeout=5)
+
+    try:
+        with other._write_transaction(time.monotonic() + 0.25) as database:
+            database.execute(
+                "UPDATE catalog_state SET active_generation_id=active_generation_id "
+                "WHERE singleton=1"
+            )
+    finally:
+        release_hash.set()
+        worker.join(timeout=5)
+
+    assert worker.is_alive() is False
+    assert errors == []
+
+
+def test_publication_keeps_seal_descriptors_open_until_catalog_commit(tmp_path, monkeypatch):
+    import generation_catalog
+
+    catalog = _catalog(tmp_path)
+    _publish(catalog, "held-through-commit")
+    events = []
+    real_close = generation_catalog._GenerationSealCapability.close
+    real_transaction = catalog._write_transaction
+
+    def tracked_close(capability):
+        assert all(os.fstat(held.descriptor) for held in capability.held_files)
+        events.append("close")
+        real_close(capability)
+
+    @contextmanager
+    def tracked_transaction(deadline):
+        with real_transaction(deadline) as database:
+            yield database
+        events.append("commit")
+
+    monkeypatch.setattr(
+        generation_catalog._GenerationSealCapability, "close", tracked_close
+    )
+    monkeypatch.setattr(catalog, "_write_transaction", tracked_transaction)
+
+    catalog.register("held-through-commit")
+
+    assert events == ["commit", "close"]
+
+
+def test_capability_close_attempts_every_descriptor_once_and_raises_first_error(
+    tmp_path, monkeypatch
+):
+    import generation_catalog
+
+    held_files = tuple(
+        generation_catalog._HeldFile(tmp_path / str(descriptor), str(descriptor), descriptor, ())
+        for descriptor in (11, 12, 13)
+    )
+    capability = generation_catalog._GenerationSealCapability(
+        tmp_path,
+        (),
+        held_files,
+        deadline=None,
+        monotonic=time.monotonic,
+        cancelled=None,
+    )
+    attempts = []
+
+    def close(descriptor):
+        assert capability._closed is False
+        attempts.append(descriptor)
+        if descriptor in {11, 13}:
+            raise OSError(f"close-{descriptor}")
+
+    monkeypatch.setattr(generation_catalog.os, "close", close)
+
+    with pytest.raises(OSError, match="close-11"):
+        capability.close()
+
+    assert attempts == [11, 12, 13]
+    assert capability._closed is True
+    capability.close()
+    assert attempts == [11, 12, 13]
+
+
+def test_capability_context_close_error_precedes_body_and_closes_all_descriptors(
+    tmp_path, monkeypatch
+):
+    import generation_catalog
+
+    held_files = tuple(
+        generation_catalog._HeldFile(tmp_path / str(descriptor), str(descriptor), descriptor, ())
+        for descriptor in (21, 22)
+    )
+    capability = generation_catalog._GenerationSealCapability(
+        tmp_path,
+        (),
+        held_files,
+        deadline=None,
+        monotonic=time.monotonic,
+        cancelled=None,
+    )
+    attempts = []
+
+    def close(descriptor):
+        attempts.append(descriptor)
+        raise OSError(f"close-{descriptor}")
+
+    monkeypatch.setattr(generation_catalog.os, "close", close)
+
+    with pytest.raises(OSError, match="close-21") as raised:
+        with capability:
+            raise ValueError("body failure")
+
+    assert attempts == [21, 22]
+    assert isinstance(raised.value.__context__, ValueError)
+    assert str(raised.value.__context__) == "body failure"
+
+
+def test_publication_rejects_membership_change_while_later_member_is_hashing(
+    tmp_path, monkeypatch
+):
+    import generation_catalog
+
+    catalog = _catalog(tmp_path)
+    directory, _manifest = _publish(catalog, "membership-race", extra_artifacts=1)
+    later = directory / "search.sqlite3"
+    injected = directory / "undeclared.bin"
+    real_read = generation_catalog.os.read
+    real_acquire = catalog._acquire_seal_capability
+    acquiring = False
+    changed = False
+
+    def read_and_add_member(descriptor, size):
+        nonlocal changed
+        chunk = real_read(descriptor, size)
+        if (
+            acquiring
+            and chunk
+            and not changed
+            and os.path.samestat(os.fstat(descriptor), later.stat(follow_symlinks=False))
+        ):
+            injected.write_bytes(b"undeclared")
+            changed = True
+        return chunk
+
+    def tracked_acquire(*args, **kwargs):
+        nonlocal acquiring
+        acquiring = True
+        try:
+            return real_acquire(*args, **kwargs)
+        finally:
+            acquiring = False
+
+    monkeypatch.setattr(generation_catalog.os, "read", read_and_add_member)
+    monkeypatch.setattr(catalog, "_acquire_seal_capability", tracked_acquire)
+
+    with pytest.raises((PermissionError, ValueError), match="changed|seal"):
+        catalog.register("membership-race")
+
+    assert changed
+
+
+def test_artifact_hash_rejects_in_place_mutation_during_read_with_restored_mtime(
+    tmp_path, monkeypatch
+):
+    import generation_catalog
+
+    catalog = _catalog(tmp_path)
+    payload = b"a" * (generation_catalog.HASH_CHUNK_BYTES + 1)
+    directory, _manifest = _publish(catalog, "hash-race", payload=payload)
+    artifact = directory / "search.sqlite3"
+    real_read = generation_catalog.os.read
+    mutated = False
+
+    def read_then_mutate(descriptor, size):
+        nonlocal mutated
+        chunk = real_read(descriptor, size)
+        if chunk and not mutated:
+            changed = bytes([payload[0] ^ 1]) + payload[1:]
+            _rewrite_preserving_metadata(artifact, changed)
+            mutated = True
+        return chunk
+
+    monkeypatch.setattr(generation_catalog.os, "read", read_then_mutate)
+
+    with pytest.raises((PermissionError, ValueError), match="changed|wrong hash"):
+        catalog.register("hash-race")
+
+
+def test_validated_candidate_honors_cancellation_and_deadline(tmp_path):
+    import generation_catalog
+
+    cancelled_catalog = _catalog(tmp_path / "cancelled")
+    _publish_v2(cancelled_catalog, "cancelled-candidate")
+    cancelled_candidate = cancelled_catalog._validate_candidate("cancelled-candidate")
+    with pytest.raises(TimeoutError, match="cancelled"):
+        cancelled_catalog._register_validated(
+            cancelled_candidate, cancelled=lambda: True
+        )
+
+    deadline_catalog = generation_catalog.GenerationCatalog(
+        tmp_path / "deadline/state", clock=lambda: NOW, monotonic=lambda: 10.0
+    )
+    _publish_v2(deadline_catalog, "deadline-candidate")
+    deadline_candidate = deadline_catalog._validate_candidate("deadline-candidate")
+    with pytest.raises(TimeoutError, match="deadline"):
+        deadline_catalog._register_validated(deadline_candidate, deadline=10.0)
+
+
+def test_v2_requires_validated_repository_scope(tmp_path):
+    from reliable_memory import canonical_json_bytes
+
+    catalog = _catalog(tmp_path)
+    directory, manifest = _publish_v2(catalog, "v2-unscoped")
+    manifest.pop("repository_scope")
+    (directory / "manifest.json").write_bytes(canonical_json_bytes(manifest))
+
+    with pytest.raises(ValueError, match="repository scope"):
+        catalog.register("v2-unscoped")
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "UPDATE chunks SET content = content || ' tampered'",
+        "UPDATE chunks SET chunk_id = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'",
+        "UPDATE chunks SET span_sha256 = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'",
+        "UPDATE chunks SET byte_start = byte_start + 1",
+        "UPDATE chunks SET byte_end = byte_end - 1",
+        "UPDATE chunks SET line_start = line_start + 1",
+        "UPDATE chunks SET line_end = line_end + 1",
+        "UPDATE chunks SET source_sha256 = 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'",
+        "UPDATE chunks SET source_id = 'source:other.md'",
+        "UPDATE chunks SET source_path = 'knowledge/notes/other.md'",
+        "UPDATE chunks SET parent_page = 'knowledge/notes/other.md'",
+        "UPDATE chunks SET heading_ancestry = '[\"Other\"]'",
+        "UPDATE chunks SET type = 'pattern'",
+        "UPDATE chunks SET project = 'other-project'",
+        "UPDATE chunks SET authority = 'web'",
+        "UPDATE chunks SET confidence = 'low'",
+        "UPDATE chunks SET status = 'superseded'",
+        "UPDATE chunks SET valid_from = '2025-01-01'",
+        "UPDATE chunks SET valid_to = '2028-01-01'",
+        "UPDATE chunks SET language = 'ru'",
+        "UPDATE chunks SET title = 'Other title'",
+        "DELETE FROM chunks",
+    ],
+)
+def test_v2_rejects_fts_rows_not_bound_to_captured_source_bytes(tmp_path, sql):
+    catalog = _catalog(tmp_path)
+    directory, manifest = _publish_v2(catalog, "v2-tampered-chunk")
+    with sqlite3.connect(directory / "search.sqlite3") as database:
+        database.execute(sql)
+        database.execute(
+            "UPDATE generation_metadata SET value=(SELECT CAST(COUNT(*) AS TEXT) FROM chunks) "
+            "WHERE key='chunk_count'"
+        )
+        database.commit()
+    _refresh_artifact(directory, manifest, "search.sqlite3")
+
+    with pytest.raises(ValueError, match="FTS|search"):
+        catalog.register("v2-tampered-chunk")
+
+
+def test_v2_rejects_extra_well_formed_stale_chunk_after_hash_recomputed(tmp_path):
+    catalog = _catalog(tmp_path)
+    directory, manifest = _publish_v2(catalog, "v2-extra-chunk")
+    with sqlite3.connect(directory / "search.sqlite3") as database:
+        row = list(database.execute("SELECT * FROM chunks LIMIT 1").fetchone())
+        row[0] = "d" * 64
+        row[1] = 1
+        database.execute("INSERT INTO chunks VALUES (" + ",".join("?" * 22) + ")", row)
+        database.execute(
+            "UPDATE generation_metadata SET value='2' WHERE key='chunk_count'"
+        )
+        database.commit()
+    _refresh_artifact(directory, manifest, "search.sqlite3")
+
+    with pytest.raises(ValueError, match="FTS|search"):
+        catalog.register("v2-extra-chunk")
+
+
+def test_public_fts_validator_rejects_graph_source_membership_drift(tmp_path):
+    import search_memory
+
+    catalog = _catalog(tmp_path)
+    directory, manifest = _publish_v2(catalog, "v2-source-drift")
+    with sqlite3.connect(directory / "evidence.sqlite3") as database:
+        database.execute("UPDATE source SET relative_path='knowledge/notes/other.md'")
+        database.commit()
+
+    with pytest.raises(ValueError, match="source|membership"):
+        search_memory.validate_generation_fts_artifact(
+            directory,
+            manifest,
+            state_root=catalog.state_root,
+        )
+
+
+def test_public_fts_validator_cancels_during_source_manifest_stream(
+    tmp_path, monkeypatch
+):
+    import search_memory
+
+    catalog = _catalog(tmp_path)
+    directory, manifest = _publish_v2(catalog, "v2-cancel-source-read")
+    cancelled = False
+    real_read = search_memory.os.read
+
+    def read_then_cancel(descriptor, size):
+        nonlocal cancelled
+        content = real_read(descriptor, size)
+        if content:
+            cancelled = True
+        return content
+
+    monkeypatch.setattr(search_memory.os, "read", read_then_cancel)
+
+    with pytest.raises(TimeoutError, match="cancel"):
+        search_memory.validate_generation_fts_artifact(
+            directory,
+            manifest,
+            state_root=catalog.state_root,
+            cancelled=lambda: cancelled,
+        )
 
 
 def test_catalog_uses_required_layout_pragmas_and_generic_tables(tmp_path):
@@ -139,16 +1030,18 @@ def test_registration_rechecks_manifest_digest_inside_transaction(tmp_path, monk
     directory, _manifest = _publish(catalog, "gen-1")
     manifest_path = directory / "manifest.json"
     changed = manifest_path.read_bytes().replace(b"collector/v1", b"collector/v2")
-    real_check = catalog._seal_unchanged
+    real_transaction = catalog._write_transaction
 
-    def mutate_then_check(generation_path, seal):
-        _rewrite_preserving_metadata(manifest_path, changed)
-        return real_check(generation_path, seal)
+    @contextmanager
+    def mutate_then_transact(deadline):
+        with real_transaction(deadline) as database:
+            _rewrite_preserving_metadata(manifest_path, changed)
+            yield database
 
-    monkeypatch.setattr(catalog, "_seal_unchanged", mutate_then_check)
+    monkeypatch.setattr(catalog, "_write_transaction", mutate_then_transact)
 
     with pytest.raises(ValueError, match="changed|seal"):
-        catalog.register("gen-1")
+        catalog.register("gen-1", cancelled=lambda: False)
     with closing(sqlite3.connect(catalog.catalog_path)) as database:
         assert database.execute("SELECT COUNT(*) FROM generations").fetchone()[0] == 0
 
@@ -175,6 +1068,47 @@ def test_manifest_contract_fails_closed(tmp_path, mutate):
     (directory / "manifest.json").write_bytes(canonical_json_bytes(manifest))
 
     with pytest.raises((TypeError, ValueError, PermissionError)):
+        catalog.register("gen-1")
+
+
+def test_manifest_accepts_optional_closed_repository_scope(tmp_path):
+    from repository_scope import resolve_repository_scope
+
+    root = tmp_path / "repository"
+    root.mkdir()
+    scope = resolve_repository_scope(root).as_dict()
+    catalog = _catalog(tmp_path)
+    _directory, manifest = _publish(catalog, "gen-1", repository_scope=scope)
+
+    assert catalog.register("gen-1") == manifest
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda scope: scope.pop("checkout_id"),
+        lambda scope: scope.update(extra=True),
+        lambda scope: scope.update(repository_id="repository:bad"),
+        lambda scope: scope.update(checkout_id="checkout:" + "f" * 63),
+        lambda scope: scope.update(checkout_root="relative/root"),
+        lambda scope: scope.update(git_common_dir="relative/.git"),
+        lambda scope: scope.update(schema_version="x" * 129),
+        lambda scope: scope.update(checkout_root="C:/" + "x" * 4096),
+    ],
+)
+def test_manifest_rejects_invalid_repository_scope(tmp_path, mutate):
+    from reliable_memory import canonical_json_bytes
+    from repository_scope import resolve_repository_scope
+
+    root = tmp_path / "repository"
+    root.mkdir()
+    scope = resolve_repository_scope(root).as_dict()
+    mutate(scope)
+    catalog = _catalog(tmp_path)
+    directory, manifest = _publish(catalog, "gen-1", repository_scope=scope)
+    (directory / "manifest.json").write_bytes(canonical_json_bytes(manifest))
+
+    with pytest.raises((TypeError, ValueError)):
         catalog.register("gen-1")
 
 
@@ -227,7 +1161,7 @@ def test_manifest_rejects_incomplete_or_inconsistent_future_metadata(tmp_path, f
         catalog.register("gen-1")
 
 
-def test_manifest_accepts_bound_vector_and_graph_metadata(tmp_path):
+def test_manifest_accepts_bound_vector_metadata(tmp_path):
     from reliable_memory import canonical_json_bytes
 
     catalog = _catalog(tmp_path)
@@ -246,12 +1180,25 @@ def test_manifest_accepts_bound_vector_and_graph_metadata(tmp_path):
         embedding_model_id="model/name",
         embedding_model_revision="commit-123",
         vector_dimensions=384,
+    )
+    (directory / "manifest.json").write_bytes(canonical_json_bytes(manifest))
+
+    assert catalog.register("gen-1") == manifest
+
+
+def test_v1_manifest_rejects_legacy_graph_schema_alias(tmp_path):
+    from reliable_memory import canonical_json_bytes
+
+    catalog = _catalog(tmp_path)
+    directory, manifest = _publish(catalog, "gen-legacy-graph")
+    manifest.update(
         graph_schema_version="graph/v1",
         graph_extractor_version="graph-extractor/v1",
     )
     (directory / "manifest.json").write_bytes(canonical_json_bytes(manifest))
 
-    assert catalog.register("gen-1") == manifest
+    with pytest.raises(ValueError, match="graph schema|Evidence Graph"):
+        catalog.register("gen-legacy-graph")
 
 
 @pytest.mark.parametrize("damage", ["missing", "size", "hash"])
@@ -305,19 +1252,292 @@ def test_compare_and_swap_has_one_winner_and_rejects_stale_expected_active(tmp_p
     assert catalog.activate(loser, expected_active=None) is False
 
 
+def test_discard_commit_failure_preserves_registration_and_directory(tmp_path, monkeypatch):
+    catalog = _catalog(tmp_path)
+    directory, _manifest = _publish(catalog, "gen-1")
+    catalog.register("gen-1")
+    real_transaction = catalog._write_transaction
+
+    @contextmanager
+    def fail_commit(deadline):
+        with real_transaction(deadline) as database:
+            yield database
+            raise sqlite3.OperationalError("injected discard commit failure")
+
+    monkeypatch.setattr(catalog, "_write_transaction", fail_commit)
+
+    with pytest.raises(sqlite3.OperationalError, match="injected discard commit failure"):
+        catalog.discard_unactivated("gen-1")
+
+    with closing(sqlite3.connect(catalog.catalog_path)) as database:
+        rows = database.execute(
+            "SELECT COUNT(*) FROM generations WHERE generation_id = 'gen-1'"
+        ).fetchone()[0]
+    assert rows == 1
+    assert directory.is_dir()
+
+
+def test_discard_cleanup_failure_leaves_unregistered_orphan_and_raises(
+    tmp_path, monkeypatch
+):
+    import generation_catalog
+
+    catalog = _catalog(tmp_path)
+    directory, _manifest = _publish(catalog, "gen-1")
+    catalog.register("gen-1")
+
+    def fail_cleanup(_path):
+        raise OSError("injected recursive deletion failure")
+
+    monkeypatch.setattr(generation_catalog.shutil, "rmtree", fail_cleanup)
+
+    with pytest.raises(OSError, match="injected recursive deletion failure"):
+        catalog.discard_unactivated("gen-1")
+
+    with closing(sqlite3.connect(catalog.catalog_path)) as database:
+        rows = database.execute(
+            "SELECT COUNT(*) FROM generations WHERE generation_id = 'gen-1'"
+        ).fetchone()[0]
+        active = database.execute(
+            "SELECT active_generation_id FROM catalog_state WHERE singleton = 1"
+        ).fetchone()[0]
+        history = database.execute(
+            "SELECT COUNT(*) FROM activation_history WHERE generation_id = 'gen-1'"
+        ).fetchone()[0]
+    assert (rows, active, history) == (0, None, 0)
+    assert directory.is_dir()
+
+
+def test_discard_parent_fsync_failure_cannot_restore_registration(tmp_path, monkeypatch):
+    import generation_catalog
+
+    catalog = _catalog(tmp_path)
+    directory, _manifest = _publish(catalog, "gen-1")
+    catalog.register("gen-1")
+
+    def fail_fsync(path):
+        assert Path(path) == catalog.generations_path
+        raise OSError("injected parent fsync failure")
+
+    monkeypatch.setattr(generation_catalog, "fsync_directory", fail_fsync)
+
+    with pytest.raises(OSError, match="injected parent fsync failure"):
+        catalog.discard_unactivated("gen-1")
+
+    with closing(sqlite3.connect(catalog.catalog_path)) as database:
+        state = (
+            database.execute(
+                "SELECT COUNT(*) FROM generations WHERE generation_id = 'gen-1'"
+            ).fetchone()[0],
+            database.execute(
+                "SELECT active_generation_id FROM catalog_state WHERE singleton = 1"
+            ).fetchone()[0],
+            database.execute(
+                "SELECT COUNT(*) FROM activation_history WHERE generation_id = 'gen-1'"
+            ).fetchone()[0],
+        )
+    assert state == (0, None, 0)
+    assert not directory.exists()
+
+
+@pytest.mark.parametrize("reference", ["active", "history"])
+def test_discard_refuses_active_or_historically_activated_generation(tmp_path, reference):
+    catalog = _catalog(tmp_path)
+    first, _manifest = _publish(catalog, "gen-1")
+    catalog.register("gen-1")
+    assert catalog.activate("gen-1", expected_active=None)
+    if reference == "history":
+        _publish(catalog, "gen-2")
+        catalog.register("gen-2")
+        assert catalog.activate("gen-2", expected_active="gen-1")
+
+    assert catalog.discard_unactivated("gen-1") is False
+
+    with closing(sqlite3.connect(catalog.catalog_path)) as database:
+        rows = database.execute(
+            "SELECT COUNT(*) FROM generations WHERE generation_id = 'gen-1'"
+        ).fetchone()[0]
+    assert rows == 1
+    assert first.is_dir()
+
+
+def test_discard_cancellation_is_cooperative_after_catalog_unregistration(tmp_path):
+    catalog = _catalog(tmp_path)
+    directory, _manifest = _publish(catalog, "gen-1", extra_artifacts=4)
+    catalog.register("gen-1")
+    checks = 0
+
+    def cancelled():
+        nonlocal checks
+        checks += 1
+        return checks >= 4
+
+    with pytest.raises(TimeoutError, match="cancel"):
+        catalog.discard_unactivated("gen-1", cancelled=cancelled)
+
+    with closing(sqlite3.connect(catalog.catalog_path)) as database:
+        rows = database.execute(
+            "SELECT COUNT(*) FROM generations WHERE generation_id = 'gen-1'"
+        ).fetchone()[0]
+    assert rows == 0
+    assert directory.exists()
+
+
+def test_repeated_expired_discard_deadlines_do_not_consume_generation_rows(
+    tmp_path, monkeypatch
+):
+    import generation_catalog
+
+    monotonic = _Monotonic()
+    catalog = generation_catalog.GenerationCatalog(
+        tmp_path / "state", clock=lambda: NOW, monotonic=monotonic
+    )
+    monkeypatch.setattr(generation_catalog, "MAX_GENERATIONS", 2)
+
+    for number in range(3):
+        generation_id = f"expired-{number}"
+        directory, _manifest = _publish(catalog, generation_id)
+        monotonic.value = 0.0
+        catalog.register(generation_id, deadline=1.0)
+        monotonic.value = 2.0
+
+        with pytest.raises(TimeoutError, match="deadline"):
+            catalog.discard_unactivated(generation_id, deadline=1.0)
+
+        with closing(sqlite3.connect(catalog.catalog_path)) as database:
+            assert database.execute(
+                "SELECT COUNT(*) FROM generations"
+            ).fetchone()[0] == 0
+        assert directory.is_dir()
+
+
+def test_discard_fences_prevalidated_concurrent_registration(tmp_path, monkeypatch):
+    import generation_catalog
+
+    catalog = _catalog(tmp_path)
+    directory, _manifest = _publish(catalog, "gen-1")
+    catalog.register("gen-1")
+    prevalidated = threading.Event()
+    allow_registration = threading.Event()
+    errors = []
+    real_acquire = catalog._acquire_seal_capability
+    real_rmtree = generation_catalog.shutil.rmtree
+
+    def pause_after_prevalidation(*args, **kwargs):
+        result = real_acquire(*args, **kwargs)
+        if threading.current_thread().name == "racing-registration":
+            prevalidated.set()
+            assert allow_registration.wait(timeout=5)
+        return result
+
+    def release_registration_then_remove(path):
+        allow_registration.set()
+        real_rmtree(path)
+
+    def register_again():
+        try:
+            catalog.register("gen-1")
+        except BaseException as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(catalog, "_acquire_seal_capability", pause_after_prevalidation)
+    monkeypatch.setattr(
+        generation_catalog.shutil, "rmtree", release_registration_then_remove
+    )
+    worker = threading.Thread(target=register_again, name="racing-registration")
+    worker.start()
+    assert prevalidated.wait(timeout=5)
+
+    assert catalog.discard_unactivated("gen-1") is True
+    worker.join(timeout=5)
+
+    assert worker.is_alive() is False
+    assert errors and isinstance(errors[0], (FileNotFoundError, ValueError))
+    with closing(sqlite3.connect(catalog.catalog_path)) as database:
+        rows = database.execute(
+            "SELECT COUNT(*) FROM generations WHERE generation_id = 'gen-1'"
+        ).fetchone()[0]
+    assert rows == 0
+    assert not directory.exists()
+
+
+def test_discard_serializes_with_activation_and_leaves_no_dangling_reference(
+    tmp_path, monkeypatch
+):
+    import generation_catalog
+
+    catalog = _catalog(tmp_path)
+    directory, _manifest = _publish(catalog, "gen-1")
+    catalog.register("gen-1")
+    activation_waiting = threading.Event()
+    allow_activation = threading.Event()
+    activation_errors = []
+    real_acquire = catalog._acquire_seal_capability
+    real_rmtree = generation_catalog.shutil.rmtree
+
+    def pause_after_activation_validation(*args, **kwargs):
+        result = real_acquire(*args, **kwargs)
+        if threading.current_thread().name == "racing-activation":
+            activation_waiting.set()
+            assert allow_activation.wait(timeout=5)
+        return result
+
+    def activate():
+        try:
+            catalog.activate("gen-1", expected_active=None)
+        except BaseException as exc:
+            activation_errors.append(exc)
+
+    def race_then_remove(path):
+        allow_activation.set()
+        real_rmtree(path)
+
+    monkeypatch.setattr(
+        catalog, "_acquire_seal_capability", pause_after_activation_validation
+    )
+    monkeypatch.setattr(generation_catalog.shutil, "rmtree", race_then_remove)
+    worker = threading.Thread(target=activate, name="racing-activation")
+    worker.start()
+    assert activation_waiting.wait(timeout=5)
+
+    assert catalog.discard_unactivated("gen-1") is True
+    worker.join(timeout=5)
+
+    assert worker.is_alive() is False
+    assert activation_errors and isinstance(
+        activation_errors[0], (FileNotFoundError, ValueError)
+    )
+    with closing(sqlite3.connect(catalog.catalog_path)) as database:
+        state = (
+            database.execute(
+                "SELECT COUNT(*) FROM generations WHERE generation_id = 'gen-1'"
+            ).fetchone()[0],
+            database.execute(
+                "SELECT active_generation_id FROM catalog_state WHERE singleton = 1"
+            ).fetchone()[0],
+            database.execute(
+                "SELECT COUNT(*) FROM activation_history WHERE generation_id = 'gen-1'"
+            ).fetchone()[0],
+        )
+    assert state == (0, None, 0)
+    assert not directory.exists()
+
+
 def test_activation_rechecks_validation_seal_inside_cas_transaction(tmp_path, monkeypatch):
     catalog = _catalog(tmp_path)
     directory, _manifest = _publish(catalog, "gen-1")
     catalog.register("gen-1")
     artifact = directory / "search.sqlite3"
 
-    real_check = catalog._seal_unchanged
+    real_transaction = catalog._write_transaction
 
-    def mutate_and_check(generation_path, seal):
-        _rewrite_preserving_metadata(artifact, b"SEARCH-INDEX")
-        return real_check(generation_path, seal)
+    @contextmanager
+    def mutate_then_transact(deadline):
+        with real_transaction(deadline) as database:
+            _rewrite_preserving_metadata(artifact, b"SEARCH-INDEX")
+            yield database
 
-    monkeypatch.setattr(catalog, "_seal_unchanged", mutate_and_check, raising=False)
+    monkeypatch.setattr(catalog, "_write_transaction", mutate_then_transact)
 
     with pytest.raises(ValueError, match="changed|seal"):
         catalog.activate("gen-1", expected_active=None)
@@ -330,19 +1550,28 @@ def test_activation_rechecks_validation_seal_inside_cas_transaction(tmp_path, mo
     assert history == 0
 
 
-def test_activation_hash_scan_finishes_before_writer_transaction(tmp_path, monkeypatch):
-    from contextlib import contextmanager
+def test_activation_hashes_outside_writer_and_revalidates_inside_transaction(
+    tmp_path, monkeypatch
+):
+    import generation_catalog
 
     catalog = _catalog(tmp_path)
     _publish(catalog, "gen-1")
     catalog.register("gen-1")
     in_transaction = False
-    real_check = catalog._seal_unchanged
+    hash_locations = []
+    revalidation_locations = []
+    real_hash = generation_catalog._hash_descriptor
+    real_revalidate = generation_catalog._GenerationSealCapability.revalidate
     real_transaction = catalog._write_transaction
 
-    def checked_seal(*args, **kwargs):
-        assert not in_transaction
-        return real_check(*args, **kwargs)
+    def checked_hash(*args, **kwargs):
+        hash_locations.append(in_transaction)
+        return real_hash(*args, **kwargs)
+
+    def checked_revalidation(self):
+        revalidation_locations.append(in_transaction)
+        return real_revalidate(self)
 
     @contextmanager
     def tracked_transaction(deadline):
@@ -354,10 +1583,15 @@ def test_activation_hash_scan_finishes_before_writer_transaction(tmp_path, monke
             finally:
                 in_transaction = False
 
-    monkeypatch.setattr(catalog, "_seal_unchanged", checked_seal)
+    monkeypatch.setattr(generation_catalog, "_hash_descriptor", checked_hash)
+    monkeypatch.setattr(
+        generation_catalog._GenerationSealCapability, "revalidate", checked_revalidation
+    )
     monkeypatch.setattr(catalog, "_write_transaction", tracked_transaction)
 
     assert catalog.activate("gen-1", expected_active=None)
+    assert hash_locations and not any(hash_locations)
+    assert revalidation_locations[-1] is True
 
 
 def test_get_active_falls_back_and_repairs_pointer_after_active_corruption(tmp_path):
@@ -381,6 +1615,78 @@ def test_get_active_falls_back_and_repairs_pointer_after_active_corruption(tmp_p
     assert pointer == "gen-1"
 
 
+@pytest.mark.parametrize("active_binding", ["foreign", "unbound"])
+def test_get_active_for_repository_rejects_ineligible_active_without_mutation(
+    tmp_path, active_binding
+):
+    from repository_scope import resolve_repository_scope
+
+    requested_repository = tmp_path / "requested"
+    foreign_repository = tmp_path / "foreign"
+    requested_repository.mkdir()
+    foreign_repository.mkdir()
+    requested_scope = resolve_repository_scope(requested_repository)
+    foreign_scope = resolve_repository_scope(foreign_repository)
+    catalog = _catalog(tmp_path)
+    _publish(catalog, "requested", repository_scope=requested_scope.as_dict())
+    _publish(
+        catalog,
+        "active",
+        parent="requested",
+        repository_scope=(
+            foreign_scope.as_dict() if active_binding == "foreign" else None
+        ),
+    )
+    for generation_id in ("requested", "active"):
+        catalog.register(generation_id)
+    assert catalog.activate("requested", expected_active=None)
+    assert catalog.activate("active", expected_active="requested")
+    (catalog.generations_path / "active/search.sqlite3").write_bytes(b"corrupt")
+    with closing(sqlite3.connect(catalog.catalog_path)) as database:
+        before = (
+            database.execute(
+                "SELECT active_generation_id FROM catalog_state WHERE singleton = 1"
+            ).fetchone()[0],
+            database.execute("SELECT COUNT(*) FROM activation_history").fetchone()[0],
+        )
+
+    assert catalog.get_active_for_repository(requested_scope) is None
+
+    with closing(sqlite3.connect(catalog.catalog_path)) as database:
+        after = (
+            database.execute(
+                "SELECT active_generation_id FROM catalog_state WHERE singleton = 1"
+            ).fetchone()[0],
+            database.execute("SELECT COUNT(*) FROM activation_history").fetchone()[0],
+        )
+    assert after == before
+
+
+def test_get_active_for_repository_repairs_only_to_same_scope_fallback(tmp_path):
+    from repository_scope import resolve_repository_scope
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    scope = resolve_repository_scope(repository)
+    catalog = _catalog(tmp_path)
+    _publish(catalog, "prior", repository_scope=scope.as_dict())
+    _publish(catalog, "active", parent="prior", repository_scope=scope.as_dict())
+    for generation_id in ("prior", "active"):
+        catalog.register(generation_id)
+    assert catalog.activate("prior", expected_active=None)
+    assert catalog.activate("active", expected_active="prior")
+    (catalog.generations_path / "active/search.sqlite3").write_bytes(b"corrupt")
+
+    selected = catalog.get_active_for_repository(scope)
+
+    assert selected is not None
+    assert selected["generation_id"] == "prior"
+    with closing(sqlite3.connect(catalog.catalog_path)) as database:
+        assert database.execute(
+            "SELECT active_generation_id FROM catalog_state WHERE singleton = 1"
+        ).fetchone()[0] == "prior"
+
+
 def test_fallback_rechecks_selected_generation_seal_before_pointer_repair(tmp_path, monkeypatch):
     catalog = _catalog(tmp_path)
     fallback, _manifest = _publish(catalog, "gen-1")
@@ -394,9 +1700,9 @@ def test_fallback_rechecks_selected_generation_seal_before_pointer_repair(tmp_pa
 
     real_check = catalog._seal_unchanged
 
-    def mutate_and_check(generation_path, seal):
+    def mutate_and_check(generation_path, seal, **kwargs):
         _rewrite_preserving_metadata(fallback_artifact, b"SEARCH-INDEX")
-        return real_check(generation_path, seal)
+        return real_check(generation_path, seal, **kwargs)
 
     monkeypatch.setattr(catalog, "_seal_unchanged", mutate_and_check)
 
@@ -739,14 +2045,30 @@ def test_deadline_immediately_before_cas_rolls_back_pointer_and_history(tmp_path
         _publish(catalog, generation_id)
         catalog.register(generation_id)
     assert catalog.activate("gen-1", expected_active=None)
-    real_check = catalog._seal_unchanged
+    in_transaction = False
+    real_transaction = catalog._write_transaction
+    real_revalidate = generation_catalog._GenerationSealCapability.revalidate
 
-    def expire_after_seal(generation_path, seal, **kwargs):
-        valid = real_check(generation_path, seal, **kwargs)
-        monotonic.value = 2.0
+    @contextmanager
+    def tracked_transaction(deadline):
+        nonlocal in_transaction
+        with real_transaction(deadline) as database:
+            in_transaction = True
+            try:
+                yield database
+            finally:
+                in_transaction = False
+
+    def expire_after_seal(self):
+        valid = real_revalidate(self)
+        if in_transaction:
+            monotonic.value = 2.0
         return valid
 
-    monkeypatch.setattr(catalog, "_seal_unchanged", expire_after_seal)
+    monkeypatch.setattr(catalog, "_write_transaction", tracked_transaction)
+    monkeypatch.setattr(
+        generation_catalog._GenerationSealCapability, "revalidate", expire_after_seal
+    )
 
     with pytest.raises(TimeoutError, match="deadline"):
         catalog.activate("gen-2", expected_active="gen-1", deadline=1.0)
@@ -801,6 +2123,14 @@ def test_public_operations_reject_non_finite_deadlines(tmp_path):
     for operation in operations:
         with pytest.raises(ValueError, match="deadline"):
             operation()
+
+
+def test_get_active_propagates_cancellation_through_validation(tmp_path):
+    catalog = _catalog(tmp_path)
+    _publish(catalog, "gen-1")
+
+    with pytest.raises(TimeoutError, match="cancelled"):
+        catalog.get_active(cancelled=lambda: True)
 
 
 def test_symlink_artifact_and_generation_path_escape_are_rejected(tmp_path):

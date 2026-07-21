@@ -8,7 +8,8 @@ import importlib
 import json
 import math
 import re
-from collections.abc import Iterable, Mapping
+import time
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Protocol
@@ -26,8 +27,11 @@ class _CapturedSource(Protocol):
     record: _SourceRecord
     content: bytes
 
-EXTRACTOR_VERSION = "code-extractor/v1"
+EXTRACTOR_VERSION = "code-extractor/v11"
 SCIP_DEFINITION_ROLE = 0x1
+_SYNTAX_STOP_INTERVAL = 256
+_MAX_OBSERVATION_TARGET_CHARS = 4096
+_MAX_OBSERVATION_TARGET_BYTES = 4096
 _GRAMMARS = {
     "bash": ("tree_sitter_bash", "language"),
     "c": ("tree_sitter_c", "language"),
@@ -54,6 +58,48 @@ _IMPORT_TYPES = {
     "import_declaration", "import_from_statement", "import_header", "import_statement",
     "include_expression", "preproc_include", "require", "use_declaration",
 }
+
+
+def _check_stop(
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> None:
+    if deadline is not None and (
+        isinstance(deadline, bool)
+        or not isinstance(deadline, (int, float))
+        or not math.isfinite(deadline)
+    ):
+        raise ValueError("code extraction deadline must be finite or None")
+    if cancelled is not None and not callable(cancelled):
+        raise TypeError("code extraction cancellation check must be callable or None")
+    if cancelled is not None and cancelled():
+        raise TimeoutError("code extraction cancelled")
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("code extraction deadline reached")
+
+
+def _canonical_observation_target(value: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError("observation target text must be a string")
+    normalized = " ".join(value.split())
+    if not normalized:
+        raise ValueError("observation target text must not be empty")
+    try:
+        encoded = normalized.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("observation target text must be valid UTF-8") from exc
+    if (
+        len(normalized) <= _MAX_OBSERVATION_TARGET_CHARS
+        and len(encoded) <= _MAX_OBSERVATION_TARGET_BYTES
+    ):
+        return normalized
+
+    digest = hashlib.sha256(encoded).hexdigest()
+    suffix = f" ... [sha256:{digest}]"
+    character_budget = _MAX_OBSERVATION_TARGET_CHARS - len(suffix)
+    byte_budget = _MAX_OBSERVATION_TARGET_BYTES - len(suffix.encode("ascii"))
+    prefix = normalized[:character_budget].encode("utf-8")[:byte_budget]
+    return prefix.decode("utf-8", errors="ignore").rstrip() + suffix
 
 
 def _optional_parser(language: str):
@@ -104,6 +150,7 @@ class ExtractionLimits:
     max_assertions: int = 500_000
     max_evidence: int = 500_000
     max_observations: int = 250_000
+    max_candidate_dependencies: int = 500_000
     max_scip_symbols: int = 500_000
     max_co_changes: int = 100_000
 
@@ -121,6 +168,7 @@ class CodeExtraction:
     assertions: tuple[Mapping[str, object], ...]
     evidence: tuple[Mapping[str, object], ...]
     observations: tuple[Mapping[str, object], ...]
+    observation_source_dependencies: Mapping[str, tuple[str, ...]]
 
 
 class _FrozenDict(dict):
@@ -149,6 +197,28 @@ def _deep_freeze(value: object) -> object:
 def _frozen(records: list[dict[str, object]], key: str) -> tuple[Mapping[str, object], ...]:
     records.sort(key=lambda item: str(item[key]))
     return tuple(_deep_freeze(record) for record in records)
+
+
+def _frozen_observation_dependencies(
+    dependencies: Mapping[str, set[str]],
+) -> Mapping[str, tuple[str, ...]]:
+    return _FrozenDict({key: tuple(sorted(value)) for key, value in sorted(dependencies.items())})
+
+
+def _bounded_values(
+    values: Iterable[object],
+    maximum: int,
+    label: str,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> tuple[object, ...]:
+    retained = []
+    for value in values:
+        _check_stop(deadline, cancelled)
+        if len(retained) >= maximum:
+            raise ValueError(f"code extraction {label} ceiling exceeded")
+        retained.append(value)
+    return tuple(retained)
 
 
 def _identifier(prefix: str, *parts: object) -> str:
@@ -223,21 +293,29 @@ class _Collector:
         repository_id: str,
         scip_symbols: tuple[ScipSymbol, ...],
         limits: ExtractionLimits,
+        deadline: float | None,
+        cancelled: Callable[[], bool] | None,
     ) -> None:
         self.sources = sources
         self.repository_id = repository_id
         self.scip_symbols = scip_symbols
         self.limits = limits
+        self.deadline = deadline
+        self.cancelled = cancelled
         self.nodes: dict[str, dict[str, object]] = {}
         self.occurrences: list[dict[str, object]] = []
         self.assertions: list[dict[str, object]] = []
         self.evidence: list[dict[str, object]] = []
         self.observations: list[dict[str, object]] = []
+        self.observation_source_dependencies: dict[str, set[str]] = {}
+        self.candidate_dependency_count = 0
         self.assertion_ids: set[str] = set()
         self.observation_ids: set[str] = set()
-        self.modules: dict[str, str] = {}
+        self.modules: dict[str, list[str]] = {}
+        self.module_name_index: dict[str, tuple[str, ...]] = {}
+        self.source_modules: dict[str, str] = {}
         self.files: dict[str, str] = {}
-        self.tables: dict[str, str] = {}
+        self.tables: dict[str, list[str]] = {}
         self.definitions: dict[tuple[str, str], list[str]] = {}
         self.python_scopes: dict[tuple[str, str, str], list[str]] = {}
         self.function_body_scope: dict[str, str] = {}
@@ -247,12 +325,17 @@ class _Collector:
         self.sqlite_modules: dict[str, set[str]] = {}
         self.python_entry_names: dict[str, set[str]] = {}
         self.node_ast: dict[int, str] = {}
+        self.node_sources: dict[str, set[str]] = {}
         self.syntax_definitions: dict[tuple[str, str, str], list[tuple[object, str]]] = {}
         self.syntax_functions: dict[str, list[tuple[object, str]]] = {}
 
     def check(self, records: object, maximum: int, label: str) -> None:
+        self.check_stop()
         if len(records) > maximum:  # type: ignore[arg-type]
             raise ValueError(f"code extraction {label} ceiling exceeded")
+
+    def check_stop(self) -> None:
+        _check_stop(self.deadline, self.cancelled)
 
     def add_node(
         self,
@@ -293,6 +376,7 @@ class _Collector:
             "line_start": line_start,
             "line_end": line_end,
         })
+        self.node_sources.setdefault(node_id, set()).add(source.record.logical_id)
         self.check(self.occurrences, self.limits.max_occurrences, "occurrence")
 
     def add_assertion(
@@ -337,12 +421,17 @@ class _Collector:
         reason: str,
         source: _CapturedSource,
         span: tuple[int, int, int, int],
+        *,
+        candidate_node_ids: Iterable[str] = (),
     ) -> None:
         start, end, _, _ = span
         if end <= start:
             return
+        canonical_target = (
+            None if target_text is None else _canonical_observation_target(target_text)
+        )
         observation_id = _identifier(
-            "observation", source_node_id, edge_type, target_text, reason,
+            "observation", source_node_id, edge_type, canonical_target, reason,
             source.record.logical_id, start, end,
         )
         if observation_id in self.observation_ids:
@@ -352,10 +441,20 @@ class _Collector:
             "observation_id": observation_id,
             "source_node_id": source_node_id,
             "edge_type": edge_type,
-            "target_text": target_text,
+            "target_text": canonical_target,
             "reason": reason,
             "extractor": EXTRACTOR_VERSION,
         })
+        candidate_sources = {
+            source_id
+            for node_id in candidate_node_ids
+            for source_id in self.node_sources.get(node_id, ())
+        }
+        if candidate_sources:
+            self.candidate_dependency_count += len(candidate_sources)
+            if self.candidate_dependency_count > self.limits.max_candidate_dependencies:
+                raise ValueError("code extraction candidate dependency ceiling exceeded")
+            self.observation_source_dependencies[observation_id] = candidate_sources
         self._add_evidence(source, start, end, observation_id=observation_id)
         self.check(self.observations, self.limits.max_observations, "observation")
 
@@ -408,12 +507,15 @@ class _Collector:
         return "code-symbol/v1", key
 
     def structural_nodes(self) -> str:
+        self.check_stop()
         repository = self.add_node(
             "repository", "repository/v1", self.repository_id,
             {"name": self.repository_id},
         )
         directories: dict[str, str] = {"": repository}
+        module_aliases: dict[str, set[str]] = {}
         for source in self.sources:
+            self.check_stop()
             path = PurePosixPath(source.record.relative_path)
             parent = repository
             accumulated: list[str] = []
@@ -429,7 +531,7 @@ class _Collector:
                         {"name": part, "path": directory_path},
                     )
                     directories[directory_path] = directory
-                    self.add_assertion(parent, "CONTAINS", directory, source, whole)
+                self.add_assertion(parent, "CONTAINS", directory, source, whole)
                 parent = directory
             file_node = self.add_node(
                 "file", "repository-path/v1",
@@ -442,18 +544,29 @@ class _Collector:
             module_name = _module_name(source.record.relative_path)
             module = self.add_node(
                 "module", "code-module/v1",
-                f"{self.repository_id}\x1f{source.record.language or 'unknown'}\x1f{module_name}",
+                f"{self.repository_id}\x1f{source.record.language or 'unknown'}\x1f"
+                f"{module_name}\x1f{source.record.relative_path}",
                 {"name": module_name, "path": source.record.relative_path},
             )
-            self.modules[module_name] = module
+            self.modules.setdefault(module_name, []).append(module)
+            module_parts = module_name.split(".")
+            for offset in range(len(module_parts)):
+                alias = ".".join(module_parts[offset:])
+                module_aliases.setdefault(alias, set()).add(module_name)
+            self.source_modules[source.record.logical_id] = module
             self.add_occurrence(module, source, "definition", whole)
             self.add_assertion(file_node, "DEFINES", module, source, whole)
+        self.module_name_index = {
+            alias: tuple(sorted(module_names))
+            for alias, module_names in module_aliases.items()
+        }
         return repository
 
     def collect_python_definitions(self, source: _CapturedSource, tree: ast.Module) -> None:
+        self.check_stop()
         offsets = _line_offsets(source.content)
         module_name = _module_name(source.record.relative_path)
-        module_id = self.modules[module_name]
+        module_id = self.source_modules[source.record.logical_id]
         self.route_receivers[source.record.logical_id] = self._python_route_receivers(tree)
         self.sqlite_modules[source.record.logical_id] = {
             alias.asname or alias.name
@@ -472,6 +585,7 @@ class _Collector:
             lexical_scope: str,
         ) -> None:
             for node in body:
+                self.check_stop()
                 if isinstance(node, ast.ClassDef):
                     span = _span(node, offsets, source.content)
                     name_span = _python_name_span(node, offsets, source.content)
@@ -603,6 +717,7 @@ class _Collector:
         offsets: tuple[int, ...],
     ) -> None:
         for statement in node.body:
+            self.check_stop()
             if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
                 continue
             targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
@@ -614,7 +729,7 @@ class _Collector:
             span = _span(statement, offsets, source.content)
             key = f"{self.repository_id}\x1f{value.value}"
             table = self.add_node("table", "database-table/v1", key, {"name": value.value, "owner": owner})
-            self.tables[value.value.casefold()] = table
+            self.tables.setdefault(value.value.casefold(), []).append(table)
             self.add_occurrence(table, source, "definition", span)
             self.add_assertion(class_id, "DEFINES", table, source, span)
 
@@ -679,28 +794,64 @@ class _Collector:
             self.add_assertion(function_id, "EXPOSES", route, source, span)
 
     def collect_python_edges(self, source: _CapturedSource, tree: ast.Module) -> None:
+        self.check_stop()
         offsets = _line_offsets(source.content)
         module_name = _module_name(source.record.relative_path)
-        module_id = self.modules[module_name]
+        module_id = self.source_modules[source.record.logical_id]
         aliases: dict[str, tuple[str, str]] = {}
 
         for node in ast.walk(tree):
+            self.check_stop()
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     aliases[alias.asname or alias.name.split(".")[0]] = (alias.name, "")
                     self._import_edge(module_id, alias.name, source, _span(node, offsets, source.content))
             elif isinstance(node, ast.ImportFrom):
-                imported_module = self._absolute_import(module_name, node.module or "", node.level)
+                imported_module = self._absolute_import(
+                    module_name,
+                    node.module or "",
+                    node.level,
+                    is_package=PurePosixPath(source.record.relative_path).name
+                    == "__init__.py",
+                )
+                if node.module is None and node.level > 0:
+                    for alias in node.names:
+                        local_name = alias.asname or alias.name
+                        submodule = f"{imported_module}.{alias.name}"
+                        package_symbol = self.definitions.get(
+                            (imported_module, alias.name), ()
+                        )
+                        if alias.name != "*" and (
+                            self._matching_modules(submodule) or not package_symbol
+                        ):
+                            self._import_edge(
+                                module_id,
+                                submodule,
+                                source,
+                                _span(node, offsets, source.content),
+                            )
+                            aliases[local_name] = (submodule, "")
+                        else:
+                            self._import_edge(
+                                module_id,
+                                imported_module,
+                                source,
+                                _span(node, offsets, source.content),
+                            )
+                            aliases[local_name] = (imported_module, alias.name)
+                    continue
                 self._import_edge(module_id, imported_module, source, _span(node, offsets, source.content))
                 for alias in node.names:
                     aliases[alias.asname or alias.name] = (imported_module, alias.name)
 
         parent: dict[int, ast.AST] = {}
         for candidate in ast.walk(tree):
+            self.check_stop()
             for child in ast.iter_child_nodes(candidate):
                 parent[id(child)] = candidate
 
         for node in ast.walk(tree):
+            self.check_stop()
             if isinstance(node, ast.ClassDef):
                 class_id = self.node_ast.get(id(node))
                 if class_id:
@@ -710,7 +861,15 @@ class _Collector:
                         if len(target) == 1:
                             self.add_assertion(class_id, "INHERITS", target[0], source, span)
                         elif len(target) > 1:
-                            self.add_observation(class_id, "INHERITS", ast.unparse(base), "ambiguous_target", source, span)
+                            self.add_observation(
+                                class_id,
+                                "INHERITS",
+                                ast.unparse(base),
+                                "ambiguous_target",
+                                source,
+                                span,
+                                candidate_node_ids=target,
+                            )
                         else:
                             self.add_observation(
                                 class_id, "INHERITS", ast.unparse(base),
@@ -726,12 +885,28 @@ class _Collector:
             if len(targets) == 1:
                 self.add_assertion(source_node_id, "CALLS", targets[0], source, span)
             elif len(targets) > 1:
-                self.add_observation(source_node_id, "CALLS", text, "ambiguous_target", source, span)
+                self.add_observation(
+                    source_node_id,
+                    "CALLS",
+                    text,
+                    "ambiguous_target",
+                    source,
+                    span,
+                    candidate_node_ids=targets,
+                )
             else:
                 reason = "dynamic_dispatch" if isinstance(node.func, ast.Attribute) else "unresolved_reference"
                 if isinstance(node.func, ast.Name) and node.func.id in aliases:
                     reason = "missing_dependency"
-                self.add_observation(source_node_id, "CALLS", text, reason, source, span)
+                self.add_observation(
+                    source_node_id,
+                    "CALLS",
+                    text,
+                    reason,
+                    source,
+                    span,
+                    candidate_node_ids=self._candidate_modules(node.func, aliases),
+                )
             self._sql_edges(node, owner, source_node_id, source, offsets)
 
     def _sql_edges(
@@ -766,6 +941,7 @@ class _Collector:
         )
         for edge_type, pattern in relationships:
             for match in re.finditer(pattern, sql, re.IGNORECASE):
+                self.check_stop()
                 table_name = match.group(1)
                 literal_span = _span(statement, offsets, source.content)
                 start = source.content.find(
@@ -780,20 +956,30 @@ class _Collector:
                     source.content.count(b"\n", 0, start) + 1,
                     source.content.count(b"\n", 0, end) + 1,
                 )
-                table = self.tables.get(table_name.casefold())
+                tables = self.tables.get(table_name.casefold(), ())
                 if not supported_api:
                     self.add_observation(
                         source_node_id, edge_type, table_name,
                         "unsupported_semantics", source, reference_span,
                     )
-                elif table is None:
+                elif not tables:
                     self.add_observation(
                         source_node_id, edge_type, table_name,
                         "unresolved_reference", source, reference_span,
                     )
-                else:
+                elif len(tables) == 1:
                     self.add_assertion(
-                        source_node_id, edge_type, table, source, reference_span
+                        source_node_id, edge_type, tables[0], source, reference_span
+                    )
+                else:
+                    self.add_observation(
+                        source_node_id,
+                        edge_type,
+                        table_name,
+                        "ambiguous_target",
+                        source,
+                        reference_span,
+                        candidate_node_ids=tables,
                     )
 
     def _sqlite_receiver(
@@ -822,16 +1008,18 @@ class _Collector:
             node.end_point[0] + 1,
         )
 
-    @staticmethod
-    def _syntax_nodes(root: object, maximum: int) -> list[object]:
+    def _syntax_nodes(self, root: object, maximum: int) -> list[object]:
         nodes: list[object] = []
         pending = [root]
         while pending:
+            if len(nodes) % _SYNTAX_STOP_INTERVAL == 0:
+                self.check_stop()
             node = pending.pop()
             nodes.append(node)
             if len(nodes) > maximum:
                 raise ValueError("code extraction syntax node ceiling exceeded")
             pending.extend(reversed(node.named_children))
+        self.check_stop()
         return nodes
 
     @staticmethod
@@ -862,12 +1050,14 @@ class _Collector:
         return name
 
     def collect_syntax_definitions(self, source: _CapturedSource, root: object) -> None:
+        self.check_stop()
         language = source.record.language or "unknown"
         module_name = _module_name(source.record.relative_path)
-        module_id = self.modules[module_name]
+        module_id = self.source_modules[source.record.logical_id]
         nodes = self._syntax_nodes(root, self.limits.max_occurrences * 4)
         classes: list[tuple[object, str, str]] = []
         for node in nodes:
+            self.check_stop()
             if node.type not in _CLASS_TYPES:
                 continue
             name = self._syntax_name(node, source.content)
@@ -892,6 +1082,7 @@ class _Collector:
             self.add_occurrence(node_id, source, "definition", span)
             self.add_assertion(module_id, "DEFINES", node_id, source, span)
         for node in nodes:
+            self.check_stop()
             if node.type not in _FUNCTION_TYPES:
                 continue
             name = self._syntax_name(node, source.content)
@@ -944,20 +1135,34 @@ class _Collector:
                     )
 
     def collect_syntax_edges(self, source: _CapturedSource, root: object) -> None:
+        self.check_stop()
         language = source.record.language or "unknown"
         module_name = _module_name(source.record.relative_path)
-        module_id = self.modules[module_name]
+        module_id = self.source_modules[source.record.logical_id]
         functions = self.syntax_functions.get(source.record.logical_id, ())
         for node in self._syntax_nodes(root, self.limits.max_occurrences * 4):
+            self.check_stop()
             if node.type in _CLASS_TYPES:
                 self._syntax_type_edges(node, source)
             if node.type in _IMPORT_TYPES:
                 text = source.content[node.start_byte:node.end_byte].decode("utf-8", errors="strict")
                 target_text = self._import_target(text)
-                target = self.modules.get(target_text)
+                targets = self._module_candidates(target_text)
                 span = self._syntax_span(node)
-                if target:
-                    self.add_assertion(module_id, "IMPORTS", target, source, span, confidence="medium")
+                if len(targets) == 1:
+                    self.add_assertion(
+                        module_id, "IMPORTS", targets[0], source, span, confidence="medium"
+                    )
+                elif len(targets) > 1:
+                    self.add_observation(
+                        module_id,
+                        "IMPORTS",
+                        target_text or text,
+                        "ambiguous_target",
+                        source,
+                        span,
+                        candidate_node_ids=targets,
+                    )
                 else:
                     self.add_observation(module_id, "IMPORTS", target_text or text, "missing_dependency", source, span)
             if node.type not in _CALL_TYPES:
@@ -1061,11 +1266,19 @@ class _Collector:
         return "" if match is None else match.group(1).replace("::", ".").rstrip(";")
 
     @staticmethod
-    def _absolute_import(module_name: str, imported: str, level: int) -> str:
+    def _absolute_import(
+        module_name: str,
+        imported: str,
+        level: int,
+        *,
+        is_package: bool = False,
+    ) -> str:
         if level == 0:
             return imported
-        package = module_name.split(".")[:-1]
-        keep = max(0, len(package) - level + 1)
+        package = module_name.split(".") if is_package else module_name.split(".")[:-1]
+        if level > len(package):
+            return f"{'.' * level}{imported}"
+        keep = len(package) - level + 1
         return ".".join([*package[:keep], *([imported] if imported else [])])
 
     def _import_edge(
@@ -1075,11 +1288,47 @@ class _Collector:
         source: _CapturedSource,
         span: tuple[int, int, int, int],
     ) -> None:
-        target = self.modules.get(imported)
-        if target:
-            self.add_assertion(module_id, "IMPORTS", target, source, span)
+        targets = self._module_candidates(imported)
+        if len(targets) == 1:
+            self.add_assertion(module_id, "IMPORTS", targets[0], source, span)
+        elif len(targets) > 1:
+            self.add_observation(
+                module_id,
+                "IMPORTS",
+                imported,
+                "ambiguous_target",
+                source,
+                span,
+                candidate_node_ids=targets,
+            )
         else:
             self.add_observation(module_id, "IMPORTS", imported, "missing_dependency", source, span)
+
+    def _matching_modules(self, imported: str) -> tuple[str, ...]:
+        return self.module_name_index.get(imported, ())
+
+    def _module_candidates(self, imported: str) -> list[str]:
+        return [
+            node_id
+            for module in self._matching_modules(imported)
+            for node_id in self.modules[module]
+        ]
+
+    def _candidate_modules(
+        self,
+        expression: ast.AST,
+        aliases: Mapping[str, tuple[str, str]],
+    ) -> tuple[str, ...]:
+        alias = None
+        if isinstance(expression, ast.Name):
+            alias = aliases.get(expression.id)
+        elif isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name):
+            alias = aliases.get(expression.value.id)
+        if alias is None:
+            return ()
+        module, symbol = alias
+        target_module = f"{module}.{symbol}" if symbol and isinstance(expression, ast.Attribute) else module
+        return tuple(self._module_candidates(target_module))
 
     def _resolve_expression(
         self,
@@ -1092,8 +1341,12 @@ class _Collector:
             if expression.id in aliases:
                 module, symbol = aliases[expression.id]
                 if symbol:
-                    return list(self.definitions.get((module, symbol), ()))
-                return [self.modules[module]] if module in self.modules else []
+                    return [
+                        node_id
+                        for candidate in self._matching_modules(module)
+                        for node_id in self.definitions.get((candidate, symbol), ())
+                    ]
+                return self._module_candidates(module)
             if owner is None:
                 return list(
                     self.python_scopes.get((module_name, module_name, expression.id), ())
@@ -1128,7 +1381,11 @@ class _Collector:
             if isinstance(expression.value, ast.Name) and expression.value.id in aliases:
                 module, symbol = aliases[expression.value.id]
                 target_module = f"{module}.{symbol}" if symbol else module
-                return list(self.definitions.get((target_module, expression.attr), ()))
+                return [
+                    node_id
+                    for candidate in self._matching_modules(target_module)
+                    for node_id in self.definitions.get((candidate, expression.attr), ())
+                ]
             if isinstance(expression.value, ast.Name):
                 class_targets = self.definitions.get((module_name, expression.value.id), ())
                 return [
@@ -1154,19 +1411,23 @@ class _Collector:
         return isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)) and node in current.decorator_list
 
     def extract(self) -> CodeExtraction:
+        self.check_stop()
         self.structural_nodes()
         parsed: list[tuple[_CapturedSource, ast.Module]] = []
         syntax_trees: list[tuple[_CapturedSource, object]] = []
         for source in self.sources:
+            self.check_stop()
             language = source.record.language
             whole = (0, len(source.content), 1, max(1, source.content.count(b"\n") + 1))
             if language != "python":
                 parser = _optional_parser(language or "")
                 if parser is not None:
+                    self.check_stop()
                     tree = parser.parse(source.content)
+                    self.check_stop()
                     if tree.root_node.has_error:
                         self.add_observation(
-                            self.modules[_module_name(source.record.relative_path)],
+                            self.source_modules[source.record.logical_id],
                             "PARSES", language, "parse_error", source, whole,
                         )
                     else:
@@ -1174,30 +1435,36 @@ class _Collector:
                         self.collect_syntax_definitions(source, tree.root_node)
                     continue
                 self.add_observation(
-                    self.modules[_module_name(source.record.relative_path)],
+                    self.source_modules[source.record.logical_id],
                     "PARSES", language, "unsupported_semantics", source, whole,
                 )
                 continue
             try:
+                self.check_stop()
                 tree = ast.parse(source.content, filename=source.record.relative_path)
+                self.check_stop()
             except (SyntaxError, ValueError, UnicodeError) as exc:
                 self.add_observation(
-                    self.modules[_module_name(source.record.relative_path)],
+                    self.source_modules[source.record.logical_id],
                     "PARSES", str(exc), "parse_error", source, whole,
                 )
                 continue
             parsed.append((source, tree))
             self.collect_python_definitions(source, tree)
         for source, tree in parsed:
+            self.check_stop()
             self.collect_python_edges(source, tree)
         for source, root in syntax_trees:
+            self.check_stop()
             self.collect_syntax_edges(source, root)
+        self.check_stop()
         return CodeExtraction(
             _frozen(list(self.nodes.values()), "node_id"),
             _frozen(self.occurrences, "occurrence_id"),
             _frozen(self.assertions, "assertion_id"),
             _frozen(self.evidence, "evidence_id"),
             _frozen(self.observations, "observation_id"),
+            _frozen_observation_dependencies(self.observation_source_dependencies),
         )
 
 
@@ -1208,14 +1475,21 @@ def extract_code(
     scip_symbols: Iterable[ScipSymbol] = (),
     co_changes: Iterable[CoChange] = (),
     limits: ExtractionLimits | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> CodeExtraction:
     """Extract immutable source snapshots without filesystem or store access."""
     if not isinstance(repository_id, str) or not repository_id or len(repository_id) > 512:
         raise ValueError("repository_id must be a bounded non-empty string")
-    captured = tuple(sources)
     bounds = limits or ExtractionLimits()
-    if len(captured) > bounds.max_sources:
-        raise ValueError("code extraction source ceiling exceeded")
+    _check_stop(deadline, cancelled)
+    captured_values = []
+    for source in sources:
+        _check_stop(deadline, cancelled)
+        captured_values.append(source)
+        if len(captured_values) > bounds.max_sources:
+            raise ValueError("code extraction source ceiling exceeded")
+    captured = tuple(captured_values)
     required_record_fields = ("logical_id", "relative_path", "sha256", "size", "language")
     if any(
         not hasattr(source, "record")
@@ -1231,6 +1505,7 @@ def extract_code(
         raise ValueError("code extraction source IDs must be unique")
     total = 0
     for source in selected:
+        _check_stop(deadline, cancelled)
         if not isinstance(source.content, bytes):
             raise TypeError("captured source content must be bytes")
         relative = source.record.relative_path
@@ -1251,11 +1526,16 @@ def extract_code(
             raise ValueError("captured source size does not match content")
         if source.record.sha256 != hashlib.sha256(source.content).hexdigest():
             raise ValueError("captured source hash does not match content")
-    symbols = tuple(scip_symbols)
-    if len(symbols) > bounds.max_scip_symbols:
-        raise ValueError("code extraction SCIP symbol ceiling exceeded")
+    symbols = _bounded_values(
+        scip_symbols,
+        bounds.max_scip_symbols,
+        "SCIP symbol",
+        deadline,
+        cancelled,
+    )
     sources_by_id = {source.record.logical_id: source for source in selected}
     for symbol in symbols:
+        _check_stop(deadline, cancelled)
         source = sources_by_id.get(getattr(symbol, "source_id", None))
         if (
             not isinstance(symbol, ScipSymbol)
@@ -1275,12 +1555,21 @@ def extract_code(
         ):
             raise ValueError("SCIP symbols must identify a valid captured source span")
     collector = _Collector(
-        selected, repository_id, tuple(sorted(symbols, key=lambda item: item.symbol)), bounds
+        selected,
+        repository_id,
+        tuple(sorted(symbols, key=lambda item: item.symbol)),
+        bounds,
+        deadline,
+        cancelled,
     )
     result = collector.extract()
-    changes = tuple(co_changes)
-    if len(changes) > bounds.max_co_changes:
-        raise ValueError("code extraction co-change ceiling exceeded")
+    changes = _bounded_values(
+        co_changes,
+        bounds.max_co_changes,
+        "co-change",
+        deadline,
+        cancelled,
+    )
     if any(
         not isinstance(change, CoChange)
         or not math.isfinite(change.weight)
@@ -1295,6 +1584,7 @@ def extract_code(
     if not changes:
         return result
     for change in sorted(changes, key=lambda item: (item.source_path, item.target_path)):
+        _check_stop(deadline, cancelled)
         evidence_source = next(
             (source for source in selected if source.record.logical_id == change.evidence_source_id),
             None,
@@ -1321,6 +1611,7 @@ def extract_code(
         _frozen(collector.assertions, "assertion_id"),
         _frozen(collector.evidence, "evidence_id"),
         _frozen(collector.observations, "observation_id"),
+        _frozen_observation_dependencies(collector.observation_source_dependencies),
     )
 
 

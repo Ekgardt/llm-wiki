@@ -23,6 +23,7 @@ def _publish(
     sources=None,
     source_bytes=None,
     graph_records=None,
+    repository_scope=None,
 ):
     import corpus_snapshot
     import evidence_graph
@@ -88,7 +89,7 @@ def _publish(
         "embedding_model_id": None,
         "embedding_model_revision": None,
         "vector_dimensions": None,
-        "graph_schema_version": "evidence-graph/v1",
+        "graph_schema_version": "evidence-graph/v2",
         "graph_extractor_version": "graph-extractor/v1",
         "source_manifest_sha256": hashlib.sha256(source_manifest_bytes).hexdigest(),
         "artifacts": [
@@ -107,6 +108,8 @@ def _publish(
     }
     if parent is not None:
         manifest["parent_generation_id"] = parent
+    if repository_scope is not None:
+        manifest["repository_scope"] = repository_scope
     (directory / "manifest.json").write_bytes(canonical_json_bytes(manifest))
     return manifest
 
@@ -221,6 +224,147 @@ def test_open_active_reuses_generation_catalog_and_falls_back_from_corruption(tm
     graph.close()
 
 
+def test_open_active_for_repository_uses_only_an_exact_scope(tmp_path, monkeypatch):
+    import evidence_graph
+    from generation_catalog import GenerationCatalog
+    from repository_scope import resolve_repository_scope
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    scope = resolve_repository_scope(repository)
+    catalog = GenerationCatalog(tmp_path / "state")
+    _publish(catalog, "gen-1", repository_scope=scope.as_dict())
+    catalog.register("gen-1")
+    assert catalog.activate("gen-1", expected_active=None)
+    calls = 0
+    real_get_active = catalog.get_active_for_repository
+
+    def tracked_get_active(repository_scope, **options):
+        nonlocal calls
+        calls += 1
+        return real_get_active(repository_scope, **options)
+
+    monkeypatch.setattr(catalog, "get_active_for_repository", tracked_get_active)
+
+    graph = evidence_graph.EvidenceGraph.open_active_for_repository(catalog, scope)
+
+    assert graph is not None
+    assert graph.generation_id == "gen-1"
+    assert calls >= 2
+    graph.close()
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["missing-scope", "other-scope"])
+def test_open_active_for_repository_rejects_ineligible_active_without_catalog_mutation(
+    tmp_path, bound
+):
+    import evidence_graph
+    from generation_catalog import GenerationCatalog
+    from repository_scope import resolve_repository_scope
+
+    requested = tmp_path / "requested" / "project"
+    active_repository = tmp_path / "active" / "project"
+    requested.mkdir(parents=True)
+    active_repository.mkdir(parents=True)
+    requested_scope = resolve_repository_scope(requested)
+    active_scope = resolve_repository_scope(active_repository)
+    catalog = GenerationCatalog(tmp_path / "state")
+    _publish(
+        catalog,
+        "active",
+        repository_scope=active_scope.as_dict() if bound else None,
+    )
+    catalog.register("active")
+    assert catalog.activate("active", expected_active=None)
+    with sqlite3.connect(catalog.catalog_path) as database:
+        before = database.execute(
+            "SELECT active_generation_id FROM catalog_state WHERE singleton=1"
+        ).fetchone()[0]
+        history_before = database.execute("SELECT count(*) FROM activation_history").fetchone()[0]
+
+    assert (
+        evidence_graph.EvidenceGraph.open_active_for_repository(catalog, requested_scope)
+        is None
+    )
+
+    with sqlite3.connect(catalog.catalog_path) as database:
+        after = database.execute(
+            "SELECT active_generation_id FROM catalog_state WHERE singleton=1"
+        ).fetchone()[0]
+        history_after = database.execute("SELECT count(*) FROM activation_history").fetchone()[0]
+    assert (after, history_after) == (before, history_before)
+
+
+def test_repository_mismatch_does_not_recover_corrupt_active_from_other_repo_history(
+    tmp_path,
+):
+    import evidence_graph
+    from generation_catalog import GenerationCatalog
+    from repository_scope import resolve_repository_scope
+
+    repository_a = tmp_path / "a" / "project"
+    repository_b = tmp_path / "b" / "project"
+    repository_a.mkdir(parents=True)
+    repository_b.mkdir(parents=True)
+    scope_a = resolve_repository_scope(repository_a)
+    scope_b = resolve_repository_scope(repository_b)
+    catalog = GenerationCatalog(tmp_path / "state")
+    _publish(catalog, "repo-a", repository_scope=scope_a.as_dict())
+    _publish(
+        catalog,
+        "repo-b",
+        parent="repo-a",
+        repository_scope=scope_b.as_dict(),
+    )
+    for generation_id in ("repo-a", "repo-b"):
+        catalog.register(generation_id)
+    assert catalog.activate("repo-a", expected_active=None)
+    assert catalog.activate("repo-b", expected_active="repo-a")
+    (catalog.generations_path / "repo-b" / "evidence.sqlite3").write_bytes(b"corrupt")
+    with sqlite3.connect(catalog.catalog_path) as database:
+        history_before = database.execute("SELECT count(*) FROM activation_history").fetchone()[0]
+
+    assert evidence_graph.EvidenceGraph.open_active_for_repository(catalog, scope_a) is None
+
+    with sqlite3.connect(catalog.catalog_path) as database:
+        active = database.execute(
+            "SELECT active_generation_id FROM catalog_state WHERE singleton=1"
+        ).fetchone()[0]
+        history_after = database.execute("SELECT count(*) FROM activation_history").fetchone()[0]
+    assert active == "repo-b"
+    assert history_after == history_before
+
+
+def test_open_active_for_repository_preserves_same_scope_corruption_recovery(tmp_path):
+    import evidence_graph
+    from generation_catalog import GenerationCatalog
+    from repository_scope import resolve_repository_scope
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    scope = resolve_repository_scope(repository)
+    catalog = GenerationCatalog(tmp_path / "state")
+    _publish(catalog, "prior", repository_scope=scope.as_dict())
+    _publish(
+        catalog,
+        "corrupt",
+        parent="prior",
+        repository_scope=scope.as_dict(),
+    )
+    for generation_id in ("prior", "corrupt"):
+        catalog.register(generation_id)
+    assert catalog.activate("prior", expected_active=None)
+    assert catalog.activate("corrupt", expected_active="prior")
+    (catalog.generations_path / "corrupt" / "evidence.sqlite3").write_bytes(b"corrupt")
+
+    graph = evidence_graph.EvidenceGraph.open_active_for_repository(catalog, scope)
+
+    assert graph is not None
+    assert graph.generation_id == "prior"
+    assert catalog.get_active()["generation_id"] == "prior"
+    graph.close()
+
+
 @pytest.mark.parametrize("member", ["evidence.sqlite3", "source-manifest.json"])
 def test_open_active_rechecks_exact_catalog_seal_after_database_open(
     tmp_path, monkeypatch, member
@@ -306,10 +450,9 @@ def test_open_active_returns_none_without_pointer_and_rejects_wrong_graph_contra
 
     manifest = catalog.generations_path / "gen-1/manifest.json"
     manifest.write_bytes(canonical_json_bytes(manifest_value))
-    catalog.register("gen-1")
-    assert catalog.activate("gen-1", expected_active=None)
     with pytest.raises(ValueError, match="Graph|graph"):
-        evidence_graph.EvidenceGraph.open_active(catalog)
+        catalog.register("gen-1")
+    assert catalog.get_active() is None
 
 
 def _rebind_registered_manifest(catalog, generation_id: str) -> None:

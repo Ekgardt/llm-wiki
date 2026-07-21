@@ -147,6 +147,40 @@ def test_agents_md_and_claude_md_are_identical():
         assert value in contract_words, f"agent contracts must document {value!r}"
 
 
+def test_superset_contract_is_canonical() -> None:
+    agents = (ROOT / "AGENTS.md").read_bytes()
+    claude = (ROOT / "CLAUDE.md").read_bytes()
+    structure = (ROOT / "docs" / "STRUCTURE.md").read_text(encoding="utf-8")
+    decision = "knowledge/notes/solo-operator-superset-product-decision.md"
+    implemented_checkpoint = structure.split(
+        "## Implemented corpus-generation checkpoint", 1
+    )[
+        1
+    ].split("\n## ", 1)[0]
+    assert agents == claude
+    assert decision.encode() in agents
+    assert (ROOT / decision).is_file()
+    for value in (
+        "corpus-generation/v2",
+        "repository_scope",
+        "source-manifest.json",
+        "incremental-manifest.json",
+        "evidence.sqlite3",
+        "search.sqlite3",
+    ):
+        assert value in implemented_checkpoint
+    for unimplemented_path in (
+        "workspace_registry.py",
+        "code_index.py",
+        "temporal_claims.py",
+        "task_control.py",
+        "operator_console.py",
+        "workspace-registry.sqlite3",
+        "task-control.sqlite3",
+    ):
+        assert unimplemented_path not in implemented_checkpoint
+
+
 def test_agent_contract_mentions_three_zone_process_rule():
     """The contract must document the 'architecture changes require sign-off'
     rule so future agents don't improvise structural changes mid-task.
@@ -311,6 +345,8 @@ def test_docs_name_stage_two_runtime_artifacts():
 
     generation_files = {
         "manifest.json",
+        "source-manifest.json",
+        "incremental-manifest.json",
         "evidence.sqlite3",
         "search.sqlite3",
         "vectors.npy",
@@ -325,7 +361,7 @@ def test_docs_name_stage_two_runtime_artifacts():
         "absent, complete, or explicitly stale",
         "No generation database belongs under `run/`",
         "operational state only",
-        "target generation layout",
+        "implemented v2 layout",
         "cache/index.sqlite",
         "cache/vectors.npy",
         "cache/vectors_meta.json",

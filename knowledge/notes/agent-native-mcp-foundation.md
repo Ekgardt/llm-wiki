@@ -44,3 +44,4 @@ capture on hosts with different lifecycle APIs.
 - [[knowledge/notes/reliable-memory-stage-2]]
 - [[knowledge/notes/centralized-memory-subsystem]]
 - [[knowledge/notes/mirror-existing-pipelines]]
+- [[solo-operator-superset-product-decision]]

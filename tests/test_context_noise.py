@@ -299,6 +299,345 @@ def test_session_and_project_context_use_the_same_budget_contract():
     assert build_context.DEFAULT_CONTEXT_BUDGET is session_start_context.DEFAULT_CONTEXT_BUDGET
 
 
+def test_direct_session_start_routes_semantic_items_through_compiler(monkeypatch):
+    import context_compiler
+    import session_start_context
+
+    captured = {}
+
+    def compile_spy(items, *, budget, **packing):
+        captured["items"] = tuple(items)
+        captured["budget"] = budget
+        captured["packing"] = packing
+        return type("Packed", (), {"text": "compiled-session"})()
+
+    monkeypatch.setattr(context_compiler, "compile_context_items", compile_spy)
+
+    result = session_start_context._pack_session_sections([
+        ("title", "# Project memory context"),
+        ("guardrails", "safe"),
+        ("health", "degraded"),
+        ("advisory", "next action"),
+        ("index", "evidence"),
+        ("daily", "old event"),
+    ])
+
+    by_id = {item.item_id: item for item in captured["items"]}
+    assert result == "compiled-session"
+    assert captured["budget"] is session_start_context.DEFAULT_CONTEXT_BUDGET
+    assert captured["packing"] == {}
+    assert by_id["session:title"].priority_class == "evidence"
+    assert by_id["session:title"].mandatory is False
+    assert by_id["session:guardrails"].priority_class == "safety"
+    assert by_id["session:guardrails"].mandatory is True
+    assert by_id["session:health"].priority_class == "health"
+    assert by_id["session:health"].mandatory is True
+    assert by_id["session:advisory"].priority_class == "handoff"
+    assert by_id["session:advisory"].mandatory is False
+    assert by_id["session:index"].priority_class == "evidence"
+    assert by_id["session:daily"].priority_class == "history"
+
+
+def test_direct_session_start_drops_optional_sections_whole_under_pressure(monkeypatch):
+    import session_start_context
+    from context_budget import ContextBudget
+
+    expected = "safety-whole\n\nhealth-whole"
+    monkeypatch.setattr(
+        session_start_context,
+        "DEFAULT_CONTEXT_BUDGET",
+        ContextBudget(None, len(expected.encode("utf-8")), 0, 0),
+    )
+
+    result = session_start_context._pack_session_sections([
+        ("title", "title-must-drop-whole"),
+        ("guardrails", "safety-whole"),
+        ("health", "health-whole"),
+        ("advisory", "advisory-must-drop-whole"),
+        ("daily", "history-must-drop-whole"),
+    ])
+
+    assert result == expected
+    assert "title" not in result
+    assert "advisory" not in result
+    assert "history" not in result
+
+
+def test_session_start_heading_and_body_drop_as_one_complete_item(monkeypatch):
+    from types import SimpleNamespace
+
+    import session_start_context
+    from context_budget import ContextBudget
+
+    monkeypatch.setattr(session_start_context, "guardrails_block", lambda: "")
+    monkeypatch.setattr(session_start_context, "metacognitive_block", lambda: "")
+    monkeypatch.setattr(session_start_context, "health_block", lambda: "")
+    monkeypatch.setattr(session_start_context, "advisory_block", lambda: "")
+    monkeypatch.setattr(session_start_context, "_impact_block", lambda: "")
+    monkeypatch.setattr(session_start_context, "trim_index", lambda text: "I" * 200)
+    monkeypatch.setattr(
+        session_start_context, "latest_daily", lambda: SimpleNamespace(name="x")
+    )
+    monkeypatch.setattr(session_start_context, "daily_excerpt", lambda path: "D" * 200)
+    monkeypatch.setattr(session_start_context, "last_log_entries", lambda count: "L" * 200)
+    monkeypatch.setattr(
+        session_start_context,
+        "DEFAULT_CONTEXT_BUDGET",
+        ContextBudget(None, 23, 0, 0),
+    )
+
+    items = session_start_context.build_context_items()
+    rendered = session_start_context._pack_session_items(items)
+
+    assert "session:index_header" not in {item.item_id for item in items}
+    assert "session:daily_header" not in {item.item_id for item in items}
+    assert "session:log_header" not in {item.item_id for item in items}
+    assert rendered == ""
+
+
+def test_generated_project_context_routes_items_through_compiler(monkeypatch):
+    import build_context
+
+    captured = {}
+
+    def compile_spy(items, *, budget, **packing):
+        captured["items"] = tuple(items)
+        captured["budget"] = budget
+        captured["packing"] = packing
+        return type("Packed", (), {"text": "compiled-project"})()
+
+    monkeypatch.setattr(build_context, "compile_context_items", compile_spy)
+
+    result = build_context._pack_project_context(
+        [
+            ("orientation", "## Project context: demo"),
+            ("handoff", "### Where you left off\nresume here"),
+            ("evidence", "## Evidence\nfact"),
+            ("history", "## Recent activity\nold event"),
+        ],
+        2000,
+    )
+
+    assert result == "compiled-project"
+    assert captured["budget"] is build_context.DEFAULT_CONTEXT_BUDGET
+    assert captured["packing"] == {
+        "emergency_byte_cap": 2000,
+        "per_source_cap": 5,
+        "per_parent_cap": 12,
+    }
+    by_text = {item.text: item for item in captured["items"]}
+    assert by_text["## Project context: demo"].priority_class == "evidence"
+    assert by_text["## Project context: demo"].mandatory is False
+    assert by_text["### Where you left off\nresume here"].priority_class == "handoff"
+    assert by_text["### Where you left off\nresume here"].mandatory is True
+    assert by_text["## Evidence\nfact"].priority_class == "evidence"
+    assert by_text["## Recent activity\nold event"].priority_class == "history"
+
+
+def test_generated_project_context_drops_history_whole_under_pressure(monkeypatch):
+    import build_context
+    from context_budget import ContextBudget
+
+    handoff = "### Where you left off\nresume-whole"
+    monkeypatch.setattr(
+        build_context,
+        "DEFAULT_CONTEXT_BUDGET",
+        ContextBudget(None, len(handoff.encode("utf-8")), 0, 0),
+    )
+    monkeypatch.setattr(build_context, "_read_state_handoff", lambda slug: "resume-whole")
+    monkeypatch.setattr(build_context, "_find_project_pages", lambda slug: [])
+    monkeypatch.setattr(
+        build_context,
+        "_find_recent_daily_activity",
+        lambda slug: ["recent-history-must-drop-whole"],
+    )
+    monkeypatch.setattr(
+        build_context,
+        "load_state",
+        lambda: {
+            "codex_heartbeats": {
+                "demo": {"reason": "last-seen-must-drop-whole", "at": "yesterday"}
+            }
+        },
+    )
+
+    result = build_context.build_context("demo")
+
+    assert result == handoff
+    assert "recent-history" not in result
+    assert "last-seen" not in result
+    assert "Project context" not in result
+
+
+def test_recovered_handoff_routes_through_compiler_as_mandatory(monkeypatch):
+    import context_compiler
+    import integration_adapter
+    import session_start_context
+
+    captured = {}
+
+    def compile_spy(items, *, budget, **packing):
+        captured["items"] = tuple(items)
+        captured["budget"] = budget
+        captured["packing"] = packing
+        return type("Packed", (), {"text": "compiled-recovery"})()
+
+    monkeypatch.setattr(context_compiler, "compile_context_items", compile_spy)
+
+    global_items = [
+        item
+        for item in (
+            session_start_context._section_item("guardrails", "safe"),
+            session_start_context._section_item("health", "degraded"),
+            session_start_context._section_item("advisory", "next action"),
+            session_start_context._section_item("daily", "old event"),
+        )
+        if item is not None
+    ]
+    result = integration_adapter._append_context(global_items, "recovered handoff")
+
+    by_id = {item.item_id: item for item in captured["items"]}
+    assert result == "compiled-recovery"
+    assert captured["packing"] == {
+        "emergency_byte_cap": captured["budget"].available_input_tokens,
+    }
+    assert by_id["session-start:project-handoff"].priority_class == "handoff"
+    assert by_id["session-start:project-handoff"].mandatory is True
+    assert by_id["session:advisory"].mandatory is False
+    assert by_id["session:daily"].priority_class == "history"
+
+
+def test_integration_uses_unpacked_project_handoff_items(monkeypatch):
+    import context_compiler
+    import integration_adapter
+    from context_budget import ContextItem
+    from project_journal import ProjectHandoffResult
+
+    handoff_item = ContextItem(
+        item_id="handoff:goal",
+        text="## Active goal\n- Ship",
+        source="project:demo",
+        priority=2,
+        relevance=0.8,
+        confidence="high",
+        freshness="fresh",
+        token_cost=21,
+        mandatory=False,
+        representation="l1",
+        parent_id="project:demo",
+        priority_class="handoff",
+    )
+    monkeypatch.setattr(integration_adapter, "ProjectStore", lambda *args: object())
+    monkeypatch.setattr(
+        integration_adapter,
+        "recover_project_handoff",
+        lambda *args, **kwargs: ProjectHandoffResult(
+            "prefiltered text must not be used", items=(handoff_item,)
+        ),
+    )
+    captured = {}
+
+    def compile_spy(items, *, budget, **packing):
+        captured["items"] = tuple(items)
+        return type("Packed", (), {"text": "one final pack"})()
+
+    monkeypatch.setattr(context_compiler, "compile_context_items", compile_spy)
+
+    handoff_items = integration_adapter._recover_project_handoff("demo", Path("demo"))
+    rendered = integration_adapter._append_context([], handoff_items)
+
+    assert handoff_items == (handoff_item,)
+    assert captured["items"] == (handoff_item,)
+    assert rendered == "one final pack"
+
+
+def test_integration_keeps_complete_recovered_handoff_under_pressure(monkeypatch):
+    import context_budget
+    import integration_adapter
+    import session_start_context
+    from context_budget import ContextBudget
+    from project_journal import ProjectProjection, build_handoff_items
+
+    handoff_items = build_handoff_items(
+        ProjectProjection(
+            project="demo",
+            goal={"goal": "Ship whole"},
+            current_task={"task": "Test whole"},
+            blockers={"blocker": "CI whole"},
+            decisions={"decision": "Keep whole"},
+            legacy_context="History whole",
+            last_applied_sequence=5,
+        )
+    )
+    expected = "\n\n".join(
+        item.text
+        for item in sorted(
+            handoff_items,
+            key=lambda item: (
+                context_budget.PRIORITY_CLASS_ORDER[item.priority_class],
+                item.item_id,
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        context_budget,
+        "DEFAULT_CONTEXT_BUDGET",
+        ContextBudget(None, len(expected.encode("utf-8")), 0, 0),
+    )
+    optional_history = session_start_context._section_item(
+        "daily", "optional global history must drop"
+    )
+    assert optional_history is not None
+
+    rendered = integration_adapter._append_context(
+        [optional_history], handoff_items
+    )
+
+    assert rendered == expected
+    assert "optional global history" not in rendered
+    assert all(item.text in rendered for item in handoff_items)
+
+    monkeypatch.setattr(
+        context_budget,
+        "DEFAULT_CONTEXT_BUDGET",
+        ContextBudget(None, len(expected.encode("utf-8")) - 1, 0, 0),
+    )
+    failure = integration_adapter._append_context([], handoff_items)
+    assert "mandatory_budget_exceeded" in failure
+    assert "Ship whole" not in failure
+    assert "History whole" not in failure
+
+
+def test_integration_context_drops_optional_sections_whole_under_pressure(monkeypatch):
+    import context_budget
+    import integration_adapter
+    import session_start_context
+    from context_budget import ContextBudget
+
+    expected = "safety-whole\n\nhealth-whole\n\nrecovered-whole"
+    monkeypatch.setattr(
+        context_budget,
+        "DEFAULT_CONTEXT_BUDGET",
+        ContextBudget(None, len(expected.encode("utf-8")), 0, 0),
+    )
+    items = [
+        item
+        for item in (
+            session_start_context._section_item("guardrails", "safety-whole"),
+            session_start_context._section_item("health", "health-whole"),
+            session_start_context._section_item("advisory", "advisory-must-drop-whole"),
+            session_start_context._section_item("daily", "history-must-drop-whole"),
+        )
+        if item is not None
+    ]
+
+    result = integration_adapter._append_context(items, "recovered-whole")
+
+    assert result == expected
+    assert "advisory" not in result
+    assert "history" not in result
+
+
 def test_session_start_impossible_mandatory_budget_is_visible_not_sliced(monkeypatch):
     import session_start_context
     from context_budget import ContextBudget
@@ -327,6 +666,31 @@ def test_project_state_impossible_cap_is_visible_not_character_sliced():
     assert "truncated for hook injection" not in result
 
 
+def test_project_state_routes_mandatory_handoff_through_compiler(monkeypatch):
+    import context_compiler
+    import session_start_project_state
+
+    captured = {}
+
+    def compile_spy(items, *, budget, **packing):
+        captured["items"] = tuple(items)
+        captured["budget"] = budget
+        captured["packing"] = packing
+        return type("Packed", (), {"text": "compiled-project-state"})()
+
+    monkeypatch.setattr(context_compiler, "compile_context_items", compile_spy)
+
+    result = session_start_project_state._clip("project state", 2400)
+
+    assert result == "compiled-project-state"
+    assert captured["packing"] == {"emergency_byte_cap": 2400}
+    assert len(captured["items"]) == 1
+    item = captured["items"][0]
+    assert item.text == "project state"
+    assert item.priority_class == "handoff"
+    assert item.mandatory is True
+
+
 def test_project_handoff_alone_still_uses_shared_budget(monkeypatch):
     import context_budget
     import integration_adapter
@@ -336,7 +700,7 @@ def test_project_handoff_alone_still_uses_shared_budget(monkeypatch):
         context_budget, "DEFAULT_CONTEXT_BUDGET", ContextBudget(None, 10, 0, 0)
     )
 
-    result = integration_adapter._append_context("", "handoff-content-too-large")
+    result = integration_adapter._append_context([], "handoff-content-too-large")
 
     assert "mandatory_budget_exceeded" in result
     assert "handoff-content-too-large" not in result
@@ -344,8 +708,13 @@ def test_project_handoff_alone_still_uses_shared_budget(monkeypatch):
 
 def test_integration_context_preserves_trailing_newline():
     import integration_adapter
+    import session_start_context
 
-    result = integration_adapter._append_context("global\n", "handoff\n")
+    item = session_start_context._section_item("guardrails", "global")
+    assert item is not None
+    result = integration_adapter._append_context(
+        [item], "handoff\n", trailing_newline=True
+    )
 
     assert result == "global\n\nhandoff\n"
 

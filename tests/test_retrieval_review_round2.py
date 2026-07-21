@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -87,20 +88,15 @@ def test_semantic_false_forces_base_lexical_even_for_hybrid_profile(monkeypatch)
 def test_vector_inclusive_seal_used_when_vectors_complete(monkeypatch):
     import retrieval
     import search_memory
+    from repository_scope import resolve_repository_scope
 
     sealed = []
 
-    def fake_seal(catalog, manifest, artifact_names):
+    def fake_seal(catalog, manifest, artifact_names, **_kwargs):
         sealed.append(tuple(artifact_names))
         return ("seal", tuple(artifact_names))
 
     monkeypatch.setattr(search_memory, "_generation_consumption_seal", fake_seal)
-    monkeypatch.setattr(
-        search_memory,
-        "_generation_consumption_unchanged",
-        lambda *a, **k: True,
-    )
-
     class Conn:
         def close(self):
             return None
@@ -123,9 +119,14 @@ def test_vector_inclusive_seal_used_when_vectors_complete(monkeypatch):
     class Catalog:
         generations_path = Path(".")
 
-        def get_active(self):
+        def get_active(self, **_kwargs):
+            pytest.fail("repository retrieval must not invoke generic get_active repair")
+
+        def get_active_for_repository(self, repository_scope, **_kwargs):
+            assert repository_scope == resolve_repository_scope(search_memory.ROOT)
             return {
                 "generation_id": "gen-v",
+                "repository_scope": resolve_repository_scope(search_memory.ROOT).as_dict(),
                 "vector_state": "complete",
                 "embedding_model_id": "m",
                 "embedding_model_revision": "r",
@@ -158,6 +159,580 @@ def test_vector_inclusive_seal_used_when_vectors_complete(monkeypatch):
     assert sealed
     # At least one seal call must include vector artifacts.
     assert any("vectors.npy" in names for names in sealed)
+
+
+@pytest.mark.parametrize("bind_generation", [True, False], ids=("foreign", "unbound"))
+def test_wrong_repository_generation_cannot_contribute_any_signal(
+    tmp_path, monkeypatch, bind_generation
+):
+    import evidence_graph
+    import graph_neighbors
+    import retrieval
+    import search_memory
+    from repository_scope import resolve_repository_scope
+
+    repository_a = tmp_path / "first" / "same-name"
+    repository_b = tmp_path / "second" / "same-name"
+    repository_a.mkdir(parents=True)
+    repository_b.mkdir(parents=True)
+    monkeypatch.setattr(search_memory, "ROOT", repository_b)
+    monkeypatch.setattr(
+        search_memory,
+        "_generation_consumption_seal",
+        lambda *_args, **_kwargs: pytest.fail("wrong generation must not be sealed"),
+    )
+    monkeypatch.setattr(
+        search_memory,
+        "_generation_consumption_unchanged",
+        lambda *_args, **_kwargs: True,
+    )
+
+    monkeypatch.setattr(
+        search_memory,
+        "_generation_connection",
+        lambda *_args, **_kwargs: pytest.fail("wrong generation FTS must not open"),
+    )
+    monkeypatch.setattr(
+        search_memory,
+        "_generation_fts_search",
+        lambda *_args, **_kwargs: pytest.fail("wrong generation lexical signal used"),
+    )
+    monkeypatch.setattr(
+        search_memory,
+        "_generation_vectors_search",
+        lambda *_args, **_kwargs: pytest.fail("wrong generation vector signal used"),
+    )
+    monkeypatch.setattr(
+        search_memory,
+        "_legacy_lexical_hits",
+        lambda *_args, **_kwargs: [_hit("local", "local.md", 1.0)],
+    )
+    monkeypatch.setattr(
+        search_memory,
+        "_legacy_dense_hits",
+        lambda *_args, **_kwargs: [_hit("local", "local.md", 0.9)],
+    )
+    monkeypatch.setattr(graph_neighbors, "boost_graph_neighbors", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        retrieval,
+        "expand_evidence_graph",
+        lambda *_args, **_kwargs: pytest.fail("wrong generation graph signal used"),
+    )
+
+    class FakeEvidenceGraph:
+        def __init__(self, repository_scope):
+            self.repository_scope = repository_scope
+
+        @classmethod
+        def open_active_for_repository(
+            cls, catalog, repository_scope, *, deadline=None, cancelled=None
+        ):
+            manifest = catalog.get_active(deadline=deadline, cancelled=cancelled)
+            if manifest.get("repository_scope") != repository_scope.as_dict():
+                return None
+            return cls(repository_scope)
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(evidence_graph, "EvidenceGraph", FakeEvidenceGraph)
+
+    class Catalog:
+        generations_path = tmp_path / "generations"
+        state_root = tmp_path / "state"
+
+        def get_active_for_repository(
+            self, _repository_scope, *, deadline=None, cancelled=None
+        ):
+            manifest = {
+                "generation_id": "repository-a",
+                "vector_state": "complete",
+                "embedding_model_id": "model",
+                "embedding_model_revision": "revision",
+                "vector_dimensions": 2,
+                "artifacts": [
+                    {"path": "search.sqlite3", "size": 1, "sha256": "0" * 64},
+                    {"path": "evidence.sqlite3", "size": 1, "sha256": "1" * 64},
+                    {"path": "vectors.npy", "size": 1, "sha256": "2" * 64},
+                    {"path": "vectors.json", "size": 1, "sha256": "3" * 64},
+                ],
+                "source_manifest_sha256": "a" * 64,
+                "collector_version": "c",
+                "extractor_version": "e",
+                "tokenizer_version": search_memory.GENERATION_TOKENIZER_VERSION,
+                "tokenizer_config_sha256": search_memory.GENERATION_TOKENIZER_CONFIG_SHA256,
+                "schema_version": "corpus-generation/v1",
+            }
+            if bind_generation:
+                manifest["repository_scope"] = resolve_repository_scope(
+                    repository_a, deadline=deadline, cancelled=cancelled
+                ).as_dict()
+            return None
+
+    rows = retrieval.retrieve_via_search_memory(
+        "needle",
+        catalog=Catalog(),
+        semantic=True,
+        generation_embedder=lambda _texts: [[1.0, 0.0]],
+        generation_model_id="model",
+        generation_model_revision="revision",
+        graph=True,
+        rerank=False,
+        emit_telemetry=False,
+        profile="GLOBAL",
+    )
+
+    assert [row["candidate_id"] for row in rows] == ["local"]
+    assert rows[0]["generation"] == "legacy"
+    assert rows[0]["fallback_reason"] == "generation_unavailable"
+
+
+def test_repository_retrieval_selects_scope_before_generic_active_repair(
+    tmp_path, monkeypatch
+):
+    import retrieval
+    import search_memory
+    from repository_scope import resolve_repository_scope
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    scope = resolve_repository_scope(repository)
+    monkeypatch.setattr(search_memory, "ROOT", repository)
+    monkeypatch.setattr(search_memory, "_legacy_lexical_hits", lambda *_a, **_k: [])
+
+    class Catalog:
+        def get_active(self, **_kwargs):
+            pytest.fail("repository retrieval must not invoke generic get_active repair")
+
+        def get_active_for_repository(self, requested_scope, **_kwargs):
+            assert requested_scope == scope
+            return None
+
+    assert retrieval.retrieve_via_search_memory(
+        "needle",
+        catalog=Catalog(),
+        semantic=False,
+        graph=False,
+        rerank=False,
+        emit_telemetry=False,
+    ) == []
+
+
+@pytest.mark.parametrize(
+    "stage",
+    ("catalog", "seal", "fts_open", "fts_search", "graph_open", "vector_search", "seal_recheck"),
+)
+def test_public_search_propagates_generation_stage_timeout(
+    tmp_path, monkeypatch, stage
+):
+    import evidence_graph
+    import retrieval
+    import search_memory
+    from repository_scope import resolve_repository_scope
+
+    root = tmp_path / "repository"
+    root.mkdir()
+    monkeypatch.setattr(search_memory, "ROOT", root)
+    deadline = time.monotonic() + 30
+
+    def cancelled():
+        return False
+
+    seen: list[tuple[str, float | None, object]] = []
+
+    def stop(name, received_deadline=None, received_cancelled=None):
+        seen.append((name, received_deadline, received_cancelled))
+        if name == stage:
+            raise TimeoutError(f"{name} timed out")
+
+    manifest = {
+        "generation_id": "scoped",
+        "repository_scope": resolve_repository_scope(root).as_dict(),
+        "vector_state": "complete",
+        "embedding_model_id": "model",
+        "embedding_model_revision": "revision",
+        "vector_dimensions": 2,
+        "artifacts": [
+            {"path": "search.sqlite3", "size": 1, "sha256": "0" * 64},
+            {"path": "evidence.sqlite3", "size": 1, "sha256": "1" * 64},
+            {"path": "vectors.npy", "size": 1, "sha256": "2" * 64},
+            {"path": "vectors.json", "size": 1, "sha256": "3" * 64},
+        ],
+        "source_manifest_sha256": "a" * 64,
+        "collector_version": "collector",
+        "extractor_version": "extractor",
+        "tokenizer_version": search_memory.GENERATION_TOKENIZER_VERSION,
+        "tokenizer_config_sha256": search_memory.GENERATION_TOKENIZER_CONFIG_SHA256,
+        "schema_version": "corpus-generation/v1",
+    }
+
+    class Catalog:
+        generations_path = tmp_path / "generations"
+        state_root = tmp_path / "state"
+
+        def get_active_for_repository(
+            self, _repository_scope, *, deadline=None, cancelled=None
+        ):
+            stop("catalog", deadline, cancelled)
+            return manifest
+
+    class Connection:
+        def close(self):
+            pass
+
+    class Graph:
+        generation_id = "scoped"
+
+        def __init__(self, repository_scope):
+            self.repository_scope = repository_scope
+
+        @classmethod
+        def open_active_for_repository(
+            cls, _catalog, repository_scope, *, deadline=None, cancelled=None
+        ):
+            stop("graph_open", deadline, cancelled)
+            assert repository_scope == resolve_repository_scope(root)
+            return cls(repository_scope)
+
+        def close(self):
+            pass
+
+    def seal(_catalog, _manifest, _names, *, deadline=None, cancelled=None):
+        stop("seal", deadline, cancelled)
+        return ("sealed",)
+
+    def unchanged(
+        _catalog, _manifest, _names, _seal, *, deadline=None, cancelled=None
+    ):
+        stop("seal_recheck", deadline, cancelled)
+        return True
+
+    def connection(_catalog, _manifest, *, deadline=None, cancelled=None):
+        stop("fts_open", deadline, cancelled)
+        return Connection()
+
+    def fts(*_args, deadline=None, cancelled=None, **_kwargs):
+        stop("fts_search", deadline, cancelled)
+        return [_hit("local", "local.md", 1.0)]
+
+    def vectors(*_args, deadline=None, cancelled=None, **_kwargs):
+        stop("vector_search", deadline, cancelled)
+        return [_hit("local", "local.md", 0.9)]
+
+    monkeypatch.setattr(evidence_graph, "EvidenceGraph", Graph)
+    monkeypatch.setattr(search_memory, "_generation_consumption_seal", seal)
+    monkeypatch.setattr(search_memory, "_generation_consumption_unchanged", unchanged)
+    monkeypatch.setattr(search_memory, "_generation_connection", connection)
+    monkeypatch.setattr(search_memory, "_generation_fts_search", fts)
+    monkeypatch.setattr(search_memory, "_generation_vectors_search", vectors)
+    monkeypatch.setattr(retrieval, "expand_evidence_graph", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        search_memory,
+        "_legacy_lexical_hits",
+        lambda *_args, **_kwargs: pytest.fail("timeout must not become legacy fallback"),
+    )
+
+    search_options = dict(
+        catalog=Catalog(),
+        semantic=True,
+        generation_embedder=lambda _texts: [[1.0, 0.0]],
+        generation_model_id="model",
+        generation_model_revision="revision",
+        graph=True,
+        rerank=False,
+        emit_telemetry=False,
+        profile="GLOBAL",
+        deadline_monotonic=deadline,
+        cancelled=cancelled,
+    )
+    with pytest.raises(TimeoutError, match=stage):
+        search_memory.search("needle", **search_options)
+
+    expected_stop = (
+        (stage, None, None)
+        if stage == "vector_search"
+        else (stage, deadline, cancelled)
+    )
+    assert expected_stop in seen
+
+
+@pytest.mark.parametrize("stop", ["deadline", "cancelled"])
+def test_public_search_rejects_expired_or_cancelled_request(stop):
+    import search_memory
+
+    options = (
+        {"deadline_monotonic": time.monotonic() - 1}
+        if stop == "deadline"
+        else {"cancelled": lambda: True}
+    )
+    with pytest.raises(TimeoutError, match=stop):
+        search_memory.search("needle", emit_telemetry=False, **options)
+
+
+@pytest.mark.parametrize("stage", ["lexical"])
+def test_public_search_threads_deadline_and_cancel_into_legacy_backends(
+    monkeypatch, stage
+):
+    import search_memory
+
+    monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: None)
+    deadline = time.monotonic() + 30
+
+    def cancelled():
+        return False
+
+    def lexical(*_args, deadline=None, cancelled=None, **_kwargs):
+        assert deadline == test_deadline
+        assert cancelled is test_cancelled
+        if stage == "lexical":
+            raise TimeoutError("legacy lexical deadline")
+        return [_hit("local", "local.md", 1.0)]
+
+    def dense(*_args, deadline=None, cancelled=None, **_kwargs):
+        assert deadline == test_deadline
+        assert cancelled is test_cancelled
+        raise TimeoutError("legacy dense deadline")
+
+    test_deadline = deadline
+    test_cancelled = cancelled
+    monkeypatch.setattr(search_memory, "_legacy_lexical_hits", lexical)
+    monkeypatch.setattr(search_memory, "_legacy_dense_hits", dense)
+
+    with pytest.raises(TimeoutError, match=f"legacy {stage} deadline"):
+        search_memory.search(
+            "needle",
+            semantic=True,
+            graph=False,
+            rerank=False,
+            emit_telemetry=False,
+            profile="HYBRID",
+            deadline_monotonic=deadline,
+            cancelled=cancelled,
+        )
+
+
+def test_deadline_allows_hybrid_signals_when_dense_finishes_in_budget(monkeypatch):
+    import search_memory
+
+    monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: None)
+    monkeypatch.setattr(
+        search_memory,
+        "_legacy_lexical_hits",
+        lambda *_args, **_kwargs: [_hit("local", "local.md", 1.0)],
+    )
+    monkeypatch.setattr(
+        search_memory,
+        "_legacy_dense_hits",
+        lambda *_args, **_kwargs: [_hit("dense", "dense.md", 0.9)],
+    )
+
+    rows = search_memory.search(
+        "needle",
+        semantic=True,
+        graph=False,
+        rerank=False,
+        emit_telemetry=False,
+        profile="HYBRID",
+        deadline_monotonic=time.monotonic() + 30,
+    )
+
+    assert {row["candidate_id"] for row in rows} == {"local", "dense"}
+    assert rows[0]["requested_mode"] == "HYBRID"
+    assert rows[0]["effective_mode"] == "HYBRID"
+    assert rows[0]["signals_used"] == ["lexical", "dense"]
+    assert rows[0]["fallback_reason"] is None
+    assert rows[0]["partial"] is False
+
+
+def test_hanging_dense_backend_falls_back_to_partial_base(monkeypatch):
+    import retrieval
+    import search_memory
+
+    release = threading.Event()
+    started = threading.Event()
+    monkeypatch.setattr(retrieval, "OPTIONAL_STAGE_MAX_SECONDS", 0.02)
+    monkeypatch.setattr(
+        retrieval,
+        "_OPTIONAL_STAGE_SLOTS",
+        threading.BoundedSemaphore(retrieval.MAX_OPTIONAL_STRAGGLERS),
+    )
+    monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: None)
+    monkeypatch.setattr(
+        search_memory,
+        "_legacy_lexical_hits",
+        lambda *_args, **_kwargs: [_hit("local", "local.md", 1.0)],
+    )
+
+    def hanging(*_args, **_kwargs):
+        started.set()
+        release.wait()
+        return [_hit("dense", "dense.md", 0.9)]
+
+    monkeypatch.setattr(search_memory, "_legacy_dense_hits", hanging)
+    try:
+        rows = search_memory.search(
+            "needle",
+            semantic=True,
+            graph=False,
+            rerank=False,
+            emit_telemetry=False,
+            profile="HYBRID",
+            deadline_monotonic=time.monotonic() + 1,
+        )
+
+        assert started.is_set()
+        assert [row["candidate_id"] for row in rows] == ["local"]
+        assert rows[0]["effective_mode"] == "BASE"
+        assert rows[0]["fallback_reason"] == "optional_stage_timeout"
+        assert rows[0]["partial"] is True
+    finally:
+        release.set()
+
+
+def test_optional_boundary_caps_concurrent_stragglers(monkeypatch):
+    import retrieval
+
+    release = threading.Event()
+    started = 0
+    lock = threading.Lock()
+    monkeypatch.setattr(retrieval, "OPTIONAL_STAGE_MAX_SECONDS", 0.01)
+    monkeypatch.setattr(
+        retrieval,
+        "_OPTIONAL_STAGE_SLOTS",
+        threading.BoundedSemaphore(retrieval.MAX_OPTIONAL_STRAGGLERS),
+    )
+
+    def hanging():
+        nonlocal started
+        with lock:
+            started += 1
+        release.wait()
+
+    try:
+        for _ in range(retrieval.MAX_OPTIONAL_STRAGGLERS + 1):
+            with pytest.raises(retrieval.OptionalStageTimeout):
+                retrieval._run_optional_bounded(
+                    hanging, deadline=time.monotonic() + 1, cancelled=None
+                )
+        assert started == retrieval.MAX_OPTIONAL_STRAGGLERS
+    finally:
+        release.set()
+
+
+def test_optional_boundary_releases_capacity_when_thread_start_fails(monkeypatch):
+    import retrieval
+
+    real_thread = retrieval.threading.Thread
+    starts = 0
+
+    class FailingThenRealThread:
+        def __init__(self, *args, **kwargs):
+            self._thread = real_thread(*args, **kwargs)
+
+        def start(self):
+            nonlocal starts
+            starts += 1
+            if starts <= retrieval.MAX_OPTIONAL_STRAGGLERS:
+                raise RuntimeError("thread startup failed")
+            self._thread.start()
+
+    monkeypatch.setattr(retrieval.threading, "Thread", FailingThenRealThread)
+    monkeypatch.setattr(
+        retrieval,
+        "_OPTIONAL_STAGE_SLOTS",
+        threading.BoundedSemaphore(retrieval.MAX_OPTIONAL_STRAGGLERS),
+    )
+
+    for _ in range(retrieval.MAX_OPTIONAL_STRAGGLERS):
+        with pytest.raises(RuntimeError, match="thread startup failed"):
+            retrieval._run_optional_bounded(
+                lambda: "unused", deadline=time.monotonic() + 1, cancelled=None
+            )
+
+    assert retrieval._run_optional_bounded(
+        lambda: "started", deadline=time.monotonic() + 1, cancelled=None
+    ) == "started"
+
+
+def test_optional_boundary_releases_the_acquired_semaphore_after_rebind(monkeypatch):
+    import retrieval
+
+    for _ in range(5):
+        acquired_slots = threading.BoundedSemaphore(1)
+        rebound_slots = threading.BoundedSemaphore(1)
+        release = threading.Event()
+        finished = threading.Event()
+        monkeypatch.setattr(retrieval, "OPTIONAL_STAGE_MAX_SECONDS", 0.005)
+        monkeypatch.setattr(retrieval, "_OPTIONAL_STAGE_SLOTS", acquired_slots)
+
+        def straggler():
+            try:
+                release.wait()
+            finally:
+                finished.set()
+
+        with pytest.raises(retrieval.OptionalStageTimeout):
+            retrieval._run_optional_bounded(
+                straggler, deadline=time.monotonic() + 1, cancelled=None
+            )
+        monkeypatch.setattr(retrieval, "_OPTIONAL_STAGE_SLOTS", rebound_slots)
+        release.set()
+        assert finished.wait(1)
+        assert acquired_slots.acquire(blocking=False)
+        assert rebound_slots.acquire(blocking=False)
+
+
+def test_optional_boundary_start_failure_releases_acquired_semaphore_after_rebind(
+    monkeypatch,
+):
+    import retrieval
+
+    acquired_slots = threading.BoundedSemaphore(1)
+    rebound_slots = threading.BoundedSemaphore(1)
+
+    class RebindingFailedThread:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            monkeypatch.setattr(retrieval, "_OPTIONAL_STAGE_SLOTS", rebound_slots)
+            raise RuntimeError("thread startup failed")
+
+    monkeypatch.setattr(retrieval, "_OPTIONAL_STAGE_SLOTS", acquired_slots)
+    monkeypatch.setattr(retrieval.threading, "Thread", RebindingFailedThread)
+
+    with pytest.raises(RuntimeError, match="thread startup failed"):
+        retrieval._run_optional_bounded(
+            lambda: None, deadline=time.monotonic() + 1, cancelled=None
+        )
+    assert acquired_slots.acquire(blocking=False)
+    assert rebound_slots.acquire(blocking=False)
+
+
+def test_explicit_base_under_deadline_is_not_reported_as_fallback(monkeypatch):
+    import search_memory
+
+    monkeypatch.setattr(search_memory, "_active_generation_catalog", lambda: None)
+    monkeypatch.setattr(
+        search_memory,
+        "_legacy_lexical_hits",
+        lambda *_args, **_kwargs: [_hit("local", "local.md", 1.0)],
+    )
+
+    rows = search_memory.search(
+        "needle",
+        semantic=False,
+        graph=False,
+        rerank=False,
+        emit_telemetry=False,
+        profile="BASE",
+        deadline_monotonic=time.monotonic() + 30,
+    )
+
+    assert rows[0]["requested_mode"] == "BASE"
+    assert rows[0]["effective_mode"] == "BASE"
+    assert rows[0]["fallback_reason"] is None
+    assert rows[0]["partial"] is False
 
 
 def test_hard_filter_candidate_id_parity_across_backends():
@@ -495,6 +1070,7 @@ def test_late_vector_seal_change_discards_generation_lexical(
 ):
     import retrieval
     import search_memory
+    from repository_scope import resolve_repository_scope
 
     checks = iter((True, True, True, False))
     monkeypatch.setattr(
@@ -537,9 +1113,10 @@ def test_late_vector_seal_change_discards_generation_lexical(
     class Catalog:
         generations_path = Path(".")
 
-        def get_active(self):
+        def get_active_for_repository(self, _repository_scope, **_kwargs):
             return {
                 "generation_id": "gen-v",
+                "repository_scope": resolve_repository_scope(search_memory.ROOT).as_dict(),
                 "vector_state": "complete",
                 "embedding_model_id": "m",
                 "embedding_model_revision": "r",

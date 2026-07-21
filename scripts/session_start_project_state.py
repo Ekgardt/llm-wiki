@@ -372,8 +372,8 @@ def _clip(text: str, limit: int) -> str:
         DEFAULT_CONTEXT_BUDGET,
         BudgetExceededError,
         ContextItem,
-        pack_context,
     )
+    from context_compiler import compile_context_items
 
     item = ContextItem(
         item_id="project-state",
@@ -390,8 +390,8 @@ def _clip(text: str, limit: int) -> str:
         priority_class="handoff",
     )
     try:
-        return pack_context(
-            [item], DEFAULT_CONTEXT_BUDGET, emergency_byte_cap=limit
+        return compile_context_items(
+            [item], budget=DEFAULT_CONTEXT_BUDGET, emergency_byte_cap=limit
         ).text
     except BudgetExceededError as error:
         return error.failure.render(max_bytes=limit)

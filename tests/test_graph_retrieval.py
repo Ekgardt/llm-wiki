@@ -505,6 +505,7 @@ def test_generation_search_seals_graph_artifact_and_uses_same_generation(
     import evidence_graph
     import retrieval
     import search_memory
+    from repository_scope import resolve_repository_scope
 
     sealed: list[tuple[str, ...]] = []
     closed: list[str] = []
@@ -522,8 +523,13 @@ def test_generation_search_seals_graph_artifact_and_uses_same_generation(
         def close(self):
             closed.append("graph")
 
+        @classmethod
+        def open_active_for_repository(cls, *_args, **_kwargs):
+            return cls()
+
     manifest = {
         "generation_id": "gen-22",
+        "repository_scope": resolve_repository_scope(search_memory.ROOT).as_dict(),
         "vector_state": "absent",
         "artifacts": [
             {"path": "search.sqlite3", "size": 1, "sha256": "0" * 64},
@@ -535,7 +541,7 @@ def test_generation_search_seals_graph_artifact_and_uses_same_generation(
         generations_path = tmp_path / "generations"
         state_root = tmp_path
 
-        def get_active(self):
+        def get_active_for_repository(self, _repository_scope, **_kwargs):
             return manifest
 
     monkeypatch.setattr(
@@ -574,6 +580,23 @@ def test_generation_search_seals_graph_artifact_and_uses_same_generation(
     assert any("evidence.sqlite3" in names for names in sealed)
     assert next(row for row in rows if row["candidate_id"] == "target")["generation"] == "gen-22"
     assert closed == ["graph", "search"]
+
+
+def test_graph_expansion_honors_cancellation_before_query() -> None:
+    import retrieval
+
+    class Graph:
+        def _execute(self, *_args, **_kwargs):
+            pytest.fail("cancelled graph expansion must not query")
+
+    with pytest.raises(TimeoutError, match="cancelled"):
+        retrieval.expand_evidence_graph(
+            Graph(),
+            seeds=({"candidate_id": "seed", "path": "seed.md"},),
+            directions=("out",),
+            edge_types=("CALLS",),
+            cancelled=lambda: True,
+        )
 
 
 def test_multiple_paths_to_one_node_merge_evidence_without_multiple_rrf_votes() -> None:

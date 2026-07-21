@@ -7,12 +7,13 @@ import json
 import math
 import os
 import re
+import shutil
 import sqlite3
 import stat
 import time
 from collections.abc import Callable
 from contextlib import closing, contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import InitVar, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,6 +28,45 @@ from reliable_memory import (
     validate_runtime_file,
     validate_state_root,
 )
+from repository_scope import RepositoryScope
+
+if os.name == "nt":
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class _FileBasicInfo(ctypes.Structure):
+        _fields_ = (
+            ("creation_time", ctypes.c_longlong),
+            ("last_access_time", ctypes.c_longlong),
+            ("last_write_time", ctypes.c_longlong),
+            ("change_time", ctypes.c_longlong),
+            ("file_attributes", wintypes.DWORD),
+        )
+
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _get_file_information_by_handle_ex = _kernel32.GetFileInformationByHandleEx
+    _get_file_information_by_handle_ex.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    )
+    _get_file_information_by_handle_ex.restype = wintypes.BOOL
+    _create_file = _kernel32.CreateFileW
+    _create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    _create_file.restype = wintypes.HANDLE
+    _close_handle = _kernel32.CloseHandle
+    _close_handle.argtypes = (wintypes.HANDLE,)
+    _close_handle.restype = wintypes.BOOL
 
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_ARTIFACTS = 1024
@@ -38,6 +78,7 @@ MAX_GENERATIONS = 1024
 MAX_ACTIVATION_HISTORY = 16384
 HASH_CHUNK_BYTES = 64 * 1024
 BUSY_MS = 5000
+CLEANUP_CATALOG_FENCE_SECONDS = 1.0
 
 _GENERATION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -65,10 +106,18 @@ _MANIFEST_KEYS = {
     "source_manifest_sha256",
     "artifacts",
     "vector_state",
+    "repository_scope",
 }
-_REQUIRED_MANIFEST_KEYS = _MANIFEST_KEYS - {"parent_generation_id"}
+_REQUIRED_MANIFEST_KEYS = _MANIFEST_KEYS - {"parent_generation_id", "repository_scope"}
 _ARTIFACT_KEYS = {"path", "size", "sha256"}
 _VECTOR_FILES = {"vectors.npy", "vectors.json"}
+_V2_REQUIRED_ARTIFACTS = {
+    "source-manifest.json",
+    "evidence.sqlite3",
+    "search.sqlite3",
+}
+_V2_OPTIONAL_ARTIFACTS = {"incremental-manifest.json", *_VECTOR_FILES}
+_CANDIDATE_MINT = object()
 
 
 @dataclass(frozen=True, order=True)
@@ -81,6 +130,107 @@ class _EntrySeal:
     size: int
     mtime_ns: int
     sha256: str | None
+
+
+@dataclass(frozen=True)
+class _HeldFile:
+    path: Path
+    relative: str
+    descriptor: int
+    opened_state: tuple[object, ...]
+
+
+class _GenerationSealCapability:
+    """Bounded open-file capability for one coherent publication check."""
+
+    def __init__(
+        self,
+        generation_path: Path,
+        expected: tuple[_EntrySeal, ...],
+        held_files: tuple[_HeldFile, ...],
+        *,
+        deadline: float | None,
+        monotonic: Callable[[], float],
+        cancelled: Callable[[], bool] | None,
+    ) -> None:
+        self.generation_path = generation_path
+        self.expected = expected
+        self.held_files = held_files
+        self.deadline = deadline
+        self.monotonic = monotonic
+        self.cancelled = cancelled
+        self._closed = False
+
+    def revalidate(self) -> bool:
+        _check_cancelled(self.cancelled)
+        _check_deadline(self.deadline, self.monotonic)
+        current, files = _scan_generation(
+            self.generation_path,
+            deadline=self.deadline,
+            monotonic=self.monotonic,
+            cancelled=self.cancelled,
+        )
+        expected_metadata = tuple(replace(entry, sha256=None) for entry in self.expected)
+        expected_files = {entry.path for entry in self.expected if entry.kind == "file"}
+        if current != expected_metadata or files != expected_files:
+            return False
+        for held in self.held_files:
+            _check_cancelled(self.cancelled)
+            _check_deadline(self.deadline, self.monotonic)
+            descriptor_stat = os.fstat(held.descriptor)
+            try:
+                path_stat = held.path.lstat()
+            except OSError:
+                return False
+            if (
+                not stat.S_ISREG(descriptor_stat.st_mode)
+                or _is_link_or_reparse(held.path)
+                or not stat.S_ISREG(path_stat.st_mode)
+                or not os.path.samestat(descriptor_stat, path_stat)
+                or _stable_descriptor_state(held.descriptor) != held.opened_state
+            ):
+                return False
+        _check_cancelled(self.cancelled)
+        _check_deadline(self.deadline, self.monotonic)
+        return True
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        errors: list[BaseException] = []
+        for held in self.held_files:
+            try:
+                os.close(held.descriptor)
+            except BaseException as exc:
+                errors.append(exc)
+        self._closed = True
+        if errors:
+            raise errors[0]
+
+    def __enter__(self) -> _GenerationSealCapability:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+
+@dataclass(frozen=True)
+class _ValidatedCandidate:
+    issuer: object
+    generation_id: str
+    generation_path: Path
+    state_root: Path
+    catalog_path: Path
+    catalog_identity: _EntrySeal
+    manifest_bytes: bytes
+    manifest_sha256: str
+    repository_scope_bytes: bytes | None
+    seal: tuple[_EntrySeal, ...]
+    mint: InitVar[object]
+
+    def __post_init__(self, mint: object) -> None:
+        if mint is not _CANDIDATE_MINT:
+            raise TypeError("validated candidates can only be minted by GenerationCatalog")
 
 
 def _generation_id(value: object) -> str:
@@ -262,6 +412,114 @@ def _content_seal(
     )
 
 
+def _stable_file_stat(metadata: os.stat_result) -> tuple[int, ...]:
+    """Return identity and mutation-sensitive fields unaffected by reads."""
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+        getattr(metadata, "st_file_attributes", 0),
+        getattr(metadata, "st_reparse_tag", 0),
+    )
+
+
+def _windows_change_time(descriptor: int) -> int | None:
+    if os.name != "nt":
+        return None
+    handle = msvcrt.get_osfhandle(descriptor)
+    if handle == -1:
+        raise OSError("invalid Windows file handle")
+    information = _FileBasicInfo()
+    if not _get_file_information_by_handle_ex(
+        handle,
+        0,  # FileBasicInfo
+        ctypes.byref(information),
+        ctypes.sizeof(information),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return int(information.change_time)
+
+
+def _stable_descriptor_state(descriptor: int) -> tuple[object, ...]:
+    return (*_stable_file_stat(os.fstat(descriptor)), _windows_change_time(descriptor))
+
+
+def _open_read_descriptor(path: Path) -> int:
+    if os.name != "nt":
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        return os.open(path, flags)
+
+    absolute = str(path.resolve(strict=False))
+    if not absolute.startswith("\\\\?\\"):
+        if absolute.startswith("\\\\"):
+            absolute = "\\\\?\\UNC\\" + absolute[2:]
+        else:
+            absolute = "\\\\?\\" + absolute
+    handle = _create_file(
+        absolute,
+        0x80000000,  # GENERIC_READ
+        0x00000001 | 0x00000002 | 0x00000004,  # share read, write, and delete
+        None,
+        3,  # OPEN_EXISTING
+        0x00200000,  # FILE_FLAG_OPEN_REPARSE_POINT
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle == invalid_handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        descriptor = msvcrt.open_osfhandle(
+            handle, os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        )
+    except BaseException:
+        _close_handle(handle)
+        raise
+    try:
+        os.set_inheritable(descriptor, False)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    return descriptor
+
+
+def _hash_descriptor(
+    descriptor: int,
+    max_bytes: int,
+    *,
+    deadline: float | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+    cancelled: Callable[[], bool] | None = None,
+) -> tuple[int, str]:
+    _check_cancelled(cancelled)
+    _check_deadline(deadline, monotonic)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    total = 0
+    while True:
+        _check_cancelled(cancelled)
+        _check_deadline(deadline, monotonic)
+        chunk = os.read(descriptor, HASH_CHUNK_BYTES)
+        _check_deadline(deadline, monotonic)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise ValueError("artifact exceeds its declared size")
+        digest.update(chunk)
+    _check_cancelled(cancelled)
+    _check_deadline(deadline, monotonic)
+    return total, digest.hexdigest()
+
+
 def _hash_artifact(
     path: Path,
     state_root: Path,
@@ -274,30 +532,21 @@ def _hash_artifact(
     _check_cancelled(cancelled)
     _check_deadline(deadline, monotonic)
     expected = validate_runtime_file(path, state_root, max_bytes=max_bytes)
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
+    descriptor = _open_read_descriptor(path)
     try:
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(expected, opened):
             raise PermissionError("artifact identity changed while opening")
-        digest = hashlib.sha256()
-        total = 0
-        while True:
-            _check_cancelled(cancelled)
-            _check_deadline(deadline, monotonic)
-            chunk = os.read(descriptor, HASH_CHUNK_BYTES)
-            _check_deadline(deadline, monotonic)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > max_bytes:
-                raise ValueError("artifact exceeds its declared size")
-            digest.update(chunk)
+        opened_state = _stable_descriptor_state(descriptor)
+        total, digest = _hash_descriptor(
+            descriptor,
+            max_bytes,
+            deadline=deadline,
+            monotonic=monotonic,
+            cancelled=cancelled,
+        )
         after = os.fstat(descriptor)
-        if not os.path.samestat(opened, after) or (opened.st_size, opened.st_mtime_ns) != (
-            after.st_size,
-            after.st_mtime_ns,
-        ):
+        if opened_state != _stable_descriptor_state(descriptor):
             raise PermissionError("artifact changed while hashing")
     finally:
         os.close(descriptor)
@@ -306,7 +555,7 @@ def _hash_artifact(
         raise PermissionError("artifact identity changed after hashing")
     _check_deadline(deadline, monotonic)
     _check_cancelled(cancelled)
-    return total, digest.hexdigest()
+    return total, digest
 
 
 def _validate_generation(
@@ -388,12 +637,18 @@ def _validate_generation(
 
     graph_schema = _optional_version("graph_schema_version", value["graph_schema_version"])
     graph_extractor = _optional_version("graph_extractor_version", value["graph_extractor_version"])
+    if graph_schema not in {None, "evidence-graph/v2"}:
+        raise ValueError("graph schema must be null or evidence-graph/v2")
     if (graph_schema is None) != (graph_extractor is None):
         raise ValueError("graph schema and extractor versions must be both set or null")
     normalized["graph_schema_version"] = graph_schema
     normalized["graph_extractor_version"] = graph_extractor
     if "parent_generation_id" in value:
         normalized["parent_generation_id"] = parent
+    if "repository_scope" in value:
+        normalized["repository_scope"] = RepositoryScope.from_dict(
+            value["repository_scope"]
+        ).as_dict()
     source_hash = value["source_manifest_sha256"]
     if not isinstance(source_hash, str) or _SHA256_RE.fullmatch(source_hash) is None:
         raise ValueError("source_manifest_sha256 must be lowercase SHA-256")
@@ -470,7 +725,37 @@ def _validate_generation(
         raise ValueError("vector artifacts require embedding metadata")
     normalized["vector_state"] = vector_state
 
-    if graph_schema == "evidence-graph/v1":
+    if normalized["schema_version"] == "corpus-generation/v2":
+        if not _V2_REQUIRED_ARTIFACTS <= seen or not seen <= (
+            _V2_REQUIRED_ARTIFACTS | _V2_OPTIONAL_ARTIFACTS
+        ):
+            raise ValueError("corpus-generation/v2 has an invalid artifact contract")
+        if graph_schema != "evidence-graph/v2":
+            raise ValueError(
+                "corpus-generation/v2 requires the Evidence Graph schema"
+            )
+        if "repository_scope" not in normalized:
+            raise ValueError("corpus-generation/v2 requires a validated repository scope")
+        from evidence_graph import validate_generation_artifact
+        from search_memory import validate_generation_fts_artifact
+
+        validate_generation_artifact(
+            generation_path,
+            normalized,
+            state_root=state_root,
+            deadline=deadline,
+            monotonic=monotonic,
+            cancelled=cancelled,
+        )
+        validate_generation_fts_artifact(
+            generation_path,
+            normalized,
+            state_root=state_root,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+
+    elif graph_schema == "evidence-graph/v2":
         from evidence_graph import validate_generation_artifact
 
         validate_generation_artifact(
@@ -541,6 +826,7 @@ class GenerationCatalog:
         fsync_directory(self.catalog_path.parent.parent)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._monotonic = monotonic or time.monotonic
+        self._candidate_issuer = object()
         with closing(self._connect()) as database, database:
             self._ensure_schema(database)
 
@@ -643,6 +929,167 @@ class GenerationCatalog:
         )
         return manifest, canonical_json_bytes(manifest), seal
 
+    def _catalog_identity(self) -> _EntrySeal:
+        validate_runtime_file(
+            self.catalog_path,
+            self.state_root,
+            max_bytes=self.max_catalog_bytes,
+        )
+        return _entry_seal(self.catalog_path, "catalog.sqlite3")
+
+    @staticmethod
+    def _same_catalog_identity(left: _EntrySeal, right: _EntrySeal) -> bool:
+        return (
+            left.path,
+            left.kind,
+            left.device,
+            left.inode,
+            left.mode,
+        ) == (
+            right.path,
+            right.kind,
+            right.device,
+            right.inode,
+            right.mode,
+        )
+
+    def _validate_candidate(
+        self,
+        generation_id: str,
+        *,
+        expected_repository_scope: RepositoryScope | None = None,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> _ValidatedCandidate:
+        """Fully validate and mint one process-local publication capability."""
+        if expected_repository_scope is not None and not isinstance(
+            expected_repository_scope, RepositoryScope
+        ):
+            raise TypeError("expected_repository_scope must be a RepositoryScope or None")
+        identifier = _generation_id(generation_id)
+        manifest, encoded, seal = self._validate(
+            identifier, deadline=deadline, cancelled=cancelled
+        )
+        scope_value = manifest.get("repository_scope")
+        scope = None if scope_value is None else RepositoryScope.from_dict(scope_value)
+        if expected_repository_scope is not None:
+            expected_repository_scope = RepositoryScope.from_dict(
+                expected_repository_scope.as_dict()
+            )
+            if scope != expected_repository_scope:
+                raise ValueError("generation repository scope does not match publication scope")
+        scope_bytes = None if scope is None else canonical_json_bytes(scope.as_dict())
+        return _ValidatedCandidate(
+            issuer=self._candidate_issuer,
+            generation_id=identifier,
+            generation_path=(self.generations_path / identifier).resolve(strict=True),
+            state_root=self.state_root.resolve(strict=True),
+            catalog_path=self.catalog_path.resolve(strict=True),
+            catalog_identity=self._catalog_identity(),
+            manifest_bytes=encoded,
+            manifest_sha256=sha256_bytes(encoded),
+            repository_scope_bytes=scope_bytes,
+            seal=seal,
+            mint=_CANDIDATE_MINT,
+        )
+
+    def _candidate_payload(
+        self,
+        candidate: object,
+        *,
+        deadline: float | None,
+        cancelled: Callable[[], bool] | None,
+    ) -> tuple[dict[str, object], bytes, _GenerationSealCapability]:
+        self._check_deadline(deadline)
+        _check_cancelled(cancelled)
+        if not isinstance(candidate, _ValidatedCandidate) or (
+            candidate.issuer is not self._candidate_issuer
+        ):
+            raise TypeError("validated candidate was not issued by this catalog")
+        generation_path = self.generations_path / candidate.generation_id
+        if (
+            generation_path.resolve(strict=True) != candidate.generation_path
+            or self.state_root.resolve(strict=True) != candidate.state_root
+            or self.catalog_path.resolve(strict=True) != candidate.catalog_path
+            or not self._same_catalog_identity(
+                candidate.catalog_identity, self._catalog_identity()
+            )
+        ):
+            raise PermissionError("validated candidate catalog or path identity changed")
+        if sha256_bytes(candidate.manifest_bytes) != candidate.manifest_sha256:
+            raise ValueError("validated candidate manifest hash changed")
+        try:
+            manifest = json.loads(candidate.manifest_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("validated candidate manifest is invalid") from exc
+        if (
+            not isinstance(manifest, dict)
+            or canonical_json_bytes(manifest) != candidate.manifest_bytes
+            or manifest.get("generation_id") != candidate.generation_id
+        ):
+            raise ValueError("validated candidate manifest is not canonical")
+        scope_value = manifest.get("repository_scope")
+        scope_bytes = (
+            None
+            if scope_value is None
+            else canonical_json_bytes(RepositoryScope.from_dict(scope_value).as_dict())
+        )
+        if scope_bytes != candidate.repository_scope_bytes:
+            raise ValueError("validated candidate repository scope changed")
+        capability = self._acquire_seal_capability(
+            generation_path,
+            candidate.seal,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+        return manifest, candidate.manifest_bytes, capability
+
+    def _register_validated(
+        self,
+        candidate: object,
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> dict[str, object]:
+        """Register a same-process candidate without repeating semantic validation."""
+        manifest, encoded, capability = self._candidate_payload(
+            candidate, deadline=deadline, cancelled=cancelled
+        )
+        assert isinstance(candidate, _ValidatedCandidate)
+        digest = candidate.manifest_sha256
+        timestamp = _utc_timestamp(self._clock)
+        with capability:
+            with self._write_transaction(deadline) as database:
+                _check_cancelled(cancelled)
+                row = database.execute(
+                    "SELECT manifest_json, manifest_sha256 FROM generations WHERE generation_id = ?",
+                    (candidate.generation_id,),
+                ).fetchone()
+                if row is None:
+                    self._require_capacity(
+                        database, "generations", MAX_GENERATIONS, "generation"
+                    )
+                elif bytes(row["manifest_json"]) != encoded or row["manifest_sha256"] != digest:
+                    raise ValueError("generation registration is immutable")
+                if not capability.revalidate():
+                    raise ValueError("generation changed before registration")
+                if row is None:
+                    database.execute(
+                        "INSERT INTO generations "
+                        "(generation_id, parent_generation_id, manifest_json, "
+                        "manifest_sha256, registered_at) VALUES (?, ?, ?, ?, ?)",
+                        (
+                            candidate.generation_id,
+                            manifest.get("parent_generation_id"),
+                            encoded,
+                            digest,
+                            timestamp,
+                        ),
+                    )
+                    self._require_catalog_bytes(database)
+                self._check_deadline(deadline)
+        return manifest
+
     def register(
         self,
         generation_id: str,
@@ -658,34 +1105,42 @@ class GenerationCatalog:
         )
         digest = sha256_bytes(encoded)
         timestamp = _utc_timestamp(self._clock)
-        if not self._deadline_seal_unchanged(
-            self.generations_path / generation_id, seal, deadline, cancelled=cancelled
-        ):
-            raise ValueError("generation changed after validation seal")
-        with self._write_transaction(deadline) as database:
-            _check_cancelled(cancelled)
-            row = database.execute(
-                "SELECT manifest_json, manifest_sha256 FROM generations WHERE generation_id = ?",
-                (generation_id,),
-            ).fetchone()
-            if row is None:
-                self._require_capacity(database, "generations", MAX_GENERATIONS, "generation")
-                database.execute(
-                    "INSERT INTO generations "
-                    "(generation_id, parent_generation_id, manifest_json, "
-                    "manifest_sha256, registered_at) VALUES (?, ?, ?, ?, ?)",
-                    (
-                        generation_id,
-                        manifest.get("parent_generation_id"),
-                        encoded,
-                        digest,
-                        timestamp,
-                    ),
-                )
-                self._require_catalog_bytes(database)
-            elif bytes(row["manifest_json"]) != encoded or row["manifest_sha256"] != digest:
-                raise ValueError("generation registration is immutable")
-            self._check_deadline(deadline)
+        capability = self._acquire_seal_capability(
+            self.generations_path / generation_id,
+            seal,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+        with capability:
+            with self._write_transaction(deadline) as database:
+                _check_cancelled(cancelled)
+                row = database.execute(
+                    "SELECT manifest_json, manifest_sha256 FROM generations WHERE generation_id = ?",
+                    (generation_id,),
+                ).fetchone()
+                if row is None:
+                    self._require_capacity(
+                        database, "generations", MAX_GENERATIONS, "generation"
+                    )
+                elif bytes(row["manifest_json"]) != encoded or row["manifest_sha256"] != digest:
+                    raise ValueError("generation registration is immutable")
+                if not capability.revalidate():
+                    raise ValueError("generation changed before registration")
+                if row is None:
+                    database.execute(
+                        "INSERT INTO generations "
+                        "(generation_id, parent_generation_id, manifest_json, "
+                        "manifest_sha256, registered_at) VALUES (?, ?, ?, ?, ?)",
+                        (
+                            generation_id,
+                            manifest.get("parent_generation_id"),
+                            encoded,
+                            digest,
+                            timestamp,
+                        ),
+                    )
+                    self._require_catalog_bytes(database)
+                self._check_deadline(deadline)
         return manifest
 
     def _registered_generation(
@@ -737,6 +1192,91 @@ class GenerationCatalog:
             generation_path, expected, deadline=deadline, cancelled=cancelled
         )
 
+    def _acquire_seal_capability(
+        self,
+        generation_path: Path,
+        expected: tuple[_EntrySeal, ...],
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> _GenerationSealCapability:
+        """Hash a bounded generation through held descriptors outside the writer lock."""
+        self._check_deadline(deadline)
+        _check_cancelled(cancelled)
+        generation_path = Path(generation_path)
+        current, files = _scan_generation(
+            generation_path,
+            deadline=deadline,
+            monotonic=self._monotonic,
+            cancelled=cancelled,
+        )
+        expected_metadata = tuple(replace(entry, sha256=None) for entry in expected)
+        expected_files = {entry.path: entry for entry in expected if entry.kind == "file"}
+        if current != expected_metadata or files != set(expected_files):
+            raise PermissionError("generation changed before publication sealing")
+
+        held_files: list[_HeldFile] = []
+        try:
+            for relative, entry in expected_files.items():
+                _check_cancelled(cancelled)
+                self._check_deadline(deadline)
+                path = generation_path.joinpath(*relative.split("/"))
+                before_open = _entry_seal(path, relative)
+                if before_open != replace(entry, sha256=None):
+                    raise PermissionError("generation member changed before opening")
+                descriptor = _open_read_descriptor(path)
+                try:
+                    opened = os.fstat(descriptor)
+                    path_stat = path.lstat()
+                    if (
+                        not stat.S_ISREG(opened.st_mode)
+                        or _is_link_or_reparse(path)
+                        or not stat.S_ISREG(path_stat.st_mode)
+                        or not os.path.samestat(opened, path_stat)
+                    ):
+                        raise PermissionError("generation member identity changed while opening")
+                    held_files.append(
+                        _HeldFile(
+                            path=path,
+                            relative=relative,
+                            descriptor=descriptor,
+                            opened_state=_stable_descriptor_state(descriptor),
+                        )
+                    )
+                except BaseException:
+                    os.close(descriptor)
+                    raise
+
+            capability = _GenerationSealCapability(
+                generation_path,
+                expected,
+                tuple(held_files),
+                deadline=deadline,
+                monotonic=self._monotonic,
+                cancelled=cancelled,
+            )
+            for held in capability.held_files:
+                entry = expected_files[held.relative]
+                size, digest = _hash_descriptor(
+                    held.descriptor,
+                    entry.size,
+                    deadline=deadline,
+                    monotonic=self._monotonic,
+                    cancelled=cancelled,
+                )
+                if size != entry.size or digest != entry.sha256:
+                    raise PermissionError("generation content changed while sealing")
+            if not capability.revalidate():
+                raise PermissionError("generation changed during publication sealing")
+            return capability
+        except BaseException:
+            for held in held_files:
+                try:
+                    os.close(held.descriptor)
+                except OSError:
+                    pass
+            raise
+
     def _seal_unchanged(
         self,
         generation_path: Path,
@@ -745,33 +1285,18 @@ class GenerationCatalog:
         deadline: float | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> bool:
-        """Recheck bounded metadata and content immediately before catalog mutation."""
-        current, files = _scan_generation(
-            generation_path,
-            deadline=deadline,
-            monotonic=self._monotonic,
-            cancelled=cancelled,
-        )
-        expected_metadata = tuple(replace(entry, sha256=None) for entry in expected)
-        if current != expected_metadata:
-            return False
-        expected_files = {entry.path: entry for entry in expected if entry.kind == "file"}
-        if files != set(expected_files):
-            return False
-        for relative, entry in expected_files.items():
-            _check_cancelled(cancelled)
-            self._check_deadline(deadline)
-            _size, digest = _hash_artifact(
-                generation_path.joinpath(*relative.split("/")),
-                self.state_root,
-                entry.size,
+        """Recheck bounded metadata and content without a catalog writer lock."""
+        try:
+            capability = self._acquire_seal_capability(
+                generation_path,
+                expected,
                 deadline=deadline,
-                monotonic=self._monotonic,
                 cancelled=cancelled,
             )
-            if digest != entry.sha256:
-                return False
-        return True
+        except (FileNotFoundError, PermissionError, ValueError):
+            return False
+        with capability:
+            return capability.revalidate()
 
     @staticmethod
     def _require_capacity(database: sqlite3.Connection, table: str, limit: int, label: str) -> None:
@@ -812,6 +1337,68 @@ class GenerationCatalog:
         if page_count * page_size + page_size > self.max_catalog_bytes:
             raise ValueError("catalog byte ceiling would be exceeded")
 
+    def _activate_validated(
+        self,
+        candidate: object,
+        *,
+        expected_active: str | None,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> bool:
+        """CAS-activate a same-process candidate without semantic revalidation."""
+        manifest, encoded, capability = self._candidate_payload(
+            candidate, deadline=deadline, cancelled=cancelled
+        )
+        assert isinstance(candidate, _ValidatedCandidate)
+        if expected_active is not None:
+            expected_active = _generation_id(expected_active)
+        registration_token = (encoded, candidate.manifest_sha256)
+        timestamp = _utc_timestamp(self._clock)
+        with capability:
+            with self._write_transaction(deadline) as database:
+                _check_cancelled(cancelled)
+                row = database.execute(
+                    "SELECT active_generation_id FROM catalog_state WHERE singleton = 1"
+                ).fetchone()
+                if row is None or row["active_generation_id"] != expected_active:
+                    self._check_deadline(deadline)
+                    return False
+                registered = database.execute(
+                    "SELECT manifest_json, manifest_sha256 FROM generations "
+                    "WHERE generation_id = ?",
+                    (candidate.generation_id,),
+                ).fetchone()
+                if registered is None:
+                    raise ValueError("generation registration disappeared")
+                if (
+                    bytes(registered["manifest_json"]),
+                    registered["manifest_sha256"],
+                ) != registration_token:
+                    raise ValueError("generation registration changed after validation")
+                if candidate.generation_id != expected_active:
+                    self._require_capacity(
+                        database,
+                        "activation_history",
+                        MAX_ACTIVATION_HISTORY,
+                        "history",
+                    )
+                if not capability.revalidate():
+                    raise ValueError("generation changed before activation")
+                self._check_deadline(deadline)
+                if candidate.generation_id == expected_active:
+                    return True
+                database.execute(
+                    "UPDATE catalog_state SET active_generation_id = ? WHERE singleton = 1",
+                    (candidate.generation_id,),
+                )
+                database.execute(
+                    "INSERT INTO activation_history(generation_id, activated_at) VALUES (?, ?)",
+                    (candidate.generation_id, timestamp),
+                )
+                self._require_catalog_bytes(database)
+                self._check_deadline(deadline)
+        return True
+
     def activate(
         self,
         generation_id: str,
@@ -834,58 +1421,143 @@ class GenerationCatalog:
             )
         encoded = canonical_json_bytes(manifest)
         registration_token = (encoded, sha256_bytes(encoded))
-        if not self._deadline_seal_unchanged(
+        capability = self._acquire_seal_capability(
             self.generations_path / identifier,
             seal,
-            deadline,
+            deadline=deadline,
             cancelled=cancelled,
-        ):
-            raise ValueError("generation changed after validation seal")
+        )
         timestamp = _utc_timestamp(self._clock)
-        with self._write_transaction(deadline) as database:
-            _check_cancelled(cancelled)
-            row = database.execute(
-                "SELECT active_generation_id FROM catalog_state WHERE singleton = 1"
-            ).fetchone()
-            if row is None or row["active_generation_id"] != expected_active:
+        with capability:
+            with self._write_transaction(deadline) as database:
+                _check_cancelled(cancelled)
+                row = database.execute(
+                    "SELECT active_generation_id FROM catalog_state WHERE singleton = 1"
+                ).fetchone()
+                if row is None or row["active_generation_id"] != expected_active:
+                    self._check_deadline(deadline)
+                    return False
+                registered = database.execute(
+                    "SELECT manifest_json, manifest_sha256 FROM generations "
+                    "WHERE generation_id = ?",
+                    (identifier,),
+                ).fetchone()
+                if registered is None:
+                    raise ValueError("generation registration disappeared")
+                if (
+                    bytes(registered["manifest_json"]),
+                    registered["manifest_sha256"],
+                ) != registration_token:
+                    raise ValueError("generation registration changed after validation")
+                if identifier != expected_active:
+                    self._require_capacity(
+                        database,
+                        "activation_history",
+                        MAX_ACTIVATION_HISTORY,
+                        "history",
+                    )
+                if not capability.revalidate():
+                    raise ValueError("generation changed before activation")
                 self._check_deadline(deadline)
-                return False
-            registered = database.execute(
-                "SELECT manifest_json, manifest_sha256 FROM generations WHERE generation_id = ?",
-                (identifier,),
-            ).fetchone()
-            if registered is None:
-                raise ValueError("generation registration disappeared")
-            if (
-                bytes(registered["manifest_json"]),
-                registered["manifest_sha256"],
-            ) != registration_token:
-                raise ValueError("generation registration changed after validation")
-            if identifier != expected_active:
-                self._require_capacity(
-                    database,
-                    "activation_history",
-                    MAX_ACTIVATION_HISTORY,
-                    "history",
+                if identifier == expected_active:
+                    return True
+                database.execute(
+                    "UPDATE catalog_state SET active_generation_id = ? WHERE singleton = 1",
+                    (identifier,),
                 )
-            self._check_deadline(deadline)
-            if identifier == expected_active:
-                return True
-            database.execute(
-                "UPDATE catalog_state SET active_generation_id = ? WHERE singleton = 1",
-                (identifier,),
-            )
-            database.execute(
-                "INSERT INTO activation_history(generation_id, activated_at) VALUES (?, ?)",
-                (identifier, timestamp),
-            )
-            self._require_catalog_bytes(database)
-            self._check_deadline(deadline)
+                database.execute(
+                    "INSERT INTO activation_history(generation_id, activated_at) VALUES (?, ?)",
+                    (identifier, timestamp),
+                )
+                self._require_catalog_bytes(database)
+                self._check_deadline(deadline)
         return True
 
+    def discard_unactivated(
+        self,
+        generation_id: str,
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> bool:
+        """Remove a never-activated registration after fenced publication aborts."""
+        identifier = _generation_id(generation_id)
+        if deadline is not None and (
+            isinstance(deadline, bool)
+            or not isinstance(deadline, (int, float))
+            or not math.isfinite(deadline)
+        ):
+            raise ValueError("deadline must be an absolute monotonic timestamp or None")
+        cleanup_deadline = self._monotonic() + CLEANUP_CATALOG_FENCE_SECONDS
+        removed_registration = False
+        with self._write_transaction(cleanup_deadline) as database:
+            active = database.execute(
+                "SELECT active_generation_id FROM catalog_state WHERE singleton = 1"
+            ).fetchone()
+            if active is None:
+                raise ValueError("catalog active pointer is missing")
+            if active["active_generation_id"] == identifier:
+                return False
+            historical = database.execute(
+                "SELECT 1 FROM activation_history WHERE generation_id = ? LIMIT 1",
+                (identifier,),
+            ).fetchone()
+            if historical is not None:
+                return False
+            registered = database.execute(
+                "SELECT 1 FROM generations WHERE generation_id = ?", (identifier,)
+            ).fetchone()
+            if registered is not None:
+                database.execute(
+                    "DELETE FROM generations WHERE generation_id = ?", (identifier,)
+                )
+                removed_registration = True
+
+        # The committed delete cannot be rolled back by filesystem failures. A
+        # second writer fence keeps activation and registration from racing the
+        # recursive cleanup.
+        _check_cancelled(cancelled)
+        self._check_deadline(deadline)
+        with self._write_transaction(deadline) as database:
+            _check_cancelled(cancelled)
+            referenced = database.execute(
+                "SELECT 1 FROM generations WHERE generation_id = ? "
+                "UNION ALL "
+                "SELECT 1 FROM catalog_state "
+                "WHERE singleton = 1 AND active_generation_id = ? "
+                "UNION ALL "
+                "SELECT 1 FROM activation_history WHERE generation_id = ? LIMIT 1",
+                (identifier, identifier, identifier),
+            ).fetchone()
+            if referenced is not None:
+                return False
+            generation_path = self.generations_path / identifier
+            removed_directory = False
+            if generation_path.exists() or generation_path.is_symlink():
+                _scan_generation(
+                    generation_path,
+                    deadline=deadline,
+                    monotonic=self._monotonic,
+                    cancelled=cancelled,
+                )
+                _check_cancelled(cancelled)
+                self._check_deadline(deadline)
+                shutil.rmtree(generation_path)
+                if generation_path.exists():
+                    raise OSError("generation cleanup did not remove candidate")
+                fsync_directory(self.generations_path)
+                removed_directory = True
+            _check_cancelled(cancelled)
+            self._check_deadline(deadline)
+        return removed_registration or removed_directory
+
     def _snapshot_catalog(
-        self, *, deadline: float | None = None
+        self,
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> tuple[str | None, list[str], dict[str, str | None]]:
+        _check_cancelled(cancelled)
         self._check_deadline(deadline)
         with closing(self._readonly()) as database:
             state = database.execute(
@@ -907,62 +1579,135 @@ class GenerationCatalog:
                 "generation",
             )
             parents = {row["generation_id"]: row["parent_generation_id"] for row in generation_rows}
+        _check_cancelled(cancelled)
         self._check_deadline(deadline)
         return state["active_generation_id"], history, parents
 
     @staticmethod
     def _fallback_order(
-        active: str | None, history: list[str], parents: dict[str, str | None]
+        active: str | None,
+        history: list[str],
+        parents: dict[str, str | None],
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> list[str]:
         ordered: list[str] = []
         seen: set[str] = set()
         prior = [identifier for identifier in [active, *history] if identifier is not None]
         for identifier in prior:
+            _check_cancelled(cancelled)
+            _check_deadline(deadline, time.monotonic)
             if identifier not in seen:
                 seen.add(identifier)
                 ordered.append(identifier)
         for identifier in prior:
+            _check_cancelled(cancelled)
+            _check_deadline(deadline, time.monotonic)
             parent = parents.get(identifier)
             while parent is not None and parent not in seen:
+                _check_cancelled(cancelled)
+                _check_deadline(deadline, time.monotonic)
                 seen.add(parent)
                 ordered.append(parent)
                 parent = parents.get(parent)
         return ordered
 
-    def get_active(self, *, deadline: float | None = None) -> dict[str, object] | None:
+    def _registered_repository_scope(
+        self,
+        generation_id: str,
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> RepositoryScope | None:
+        """Read repository eligibility from the catalog without validating artifacts."""
+        _check_cancelled(cancelled)
+        self._check_deadline(deadline)
+        with closing(self._readonly()) as database:
+            row = database.execute(
+                "SELECT manifest_json, manifest_sha256 FROM generations "
+                "WHERE generation_id = ?",
+                (generation_id,),
+            ).fetchone()
+        _check_cancelled(cancelled)
+        self._check_deadline(deadline)
+        if row is None:
+            return None
+        encoded = bytes(row["manifest_json"])
+        if sha256_bytes(encoded) != row["manifest_sha256"]:
+            return None
+        try:
+            manifest = json.loads(encoded)
+            if canonical_json_bytes(manifest) != encoded:
+                return None
+            return RepositoryScope.from_dict(manifest.get("repository_scope"))
+        except (TypeError, ValueError, UnicodeError, json.JSONDecodeError):
+            return None
+
+    def _get_active(
+        self,
+        *,
+        repository_scope: RepositoryScope | None = None,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> dict[str, object] | None:
         """Return a valid active generation, repairing a corrupt pointer safely."""
         for _attempt in range(3):
+            _check_cancelled(cancelled)
             self._check_deadline(deadline)
-            active, history, parents = self._snapshot_catalog(deadline=deadline)
+            active, history, parents = self._snapshot_catalog(
+                deadline=deadline, cancelled=cancelled
+            )
+            if active is not None and repository_scope is not None:
+                if self._registered_repository_scope(
+                    active, deadline=deadline, cancelled=cancelled
+                ) != repository_scope:
+                    return None
             selected: dict[str, object] | None = None
             selected_id: str | None = None
             selected_seal: tuple[_EntrySeal, ...] | None = None
-            for identifier in self._fallback_order(active, history, parents):
+            for identifier in self._fallback_order(
+                active,
+                history,
+                parents,
+                deadline=deadline,
+                cancelled=cancelled,
+            ):
+                _check_cancelled(cancelled)
                 self._check_deadline(deadline)
+                if repository_scope is not None and self._registered_repository_scope(
+                    identifier, deadline=deadline, cancelled=cancelled
+                ) != repository_scope:
+                    continue
                 try:
-                    if deadline is None:
+                    if deadline is None and cancelled is None:
                         selected, selected_seal = self._registered_generation(identifier)
                     else:
                         selected, selected_seal = self._registered_generation(
-                            identifier, deadline=deadline
+                            identifier, deadline=deadline, cancelled=cancelled
                         )
                 except (FileNotFoundError, PermissionError, TypeError, ValueError):
                     continue
                 selected_id = identifier
                 break
             if selected_id == active:
+                _check_cancelled(cancelled)
                 self._check_deadline(deadline)
                 return selected
             selected_token: tuple[bytes, str] | None = None
             if selected_id is not None:
                 if selected_seal is None or not self._deadline_seal_unchanged(
-                    self.generations_path / selected_id, selected_seal, deadline
+                    self.generations_path / selected_id,
+                    selected_seal,
+                    deadline,
+                    cancelled=cancelled,
                 ):
                     raise ValueError("fallback generation changed after validation seal")
                 selected_encoded = canonical_json_bytes(selected)
                 selected_token = (selected_encoded, sha256_bytes(selected_encoded))
             timestamp = _utc_timestamp(self._clock)
             with self._write_transaction(deadline) as database:
+                _check_cancelled(cancelled)
                 current = database.execute(
                     "SELECT active_generation_id FROM catalog_state WHERE singleton = 1"
                 ).fetchone()
@@ -997,9 +1742,36 @@ class GenerationCatalog:
                         (selected_id, timestamp),
                     )
                 self._require_catalog_bytes(database)
+                _check_cancelled(cancelled)
                 self._check_deadline(deadline)
             return selected
         raise sqlite3.OperationalError("active generation changed during fallback repair")
+
+    def get_active(
+        self,
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> dict[str, object] | None:
+        """Return a valid active generation, repairing a corrupt pointer safely."""
+        return self._get_active(deadline=deadline, cancelled=cancelled)
+
+    def get_active_for_repository(
+        self,
+        repository_scope: RepositoryScope,
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> dict[str, object] | None:
+        """Return or repair an active generation only within one repository scope."""
+        if not isinstance(repository_scope, RepositoryScope):
+            raise TypeError("repository_scope must be a RepositoryScope")
+        expected_scope = RepositoryScope.from_dict(repository_scope.as_dict())
+        return self._get_active(
+            repository_scope=expected_scope,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
 
     def recover_orphans(self, *, deadline: float | None = None) -> list[str]:
         """Register complete immediate-child generations without activating them."""

@@ -3,7 +3,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from project_journal import CheckpointReducer, ProjectProjection, build_handoff
+from project_journal import (
+    CheckpointReducer,
+    ProjectProjection,
+    build_handoff,
+    recover_project_handoff,
+)
 
 NOW = datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc)
 
@@ -320,7 +325,7 @@ def test_handoff_is_bounded_and_contains_only_active_operational_fields():
     assert "sequence:42" in handoff
 
 
-def test_handoff_hard_limit_drops_complete_optional_items_without_slicing():
+def test_handoff_hard_limit_fails_visibly_without_dropping_mandatory_sections():
     projection = ProjectProjection(
         project="demo",
         goal={"goal": "g" * 4000},
@@ -330,7 +335,76 @@ def test_handoff_hard_limit_drops_complete_optional_items_without_slicing():
     )
     handoff = build_handoff(projection, max_chars=300)
     assert len(handoff.encode()) <= 300
-    assert "project:demo" in handoff
-    assert "sequence:1" in handoff
+    assert "mandatory_" in handoff
     assert "g" * 100 not in handoff
-    assert "handoff truncated" not in handoff
+    assert "project:demo" not in handoff
+
+
+def test_complete_handoff_semantic_package_is_mandatory():
+    from project_journal import build_handoff_items
+
+    items = build_handoff_items(
+        ProjectProjection(
+            project="demo",
+            goal={"goal": "Ship"},
+            current_task={"task": "Test"},
+            next_actions={"next": "Review"},
+            blockers={"blocker": "CI"},
+            decisions={"decision": "Keep all sections"},
+            legacy_context="Older context",
+            last_applied_sequence=4,
+        )
+    )
+
+    assert len(items) == 8
+    assert all(item.mandatory for item in items)
+
+
+def test_public_handoff_rendering_uses_compiler_facade(monkeypatch):
+    import context_compiler
+
+    captured = {}
+
+    def compile_spy(items, *, budget, **packing):
+        captured["items"] = tuple(items)
+        captured["packing"] = packing
+        return type("Packed", (), {"text": "compatible handoff"})()
+
+    monkeypatch.setattr(context_compiler, "compile_context_items", compile_spy)
+
+    rendered = build_handoff(ProjectProjection(project="demo", last_applied_sequence=2))
+
+    assert rendered == "compatible handoff\n"
+    assert captured["packing"]["emergency_byte_cap"] == 2400
+    assert any(item.item_id.endswith(":identifiers") for item in captured["items"])
+
+
+def test_recovery_can_return_complete_unpacked_handoff_items(monkeypatch):
+    import context_compiler
+
+    class Store:
+        def recover(self, slug, **kwargs):
+            return None
+
+        def projection(self, slug):
+            return ProjectProjection(
+                project=slug,
+                goal={"goal": "Ship"},
+                legacy_context="older context",
+                last_applied_sequence=3,
+            )
+
+    monkeypatch.setattr(
+        context_compiler,
+        "compile_context_items",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("structured recovery must not pre-pack")
+        ),
+    )
+
+    result = recover_project_handoff(Store(), "demo", render_context=False)
+
+    assert result.context == ""
+    assert result.items
+    assert any(item.text.startswith("## Active goal") for item in result.items)
+    assert any(item.priority_class == "history" for item in result.items)

@@ -13,6 +13,10 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from context_budget import ContextItem
 
 from markdown_transaction import (
     ABSENT,
@@ -142,6 +146,7 @@ class ProjectHandoffResult:
     context: str
     degraded: bool = False
     legacy: bool = False
+    items: tuple[ContextItem, ...] = ()
 
 
 class CheckpointReducer:
@@ -392,25 +397,19 @@ class CheckpointReducer:
         )
 
 
-def build_handoff(
+def build_handoff_items(
     project: ProjectProjection,
     *,
     max_actions: int = 3,
-    max_chars: int = 2400,
-) -> str:
-    """Render the bounded operational subset used for SessionStart handoff."""
+) -> tuple[ContextItem, ...]:
+    """Build the complete semantic items used for SessionStart handoff."""
     if not isinstance(project, ProjectProjection):
         raise TypeError("project must be a ProjectProjection")
-    if max_actions < 0 or max_chars < 1:
+    if max_actions < 0:
         raise ValueError("handoff bounds must be positive")
     max_actions = min(max_actions, 3)
 
-    from context_budget import (
-        DEFAULT_CONTEXT_BUDGET,
-        BudgetExceededError,
-        ContextItem,
-        pack_context,
-    )
+    from context_budget import ContextItem
 
     sections: list[tuple[str, str, str, bool]] = [
         ("title", f"# Project handoff: {project.project}", "handoff", True)
@@ -424,7 +423,7 @@ def build_handoff(
         text = "\n".join(
             [f"## {title}", *(f"- `{item_id}`: {value}" for item_id, value in values)]
         )
-        sections.append((title, text, priority_class, False))
+        sections.append((title, text, priority_class, True))
 
     add_section("Active goal", list(project.goal.items())[-1:], "handoff")
     add_section("Active task", list(project.current_task.items())[-1:], "handoff")
@@ -433,7 +432,7 @@ def build_handoff(
     add_section("Recent decisions", list(project.decisions.items())[-5:], "decision")
     if project.legacy_context:
         sections.append(
-            ("legacy", f"## Legacy context\n{project.legacy_context}", "history", False)
+            ("legacy", f"## Legacy context\n{project.legacy_context}", "history", True)
         )
     identifiers = "\n".join(
         (
@@ -443,7 +442,7 @@ def build_handoff(
         )
     )
     sections.append(("identifiers", identifiers, "handoff", True))
-    items = [
+    return tuple(
         ContextItem(
             item_id=f"handoff:{index:02d}:{name}",
             text=text,
@@ -459,17 +458,42 @@ def build_handoff(
             priority_class=priority_class,
         )
         for index, (name, text, priority_class, mandatory) in enumerate(sections)
-    ]
+    )
+
+
+def _render_handoff_items(
+    items: Sequence[ContextItem],
+    *,
+    max_chars: int,
+) -> str:
+    from context_budget import DEFAULT_CONTEXT_BUDGET, BudgetExceededError
+    from context_compiler import compile_context_items
+
     try:
-        return pack_context(
+        return compile_context_items(
             items,
-            DEFAULT_CONTEXT_BUDGET,
+            budget=DEFAULT_CONTEXT_BUDGET,
             emergency_byte_cap=max_chars,
             per_source_cap=len(items),
             per_parent_cap=len(items),
         ).text + "\n"
     except BudgetExceededError as error:
         return error.failure.render(max_bytes=max_chars)
+
+
+def build_handoff(
+    project: ProjectProjection,
+    *,
+    max_actions: int = 3,
+    max_chars: int = 2400,
+) -> str:
+    """Render the bounded operational subset used for SessionStart handoff."""
+    if max_chars < 1:
+        raise ValueError("handoff bounds must be positive")
+    return _render_handoff_items(
+        build_handoff_items(project, max_actions=max_actions),
+        max_chars=max_chars,
+    )
 
 
 def recover_project_handoff(
@@ -479,6 +503,7 @@ def recover_project_handoff(
     writer_wait_seconds: float = SESSION_START_RECOVERY_SECONDS,
     max_chars: int = MAX_PROJECT_HANDOFF_CHARS,
     project_root: Path | str | None = None,
+    render_context: bool = True,
 ) -> ProjectHandoffResult:
     """Recover briefly, then render the last committed bounded project handoff."""
     degraded = False
@@ -493,23 +518,46 @@ def recover_project_handoff(
         if candidate is not None:
             projection = candidate
             legacy = True
+    items = build_handoff_items(projection)
     if not degraded:
         return ProjectHandoffResult(
-            build_handoff(projection, max_chars=max_chars), legacy=legacy
+            _render_handoff_items(items, max_chars=max_chars) if render_context else "",
+            legacy=legacy,
+            items=items,
         )
     warning = (
         "## Recovery status\n"
         "- Degraded: project recovery deferred due to writer contention.\n"
         f"- MCP recovery ID: `recovery:project:{slug}`\n"
     )
-    handoff = build_handoff(
-        projection,
-        max_chars=max_chars - len(warning) - 2,
+    from context_budget import ContextItem
+
+    warning_item = ContextItem(
+        item_id="handoff:recovery-status",
+        text=warning.rstrip(),
+        source=f"project:{slug}",
+        priority=2,
+        relevance=1.0,
+        confidence="high",
+        freshness="fresh",
+        token_cost=len(warning.rstrip().encode("utf-8")),
+        mandatory=True,
+        representation="l1",
+        parent_id=f"project:{slug}",
+        priority_class="health",
+    )
+    if not render_context:
+        return ProjectHandoffResult(
+            "", degraded=True, legacy=legacy, items=(*items, warning_item)
+        )
+    handoff = _render_handoff_items(
+        items, max_chars=max_chars - len(warning) - 2
     )
     return ProjectHandoffResult(
         handoff.rstrip() + "\n\n" + warning,
         degraded=True,
         legacy=legacy,
+        items=(*items, warning_item),
     )
 
 

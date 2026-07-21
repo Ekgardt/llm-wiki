@@ -18,7 +18,7 @@ import subprocess
 import time
 import unicodedata
 import warnings
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -447,15 +447,23 @@ def read_runtime_bytes(
 
 
 @contextlib.contextmanager
-def begin_immediate(connection: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+def begin_immediate(
+    connection: sqlite3.Connection,
+    *,
+    before_commit: Callable[[], None] | None = None,
+) -> Iterator[sqlite3.Connection]:
     connection.execute("BEGIN IMMEDIATE")
     try:
         yield connection
-    except BaseException:
-        connection.rollback()
-        raise
-    else:
+        if before_commit is not None:
+            before_commit()
         connection.commit()
+    except BaseException as original:
+        try:
+            connection.rollback()
+        except BaseException as rollback_error:
+            original.__context__ = rollback_error
+        raise
 
 
 def fsync_file(path: Path) -> None:

@@ -26,6 +26,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
 from memory_state import ROOT  # noqa: E402
+from retrieval import PROFILES as QA_PROFILES  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
 MEMORY = ROOT / "knowledge"
@@ -38,20 +39,6 @@ QA_MAX_CANDIDATES = 12
 QA_MAX_OUTPUT_TOKENS = 1200
 CACHED_FULL_MAX_SOURCES = 32
 CACHED_FULL_MAX_BYTES = 64 * 1024
-QA_PROFILES = (
-    "DIRECT",
-    "EXACT",
-    "BASE",
-    "HYBRID",
-    "GRAPH",
-    "TEMPORAL",
-    "REPO_MAP",
-    "IMPACT",
-    "GLOBAL",
-    "CACHED_FULL",
-)
-
-
 class GroundedQAError(ValueError):
     """A grounded answer failed a deterministic safety or evidence gate."""
 

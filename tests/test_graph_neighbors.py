@@ -1,6 +1,7 @@
 """Tests for graph_neighbors.py — link resolution and boost calculation."""
 from __future__ import annotations
 
+import hashlib
 import sys
 import time
 from pathlib import Path
@@ -187,3 +188,52 @@ def test_source_scan_fallback_honors_expired_deadline(fake_graph):
             fake_graph.get_link_graph(
                 catalog=object(), deadline=time.monotonic() - 1
             )
+
+
+@pytest.mark.parametrize("bind_generation", [True, False], ids=("other-repository", "legacy-unbound"))
+def test_shared_state_generation_for_another_repository_uses_honest_fallback(
+    fake_graph, tmp_path, monkeypatch, bind_generation
+):
+    from evidence_graph_builder import build_full_generation
+    from generation_catalog import GenerationCatalog
+    from repository_scope import resolve_repository_scope
+
+    repository_a = tmp_path / "first" / "same-name"
+    repository_b = tmp_path / "second" / "same-name"
+    repository_a.mkdir(parents=True)
+    repository_b.mkdir(parents=True)
+    catalog = GenerationCatalog(tmp_path / "state")
+    content = b"# A\n"
+    build_full_generation(
+        catalog,
+        sources=(
+            {
+                "source_id": "a",
+                "relative_path": "knowledge/notes/a.md",
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "size": len(content),
+                "media_type": "text/markdown",
+                "language": "en",
+                "git_oid": None,
+            },
+        ),
+        source_bytes={"a": content},
+        nodes=(),
+        occurrences=(),
+        assertions=(),
+        evidence=(),
+        observations=(),
+        dependencies=(),
+        generation_id="repository-a",
+        **(
+            {"repository_scope": resolve_repository_scope(repository_a)}
+            if bind_generation
+            else {}
+        ),
+    )
+    fallback = {"knowledge/notes/b.md": ["knowledge/notes/local.md"]}
+    monkeypatch.setattr(fake_graph, "ROOT", repository_b)
+    monkeypatch.setattr(fake_graph, "KNOWLEDGE_DIR", repository_b / "knowledge" / "notes")
+    monkeypatch.setattr(fake_graph, "_build_link_graph", lambda **_kwargs: fallback)
+
+    assert fake_graph.get_link_graph(catalog=catalog) == fallback

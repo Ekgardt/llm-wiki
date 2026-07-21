@@ -610,6 +610,93 @@ def test_purge_requires_cutoff_and_export_then_verifies_before_deleting(
         queue.get(task_id)
 
 
+def test_purge_expired_deadline_creates_no_export_and_deletes_nothing(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    queue = MemoryQueue(tmp_path, clock=lambda: now)
+    task_id = queue.enqueue("query", 1, {})
+    lease = queue.claim("worker")
+    assert lease is not None
+    queue.publish_result(lease, operation_id=task_id, result=b"answer")
+    queue.acknowledge(lease)
+    with sqlite3.connect(queue.db_path) as connection:
+        connection.execute(
+            "UPDATE tasks SET updated_at=? WHERE id=?",
+            ((now - timedelta(days=31)).isoformat(timespec="microseconds"), task_id),
+        )
+    export = tmp_path / "exports" / "purge"
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        queue.purge(
+            terminal_before=now - timedelta(days=30),
+            export_path=export,
+            deadline=time.monotonic() - 1,
+        )
+
+    assert queue.get(task_id).state == "succeeded"
+    assert not export.exists()
+
+
+def test_purge_rolls_back_when_deadline_expires_after_delete_before_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import contextmanager
+
+    now = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    queue = MemoryQueue(tmp_path, clock=lambda: now)
+    task_id = queue.enqueue("query", 1, {})
+    lease = queue.claim("worker")
+    assert lease is not None
+    queue.publish_result(lease, operation_id=task_id, result=b"answer")
+    queue.acknowledge(lease)
+    with sqlite3.connect(queue.db_path) as connection:
+        connection.execute(
+            "UPDATE tasks SET updated_at=? WHERE id=?",
+            ((now - timedelta(days=31)).isoformat(timespec="microseconds"), task_id),
+        )
+    expired = False
+
+    def cancelled() -> bool:
+        return expired
+
+    @contextmanager
+    def expire_before_commit(connection, *, before_commit=None):
+        nonlocal expired
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            yield connection
+            expired = True
+            if before_commit is not None:
+                before_commit()
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+
+    real_begin_immediate = memory_queue.begin_immediate
+    monkeypatch.setattr(memory_queue, "begin_immediate", expire_before_commit)
+
+    export = tmp_path / "exports" / "purge"
+    with pytest.raises(TimeoutError, match="deadline"):
+        queue.purge(
+            terminal_before=now - timedelta(days=30),
+            export_path=export,
+            deadline=time.monotonic() + 5,
+            cancelled=cancelled,
+        )
+
+    assert queue.get(task_id).state == "succeeded"
+    assert not export.exists()
+
+    monkeypatch.setattr(memory_queue, "begin_immediate", real_begin_immediate)
+    receipt = queue.purge(
+        terminal_before=now - timedelta(days=30), export_path=export
+    )
+    assert receipt.task_ids == (task_id,)
+    assert export.is_dir()
+
+
 def test_purge_build_failure_cleans_staging_and_retry_is_atomic(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

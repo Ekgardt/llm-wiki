@@ -172,7 +172,7 @@ def test_install_sh_no_undefined_vars():
     skip = {
         "HOME", "PATH", "PROFILE", "LLM_WIKI_ROOT", "LLM_WIKI_STATE_ROOT",
         # Standard bash/environment builtins not assigned inside the script.
-        "SHELL", "BASH_SOURCE", "ZSH_VERSION", "BASH_VERSION",
+        "SHELL", "BASH_SOURCE", "ZSH_VERSION", "BASH_VERSION", "TMPDIR",
     }
 
     # Collect all $VAR and ${VAR} references (not $(...) command subs).
@@ -192,6 +192,66 @@ def test_install_sh_no_undefined_vars():
 
     undefined = sorted(refs - assigned - skip)
     assert not undefined, f"Undefined bash vars in install.sh: {undefined}"
+
+
+def test_installers_do_not_infer_pytest_exit_status_from_output():
+    powershell_source = (ROOT / "install.ps1").read_text(encoding="utf-8")
+    assert powershell_source.isascii(), (
+        "install.ps1 must remain ASCII-safe for Windows PowerShell 5.1 without a BOM"
+    )
+    powershell = powershell_source.split("4. Run tests", 1)[1].split(
+        "5. Set environment variables", 1
+    )[0]
+    shell = (ROOT / "install.sh").read_text(encoding="utf-8").split(
+        "4. Run tests", 1
+    )[1].split("5. Set environment variables", 1)[0]
+
+    assert "Start-Process" in powershell
+    assert "-PassThru" in powershell
+    assert "$testProcess.Handle" in powershell
+    assert ".WaitForExit()" in powershell
+    assert ".ExitCode" in powershell
+    assert "finally" in powershell
+    assert ".HasExited" in powershell
+    assert ".Kill()" in powershell
+    assert powershell.count("WaitForExit") >= 3
+    assert "taskkill.exe" in powershell
+    assert '"/PID"' in powershell
+    assert '"/T"' in powershell
+    assert '"/F"' in powershell
+    assert "WaitForExit(10000)" in powershell
+    assert "[int]$testProcess.Id" in powershell
+    assert "GetTempFileName" not in powershell
+    assert "RedirectStandard" not in powershell
+    assert "Get-Content" not in powershell
+    assert "Remove-Item" not in powershell
+    assert "$testOutput = uv" not in powershell
+    assert "-match" not in powershell.casefold()
+    assert "mktemp" not in shell
+    assert "testOutput" not in shell
+    assert "tail -n 1" not in shell
+    assert "cut -c" not in shell
+    assert re.search(r"trap .*EXIT", shell)
+    assert re.search(r"uv run pytest -q\s*&", shell)
+    assert "testPid=$!" in shell
+    assert "testPgid=$!" in shell
+    assert 'wait "$testPid"' in shell
+    assert "if wait_test_child" in shell
+    assert 'kill -s TERM -- "-$testPgid"' in shell
+    assert 'kill -s CONT -- "-$testPgid"' in shell
+    assert 'kill -s KILL -- "-$testPgid"' in shell
+    assert "set -m" in shell
+    assert "set +m" in shell
+    assert 'trap \'stop_test_child; restore_test_monitor_mode\' EXIT' in shell
+    assert "testMonitorMode=off; set -m" in shell
+    assert "restore_test_monitor_mode" in shell
+    assert "setsid" not in shell
+    assert "wait -f" not in shell
+    assert not re.search(r'=\s*"\$\(uv run pytest', shell)
+    assert "grep" not in shell
+    assert "|| true" not in shell
+    assert 'ok "Test suite passed"' in shell
+    assert 'Ok "Test suite passed"' in powershell
 
 
 # ─── 4. CHANGELOG latest version matches pyproject.toml ─────────────
@@ -303,7 +363,7 @@ def test_architecture_no_recall_at_2():
     assert "legacy vectors.json" not in search_source
 
     contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
-    assert "3081 tests collected" in contributing
+    assert "3609 tests collected" in contributing
 
     integrations = (ROOT / "integrations" / "README.md").read_text(encoding="utf-8")
     assert "installer baseline" in integrations.casefold()

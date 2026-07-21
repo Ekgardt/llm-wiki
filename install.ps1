@@ -1,4 +1,4 @@
-# install.ps1 — One-command installer for Windows.
+# install.ps1 - One-command installer for Windows.
 #
 # Usage:
 #   irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
@@ -100,7 +100,7 @@ args = ["run", "--directory", "$tomlVault", "python", "scripts/mcp_server.py"]
     return 0
 }
 
-# ─── 1. Resolve vault root ──────────────────────────────────────────
+# --- 1. Resolve vault root -----------------------------------------
 
 $VAULT_ROOT = if ($env:LLM_WIKI_ROOT) { $env:LLM_WIKI_ROOT } else { $PSScriptRoot }
 if (-not (Test-Path "$VAULT_ROOT\pyproject.toml")) {
@@ -116,9 +116,9 @@ Info "Vault root: $VAULT_ROOT"
 
 # Prevent accidental pushes from the installed vault
 git -C $VAULT_ROOT remote set-url --push origin no-push
-Ok "Push disabled (no-push) — installed vault cannot push to public remote"
+Ok "Push disabled (no-push) - installed vault cannot push to public remote"
 
-# ─── 2. Check prerequisites ────────────────────────────────────────
+# --- 2. Check prerequisites ---------------------------------------
 
 Info "Checking prerequisites..."
 
@@ -145,23 +145,69 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
 }
 Ok "uv installed"
 
-# ─── 3. Install dependencies ───────────────────────────────────────
+# --- 3. Install dependencies --------------------------------------
 
 Info "Installing locked Python dependencies with MCP support..."
 uv sync --locked --extra mcp-server --quiet
 Ok "Dependencies installed (MCP server baseline included)"
 
-# ─── 4. Run tests ──────────────────────────────────────────────────
+# --- 4. Run tests -------------------------------------------------
 
 Info "Running test suite..."
-$testResult = uv run pytest -q 2>&1 | Select-Object -Last 1
-if ($testResult -match "failed|error") {
-    Warn "Some tests may have issues"
-} else {
-    Ok $testResult
+$testProcess = $null
+try {
+    $testProcess = Start-Process `
+        -FilePath "uv" `
+        -ArgumentList "run pytest -q" `
+        -NoNewWindow `
+        -PassThru
+    # Windows PowerShell 5.1 needs an open handle to retain a fast process's exit code.
+    $null = $testProcess.Handle
+    $testProcess.WaitForExit()
+    $testExit = $testProcess.ExitCode
+    if ($testExit -ne 0) {
+        Warn "Some tests failed - core features will still work, but please report issues"
+    } else {
+        Ok "Test suite passed"
+    }
+} finally {
+    if ($null -ne $testProcess) {
+        if (-not $testProcess.HasExited) {
+            $testPid = [int]$testProcess.Id
+            $taskkillProcess = $null
+            try {
+                $taskkillPath = Join-Path $env:SystemRoot "System32\taskkill.exe"
+                $taskkillProcess = Start-Process `
+                    -FilePath $taskkillPath `
+                    -ArgumentList @("/PID", [string]$testPid, "/T", "/F") `
+                    -NoNewWindow `
+                    -PassThru
+                $null = $taskkillProcess.Handle
+                if (-not $taskkillProcess.WaitForExit(10000)) {
+                    $taskkillProcess.Kill()
+                    $null = $taskkillProcess.WaitForExit(5000)
+                }
+            } catch {
+                # The process may have exited between HasExited and taskkill.
+            } finally {
+                if ($null -ne $taskkillProcess) {
+                    $taskkillProcess.Close()
+                }
+            }
+            if (-not $testProcess.HasExited) {
+                try {
+                    $testProcess.Kill()
+                    $null = $testProcess.WaitForExit(5000)
+                } catch {
+                    # Ignore an already-exited race during fallback cleanup.
+                }
+            }
+        }
+        $testProcess.Close()
+    }
 }
 
-# ─── 5. Set environment variables ──────────────────────────────────
+# --- 5. Set environment variables ---------------------------------
 
 Info "Setting environment variables..."
 
@@ -194,24 +240,24 @@ New-Item -ItemType Directory -Path "$STATE_ROOT\cache" -Force | Out-Null
 New-Item -ItemType Directory -Path "$STATE_ROOT\cache\cognee" -Force | Out-Null
 Ok "LLM_WIKI_ROOT set (User scope); runtime at $STATE_ROOT\{run,logs,cache} (gitignored)"
 
-# ─── 6. Register Task Scheduler ────────────────────────────────────
+# --- 6. Register Task Scheduler -----------------------------------
 
 Info "Registering Windows Task Scheduler..."
 $pythonExe = (Get-Command python).Source
 try {
     & ".\scripts\install-scheduled-tasks.ps1" 2>$null
     if ($LASTEXITCODE -eq 0) { Ok "Task Scheduler: nightly 03:00 + weekly Sun 04:00" }
-    else { Warn "Task Scheduler registration failed — run scripts\install-scheduled-tasks.ps1 manually" }
+    else { Warn "Task Scheduler registration failed - run scripts\install-scheduled-tasks.ps1 manually" }
 } catch {
-    Warn "Task Scheduler registration failed — run scripts\install-scheduled-tasks.ps1 manually"
+    Warn "Task Scheduler registration failed - run scripts\install-scheduled-tasks.ps1 manually"
 }
 
-# ─── 7. Detect and wire up agents ──────────────────────────────────
+# --- 7. Detect and wire up agents ---------------------------------
 
 Info "Detecting agents..."
 $agents = @()
 
-# OpenCode — detect by process OR config dir (process may not be running at install time)
+# OpenCode - detect by process OR config dir (process may not be running at install time)
 $openCodeConfig = "$env:USERPROFILE\.config\opencode"
 $openCodePluginSrc = Join-Path $VAULT_ROOT "scripts\llm-wiki-memory-opencode.js"
 if ((Get-Process "OpenCode*" -ErrorAction SilentlyContinue) -or (Test-Path $openCodeConfig) -or (Get-Command opencode -ErrorAction SilentlyContinue)) {
@@ -221,7 +267,7 @@ if ((Get-Process "OpenCode*" -ErrorAction SilentlyContinue) -or (Test-Path $open
     $pluginDst = Join-Path $pluginDir "llm-wiki-memory.js"
     if (Test-Path $openCodePluginSrc) {
         Copy-Item -LiteralPath $openCodePluginSrc -Destination $pluginDst -Force
-        Ok "OpenCode plugin installed → $pluginDst"
+        Ok "OpenCode plugin installed -> $pluginDst"
         # Generate initial context file so the first session has context
         $ctxFile = Join-Path $STATE_ROOT "cache\session-context.md"
         try { & uv run python (Join-Path $VAULT_ROOT "scripts\session_start_context.py") --output-file $ctxFile 2>$null | Out-Null } catch {}
@@ -241,7 +287,7 @@ if ((Get-Process "OpenCode*" -ErrorAction SilentlyContinue) -or (Test-Path $open
     $openCodeMerge = ([ordered]@{ "llm-wiki" = $openCodeEntryObject } | ConvertTo-Json -Depth 5 -Compress)
     if (-not (Test-Path $openCodeMcp)) {
         Write-Utf8NoBom $openCodeMcp $openCodeJson
-        Ok "OpenCode MCP config created → $openCodeMcp"
+        Ok "OpenCode MCP config created -> $openCodeMcp"
     } else {
         $openCodeExisting = Get-Content -LiteralPath $openCodeMcp -Raw
         if ($openCodeExisting -notmatch '"llm-wiki"\s*:') {
@@ -259,7 +305,7 @@ if (Get-Command codex -ErrorAction SilentlyContinue) {
     New-Item -ItemType Directory -Path $codexDir -Force | Out-Null
     $codexMcpExit = Install-CodexMcp -VaultRoot $VAULT_ROOT -Config $codexConfig
     if ($codexMcpExit -eq 0) {
-        Ok "Codex MCP config verified → $codexConfig"
+        Ok "Codex MCP config verified -> $codexConfig"
     } elseif ($codexMcpExit -eq 2) {
         Warn "Existing Codex MCP entry conflicts with LLM-Wiki; config.toml was not changed. Merge manually."
     } else {
@@ -268,7 +314,7 @@ if (Get-Command codex -ErrorAction SilentlyContinue) {
     $codexHooks = Join-Path $codexDir "hooks.json"
     $codexHookExit = Install-CodexHooks -VaultRoot $VAULT_ROOT -CodexDir $codexDir
     if ($codexHookExit -eq 0) {
-        Ok "Codex official hooks merged → $codexHooks"
+        Ok "Codex official hooks merged -> $codexHooks"
         Info "Open /hooks in Codex to review and trust the LLM-Wiki commands."
     } elseif ($codexHookExit -eq 2) {
         Warn "Active inline Codex hooks require manual merge and /hooks trust review; hooks.json was not changed."
@@ -284,7 +330,7 @@ if (Get-Command codex -ErrorAction SilentlyContinue) {
     Ok "Codex detected"
 }
 
-# Claude Code — merge hooks into user settings if CLI or config dir present
+# Claude Code - merge hooks into user settings if CLI or config dir present
 $claudeConfig = Join-Path $env:USERPROFILE ".claude"
 $claudeUserConfig = Join-Path $env:USERPROFILE ".claude.json"
 if ((Get-Command claude -ErrorAction SilentlyContinue) -or (Test-Path $claudeConfig) -or (Test-Path $claudeUserConfig)) {
@@ -295,9 +341,9 @@ if ((Get-Command claude -ErrorAction SilentlyContinue) -or (Test-Path $claudeCon
         --vault-root $VAULT_ROOT `
         --state-root $STATE_ROOT 2>&1 | ForEach-Object { Info "$_" }
     if ($LASTEXITCODE -eq 0) {
-        Ok "Claude settings merged → $claudeConfig\settings.json"
+        Ok "Claude settings merged -> $claudeConfig\settings.json"
     } else {
-        Warn "Claude settings merge failed — run manually:"
+        Warn "Claude settings merge failed - run manually:"
         Warn "  uv run python scripts\merge_claude_settings.py"
     }
     $claudeMcp = $claudeUserConfig
@@ -312,7 +358,7 @@ if ((Get-Command claude -ErrorAction SilentlyContinue) -or (Test-Path $claudeCon
     $claudeMerge = ([ordered]@{ "llm-wiki" = $claudeEntryObject } | ConvertTo-Json -Depth 5 -Compress)
     if (-not (Test-Path $claudeMcp)) {
         Write-Utf8NoBom $claudeMcp $claudeJson
-        Ok "Claude MCP config created → $claudeMcp"
+        Ok "Claude MCP config created -> $claudeMcp"
     } else {
         $claudeExisting = Get-Content -LiteralPath $claudeMcp -Raw
         if ($claudeExisting -notmatch '"llm-wiki"\s*:') {
@@ -331,7 +377,7 @@ if (Test-Path "$env:USERPROFILE\.cursor") {
 # Antigravity
 if (Test-Path "$env:USERPROFILE\.antigravity" -ErrorAction SilentlyContinue) {
     $agents += "Antigravity"
-    Ok "Antigravity detected — copy integrations\antigravity\AGENTS.md to your project root"
+    Ok "Antigravity detected - copy integrations\antigravity\AGENTS.md to your project root"
 }
 
 if ($agents.Count -eq 0) {
@@ -340,7 +386,7 @@ if ($agents.Count -eq 0) {
     Ok "Agents: $($agents -join ', ')"
 }
 
-# ─── 8. Bounded runtime sync ───────────────────────────────────────
+# --- 8. Bounded runtime sync --------------------------------------
 
 Info "Synchronizing runtime state and derived indexes..."
 uv run --locked --no-sync python "$VAULT_ROOT\scripts\sync_memory.py" --apply
@@ -352,7 +398,7 @@ switch ($syncExit) {
     default { Fail "Runtime synchronization failed" }
 }
 
-# ─── 9. Summary ────────────────────────────────────────────────────
+# --- 9. Summary ---------------------------------------------------
 
 Write-Host ""
 Write-Host "==============================================" -ForegroundColor Green
@@ -371,7 +417,7 @@ Write-Host ""
 Write-Host "Next steps:"
 Write-Host "  1. Restart terminal"
 Write-Host "  2. Open a project in your agent"
-Write-Host "  3. Work normally — capture is automatic"
+Write-Host "  3. Work normally - capture is automatic"
 Write-Host ""
 Write-Host "MCP baseline: 12 local task-shaped tools (installed)"
 Write-Host "Optional enhancements:"

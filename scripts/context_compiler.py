@@ -24,15 +24,17 @@ Design contract (from docs/superpowers/plans/2026-07-16-unified-evidence-retriev
 """
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 from context_budget import (
+    DEFAULT_CONTEXT_BUDGET,
     ContextBudget,
     ContextItem,
     DroppedItem,
+    PackedContext,
     pack_context,
 )
 from corpus_snapshot import (
@@ -66,6 +68,16 @@ MaterializationReason = Literal[
     "small_parent_full",
     "heading_subtree",
 ]
+
+
+def compile_context_items(
+    items: Iterable[ContextItem],
+    *,
+    budget: ContextBudget = DEFAULT_CONTEXT_BUDGET,
+    **packing: object,
+) -> PackedContext:
+    """Pack final context items through the shared compiler boundary."""
+    return pack_context(items, budget, **packing)
 
 
 @dataclass(frozen=True)
@@ -160,37 +172,6 @@ class _Parent:
     aliases: tuple[str, ...]
 
 
-def _parse_frontmatter(content: str) -> dict[str, object]:
-    """Minimal YAML frontmatter reader covering the fields the compiler needs."""
-    if not content.startswith("---"):
-        return {}
-    end = content.find("\n---", 3)
-    if end < 0:
-        return {}
-    block = content[3:end].strip()
-    fields: dict[str, object] = {}
-    current_key: str | None = None
-    for raw in block.splitlines():
-        if not raw.strip() or raw.lstrip().startswith("#"):
-            continue
-        if raw.startswith(" ") or raw.startswith("\t"):
-            value = raw.strip().lstrip("-").strip()
-            if current_key is not None and isinstance(fields.get(current_key), list):
-                fields[current_key].append(value)  # type: ignore[union-attr]
-            continue
-        if ":" not in raw:
-            continue
-        key, _, value = raw.partition(":")
-        key = key.strip()
-        value = value.strip().strip("\"'")
-        if value:
-            fields[key] = value
-        else:
-            fields[key] = []
-            current_key = key
-    return fields
-
-
 def _extract_aliases(frontmatter: Mapping[str, object]) -> tuple[str, ...]:
     aliases = frontmatter.get("aliases")
     if isinstance(aliases, list):
@@ -225,7 +206,7 @@ def _build_parents(snapshot: CorpusSnapshot) -> tuple[_Parent, ...]:
     for source in snapshot.sources:
         relative_path = source.record.relative_path
         content_text = source.content.decode("utf-8", errors="strict")
-        frontmatter = _parse_frontmatter(content_text)
+        frontmatter, _frontmatter_end = _frontmatter(source.content)
         title = _extract_title(content_text, Path(relative_path).stem)
         summary = _extract_summary(content_text) or title
         aliases = _extract_aliases(frontmatter)
@@ -308,12 +289,19 @@ def _l2_text_heading_subtree(
     chunk: RetrievalChunk,
     *,
     subtree_char_budget: int,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
 ) -> tuple[str, int, int]:
     content = parent.source.content
     if not 0 <= chunk.byte_start <= chunk.byte_end <= len(content):
         raise ValueError("evidence chunk byte span is outside its captured source")
     _metadata, searchable_start = _frontmatter(content)
-    headings = _markdown_headings(content, searchable_start)
+    headings = _markdown_headings(
+        content,
+        searchable_start,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
     target = next((match for match in headings if match.start() == chunk.byte_start), None)
     section_start = chunk.byte_start
     section_end = chunk.byte_end
@@ -403,7 +391,7 @@ def _to_context_item(compiled: CompiledItem) -> ContextItem:
         mandatory=compiled.representation == "l2",
         representation=compiled.representation,
         parent_id=compiled.parent_id,
-        priority_class="evidence" if compiled.representation != "l1" else "decision",
+        priority_class="evidence",
     )
 
 
@@ -444,6 +432,8 @@ def _build_l2_item(
     chunk: RetrievalChunk | None,
     small_parent_chars: int,
     large_parent_subtree_chars: int,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
 ) -> tuple[CompiledItem, MaterializationReason]:
     body_bytes = len(parent.source.content)
     cited_start = chunk.byte_start if chunk is not None else 0
@@ -475,7 +465,11 @@ def _build_l2_item(
         )
         return item, "small_parent_full"
     text, emitted_start, emitted_end = _l2_text_heading_subtree(
-        parent, chunk, subtree_char_budget=large_parent_subtree_chars
+        parent,
+        chunk,
+        subtree_char_budget=large_parent_subtree_chars,
+        deadline=deadline,
+        cancelled=cancelled,
     )
     item = _make_compiled_item(
         parent=parent,
@@ -500,6 +494,8 @@ def compile_context(
     large_parent_subtree_chars: int = DEFAULT_LARGE_PARENT_SUBTREE_CHARS,
     generated_context: bool = LLM_GENERATED_CONTEXT_DEFAULT,
     graph_expansions: Iterable[Mapping[str, object]] = (),
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> CompiledContext:
     """Compile L0/L1/L2 representations for every parent in ``snapshot``.
 
@@ -643,6 +639,8 @@ def compile_context(
             chunk=chunk,
             small_parent_chars=small_parent_chars,
             large_parent_subtree_chars=large_parent_subtree_chars,
+            deadline=deadline,
+            cancelled=cancelled,
         )
         compiled_items.append(item)
         evidence_by_item_id[item.item_id] = chunk_id
@@ -661,9 +659,9 @@ def compile_context(
 
     # 4. Always pack under the shared budget, including the default path.
     active_budget = budget if budget is not None else DEFAULT_BUDGET
-    packed = pack_context(
+    packed = compile_context_items(
         [_to_context_item(item) for item in compiled_items],
-        active_budget,
+        budget=active_budget,
         per_source_cap=6,
         per_parent_cap=6,
     )

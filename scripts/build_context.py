@@ -27,8 +27,8 @@ from context_budget import (  # noqa: E402
     DEFAULT_CONTEXT_BUDGET,
     BudgetExceededError,
     ContextItem,
-    pack_context,
 )
+from context_compiler import compile_context_items  # noqa: E402
 from markdown_transaction import mutate_knowledge, stable_operation_id  # noqa: E402
 from memory_state import ROOT, load_state  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
@@ -195,30 +195,44 @@ def _detect_agent_strengths(agent: str) -> list[str] | None:
     return [t for t, _ in ranked[:5]]
 
 
-def _project_context_item(index: int, text: str, *, total: int) -> ContextItem | None:
+def _project_context_item(
+    kind: str,
+    index: int,
+    text: str,
+    *,
+    total: int,
+) -> ContextItem | None:
     """Build a ContextItem from one project-context section."""
     stripped = (text or "").strip()
     if not stripped:
         return None
-    is_handoff = index == 0 or stripped.startswith("### Where you left off")
-    priority = 3 if is_handoff else min(index + 3, 7)
+    priority = {"orientation": 3, "handoff": 3, "evidence": 5, "history": 7}.get(
+        kind, 5
+    )
+    priority_class = {
+        "orientation": "evidence",
+        "handoff": "handoff",
+        "evidence": "evidence",
+        "history": "history",
+    }.get(kind, "evidence")
+    mandatory = kind == "handoff"
     return ContextItem(
-        item_id=f"project:{index:03d}",
+        item_id=f"project:{kind}:{index:03d}",
         text=stripped,
-        source=f"build_context:section-{index:03d}",
+        source=f"build_context:{kind}",
         priority=priority,
         relevance=1.0 if index == 0 else max(0.1, 1.0 - (index / max(total, 1))),
         confidence="medium",
         freshness="fresh",
         token_cost=len(stripped.encode("utf-8")),
-        mandatory=is_handoff,
+        mandatory=mandatory,
         representation="l1",
-        parent_id="project-handoff",
-        priority_class="handoff" if is_handoff else "evidence",
+        parent_id="project-handoff" if mandatory else "project-context",
+        priority_class=priority_class,
     )
 
 
-def _pack_project_context(parts: list[str], max_chars: int) -> str:
+def _pack_project_context(parts: list[tuple[str, str]], max_chars: int) -> str:
     """Pack project-context sections under one shared token budget.
 
     Replaces the independent character cap with a shared budget; the legacy
@@ -228,17 +242,17 @@ def _pack_project_context(parts: list[str], max_chars: int) -> str:
     items = [
         item
         for item in (
-            _project_context_item(index, text, total=len(parts))
-            for index, text in enumerate(parts)
+            _project_context_item(kind, index, text, total=len(parts))
+            for index, (kind, text) in enumerate(parts)
         )
         if item is not None
     ]
     if not items:
         return ""
     try:
-        packed = pack_context(
+        packed = compile_context_items(
             items,
-            DEFAULT_CONTEXT_BUDGET,
+            budget=DEFAULT_CONTEXT_BUDGET,
             emergency_byte_cap=max_chars,
             per_source_cap=5,
             per_parent_cap=12,
@@ -258,12 +272,12 @@ def build_context(slug: str, max_chars: int = 2000, agent: str | None = None) ->
                demonstrated strengths (derived from feedback history),
                NOT hardcoded assumptions about which tool is "better at X".
     """
-    parts = [f"## Project context: {slug}\n"]
+    parts = [("orientation", f"## Project context: {slug}\n")]
 
     # 1. Handoff note from state.md
     handoff = _read_state_handoff(slug)
     if handoff:
-        parts.append(f"### Where you left off\n{handoff}\n")
+        parts.append(("handoff", f"### Where you left off\n{handoff}\n"))
 
     # 2. Knowledge pages tagged for this project
     pages = _find_project_pages(slug)
@@ -286,32 +300,35 @@ def build_context(slug: str, max_chars: int = 2000, agent: str | None = None) ->
             )
 
     if active_pages:
-        parts.append(f"### Known knowledge ({len(active_pages)} pages)")
+        knowledge = [f"### Known knowledge ({len(active_pages)} pages)"]
         by_type: dict[str, list[dict]] = {}
         for p in active_pages:
             by_type.setdefault(p["type"], []).append(p)
         for ptype in sorted(by_type.keys()):
-            parts.append(f"**{ptype}s:**")
+            knowledge.append(f"**{ptype}s:**")
             for p in by_type[ptype][:5]:
                 summary = p["summary"] if p["summary"] else p["title"]
-                parts.append(f"- {summary}")
-            parts.append("")
+                knowledge.append(f"- {summary}")
+            knowledge.append("")
+        parts.append(("evidence", "\n".join(knowledge)))
 
     # 3. Recent activity
     activity = _find_recent_daily_activity(slug)
     if activity:
-        parts.append("### Recent activity (last 7 days)")
-        for line in activity[:5]:
-            parts.append(f"- {line}")
-        parts.append("")
+        recent = ["### Recent activity (last 7 days)"]
+        recent.extend(f"- {line}" for line in activity[:5])
+        parts.append(("history", "\n".join(recent)))
 
     # 4. Heartbeat from state.json
     try:
         state = load_state()
         hb = state.get("codex_heartbeats", {}).get(slug, {})
         if hb:
-            parts.append("### Last seen")
-            parts.append(f"- {hb.get('reason', 'unknown')} at {hb.get('at', '?')}")
+            parts.append((
+                "history",
+                "### Last seen\n"
+                f"- {hb.get('reason', 'unknown')} at {hb.get('at', '?')}",
+            ))
     except Exception:
         pass
 

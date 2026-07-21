@@ -18,10 +18,11 @@ from typing import Any
 
 import yaml
 from bounded_io import read_stable_bytes
+from code_languages import language_for_path
 from vault_editorial import EDITORIAL_NAMES
 
 COLLECTOR_VERSION = "corpus-collector/v1"
-EXTRACTOR_VERSION = "markdown-heading-extractor/v1"
+EXTRACTOR_VERSION = "markdown-heading-extractor/v2"
 
 MAX_CORPUS_FILES = 10_000
 MAX_CORPUS_FILE_BYTES = 8 * 1024 * 1024
@@ -29,6 +30,8 @@ MAX_CORPUS_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_CORPUS_INSPECTED_ENTRIES = 50_000
 MAX_CORPUS_DIRECTORIES = 5_000
 MAX_CORPUS_DEPTH = 16
+MAX_CORPUS_HEADINGS = 100_000
+MAX_CORPUS_CHUNKS = 100_000
 DEFAULT_DEADLINE_SECONDS = 30.0
 
 PROJECT_FILES = frozenset({"state.md", "journal.md", "context.md"})
@@ -184,6 +187,27 @@ def _canonical_hash(value: object) -> str:
     return _sha256(encoded)
 
 
+def canonical_chunk_id(
+    *,
+    source_id: str,
+    source_path: str,
+    byte_start: int,
+    byte_end: int,
+    span_sha256: str,
+    extractor_version: str = EXTRACTOR_VERSION,
+) -> str:
+    """Return the shared content-bound identity for one retrieval chunk."""
+    return _canonical_hash(
+        {
+            "extractor": extractor_version,
+            "parent": source_id,
+            "path": source_path,
+            "range": [byte_start, byte_end],
+            "sha256": span_sha256,
+        }
+    )
+
+
 def _manifest_source(record: SourceRecord | Mapping[str, object]) -> dict[str, str]:
     if isinstance(record, SourceRecord):
         logical_id = record.logical_id
@@ -333,6 +357,15 @@ def _deadline_value(deadline: float | None, deadline_seconds: float | None) -> f
 def _check_deadline(deadline: float) -> None:
     if time.monotonic() >= deadline:
         raise TimeoutError("corpus collection deadline reached")
+
+
+def _check_processing_stop(
+    deadline: float | None, cancelled: Callable[[], bool] | None
+) -> None:
+    if bool(cancelled and cancelled()):
+        raise TimeoutError("corpus collection cancelled")
+    if deadline is not None:
+        _check_deadline(deadline)
 
 
 def _relative_posix(value: str | Path, *, prefixes: tuple[str, ...]) -> str:
@@ -858,25 +891,45 @@ def _discover(vault: Path, policy: SnapshotPolicy, deadline: float) -> tuple[_Ca
     return tuple(discovery.candidates[key] for key in sorted(discovery.candidates))
 
 
-def _frontmatter(content: bytes) -> tuple[dict[str, Any], int]:
-    text = content.decode("utf-8", errors="strict")
-    lines = content.splitlines(keepends=True)
-    if not lines or lines[0].strip() != b"---":
+def _line_spans(content: bytes, start: int = 0) -> Iterable[tuple[int, int]]:
+    offset = start
+    while offset < len(content):
+        newline = content.find(b"\n", offset)
+        end = len(content) if newline < 0 else newline + 1
+        yield offset, end
+        offset = end
+
+
+def _frontmatter(
+    content: bytes,
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> tuple[dict[str, Any], int]:
+    content.decode("utf-8", errors="strict")
+    lines = iter(_line_spans(content))
+    try:
+        first_start, first_end = next(lines)
+    except StopIteration:
         return {}, 0
-    end = None
-    for index, line in enumerate(lines[1:], 1):
-        if line.strip() == b"---":
-            end = index
+    if content[first_start:first_end].strip() != b"---":
+        return {}, 0
+    frontmatter_start = first_end
+    frontmatter_end = None
+    searchable_start = None
+    for line_start, line_end in lines:
+        _check_processing_stop(deadline, cancelled)
+        if content[line_start:line_end].strip() == b"---":
+            frontmatter_end = line_start
+            searchable_start = line_end
             break
-    if end is None:
+    if frontmatter_end is None or searchable_start is None:
         raise ValueError("unterminated YAML frontmatter")
-    frontmatter_bytes = b"".join(lines[1:end])
+    frontmatter_bytes = content[frontmatter_start:frontmatter_end]
     value = yaml.safe_load(frontmatter_bytes.decode("utf-8", errors="strict"))
     if not isinstance(value, Mapping):
         raise ValueError("frontmatter must be a mapping")
-    # Decode above is deliberate: invalid UTF-8 is rejected even outside frontmatter.
-    del text
-    return dict(value), sum(len(line) for line in lines[: end + 1])
+    return dict(value), searchable_start
 
 
 def _metadata_value(value: object) -> str | None:
@@ -969,17 +1022,28 @@ def _infer_language(text: str) -> str | None:
     return None
 
 
+def _classify_language(*, explicit: str | None, path: Path, text: str) -> str | None:
+    return explicit or language_for_path(path) or _infer_language(text)
+
+
 def _clean_heading(raw: bytes | None) -> str:
     title = (raw or b"").decode("utf-8", errors="strict").strip()
     return _CLOSING_HASHES.sub("", title)
 
 
-def _markdown_headings(content: bytes, start: int) -> list[re.Match[bytes]]:
+def _markdown_headings(
+    content: bytes,
+    start: int,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[re.Match[bytes]]:
     headings: list[re.Match[bytes]] = []
     fence_character: bytes | None = None
     fence_length = 0
-    offset = start
-    for line in content[start:].splitlines(keepends=True):
+    for offset, end in _line_spans(content, start):
+        _check_processing_stop(deadline, cancelled)
+        line = content[offset:end]
         body = line.rstrip(b"\r\n")
         if fence_character is not None:
             closing = re.fullmatch(
@@ -1001,9 +1065,76 @@ def _markdown_headings(content: bytes, start: int) -> list[re.Match[bytes]]:
             else:
                 heading = _HEADING.match(content, offset, offset + len(line))
                 if heading:
+                    if len(headings) >= MAX_CORPUS_HEADINGS:
+                        raise ValueError("corpus heading row ceiling exceeded")
                     headings.append(heading)
-        offset += len(line)
     return headings
+
+
+def _retrieval_spans(
+    content: bytes,
+    searchable_start: int,
+    *,
+    heading_enabled: bool,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> tuple[tuple[int, int, tuple[str, ...]], ...]:
+    headings = (
+        _markdown_headings(
+            content,
+            searchable_start,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+        if heading_enabled
+        else []
+    )
+    spans: list[tuple[int, int, tuple[str, ...]]] = []
+    first_heading = headings[0].start() if headings else len(content)
+    if content[searchable_start:first_heading].strip():
+        spans.append((searchable_start, first_heading, ()))
+    ancestry: list[tuple[int, str]] = []
+    for index, heading in enumerate(headings):
+        _check_processing_stop(deadline, cancelled)
+        level = len(heading.group(1))
+        title = _clean_heading(heading.group(2))
+        ancestry = [item for item in ancestry if item[0] < level]
+        ancestry.append((level, title))
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(content)
+        if content[heading.start():end].strip():
+            if len(spans) >= MAX_CORPUS_CHUNKS:
+                raise ValueError("corpus chunk row ceiling exceeded")
+            spans.append((heading.start(), end, tuple(item[1] for item in ancestry)))
+    return tuple(spans)
+
+
+def canonical_retrieval_spans(
+    source_path: str,
+    content: bytes,
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> tuple[tuple[int, int, tuple[str, ...]], ...]:
+    """Return the shared canonical chunk ranges for captured source bytes."""
+    if not isinstance(source_path, str) or not source_path:
+        raise ValueError("source_path must be a non-empty string")
+    if not isinstance(content, bytes) or len(content) > MAX_CORPUS_FILE_BYTES:
+        raise ValueError("captured retrieval source must be bounded bytes")
+    is_markdown = PurePosixPath(source_path).suffix.casefold() == ".md"
+    if is_markdown:
+        _frontmatter_value, searchable_start = _frontmatter(
+            content, deadline=deadline, cancelled=cancelled
+        )
+    else:
+        content.decode("utf-8", errors="strict")
+        searchable_start = 0
+    return _retrieval_spans(
+        content,
+        searchable_start,
+        heading_enabled=is_markdown,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
 
 
 def _chunks(
@@ -1013,34 +1144,30 @@ def _chunks(
     searchable_start: int,
     *,
     heading_enabled: bool = True,
+    extractor_version: str = EXTRACTOR_VERSION,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple[RetrievalChunk, ...]:
-    headings = _markdown_headings(content, searchable_start) if heading_enabled else []
-    spans: list[tuple[int, int, tuple[str, ...]]] = []
-    first_heading = headings[0].start() if headings else len(content)
-    if content[searchable_start:first_heading].strip():
-        spans.append((searchable_start, first_heading, ()))
-    ancestry: list[tuple[int, str]] = []
-    for index, heading in enumerate(headings):
-        level = len(heading.group(1))
-        title = _clean_heading(heading.group(2))
-        ancestry = [item for item in ancestry if item[0] < level]
-        ancestry.append((level, title))
-        end = headings[index + 1].start() if index + 1 < len(headings) else len(content)
-        if content[heading.start():end].strip():
-            spans.append((heading.start(), end, tuple(item[1] for item in ancestry)))
     result = []
+    spans = _retrieval_spans(
+        content,
+        searchable_start,
+        heading_enabled=heading_enabled,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
     for start, end, heading_ancestry in spans:
+        _check_processing_stop(deadline, cancelled)
         span = content[start:end]
         text = span.decode("utf-8", errors="strict")
         span_hash = _sha256(span)
-        chunk_id = _canonical_hash(
-            {
-                "extractor": EXTRACTOR_VERSION,
-                "parent": source.logical_id,
-                "path": source.relative_path,
-                "range": [start, end],
-                "sha256": span_hash,
-            }
+        chunk_id = canonical_chunk_id(
+            source_id=source.logical_id,
+            source_path=source.relative_path,
+            byte_start=start,
+            byte_end=end,
+            span_sha256=span_hash,
+            extractor_version=extractor_version,
         )
         result.append(
             RetrievalChunk(
@@ -1067,6 +1194,67 @@ def _chunks(
             )
         )
     return tuple(result)
+
+
+def canonical_retrieval_chunks(
+    *,
+    source_id: str,
+    source_path: str,
+    source_sha256: str,
+    content: bytes,
+    extractor_version: str = EXTRACTOR_VERSION,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> tuple[RetrievalChunk, ...]:
+    """Reconstruct every canonical chunk field from authoritative source bytes."""
+    path = PurePosixPath(source_path)
+    if not source_id or source_id != f"source:{source_path}" or not path.parts:
+        raise ValueError("source identity is not canonical")
+    if _sha256(content) != source_sha256:
+        raise ValueError("source bytes do not match their canonical hash")
+    if path.parts[:2] == ("knowledge", "notes"):
+        kind, project = "note", None
+    elif path.parts[:2] == ("knowledge", "projects"):
+        kind = "project"
+        project = path.parts[2] if len(path.parts) > 3 else None
+    elif path.parts[:2] == ("knowledge", "daily"):
+        kind, project = "daily", None
+    else:
+        kind, project = "code", None
+    is_markdown = path.suffix.casefold() == ".md"
+    if is_markdown:
+        frontmatter, searchable_start = _frontmatter(
+            content, deadline=deadline, cancelled=cancelled
+        )
+    else:
+        content.decode("utf-8", errors="strict")
+        frontmatter, searchable_start = {}, 0
+    candidate = _Candidate(Path(*path.parts), source_path, kind, project, ())
+    metadata = _metadata(frontmatter, candidate)
+    language = _classify_language(
+        explicit=metadata.language,
+        path=candidate.path,
+        text=content[searchable_start:].decode("utf-8", errors="strict"),
+    )
+    source = SourceRecord(
+        source_id,
+        source_path,
+        source_sha256,
+        len(content),
+        "text/markdown" if is_markdown else "text/plain",
+        language,
+        None,
+    )
+    return _chunks(
+        source,
+        metadata,
+        content,
+        searchable_start,
+        heading_enabled=is_markdown,
+        extractor_version=extractor_version,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
 
 
 def _normalize_explicit_paths(
@@ -1135,7 +1323,12 @@ def _policy(
     )
 
 
-def _capture(vault: Path, policy: SnapshotPolicy, deadline: float) -> CorpusSnapshot:
+def _capture(
+    vault: Path,
+    policy: SnapshotPolicy,
+    deadline: float,
+    cancelled: Callable[[], bool] | None,
+) -> CorpusSnapshot:
     candidates = _discover(vault, policy, deadline)
     captured: list[CapturedSource] = []
     chunks: list[RetrievalChunk] = []
@@ -1156,7 +1349,9 @@ def _capture(vault: Path, policy: SnapshotPolicy, deadline: float) -> CorpusSnap
             raise ValueError("corpus total byte limit exceeded")
         is_markdown = candidate.path.suffix.casefold() == ".md"
         if is_markdown:
-            frontmatter, searchable_start = _frontmatter(content)
+            frontmatter, searchable_start = _frontmatter(
+                content, deadline=deadline, cancelled=cancelled
+            )
         else:
             content.decode("utf-8", errors="strict")
             frontmatter, searchable_start = {}, 0
@@ -1165,8 +1360,10 @@ def _capture(vault: Path, policy: SnapshotPolicy, deadline: float) -> CorpusSnap
         first_hashes[candidate.relative] = digest
         if not _included(metadata, policy):
             continue
-        language = metadata.language or _infer_language(
-            content[searchable_start:].decode("utf-8", errors="strict")
+        language = _classify_language(
+            explicit=metadata.language,
+            path=candidate.path,
+            text=content[searchable_start:].decode("utf-8", errors="strict"),
         )
         record = SourceRecord(
             logical_id=f"source:{candidate.relative}",
@@ -1179,15 +1376,18 @@ def _capture(vault: Path, policy: SnapshotPolicy, deadline: float) -> CorpusSnap
         )
         captured_source = CapturedSource(record, metadata, content)
         captured.append(captured_source)
-        chunks.extend(
-            _chunks(
-                record,
-                metadata,
-                content,
-                searchable_start,
-                heading_enabled=is_markdown,
-            )
+        source_chunks = _chunks(
+            record,
+            metadata,
+            content,
+            searchable_start,
+            heading_enabled=is_markdown,
+            deadline=deadline,
+            cancelled=cancelled,
         )
+        if len(chunks) + len(source_chunks) > MAX_CORPUS_CHUNKS:
+            raise ValueError("corpus chunk row ceiling exceeded")
+        chunks.extend(source_chunks)
 
     _check_deadline(deadline)
     current = _discover(vault, policy, deadline)
@@ -1230,6 +1430,7 @@ def collect_corpus(
     deadline: float | None = None,
     deadline_seconds: float | None = None,
     coordinator: object | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> CorpusSnapshot:
     """Capture one immutable corpus and reject any change before returning it."""
     root = Path(vault).resolve(strict=True)
@@ -1255,7 +1456,8 @@ def collect_corpus(
     else:
         gate = contextlib.nullcontext()
     with gate:
-        return _capture(root, selected_policy, selected_deadline)
+        _check_processing_stop(selected_deadline, cancelled)
+        return _capture(root, selected_policy, selected_deadline, cancelled)
 
 
 def validate_live_snapshot(
@@ -1275,6 +1477,7 @@ def validate_live_snapshot(
     deadline: float | None = None,
     deadline_seconds: float | None = None,
     coordinator: object | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> None:
     """Rediscover and hash the live corpus immediately before publication."""
     if not isinstance(snapshot, CorpusSnapshot):
@@ -1306,6 +1509,7 @@ def validate_live_snapshot(
             deadline=deadline,
             deadline_seconds=deadline_seconds,
             coordinator=coordinator,
+            cancelled=cancelled,
         )
     except (FileNotFoundError, PermissionError) as exc:
         raise CorpusChanged("live corpus cannot reproduce captured membership") from exc

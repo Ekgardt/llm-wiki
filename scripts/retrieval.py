@@ -2,11 +2,71 @@
 from __future__ import annotations
 
 import json
+import queue
 import re
+import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+MAX_OPTIONAL_STRAGGLERS = 2
+OPTIONAL_STAGE_MAX_SECONDS = 0.5
+_OPTIONAL_STAGE_SLOTS = threading.BoundedSemaphore(MAX_OPTIONAL_STRAGGLERS)
+
+
+class OptionalStageTimeout(TimeoutError):
+    """An optional uninterruptible stage exceeded its isolated budget."""
+
+
+def _run_optional_bounded(
+    operation: Callable[[], Any],
+    *,
+    deadline: float,
+    cancelled: Callable[[], bool] | None,
+) -> Any:
+    """Run optional work with a hard wait bound and capped daemon stragglers."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0 or (cancelled is not None and cancelled()):
+        raise OptionalStageTimeout("optional stage deadline reached")
+    slots = _OPTIONAL_STAGE_SLOTS
+    if not slots.acquire(blocking=False):
+        raise OptionalStageTimeout("optional stage capacity exhausted")
+    completed = threading.Event()
+    result: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+
+    def run() -> None:
+        try:
+            result.put((True, operation()))
+        except BaseException as exc:
+            result.put((False, exc))
+        finally:
+            completed.set()
+            slots.release()
+
+    worker = threading.Thread(
+        target=run,
+        name="llm-wiki-optional-retrieval",
+        daemon=True,
+    )
+    try:
+        worker.start()
+    except BaseException:
+        slots.release()
+        raise
+    stage_deadline = min(deadline, time.monotonic() + OPTIONAL_STAGE_MAX_SECONDS)
+    while not completed.is_set():
+        if cancelled is not None and cancelled():
+            raise OptionalStageTimeout("optional stage cancelled")
+        wait = stage_deadline - time.monotonic()
+        if wait <= 0:
+            raise OptionalStageTimeout("optional stage deadline reached")
+        completed.wait(min(wait, 0.01))
+    ok, value = result.get_nowait()
+    if ok:
+        return value
+    raise value
 
 PROFILES = (
     "DIRECT",
@@ -532,6 +592,7 @@ def expand_evidence_graph(
     per_seed_limit: int = GRAPH_PER_SEED_LIMIT,
     global_limit: int = GRAPH_GLOBAL_LIMIT,
     deadline_monotonic: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple[Mapping[str, Any], ...]:
     """Read one evidenced typed hop from a sealed ``EvidenceGraph`` handle."""
     if not 1 <= per_seed_limit <= 100 or not 1 <= global_limit <= 1000:
@@ -546,11 +607,12 @@ def expand_evidence_graph(
     results: list[Mapping[str, Any]] = []
     edge_placeholders = ",".join("?" for _ in normalized_edges)
     for seed in seeds:
-        _check_deadline(deadline_monotonic)
+        _check_stopped(deadline_monotonic, cancelled)
         seed_id = _candidate_key(seed)
         seed_path = _hit_path(seed)
         seed_results: list[Mapping[str, Any]] = []
         for direction in normalized_directions:
+            _check_stopped(deadline_monotonic, cancelled)
             source_column, target_column = (
                 ("source_node_id", "target_node_id")
                 if direction == "out"
@@ -593,6 +655,7 @@ def expand_evidence_graph(
             )
             grouped: dict[tuple[str, str], dict[str, Any]] = {}
             for row in rows:
+                _check_stopped(deadline_monotonic, cancelled)
                 key = (str(row["assertion_id"]), str(row["node_id"]))
                 item = grouped.get(key)
                 evidence = {
@@ -644,6 +707,7 @@ def expand_evidence_graph(
                 step["evidence"].append(evidence)
                 item["evidence_ids"].append(evidence["evidence_id"])
             for item in grouped.values():
+                _check_stopped(deadline_monotonic, cancelled)
                 step = item["assertion_path"][0]
                 step["evidence_ids"] = tuple(step["evidence_ids"])
                 step["evidence"] = tuple(step["evidence"])
@@ -983,6 +1047,7 @@ def retrieve(
     dense_available: bool | None = None
     graph_available: bool | None = None
     graph_failure: str | None = None
+    optional_failure: str | None = None
 
     if lexical_backend is not None and "lexical" in wanted:
         _check_stopped(deadline_monotonic, cancelled)
@@ -992,10 +1057,24 @@ def retrieve(
 
     if dense_backend is not None and "dense" in wanted:
         _check_stopped(deadline_monotonic, cancelled)
-        dense_hits = dense_backend(**filters)
-        ran_dense = True
-        # None ⇒ backend unavailable; empty sequence ⇒ available but no hits.
-        dense_available = dense_hits is not None
+        try:
+            dense_hits = (
+                _run_optional_bounded(
+                    lambda: dense_backend(**filters),
+                    deadline=deadline_monotonic,
+                    cancelled=cancelled,
+                )
+                if deadline_monotonic is not None
+                else dense_backend(**filters)
+            )
+            ran_dense = True
+            # None ⇒ backend unavailable; empty sequence ⇒ available but no hits.
+            dense_available = dense_hits is not None
+        except OptionalStageTimeout:
+            dense_hits = None
+            dense_available = False
+            optional_failure = "optional_stage_timeout"
+            partial = True
         _check_stopped(deadline_monotonic, cancelled)
 
     if graph_backend is not None and "graph" in wanted and graph_enabled:
@@ -1153,11 +1232,21 @@ def retrieve(
                 pool_limit = max(limit, 20) if limit > 0 else 20
                 if max_candidates is not None and int(max_candidates) > 0:
                     pool_limit = min(pool_limit, int(max_candidates))
-                reranked = _rerank(
-                    analysis.normalized_query or analysis.query,
-                    legacy_rows[:pool_limit],
-                    limit=pool_limit,
-                    text_field="content",
+                def rerank_call():
+                    return _rerank(
+                        analysis.normalized_query or analysis.query,
+                        legacy_rows[:pool_limit],
+                        limit=pool_limit,
+                        text_field="content",
+                    )
+                reranked = (
+                    _run_optional_bounded(
+                        rerank_call,
+                        deadline=deadline_monotonic,
+                        cancelled=cancelled,
+                    )
+                    if deadline_monotonic is not None
+                    else rerank_call()
                 )
                 _check_stopped(deadline_monotonic, cancelled)
                 if reranked and reranked[0].get("reranker_applied"):
@@ -1217,6 +1306,10 @@ def retrieve(
                     reranker_model_revision = reranked[0].get("reranker_model_revision")
                     reranker_depth = reranked[0].get("reranker_depth")
                     reranker_duration_ms = reranked[0].get("reranker_duration_ms")
+        except OptionalStageTimeout:
+            reranker_fallback_reason = "optional_stage_timeout"
+            optional_failure = optional_failure or "optional_stage_timeout"
+            partial = True
         except TimeoutError:
             raise
         except Exception:
@@ -1230,7 +1323,7 @@ def retrieve(
         requested_mode=requested,
         effective_mode=effective,
         signals_used=tuple(dict.fromkeys(signal_list)),
-        fallback_reason=fallback,
+        fallback_reason=optional_failure or fallback,
         corpus_generation=corpus_generation,
         partial=partial,
         reranker_applied=reranker_applied,
@@ -1318,6 +1411,7 @@ def candidates_to_legacy(
             "signals_used": list(result.trace.signals_used),
             "fallback_reason": result.trace.fallback_reason,
             "generation": result.trace.corpus_generation,
+            "partial": result.trace.partial,
             "reranker_applied": result.trace.reranker_applied,
             "reranker_model_id": result.trace.reranker_model_id,
             "reranker_model_revision": result.trace.reranker_model_revision,
@@ -1457,6 +1551,7 @@ def retrieve_via_search_memory(
     wanted_tuple = PROFILE_SIGNALS[requested]
     if not semantic:
         wanted_tuple = tuple(s for s in wanted_tuple if s != "dense") or ("lexical",)
+    hard_deadline = deadline_monotonic is not None
 
     selected_catalog = catalog if catalog is not None else search_memory._active_generation_catalog()
     corpus_generation = "legacy"
@@ -1466,7 +1561,14 @@ def retrieve_via_search_memory(
         "graph": None,
         "seal": None,
         "dense_fallback": None,
+        "legacy_dense_blocked": False,
     }
+    generation_stop = {}
+    if deadline_monotonic is not None:
+        generation_stop["deadline"] = deadline_monotonic
+    if cancelled is not None:
+        generation_stop["cancelled"] = cancelled
+    optional_generation_stop = {} if hard_deadline else generation_stop
 
     def _artifact_names_for(manifest: dict[str, object], *, want_vectors: bool) -> tuple[str, ...]:
         names: list[str] = [search_memory.GENERATION_FTS_ARTIFACT]
@@ -1482,17 +1584,33 @@ def retrieve_via_search_memory(
         if selected_catalog is None or force_rebuild or page_paths is not None:
             return False
         try:
-            manifest = selected_catalog.get_active()
+            from repository_scope import resolve_repository_scope
+
+            repository_scope = resolve_repository_scope(
+                search_memory.ROOT,
+                deadline=deadline_monotonic,
+                cancelled=cancelled,
+            )
+            manifest = selected_catalog.get_active_for_repository(
+                repository_scope, **generation_stop
+            )
+            if not isinstance(manifest, dict):
+                return False
+            if want_vectors and manifest.get("vector_state") == "stale":
+                generation_ctx["dense_fallback"] = "generation_vectors_unavailable"
+                generation_ctx["legacy_dense_blocked"] = True
+        except TimeoutError:
+            raise
         except Exception:
-            return False
-        if not isinstance(manifest, dict):
             return False
         artifact_names = _artifact_names_for(manifest, want_vectors=want_vectors)
         seal = search_memory._generation_consumption_seal(
-            selected_catalog, manifest, artifact_names
+            selected_catalog, manifest, artifact_names, **generation_stop
         )
         connection = (
-            search_memory._generation_connection(selected_catalog, manifest)
+            search_memory._generation_connection(
+                selected_catalog, manifest, **generation_stop
+            )
             if seal is not None
             else None
         )
@@ -1506,13 +1624,20 @@ def retrieve_via_search_memory(
             try:
                 from evidence_graph import EvidenceGraph
 
-                generation_ctx["graph"] = EvidenceGraph(
-                    selected_catalog.generations_path
-                    / str(manifest["generation_id"])
-                    / "evidence.sqlite3",
-                    state_root=selected_catalog.state_root,
-                    generation_id=str(manifest["generation_id"]),
+                generation_ctx["graph"] = EvidenceGraph.open_active_for_repository(
+                    selected_catalog,
+                    repository_scope,
+                    deadline=deadline_monotonic,
+                    cancelled=cancelled,
                 )
+                if generation_ctx["graph"] is None:
+                    connection.close()
+                    generation_ctx["connection"] = None
+                    return False
+            except TimeoutError:
+                connection.close()
+                generation_ctx["connection"] = None
+                raise
             except Exception:
                 connection.close()
                 generation_ctx["connection"] = None
@@ -1541,6 +1666,7 @@ def retrieve_via_search_memory(
                     generation_ctx["manifest"],
                     generation_ctx["artifact_names"],
                     generation_ctx["seal"],
+                    **generation_stop,
                 ):
                     generation_fallback = "generation_seal_changed"
                     raise _GenerationSealChanged
@@ -1556,12 +1682,14 @@ def retrieve_via_search_memory(
                         project=filters["project"],
                         since=filters["since"],
                         as_of=filters["as_of"],
+                        **generation_stop,
                     )
                     if not search_memory._generation_consumption_unchanged(
                         selected_catalog,
                         generation_ctx["manifest"],
                         generation_ctx["artifact_names"],
                         generation_ctx["seal"],
+                        **generation_stop,
                     ):
                         generation_fallback = "generation_seal_changed"
                         raise _GenerationSealChanged
@@ -1576,6 +1704,8 @@ def retrieve_via_search_memory(
                         )
             except _GenerationSealChanged:
                 raise
+            except TimeoutError:
+                raise
             except Exception:
                 generation_fallback = generation_fallback or "generation_corrupt"
                 raise _GenerationSealChanged
@@ -1588,6 +1718,8 @@ def retrieve_via_search_memory(
             since=filters["since"],
             as_of=filters["as_of"],
             page_paths=page_paths,
+            deadline=deadline_monotonic,
+            cancelled=cancelled,
         )
         hits = [_backend_hit_from_legacy(row) for row in rows]
         return search_memory.apply_hard_filters(
@@ -1601,6 +1733,8 @@ def retrieve_via_search_memory(
     def dense_backend(**filters: Any) -> Sequence[Mapping[str, Any]] | None:
         nonlocal generation_fallback
         if "dense" not in wanted_tuple:
+            return None
+        if generation_ctx["legacy_dense_blocked"]:
             return None
         if use_generation:
             if generation_fallback in {
@@ -1617,21 +1751,34 @@ def retrieve_via_search_memory(
             ):
                 generation_ctx["dense_fallback"] = "generation_vectors_unavailable"
                 return None
+            dense_connection = generation_ctx["connection"]
+            owns_dense_connection = False
             try:
                 if not search_memory._generation_consumption_unchanged(
                     selected_catalog,
                     generation_ctx["manifest"],
                     generation_ctx["artifact_names"],
                     generation_ctx["seal"],
+                    **optional_generation_stop,
                 ):
                     generation_ctx["dense_fallback"] = "generation_seal_changed"
                     generation_fallback = "generation_seal_changed"
                     raise _GenerationSealChanged
+                if hard_deadline:
+                    dense_connection = search_memory._generation_connection(
+                        selected_catalog,
+                        generation_ctx["manifest"],
+                        **optional_generation_stop,
+                    )
+                    owns_dense_connection = dense_connection is not None
+                    if dense_connection is None:
+                        generation_ctx["dense_fallback"] = "generation_vectors_unavailable"
+                        return None
                 rows = search_memory._generation_vectors_search(
                     filters["query"],
                     selected_catalog,
                     generation_ctx["manifest"],
-                    generation_ctx["connection"],
+                    dense_connection,
                     embedder=generation_embedder,
                     model_id=generation_model_id,
                     model_revision=generation_model_revision,
@@ -1640,6 +1787,7 @@ def retrieve_via_search_memory(
                     project=filters["project"],
                     since=filters["since"],
                     as_of=filters["as_of"],
+                    **optional_generation_stop,
                 )
                 if rows is None:
                     if not search_memory._generation_consumption_unchanged(
@@ -1647,6 +1795,7 @@ def retrieve_via_search_memory(
                         generation_ctx["manifest"],
                         generation_ctx["artifact_names"],
                         generation_ctx["seal"],
+                        **optional_generation_stop,
                     ):
                         generation_ctx["dense_fallback"] = "generation_seal_changed"
                         generation_fallback = "generation_seal_changed"
@@ -1658,6 +1807,7 @@ def retrieve_via_search_memory(
                     generation_ctx["manifest"],
                     generation_ctx["artifact_names"],
                     generation_ctx["seal"],
+                    **optional_generation_stop,
                 ):
                     generation_ctx["dense_fallback"] = "generation_seal_changed"
                     generation_fallback = "generation_seal_changed"
@@ -1675,18 +1825,24 @@ def retrieve_via_search_memory(
                 )
             except _GenerationSealChanged:
                 raise
+            except TimeoutError:
+                raise
             except Exception:
                 if not search_memory._generation_consumption_unchanged(
                     selected_catalog,
                     generation_ctx["manifest"],
                     generation_ctx["artifact_names"],
                     generation_ctx["seal"],
+                    **optional_generation_stop,
                 ):
                     generation_ctx["dense_fallback"] = "generation_seal_changed"
                     generation_fallback = "generation_seal_changed"
                     raise _GenerationSealChanged
                 generation_ctx["dense_fallback"] = "generation_vectors_unavailable"
                 return None
+            finally:
+                if owns_dense_connection:
+                    dense_connection.close()
         # semantic=False / BASE: dense backend not requested via wanted_tuple.
         rows = search_memory._legacy_dense_hits(
             filters["query"],
@@ -1696,6 +1852,8 @@ def retrieve_via_search_memory(
             since=filters["since"],
             as_of=filters["as_of"],
             page_paths=page_paths,
+            deadline=None if hard_deadline else deadline_monotonic,
+            cancelled=None if hard_deadline else cancelled,
         )
         if rows is None:
             return None
@@ -1723,6 +1881,7 @@ def retrieve_via_search_memory(
                 generation_ctx["manifest"],
                 generation_ctx["artifact_names"],
                 generation_ctx["seal"],
+                **generation_stop,
             ):
                 raise _GenerationSealChanged
             rows = expand_evidence_graph(
@@ -1733,12 +1892,14 @@ def retrieve_via_search_memory(
                 per_seed_limit=filters["per_seed_limit"],
                 global_limit=filters["global_limit"],
                 deadline_monotonic=filters["deadline_monotonic"],
+                cancelled=cancelled,
             )
             if not search_memory._generation_consumption_unchanged(
                 selected_catalog,
                 generation_ctx["manifest"],
                 generation_ctx["artifact_names"],
                 generation_ctx["seal"],
+                **generation_stop,
             ):
                 raise _GenerationSealChanged
             return rows
@@ -1765,6 +1926,8 @@ def retrieve_via_search_memory(
                 )
                 for item in boosts
             ]
+        except TimeoutError:
+            raise
         except Exception:
             return None
 
@@ -1783,6 +1946,7 @@ def retrieve_via_search_memory(
             corpus_generation=corpus_generation,
             graph_enabled=graph,
             rerank_enabled=rerank,
+            partial=False,
             deadline_monotonic=deadline_monotonic,
             max_candidates=max_candidates,
             cancelled=cancelled,
@@ -1796,6 +1960,7 @@ def retrieve_via_search_memory(
                 generation_ctx["manifest"],
                 generation_ctx["artifact_names"],
                 generation_ctx["seal"],
+                **generation_stop,
             ):
                 generation_fallback = "generation_seal_changed"
                 raise _GenerationSealChanged

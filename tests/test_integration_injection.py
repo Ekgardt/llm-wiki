@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -1973,6 +1974,895 @@ def _shell_function(source: str, name: str) -> str:
     match = re.search(rf"(?ms)^{re.escape(name)}\(\) \{{.*?^\}}", source)
     assert match, f"{name} missing"
     return match.group(0)
+
+
+def _installer_test_section(source: str) -> str:
+    section = source.split("4. Run tests", 1)[1].split(
+        "5. Set environment variables", 1
+    )[0]
+    return section.split("\n", 1)[1]
+
+
+def _write_fake_uv(directory: Path, *, exit_code: int, last_line: str) -> None:
+    fake_uv = directory / "uv"
+    fake_uv.write_text(
+        "#!/bin/sh\n"
+        "i=0\n"
+        "while [ \"$i\" -lt 100 ]; do echo 'filler output'; i=$((i + 1)); done\n"
+        f"printf '%s\\n' {json.dumps(last_line)}\n"
+        f"exit {exit_code}\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o700)
+
+
+@pytest.fixture(scope="module")
+def windows_fake_uv(tmp_path_factory):
+    if os.name != "nt":
+        return None
+    compiler = shutil.which("powershell")
+    if compiler is None:
+        pytest.skip("Windows PowerShell compiler unavailable")
+    build = tmp_path_factory.mktemp("native-fake-uv")
+    source = build / "fake-uv.cs"
+    executable = build / "uv.exe"
+    source.write_text(
+        "using System;\n"
+        "using System.Diagnostics;\n"
+        "using System.IO;\n"
+        "using System.Threading;\n"
+        "public static class FakeUv {\n"
+        "  public static int Main() {\n"
+        "    var pidFile = Environment.GetEnvironmentVariable(\"FAKE_UV_PID_FILE\");\n"
+        "    var startedFile = Environment.GetEnvironmentVariable(\"FAKE_UV_STARTED_FILE\");\n"
+        "    if (!String.IsNullOrEmpty(pidFile)) File.WriteAllText(pidFile, Process.GetCurrentProcess().Id.ToString());\n"
+        "    if (!String.IsNullOrEmpty(startedFile)) File.WriteAllText(startedFile, \"started\");\n"
+        "    var output = Environment.GetEnvironmentVariable(\"FAKE_UV_OUTPUT\");\n"
+        "    if (!String.IsNullOrEmpty(output)) Console.WriteLine(output);\n"
+        "    if (Environment.GetEnvironmentVariable(\"FAKE_UV_MODE\") == \"block\") {\n"
+        "      var python = Environment.GetEnvironmentVariable(\"FAKE_UV_PYTHON\");\n"
+        "      var childScript = Environment.GetEnvironmentVariable(\"FAKE_UV_CHILD_SCRIPT\");\n"
+        "      var childInfo = new ProcessStartInfo(python, \"\\\"\" + childScript + \"\\\"\");\n"
+        "      childInfo.UseShellExecute = false;\n"
+        "      Process.Start(childInfo);\n"
+        "      Thread.Sleep(Timeout.Infinite);\n"
+        "    }\n"
+        "    int code;\n"
+        "    return Int32.TryParse(Environment.GetEnvironmentVariable(\"FAKE_UV_EXIT\"), out code) ? code : 0;\n"
+        "  }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    try:
+        compiled = subprocess.run(
+            [
+                compiler,
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                f"Add-Type -Path {json.dumps(str(source))} "
+                f"-OutputAssembly {json.dumps(str(executable))} "
+                "-OutputType ConsoleApplication",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.skip("Windows PowerShell compiler unavailable within 120 seconds")
+    if compiled.returncode != 0:
+        pytest.skip(f"Windows PowerShell compiler unavailable: {compiled.stderr[-500:]}")
+    return executable
+
+
+def _write_blocking_fake_uv(directory: Path) -> None:
+    fake_uv = directory / "uv"
+    fake_uv.write_text(
+        "#!/bin/sh\n"
+        "printf '%s' \"$$\" > child.pid\n"
+        ": > child.started\n"
+        "stop_child() { : > child.stopped; exit 0; }\n"
+        "trap stop_child HUP INT TERM\n"
+        "i=0\n"
+        "while [ \"$i\" -lt 30 ]; do sleep 0.1; i=$((i + 1)); done\n"
+        ": > child.completed\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o700)
+
+
+def _write_stubborn_fake_uv_tree(directory: Path) -> None:
+    grandchild = directory / "fake-pytest-grandchild"
+    grandchild.write_text(
+        "#!/bin/bash\n"
+        "printf '%s' \"$$\" > grandchild.pid\n"
+        ": > grandchild.started\n"
+        "trap '' HUP INT TERM\n"
+        "while :; do sleep 1; done\n",
+        encoding="utf-8",
+    )
+    grandchild.chmod(0o700)
+    child = directory / "fake-pytest-child"
+    child.write_text(
+        "#!/bin/bash\n"
+        "printf '%s' \"$$\" > child.pid\n"
+        "trap '' HUP INT TERM\n"
+        '"$(dirname "$0")/fake-pytest-grandchild" &\n'
+        "wait\n",
+        encoding="utf-8",
+    )
+    child.chmod(0o700)
+    fake_uv = directory / "uv"
+    fake_uv.write_text(
+        "#!/bin/bash\n"
+        "printf '%s' \"$$\" > uv.pid\n"
+        "stop_uv() { exit 0; }\n"
+        "trap stop_uv HUP INT TERM\n"
+        '"$(dirname "$0")/fake-pytest-child" &\n'
+        "wait\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o700)
+
+
+def _find_working_bash() -> str | None:
+    search_paths = [None]
+    git = shutil.which("git")
+    if git:
+        search_paths.append(str(Path(git).resolve().parent.parent / "bin"))
+    for search_path in search_paths:
+        bash = shutil.which("bash", path=search_path)
+        if not bash:
+            continue
+        try:
+            result = subprocess.run(
+                [bash, "--version"], capture_output=True, timeout=5, check=False
+            )
+        except OSError:
+            continue
+        if result.returncode == 0:
+            return bash
+    return None
+
+
+@pytest.mark.parametrize(
+    ("fake_exit", "fake_output", "expected_marker"),
+    [
+        (1, "3081 passed", "[WARN] Some tests failed"),
+        (0, "1 failed", "[OK] Test suite passed"),
+    ],
+    ids=["pytest_exit_1_success_output", "pytest_exit_0_failure_output"],
+)
+def test_unix_installer_trusts_pytest_exit_status(
+    tmp_path, fake_exit, fake_output, expected_marker
+):
+    bash = _find_working_bash()
+    if bash is None:
+        pytest.skip("bash unavailable")
+    section = _installer_test_section(
+        (ROOT / "install.sh").read_text(encoding="utf-8")
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_fake_uv(fake_bin, exit_code=fake_exit, last_line=fake_output)
+    runner = tmp_path / "installer-pytest-contract.sh"
+    runner.write_text(
+        textwrap.dedent(
+            f"""
+            set -euo pipefail
+            RED='' GREEN='' YELLOW='' BLUE='' NC=''
+            PATH="$(dirname "$0")/bin:$PATH"
+            export PATH
+            info() {{ echo "[INFO] $1"; }}
+            ok() {{ echo "[OK] $1"; }}
+            warn() {{ echo "[WARN] $1"; }}
+            {section}
+            case "$-" in *m*) exit 91 ;; esac
+            """
+        ),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+
+    result = subprocess.run(
+        [bash, str(runner)],
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=20,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert expected_marker in result.stdout
+    assert fake_output in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("signal_name", "expected_exit"),
+    [("HUP", 129), ("INT", 130), ("TERM", 143)],
+)
+def test_unix_installer_signal_traps_cleanup_and_exit(
+    tmp_path, signal_name, expected_exit
+):
+    bash = _find_working_bash()
+    if bash is None:
+        pytest.skip("bash unavailable")
+    section = _installer_test_section(
+        (ROOT / "install.sh").read_text(encoding="utf-8")
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_blocking_fake_uv(fake_bin)
+    continued = tmp_path / "continued.marker"
+    installer = tmp_path / "installer-under-test.sh"
+    installer.write_text(
+        textwrap.dedent(
+            f"""
+            set -euo pipefail
+            PATH="$(dirname "$0")/bin:$PATH"
+            export PATH
+            info() {{ :; }}
+            ok() {{ :; }}
+            warn() {{ :; }}
+            {section}
+            : > continued.marker
+            """
+        ),
+        encoding="utf-8",
+    )
+    installer.chmod(0o700)
+    orchestrator = tmp_path / "orchestrate-signal.sh"
+    orchestrator.write_text(
+        textwrap.dedent(
+            f"""
+            set -euo pipefail
+            ./installer-under-test.sh &
+            installerPid=$!
+            started=0
+            for ((attempt = 0; attempt < 500; attempt++)); do
+              if [ -f child.started ]; then started=1; break; fi
+              if ! kill -0 "$installerPid" 2>/dev/null; then break; fi
+              sleep 0.01
+            done
+            if [ "$started" -ne 1 ]; then exit 90; fi
+            kill -s {signal_name} "$installerPid"
+            if wait "$installerPid"; then
+              installerExit=0
+            else
+              installerExit=$?
+            fi
+            printf '%s' "$installerExit" > installer.status
+            childPid="$(cat child.pid)"
+            if kill -0 "$childPid" 2>/dev/null; then
+              : > child.alive
+              kill -TERM "$childPid"
+            fi
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [bash, str(orchestrator)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "installer.status").read_text() == str(expected_exit)
+    assert (tmp_path / "child.stopped").exists()
+    assert not (tmp_path / "child.completed").exists()
+    assert not (tmp_path / "child.alive").exists()
+    assert not continued.exists()
+
+
+def test_unix_installer_signal_kills_complete_stubborn_test_tree(tmp_path):
+    bash = _find_working_bash()
+    if bash is None:
+        pytest.skip("bash unavailable")
+    section = _installer_test_section(
+        (ROOT / "install.sh").read_text(encoding="utf-8")
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_stubborn_fake_uv_tree(fake_bin)
+    installer = tmp_path / "installer-under-test.sh"
+    installer.write_text(
+        textwrap.dedent(
+            f"""
+            set -euo pipefail
+            PATH="$(dirname "$0")/bin:$PATH"
+            export PATH
+            info() {{ :; }}
+            ok() {{ :; }}
+            warn() {{ :; }}
+            {section}
+            : > continued.marker
+            """
+        ),
+        encoding="utf-8",
+    )
+    installer.chmod(0o700)
+    orchestrator = tmp_path / "orchestrate-tree-signal.sh"
+    orchestrator.write_text(
+        textwrap.dedent(
+            """
+            set -euo pipefail
+            ./installer-under-test.sh &
+            installerPid=$!
+            started=0
+            for ((attempt = 0; attempt < 500; attempt++)); do
+              if [ -f grandchild.started ]; then started=1; break; fi
+              if ! kill -0 "$installerPid" 2>/dev/null; then break; fi
+              sleep 0.01
+            done
+            if [ "$started" -ne 1 ]; then exit 90; fi
+            kill -s TERM "$installerPid"
+            if wait "$installerPid"; then
+              installerExit=0
+            else
+              installerExit=$?
+            fi
+            printf '%s' "$installerExit" > installer.status
+            : > survivors
+            for pidFile in uv.pid child.pid grandchild.pid; do
+              pid="$(cat "$pidFile")"
+              if kill -0 "$pid" 2>/dev/null; then
+                printf '%s:%s\n' "$pidFile" "$pid" >> survivors
+                kill -s KILL "$pid" 2>/dev/null || :
+              fi
+            done
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [bash, str(orchestrator)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=15,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "installer.status").read_text() == "143"
+    assert (tmp_path / "survivors").read_text() == ""
+    assert not (tmp_path / "continued.marker").exists()
+
+
+def test_unix_installer_initial_monitor_mode_cleans_stopped_test_tree(tmp_path):
+    bash = _find_working_bash()
+    if bash is None:
+        pytest.skip("bash unavailable")
+    section = _installer_test_section(
+        (ROOT / "install.sh").read_text(encoding="utf-8")
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_stubborn_fake_uv_tree(fake_bin)
+    installer = tmp_path / "installer-under-test.sh"
+    installer.write_text(
+        textwrap.dedent(
+            f"""
+            set -euo pipefail
+            set -m
+            PATH="$(dirname "$0")/bin:$PATH"
+            export PATH
+            info() {{ :; }}
+            ok() {{ : > passed.marker; }}
+            warn() {{ : > warned.marker; }}
+            {section}
+            case "$-" in *m*) : > monitor-restored.marker ;; esac
+            : > continued.marker
+            """
+        ),
+        encoding="utf-8",
+    )
+    installer.chmod(0o700)
+    orchestrator = tmp_path / "orchestrate-stopped-tree.sh"
+    orchestrator.write_text(
+        textwrap.dedent(
+            """
+            set -euo pipefail
+            ./installer-under-test.sh &
+            installerPid=$!
+            started=0
+            for ((attempt = 0; attempt < 500; attempt++)); do
+              if [ -f grandchild.started ]; then started=1; break; fi
+              if ! kill -0 "$installerPid" 2>/dev/null; then break; fi
+              sleep 0.01
+            done
+            if [ "$started" -ne 1 ]; then exit 90; fi
+            kill -s STOP "$(cat uv.pid)"
+            if wait "$installerPid"; then
+              installerExit=0
+            else
+              installerExit=$?
+            fi
+            printf '%s' "$installerExit" > installer.status
+            : > survivors
+            for pidFile in uv.pid child.pid grandchild.pid; do
+              pid="$(cat "$pidFile")"
+              if kill -0 "$pid" 2>/dev/null; then
+                printf '%s:%s\n' "$pidFile" "$pid" >> survivors
+                kill -s KILL "$pid" 2>/dev/null || :
+              fi
+            done
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [bash, str(orchestrator)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=15,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "installer.status").read_text() == "0"
+    assert (tmp_path / "survivors").read_text() == ""
+    assert (tmp_path / "warned.marker").exists()
+    assert not (tmp_path / "passed.marker").exists()
+    assert (tmp_path / "monitor-restored.marker").exists()
+    assert (tmp_path / "continued.marker").exists()
+
+
+@pytest.mark.parametrize("stop_signal", ["STOP", "TTIN"])
+def test_unix_installer_initial_monitor_off_cleans_stopped_test_tree(
+    tmp_path, stop_signal
+):
+    bash = _find_working_bash()
+    if bash is None:
+        pytest.skip("bash unavailable")
+    section = _installer_test_section(
+        (ROOT / "install.sh").read_text(encoding="utf-8")
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_stubborn_fake_uv_tree(fake_bin)
+    installer = tmp_path / "installer-under-test.sh"
+    installer.write_text(
+        textwrap.dedent(
+            f"""
+            set -euo pipefail
+            set +m
+            PATH="$(dirname "$0")/bin:$PATH"
+            export PATH
+            info() {{ :; }}
+            ok() {{ : > passed.marker; }}
+            warn() {{ : > warned.marker; }}
+            {section}
+            case "$-" in
+              *m*) : > monitor-wrong.marker ;;
+              *) : > monitor-restored.marker ;;
+            esac
+            : > continued.marker
+            """
+        ),
+        encoding="utf-8",
+    )
+    installer.chmod(0o700)
+    orchestrator = tmp_path / "orchestrate-stopped-tree.sh"
+    orchestrator.write_text(
+        textwrap.dedent(
+            f"""
+            set -euo pipefail
+            ./installer-under-test.sh &
+            installerPid=$!
+            started=0
+            for ((attempt = 0; attempt < 500; attempt++)); do
+              if [ -f grandchild.started ]; then started=1; break; fi
+              if ! kill -0 "$installerPid" 2>/dev/null; then break; fi
+              sleep 0.01
+            done
+            if [ "$started" -ne 1 ]; then exit 90; fi
+            kill -s {stop_signal} "$(cat uv.pid)"
+            finished=0
+            for ((attempt = 0; attempt < 300; attempt++)); do
+              if ! kill -0 "$installerPid" 2>/dev/null; then finished=1; break; fi
+              sleep 0.01
+            done
+            if [ "$finished" -ne 1 ]; then
+              : > hung.marker
+              kill -s TERM "$installerPid" 2>/dev/null || :
+            fi
+            if wait "$installerPid"; then
+              installerExit=0
+            else
+              installerExit=$?
+            fi
+            printf '%s' "$installerExit" > installer.status
+            : > survivors
+            for pidFile in uv.pid child.pid grandchild.pid; do
+              pid="$(cat "$pidFile")"
+              if kill -0 "$pid" 2>/dev/null; then
+                printf '%s:%s\n' "$pidFile" "$pid" >> survivors
+                kill -s KILL "$pid" 2>/dev/null || :
+              fi
+            done
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [bash, str(orchestrator)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=20,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "hung.marker").exists()
+    assert (tmp_path / "installer.status").read_text() == "0"
+    assert (tmp_path / "survivors").read_text() == ""
+    assert (tmp_path / "warned.marker").exists()
+    assert not (tmp_path / "passed.marker").exists()
+    assert (tmp_path / "monitor-restored.marker").exists()
+    assert not (tmp_path / "monitor-wrong.marker").exists()
+    assert (tmp_path / "continued.marker").exists()
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
+def test_unix_installer_sigttin_wait_status_enters_bounded_group_cleanup(tmp_path):
+    bash = _find_working_bash()
+    if bash is None:
+        pytest.skip("bash unavailable")
+    source = (ROOT / "install.sh").read_text(encoding="utf-8")
+    functions = "\n".join(
+        _shell_function(source, name)
+        for name in (
+            "restore_test_monitor_mode",
+            "test_tree_alive",
+            "stop_test_child",
+            "wait_test_child",
+        )
+    )
+    runner = tmp_path / "exercise-stopped-wait.sh"
+    runner.write_text(
+        textwrap.dedent(
+            f"""
+            set -euo pipefail
+            set -m
+            calls="$(pwd)/calls"
+            : > "$calls"
+            waitCount=0
+            killed=0
+            kill() {{
+              printf 'kill %s\n' "$*" >> "$calls"
+              case "$*" in
+                "-0 -- -4242") [ "$killed" -eq 0 ] ;;
+                "-s KILL -- -4242") killed=1; return 0 ;;
+                *) return 0 ;;
+              esac
+            }}
+            sleep() {{ printf 'sleep %s\n' "$*" >> "$calls"; }}
+            wait() {{
+              waitCount=$((waitCount + 1))
+              printf 'wait %s\n' "$*" >> "$calls"
+              [ "$waitCount" -gt 1 ] && return 143
+              return 149
+            }}
+            testPid=4242
+            testPgid=4242
+            testMonitorMode=on
+            {functions}
+            if wait_test_child; then status=0; else status=$?; fi
+            printf '%s' "$status" > status
+            case "$-" in *m*) : > monitor-restored ;; esac
+            printf '%s:%s' "$testPid" "$testPgid" > state
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [bash, str(runner)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    assert (tmp_path / "status").read_text() == "149"
+    assert (tmp_path / "state").read_text() == ":"
+    assert (tmp_path / "monitor-restored").exists()
+    calls = (tmp_path / "calls").read_text().splitlines()
+    assert calls.count("wait 4242") == 2
+    assert "kill -s TERM -- -4242" in calls
+    assert "kill -s CONT -- -4242" in calls
+    assert "kill -s KILL -- -4242" in calls
+
+
+def test_unix_installer_signal_trap_restores_initial_monitor_mode(tmp_path):
+    bash = _find_working_bash()
+    if bash is None:
+        pytest.skip("bash unavailable")
+    source = (ROOT / "install.sh").read_text(encoding="utf-8")
+    functions = "\n".join(
+        _shell_function(source, name)
+        for name in (
+            "restore_test_monitor_mode",
+            "test_tree_alive",
+            "stop_test_child",
+            "handle_test_signal",
+        )
+    )
+    runner = tmp_path / "exercise-signal-mode-restore.sh"
+    runner.write_text(
+        textwrap.dedent(
+            f"""
+            set -euo pipefail
+            set -m
+            testPid=""
+            testPgid=""
+            testMonitorMode=off
+            exitStatus=""
+            exit() {{ exitStatus="$1"; }}
+            {functions}
+            handle_test_signal 143
+            printf '%s' "$exitStatus" > status
+            case "$-" in
+              *m*) : > monitor-wrong ;;
+              *) : > monitor-restored ;;
+            esac
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [bash, str(runner)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    assert (tmp_path / "status").read_text() == "143"
+    assert (tmp_path / "monitor-restored").exists()
+    assert not (tmp_path / "monitor-wrong").exists()
+
+
+def test_unix_installer_cleanup_targets_group_with_term_then_kill(tmp_path):
+    bash = _find_working_bash()
+    if bash is None:
+        pytest.skip("bash unavailable")
+    source = (ROOT / "install.sh").read_text(encoding="utf-8")
+    functions = "\n".join(
+        _shell_function(source, name)
+        for name in ("test_tree_alive", "stop_test_child")
+    )
+    runner = tmp_path / "exercise-cleanup.sh"
+    runner.write_text(
+        textwrap.dedent(
+            f"""
+            set -euo pipefail
+            calls="$(pwd)/calls"
+            : > "$calls"
+            kill() {{
+              printf 'kill %s\n' "$*" >> "$calls"
+              return 0
+            }}
+            sleep() {{ printf 'sleep %s\n' "$*" >> "$calls"; }}
+            wait() {{ printf 'wait %s\n' "$*" >> "$calls"; return 0; }}
+            testPid=4242
+            testPgid=4242
+            {functions}
+            stop_test_child
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [bash, str(runner)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls").read_text().splitlines()
+    assert "kill -s TERM -- -4242" in calls
+    assert "kill -s KILL -- -4242" in calls
+    assert calls.index("kill -s TERM -- -4242") < calls.index(
+        "kill -s KILL -- -4242"
+    )
+    assert calls.count("sleep 1") == 5
+    assert calls[-1] == "wait 4242"
+
+
+@pytest.mark.parametrize(
+    ("fake_exit", "fake_output", "expected_marker"),
+    [
+        (1, "3081 passed", "[WARN] Some tests failed"),
+        (0, "1 failed", "[OK] Test suite passed"),
+    ],
+    ids=["pytest_exit_1_success_output", "pytest_exit_0_failure_output"],
+)
+@pytest.mark.parametrize("powershell_name", ["powershell", "pwsh"])
+def test_windows_installer_trusts_pytest_exit_status(
+    tmp_path, windows_fake_uv, powershell_name, fake_exit, fake_output, expected_marker
+):
+    powershell = shutil.which(powershell_name)
+    if powershell is None:
+        pytest.skip(f"{powershell_name} unavailable")
+    section = _installer_test_section(
+        (ROOT / "install.ps1").read_text(encoding="utf-8")
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_fake_uv(fake_bin, exit_code=fake_exit, last_line=fake_output)
+    if windows_fake_uv is not None:
+        shutil.copy2(windows_fake_uv, fake_bin / "uv.exe")
+    command = textwrap.dedent(
+        f"""
+        $ErrorActionPreference = "Stop"
+        if (Get-Variable PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {{
+            $PSNativeCommandUseErrorActionPreference = $true
+        }}
+        function Info($msg) {{ Write-Output "[INFO] $msg" }}
+        function Ok($msg) {{ Write-Output "[OK] $msg" }}
+        function Warn($msg) {{ Write-Output "[WARN] $msg" }}
+        {section}
+        """
+    )
+    env = os.environ.copy()
+    env.update(
+        PATH=f"{fake_bin}{os.pathsep}{env['PATH']}",
+        FAKE_UV_EXIT=str(fake_exit),
+        FAKE_UV_OUTPUT=fake_output,
+    )
+
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=20,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert expected_marker in result.stdout
+    assert fake_output in result.stdout
+
+
+@pytest.mark.parametrize("powershell_name", ["powershell", "pwsh"])
+def test_windows_installer_error_stops_native_child_and_later_steps(
+    tmp_path, windows_fake_uv, powershell_name
+):
+    if os.name != "nt":
+        pytest.skip("Windows-only native process cleanup contract")
+    powershell = shutil.which(powershell_name)
+    if powershell is None:
+        pytest.skip(f"{powershell_name} unavailable")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    shutil.copy2(windows_fake_uv, fake_bin / "uv.exe")
+    started = tmp_path / "child.started"
+    uv_pid_file = tmp_path / "uv.pid"
+    python_pid_file = tmp_path / "python.pid"
+    python_started = tmp_path / "python.started"
+    child_script = tmp_path / "blocking-child.py"
+    child_script.write_text(
+        "import os\n"
+        "import time\n"
+        "from pathlib import Path\n"
+        "Path(os.environ['FAKE_PYTHON_PID_FILE']).write_text(str(os.getpid()))\n"
+        "Path(os.environ['FAKE_PYTHON_STARTED_FILE']).write_text('started')\n"
+        "while True:\n"
+        "    time.sleep(1)\n",
+        encoding="utf-8",
+    )
+    later = tmp_path / "later.marker"
+    section = _installer_test_section(
+        (ROOT / "install.ps1").read_text(encoding="utf-8")
+    )
+    injected_wait = textwrap.dedent(
+        """
+        $testDeadline = [DateTime]::UtcNow.AddSeconds(10)
+        while (-not (Test-Path -LiteralPath $env:FAKE_PYTHON_STARTED_FILE)) {
+            if ([DateTime]::UtcNow -ge $testDeadline) { throw "fake uv did not start" }
+            Start-Sleep -Milliseconds 10
+        }
+        throw "injected installer interruption"
+        """
+    ).strip()
+    section = section.replace("$testProcess.WaitForExit()", injected_wait, 1)
+    command = textwrap.dedent(
+        f"""
+        $ErrorActionPreference = "Stop"
+        function Info($msg) {{ Write-Output "[INFO] $msg" }}
+        function Ok($msg) {{ Write-Output "[OK] $msg" }}
+        function Warn($msg) {{ Write-Output "[WARN] $msg" }}
+        {section}
+        New-Item -ItemType File -Path {json.dumps(str(later))} | Out-Null
+        """
+    )
+    env = os.environ.copy()
+    env.update(
+        PATH=f"{fake_bin}{os.pathsep}{env['PATH']}",
+        FAKE_UV_MODE="block",
+        FAKE_UV_PID_FILE=str(uv_pid_file),
+        FAKE_UV_STARTED_FILE=str(started),
+        FAKE_UV_PYTHON=sys.executable,
+        FAKE_UV_CHILD_SCRIPT=str(child_script),
+        FAKE_PYTHON_PID_FILE=str(python_pid_file),
+        FAKE_PYTHON_STARTED_FILE=str(python_started),
+    )
+    error_log = tmp_path / "powershell-error.log"
+    with error_log.open("wb") as stderr:
+        result = subprocess.run(
+            [powershell, "-NoProfile", "-NonInteractive", "-Command", command],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=stderr,
+            timeout=30,
+            check=False,
+        )
+
+    assert result.returncode != 0
+    assert b"injected installer interruption" in error_log.read_bytes()
+    assert started.exists()
+    assert python_started.exists()
+    assert not later.exists()
+    import ctypes
+
+    survivors = []
+    for label, pid_file in (("uv", uv_pid_file), ("python", python_pid_file)):
+        pid = int(pid_file.read_text())
+        process = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+        if not process:
+            continue
+        exit_code = ctypes.c_ulong()
+        assert ctypes.windll.kernel32.GetExitCodeProcess(process, ctypes.byref(exit_code))
+        if exit_code.value == 259:
+            survivors.append(f"{label}:{pid}")
+            ctypes.windll.kernel32.TerminateProcess(process, 1)
+        ctypes.windll.kernel32.CloseHandle(process)
+    assert not survivors, f"native process tree survived installer cleanup: {survivors}"
 
 
 def _codex_mcp_toml(vault: Path, *, quoted: bool, conflicting: bool = False) -> str:

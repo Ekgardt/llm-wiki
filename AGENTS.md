@@ -81,6 +81,21 @@ resources). Native hooks, plugins, and wrappers are thin lifecycle adapters
 for events MCP cannot observe. Automatic health context is injected only when
 `doctor` reports degraded/error findings.
 
+**Superset product contract (approved 2026-07-19):** LLM Wiki is the single
+local-first memory, code-intelligence, and agent-control product for one person
+managing many agents, sessions, projects, repositories, branches, and worktrees.
+Normal Graphify and codebase-memory-mcp workflows must not require a separate
+installation. The approved target includes a native code-index kernel,
+repository-scoped generations, multi-repository contracts, temporal claims,
+episodic/semantic/procedural/prospective memory, one Adaptive Context Compiler,
+durable task/execution/artifact/budget control, an exception-driven local
+operator console, optional bounded watching, HTTP MCP, and broad ingestion.
+These additions remain derived or operational; they do not displace Markdown,
+Git, raw episodes, project journals, accepted decisions, or accepted artifacts
+as authority. Completion requires real paired task, token, latency, safety, and
+operator-attention evidence. A finished subplan or smoke fixture is not product
+completion. See `knowledge/notes/solo-operator-superset-product-decision.md`.
+
 **Reliable mutation boundary:** automatic Markdown writes use recoverable
 transactions with before/after hashes. Project handoff is projected from an
 append-only `journal.md`. `cache/` and `logs/` are disposable; `run/` must not be
@@ -302,7 +317,7 @@ for tests/e2e.
 ## 7. Quick command reference
 
 ```bash
-uv run pytest -q                              # run the test suite (3081 tests collected)
+uv run pytest -q                              # run the test suite (3609 tests collected)
 uv run ruff check scripts/ tests/             # Python static analysis
 uv run python scripts/lint_memory.py --scope all   # structural lint
 uv run python scripts/search_memory.py "query"     # hybrid search

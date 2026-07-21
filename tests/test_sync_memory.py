@@ -1018,6 +1018,76 @@ def test_installers_handle_sync_exit_codes_explicitly():
     assert 'LLM-Wiki installed with warnings' in powershell
 
 
+def test_sync_reports_legacy_change_separately_when_generation_is_deferred(
+    tmp_path, monkeypatch
+):
+    sync_memory = _load_sync_memory()
+    report = _doctor_report(index="degraded", overall="degraded")
+    report["checks"].append(
+        {
+            "id": "generation",
+            "status": "degraded",
+            "message": "generation is stale",
+            "details": {"freshness": "stale", "repairable": True},
+        }
+    )
+    monkeypatch.setattr(sync_memory.doctor, "run_doctor", lambda **kwargs: report)
+    monkeypatch.setattr(sync_memory, "_dependency_action", lambda **kwargs: _dependency_result())
+    monkeypatch.setattr(
+        sync_memory,
+        "_run_generation_builder",
+        lambda **kwargs: sync_memory._result(
+            "indexes",
+            "skipped",
+            "Evidence generation refresh was deferred; retry will rebuild from source.",
+            {"generation": "candidate", "partial": True, "reason": "time_limit"},
+        ),
+    )
+    monkeypatch.setattr(
+        sync_memory,
+        "_run_index_builder",
+        lambda **kwargs: sync_memory._result(
+            "indexes", "changed", "Derived search index was rebuilt.", {}
+        ),
+    )
+
+    result = sync_memory.run_sync(
+        root=tmp_path, state_root=tmp_path, home=tmp_path, apply=True
+    )
+    indexes = next(action for action in result["actions"] if action["id"] == "indexes")
+
+    assert indexes["status"] == "skipped"
+    assert result["overall_status"] == "degraded"
+    assert indexes["details"]["legacy_index"] == "changed"
+    assert indexes["details"]["generation_refresh"] == "skipped"
+    assert "synchronized" not in indexes["message"].casefold()
+
+
+def test_generation_timeout_does_not_claim_nonexistent_continuation(tmp_path, monkeypatch):
+    sync_memory = _load_sync_memory()
+    monkeypatch.setattr(
+        sync_memory.doctor,
+        "run_generation_maintenance",
+        lambda **kwargs: {
+            "status": "deferred",
+            "generation_id": None,
+            "partial": True,
+            "reason": "time_limit",
+        },
+    )
+
+    result = sync_memory._run_generation_builder(
+        root=tmp_path,
+        state_root=tmp_path,
+        timeout=30,
+        max_sources=10,
+    )
+
+    assert result["status"] == "skipped"
+    assert "continuation" not in result["message"].casefold()
+    assert "retry" in result["message"].casefold()
+
+
 @pytest.mark.parametrize(
     ("sync_exit", "expected_exit", "expected_text", "forbidden_text"),
     [
@@ -1033,7 +1103,9 @@ def test_powershell_installer_sync_block_behaves_by_exit_code(
     if pwsh is None:
         pytest.skip("PowerShell 7 is unavailable")
     source = (ROOT / "install.ps1").read_text(encoding="utf-8")
-    block = source.split("# ─── 8. Bounded runtime sync", 1)[1]
+    block = source.split(
+        "# --- 8. Bounded runtime sync --------------------------------------", 1
+    )[1]
     harness = f"""
 function Info([string]$Message) {{ Write-Output "INFO:$Message" }}
 function Warn([string]$Message) {{ Write-Output "WARN:$Message" }}

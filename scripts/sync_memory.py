@@ -471,7 +471,7 @@ def _run_generation_builder(
         {
             "built": "Evidence generation was refreshed.",
             "current": "Evidence generation is current.",
-            "deferred": "Evidence generation refresh was deferred for continuation.",
+            "deferred": "Evidence generation refresh was deferred; retry will rebuild from source.",
         }.get(status, "Evidence generation refresh failed."),
         {
             "generation": result.get("generation_id"),
@@ -616,6 +616,8 @@ def run_sync(
                 generation = _check_by_id(report, "generation")
                 index = _check_by_id(report, "index")
                 refreshes = []
+                generation_refresh = None
+                legacy_index_refresh = None
                 index_needs_refresh = (
                     apply and index["status"] != "ok" and index["details"].get("repairable")
                 )
@@ -626,14 +628,13 @@ def run_sync(
                     and generation["details"].get("repairable")
                 )
                 if generation_needs_refresh:
-                    refreshes.append(
-                        _run_generation_builder(
-                            root=root_path,
-                            state_root=state_path,
-                            timeout=remaining(),
-                            max_sources=doctor.DEFAULT_GENERATION_SOURCE_LIMIT,
-                        )
+                    generation_refresh = _run_generation_builder(
+                        root=root_path,
+                        state_root=state_path,
+                        timeout=remaining(),
+                        max_sources=doctor.DEFAULT_GENERATION_SOURCE_LIMIT,
                     )
+                    refreshes.append(generation_refresh)
                 if index_needs_refresh:
                     index_action = _run_index_builder(
                         root=root_path,
@@ -653,6 +654,7 @@ def run_sync(
                                 "Rebuilt index did not pass freshness validation.",
                                 after["details"],
                             )
+                    legacy_index_refresh = index_action
                     refreshes.append(index_action)
                 if refreshes:
                     if len(refreshes) == 1:
@@ -660,25 +662,28 @@ def run_sync(
                         actions.append(action)
                         continue
                     statuses = {item["status"] for item in refreshes}
-                    fatal_error = any(
-                        item["status"] == "error" and not item["details"].get("timed_out")
-                        for item in refreshes
-                    )
                     status = (
                         "error"
-                        if fatal_error
-                        else "changed"
-                        if "changed" in statuses
+                        if "error" in statuses
                         else "skipped"
                         if "skipped" in statuses
+                        else "changed"
+                        if "changed" in statuses
                         else "ok"
                     )
+                    if status == "skipped" and legacy_index_refresh is not None:
+                        message = (
+                            "Legacy search index was rebuilt, but evidence generation "
+                            "refresh was deferred."
+                        )
+                    elif status == "changed":
+                        message = "Evidence generation and legacy search index were refreshed."
+                    else:
+                        message = "Derived index synchronization requires attention."
                     action = _result(
                         "indexes",
                         status,
-                        "Derived indexes were synchronized."
-                        if status in {"ok", "changed"}
-                        else "Derived index synchronization requires attention.",
+                        message,
                         {
                             "generation": next(
                                 (
@@ -692,6 +697,16 @@ def run_sync(
                                 item["details"].get("partial", False)
                                 or item["details"].get("timed_out", False)
                                 for item in refreshes
+                            ),
+                            "generation_refresh": (
+                                generation_refresh["status"]
+                                if generation_refresh is not None
+                                else "not_needed"
+                            ),
+                            "legacy_index": (
+                                legacy_index_refresh["status"]
+                                if legacy_index_refresh is not None
+                                else "not_needed"
                             ),
                             "actions": [item["status"] for item in refreshes],
                             "results": [item["details"] for item in refreshes],

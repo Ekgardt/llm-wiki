@@ -31,22 +31,48 @@ from code_graph import (  # noqa: E402
     parse_file,
     refine_call_edges_with_co_changes,
 )
+from code_languages import CODE_LANGUAGE_BY_SUFFIX  # noqa: E402
 from import_resolver import (  # noqa: E402
     build_python_symbol_registry,
     resolve_python_imports_and_calls,
 )
 
 
-def _activate_graph(tmp_path):
+def _activate_graph(tmp_path, repository=None):
     from generation_catalog import GenerationCatalog
+    from repository_scope import resolve_repository_scope
 
     from tests.test_evidence_graph_recovery import _publish, _rich_graph_records
 
     catalog = GenerationCatalog(tmp_path / "state")
-    _publish(catalog, "active", graph_records=_rich_graph_records())
+    scope = resolve_repository_scope(repository or tmp_path)
+    _publish(
+        catalog,
+        "active",
+        graph_records=_rich_graph_records(),
+        repository_scope=scope.as_dict(),
+    )
     catalog.register("active")
     catalog.activate("active", expected_active=None)
     return catalog
+
+
+def _activate_nested_repository_graph(tmp_path, monkeypatch):
+    repository = tmp_path / "repository"
+    nested = repository / "src" / "feature"
+    nested.mkdir(parents=True)
+    subprocess.run(
+        ["git", "init", str(repository)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    source = repository / "app.py"
+    source.write_text("def caller():\n    callee()\n", encoding="utf-8")
+    catalog = _activate_graph(tmp_path, repository)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(catalog.state_root))
+    return repository, nested, source
 
 
 def test_code_graph_importable_as_package():
@@ -153,6 +179,116 @@ def test_live_fallback_report_is_explicit_when_generation_is_missing(tmp_path):
     assert result["fallback"] is True
 
 
+def test_repository_binding_rejects_same_basename_repository_in_shared_state(
+    tmp_path, monkeypatch
+):
+    import code_graph
+    from generation_catalog import GenerationCatalog
+    from repository_scope import resolve_repository_scope
+
+    from tests.test_evidence_graph_recovery import _publish, _rich_graph_records
+
+    repository_a = tmp_path / "owner-a" / "project"
+    repository_b = tmp_path / "owner-b" / "project"
+    repository_a.mkdir(parents=True)
+    repository_b.mkdir(parents=True)
+    (repository_b / "b.py").write_text("def b_only_symbol():\n    pass\n", encoding="utf-8")
+    records = _rich_graph_records()
+    for node in records["nodes"]:
+        node["metadata"]["name"] = "a_only_symbol"
+    state = tmp_path / "shared-state"
+    catalog = GenerationCatalog(state)
+    _publish(
+        catalog,
+        "repo-a",
+        graph_records=records,
+        repository_scope=resolve_repository_scope(repository_a).as_dict(),
+    )
+    catalog.register("repo-a")
+    assert catalog.activate("repo-a", expected_active=None)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
+
+    dead = code_graph.find_dead_code(repository_b, with_report=True)
+    architecture = code_graph.get_architecture(repository_b, with_report=True)
+
+    for report in (dead, architecture):
+        assert report["source_generation"] is None
+        assert report["fallback"] is True
+        assert "a_only_symbol" not in json.dumps(report)
+        assert str(repository_a) not in json.dumps(report)
+
+
+def test_repository_binding_exact_scope_still_uses_store(tmp_path, monkeypatch):
+    import code_graph
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    catalog = _activate_graph(tmp_path, repository)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(catalog.state_root))
+    monkeypatch.setattr(
+        code_graph,
+        "_workspace_call_graph",
+        lambda directory: (_ for _ in ()).throw(AssertionError("live scan used")),
+    )
+
+    report = code_graph.find_dead_code(repository, with_report=True)
+
+    assert report["source_generation"] == "active"
+    assert report["fallback"] is False
+
+
+def test_external_repository_uses_canonical_state_root_without_env(tmp_path, monkeypatch):
+    import code_graph
+    import memory_state
+
+    repository = tmp_path / "external-repository"
+    repository.mkdir()
+    catalog = _activate_graph(tmp_path, repository)
+    monkeypatch.delenv("LLM_WIKI_STATE_ROOT", raising=False)
+    monkeypatch.setattr(memory_state, "STATE_ROOT", catalog.state_root)
+    monkeypatch.setattr(
+        code_graph,
+        "_workspace_call_graph",
+        lambda directory: (_ for _ in ()).throw(AssertionError("live scan used")),
+    )
+
+    report = code_graph.find_dead_code(repository, with_report=True)
+
+    assert report["source_generation"] == "active"
+    assert report["fallback"] is False
+
+
+def test_nested_directory_store_renders_occurrence_from_checkout_root(
+    tmp_path, monkeypatch
+):
+    import code_graph
+
+    repository, nested, source = _activate_nested_repository_graph(tmp_path, monkeypatch)
+
+    report = code_graph.find_dead_code(nested, with_report=True)
+
+    caller = next(item for item in report["candidates"] if item["name"] == "caller")
+    assert Path(caller["file"]) == source
+    assert Path(caller["file"]) != nested / "app.py"
+    assert report["source_scope"] == "checkout"
+    assert Path(report["source_root"]) == repository
+
+
+def test_nested_directory_store_renders_edge_evidence_from_checkout_root(
+    tmp_path, monkeypatch
+):
+    import code_graph
+
+    repository, nested, source = _activate_nested_repository_graph(tmp_path, monkeypatch)
+
+    report = code_graph.find_callers("callee", nested, with_report=True)
+
+    assert Path(report["callers"][0]["file"]) == source
+    assert Path(report["callers"][0]["file"]) != nested / "app.py"
+    assert report["source_scope"] == "checkout"
+    assert Path(report["source_root"]) == repository
+
+
 def test_dependency_and_path_facades_use_bounded_live_fallback_without_generation(
     tmp_path,
 ):
@@ -201,16 +337,29 @@ def test_store_facades_switch_only_after_generation_activation(tmp_path, monkeyp
     import code_graph
     from evidence_graph import EvidenceGraph
     from generation_catalog import GenerationCatalog
+    from repository_scope import resolve_repository_scope
 
     from tests.test_evidence_graph_recovery import _publish, _rich_graph_records
 
     catalog = GenerationCatalog(tmp_path / "state")
-    _publish(catalog, "prior", graph_records=_rich_graph_records())
+    scope = resolve_repository_scope(tmp_path).as_dict()
+    _publish(
+        catalog,
+        "prior",
+        graph_records=_rich_graph_records(),
+        repository_scope=scope,
+    )
     catalog.register("prior")
     catalog.activate("prior", expected_active=None)
     monkeypatch.setattr(code_graph, "_generation_catalog", lambda directory: catalog)
 
-    _publish(catalog, "next", parent="prior", graph_records=_rich_graph_records())
+    _publish(
+        catalog,
+        "next",
+        parent="prior",
+        graph_records=_rich_graph_records(),
+        repository_scope=scope,
+    )
     catalog.register("next")
     entered = threading.Event()
     release = threading.Event()
@@ -240,6 +389,7 @@ def test_store_facades_switch_only_after_generation_activation(tmp_path, monkeyp
 def test_store_hotspots_count_distinct_callers_not_call_sites(tmp_path, monkeypatch):
     import code_graph
     from generation_catalog import GenerationCatalog
+    from repository_scope import resolve_repository_scope
 
     from tests.test_evidence_graph_recovery import _publish, _rich_graph_records
 
@@ -255,7 +405,12 @@ def test_store_hotspots_count_distinct_callers_not_call_sites(tmp_path, monkeypa
         }
     )
     catalog = GenerationCatalog(tmp_path / "state")
-    _publish(catalog, "active", graph_records=records)
+    _publish(
+        catalog,
+        "active",
+        graph_records=records,
+        repository_scope=resolve_repository_scope(tmp_path).as_dict(),
+    )
     catalog.register("active")
     catalog.activate("active", expected_active=None)
     monkeypatch.setattr(code_graph, "_generation_catalog", lambda directory: catalog)
@@ -323,20 +478,31 @@ class TestDetectLanguage:
     def test_unknown(self):
         assert detect_language(Path("readme.md")) is None
 
-    def test_case_insensitive(self):
-        assert detect_language(Path("Test.PY")) == "python"
+    @pytest.mark.parametrize(
+        ("name", "language"),
+        [("APP.PY", "python"), ("component.generated.D.TS", "typescript")],
+    )
+    def test_final_suffix_is_case_insensitive(self, name, language):
+        assert detect_language(Path(name)) == language
 
-    def test_all_twelve_languages_and_common_extensions(self):
+    @pytest.mark.parametrize(
+        ("suffix", "language"), sorted(CODE_LANGUAGE_BY_SUFFIX.items())
+    )
+    def test_all_supported_suffixes(self, suffix, language):
+        assert detect_language(Path(f"example{suffix}")) == language
+
+    def test_language_map_has_independent_core_contract(self):
         expected = {
-            "example.py": "python", "example.js": "javascript",
-            "example.ts": "typescript", "example.go": "go", "example.rs": "rust",
-            "Example.java": "java", "example.c": "c", "example.cpp": "cpp",
-            "example.rb": "ruby", "example.php": "php", "Example.cs": "c_sharp",
-            "example.sh": "bash",
+            ".py": "python",
+            ".ts": "typescript",
+            ".cpp": "cpp",
+            ".cs": "c_sharp",
+            ".sh": "bash",
         }
 
-        assert {name: detect_language(Path(name)) for name in expected} == expected
-        assert set(LANGUAGE_MAP.values()) == set(expected.values())
+        assert {
+            suffix: CODE_LANGUAGE_BY_SUFFIX.get(suffix) for suffix in expected
+        } == expected
 
 
 LANGUAGE_CASES = [

@@ -38,7 +38,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── impact_analysis.py           v4.0: LINK layer (code→wiki impact)
 │   ├── build_tiers.py               v4.0: L0/L1/L2 progressive disclosure
 │   └── queries/                     v4.0: 12 tree-sitter .scm language queries
-├── tests/                         CODE — regression suite (pytest, 3081 tests)
+├── tests/                         CODE — regression suite (pytest, 3609 tests)
 ├── docs/                          CODE — architecture + user guide
 ├── skills/                        CODE — 9 agent skills (SKILL.md)
 ├── rules/                         CODE — file-handling policies
@@ -56,11 +56,13 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   └── feedback/                    correction candidates
 │
 ├── cache/                        RUNTIME — gitignored (FTS5/vector/graph/LanceDB)
-│   ├── evidence-graph/              new target generation layout
+│   ├── evidence-graph/              immutable corpus-generation layout
 │   │   ├── catalog.sqlite3            active-generation catalog
 │   │   ├── telemetry.sqlite3          private cross-generation telemetry
 │   │   └── generations/<generation-id>/ immutable after activation
 │   │       ├── manifest.json
+│   │       ├── source-manifest.json
+│   │       ├── incremental-manifest.json optional reuse/invalidation record
 │   │       ├── evidence.sqlite3
 │   │       ├── search.sqlite3
 │   │       ├── vectors.npy             optional
@@ -112,6 +114,46 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 | `$LLM_WIKI_STATE_ROOT` | **The vault root itself** | Runtime root → `cache/`, `logs/`, `run/` at vault root. Override for multi-disk or hermetic tests. |
 | `$MEMORY_LLM_PROVIDER` | Auto-detected (`opencode` → `codex` → `claude` → `openai` → `ollama`) | LLM backend for compile/flush/query. `fake` for tests. |
 
+## Implemented corpus-generation checkpoint
+
+The current checkpoint implements one complete `corpus-generation/v2` for one
+repository checkout or worktree. `repository_scope` is a closed
+`repository-scope/v1` object containing the repository ID, checkout ID, canonical
+checkout root, Git common directory, and captured commit. Repository identity is
+shared by linked worktrees; checkout identity remains specific to the worktree.
+Readers requesting repository-scoped evidence accept only an active or validated
+fallback generation with the exact same scope. A scope mismatch returns no
+generation rather than reading another checkout's evidence.
+
+Every v2 generation contains `manifest.json`, canonical `source-manifest.json`,
+`evidence.sqlite3`, and `search.sqlite3`. Incremental builds also contain canonical
+`incremental-manifest.json`, which records source deltas, ownership, dependency and
+workspace invalidation metadata, and exact reuse configuration. Optional vectors
+remain an all-or-nothing pair. `source-manifest.json` binds the captured source
+membership, hashes, collection policy, and collector/extractor identity. The
+Evidence Graph and FTS artifacts are both built from that exact immutable
+`CorpusSnapshot`; live membership and hashes are recaptured immediately before
+publication.
+
+Publication is complete or absent. The builder writes and fsyncs every required
+artifact, validates canonical manifests, repository scope, artifact hashes, SQLite
+integrity, graph evidence spans, FTS content, and the final directory seal, then
+registers the candidate and compare-and-swap activates it in the catalog. A partial,
+stale, raced, timed-out, or changed candidate is never published as active. The
+previous active generation stays readable. The catalog selects one active
+generation, can register complete orphans without activating them, and repairs a
+corrupt pointer only to a revalidated prior generation in activation history or
+parent lineage.
+
+`doctor.run_generation_maintenance()` is the shared bounded, fenced refresh path.
+It resolves repository/worktree scope, captures knowledge and approved workspace
+code, performs workspace-level extraction, reuses exact parent records when valid,
+and returns `current`, `built`, `deferred`, or `error` without mutating knowledge.
+Nightly maintenance invokes this same path and treats only `current` or `built` as
+success. This checkpoint does not document a native code-index kernel, multi-repo
+portfolio generation, temporal/control-plane services, or an operator console as
+implemented.
+
 ## What lives where
 
 ### CODE zone (tracked in git)
@@ -121,7 +163,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
   `maybe_compile.py` (PID-locked spawn), `search_memory.py` (triple-RRF),
   `llm_client.py` (5 backends + fake), `integration_adapter.py` (thin host
   lifecycle boundary), `mcp_server.py` (12 task-shaped tools), and `doctor.py`.
-- `tests/` — 3081 tests collected. Hermetic via `conftest.py` (pins
+- `tests/` — 3609 tests collected. Hermetic via `conftest.py` (pins
   `LLM_WIKI_ROOT` to checkout, redirects `LLM_WIKI_STATE_ROOT` to a temp
   dir, defaults `MEMORY_LLM_PROVIDER=fake`).
 - `docs/` — `ARCHITECTURE.md`, `USER-GUIDE.md`, `AGENTS.md` (knowledge
@@ -169,13 +211,16 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 - `knowledge/feedback/` — correction candidates (JSON). Gitignored.
 
 ### RUNTIME zone (always gitignored, inside vault)
-- Task 9 is implemented by `generation_catalog.py` and `corpus_snapshot.py`.
-  The bounded rollback-journal catalog provides CAS activation, validated fallback,
-  orphan recovery, and deadlines. Corpus snapshots bind immutable captured bytes to
-  source hashes, and the FTS, NumPy, Lance, contextual-retrieval, and tier builders
-  can publish from one generation snapshot. POSIX collection is
+- Complete corpus generation is implemented by `generation_catalog.py`,
+  `corpus_snapshot.py`, `evidence_graph_builder.py`, `evidence_graph.py`,
+  `search_memory.py`, `code_extractor.py`, and `repository_scope.py`. The bounded
+  rollback-journal catalog provides repository-scoped active selection, CAS
+  activation, validated fallback, orphan recovery, and deadlines. Corpus snapshots
+  bind immutable captured bytes to source hashes; Evidence Graph v2 and FTS are
+  required artifacts built from the exact same snapshot. Incremental reuse never
+  changes the requirement to publish a complete generation. POSIX collection is
   descriptor-authoritative; Windows reparse and identity checks are best effort.
-  This adds no daemon or automatic migration, and does not remove legacy caches.
+  This adds no daemon or automatic legacy-cache removal.
 - `cache/` — `index.sqlite` (FTS5), `vectors.npy` (binary numpy, mmap),
   `vectors_meta.json` (metadata),
   `code_tools.json` (fresh code-tool detection and active semantic capabilities).
@@ -183,13 +228,15 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
   legacy bounded read-only `access_log.jsonl`, `cache/compile/` (validated compile-plan
   action cache), and `cache/claims.sqlite3` (derived claim index).
 - `cache/evidence-graph/` — disposable derived graph, FTS, vector, tier, and
-  telemetry generation state. This is the new target generation layout:
+  telemetry generation state. The implemented v2 layout is:
 
 ```text
 cache/evidence-graph/catalog.sqlite3
 cache/evidence-graph/telemetry.sqlite3
 cache/evidence-graph/generations/<generation-id>/
 ├── manifest.json
+├── source-manifest.json
+├── incremental-manifest.json    optional; present for incremental builds
 ├── evidence.sqlite3
 ├── search.sqlite3
 ├── vectors.npy
@@ -197,6 +244,8 @@ cache/evidence-graph/generations/<generation-id>/
 ```
 
   `catalog.sqlite3` contains generation metadata and selects one active generation.
+  Repository-scoped readers validate its `repository_scope` before using that
+  generation or any prior-generation fallback.
   `telemetry.sqlite3` is private, disposable cross-generation retrieval telemetry.
   It is not authoritative and contains query hashes rather than raw query or response
   content. Ingestion enforces a transactional row ceiling. Explicit bounded promotion
@@ -204,17 +253,22 @@ cache/evidence-graph/generations/<generation-id>/
   access counters, making retries idempotent. Legacy `access_log.jsonl` is stats-only
   history and is never promoted automatically. Telemetry sits beside the catalog and
   generations, never under `run/`.
-  A generation is immutable after activation. The vector pair is optional and must
+  A v2 generation is immutable after activation and always contains the source
+  manifest, Evidence Graph, and FTS snapshot. The incremental manifest is optional;
+  it describes reuse but never permits partial publication. The vector pair is
+  optional and must
   be absent, complete, or explicitly stale; partial vectors are never silently
   used. `cache/evidence-graph/` can be deleted and regenerated from authoritative
   Markdown, Git, and project journals. No generation database belongs under `run/`;
   `run/` remains operational state only.
-- Activation is register-then-CAS: manifest/schema, source membership, artifact
-  hashes, SQLite integrity, and evidence spans validate before a short catalog
-  transaction changes the active pointer. A failed build cannot replace the prior
+- Activation is validate-register-then-CAS: canonical manifests, exact
+  `repository_scope`, source membership, artifact hashes, SQLite integrity, graph
+  evidence spans, FTS contents, and the final directory seal validate before a short
+  catalog transaction changes the active pointer. The live corpus is recaptured
+  before publication. A failed, deferred, or partial build cannot replace the prior
   active generation. Recovery may register complete orphan generations without
   activating them. A corrupt active generation is replaced only by a revalidated
-  prior generation from activation history/parent lineage.
+  same-scope prior generation from activation history/parent lineage.
 - Legacy `cache/index.sqlite`, `cache/vectors.npy`, `cache/vectors_meta.json`, and
   `cache/lancedb/` remain readable during migration. They are disposable derived
   caches retained as fallback, not members of a generation. They must not be removed
@@ -224,8 +278,8 @@ cache/evidence-graph/generations/<generation-id>/
 ### Evidence-cache migration and rollback
 
 There is no automatic legacy-cache deletion and no supported end-user migration CLI
-yet. The current generation builder/catalog APIs are integrated, while operator CLI
-evidence is **evidence pending**. Migration therefore preserves both layouts:
+yet. Generation refresh is integrated with `doctor.run_generation_maintenance()`
+and nightly maintenance. Migration therefore preserves both layouts:
 
 1. Keep authoritative `knowledge/`, Git history, and project journals unchanged.
 2. Keep all four legacy cache paths while a candidate generation is built and

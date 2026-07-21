@@ -20,6 +20,7 @@
 - 2026-07-13 — Recorded the approved Stage 2 reliable-memory architecture after current-practice research: recoverable Markdown transactions, project checkpoint journals, manifest-verified archives, content-addressed compile plans, a SQLite rollback-journal priority queue, and evidence-backed atomic claims.
 - 2026-07-15 — Completed Stage 2 reliable-memory implementation and repaired reciprocal links among its public architecture decisions. Clarified that Obsidian remains an optional viewer outside the MCP and lifecycle-adapter boundary.
 - 2026-07-17 — Recorded the public decision that evidence retrieval uses disposable immutable cache generations while Markdown, Git, and project journals remain authoritative.
+- 2026-07-19 — Recorded the approved product contract: LLM Wiki becomes one local-first memory, code-intelligence, and agent-control system for a single operator managing many agents and sessions, with Graphify and codebase-memory-mcp workflow replacement proven by paired benchmarks rather than feature counts.
 
 ## Editorial note
 This log is vault metadata — an append-only editorial changelog of compile passes and hygiene actions over `knowledge/`, not content derived from `knowledge/raw/` or `knowledge/inbox/`. New entries are appended at the bottom by compile passes and by hand; entries are never rewritten or removed.

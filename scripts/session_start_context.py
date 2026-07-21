@@ -36,7 +36,6 @@ from context_budget import (  # noqa: E402
     DEFAULT_CONTEXT_BUDGET,
     BudgetExceededError,
     ContextItem,
-    pack_context,
 )
 from memory_state import (  # noqa: E402
     REPORTS_DIR,
@@ -66,7 +65,7 @@ DEBUG_FILE = DEBUG_DIR / "session-start-last.txt"
 #   6 changes      — recent knowledge log entries
 #   7 history      — latest daily-log excerpt
 SECTION_PRIORITIES: dict[str, int] = {
-    "title": 1,
+    "title": 3,
     "guardrails": 1,
     "metacognitive": 2,
     "health": 2,
@@ -641,7 +640,7 @@ def _section_item(name: str, text: str) -> ContextItem | None:
         1: "safety",
         2: "health",
         3: "evidence",
-        4: "decision",
+        4: "handoff",
         5: "evidence",
         6: "history",
         7: "history",
@@ -662,26 +661,33 @@ def _section_item(name: str, text: str) -> ContextItem | None:
     )
 
 
-def _pack_session_sections(sections: list[tuple[str, str]]) -> str:
-    """Pack sections under the shared SessionStart budget without mid-item slicing."""
-    items = [
+def _context_items(sections: list[tuple[str, str]]) -> list[ContextItem]:
+    """Convert named SessionStart sections to semantic context items."""
+    return [
         item
         for item in (_section_item(name, text) for name, text in sections)
         if item is not None
     ]
+
+
+def _pack_session_items(items: list[ContextItem]) -> str:
+    """Pack SessionStart items under the shared budget without slicing."""
+    from context_compiler import compile_context_items
+
     if not items:
         return ""
     try:
-        packed = pack_context(
+        packed = compile_context_items(
             items,
-            DEFAULT_CONTEXT_BUDGET,
+            budget=DEFAULT_CONTEXT_BUDGET,
         )
         return packed.text
     except BudgetExceededError as error:
         return error.failure.render()
 
 
-def build_context() -> str:
+def build_context_items() -> list[ContextItem]:
+    """Build structured SessionStart items for direct and adapter injection."""
     index_txt = (
         MEMORY_INDEX.read_text(encoding="utf-8", errors="replace")
         if MEMORY_INDEX.exists() else ""
@@ -701,14 +707,20 @@ def build_context() -> str:
         ("health", health_block()),
         ("advisory", advisory_block()),
         ("impact", _impact_block()),
-        ("index_header", "## knowledge/index.md (trimmed)"),
-        ("index", index_trimmed),
-        ("daily_header", f"## Latest daily log: {daily_name}"),
-        ("daily", daily_block),
-        ("log_header", "## Recent knowledge/log.md"),
-        ("log", log_tail),
+        ("index", f"## knowledge/index.md (trimmed)\n\n{index_trimmed}"),
+        ("daily", f"## Latest daily log: {daily_name}\n\n{daily_block}"),
+        ("log", f"## Recent knowledge/log.md\n\n{log_tail}"),
     ]
-    return _pack_session_sections(sections) + "\n"
+    return _context_items(sections)
+
+
+def _pack_session_sections(sections: list[tuple[str, str]]) -> str:
+    """Pack named sections under the shared SessionStart budget."""
+    return _pack_session_items(_context_items(sections))
+
+
+def build_context() -> str:
+    return _pack_session_items(build_context_items()) + "\n"
 
 
 def write_debug(additional: str, daily_name: str) -> None:

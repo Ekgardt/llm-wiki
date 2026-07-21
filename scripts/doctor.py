@@ -1357,6 +1357,9 @@ def _generation_result(
         "generation_schema": None,
         "source_manifest": "unknown",
         "evidence_integrity": "unknown",
+        "search_index": "unknown",
+        "search_schema": None,
+        "search_integrity": "unknown",
         "vector_state": "unknown",
         "vector_model": None,
         "vector_dimensions": None,
@@ -1371,6 +1374,20 @@ def _generation_result(
     return _result("generation", status, message, baseline)
 
 
+def _maintenance_extractor_identity() -> str:
+    import code_extractor
+    import code_languages
+    import corpus_snapshot
+
+    inputs = {
+        "classifier": code_languages.CLASSIFIER_IDENTITY,
+        "code_extractor": code_extractor.EXTRACTOR_VERSION,
+        "corpus_extractor": corpus_snapshot.EXTRACTOR_VERSION,
+    }
+    digest = hashlib.sha256(reliable_memory.canonical_json_bytes(inputs)).hexdigest()
+    return f"maintenance-extractors/v3:{digest}"
+
+
 def _generation_check(
     root: Path,
     state_root: Path,
@@ -1378,11 +1395,15 @@ def _generation_check(
     deadline: float = float("inf"),
     *,
     max_sources: int = DEFAULT_GENERATION_SOURCE_LIMIT,
+    cancelled=None,
 ) -> dict:
     """Validate the catalog-selected immutable generation without writing."""
     if isinstance(max_sources, bool) or not isinstance(max_sources, int) or max_sources < 1:
         raise ValueError("max_sources must be a positive integer")
     catalog_path = state_root / "cache" / "evidence-graph" / "catalog.sqlite3"
+    invalid_details: dict[str, object] = {"catalog": "invalid", "repairable": True}
+    diagnostic_manifest: dict[str, object] | None = None
+    generation_path: Path | None = None
     kind, catalog_info = _safe_kind(catalog_path, state_root)
     if kind == "missing":
         return _generation_result(
@@ -1432,12 +1453,29 @@ def _generation_check(
             ).fetchone()
             if registered is None:
                 raise sqlite3.DatabaseError("active generation is not registered")
+            invalid_details.update(
+                catalog="valid",
+                active_generation=active,
+                catalog_schema="valid",
+            )
         if _deadline_reached(deadline):
             raise TimeoutError("generation check deadline")
 
         import generation_catalog
 
         generation_path = state_root / "cache" / "evidence-graph" / "generations" / active
+        diagnostic_value = json.loads(
+            read_runtime_bytes(
+                generation_path / "manifest.json",
+                state_root,
+                max_bytes=MAX_MANIFEST_BYTES,
+            )
+        )
+        if isinstance(diagnostic_value, dict):
+            diagnostic_manifest = diagnostic_value
+            invalid_details["generation_schema"] = diagnostic_manifest.get(
+                "graph_schema_version"
+            )
         manifest, seal = generation_catalog._validate_generation(  # noqa: SLF001
             generation_path,
             state_root,
@@ -1451,7 +1489,32 @@ def _generation_check(
         source_manifest = json.loads(source_manifest_raw)
         policy = source_manifest["policy"]
 
-        from corpus_snapshot import collect_corpus
+        from corpus_snapshot import COLLECTOR_VERSION, EXTRACTOR_VERSION, collect_corpus
+        from repository_scope import resolve_repository_scope
+
+        repository_scope = resolve_repository_scope(
+            root,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+        scope_state = (
+            "current"
+            if manifest.get("repository_scope") == repository_scope.as_dict()
+            else "missing"
+            if "repository_scope" not in manifest
+            else "mismatched"
+        )
+        corpus_extraction_state = (
+            "current"
+            if manifest.get("collector_version") == COLLECTOR_VERSION
+            and manifest.get("extractor_version") == EXTRACTOR_VERSION
+            else "stale"
+        )
+        graph_extraction_state = (
+            "current"
+            if manifest.get("graph_extractor_version") == _maintenance_extractor_identity()
+            else "stale"
+        )
 
         snapshot = collect_corpus(
             root,
@@ -1487,7 +1550,18 @@ def _generation_check(
         age = max(0, (now_ns - age_timestamp_ns) // 1_000_000_000)
         stale_age = age > GENERATION_FRESH_SECONDS
         vector_state = str(manifest["vector_state"])
-        status = "degraded" if delta or stale_age or vector_state == "stale" or unresolved else "ok"
+        complete_v2 = manifest.get("schema_version") == "corpus-generation/v2"
+        identity_stale = (
+            scope_state != "current"
+            or corpus_extraction_state != "current"
+            or graph_extraction_state != "current"
+            or not complete_v2
+        )
+        status = (
+            "degraded"
+            if delta or stale_age or identity_stale or vector_state == "stale" or unresolved
+            else "ok"
+        )
         return _generation_result(
             status,
             "Evidence generation requires refresh."
@@ -1499,10 +1573,16 @@ def _generation_check(
             generation_schema=manifest["graph_schema_version"],
             source_manifest="valid",
             evidence_integrity="valid",
+            search_index="valid" if complete_v2 else "missing",
+            search_schema="corpus-search/v1" if complete_v2 else None,
+            search_integrity="valid" if complete_v2 else "missing",
             vector_state=vector_state,
             vector_model=manifest["embedding_model_id"],
             vector_dimensions=manifest["vector_dimensions"],
-            freshness="stale" if delta or stale_age else "fresh",
+            freshness="stale" if delta or stale_age or identity_stale else "fresh",
+            repository_scope=scope_state,
+            extraction_identity=graph_extraction_state,
+            corpus_extraction_identity=corpus_extraction_state,
             unindexed_delta=delta,
             unresolved_observations=unresolved,
             age_seconds=age,
@@ -1527,11 +1607,35 @@ def _generation_check(
         json.JSONDecodeError,
         sqlite3.Error,
     ):
+        if (
+            generation_path is not None
+            and diagnostic_manifest is not None
+            and diagnostic_manifest.get("schema_version") == "corpus-generation/v2"
+        ):
+            invalid_details["search_schema"] = "corpus-search/v1"
+            search_kind = _safe_kind(generation_path / "search.sqlite3", state_root)[0]
+            if search_kind == "missing":
+                invalid_details.update(search_index="missing", search_integrity="missing")
+            elif search_kind == "regular":
+                try:
+                    from search_memory import validate_generation_fts_artifact
+
+                    validate_generation_fts_artifact(
+                        generation_path,
+                        diagnostic_manifest,
+                        state_root=state_root,
+                        deadline=deadline,
+                    )
+                except (OSError, PermissionError, TypeError, ValueError, sqlite3.Error):
+                    invalid_details.update(search_index="corrupt", search_integrity="invalid")
+                else:
+                    invalid_details.update(search_index="valid", search_integrity="valid")
+            else:
+                invalid_details.update(search_index="corrupt", search_integrity="invalid")
         return _generation_result(
             "error",
             "Evidence generation catalog or active artifacts are invalid.",
-            catalog="invalid",
-            repairable=True,
+            **invalid_details,
         )
 
 
@@ -2772,14 +2876,152 @@ def _repair_generation_catalog(
         repaired.append({"action": "cleanup_generation_orphans", "count": removed})
 
 
-def _generation_source_extractor(snapshot, root: Path):
+def _partition_code_extraction(
+    result,
+    code_sources,
+    *,
+    deadline: float | None = None,
+    cancelled=None,
+):
+    """Partition one workspace extraction by the source that proves each record."""
+    from evidence_graph_builder import SourceExtraction
+
+    source_ids = tuple(source.record.logical_id for source in code_sources)
+    grouped = {
+        source_id: {
+            "nodes": [],
+            "occurrences": [],
+            "assertions": [],
+            "evidence": [],
+            "observations": [],
+            "dependencies": [],
+        }
+        for source_id in source_ids
+    }
+
+    def check_stop() -> None:
+        if cancelled is not None and cancelled():
+            raise TimeoutError("workspace extraction partition cancelled")
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("workspace extraction partition deadline reached")
+
+    check_stop()
+    occurrence_sources: dict[str, set[str]] = {}
+    record_sources: dict[str, str] = {}
+    node_references: dict[str, set[str]] = {}
+    dependencies = {source_id: set() for source_id in source_ids}
+    workspace_sensitive = set()
+    for occurrence in result.occurrences:
+        check_stop()
+        source_id = str(occurrence["source_id"])
+        node_id = str(occurrence["node_id"])
+        occurrence_sources.setdefault(node_id, set()).add(source_id)
+        node_references.setdefault(node_id, set()).add(source_id)
+        grouped[source_id]["occurrences"].append(occurrence)
+    for evidence in result.evidence:
+        check_stop()
+        source_id = str(evidence["source_id"])
+        grouped[source_id]["evidence"].append(evidence)
+        assertion_id = evidence.get("assertion_id")
+        observation_id = evidence.get("observation_id")
+        if assertion_id is not None:
+            record_sources[str(assertion_id)] = source_id
+        if observation_id is not None:
+            record_sources[str(observation_id)] = source_id
+    for assertion in result.assertions:
+        check_stop()
+        owner = record_sources[str(assertion["assertion_id"])]
+        grouped[owner]["assertions"].append(assertion)
+        node_references.setdefault(str(assertion["source_node_id"]), set()).add(owner)
+        target = assertion.get("target_node_id")
+        if target is not None:
+            node_references.setdefault(str(target), set()).add(owner)
+            dependencies[owner].update(occurrence_sources.get(str(target), ()))
+    for observation in result.observations:
+        check_stop()
+        owner = record_sources[str(observation["observation_id"])]
+        grouped[owner]["observations"].append(observation)
+        source_node = observation.get("source_node_id")
+        if source_node is not None:
+            node_references.setdefault(str(source_node), set()).add(owner)
+        if (
+            observation["reason"] in {"missing_dependency", "unresolved_reference"}
+            and str(observation["observation_id"])
+            not in result.observation_source_dependencies
+        ):
+            workspace_sensitive.add(owner)
+
+    for observation_id, candidate_sources in result.observation_source_dependencies.items():
+        check_stop()
+        dependencies[record_sources[str(observation_id)]].update(candidate_sources)
+    for dependency in getattr(result, "dependencies", ()):
+        check_stop()
+        owner = dependency.get("source_id")
+        owners = (
+            (str(owner),)
+            if owner is not None
+            else tuple(
+                sorted(
+                    occurrence_sources.get(str(dependency["dependent_node_id"]), ())
+                )
+            )
+        )
+        for source_id in owners:
+            grouped[source_id]["dependencies"].append(dependency)
+
+    fallback_owner = min(source_ids)
+    for node in result.nodes:
+        check_stop()
+        node_id = str(node["node_id"])
+        owners = occurrence_sources.get(node_id)
+        if not owners:
+            owners = node_references.get(node_id, {fallback_owner})
+        for source_id in sorted(owners):
+            grouped[source_id]["nodes"].append(node)
+    for source_id in source_ids:
+        check_stop()
+        dependencies[source_id].discard(source_id)
+
+    partitions = {}
+    for source_id in source_ids:
+        check_stop()
+        records = grouped[source_id]
+        partitions[source_id] = SourceExtraction(
+            nodes=tuple(records["nodes"]),
+            occurrences=tuple(records["occurrences"]),
+            assertions=tuple(records["assertions"]),
+            evidence=tuple(records["evidence"]),
+            observations=tuple(records["observations"]),
+            dependencies=tuple(records["dependencies"]),
+            source_dependencies=tuple(sorted(dependencies[source_id])),
+            workspace_sensitive=source_id in workspace_sensitive,
+        )
+    return partitions
+
+
+def _generation_source_extractor(snapshot, repository_id: str):
     """Return the incremental builder adapter for one immutable snapshot."""
     from evidence_graph_builder import SourceExtraction
 
     by_id = {source.record.logical_id: source for source in snapshot.sources}
+    code_sources = tuple(
+        sorted(
+            (
+                source for source in snapshot.sources
+                if not source.record.relative_path.startswith("knowledge/")
+            ),
+            key=lambda source: (
+                source.record.logical_id,
+                source.record.relative_path,
+                source.record.language or "",
+            ),
+        )
+    )
+    code_partitions = None
 
     def extract(source, content, *, sources, source_bytes, deadline, cancelled):
-        del sources, source_bytes
+        nonlocal code_partitions
+        del sources
         captured = by_id[str(source["source_id"])]
         if captured.content != content:
             raise ValueError("incremental extraction bytes differ from snapshot")
@@ -2795,7 +3037,25 @@ def _generation_source_extractor(snapshot, root: Path):
         else:
             from code_extractor import extract_code
 
-            result = extract_code((captured,), repository_id=root.name or "vault")
+            if code_partitions is None:
+                if any(
+                    item.content != source_bytes[item.record.logical_id]
+                    for item in code_sources
+                ):
+                    raise ValueError("workspace extraction bytes differ from snapshot")
+                workspace_result = extract_code(
+                    code_sources,
+                    repository_id=repository_id,
+                    deadline=deadline,
+                    cancelled=cancelled,
+                )
+                code_partitions = _partition_code_extraction(
+                    workspace_result,
+                    code_sources,
+                    deadline=deadline,
+                    cancelled=cancelled,
+                )
+            result = code_partitions[captured.record.logical_id]
         digest = hashlib.sha256(content).hexdigest()
         fingerprints = {
             key: hashlib.sha256(f"{key}:{digest}".encode("ascii")).hexdigest()
@@ -2814,7 +3074,8 @@ def _generation_source_extractor(snapshot, root: Path):
             evidence=tuple(result.evidence),
             observations=tuple(result.observations),
             dependencies=tuple(getattr(result, "dependencies", ())),
-            source_dependencies=(),
+            source_dependencies=tuple(getattr(result, "source_dependencies", ())),
+            workspace_sensitive=bool(getattr(result, "workspace_sensitive", False)),
             invalidation_fingerprints=fingerprints,
         )
 
@@ -2829,18 +3090,27 @@ def _build_or_refresh_generation(
     cancelled,
     max_sources: int,
     force_rebuild: bool,
+    coordinator: object | None = None,
 ) -> dict:
     from corpus_snapshot import (
         APPROVED_CODE_ROOTS,
-        canonical_source_manifest_sha256,
         collect_corpus,
     )
     from evidence_graph_builder import (
+        GRAPH_SCHEMA_VERSION,
         IncrementalReuseConfig,
         build_incremental_generation,
     )
     from generation_catalog import GenerationCatalog
     from reliable_memory import canonical_json_bytes
+    from repository_scope import resolve_repository_scope
+
+    repository_scope = resolve_repository_scope(
+        root,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    maintenance_extractor_version = _maintenance_extractor_identity()
 
     code_roots = tuple(
         relative for relative in sorted(APPROVED_CODE_ROOTS) if (root / relative).is_dir()
@@ -2856,15 +3126,49 @@ def _build_or_refresh_generation(
     catalog = GenerationCatalog(state_root)
     parent = catalog.get_active(deadline=deadline)
     parent_id = None if parent is None else str(parent["generation_id"])
-    source_manifest_sha256 = canonical_source_manifest_sha256(
-        (source.record for source in snapshot.sources),
-        snapshot.policy,
-        extractor_version="maintenance-extractors/v1",
+    source_manifest_sha256 = snapshot.corpus_sha256
+    policy = {
+        "daily_paths": list(snapshot.policy.daily_paths),
+        "code_roots": list(snapshot.policy.code_roots),
+        "include_historical": snapshot.policy.include_historical,
+        "as_of": snapshot.policy.as_of,
+    }
+    workspace_membership = sorted(
+        [
+            source.record.logical_id,
+            source.record.relative_path,
+            source.record.language,
+        ]
+        for source in snapshot.sources
+        if not source.record.relative_path.startswith("knowledge/")
     )
+    workspace_manifest_sha256 = hashlib.sha256(
+        canonical_json_bytes(workspace_membership)
+    ).hexdigest()
+    parent_workspace_manifest_sha256 = None
+    if parent_id is not None:
+        from evidence_graph_builder import _load_incremental_manifest
+
+        parent_incremental, _parent_generation = _load_incremental_manifest(
+            catalog,
+            parent_id,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+        if parent_incremental is not None:
+            parent_workspace_manifest_sha256 = parent_incremental["reuse_config"].get(
+                "workspace_manifest_sha256"
+            )
     if (
         parent is not None
         and not force_rebuild
+        and parent.get("schema_version") == "corpus-generation/v2"
+        and parent.get("repository_scope") == repository_scope.as_dict()
+        and parent.get("collector_version") == snapshot.collector_version
+        and parent.get("extractor_version") == snapshot.extractor_version
+        and parent.get("graph_extractor_version") == maintenance_extractor_version
         and parent.get("source_manifest_sha256") == source_manifest_sha256
+        and parent_workspace_manifest_sha256 == workspace_manifest_sha256
     ):
         return {
             "status": "current",
@@ -2872,21 +3176,13 @@ def _build_or_refresh_generation(
             "sources": len(snapshot.sources),
             "partial": False,
         }
-
-    policy = {
-        "daily_paths": list(snapshot.policy.daily_paths),
-        "code_roots": list(snapshot.policy.code_roots),
-        "include_historical": snapshot.policy.include_historical,
-        "as_of": snapshot.policy.as_of,
-    }
-    policy_hash = hashlib.sha256(canonical_json_bytes(policy)).hexdigest()
     config = IncrementalReuseConfig(
-        extractor_version="maintenance-extractors/v1",
+        extractor_version=maintenance_extractor_version,
         grammar_version="builtin-grammars/v1",
         compiler_version=f"python-{sys.version_info.major}.{sys.version_info.minor}",
         resolver_config_sha256=hashlib.sha256(b"llm-wiki-maintenance-resolver/v1").hexdigest(),
-        schema_version="evidence-graph/v1",
-        workspace_manifest_sha256=policy_hash,
+        schema_version=GRAPH_SCHEMA_VERSION,
+        workspace_manifest_sha256=workspace_manifest_sha256,
     )
     source_rows = [
         {
@@ -2909,7 +3205,7 @@ def _build_or_refresh_generation(
         catalog,
         sources=source_rows,
         source_bytes=source_bytes,
-        extractor=_generation_source_extractor(snapshot, root),
+        extractor=_generation_source_extractor(snapshot, repository_scope.repository_id),
         reuse_config=config,
         generation_id=generation_id,
         parent_generation_id=None if force_rebuild else parent_id,
@@ -2917,6 +3213,10 @@ def _build_or_refresh_generation(
         expected_active=parent_id,
         deadline=deadline,
         cancelled=cancelled,
+        repository_scope=repository_scope,
+        snapshot=snapshot,
+        publication_root=root,
+        coordinator=coordinator,
     )
     if not built.activated:
         return {
@@ -3007,6 +3307,7 @@ def run_generation_maintenance(
                 cancelled=guard.cancelled,
                 max_sources=max_sources,
                 force_rebuild=force_rebuild,
+                coordinator=coordinator,
             )
             result["repairs"] = repaired
             return result
@@ -3123,6 +3424,7 @@ def run_doctor(
     repair_actions: set[str] | frozenset[str] | None = None,
     now: datetime | None = None,
     time_budget_seconds: float = DEFAULT_TIME_BUDGET_SECONDS,
+    deadline: float | None = None,
 ) -> dict:
     """Return a JSON-safe local health report; mutate only with ``repair=True``."""
     selected_repairs = set(VALID_REPAIR_ACTIONS if repair_actions is None else repair_actions)
@@ -3140,7 +3442,16 @@ def run_doctor(
     repaired: list[dict] = []
     repair_errors: dict[str, list[str]] = {}
     repair_deferred: set[str] = set()
-    deadline = time.monotonic() + max(0.0, time_budget_seconds)
+    if deadline is None:
+        deadline = time.monotonic() + max(0.0, time_budget_seconds)
+    elif (
+        isinstance(deadline, bool)
+        or not isinstance(deadline, (int, float))
+        or not math.isfinite(deadline)
+    ):
+        raise ValueError("deadline must be a finite monotonic timestamp")
+    else:
+        deadline = float(deadline)
 
     if repair:
         maintenance: tuple[Any, dict[str, object]] | None = None

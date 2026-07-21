@@ -6,7 +6,7 @@
   "properties": {
     "generation_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
     "parent_generation_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
-    "schema_version": {"type": "string", "minLength": 1, "maxLength": 128},
+    "schema_version": {"enum": ["corpus-generation/v1", "corpus-generation/v2"]},
     "collector_version": {"type": "string", "minLength": 1, "maxLength": 128},
     "extractor_version": {"type": "string", "minLength": 1, "maxLength": 128},
     "tokenizer_version": {"type": "string", "minLength": 1, "maxLength": 128},
@@ -14,9 +14,50 @@
     "embedding_model_id": {"oneOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 128}]},
     "embedding_model_revision": {"oneOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 128}]},
     "vector_dimensions": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 1, "maximum": 65536}]},
-    "graph_schema_version": {"const": "evidence-graph/v1"},
-    "graph_extractor_version": {"type": "string", "minLength": 1, "maxLength": 128},
+    "graph_schema_version": {"oneOf": [{"type": "null"}, {"const": "evidence-graph/v2"}]},
+    "graph_extractor_version": {"oneOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 128}]},
     "source_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "repository_scope": {
+      "type": "object",
+      "required": ["schema_version", "repository_id", "checkout_id", "checkout_root", "git_common_dir", "git_commit"],
+      "properties": {
+        "schema_version": {"const": "repository-scope/v1"},
+        "repository_id": {"type": "string", "pattern": "^repository:[0-9a-f]{64}$"},
+        "checkout_id": {"type": "string", "pattern": "^checkout:[0-9a-f]{64}$"},
+        "checkout_root": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^(?:/(?!/)(?:(?!\\.{1,2}(?:/|$))[^/\\u0000\\r\\n]+(?:/(?!\\.{1,2}(?:/|$))[^/\\u0000\\r\\n]+)*)?|[A-Z]:/(?:(?!\\.{1,2}(?:/|$))[^/\\\\\\u0000\\r\\n]+(?:/(?!\\.{1,2}(?:/|$))[^/\\\\\\u0000\\r\\n]+)*)?)$"},
+        "git_common_dir": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^(?:/(?!/)(?:(?!\\.{1,2}(?:/|$))[^/\\u0000\\r\\n]+(?:/(?!\\.{1,2}(?:/|$))[^/\\u0000\\r\\n]+)*)?|[A-Z]:/(?:(?!\\.{1,2}(?:/|$))[^/\\\\\\u0000\\r\\n]+(?:/(?!\\.{1,2}(?:/|$))[^/\\\\\\u0000\\r\\n]+)*)?)$"}
+          ]
+        },
+        "git_commit": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"}
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["git_common_dir", "git_commit"],
+          "properties": {
+            "git_common_dir": {"type": "string"},
+            "git_commit": {"type": ["null", "string"]}
+          }
+        },
+        {
+          "type": "object",
+          "required": ["git_common_dir", "git_commit"],
+          "properties": {
+            "git_common_dir": {"type": "null"},
+            "git_commit": {"type": "null"}
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
     "artifacts": {
       "type": "array",
       "minItems": 1,
@@ -34,5 +75,31 @@
     },
     "vector_state": {"enum": ["absent", "complete", "stale"]}
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {"properties": {"schema_version": {"const": "corpus-generation/v2"}}},
+      "then": {
+        "required": ["repository_scope"],
+        "properties": {
+          "graph_schema_version": {"const": "evidence-graph/v2"},
+          "graph_extractor_version": {"type": "string", "minLength": 1, "maxLength": 128},
+          "artifacts": {
+            "contains": {"properties": {"path": {"const": "source-manifest.json"}}, "required": ["path"]},
+            "allOf": [
+              {"contains": {"properties": {"path": {"const": "evidence.sqlite3"}}, "required": ["path"]}},
+              {"contains": {"properties": {"path": {"const": "search.sqlite3"}}, "required": ["path"]}}
+            ],
+            "items": {
+              "properties": {
+                "path": {
+                  "enum": ["source-manifest.json", "evidence.sqlite3", "search.sqlite3", "incremental-manifest.json", "vectors.npy", "vectors.json"]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

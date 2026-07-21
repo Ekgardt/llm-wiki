@@ -65,6 +65,13 @@ _SECRET_KEYS = {
 }
 
 
+def _require_active(
+    deadline: float, cancelled: Callable[[], bool] | None = None
+) -> None:
+    if time.monotonic() >= deadline or bool(cancelled and cancelled()):
+        raise TimeoutError("queue mutation deadline or cancellation reached")
+
+
 class LeaseFenceError(RuntimeError):
     """Raised when a lease token no longer owns an unexpired task."""
 
@@ -1186,15 +1193,26 @@ class MemoryQueue:
             raise LeaseFenceError(f"lease is stale or not owned: {lease.id}")
         return row
 
-    def cancel(self, task_id: str) -> bool:
+    def cancel(
+        self,
+        task_id: str,
+        *,
+        deadline: float = float("inf"),
+        cancelled: Callable[[], bool] | None = None,
+    ) -> bool:
+        _require_active(deadline, cancelled)
         now = _as_utc(self._clock())
-        with self._connect() as connection, begin_immediate(connection):
+        with self._connect() as connection, begin_immediate(
+            connection,
+            before_commit=lambda: _require_active(deadline, cancelled),
+        ):
             row = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
             if row is None or row["state"] in _TERMINAL_STATES:
                 return False
             if row["state"] == "leased":
                 self._record_attempt(connection, row, now, "cancelled", "cancelled")
             self._clear_payload_failure(connection, str(row["payload_json"]))
+            _require_active(deadline, cancelled)
             connection.execute(
                 """UPDATE tasks SET state='cancelled', updated_at=?, lease_owner=NULL,
                        lease_token=NULL, lease_expires_at=NULL, lease_heartbeat_at=NULL,
@@ -1203,9 +1221,19 @@ class MemoryQueue:
             )
             return True
 
-    def redrive(self, task_id: str) -> str:
+    def redrive(
+        self,
+        task_id: str,
+        *,
+        deadline: float = float("inf"),
+        cancelled: Callable[[], bool] | None = None,
+    ) -> str:
+        _require_active(deadline, cancelled)
         now = _as_utc(self._clock())
-        with self._connect() as connection, begin_immediate(connection):
+        with self._connect() as connection, begin_immediate(
+            connection,
+            before_commit=lambda: _require_active(deadline, cancelled),
+        ):
             row = connection.execute(
                 "SELECT * FROM tasks WHERE id=?", (task_id,)
             ).fetchone()
@@ -1217,6 +1245,7 @@ class MemoryQueue:
             self._assert_payload_not_fenced(connection, str(row["payload_json"]))
             payload_bytes = str(row["payload_json"]).encode("utf-8")
             replacement = uuid.UUID(int=self._rng.getrandbits(128)).hex
+            _require_active(deadline, cancelled)
             connection.execute(
                 """INSERT INTO tasks(
                        id, kind, handler_version, payload_json, input_hash, state,
@@ -1634,8 +1663,14 @@ class MemoryQueue:
             return True
 
     def purge(
-        self, *, terminal_before: datetime, export_path: Path
+        self,
+        *,
+        terminal_before: datetime,
+        export_path: Path,
+        deadline: float = float("inf"),
+        cancelled: Callable[[], bool] | None = None,
     ) -> PurgeReceipt:
+        _require_active(deadline, cancelled)
         requested_cutoff = _as_utc(terminal_before)
         retention_cutoff = _as_utc(self._clock()) - timedelta(
             days=DEFAULTS.queue_result_retention_days
@@ -1684,6 +1719,7 @@ class MemoryQueue:
             _harden_owner_only(results_export, 0o700)
             result_manifest: list[dict[str, str]] = []
             for row in rows:
+                _require_active(deadline, cancelled)
                 reference = row["result_reference"]
                 digest = row["result_sha256"]
                 if reference is None:
@@ -1721,40 +1757,51 @@ class MemoryQueue:
                 != manifest_bytes
             ):
                 raise QueueOperationError("export_verification_failed")
+            _require_active(deadline, cancelled)
             staging.replace(export)
             fsync_directory(parent)
         except Exception:
             _remove_export_staging(staging)
             raise
         if task_ids:
-            placeholders = ",".join("?" for _ in task_ids)
-            with self._connect() as connection, begin_immediate(connection):
-                current = connection.execute(
-                    f"""SELECT id, state, updated_at FROM tasks
-                        WHERE id IN ({placeholders})""",  # noqa: S608
-                    task_ids,
-                ).fetchall()
-                if len(current) != len(task_ids) or any(
-                    row["state"] not in ("succeeded", "cancelled")
-                    or row["updated_at"] >= _timestamp(cutoff)
-                    for row in current
+            try:
+                _require_active(deadline, cancelled)
+                placeholders = ",".join("?" for _ in task_ids)
+                with self._connect() as connection, begin_immediate(
+                    connection,
+                    before_commit=lambda: _require_active(deadline, cancelled),
                 ):
-                    raise QueueOperationError("purge_selection_changed")
-                connection.execute("DROP TRIGGER attempt_history_immutable_delete")
-                connection.execute(
-                    f"DELETE FROM attempt_history WHERE task_id IN ({placeholders})",  # noqa: S608
-                    task_ids,
-                )
-                connection.execute(
-                    f"DELETE FROM tasks WHERE id IN ({placeholders})",  # noqa: S608
-                    task_ids,
-                )
-                connection.execute(
-                    """CREATE TRIGGER attempt_history_immutable_delete
-                       BEFORE DELETE ON attempt_history BEGIN
-                       SELECT RAISE(ABORT, 'attempt history is immutable'); END"""
-                )
+                    current = connection.execute(
+                        f"""SELECT id, state, updated_at FROM tasks
+                            WHERE id IN ({placeholders})""",  # noqa: S608
+                        task_ids,
+                    ).fetchall()
+                    if len(current) != len(task_ids) or any(
+                        row["state"] not in ("succeeded", "cancelled")
+                        or row["updated_at"] >= _timestamp(cutoff)
+                        for row in current
+                    ):
+                        raise QueueOperationError("purge_selection_changed")
+                    _require_active(deadline, cancelled)
+                    connection.execute("DROP TRIGGER attempt_history_immutable_delete")
+                    connection.execute(
+                        f"DELETE FROM attempt_history WHERE task_id IN ({placeholders})",  # noqa: S608
+                        task_ids,
+                    )
+                    connection.execute(
+                        f"DELETE FROM tasks WHERE id IN ({placeholders})",  # noqa: S608
+                        task_ids,
+                    )
+                    connection.execute(
+                        """CREATE TRIGGER attempt_history_immutable_delete
+                           BEFORE DELETE ON attempt_history BEGIN
+                           SELECT RAISE(ABORT, 'attempt history is immutable'); END"""
+                    )
+            except BaseException:
+                _remove_export_staging(export)
+                raise
             for row in rows:
+                _require_active(deadline, cancelled)
                 reference = row["result_reference"]
                 if reference is None:
                     continue
@@ -2630,16 +2677,37 @@ def recover_stale_leases(max_age_seconds: int = 600) -> int:
     return _queue().recover_expired_leases()
 
 
-def cancel(task_id: str) -> bool:
-    return _queue().cancel(task_id)
+def cancel(
+    task_id: str,
+    *,
+    deadline: float = float("inf"),
+    cancelled: Callable[[], bool] | None = None,
+) -> bool:
+    return _queue().cancel(task_id, deadline=deadline, cancelled=cancelled)
 
 
-def redrive(task_id: str) -> str:
-    return _queue().redrive(task_id)
+def redrive(
+    task_id: str,
+    *,
+    deadline: float = float("inf"),
+    cancelled: Callable[[], bool] | None = None,
+) -> str:
+    return _queue().redrive(task_id, deadline=deadline, cancelled=cancelled)
 
 
-def purge(*, terminal_before: datetime, export_path: Path) -> PurgeReceipt:
-    return _queue().purge(terminal_before=terminal_before, export_path=export_path)
+def purge(
+    *,
+    terminal_before: datetime,
+    export_path: Path,
+    deadline: float = float("inf"),
+    cancelled: Callable[[], bool] | None = None,
+) -> PurgeReceipt:
+    return _queue().purge(
+        terminal_before=terminal_before,
+        export_path=export_path,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
 
 
 def retained_queue_state() -> bool:

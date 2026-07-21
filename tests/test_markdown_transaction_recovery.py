@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1352,6 +1353,52 @@ def test_recovery_honors_cancellation_before_next_transaction(
     assert len(recovered) <= 1
 
 
+def test_recovery_rolls_back_state_when_deadline_expires_before_sql_commit(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    coordinator = MarkdownCoordinator(vault, state_root)
+    transaction = coordinator.prepare(
+        [MarkdownChange.create("knowledge/notes/recover-fence.md", b"new")],
+        operation_id="recover-precommit-fence",
+    )
+    expired = False
+
+    def cancelled() -> bool:
+        return expired
+
+    @contextmanager
+    def expire_before_commit(database, *, before_commit=None):
+        nonlocal expired
+        statements = []
+        database.set_trace_callback(statements.append)
+        database.execute("BEGIN IMMEDIATE")
+        try:
+            yield database
+            expires_here = any(
+                'UPDATE "transaction" SET state = \'applying\'' in statement
+                for statement in statements
+            )
+            if expires_here:
+                expired = True
+            if before_commit is not None:
+                before_commit()
+            database.commit()
+        except BaseException:
+            database.rollback()
+            raise
+
+    monkeypatch.setattr(markdown_transaction, "begin_immediate", expire_before_commit)
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        coordinator.recover(
+            deadline=time.monotonic() + 5,
+            cancelled=cancelled,
+        )
+
+    assert coordinator._record(transaction.id).state == "prepared"
+    assert not (vault / "knowledge/notes/recover-fence.md").exists()
+
+
 def test_two_subprocesses_recover_the_same_transaction_safely(
     vault: Path, state_root: Path, tmp_path: Path
 ):
@@ -1450,6 +1497,96 @@ def test_undo_is_new_forward_transaction_with_parent(vault: Path, state_root: Pa
     assert target.read_bytes() == b"before"
 
 
+def test_undo_expired_deadline_does_not_prepare_inverse(vault: Path, state_root: Path):
+    target = vault / "knowledge/notes/page.md"
+    target.write_bytes(b"before")
+    coordinator = MarkdownCoordinator(vault, state_root)
+    original = coordinator.prepare(
+        [MarkdownChange.replace("knowledge/notes/page.md", b"after")],
+        operation_id="expired-undo-original",
+    )
+    coordinator.apply(original.id)
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        coordinator.undo(original.id, deadline=time.monotonic() - 1)
+
+    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+        count = database.execute('SELECT COUNT(*) FROM "transaction"').fetchone()[0]
+    assert count == 1
+    assert target.read_bytes() == b"after"
+
+
+def test_undo_rolls_back_prepare_when_cancelled_at_sql_commit(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    target = vault / "knowledge/notes/page.md"
+    target.write_bytes(b"before")
+    coordinator = MarkdownCoordinator(vault, state_root)
+    original = coordinator.prepare(
+        [MarkdownChange.replace("knowledge/notes/page.md", b"after")],
+        operation_id="undo-precommit-original",
+    )
+    coordinator.apply(original.id)
+    expired = False
+    commits = 0
+
+    def cancelled() -> bool:
+        return expired
+
+    @contextmanager
+    def expire_before_commit(database, *, before_commit=None):
+        nonlocal commits, expired
+        statements = []
+        database.set_trace_callback(statements.append)
+        database.execute("BEGIN IMMEDIATE")
+        try:
+            yield database
+            expires_here = any(
+                'INSERT INTO "transaction"' in statement for statement in statements
+            )
+            if expires_here:
+                expired = True
+            if before_commit is not None:
+                before_commit()
+            database.commit()
+            if expires_here:
+                commits += 1
+        except BaseException:
+            database.rollback()
+            raise
+
+    monkeypatch.setattr(markdown_transaction, "begin_immediate", expire_before_commit)
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        coordinator.undo(
+            original.id,
+            deadline=time.monotonic() + 5,
+            cancelled=cancelled,
+        )
+
+    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+        count = database.execute('SELECT COUNT(*) FROM "transaction"').fetchone()[0]
+    assert commits == 0
+    assert count == 1
+    assert target.read_bytes() == b"after"
+
+
+def test_apply_expired_deadline_does_not_mutate_target(vault: Path, state_root: Path):
+    target = vault / "knowledge/notes/page.md"
+    target.write_bytes(b"before")
+    coordinator = MarkdownCoordinator(vault, state_root)
+    transaction = coordinator.prepare(
+        [MarkdownChange.replace("knowledge/notes/page.md", b"after")],
+        operation_id="expired-apply",
+    )
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        coordinator.apply(transaction.id, deadline=time.monotonic() - 1)
+
+    assert target.read_bytes() == b"before"
+    assert coordinator._record(transaction.id).state == "prepared"
+
+
 @pytest.mark.parametrize(
     ("change", "expected"),
     [
@@ -1530,6 +1667,65 @@ def test_prune_retains_artifacts_for_thirty_days_then_removes_them(
     assert (state_root / "run/transactions" / transaction.id).is_dir()
     assert coordinator.prune(now=created + timedelta(days=30, seconds=1)) == 1
     assert not (state_root / "run/transactions" / transaction.id).exists()
+
+
+def test_prune_rolls_back_marker_when_cancelled_at_sql_commit(
+    vault: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    coordinator = MarkdownCoordinator(vault, state_root)
+    transaction = coordinator.prepare(
+        [MarkdownChange.create("knowledge/notes/prune-fence.md", b"new")],
+        operation_id="prune-precommit-fence",
+    )
+    coordinator.apply(transaction.id)
+    old = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+        database.execute(
+            'UPDATE "transaction" SET updated_at = ? WHERE id = ?',
+            (old.isoformat().replace("+00:00", "Z"), transaction.id),
+        )
+        database.commit()
+    expired = False
+
+    def cancelled() -> bool:
+        return expired
+
+    @contextmanager
+    def expire_before_commit(database, *, before_commit=None):
+        nonlocal expired
+        statements = []
+        database.set_trace_callback(statements.append)
+        database.execute("BEGIN IMMEDIATE")
+        try:
+            yield database
+            expires_here = any(
+                "SET artifacts_pruned_at" in statement for statement in statements
+            )
+            if expires_here:
+                expired = True
+            if before_commit is not None:
+                before_commit()
+            database.commit()
+        except BaseException:
+            database.rollback()
+            raise
+
+    monkeypatch.setattr(markdown_transaction, "begin_immediate", expire_before_commit)
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        coordinator.prune(
+            now=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            deadline=time.monotonic() + 5,
+            cancelled=cancelled,
+        )
+
+    with sqlite3.connect(state_root / "run/markdown-transactions.sqlite3") as database:
+        pruned_at = database.execute(
+            'SELECT artifacts_pruned_at FROM "transaction" WHERE id = ?',
+            (transaction.id,),
+        ).fetchone()[0]
+    assert pruned_at is None
+    assert (state_root / "run/transactions" / transaction.id).is_dir()
 
 
 @pytest.mark.parametrize("retention_days", [-1, 0, 29])

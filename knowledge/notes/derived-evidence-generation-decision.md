@@ -78,3 +78,7 @@ undo artifacts retain their existing protections.
   https://www.sqlite.org/atomiccommit.html
 - SQLite rollback-mode locking and local-filesystem cautions:
   https://www.sqlite.org/lockingv3.html
+
+## Related
+
+- [[solo-operator-superset-product-decision]]

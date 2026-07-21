@@ -676,6 +676,12 @@ class DailyArchiver:
     ) -> bool:
         return time.monotonic() >= deadline or bool(cancelled and cancelled())
 
+    def _require_recovery_active(
+        self, deadline: float, cancelled: Callable[[], bool] | None
+    ) -> None:
+        if self._recovery_stopped(deadline, cancelled):
+            raise TimeoutError("archive recovery cancelled or deadline reached")
+
     def _recover_hidden_builds(
         self,
         *,
@@ -688,6 +694,7 @@ class DailyArchiver:
             try:
                 self._bounded_tree(build)
             except (OSError, PermissionError, ValueError) as exc:
+                self._require_recovery_active(deadline, cancelled)
                 self._quarantine_hidden_build(build, "unsafe_hidden_build")
                 raise ArchiveConflict("unsafe hidden archive build") from exc
             try:
@@ -700,12 +707,16 @@ class DailyArchiver:
                 )
                 final = build.parent / intent["final_bag_name"]
                 if final.exists():
+                    self._require_recovery_active(deadline, cancelled)
                     self._remove_build(build)
                     continue
+                self._require_recovery_active(deadline, cancelled)
                 self._prepare_build_for_publish(build)
+                self._require_recovery_active(deadline, cancelled)
                 build.replace(final)
                 fsync_directory(final.parent)
             except (OSError, TypeError, ValueError, EvidenceResolutionError):
+                self._require_recovery_active(deadline, cancelled)
                 self._remove_build(build)
 
     def _quarantine_hidden_build(self, build: Path, reason: str) -> None:
@@ -741,14 +752,29 @@ class DailyArchiver:
         fsync_file(record_path)
         fsync_directory(root)
 
-    def _remove_flat(self, daily_id: str, digest: str) -> None:
+    def _remove_flat(
+        self,
+        daily_id: str,
+        digest: str,
+        *,
+        deadline: float = float("inf"),
+        cancelled: Callable[[], bool] | None = None,
+    ) -> None:
+        if self._recovery_stopped(deadline, cancelled):
+            raise TimeoutError("archive recovery cancelled or deadline reached")
         relative = f"knowledge/daily/{daily_id}.md"
+        bounds = (
+            {}
+            if deadline == float("inf") and cancelled is None
+            else {"deadline": deadline, "cancelled": cancelled}
+        )
         transaction = self.coordinator.prepare(
             [MarkdownChange.delete(relative, max_before_bytes=MAX_DAILY_BYTES)],
             operation_id=f"archive-remove:{daily_id}:{digest}",
             preconditions={relative: digest},
+            **bounds,
         )
-        self.coordinator.apply(transaction.id)
+        self.coordinator.apply(transaction.id, **bounds)
 
     def _remove_flat_after_eligibility_recheck(
         self,
@@ -757,7 +783,11 @@ class DailyArchiver:
         *,
         hot_days: int,
         transaction_retention_days: int,
+        deadline: float = float("inf"),
+        cancelled: Callable[[], bool] | None = None,
     ) -> None:
+        if self._recovery_stopped(deadline, cancelled):
+            raise TimeoutError("archive recovery cancelled or deadline reached")
         queue = self.queue
         fence = queue.acquire_source_fence(
             daily_id, digest, lease_seconds=self.source_lease_seconds
@@ -774,6 +804,8 @@ class DailyArchiver:
                         heartbeat.refresh(),
                         hot_days=hot_days,
                         transaction_retention_days=transaction_retention_days,
+                        deadline=deadline,
+                        cancelled=cancelled,
                     )
             except QueueOperationError as exc:
                 if exc.code == "source_fence_lost":
@@ -798,7 +830,11 @@ class DailyArchiver:
         *,
         hot_days: int,
         transaction_retention_days: int,
+        deadline: float = float("inf"),
+        cancelled: Callable[[], bool] | None = None,
     ) -> None:
+        if self._recovery_stopped(deadline, cancelled):
+            raise TimeoutError("archive recovery cancelled or deadline reached")
         try:
             with queue.source_finalization(fence):
                 source = self.daily_root / f"{fence.daily_id}.md"
@@ -816,7 +852,12 @@ class DailyArchiver:
                         "daily is not archive eligible: "
                         + ", ".join(eligibility.reasons)
                     )
-                self._remove_flat(fence.daily_id, fence.source_digest)
+                self._remove_flat(
+                    fence.daily_id,
+                    fence.source_digest,
+                    deadline=deadline,
+                    cancelled=cancelled,
+                )
         except QueueOperationError as exc:
             if exc.code in {"source_failure", "source_referenced"}:
                 raise ValueError(f"daily is not archive eligible: {exc.code}") from exc
@@ -856,6 +897,7 @@ class DailyArchiver:
                 if sha256_bytes(flat_bytes) == digest:
                     keeper = paths[0]
                     for duplicate in paths[1:]:
+                        self._require_recovery_active(deadline, cancelled)
                         self._quarantine(
                             duplicate,
                             daily_id,
@@ -867,10 +909,13 @@ class DailyArchiver:
                         digest,
                         hot_days=hot_days,
                         transaction_retention_days=transaction_retention_days,
+                        deadline=deadline,
+                        cancelled=cancelled,
                     )
                     recovered.extend((ArchiveReceipt(daily_id, digest, keeper, "recovered"),))
                 else:
                     for path in paths:
+                        self._require_recovery_active(deadline, cancelled)
                         self._quarantine(path, daily_id, digest)
                         recovered.extend(
                             (ArchiveReceipt(daily_id, digest, path, "quarantined"),)
@@ -904,6 +949,7 @@ class DailyArchiver:
         )
         _harden_owner_only(temporary, 0o600)
         fsync_file(temporary)
+        self._require_recovery_active(deadline, cancelled)
         temporary.replace(index)
         fsync_directory(self.archive_root)
         return index

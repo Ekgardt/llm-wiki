@@ -19,6 +19,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -105,7 +106,12 @@ def _daily_lock(timeout: float = 10.0, poll: float = 0.05):
 
 
 def locked_append(
-    daily_path: Path, text: str, operation_id: str | None = None
+    daily_path: Path,
+    text: str,
+    operation_id: str | None = None,
+    *,
+    deadline: float = float("inf"),
+    cancelled: Callable[[], bool] | None = None,
 ) -> None:
     """Append text to a daily-log file under the shared cross-process lock.
 
@@ -118,13 +124,30 @@ def locked_append(
     header = f"# Daily Session Memory — {daily_path.stem}\n".encode()
     if not daily_path.exists():
         append_knowledge(
-            stable_operation_id("daily-header", daily_path.name, header), daily_path, header
+            stable_operation_id("daily-header", daily_path.name, header),
+            daily_path,
+            header,
+            deadline=deadline,
+            cancelled=cancelled,
         )
     block = (text if text.endswith("\n") else text + "\n").encode("utf-8")
-    append_knowledge(operation_id, daily_path, block)
+    append_knowledge(
+        operation_id,
+        daily_path,
+        block,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
 
 
-def locked_append_once(daily_path: Path, text: str, operation_id: str) -> bool:
+def locked_append_once(
+    daily_path: Path,
+    text: str,
+    operation_id: str,
+    *,
+    deadline: float = float("inf"),
+    cancelled: Callable[[], bool] | None = None,
+) -> bool:
     """Append one operation exactly once while holding the daily-log lock."""
     if not operation_id:
         raise ValueError("operation_id must be non-empty")
@@ -135,12 +158,22 @@ def locked_append_once(daily_path: Path, text: str, operation_id: str) -> bool:
     header = f"# Daily Session Memory — {daily_path.stem}\n".encode()
     if not daily_path.exists():
         append_knowledge(
-            stable_operation_id("daily-header", daily_path.name, header), daily_path, header
+            stable_operation_id("daily-header", daily_path.name, header),
+            daily_path,
+            header,
+            deadline=deadline,
+            cancelled=cancelled,
         )
     block = redact_secrets(
         f"\n{marker}\n{text}{'' if text.endswith(chr(10)) else chr(10)}"
     ).encode("utf-8")
-    append_knowledge(operation_id, daily_path, block)
+    append_knowledge(
+        operation_id,
+        daily_path,
+        block,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
     return True
 
 
@@ -149,6 +182,9 @@ def append_daily(
     session_id: str,
     block: str,
     operation_id: str | None = None,
+    *,
+    deadline: float = float("inf"),
+    cancelled: Callable[[], bool] | None = None,
 ) -> Path:
     """Append a pre-built block to today's daily log (unified locked writer).
 
@@ -172,7 +208,13 @@ def append_daily(
     day = datetime.now().strftime("%Y-%m-%d")
     path = daily_dir / f"{day}.md"
     text = "\n" + block if not block.startswith("\n") else block
-    locked_append(path, text, operation_id=operation_id)
+    locked_append(
+        path,
+        text,
+        operation_id=operation_id,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
     return path
 
 

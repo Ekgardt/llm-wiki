@@ -16,8 +16,9 @@ from functools import lru_cache
 from pathlib import Path, PurePosixPath
 
 from reliable_memory import canonical_json_bytes, validate_runtime_file
+from repository_scope import RepositoryScope
 
-GRAPH_SCHEMA_VERSION = "evidence-graph/v1"
+GRAPH_SCHEMA_VERSION = "evidence-graph/v2"
 MAX_DATABASE_BYTES = 16 * 1024 * 1024 * 1024
 MAX_SOURCE_BYTES = 16 * 1024 * 1024 * 1024
 MAX_ROWS = 10_000
@@ -157,6 +158,7 @@ _EXPLICIT_INDEXES = frozenset(
         "assertion_traversal",
         "assertion_reverse",
         "assertion_resolution",
+        "evidence_assertion",
         "evidence_source_span",
         "observation_resolution",
         "dependency_invalidation",
@@ -179,6 +181,7 @@ _INDEX_COLUMNS = {
         "assertion_id",
     ),
     "assertion_resolution": ("resolution", "edge_type", "assertion_id"),
+    "evidence_assertion": ("assertion_id",),
     "evidence_source_span": ("source_id", "byte_start", "byte_end", "evidence_id"),
     "observation_resolution": ("reason", "edge_type", "observation_id"),
     "dependency_invalidation": (
@@ -267,6 +270,7 @@ CREATE INDEX occurrence_source_span ON occurrence(source_id, byte_start, byte_en
 CREATE INDEX assertion_traversal ON assertion(source_node_id, edge_type, target_node_id, assertion_id);
 CREATE INDEX assertion_reverse ON assertion(target_node_id, edge_type, source_node_id, assertion_id);
 CREATE INDEX assertion_resolution ON assertion(resolution, edge_type, assertion_id);
+CREATE INDEX evidence_assertion ON evidence(assertion_id);
 CREATE INDEX evidence_source_span ON evidence(source_id, byte_start, byte_end, evidence_id);
 CREATE INDEX observation_resolution ON observation(reason, edge_type, observation_id);
 CREATE INDEX dependency_invalidation ON dependency(dependency_node_id, kind, dependent_node_id, dependency_id);
@@ -434,7 +438,7 @@ def _configure_write(database: sqlite3.Connection) -> None:
     database.execute("PRAGMA synchronous=FULL")
     database.execute("PRAGMA foreign_keys=ON")
     database.execute("PRAGMA trusted_schema=OFF")
-    database.execute("PRAGMA user_version=1")
+    database.execute("PRAGMA user_version=2")
 
 
 def create_generation_database(
@@ -967,7 +971,7 @@ def _validate_connection(
     try:
         signature = _schema_signature(database)
         if signature != _expected_schema_signature():
-            raise ValueError("Evidence Graph sqlite_schema is not the exact v1 contract")
+            raise ValueError("Evidence Graph sqlite_schema is not the exact v2 contract")
         schema_rows = database.execute(
             "SELECT type, name, tbl_name, sql FROM sqlite_schema "
             "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
@@ -976,7 +980,7 @@ def _validate_connection(
         indexes = {row["name"] for row in schema_rows if row["type"] == "index"}
         other = {row["type"] for row in schema_rows if row["type"] not in {"table", "index"}}
         if tables != set(_TABLE_COLUMNS) or indexes != _EXPLICIT_INDEXES or other:
-            raise ValueError("Evidence Graph sqlite_schema is not the exact v1 contract")
+            raise ValueError("Evidence Graph sqlite_schema is not the exact v2 contract")
         for table, expected in _TABLE_COLUMNS.items():
             _check_build_stop(deadline, cancelled, monotonic)
             columns = tuple(row["name"] for row in database.execute(f"PRAGMA table_info({table})"))
@@ -987,8 +991,8 @@ def _validate_connection(
             columns = tuple(row["name"] for row in database.execute(f"PRAGMA index_info({index})"))
             if columns != expected:
                 raise ValueError(f"Evidence Graph index columns differ for {index}")
-        if database.execute("PRAGMA user_version").fetchone()[0] != 1:
-            raise ValueError("Evidence Graph schema version is not v1")
+        if database.execute("PRAGMA user_version").fetchone()[0] != 2:
+            raise ValueError("Evidence Graph schema version is not v2")
         if str(database.execute("PRAGMA journal_mode").fetchone()[0]).casefold() != "delete":
             raise ValueError("Evidence Graph must use rollback-journal DELETE mode")
         if database.execute("PRAGMA foreign_key_check").fetchone() is not None:
@@ -1215,7 +1219,10 @@ class EvidenceGraph:
         state_root: Path,
         generation_id: str | None = None,
         max_database_bytes: int = MAX_DATABASE_BYTES,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> None:
+        _check_build_stop(deadline, cancelled, time.monotonic)
         self.database_path = Path(database_path)
         self.state_root = Path(state_root)
         self.generation_id = generation_id
@@ -1236,15 +1243,25 @@ class EvidenceGraph:
             database.row_factory = sqlite3.Row
             database.execute("PRAGMA query_only=ON")
             database.execute("PRAGMA trusted_schema=OFF")
-            _validate_connection(database)
+            _validate_connection(database, deadline=deadline, cancelled=cancelled)
             self._database = database
         except BaseException:
             database.close()
             raise
 
     @classmethod
-    def open_active(cls, catalog: object, *, deadline: float | None = None) -> EvidenceGraph | None:
-        options = {} if deadline is None else {"deadline": deadline}
+    def open_active(
+        cls,
+        catalog: object,
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> EvidenceGraph | None:
+        options = {}
+        if deadline is not None:
+            options["deadline"] = deadline
+        if cancelled is not None:
+            options["cancelled"] = cancelled
         for _attempt in range(3):
             manifest = catalog.get_active(**options)
             if manifest is None:
@@ -1265,8 +1282,12 @@ class EvidenceGraph:
                     generation_path / "evidence.sqlite3",
                     state_root=catalog.state_root,
                     generation_id=generation_id,
+                    deadline=deadline,
+                    cancelled=cancelled,
                 )
-                if not catalog._deadline_seal_unchanged(generation_path, seal, deadline):
+                if not catalog._deadline_seal_unchanged(
+                    generation_path, seal, deadline, cancelled=cancelled
+                ):
                     graph.close()
                     graph = None
                     continue
@@ -1279,6 +1300,66 @@ class EvidenceGraph:
                 if graph is not None:
                     graph.close()
                 continue
+        raise PermissionError("active Evidence Graph changed while opening")
+
+    @classmethod
+    def open_active_for_repository(
+        cls,
+        catalog: object,
+        repository_scope: RepositoryScope,
+        *,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> EvidenceGraph | None:
+        """Open only a generation bound to the exact requested repository state."""
+        _check_build_stop(deadline, cancelled, time.monotonic)
+        expected_scope = RepositoryScope.from_dict(repository_scope.as_dict())
+        options = {}
+        if deadline is not None:
+            options["deadline"] = deadline
+        if cancelled is not None:
+            options["cancelled"] = cancelled
+        for _attempt in range(3):
+            _check_build_stop(deadline, cancelled, time.monotonic)
+            manifest = catalog.get_active_for_repository(expected_scope, **options)
+            if manifest is None:
+                return None
+            if manifest.get("graph_schema_version") != GRAPH_SCHEMA_VERSION:
+                return None
+            generation_id = manifest["generation_id"]
+            graph = None
+            try:
+                validated, seal = catalog._registered_generation(generation_id, **options)
+                generation_scope = RepositoryScope.from_dict(validated.get("repository_scope"))
+                if validated != manifest or generation_scope != expected_scope:
+                    continue
+                artifacts = {item["path"] for item in validated["artifacts"]}
+                if "evidence.sqlite3" not in artifacts:
+                    return None
+                generation_path = catalog.generations_path / generation_id
+                graph = cls(
+                    generation_path / "evidence.sqlite3",
+                    state_root=catalog.state_root,
+                    generation_id=generation_id,
+                    deadline=deadline,
+                    cancelled=cancelled,
+                )
+                graph.repository_scope = generation_scope
+                if not catalog._deadline_seal_unchanged(
+                    generation_path, seal, deadline, cancelled=cancelled
+                ):
+                    graph.close()
+                    graph = None
+                    continue
+                if catalog.get_active_for_repository(expected_scope, **options) != manifest:
+                    graph.close()
+                    graph = None
+                    continue
+                return graph
+            except (FileNotFoundError, PermissionError, TypeError, ValueError, sqlite3.Error):
+                if graph is not None:
+                    graph.close()
+                return None
         raise PermissionError("active Evidence Graph changed while opening")
 
     def close(self) -> None:

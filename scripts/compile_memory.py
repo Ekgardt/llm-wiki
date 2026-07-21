@@ -30,7 +30,8 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1041,6 +1042,8 @@ def apply_compile_plan(
     trigger: str,
     coordinator: MarkdownCoordinator,
     completed_at: str | None = None,
+    deadline: float = float("inf"),
+    cancelled: Callable[[], bool] | None = None,
 ) -> CompileApplyResult:
     """Materialize and publish one validated plan as one Markdown transaction."""
     validate_compile_plan(plan, inputs)
@@ -1143,8 +1146,12 @@ def apply_compile_plan(
                 **{path: "absent" for path in quarantine_paths},
                 "claim_tree_manifest": snapshot_claim_tree(ROOT),
             },
+            deadline=deadline,
+            cancelled=cancelled,
         )
-        coordinator.apply(transaction.id)
+        coordinator.apply(
+            transaction.id, deadline=deadline, cancelled=cancelled
+        )
         committed, sequence = _transaction_authority(
             coordinator, quarantine_operation_id
         )
@@ -1159,7 +1166,7 @@ def apply_compile_plan(
         )
 
     with coordinator.writer_gate():
-        coordinator.recover()
+        coordinator.recover(deadline=deadline, cancelled=cancelled)
         existing = [read_compile_receipt(digest, coordinator) for digest in source_digests]
         if existing and all(item is not None for item in existing):
             receipt_records = [item for item in existing if item is not None]
@@ -1372,9 +1379,15 @@ def apply_compile_plan(
             preconditions[relative] = "absent"
 
         transaction = coordinator.prepare(
-            changes, operation_id=operation_id, preconditions=preconditions
+            changes,
+            operation_id=operation_id,
+            preconditions=preconditions,
+            deadline=deadline,
+            cancelled=cancelled,
         )
-        committed = coordinator.apply(transaction.id)
+        committed = coordinator.apply(
+            transaction.id, deadline=deadline, cancelled=cancelled
+        )
         committed, sequence = _transaction_authority(coordinator, operation_id)
         if claim_index is not None:
             try:
@@ -2253,10 +2266,17 @@ def main() -> int:
                 pass
 
 
-def _run(args: argparse.Namespace) -> int:
+def _run(
+    args: argparse.Namespace,
+    *,
+    deadline: float = float("inf"),
+    cancelled: Callable[[], bool] | None = None,
+) -> int:
+    _require_compile_active(deadline, cancelled)
     state = load_state()
     coordinator = MarkdownCoordinator(ROOT, STATE_ROOT)
     dailies = select_dailies(args, state, coordinator=coordinator)
+    _require_compile_active(deadline, cancelled)
     if not dailies:
         print("compile_memory: no changed daily logs; nothing to do.")
         _mark_finished(args.trigger, "ok")
@@ -2272,6 +2292,7 @@ def _run(args: argparse.Namespace) -> int:
             inputs, CompileCache(STATE_ROOT), coordinator=coordinator
         )
     except Exception as exc:  # noqa: BLE001 - provider/cache boundary is fail-closed
+        _require_compile_active(deadline, cancelled)
         error = f"{type(exc).__name__}: {exc}"
         _record_compile_source_failures(
             inputs, STATE_ROOT, error_code=type(exc).__name__
@@ -2280,6 +2301,7 @@ def _run(args: argparse.Namespace) -> int:
         _mark_finished(args.trigger, "error", error)
         return 1
 
+    _require_compile_active(deadline, cancelled)
     if args.dry_run:
         print(
             f"compile_memory: dry-run resolved {len(resolved.plan['operations'])} "
@@ -2295,7 +2317,11 @@ def _run(args: argparse.Namespace) -> int:
             action_key=resolved.action_key,
             trigger=args.trigger,
             coordinator=coordinator,
+            deadline=deadline,
+            cancelled=cancelled,
         )
+    except TimeoutError:
+        raise
     except Exception as exc:  # noqa: BLE001 - no diagnostic state is a commit receipt
         error = f"{type(exc).__name__}: {exc}"
         _record_compile_source_failures(
@@ -2321,10 +2347,35 @@ def _run(args: argparse.Namespace) -> int:
             trigger=args.trigger,
         )
 
+    _require_compile_active(deadline, cancelled)
     update_state(_mutate)
+    _require_compile_active(deadline, cancelled)
     _mark_finished(args.trigger, "ok")
     print("compile_memory: done.")
     return 0
+
+
+def _require_compile_active(
+    deadline: float, cancelled: Callable[[], bool] | None
+) -> None:
+    if time.monotonic() >= deadline or bool(cancelled and cancelled()):
+        raise TimeoutError("compile deadline or cancellation reached")
+
+
+def run_pending_compile(
+    *,
+    trigger: str = "manual",
+    deadline: float = float("inf"),
+    cancelled: Callable[[], bool] | None = None,
+) -> int:
+    """Compile pending daily logs in-process under caller-owned bounds."""
+    if trigger not in {"auto", "manual"}:
+        raise ValueError("compile trigger must be auto or manual")
+    return _run(
+        argparse.Namespace(file=None, all=False, dry_run=False, trigger=trigger),
+        deadline=deadline,
+        cancelled=cancelled,
+    )
 
 
 def _record_compile_source_failures(

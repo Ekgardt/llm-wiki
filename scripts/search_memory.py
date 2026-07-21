@@ -38,9 +38,23 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bounded_io import read_stable_bytes  # noqa: E402
-from corpus_snapshot import CorpusSnapshot, validate_live_snapshot  # noqa: E402
+from corpus_snapshot import (  # noqa: E402
+    MAX_CORPUS_FILE_BYTES,
+    MAX_CORPUS_FILES,
+    MAX_CORPUS_TOTAL_BYTES,
+    CorpusSnapshot,
+    canonical_retrieval_chunks,
+    validate_canonical_source_manifest,
+    validate_live_snapshot,
+)
 from generation_catalog import GenerationCatalog  # noqa: E402
 from memory_state import ROOT, STATE_ROOT, _is_pid_alive, atomic_write  # noqa: E402
+from reliable_memory import (  # noqa: E402
+    canonical_json_bytes,
+    fsync_directory,
+    fsync_file,
+    validate_runtime_file,
+)
 
 INDEX_DIR = STATE_ROOT / "cache"
 INDEX_FILE = INDEX_DIR / "index.sqlite"
@@ -104,6 +118,8 @@ GENERATION_METADATA_KEYS = frozenset(
         "chunk_count",
     }
 )
+MAX_GENERATION_FTS_CHUNKS = 100_000
+GENERATION_FTS_PROGRESS_OPCODES = 1_000
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
@@ -178,11 +194,18 @@ def _cli_search_limit(value: str) -> int:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
-def _artifact_descriptor(path: Path, relative: str) -> dict[str, object]:
+def _artifact_descriptor(
+    path: Path,
+    relative: str,
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> dict[str, object]:
     digest = hashlib.sha256()
     size = 0
     with path.open("rb") as artifact:
         while chunk := artifact.read(64 * 1024):
+            _check_generation_stop(deadline, cancelled)
             size += len(chunk)
             digest.update(chunk)
     return {
@@ -214,18 +237,35 @@ def _publish_new_file(temporary: Path, destination: Path) -> None:
 def build_generation_fts(
     snapshot: CorpusSnapshot,
     generation_directory: Path,
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, object]:
     """Build one immutable generation-local FTS5 artifact from captured chunks."""
     if not isinstance(snapshot, CorpusSnapshot):
         raise TypeError("snapshot must be a CorpusSnapshot")
+    _check_generation_stop(deadline, cancelled)
+    if len(snapshot.chunks) > MAX_GENERATION_FTS_CHUNKS:
+        raise ValueError("generation FTS chunk row ceiling exceeded")
     directory = _generation_directory(generation_directory)
     destination = directory / GENERATION_FTS_ARTIFACT
     if destination.exists() or destination.is_symlink():
         raise FileExistsError(destination)
     temporary = directory / f".{GENERATION_FTS_ARTIFACT}.{uuid.uuid4().hex}.tmp"
     database = None
+    stopped = False
+    complete = False
+
+    def progress() -> int:
+        nonlocal stopped
+        stopped = bool(cancelled and cancelled()) or bool(
+            deadline is not None and time.monotonic() >= deadline
+        )
+        return int(stopped)
+
     try:
         database = sqlite3.connect(temporary)
+        database.set_progress_handler(progress, GENERATION_FTS_PROGRESS_OPCODES)
         database.execute("PRAGMA journal_mode=DELETE")
         database.execute("PRAGMA synchronous=FULL")
         database.executescript(
@@ -271,13 +311,13 @@ def build_generation_fts(
             "INSERT INTO generation_metadata(key, value) VALUES (?, ?)",
             sorted(metadata.items()),
         )
-        rows = []
-        for order, chunk in enumerate(snapshot.chunks):
-            title = chunk.heading_ancestry[-1] if chunk.heading_ancestry else Path(
-                chunk.source_path
-            ).stem
-            rows.append(
-                (
+        def rows():
+            for order, chunk in enumerate(snapshot.chunks):
+                _check_generation_stop(deadline, cancelled)
+                title = chunk.heading_ancestry[-1] if chunk.heading_ancestry else Path(
+                    chunk.source_path
+                ).stem
+                yield (
                     chunk.id,
                     order,
                     chunk.source_id,
@@ -305,23 +345,41 @@ def build_generation_fts(
                     title,
                     chunk.text,
                 )
-            )
         database.executemany(
             "INSERT INTO chunks VALUES ("
             + ",".join("?" for _ in range(22))
             + ")",
-            rows,
+            rows(),
         )
         database.commit()
         if database.execute("PRAGMA integrity_check").fetchone() != ("ok",):
             raise ValueError("generation FTS integrity check failed")
         database.close()
         database = None
+        fsync_file(temporary)
+        _check_generation_stop(deadline, cancelled)
         _publish_new_file(temporary, destination)
-        return _artifact_descriptor(destination, GENERATION_FTS_ARTIFACT)
+        fsync_directory(directory)
+        descriptor = _artifact_descriptor(
+            destination,
+            GENERATION_FTS_ARTIFACT,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+        complete = True
+        return descriptor
+    except sqlite3.DatabaseError as exc:
+        if stopped:
+            raise TimeoutError("generation FTS build cancelled or deadline reached") from exc
+        raise
     finally:
         if database is not None:
             database.close()
+        if not complete:
+            try:
+                destination.unlink()
+            except FileNotFoundError:
+                pass
         try:
             temporary.unlink()
         except FileNotFoundError:
@@ -425,8 +483,62 @@ def publish_generation(
     expected_active: str | None,
     coordinator: object | None = None,
     deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> bool:
     """Fence live bytes, register a complete generation, then CAS-activate it."""
+    return _publish_generation(
+        snapshot,
+        vault,
+        catalog,
+        generation_id,
+        expected_active=expected_active,
+        coordinator=coordinator,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+
+
+def _publish_validated_generation(
+    snapshot: CorpusSnapshot,
+    vault: Path,
+    catalog: GenerationCatalog,
+    generation_id: str,
+    candidate: object,
+    *,
+    expected_repository_scope: object,
+    expected_active: str | None,
+    coordinator: object | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> bool:
+    """Publish a catalog-minted candidate while preserving the live-source fence."""
+    return _publish_generation(
+        snapshot,
+        vault,
+        catalog,
+        generation_id,
+        candidate=candidate,
+        expected_repository_scope=expected_repository_scope,
+        expected_active=expected_active,
+        coordinator=coordinator,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+
+
+def _publish_generation(
+    snapshot: CorpusSnapshot,
+    vault: Path,
+    catalog: GenerationCatalog,
+    generation_id: str,
+    *,
+    candidate: object | None = None,
+    expected_repository_scope: object | None = None,
+    expected_active: str | None,
+    coordinator: object | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> bool:
     if deadline is not None and (
         isinstance(deadline, bool)
         or not isinstance(deadline, (int, float))
@@ -435,6 +547,7 @@ def publish_generation(
         raise ValueError("deadline must be a finite monotonic timestamp")
 
     def remaining() -> float | None:
+        _check_generation_stop(deadline, cancelled)
         if deadline is None:
             return None
         value = float(deadline) - time.monotonic()
@@ -450,29 +563,118 @@ def publish_generation(
     else:
         gate = coordinator.writer_gate(wait_seconds=wait_seconds)
     with gate:
-        validation_options = {"coordinator": None}
-        if deadline is not None:
-            validation_options["deadline_seconds"] = remaining()
-        validate_live_snapshot(snapshot, vault, **validation_options)
-        remaining()
-        catalog_options = {}
-        if deadline is not None:
-            catalog_options["deadline"] = float(deadline)
-        catalog.register(generation_id, **catalog_options)
-        remaining()
-        return catalog.activate(
-            generation_id,
-            expected_active=expected_active,
-            **catalog_options,
+        registered = False
+        try:
+            _check_generation_stop(deadline, cancelled)
+            if expected_repository_scope is not None:
+                from repository_scope import RepositoryScope, resolve_repository_scope
+
+                if not isinstance(expected_repository_scope, RepositoryScope):
+                    raise TypeError("expected_repository_scope must be a RepositoryScope")
+                live_scope = resolve_repository_scope(
+                    vault, deadline=deadline, cancelled=cancelled
+                )
+                if live_scope != expected_repository_scope:
+                    raise ValueError("publication root does not match generation repository scope")
+            validation_options = {"coordinator": None}
+            if cancelled is not None:
+                validation_options["cancelled"] = cancelled
+            if deadline is not None:
+                validation_options["deadline_seconds"] = remaining()
+            validate_live_snapshot(snapshot, vault, **validation_options)
+            remaining()
+            catalog_options = {}
+            if deadline is not None:
+                catalog_options["deadline"] = float(deadline)
+            if cancelled is not None:
+                catalog_options["cancelled"] = cancelled
+            if candidate is None:
+                catalog.register(generation_id, **catalog_options)
+            else:
+                catalog._register_validated(candidate, **catalog_options)  # noqa: SLF001
+            registered = True
+            remaining()
+            if candidate is None:
+                activated = catalog.activate(
+                    generation_id,
+                    expected_active=expected_active,
+                    **catalog_options,
+                )
+            else:
+                activated = catalog._activate_validated(  # noqa: SLF001
+                    candidate,
+                    expected_active=expected_active,
+                    **catalog_options,
+                )
+            if not activated:
+                discard = getattr(catalog, "discard_unactivated", None)
+                if callable(discard):
+                    discard(generation_id, **catalog_options)
+            return activated
+        except BaseException:
+            if registered:
+                discard = getattr(catalog, "discard_unactivated", None)
+                if callable(discard):
+                    discard(generation_id, **catalog_options)
+            raise
+
+
+def _check_legacy_stop(
+    deadline: float | None, cancelled: Callable[[], bool] | None
+) -> None:
+    if cancelled is not None and cancelled():
+        raise TimeoutError("legacy retrieval cancelled")
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("legacy retrieval deadline reached")
+
+
+@contextmanager
+def _legacy_sqlite_guard(
+    connection: sqlite3.Connection,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> Iterator[None]:
+    _check_legacy_stop(deadline, cancelled)
+    if deadline is None and cancelled is None:
+        yield
+        return
+    stopped = False
+
+    def progress() -> int:
+        nonlocal stopped
+        stopped = bool(cancelled and cancelled()) or bool(
+            deadline is not None and time.monotonic() >= deadline
         )
+        return int(stopped)
+
+    connection.set_progress_handler(progress, 1000)
+    try:
+        yield
+    except sqlite3.DatabaseError as exc:
+        if stopped:
+            raise TimeoutError(
+                "legacy SQLite work cancelled or deadline exceeded"
+            ) from exc
+        _check_legacy_stop(deadline, cancelled)
+        raise
+    finally:
+        connection.set_progress_handler(None, 0)
+    _check_legacy_stop(deadline, cancelled)
 
 
-def _embed_texts(texts: list[str], is_query: bool = False) -> list[list[float]] | None:
+def _embed_texts(
+    texts: list[str],
+    is_query: bool = False,
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> list[list[float]] | None:
     """Embed a list of texts. Returns None if model unavailable.
 
     For bge-small-en-v1.5, queries are prefixed with a retrieval instruction
     for better accuracy. Documents are embedded without prefix.
     """
+    _check_legacy_stop(deadline, cancelled)
     embedder = _get_embedder()
     if not embedder:
         return None
@@ -480,7 +682,10 @@ def _embed_texts(texts: list[str], is_query: bool = False) -> list[list[float]] 
         if is_query and QUERY_INSTRUCTION:
             texts = [f"{QUERY_INSTRUCTION} {t}" for t in texts]
         vectors = embedder.encode(texts, show_progress_bar=False, convert_to_numpy=True)
+        _check_legacy_stop(deadline, cancelled)
         return vectors.tolist()
+    except TimeoutError:
+        raise
     except Exception:
         return None
 
@@ -658,23 +863,29 @@ def _needs_rebuild(
     root: Path | None = None,
     index_file: Path | None = None,
     index_manifest: Path | None = None,
-    deadline: float = float("inf"),
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> bool:
     """Check if any page is newer than the index, or if pages were added/removed."""
+    _check_legacy_stop(deadline, cancelled)
     source_root = root or ROOT
     current_index = index_file or INDEX_FILE
     current_manifest = index_manifest or INDEX_MANIFEST
     if not current_index.exists():
         return True
     try:
-        with sqlite3.connect(str(current_index)) as conn:
-            columns = tuple(
-                row[1] for row in conn.execute("PRAGMA table_info(pages)")
-            )
-            schema_row = conn.execute(
-                "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
-                ("pages",),
-            ).fetchone()
+        connect_options = {}
+        if deadline is not None:
+            connect_options["timeout"] = max(0.0, min(5.0, deadline - time.monotonic()))
+        with sqlite3.connect(str(current_index), **connect_options) as conn:
+            with _legacy_sqlite_guard(conn, deadline, cancelled):
+                columns = tuple(
+                    row[1] for row in conn.execute("PRAGMA table_info(pages)")
+                )
+                schema_row = conn.execute(
+                    "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
+                    ("pages",),
+                ).fetchone()
         schema_sql = schema_row[0] if schema_row and isinstance(schema_row[0], str) else ""
         normalized_schema = " ".join(schema_sql.casefold().split())
         if columns != SEARCH_INDEX_COLUMNS or re.search(
@@ -695,8 +906,7 @@ def _needs_rebuild(
         return True
     # Manifest check: if the set of indexed paths differs from the
     # current set (e.g. a page was deleted), trigger rebuild.
-    if time.monotonic() >= deadline:
-        raise TimeoutError("index freshness deadline reached")
+    _check_legacy_stop(deadline, cancelled)
     current_paths = sorted(p.relative_to(source_root).as_posix() for p in pages)
     if current_manifest.exists():
         try:
@@ -714,12 +924,10 @@ def _needs_rebuild(
     else:
         # No manifest from a prior build — rebuild to create one.
         return True
-    if time.monotonic() >= deadline:
-        raise TimeoutError("index freshness deadline reached")
+    _check_legacy_stop(deadline, cancelled)
     index_mtime = current_index.stat().st_mtime
     for p in pages:
-        if time.monotonic() >= deadline:
-            raise TimeoutError("index freshness deadline reached")
+        _check_legacy_stop(deadline, cancelled)
         try:
             if p.stat().st_mtime > index_mtime:
                 return True
@@ -737,15 +945,20 @@ def _is_transient_windows_access_error(error: OSError) -> bool:
 
 @contextmanager
 def _index_swap_lock(
-    timeout: float = _INDEX_SWAP_WAIT_SECONDS, poll: float = 0.01
+    timeout: float = _INDEX_SWAP_WAIT_SECONDS,
+    poll: float = 0.01,
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> Iterator[None]:
     """Serialize live-index swaps across processes with crash recovery."""
     lock_file = INDEX_FILE.with_suffix(INDEX_FILE.suffix + ".swap.lock")
     token = uuid.uuid4().hex
     payload = json.dumps({"pid": os.getpid(), "token": token}).encode("utf-8")
-    deadline = time.monotonic() + timeout
+    end = time.monotonic() + timeout if deadline is None else deadline
 
     while True:
+        _check_legacy_stop(end, cancelled)
         try:
             descriptor = os.open(
                 str(lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
@@ -794,10 +1007,12 @@ def _index_swap_lock(
                     continue
                 except OSError:
                     pass
-        remaining = deadline - time.monotonic()
+        _check_legacy_stop(end, cancelled)
+        remaining = end - time.monotonic()
         if remaining <= 0:
             raise TimeoutError(f"Could not acquire index swap lock: {lock_file}")
         time.sleep(min(poll, remaining))
+        _check_legacy_stop(end, cancelled)
 
     try:
         yield
@@ -810,31 +1025,49 @@ def _index_swap_lock(
             pass
 
 
-def _replace_live_index(tmp_file: Path) -> None:
-    deadline = time.monotonic() + _INDEX_REPLACE_WAIT_SECONDS
+def _replace_live_index(
+    tmp_file: Path,
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
+    end = (
+        time.monotonic() + _INDEX_REPLACE_WAIT_SECONDS
+        if deadline is None
+        else deadline
+    )
     attempt = 0
     while True:
+        _check_legacy_stop(end, cancelled)
         try:
             os.replace(str(tmp_file), str(INDEX_FILE))
             return
         except PermissionError as error:
             if not _is_transient_windows_access_error(error):
                 raise
-            remaining = deadline - time.monotonic()
+            _check_legacy_stop(end, cancelled)
+            remaining = end - time.monotonic()
             if remaining <= 0:
                 raise
             delay = min(0.01 * (2 ** min(attempt, 4)), 0.1, remaining)
             time.sleep(delay)
+            _check_legacy_stop(end, cancelled)
             attempt += 1
 
 
-def _build_index(pages: list[Path]) -> None:
+def _build_index(
+    pages: list[Path],
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
     """Build the FTS5 index from scratch (atomically).
 
     Builds into a temporary database file, then atomically replaces the
     live index via ``os.replace``. This ensures concurrent searches never
     see a partially-built index or a missing-index window.
     """
+    _check_legacy_stop(deadline, cancelled)
     INDEX_DIR.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
         prefix=f".{INDEX_FILE.name}.", suffix=".tmp", dir=INDEX_DIR
@@ -860,6 +1093,7 @@ def _build_index(pages: list[Path]) -> None:
         )
 
         for p in pages:
+            _check_legacy_stop(deadline, cancelled)
             try:
                 content = read_stable_bytes(p, MAX_PAGE_BYTES, label="search page").decode(
                     "utf-8", errors="ignore"
@@ -880,13 +1114,16 @@ def _build_index(pages: list[Path]) -> None:
             )
 
         conn.commit()
+        _check_legacy_stop(deadline, cancelled)
         conn.close()
         conn = None
 
         # Builders do the expensive work independently, then briefly serialize
         # the atomic live-index swap. Windows readers may transiently deny it.
-        with _index_swap_lock():
-            _replace_live_index(tmp_file)
+        with _index_swap_lock(deadline=deadline, cancelled=cancelled):
+            _replace_live_index(
+                tmp_file, deadline=deadline, cancelled=cancelled
+            )
 
             # Keep the manifest paired with the winning index build.
             try:
@@ -1045,6 +1282,49 @@ def _generation_artifact(manifest: dict[str, object], name: str) -> bool:
     )
 
 
+def _check_generation_stop(
+    deadline: float | None, cancelled: Callable[[], bool] | None
+) -> None:
+    if cancelled is not None and cancelled():
+        raise TimeoutError("generation retrieval cancelled")
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("generation retrieval deadline exceeded")
+
+
+@contextmanager
+def _generation_sqlite_guard(
+    connection: sqlite3.Connection,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> Iterator[None]:
+    _check_generation_stop(deadline, cancelled)
+    if deadline is None and cancelled is None:
+        yield
+        return
+    stopped = False
+
+    def progress() -> int:
+        nonlocal stopped
+        stopped = bool(cancelled and cancelled()) or bool(
+            deadline is not None and time.monotonic() >= deadline
+        )
+        return int(stopped)
+
+    connection.set_progress_handler(progress, 1000)
+    try:
+        yield
+    except sqlite3.DatabaseError as exc:
+        if stopped:
+            raise TimeoutError(
+                "generation SQLite work cancelled or deadline exceeded"
+            ) from exc
+        _check_generation_stop(deadline, cancelled)
+        raise
+    finally:
+        connection.set_progress_handler(None, 0)
+    _check_generation_stop(deadline, cancelled)
+
+
 def _canonical_manifest_bytes(manifest: dict[str, object]) -> bytes:
     return json.dumps(
         manifest,
@@ -1054,7 +1334,14 @@ def _canonical_manifest_bytes(manifest: dict[str, object]) -> bytes:
     ).encode("utf-8")
 
 
-def _sealed_file(path: Path, expected: dict[str, object] | None = None) -> tuple:
+def _sealed_file(
+    path: Path,
+    expected: dict[str, object] | None = None,
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> tuple:
+    _check_generation_stop(deadline, cancelled)
     before = path.lstat()
     if path.is_symlink() or not stat.S_ISREG(before.st_mode):
         raise PermissionError("generation artifact must be a regular file")
@@ -1065,8 +1352,10 @@ def _sealed_file(path: Path, expected: dict[str, object] | None = None) -> tuple
         if not os.path.samestat(before, opened):
             raise PermissionError("generation artifact changed while opening")
         while chunk := source.read(64 * 1024):
+            _check_generation_stop(deadline, cancelled)
             size += len(chunk)
             digest.update(chunk)
+        _check_generation_stop(deadline, cancelled)
         after_open = os.fstat(source.fileno())
     after = path.lstat()
     if (
@@ -1096,8 +1385,12 @@ def _generation_consumption_seal(
     catalog: object,
     manifest: dict[str, object],
     artifact_names: tuple[str, ...],
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple | None:
     try:
+        _check_generation_stop(deadline, cancelled)
         generation_id = manifest["generation_id"]
         generations_path = Path(getattr(catalog, "generations_path"))
         if not isinstance(generation_id, str):
@@ -1115,10 +1408,21 @@ def _generation_consumption_seal(
         directory = generations_path / generation_id
         seals = []
         for name in artifact_names:
+            _check_generation_stop(deadline, cancelled)
             descriptor = descriptors.get(name)
             if not isinstance(descriptor, dict):
                 return None
-            seals.append((name, _sealed_file(directory / name, descriptor)))
+            seals.append(
+                (
+                    name,
+                    _sealed_file(
+                        directory / name,
+                        descriptor,
+                        deadline=deadline,
+                        cancelled=cancelled,
+                    ),
+                )
+            )
         manifest_path = directory / "manifest.json"
         canonical = _canonical_manifest_bytes(manifest)
         if manifest_path.exists() or manifest_path.is_symlink():
@@ -1128,10 +1432,14 @@ def _generation_consumption_seal(
                     "size": len(canonical),
                     "sha256": hashlib.sha256(canonical).hexdigest(),
                 },
+                deadline=deadline,
+                cancelled=cancelled,
             )
         else:
             manifest_seal = None
         return hashlib.sha256(canonical).hexdigest(), manifest_seal, tuple(seals)
+    except TimeoutError:
+        raise
     except (OSError, PermissionError, TypeError, ValueError):
         return None
 
@@ -1141,22 +1449,47 @@ def _generation_consumption_unchanged(
     manifest: dict[str, object],
     artifact_names: tuple[str, ...],
     expected_seal: tuple,
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> bool:
     try:
-        active = catalog.get_active()
+        from repository_scope import RepositoryScope
+
+        _check_generation_stop(deadline, cancelled)
+        repository_scope = RepositoryScope.from_dict(manifest.get("repository_scope"))
+        if deadline is None and cancelled is None:
+            active = catalog.get_active_for_repository(repository_scope)
+        else:
+            active = catalog.get_active_for_repository(
+                repository_scope, deadline=deadline, cancelled=cancelled
+            )
         return (
             isinstance(active, dict)
             and _canonical_manifest_bytes(active) == _canonical_manifest_bytes(manifest)
-            and _generation_consumption_seal(catalog, active, artifact_names)
+            and _generation_consumption_seal(
+                catalog,
+                active,
+                artifact_names,
+                deadline=deadline,
+                cancelled=cancelled,
+            )
             == expected_seal
         )
+    except TimeoutError:
+        raise
     except (OSError, PermissionError, sqlite3.Error, TypeError, ValueError):
         return False
 
 
 def _generation_connection(
-    catalog: object, manifest: dict[str, object]
+    catalog: object,
+    manifest: dict[str, object],
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> sqlite3.Connection | None:
+    _check_generation_stop(deadline, cancelled)
     generation_id = manifest.get("generation_id")
     generations_path = getattr(catalog, "generations_path", None)
     if not isinstance(generation_id, str) or generations_path is None:
@@ -1165,11 +1498,28 @@ def _generation_connection(
         return None
     artifact = Path(generations_path) / generation_id / GENERATION_FTS_ARTIFACT
     try:
-        connection = sqlite3.connect(f"{artifact.resolve().as_uri()}?mode=ro", uri=True)
-        if not _valid_generation_fts(connection, manifest):
+        connect_options = {"uri": True}
+        if deadline is not None:
+            connect_options["timeout"] = max(
+                0.0, min(5.0, deadline - time.monotonic())
+            )
+        _check_generation_stop(deadline, cancelled)
+        connection = sqlite3.connect(
+            f"{artifact.resolve().as_uri()}?mode=ro", **connect_options
+        )
+        _check_generation_stop(deadline, cancelled)
+        if not _valid_generation_fts(
+            connection, manifest, deadline=deadline, cancelled=cancelled
+        ):
             connection.close()
             return None
         return connection
+    except TimeoutError:
+        try:
+            connection.close()
+        except (UnboundLocalError, sqlite3.Error):
+            pass
+        raise
     except (OSError, PermissionError, sqlite3.Error, TypeError, ValueError):
         try:
             connection.close()
@@ -1179,7 +1529,184 @@ def _generation_connection(
 
 
 def _valid_generation_fts(
-    connection: sqlite3.Connection, manifest: dict[str, object]
+    connection: sqlite3.Connection,
+    manifest: dict[str, object],
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    authoritative_sources: dict[str, dict[str, object]] | None = None,
+) -> bool:
+    with _generation_sqlite_guard(connection, deadline, cancelled):
+        return _valid_generation_fts_contents(
+            connection,
+            manifest,
+            deadline=deadline,
+            cancelled=cancelled,
+            authoritative_sources=authoritative_sources,
+        )
+
+
+def _generation_authoritative_sources(
+    generation_path: Path,
+    manifest: dict[str, object],
+    *,
+    state_root: Path,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> dict[str, dict[str, object]]:
+    _check_generation_stop(deadline, cancelled)
+    source_manifest_path = generation_path / "source-manifest.json"
+    expected_manifest = validate_runtime_file(
+        source_manifest_path, state_root, max_bytes=MAX_CORPUS_TOTAL_BYTES
+    )
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(source_manifest_path, flags)
+    try:
+        opened_manifest = os.fstat(descriptor)
+        if not os.path.samestat(expected_manifest, opened_manifest):
+            raise PermissionError("generation source manifest identity changed before read")
+        chunks = []
+        total = 0
+        while True:
+            _check_generation_stop(deadline, cancelled)
+            chunk = os.read(descriptor, 64 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_CORPUS_TOTAL_BYTES:
+                raise ValueError("generation source manifest exceeds its byte ceiling")
+            chunks.append(chunk)
+        after_manifest = os.fstat(descriptor)
+        if not os.path.samestat(opened_manifest, after_manifest) or (
+            opened_manifest.st_size,
+            opened_manifest.st_mtime_ns,
+        ) != (after_manifest.st_size, after_manifest.st_mtime_ns):
+            raise PermissionError("generation source manifest changed during read")
+        source_manifest_raw = b"".join(chunks)
+    finally:
+        os.close(descriptor)
+    current_manifest = source_manifest_path.stat(follow_symlinks=False)
+    if not os.path.samestat(after_manifest, current_manifest):
+        raise PermissionError("generation source manifest identity changed after read")
+    _check_generation_stop(deadline, cancelled)
+    try:
+        source_manifest_value = json.loads(source_manifest_raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("generation source manifest is invalid") from exc
+    source_manifest = validate_canonical_source_manifest(source_manifest_value)
+    if (
+        canonical_json_bytes(source_manifest) != source_manifest_raw
+        or hashlib.sha256(source_manifest_raw).hexdigest()
+        != manifest.get("source_manifest_sha256")
+    ):
+        raise ValueError("generation source manifest hash is invalid")
+
+    evidence_path = generation_path / "evidence.sqlite3"
+    validate_runtime_file(evidence_path, state_root, max_bytes=16 * 1024 * 1024 * 1024)
+    uri = f"{evidence_path.resolve(strict=True).as_uri()}?mode=ro&immutable=1"
+    source_metadata: list[tuple[str, str, str, int]] = []
+    seen_source_ids: set[str] = set()
+    total_bytes = 0
+    with sqlite3.connect(uri, uri=True, timeout=0) as database:
+        with _generation_sqlite_guard(database, deadline, cancelled):
+            rows = database.execute(
+                "SELECT source_id, relative_path, sha256, size, length(content) FROM source "
+                "ORDER BY relative_path, source_id LIMIT ?",
+                (MAX_CORPUS_FILES + 1,),
+            )
+            for row in rows:
+                _check_generation_stop(deadline, cancelled)
+                if len(source_metadata) >= MAX_CORPUS_FILES:
+                    raise ValueError("generation source row ceiling exceeded")
+                source_id, relative_path, digest, size, content_size = row
+                if (
+                    not isinstance(source_id, str)
+                    or source_id in seen_source_ids
+                    or not isinstance(relative_path, str)
+                    or not isinstance(digest, str)
+                    or not isinstance(size, int)
+                    or not isinstance(content_size, int)
+                    or content_size > MAX_CORPUS_FILE_BYTES
+                    or size != content_size
+                ):
+                    raise ValueError("generation evidence source rows are invalid")
+                total_bytes += content_size
+                if total_bytes > MAX_CORPUS_TOTAL_BYTES:
+                    raise ValueError("generation evidence source bytes exceed their ceiling")
+                seen_source_ids.add(source_id)
+                source_metadata.append((source_id, relative_path, digest, size))
+            sources: dict[str, dict[str, object]] = {}
+            for source_id, relative_path, digest, size in source_metadata:
+                _check_generation_stop(deadline, cancelled)
+                content_row = database.execute(
+                    "SELECT content FROM source WHERE source_id = ?", (source_id,)
+                ).fetchone()
+                if content_row is None:
+                    raise ValueError("generation evidence source content is missing")
+                content = bytes(content_row[0])
+                if len(content) != size or hashlib.sha256(content).hexdigest() != digest:
+                    raise ValueError("generation evidence source content is invalid")
+                sources[source_id] = {
+                    "relative_path": relative_path,
+                    "sha256": digest,
+                    "content": content,
+                }
+    membership = [
+        {
+            "logical_id": source_id,
+            "relative_path": source["relative_path"],
+            "sha256": source["sha256"],
+        }
+        for source_id, source in sorted(
+            sources.items(), key=lambda item: (str(item[1]["relative_path"]), item[0])
+        )
+    ]
+    if membership != source_manifest["sources"]:
+        raise ValueError("generation evidence source membership does not match source manifest")
+    return sources
+
+
+def validate_generation_fts_artifact(
+    generation_path: Path,
+    manifest: dict[str, object],
+    *,
+    state_root: Path,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
+    """Fail closed unless a generation-local FTS artifact is semantically valid."""
+    _check_generation_stop(deadline, cancelled)
+    generation_path = Path(generation_path)
+    state_root = Path(state_root)
+    authoritative_sources = _generation_authoritative_sources(
+        generation_path,
+        manifest,
+        state_root=state_root,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    artifact = Path(generation_path) / GENERATION_FTS_ARTIFACT
+    validate_runtime_file(artifact, state_root, max_bytes=16 * 1024 * 1024 * 1024)
+    uri = f"{artifact.resolve(strict=True).as_uri()}?mode=ro&immutable=1"
+    with sqlite3.connect(uri, uri=True, timeout=0) as connection:
+        if not _valid_generation_fts(
+            connection,
+            manifest,
+            deadline=deadline,
+            cancelled=cancelled,
+            authoritative_sources=authoritative_sources,
+        ):
+            raise ValueError("generation FTS search artifact is semantically invalid")
+    _check_generation_stop(deadline, cancelled)
+
+
+def _valid_generation_fts_contents(
+    connection: sqlite3.Connection,
+    manifest: dict[str, object],
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+    authoritative_sources: dict[str, dict[str, object]] | None = None,
 ) -> bool:
     if connection.execute("PRAGMA integrity_check").fetchone() != ("ok",):
         return False
@@ -1214,7 +1741,12 @@ def _valid_generation_fts(
     ]
     if arguments != expected_arguments:
         return False
-    metadata_rows = list(connection.execute("SELECT key, value FROM generation_metadata"))
+    metadata_rows = list(
+        connection.execute(
+            "SELECT key, value FROM generation_metadata LIMIT ?",
+            (len(GENERATION_METADATA_KEYS) + 1,),
+        )
+    )
     if (
         len(metadata_rows) != len(GENERATION_METADATA_KEYS)
         or {row[0] for row in metadata_rows} != GENERATION_METADATA_KEYS
@@ -1232,8 +1764,77 @@ def _valid_generation_fts(
     }
     if any(metadata.get(key) != value for key, value in expected.items()):
         return False
-    count = connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-    if not isinstance(count, int) or metadata.get("chunk_count") != str(count):
+    expected_chunks: list[tuple[object, ...]] = []
+    if authoritative_sources is not None:
+        ordered_sources = sorted(
+            authoritative_sources.items(),
+            key=lambda item: (str(item[1]["relative_path"]), item[0]),
+        )
+        for source_id, source in ordered_sources:
+            _check_generation_stop(deadline, cancelled)
+            source_path = str(source["relative_path"])
+            source_sha256 = str(source["sha256"])
+            source_content = source["content"]
+            if not isinstance(source_content, bytes):
+                return False
+            for chunk in canonical_retrieval_chunks(
+                source_id=source_id,
+                source_path=source_path,
+                source_sha256=source_sha256,
+                content=source_content,
+                extractor_version=str(manifest.get("extractor_version")),
+                deadline=deadline,
+                cancelled=cancelled,
+            ):
+                title = chunk.heading_ancestry[-1] if chunk.heading_ancestry else Path(
+                    chunk.source_path
+                ).stem
+                expected_chunks.append(
+                    (
+                        chunk.id,
+                        len(expected_chunks),
+                        chunk.source_id,
+                        chunk.source_path,
+                        chunk.source_sha256,
+                        chunk.parent_page,
+                        json.dumps(
+                            chunk.heading_ancestry,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                        chunk.byte_start,
+                        chunk.byte_end,
+                        chunk.line_start,
+                        chunk.line_end,
+                        chunk.span_sha256,
+                        chunk.type,
+                        chunk.project,
+                        chunk.authority,
+                        chunk.confidence,
+                        chunk.status,
+                        chunk.valid_from,
+                        chunk.valid_to,
+                        chunk.language,
+                        title,
+                        chunk.text,
+                    )
+                )
+                if len(expected_chunks) > MAX_GENERATION_FTS_CHUNKS:
+                    return False
+    counted_rows = list(
+        connection.execute(
+            "SELECT 1 FROM chunks LIMIT ?", (MAX_GENERATION_FTS_CHUNKS + 1,)
+        )
+    )
+    count = len(counted_rows)
+    if (
+        count > MAX_GENERATION_FTS_CHUNKS
+        or metadata.get("chunk_count") != str(count)
+        or (
+            authoritative_sources is not None
+            and count != len(expected_chunks)
+        )
+    ):
         return False
     seen_chunk_ids: set[str] = set()
     rows = connection.execute(
@@ -1243,6 +1844,7 @@ def _valid_generation_fts(
         "valid_to, language, title, content FROM chunks ORDER BY chunk_order"
     )
     for expected_order, row in enumerate(rows):
+        _check_generation_stop(deadline, cancelled)
         (
             chunk_id,
             chunk_order,
@@ -1272,6 +1874,11 @@ def _valid_generation_fts(
         except (TypeError, json.JSONDecodeError):
             return False
         optional_text = (project, authority, confidence, valid_from, valid_to, language)
+        expected_chunk = (
+            expected_chunks[expected_order]
+            if authoritative_sources is not None and expected_order < len(expected_chunks)
+            else None
+        )
         if (
             not isinstance(chunk_id, str)
             or _SHA256_RE.fullmatch(chunk_id) is None
@@ -1303,6 +1910,9 @@ def _valid_generation_fts(
             or not content.strip()
         ):
             return False
+        if expected_chunk is not None:
+            if row != expected_chunk:
+                return False
         seen_chunk_ids.add(chunk_id)
     return len(seen_chunk_ids) == count
 
@@ -1428,20 +2038,27 @@ def _generation_fts_search(
     project: str | None,
     since: str | None,
     as_of: str | None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[dict[str, object]]:
-    connection.row_factory = sqlite3.Row
-    filters, values = _generation_filters(scope=scope, since=since, as_of=as_of)
-    rows = connection.execute(
-        "SELECT chunk_id, chunk_order, source_id, source_path, source_sha256, "
-        "heading_ancestry, type, project, authority, confidence, status, valid_from, "
-        "valid_to, language, title, content, bm25(chunks) AS rank FROM chunks "
-        f"WHERE chunks MATCH ?{filters} ORDER BY rank, chunk_order LIMIT ?",
-        [_fts_query(query), *values, limit * 5],
-    ).fetchall()
+    with _generation_sqlite_guard(connection, deadline, cancelled):
+        connection.row_factory = sqlite3.Row
+        filters, values = _generation_filters(scope=scope, since=since, as_of=as_of)
+        rows = connection.execute(
+            "SELECT chunk_id, chunk_order, source_id, source_path, source_sha256, "
+            "heading_ancestry, type, project, authority, confidence, status, valid_from, "
+            "valid_to, language, title, content, bm25(chunks) AS rank FROM chunks "
+            f"WHERE chunks MATCH ?{filters} ORDER BY rank, chunk_order LIMIT ?",
+            [_fts_query(query), *values, limit * 5],
+        ).fetchall()
     generation_id = str(manifest["generation_id"])
-    results = [_generation_result(row, generation_id) for row in rows]
+    results = []
+    for row in rows:
+        _check_generation_stop(deadline, cancelled)
+        results.append(_generation_result(row, generation_id))
     query_words = set(query.casefold().split())
     for result in results:
+        _check_generation_stop(deadline, cancelled)
         if project and str(result["project"]).casefold() == project.casefold():
             result["score"] = round(float(result["score"]) * 2.0, 4)
         title_words = set(str(result["title"]).casefold().split())
@@ -1455,6 +2072,7 @@ def _generation_fts_search(
         )
     )
     for result in results:
+        _check_generation_stop(deadline, cancelled)
         result.pop("_chunk_order", None)
     results = apply_hard_filters(
         results, project=project, since=since, as_of=as_of, scope=scope
@@ -1476,7 +2094,10 @@ def _generation_vectors_search(
     project: str | None,
     since: str | None,
     as_of: str | None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[dict[str, object]] | None:
+    _check_generation_stop(deadline, cancelled)
     if (
         manifest.get("vector_state") != "complete"
         or manifest.get("embedding_model_id") != model_id
@@ -1489,13 +2110,28 @@ def _generation_vectors_search(
     try:
         import numpy as np
 
-        metadata = json.loads((directory / "vectors.json").read_text(encoding="utf-8"))
+        metadata_bytes = bytearray()
+        with (directory / "vectors.json").open("rb") as source:
+            while chunk := source.read(64 * 1024):
+                _check_generation_stop(deadline, cancelled)
+                metadata_bytes.extend(chunk)
+        _check_generation_stop(deadline, cancelled)
+        metadata = json.loads(metadata_bytes.decode("utf-8"))
         matrix = np.load(directory / "vectors.npy", mmap_mode="r", allow_pickle=False)
-        ordered = connection.execute(
-            "SELECT chunk_id, source_id, source_path, source_sha256 "
-            "FROM chunks ORDER BY chunk_order"
-        ).fetchall()
+        _check_generation_stop(deadline, cancelled)
+        with _generation_sqlite_guard(connection, deadline, cancelled):
+            connection.row_factory = sqlite3.Row
+            ordered = connection.execute(
+                "SELECT chunk_id, source_id, source_path, source_sha256 "
+                "FROM chunks ORDER BY chunk_order"
+            ).fetchall()
         dimensions = manifest.get("vector_dimensions")
+        matrix_finite = True
+        for start in range(0, len(matrix), 4096):
+            _check_generation_stop(deadline, cancelled)
+            if not np.isfinite(matrix[start : start + 4096]).all():
+                matrix_finite = False
+                break
         if (
             metadata.get("schema_version") != "corpus-vectors/v1"
             or metadata.get("corpus_sha256") != manifest.get("source_manifest_sha256")
@@ -1510,10 +2146,12 @@ def _generation_vectors_search(
             or metadata.get("source_sha256") != [row[3] for row in ordered]
             or matrix.shape != (len(ordered), dimensions)
             or matrix.dtype != np.dtype(np.float32)
-            or not np.isfinite(matrix).all()
+            or not matrix_finite
         ):
             return None
+        _check_generation_stop(deadline, cancelled)
         query_matrix = np.asarray(_call_generation_embedder(embedder, [query]))
+        _check_generation_stop(deadline, cancelled)
         if (
             query_matrix.shape != (1, dimensions)
             or query_matrix.dtype.kind != "f"
@@ -1521,20 +2159,26 @@ def _generation_vectors_search(
         ):
             return None
         query_vector = query_matrix[0]
-        similarities = (matrix @ query_vector) / (
-            (np.linalg.norm(matrix, axis=1) + 1e-10)
-            * (np.linalg.norm(query_vector) + 1e-10)
-        )
+        query_norm = np.linalg.norm(query_vector) + 1e-10
+        similarities = np.empty(len(matrix), dtype=np.float32)
+        for start in range(0, len(matrix), 4096):
+            _check_generation_stop(deadline, cancelled)
+            block = matrix[start : start + 4096]
+            similarities[start : start + len(block)] = (block @ query_vector) / (
+                (np.linalg.norm(block, axis=1) + 1e-10) * query_norm
+            )
         filters, values = _generation_filters(scope=scope, since=since, as_of=as_of)
-        rows = connection.execute(
-            "SELECT chunk_id, chunk_order, source_id, source_path, source_sha256, "
-            "heading_ancestry, type, project, authority, confidence, status, valid_from, "
-            "valid_to, language, title, content, 0.0 AS rank FROM chunks "
-            f"WHERE 1=1{filters} ORDER BY chunk_order",
-            values,
-        ).fetchall()
+        with _generation_sqlite_guard(connection, deadline, cancelled):
+            rows = connection.execute(
+                "SELECT chunk_id, chunk_order, source_id, source_path, source_sha256, "
+                "heading_ancestry, type, project, authority, confidence, status, valid_from, "
+                "valid_to, language, title, content, 0.0 AS rank FROM chunks "
+                f"WHERE 1=1{filters} ORDER BY chunk_order",
+                values,
+            ).fetchall()
         results = []
         for row in rows:
+            _check_generation_stop(deadline, cancelled)
             result = _generation_result(row, generation_id)
             score = float(similarities[row["chunk_order"]])
             if project and str(result["project"]).casefold() == project.casefold():
@@ -1544,7 +2188,10 @@ def _generation_vectors_search(
             result["effective_mode"] = "hybrid"
             results.append(result)
         results.sort(key=lambda item: (-float(item["score"]), str(item["chunk_id"])))
+        _check_generation_stop(deadline, cancelled)
         return results[: limit * 3]
+    except TimeoutError:
+        raise
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         return None
 
@@ -1674,44 +2321,71 @@ def _legacy_lexical_hits(
     since: str | None = None,
     as_of: str | None = None,
     page_paths: list[Path] | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[dict]:
     """Independent lexical backend used by retrieve() — no dense/graph fusion."""
+    _check_legacy_stop(deadline, cancelled)
     if not query or not query.strip():
         return []
 
-    pages = page_paths if page_paths is not None else _collect_pages(scope)
+    pages = (
+        page_paths
+        if page_paths is not None
+        else _collect_pages(scope, deadline=deadline or float("inf"))
+    )
     if not pages:
         return []
 
-    if force_rebuild or _needs_rebuild(pages):
-        _build_index(pages)
+    needs_rebuild = force_rebuild
+    if not needs_rebuild:
+        if deadline is None and cancelled is None:
+            needs_rebuild = _needs_rebuild(pages)
+        else:
+            needs_rebuild = _needs_rebuild(
+                pages, deadline=deadline, cancelled=cancelled
+            )
+    if needs_rebuild:
+        if deadline is None and cancelled is None:
+            _build_index(pages)
+        else:
+            _build_index(pages, deadline=deadline, cancelled=cancelled)
 
-    conn = sqlite3.connect(str(INDEX_FILE))
-    fts_terms = []
-    for w in query.split():
-        if not w:
-            continue
-        safe = w.replace('"', '""')
-        fts_terms.append(f'"{safe}"')
-    fts_query = " ".join(fts_terms)
-    query_word_count = len([w for w in query.split() if w])
-    fetch_multiplier = 5 if query_word_count <= 3 else 3
-    bm25_raw = conn.execute(
-        """
-        SELECT path, title, summary, project, timestamp, bm25(pages) as rank
-        FROM pages
-        WHERE pages MATCH ?
-        ORDER BY rank
-        LIMIT ?
-        """,
-        (fts_query, limit * fetch_multiplier),
-    ).fetchall()
-    conn.close()
+    _check_legacy_stop(deadline, cancelled)
+    connect_timeout = 5.0
+    if deadline is not None:
+        connect_timeout = max(0.0, min(connect_timeout, deadline - time.monotonic()))
+    conn = sqlite3.connect(str(INDEX_FILE), timeout=connect_timeout)
+    try:
+        _check_legacy_stop(deadline, cancelled)
+        with _legacy_sqlite_guard(conn, deadline, cancelled):
+            fts_terms = []
+            for w in query.split():
+                if not w:
+                    continue
+                safe = w.replace('"', '""')
+                fts_terms.append(f'"{safe}"')
+            fts_query = " ".join(fts_terms)
+            query_word_count = len([w for w in query.split() if w])
+            fetch_multiplier = 5 if query_word_count <= 3 else 3
+            bm25_raw = conn.execute(
+                """
+                SELECT path, title, summary, project, timestamp, bm25(pages) as rank
+                FROM pages
+                WHERE pages MATCH ?
+                ORDER BY rank
+                LIMIT ?
+                """,
+                (fts_query, limit * fetch_multiplier),
+            ).fetchall()
+    finally:
+        conn.close()
 
     query_lower = query.lower().strip()
     query_words = set(query_lower.split())
     bm25_results: list[dict] = []
     for row in bm25_raw:
+        _check_legacy_stop(deadline, cancelled)
         path, title, summary, proj, ts, rank = row
         if since and ts:
             try:
@@ -1788,13 +2462,22 @@ def _legacy_dense_hits(
     since: str | None = None,
     as_of: str | None = None,
     page_paths: list[Path] | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[dict] | None:
     """Independent dense backend used by retrieve() — returns None if unavailable."""
+    _check_legacy_stop(deadline, cancelled)
+    if deadline is not None:
+        return None
     if not query or not query.strip():
         return None
     if not _have_sentence_transformers():
         return None
-    pages = page_paths if page_paths is not None else _collect_pages(scope)
+    pages = (
+        page_paths
+        if page_paths is not None
+        else _collect_pages(scope, deadline=deadline or float("inf"))
+    )
     if not pages:
         return None
     vector_results = None
@@ -1804,7 +2487,9 @@ def _legacy_dense_hits(
         from lance_store import vector_search as _lance_search
 
         if have_lancedb():
-            qvecs = _embed_texts([query], is_query=True)
+            qvecs = _embed_texts(
+                [query], is_query=True, deadline=deadline, cancelled=cancelled
+            )
             if qvecs:
                 lance_results = _lance_search(
                     qvecs[0],
@@ -1814,8 +2499,11 @@ def _legacy_dense_hits(
                     as_of=as_of,
                     expected_model_id=EMBEDDING_MODEL,
                     expected_model_revision=EMBEDDING_MODEL_REVISION,
-                    expected_sources=_legacy_vector_source_membership(pages),
+                    expected_sources=_legacy_vector_source_membership(
+                        pages, deadline=deadline, cancelled=cancelled
+                    ),
                 )
+                _check_legacy_stop(deadline, cancelled)
                 if lance_results:
                     vector_results = []
                     for item in lance_results:
@@ -1824,16 +2512,29 @@ def _legacy_dense_hits(
                         row["candidate_id"] = Path(str(row.get("path") or "")).stem
                         row["generation"] = "legacy"
                         vector_results.append(row)
+    except TimeoutError:
+        raise
     except Exception:
         vector_results = None
     if vector_results is None:
         try:
-            vector_results = _vector_search(query, pages, limit * 3, project, since, as_of)
+            vector_results = _vector_search(
+                query,
+                pages,
+                limit * 3,
+                project,
+                since,
+                as_of,
+                deadline=deadline,
+                cancelled=cancelled,
+            )
             if vector_results is not None:
                 for row in vector_results:
                     row["vector_score"] = row.get("score")
                     row.setdefault("candidate_id", Path(str(row.get("path") or "")).stem)
                     row["generation"] = "legacy"
+        except TimeoutError:
+            raise
         except Exception:
             return None
     return vector_results
@@ -1858,15 +2559,25 @@ def _search_backends(
     generation_embedder: object | None = None,
     generation_model_id: str | None = None,
     generation_model_revision: str | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[dict]:
     """Prefer a validated generation and otherwise preserve legacy search behavior."""
     limit = _validate_search_limit(limit)
     if not query or not query.strip():
         return []
     selected_catalog = catalog if catalog is not None else _active_generation_catalog()
+    stop_options = {}
+    if deadline is not None:
+        stop_options["deadline"] = deadline
+    if cancelled is not None:
+        stop_options["cancelled"] = cancelled
+    _check_generation_stop(deadline, cancelled)
     if selected_catalog is not None and not force_rebuild and page_paths is None:
         try:
-            manifest = selected_catalog.get_active()
+            manifest = selected_catalog.get_active(**stop_options)
+        except TimeoutError:
+            raise
         except (OSError, PermissionError, sqlite3.Error, TypeError, ValueError):
             manifest = None
         if isinstance(manifest, dict):
@@ -1881,10 +2592,10 @@ def _search_backends(
             if vector_requested:
                 artifact_names += GENERATION_VECTOR_ARTIFACTS
             consumption_seal = _generation_consumption_seal(
-                selected_catalog, manifest, artifact_names
+                selected_catalog, manifest, artifact_names, **stop_options
             )
             connection = (
-                _generation_connection(selected_catalog, manifest)
+                _generation_connection(selected_catalog, manifest, **stop_options)
                 if consumption_seal is not None
                 else None
             )
@@ -1899,6 +2610,7 @@ def _search_backends(
                         project=project,
                         since=since,
                         as_of=as_of,
+                        **stop_options,
                     )
                     if semantic:
                         vectors = None
@@ -1920,6 +2632,7 @@ def _search_backends(
                                 project=project,
                                 since=since,
                                 as_of=as_of,
+                                **stop_options,
                             )
                         if vectors is not None:
                             if _generation_consumption_unchanged(
@@ -1927,6 +2640,7 @@ def _search_backends(
                                 manifest,
                                 artifact_names,
                                 consumption_seal,
+                                **stop_options,
                             ):
                                 return _finalize_generation_results(
                                     _fuse_generation_results(lexical, vectors, limit),
@@ -1936,6 +2650,7 @@ def _search_backends(
                                 )
                             vectors = None
                         for result in lexical:
+                            _check_generation_stop(deadline, cancelled)
                             result["requested_mode"] = "hybrid"
                             result["fallback_reason"] = "generation_vectors_unavailable"
                     if _generation_consumption_unchanged(
@@ -1943,6 +2658,7 @@ def _search_backends(
                         manifest,
                         artifact_names,
                         consumption_seal,
+                        **stop_options,
                     ):
                         return _finalize_generation_results(
                             lexical,
@@ -1950,6 +2666,8 @@ def _search_backends(
                             source_tool=source_tool,
                             emit_telemetry=emit_telemetry,
                         )
+                except TimeoutError:
+                    raise
                 except (
                     OSError,
                     PermissionError,
@@ -1961,6 +2679,7 @@ def _search_backends(
                     pass
                 finally:
                     connection.close()
+    _check_generation_stop(deadline, cancelled)
     return _legacy_search(
         query,
         scope,
@@ -2283,6 +3002,9 @@ def _vector_search(
     project: str | None = None,
     since: str | None = None,
     as_of: str | None = None,
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> list[dict] | None:
     """Run vector similarity search using sentence-transformers.
 
@@ -2292,7 +3014,10 @@ def _vector_search(
     import numpy as np
 
     # Load or build vector cache
-    vectors_data = _load_or_build_vectors(pages)
+    _check_legacy_stop(deadline, cancelled)
+    vectors_data = _load_or_build_vectors(
+        pages, deadline=deadline, cancelled=cancelled
+    )
     if not vectors_data:
         return None
 
@@ -2310,7 +3035,9 @@ def _vector_search(
         return None
 
     # Embed the query
-    query_vec = _embed_texts([query], is_query=True)
+    query_vec = _embed_texts(
+        [query], is_query=True, deadline=deadline, cancelled=cancelled
+    )
     if not query_vec:
         return None
     q = np.asarray(query_vec[0], dtype=np.float32)
@@ -2323,6 +3050,7 @@ def _vector_search(
     # Build results
     results = []
     for i, sim in enumerate(sims):
+        _check_legacy_stop(deadline, cancelled)
         proj = projects[i]
         ts = timestamps[i]
         path = paths[i]
@@ -2369,7 +3097,12 @@ def _vector_search(
     return results[:limit]
 
 
-def _legacy_vector_documents(pages: list[Path]) -> dict[str, list[str]]:
+def _legacy_vector_documents(
+    pages: list[Path],
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> dict[str, list[str]]:
     documents = {
         "source_paths": [],
         "source_sha256": [],
@@ -2384,6 +3117,7 @@ def _legacy_vector_documents(pages: list[Path]) -> dict[str, list[str]]:
         key=lambda page: page.relative_to(ROOT).as_posix(),
     )
     for page in ordered:
+        _check_legacy_stop(deadline, cancelled)
         raw = read_stable_bytes(page, MAX_PAGE_BYTES, label="legacy vector source")
         content = raw.decode("utf-8", errors="ignore")
         title, summary = _extract_title_and_summary(content, page.stem)
@@ -2400,12 +3134,22 @@ def _legacy_vector_documents(pages: list[Path]) -> dict[str, list[str]]:
     return documents
 
 
-def _legacy_vector_source_membership(pages: list[Path]) -> list[tuple[str, str]]:
-    live = _legacy_vector_documents(pages)
+def _legacy_vector_source_membership(
+    pages: list[Path],
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> list[tuple[str, str]]:
+    live = _legacy_vector_documents(pages, deadline=deadline, cancelled=cancelled)
     return list(zip(live["source_paths"], live["source_sha256"], strict=True))
 
 
-def _load_or_build_vectors(pages: list[Path]) -> dict | None:
+def _load_or_build_vectors(
+    pages: list[Path],
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> dict | None:
     """Load cached embeddings or build them fresh.
 
     v4.0: Uses memory-mapped .npy format for vectors (instant load) +
@@ -2413,13 +3157,16 @@ def _load_or_build_vectors(pages: list[Path]) -> dict | None:
     metadata value still matches the configured model and live source bytes.
     """
     # Try .npy format (fast, memory-mapped). Never convert mmap → Python list.
+    _check_legacy_stop(deadline, cancelled)
     if VECTOR_NPY.exists() and VECTOR_META.exists():
         try:
             import numpy as np
 
             cache_meta = json.loads(VECTOR_META.read_text(encoding="utf-8"))
             vectors = np.load(str(VECTOR_NPY), mmap_mode="r", allow_pickle=False)
-            live = _legacy_vector_documents(pages)
+            live = _legacy_vector_documents(
+                pages, deadline=deadline, cancelled=cancelled
+            )
             finite = bool(np.isfinite(vectors).all())
             expected = {
                 "schema_version": "legacy-vectors/v1",
@@ -2448,14 +3195,22 @@ def _load_or_build_vectors(pages: list[Path]) -> dict | None:
             ):
                 return None
             return {**live, **cache_meta, "paths": live["source_paths"], "vectors": vectors}
+        except TimeoutError:
+            raise
         except Exception:
             return None
 
-    return _build_vectors(pages)
+    return _build_vectors(pages, deadline=deadline, cancelled=cancelled)
 
 
-def _build_vectors(pages: list[Path]) -> dict | None:
+def _build_vectors(
+    pages: list[Path],
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> dict | None:
     """Build embeddings for all pages. Returns None if model unavailable."""
+    _check_legacy_stop(deadline, cancelled)
     embedder = _get_embedder()
     if not embedder:
         return None
@@ -2463,7 +3218,9 @@ def _build_vectors(pages: list[Path]) -> dict | None:
     INDEX_DIR.mkdir(parents=True, exist_ok=True)
 
     try:
-        live = _legacy_vector_documents(pages)
+        live = _legacy_vector_documents(
+            pages, deadline=deadline, cancelled=cancelled
+        )
     except (OSError, ValueError):
         return None
     texts_list = live.pop("texts")
@@ -2478,6 +3235,9 @@ def _build_vectors(pages: list[Path]) -> dict | None:
         vectors = np.asarray(
             embedder.encode(texts_list, show_progress_bar=False, convert_to_numpy=True)
         )
+        _check_legacy_stop(deadline, cancelled)
+    except TimeoutError:
+        raise
     except Exception:
         return None
     if (
@@ -2511,6 +3271,8 @@ def _build_vectors(pages: list[Path]) -> dict | None:
             VECTOR_META,
             json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
         )
+    except TimeoutError:
+        raise
     except Exception:
         return None
 

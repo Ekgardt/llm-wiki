@@ -76,6 +76,27 @@ The slug system (5-step collision resolution) lets a single vault track unlimite
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
+## Approved superset direction
+
+The 2026-07-19 product decision extends this architecture from a memory and
+evidence system into a local control plane for one operator managing many agents.
+The extension preserves all seven axioms and adds four requirements:
+
+1. Code, knowledge, project, task, and decision evidence share one validated
+   repository-scoped generation.
+2. Episodic, semantic, procedural, and prospective memory have distinct lifecycle
+   rules and temporal provenance.
+3. Objectives, tasks, executions, workspaces, artifacts, checkpoints, budgets,
+   capabilities, and exceptions survive individual sessions.
+4. SessionStart, MCP, grounded QA, handoff, impact, and task execution all use one
+   Adaptive Context Compiler.
+
+An optional watcher, HTTP MCP transport, and local operator console are permitted
+adapters. They are not authoritative and are not required for offline operation.
+The console is an exception and portfolio-decision surface, not a chat dashboard.
+See `knowledge/notes/solo-operator-superset-product-decision.md` and
+`docs/superpowers/plans/2026-07-19-solo-operator-superset-roadmap.md`.
+
 ---
 
 ## Memory taxonomy
@@ -197,10 +218,10 @@ For most teams and most use cases, **you should**. Those tools are mature, suppo
 
 ---
 
-## What's intentionally NOT here
+## Current omissions, not permanent product exclusions
 
 - **No cloud sync** — your memory stays on your disk. Use git for remote backup.
-- **No canonical frontend** — Obsidian is an optional Markdown viewer; any editor or `cat` works.
+- **No canonical frontend today** — Obsidian remains an optional Markdown viewer. The approved target adds a local exception-driven operator console without making it authoritative.
 - **No multi-user** — solo developer only.
 - **No unbounded full-vault prompt dump** — ordinary QA retrieves and verifies bounded evidence; only a measured genuinely small vault may use the `CACHED_FULL` orientation profile.
 

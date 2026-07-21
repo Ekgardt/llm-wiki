@@ -804,6 +804,42 @@ def test_mid_apply_failure_recovers_complete_compile_tree(vault, monkeypatch):
     assert b"exact-byte-pattern" in (root / "knowledge/index.md").read_bytes()
 
 
+def test_cancelled_compile_does_not_publish_markdown_after_prepare(vault, monkeypatch):
+    root, state_root = vault
+    daily = _daily(root)
+    import compile_memory
+
+    inputs = compile_memory.snapshot_compile_inputs([daily])
+    coordinator = MarkdownCoordinator(root, state_root)
+    original_prepare = coordinator.prepare
+    cancelled = False
+
+    def prepare_then_cancel(*args, **kwargs):
+        nonlocal cancelled
+        transaction = original_prepare(*args, **kwargs)
+        cancelled = True
+        return transaction
+
+    monkeypatch.setattr(coordinator, "prepare", prepare_then_cancel)
+
+    with pytest.raises(TimeoutError, match="deadline|cancellation"):
+        compile_memory.apply_compile_plan(
+            inputs,
+            _semantic_plan(),
+            action_key="f" * 64,
+            trigger="manual",
+            coordinator=coordinator,
+            completed_at="2026-07-14T12:00:00Z",
+            deadline=float("inf"),
+            cancelled=lambda: cancelled,
+        )
+
+    assert not (root / "knowledge/notes/exact-byte-pattern.md").exists()
+    assert (root / "knowledge/index.md").read_bytes() == b"# Old index\n"
+    assert (root / "knowledge/log.md").read_bytes() == b"# Session Memory Log\n"
+    assert not list((root / "knowledge/daily/receipts").glob("*.md"))
+
+
 def test_concurrent_agents_publish_snapshot_once(vault):
     root, state_root = vault
     daily = _daily(root)
@@ -902,6 +938,43 @@ def test_run_records_snapshot_hash_only_after_commit(vault, monkeypatch):
         state,
         coordinator=MarkdownCoordinator(root, compile_memory.STATE_ROOT),
     ) == [daily]
+
+
+def test_run_does_not_record_provider_failure_after_cancellation(vault, monkeypatch):
+    root, _state_root = vault
+    _daily(root)
+    import compile_memory
+
+    cancelled = False
+    recorded = []
+    finished = []
+
+    def fail_after_cancellation(*args, **kwargs):
+        nonlocal cancelled
+        cancelled = True
+        raise RuntimeError("provider failed after timeout")
+
+    monkeypatch.setattr(compile_memory, "load_state", lambda: {})
+    monkeypatch.setattr(compile_memory, "resolve_compile_plan", fail_after_cancellation)
+    monkeypatch.setattr(
+        compile_memory,
+        "_record_compile_source_failures",
+        lambda *args, **kwargs: recorded.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        compile_memory,
+        "_mark_finished",
+        lambda *args, **kwargs: finished.append((args, kwargs)),
+    )
+
+    with pytest.raises(TimeoutError, match="deadline|cancel"):
+        compile_memory._run(
+            Namespace(file=None, all=False, dry_run=False, trigger="manual"),
+            cancelled=lambda: cancelled,
+        )
+
+    assert recorded == []
+    assert finished == []
 
 
 def test_evidence_quote_must_be_inside_cited_timestamp_block(vault):

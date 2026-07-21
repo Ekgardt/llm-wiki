@@ -26,15 +26,24 @@ Tools (task-shaped, not entity-shaped — see repowise design):
   vault_status()             — metacognitive block (gaps, backlog, stale)
   log_decision(summary)      — append a decision to daily log
   check_contradiction(claim) — find conflicting pages
-  compile(scope)             — trigger compile (non-blocking)
+  compile(scope)             — compile pending logs within the operation deadline
   find_dead_code(directory)  — conservative zero-confirmed-caller candidates
   get_architecture(directory) — entry points, routes, hotspots, communities
   doctor(repair)            — local health and optional safe repairs
 """
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
+import contextvars
+import datetime as dt
+import inspect
+import itertools
+import re
 import sys
+import threading
 import time
+from contextvars import ContextVar
 from dataclasses import asdict
 from pathlib import Path, PureWindowsPath
 
@@ -51,7 +60,21 @@ MAX_MCP_CONTEXT_SLUGS = 20
 MAX_MCP_CONTEXT_INCLUDE = 10
 MAX_MCP_INCLUDE_LENGTH = 64
 MAX_MCP_CONTEXT_TOKENS = 32_768
+MAX_MCP_ERROR_CHARS = 256
 MCP_OPERATION_SECONDS = 10.0
+MCP_WORKER_SLOTS = 4
+_MCP_WORKERS: set[concurrent.futures.Future] = set()
+_MCP_WORKERS_LOCK = threading.Lock()
+_MCP_WORKER_IDS = itertools.count(1)
+_OPERATION_DEADLINE: ContextVar[float | None] = ContextVar(
+    "mcp_operation_deadline", default=None
+)
+_OPERATION_CANCELLED: ContextVar[object | None] = ContextVar(
+    "mcp_operation_cancelled", default=None
+)
+_SEARCH_OPERATION_DEADLINE: ContextVar[float | None] = ContextVar(
+    "search_operation_deadline", default=None
+)
 RETRIEVAL_TRACE_SCHEMA = (
     Path(__file__).resolve().parent / "schemas" / "retrieval-trace-v1.json"
 )
@@ -102,9 +125,129 @@ if MCP_AVAILABLE:
         pass
 
 from mcp_contract import build_envelope, envelope_schema  # noqa: E402
+from retrieval import PROFILES as QA_PROFILES  # noqa: E402
+from secret_redact import redact_secrets  # noqa: E402
 
 HEALTH_RESOURCE_URI = "llm-wiki://health"
 CONTEXT_RESOURCE_URI = "llm-wiki://context"
+
+
+def _operation_deadline(deadline: float | None = None) -> float:
+    if deadline is not None:
+        return deadline
+    inherited = _OPERATION_DEADLINE.get()
+    return inherited if inherited is not None else time.monotonic() + MCP_OPERATION_SECONDS
+
+
+def _check_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("MCP operation deadline reached")
+
+
+def _operation_cancelled():
+    cancelled = _OPERATION_CANCELLED.get()
+    return cancelled if callable(cancelled) else lambda: False
+
+
+def _call_with_deadline(function, *args, deadline: float, **kwargs):
+    """Pass deadlines to helpers that explicitly support them."""
+    try:
+        accepts_deadline = "deadline" in inspect.signature(function).parameters
+    except (TypeError, ValueError):
+        accepts_deadline = False
+    if accepts_deadline:
+        kwargs["deadline"] = deadline
+    return function(*args, **kwargs)
+
+
+async def _run_bounded(function, *args, deadline: float):
+    """Run synchronous work off-loop without an unbounded submission queue."""
+    _check_deadline(deadline)
+    submitted = concurrent.futures.Future()
+    abandoned = threading.Event()
+    cancellation_token = _OPERATION_CANCELLED.set(abandoned.is_set)
+    try:
+        context = contextvars.copy_context()
+    finally:
+        _OPERATION_CANCELLED.reset(cancellation_token)
+    with _MCP_WORKERS_LOCK:
+        _MCP_WORKERS.difference_update(
+            future for future in _MCP_WORKERS if future.done()
+        )
+        if len(_MCP_WORKERS) >= MCP_WORKER_SLOTS:
+            raise TimeoutError("MCP worker capacity exhausted")
+        _MCP_WORKERS.add(submitted)
+
+    def discard(completed):
+        try:
+            error = completed.exception()
+        except concurrent.futures.CancelledError:
+            error = None
+        if error is not None and abandoned.is_set():
+            print(
+                f"mcp worker failed after caller timeout: {type(error).__name__}",
+                file=sys.stderr,
+            )
+        with _MCP_WORKERS_LOCK:
+            _MCP_WORKERS.discard(completed)
+
+    submitted.add_done_callback(discard)
+
+    def run():
+        if not submitted.set_running_or_notify_cancel():
+            return
+        try:
+            result = context.run(function, *args)
+        except BaseException as error:
+            submitted.set_exception(error)
+        else:
+            submitted.set_result(result)
+
+    thread = threading.Thread(
+        target=run,
+        name=f"llm-wiki-mcp-{next(_MCP_WORKER_IDS)}",
+        daemon=True,
+    )
+    try:
+        thread.start()
+    except BaseException:
+        submitted.cancel()
+        raise
+    future = asyncio.wrap_future(submitted)
+    try:
+        done, _pending = await asyncio.wait(
+            {future}, timeout=max(0.0, deadline - time.monotonic())
+        )
+    except asyncio.CancelledError:
+        abandoned.set()
+        future.cancel()
+        raise
+    if not done:
+        abandoned.set()
+        future.cancel()
+        raise TimeoutError("MCP operation deadline reached")
+    return future.result()
+
+
+def _timeout_envelope_text() -> str:
+    import json
+
+    error = "operation_timeout"
+    envelope = {
+        "schema_version": "1.0",
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "index_timestamp": None,
+        "source_commit": None,
+        "freshness": "unknown",
+        "coverage": 0.0,
+        "confidence": 0.2,
+        "fallback": False,
+        "partial": True,
+        "warnings": [error],
+        "components": {},
+        "data": {"error": error},
+    }
+    return json.dumps(envelope, indent=2, ensure_ascii=False, allow_nan=False)
 
 
 def _doctor_branch(
@@ -165,8 +308,27 @@ TOOL_INPUT_SCHEMAS = {
                 "default": 8,
                 "description": "Requested result count; execution clamps it to 1-20",
             },
+            "grounded": {
+                "type": "boolean",
+                "default": False,
+                "description": "Return a verified evidence-grounded answer",
+            },
+            "profile": {
+                "type": "string",
+                "enum": list(QA_PROFILES),
+                "description": "Grounded QA retrieval profile",
+            },
         },
         "required": ["query"],
+        "allOf": [
+            {
+                "if": {"required": ["profile"]},
+                "then": {
+                    "properties": {"grounded": {"const": True}},
+                    "required": ["grounded"],
+                },
+            }
+        ],
     },
     "read_page": {
         "type": "object",
@@ -302,11 +464,19 @@ TOOL_INPUT_SCHEMAS = {
 }
 
 
-def _search_vault(query: str, limit: int = 8) -> list[dict]:
+def _search_vault(
+    query: str, limit: int = 8, *, deadline: float | None = None
+) -> list[dict]:
     """Run hybrid search on the vault."""
     if not isinstance(query, str) or len(query) > MAX_MCP_QUERY_LENGTH:
         raise ValueError("query exceeds the MCP retrieval bound")
     from search_memory import search
+
+    operation_deadline = (
+        _SEARCH_OPERATION_DEADLINE.get() if deadline is None else deadline
+    )
+    if operation_deadline is None:
+        operation_deadline = time.monotonic() + MCP_OPERATION_SECONDS
 
     def run_search(*, semantic: bool, graph: bool = True, rerank: bool = True) -> list[dict]:
         return search(
@@ -316,17 +486,14 @@ def _search_vault(query: str, limit: int = 8) -> list[dict]:
             graph=graph,
             rerank=rerank,
             source_tool="mcp.recall",
-            deadline_monotonic=time.monotonic() + MCP_OPERATION_SECONDS,
+            deadline_monotonic=operation_deadline,
             max_candidates=limit,
         )
 
     try:
         return run_search(semantic=True)
     except TimeoutError:
-        try:
-            lexical = run_search(semantic=False, graph=False, rerank=False)
-        except TimeoutError:
-            return []
+        lexical = run_search(semantic=False, graph=False, rerank=False)
         return [
             {
                 **row,
@@ -386,7 +553,11 @@ def _retrieval_trace(query: str, results: list[dict]) -> dict[str, object]:
 
 
 def _read_page(
-    slug: str, *, emit_telemetry: bool = True, resolve_evidence: bool = True
+    slug: str,
+    *,
+    emit_telemetry: bool = True,
+    resolve_evidence: bool = True,
+    deadline: float | None = None,
 ) -> dict:
     """Read a full page by slug."""
     from memory_state import ROOT, STATE_ROOT
@@ -404,6 +575,7 @@ def _read_page(
         return {"error": f"Invalid page slug: {slug}"}
     notes_dir = ROOT / "knowledge" / "notes"
     page_path = notes_dir / f"{slug}.md"
+    _check_deadline(deadline)
     if not page_path.exists():
         return {"error": f"Page not found: {slug}"}
     try:
@@ -411,7 +583,7 @@ def _read_page(
             page_path, MAX_MCP_PAGE_BYTES, label="MCP page"
         ).decode("utf-8", errors="strict")
     except (OSError, UnicodeDecodeError, ValueError) as exc:
-        return {"error": f"Page read failed for {slug}: {exc}"}
+        return {"error": f"Page read failed: {_safe_page_read_error(exc)}"}
     from evidence_resolver import (
         EvidenceResolutionError,
         EvidenceResolver,
@@ -424,6 +596,7 @@ def _read_page(
     try:
         references = extract_evidence_references(content) if resolve_evidence else []
         for reference in references:
+            _check_deadline(deadline)
             resolved = resolver.resolve(reference)
             if len(resolved.bytes) > MAX_MCP_EVIDENCE_BYTES:
                 raise EvidenceResolutionError(
@@ -442,7 +615,7 @@ def _read_page(
                 }
             )
     except (EvidenceResolutionError, OSError, UnicodeDecodeError, ValueError) as exc:
-        return {"error": f"Evidence resolution failed for {slug}: {exc}"}
+        return {"error": f"Evidence resolution failed: {_safe_evidence_error(exc)}"}
     result = {
         "slug": slug,
         "path": str(page_path.relative_to(ROOT)),
@@ -479,12 +652,14 @@ def _read_page(
     return result
 
 
-def _wiki_overview() -> dict:
+def _wiki_overview(*, deadline: float | None = None) -> dict:
     """Get vault statistics and retrieval tier recommendation."""
     from lookup_mode import count_wiki_pages, tier_for
     from memory_state import ROOT
 
+    _check_deadline(deadline)
     count = count_wiki_pages()
+    _check_deadline(deadline)
     tier = tier_for(count)
     return {
         "page_count": count,
@@ -493,10 +668,11 @@ def _wiki_overview() -> dict:
     }
 
 
-def _vault_status() -> dict:
+def _vault_status(*, deadline: float | None = None) -> dict:
     """Return compile status and current daily-file backlog."""
     from memory_state import ROOT, file_hash, load_state
 
+    _check_deadline(deadline)
     state = load_state()
     compiled = state.get("compiled_daily_hashes", {}) or {}
     try:
@@ -505,6 +681,7 @@ def _vault_status() -> dict:
         daily_files = []
     backlog = 0
     for daily_path in daily_files:
+        _check_deadline(deadline)
         try:
             current_hash = file_hash(daily_path)
         except OSError:
@@ -519,7 +696,9 @@ def _vault_status() -> dict:
     }
 
 
-def _get_decisions(query: str | None = None, limit: int = 10) -> list[dict]:
+def _get_decisions(
+    query: str | None = None, limit: int = 10, *, deadline: float | None = None
+) -> list[dict]:
     """Get active decisions from the vault."""
     from search_memory import search
     if query is not None and (
@@ -532,6 +711,7 @@ def _get_decisions(query: str | None = None, limit: int = 10) -> list[dict]:
         limit=limit,
         source_tool="mcp.get_decisions",
         emit_telemetry=False,
+        deadline_monotonic=deadline,
     )
     # Filter to decision-type pages
     results = [
@@ -575,6 +755,7 @@ def _get_context(
     include: list[str] | None = None,
     *,
     token_budget: int = 8192,
+    deadline: float | None = None,
 ) -> dict:
     """Return one compiler package under one shared token budget."""
     if not isinstance(slugs, list) or not 1 <= len(slugs) <= MAX_MCP_CONTEXT_SLUGS:
@@ -606,9 +787,8 @@ def _get_context(
     from corpus_snapshot import CorpusSnapshot, collect_corpus
     from memory_state import ROOT
 
-    snapshot = collect_corpus(
-        ROOT, deadline=time.monotonic() + MCP_OPERATION_SECONDS
-    )
+    operation_deadline = _operation_deadline(deadline)
+    snapshot = collect_corpus(ROOT, deadline=operation_deadline)
     requested = set(slugs)
     sources = tuple(
         source
@@ -648,6 +828,7 @@ def _get_context(
             shortlist=shortlist,
             evidence_chunk_ids=(chunk.id for chunk in chunks),
             budget=budget,
+            deadline=operation_deadline,
         )
     except BudgetExceededError:
         compiled = compile_context(
@@ -655,6 +836,7 @@ def _get_context(
             shortlist=shortlist,
             evidence_chunk_ids=(),
             budget=budget,
+            deadline=operation_deadline,
         )
     items = [asdict(item) for item in compiled.items]
     pages = [item for item in items if item["source"].endswith(".md")]
@@ -709,18 +891,23 @@ def _get_context(
     return result
 
 
-def _assess_contradiction_text(claim: str) -> dict:
+def _assess_contradiction_text(
+    claim: str, *, deadline: float | None = None
+) -> dict:
     from contradiction_pipeline import assess_text
 
+    _check_deadline(deadline)
     return assess_text(claim)
 
 
-def _check_contradiction(claim: str) -> dict:
+def _check_contradiction(claim: str, *, deadline: float | None = None) -> dict:
     """Assess a claim and return evidence, validity, and lifecycle advice."""
-    return _assess_contradiction_text(claim)
+    return _call_with_deadline(_assess_contradiction_text, claim, deadline=deadline)
 
 
-def _log_decision(summary: str, rationale: str = "") -> dict:
+def _log_decision(
+    summary: str, rationale: str = "", *, deadline: float | None = None
+) -> dict:
     """Append a decision to the daily log."""
     from datetime import datetime
 
@@ -736,24 +923,40 @@ def _log_decision(summary: str, rationale: str = "") -> dict:
         block += f"Rationale: {rationale}\n"
 
     try:
-        path = append_daily(now.strftime("%Y-%m-%d"), slug, block)
+        _check_deadline(deadline)
+        path = append_daily(
+            now.strftime("%Y-%m-%d"),
+            slug,
+            block,
+            deadline=_operation_deadline(deadline),
+            cancelled=_operation_cancelled(),
+        )
         return {"status": "logged", "path": str(path)}
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": _safe_exception_text(e)}
 
 
-def _trigger_compile() -> dict:
-    """Trigger a compile (non-blocking)."""
-    from maybe_compile import spawn_compile_if_idle
-    spawned, reason = spawn_compile_if_idle()
-    return {"spawned": spawned, "reason": reason}
+def _trigger_compile(*, deadline: float | None = None) -> dict:
+    """Compile pending daily logs under the MCP operation bounds."""
+    from compile_memory import run_pending_compile
+
+    operation_deadline = _operation_deadline(deadline)
+    _check_deadline(operation_deadline)
+    returncode = run_pending_compile(
+        trigger="manual",
+        deadline=operation_deadline,
+        cancelled=_operation_cancelled(),
+    )
+    return {"status": "completed", "returncode": returncode}
 
 
-def _find_dead_code(directory: str, *, live: bool = False) -> dict:
+def _find_dead_code(
+    directory: str, *, live: bool = False, deadline: float | None = None
+) -> dict:
     """Find conservative dead-code candidates in a project directory."""
     from code_graph import find_dead_code
 
-    resolved, error = _validated_code_directory(directory)
+    resolved, error = _validated_code_directory(directory, deadline=deadline)
     if error:
         return {"error": error}
     result = find_dead_code(resolved, live=live, with_report=True)
@@ -769,11 +972,13 @@ def _find_dead_code(directory: str, *, live: bool = False) -> dict:
     return {"directory": str(resolved), **result}
 
 
-def _get_architecture(directory: str, *, live: bool = False) -> dict:
+def _get_architecture(
+    directory: str, *, live: bool = False, deadline: float | None = None
+) -> dict:
     """Summarize the statically visible architecture of a project directory."""
     from code_graph import get_architecture
 
-    resolved, error = _validated_code_directory(directory)
+    resolved, error = _validated_code_directory(directory, deadline=deadline)
     if error:
         return {"error": error}
     architecture = get_architecture(resolved, live=live, with_report=True)
@@ -799,6 +1004,7 @@ def _get_architecture_mode(
     target: str | None = None,
     reverse: bool = False,
     live: bool = False,
+    deadline: float | None = None,
 ) -> dict:
     """Dispatch bounded graph queries while retaining live/store reports."""
     from code_graph import (
@@ -809,7 +1015,7 @@ def _get_architecture_mode(
         find_paths,
     )
 
-    resolved, error = _validated_code_directory(directory)
+    resolved, error = _validated_code_directory(directory, deadline=deadline)
     if error:
         return {"error": error}
     if mode in {"symbol", "callers", "callees", "dependencies"} and not symbol:
@@ -817,6 +1023,7 @@ def _get_architecture_mode(
     if mode == "path" and (not symbol or not target):
         return {"error": "symbol and target are required for path mode"}
 
+    _check_deadline(deadline)
     if mode == "callers":
         architecture = find_callers(symbol, resolved, live=live, with_report=True)
     elif mode == "callees":
@@ -833,7 +1040,9 @@ def _get_architecture_mode(
         architecture = detect_communities(resolved, live=live, with_report=True)
     else:
         callers = find_callers(symbol, resolved, live=live, with_report=True)
+        _check_deadline(deadline)
         callees = find_callees(symbol, resolved, live=live, with_report=True)
+        _check_deadline(deadline)
         dependencies = find_dependencies(
             symbol, resolved, live=live, with_report=True
         )
@@ -877,11 +1086,12 @@ def _analyze_impact(
     base: str | None = None,
     target: str | None = None,
     branch: str | None = None,
+    deadline: float | None = None,
 ) -> dict:
     """Run bounded diff-to-graph impact through the architecture tool."""
     from impact_analysis import COMPARISONS, analyze_impact
 
-    resolved, error = _validated_code_directory(directory)
+    resolved, error = _validated_code_directory(directory, deadline=deadline)
     if error:
         return {"error": error}
     if comparison not in COMPARISONS:
@@ -892,6 +1102,7 @@ def _analyze_impact(
         base=base,
         target=target,
         branch=branch,
+        deadline=deadline,
     )
 
 
@@ -928,6 +1139,7 @@ def _doctor(
     target_id: str | None = None,
     limit: int = 20,
     repair: bool = False,
+    deadline: float | None = None,
 ) -> dict:
     """Dispatch bounded health and recovery actions with redacted output."""
     from memory_state import ROOT, STATE_ROOT
@@ -942,11 +1154,17 @@ def _doctor(
         return _operator_result(
             action, states=["error"], codes=["repair_required"], overall_status="error"
         )
+    operation_deadline = _operation_deadline(deadline)
+    cancelled = _operation_cancelled()
     try:
         if action == "status":
             from doctor import run_doctor
 
-            report = run_doctor(root=ROOT, state_root=STATE_ROOT)
+            report = run_doctor(
+                root=ROOT,
+                state_root=STATE_ROOT,
+                deadline=operation_deadline,
+            )
             codes = [item["code"] for item in report["run_deletion"]["blockers"]]
             for check in report["checks"]:
                 codes.extend(str(code) for code in check.get("details", {}).get("codes", []))
@@ -1012,7 +1230,11 @@ def _doctor(
 
             queue = MemoryQueue(STATE_ROOT)
             if action == "queue-cancel":
-                changed = queue.cancel(str(target_id))
+                changed = queue.cancel(
+                    str(target_id),
+                    deadline=operation_deadline,
+                    cancelled=cancelled,
+                )
                 return _operator_result(
                     action,
                     ids=[str(target_id)] if changed else [],
@@ -1021,7 +1243,11 @@ def _doctor(
                     overall_status="ok" if changed else "error",
                 )
             try:
-                replacement = queue.redrive(str(target_id))
+                replacement = queue.redrive(
+                    str(target_id),
+                    deadline=operation_deadline,
+                    cancelled=cancelled,
+                )
             except KeyError:
                 return _operator_result(
                     action,
@@ -1045,11 +1271,22 @@ def _doctor(
             if action == "transaction-recover":
                 records = coordinator.recover(
                     max_transactions=limit,
-                    deadline=time.monotonic() + 5.0,
+                    deadline=operation_deadline,
+                    cancelled=cancelled,
                 )
             else:
-                prepared = coordinator.undo(str(target_id))
-                records = [coordinator.apply(prepared.id)]
+                prepared = coordinator.undo(
+                    str(target_id),
+                    deadline=operation_deadline,
+                    cancelled=cancelled,
+                )
+                records = [
+                    coordinator.apply(
+                        prepared.id,
+                        deadline=operation_deadline,
+                        cancelled=cancelled,
+                    )
+                ]
             return _operator_result(
                 action,
                 ids=[record.id for record in records],
@@ -1060,9 +1297,9 @@ def _doctor(
             from doctor import _archive_check, _claim_check
 
             check = (
-                _archive_check(ROOT, STATE_ROOT)
+                _archive_check(ROOT, STATE_ROOT, operation_deadline)
                 if action == "archive-status"
-                else _claim_check(ROOT, STATE_ROOT)
+                else _claim_check(ROOT, STATE_ROOT, operation_deadline)
             )
             details = check["details"]
             counts = {
@@ -1090,10 +1327,13 @@ def _doctor(
     )
 
 
-def _validated_code_directory(directory: str) -> tuple[Path | None, str | None]:
+def _validated_code_directory(
+    directory: str, *, deadline: float | None = None
+) -> tuple[Path | None, str | None]:
     """Validate an explicitly supplied, bounded local project directory."""
     if not isinstance(directory, str) or not directory.strip():
         return None, "directory is required"
+    _check_deadline(deadline)
     candidate = Path(directory).expanduser()
     if not candidate.is_absolute():
         return None, "directory must be an absolute local path"
@@ -1155,7 +1395,7 @@ def _build_tool_definitions() -> list:
         ),
         _make_tool(
             name="compile",
-            description="Trigger a background compile of daily logs into knowledge pages. Non-blocking.",
+            description="Compile pending daily logs into knowledge pages within the operation deadline.",
             inputSchema=TOOL_INPUT_SCHEMAS["compile"],
         ),
         _make_tool(
@@ -1183,14 +1423,16 @@ def _make_tool(**kwargs):
     return Tool(**kwargs)
 
 
-def _meta() -> dict:
+def _meta(*, deadline: float | None = None) -> dict:
     """Build the legacy payload metadata retained inside envelope data."""
     from datetime import datetime
 
     from lookup_mode import count_wiki_pages
     from memory_state import load_state
 
+    _check_deadline(deadline)
     state = load_state()
+    _check_deadline(deadline)
     return {
         "page_count": count_wiki_pages(),
         "last_compile": state.get("last_compile_at", "never"),
@@ -1214,6 +1456,8 @@ def _validate_tool_arguments(name: str, arguments) -> str | None:
     error = _validate_object_schema(schema, arguments, reject_unknown=False)
     if error is not None:
         return error
+    if name == "recall" and "profile" in arguments and arguments.get("grounded") is not True:
+        return "argument 'profile' requires grounded=true"
     if name == "get_architecture":
         mode = arguments.get("mode", "summary")
         if mode in {"symbol", "callers", "callees", "dependencies"} and not arguments.get(
@@ -1303,6 +1547,64 @@ def _degrade_quality(
     return quality
 
 
+def _safe_exception_text(error: BaseException) -> str:
+    """Return a bounded stable code without exposing untrusted exception details."""
+    code = "operation_timeout" if isinstance(error, TimeoutError) else "operation_failed"
+    return " ".join(redact_secrets(code).split())[:MAX_MCP_ERROR_CHARS]
+
+
+def _safe_page_read_error(error: BaseException) -> str:
+    message = " ".join(str(error).split())
+    allowed = {
+        f"MCP page exceeds {MAX_MCP_PAGE_BYTES} bytes",
+        "MCP page parent must be a regular directory",
+        "MCP page must be a regular non-symlink file",
+        "MCP page changed before open",
+        "MCP page changed during read",
+        "MCP page was replaced during read",
+    }
+    return message if message in allowed else _safe_exception_text(error)
+
+
+def _safe_evidence_error(error: BaseException) -> str:
+    message = " ".join(str(error).split())
+    allowed = {
+        f"evidence slice exceeds {MAX_MCP_EVIDENCE_BYTES} bytes",
+        f"total evidence exceeds {MAX_MCP_TOTAL_EVIDENCE_BYTES} bytes",
+    }
+    return message if message in allowed else _safe_exception_text(error)
+
+
+_ABSOLUTE_PATH = re.compile(
+    r"(?<![\w])(?:[A-Za-z]:[\\/](?:[^\\/\s]+[\\/])*[^\\/\s]+|/(?:[^/\s]+/)+[^/\s]+)"
+)
+
+
+def _sanitize_diagnostic(value):
+    if isinstance(value, str):
+        text = redact_secrets(value)
+        text = _ABSOLUTE_PATH.sub("[REDACTED_PATH]", text)
+        return " ".join(text.split())[:MAX_MCP_ERROR_CHARS]
+    if isinstance(value, list):
+        return [_sanitize_diagnostic(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _sanitize_diagnostic(item) for key, item in value.items()}
+    return value
+
+
+def _sanitize_error_fields(value):
+    if isinstance(value, list):
+        return [_sanitize_error_fields(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_diagnostic(item)
+            if key == "error"
+            else _sanitize_error_fields(item)
+            for key, item in value.items()
+        }
+    return value
+
+
 def _quality_for(
     name: str,
     data,
@@ -1317,6 +1619,36 @@ def _quality_for(
             "confidence": 0.2,
             "partial": True,
             "warnings": [str(data["error"])],
+        }
+    if name == "recall" and arguments and arguments.get("grounded") is True:
+        if isinstance(data, dict) and data.get("status") == "answered":
+            claims = data.get("claims", [])
+            citations = data.get("citations", [])
+            citation_ids = {
+                citation.get("citation_id")
+                for citation in citations
+                if isinstance(citation, dict) and citation.get("citation_id")
+            }
+            verified_claims = sum(
+                1
+                for claim in claims
+                if isinstance(claim, dict)
+                and claim.get("citation_ids")
+                and set(claim["citation_ids"]).issubset(citation_ids)
+            )
+            verification_ratio = verified_claims / len(claims) if claims else 0.0
+            return {
+                "coverage": 0.0,
+                "confidence": min(0.8, verification_ratio),
+                "partial": verification_ratio < 1.0,
+                "warnings": ["Grounded answer coverage is unknown."],
+            }
+        reason = data.get("reason") if isinstance(data, dict) else None
+        return {
+            "coverage": 0.0,
+            "confidence": 0.0,
+            "partial": True,
+            "warnings": [str(reason or "Grounded QA abstained without a reason.")],
         }
     if name == "check_contradiction":
         if isinstance(data, list):
@@ -1545,6 +1877,8 @@ def _build_operation_envelope(
         warning = "One or more response components are stale."
         if warning not in envelope["warnings"]:
             envelope["warnings"].append(warning)
+    envelope["warnings"] = _sanitize_diagnostic(envelope["warnings"])
+    envelope["data"] = _sanitize_error_fields(envelope["data"])
     return envelope
 
 
@@ -1594,104 +1928,169 @@ def _components_for(name: str, data) -> dict[str, dict[str, object]]:
     return {}
 
 
-async def _handle_tool_call(name: str, arguments) -> str:
-    """Handle a tool call and return a compatible JSON text envelope."""
+def _execute_tool_call(name: str, arguments, operation_deadline: float) -> str:
+    """Execute one tool under the absolute deadline created by its async handler."""
     import json
 
+    deadline_token = _OPERATION_DEADLINE.set(operation_deadline)
     limit_clamped = False
-    if name not in TOOL_INPUT_SCHEMAS:
-        data = {"error": f"Unknown tool: {name}"}
-    elif validation_error := _validate_tool_arguments(name, arguments):
-        data = {"error": validation_error}
-    else:
-        try:
-            if name == "recall":
-                effective_limit, limit_clamped = _clamped_limit(
-                    arguments.get("limit", 8)
-                )
-                results = _search_vault(
-                    arguments["query"], limit=effective_limit
-                )
-                data = {
-                    "results": results,
-                    "retrieval_trace": _retrieval_trace(arguments["query"], results),
-                    "_meta": _meta(),
-                }
-            elif name == "read_page":
-                data = _read_page(arguments["slug"])
-            elif name == "wiki_overview":
-                data = _wiki_overview()
-                data["_meta"] = _meta()
-            elif name == "vault_status":
-                data = _vault_status()
-            elif name == "get_decisions":
-                effective_limit, limit_clamped = _clamped_limit(
-                    arguments.get("limit", 10)
-                )
-                data = _get_decisions(
-                    arguments.get("query"),
-                    limit=effective_limit,
-                )
-            elif name == "get_context":
-                context_options = (
-                    {"token_budget": arguments["token_budget"]}
-                    if "token_budget" in arguments
-                    else {}
-                )
-                data = _get_context(
-                    arguments["slugs"], arguments.get("include"), **context_options
-                )
-            elif name == "check_contradiction":
-                data = _check_contradiction(arguments["claim"])
-            elif name == "log_decision":
-                data = _log_decision(
-                    arguments["summary"], arguments.get("rationale", "")
-                )
-            elif name == "compile":
-                data = _trigger_compile()
-            elif name == "find_dead_code":
-                data = _find_dead_code(
-                    arguments["directory"], live=arguments.get("live", False)
-                )
-            elif name == "get_architecture":
-                if arguments.get("mode", "summary") == "impact":
-                    data = _analyze_impact(
-                        directory=arguments["directory"],
-                        comparison=arguments.get("comparison", "dirty"),
-                        base=arguments.get("base"),
-                        target=arguments.get("target"),
-                        branch=arguments.get("branch"),
-                    )
-                elif arguments.get("mode", "summary") == "summary":
-                    data = _get_architecture(
-                        arguments["directory"], live=arguments.get("live", False)
-                    )
-                else:
-                    data = _get_architecture_mode(
-                        arguments["directory"],
-                        mode=arguments["mode"],
-                        symbol=arguments.get("symbol"),
-                        target=arguments.get("target"),
-                        reverse=arguments.get("reverse", False),
-                        live=arguments.get("live", False),
-                    )
-            else:
-                data = _doctor(**arguments)
-        except Exception as e:
-            data = {"error": str(e)}
+    try:
+        if name not in TOOL_INPUT_SCHEMAS:
+            data = {"error": f"Unknown tool: {name}"}
+        elif validation_error := _validate_tool_arguments(name, arguments):
+            data = {"error": validation_error}
+        else:
+            try:
+                _check_deadline(operation_deadline)
+                if name == "recall":
+                    if arguments.get("grounded", False):
+                        from memory_state import ROOT
+                        from query_memory import grounded_qa
 
-    quality = _quality_for(
-        name,
-        data,
-        arguments if isinstance(arguments, dict) else None,
-        limit_clamped=limit_clamped,
-    )
-    envelope = _build_operation_envelope(
-        data,
-        quality,
-        components=_components_for(name, data),
-    )
-    return json.dumps(envelope, indent=2, ensure_ascii=False, allow_nan=False)
+                        data = grounded_qa(
+                            arguments["query"],
+                            vault=ROOT,
+                            profile=arguments.get("profile"),
+                            deadline=operation_deadline,
+                        )
+                    else:
+                        effective_limit, limit_clamped = _clamped_limit(
+                            arguments.get("limit", 8)
+                        )
+                        results = _call_with_deadline(
+                            _search_vault,
+                            arguments["query"],
+                            limit=effective_limit,
+                            deadline=operation_deadline,
+                        )
+                        data = {
+                            "results": results,
+                            "retrieval_trace": _retrieval_trace(arguments["query"], results),
+                            "_meta": _call_with_deadline(
+                                _meta, deadline=operation_deadline
+                            ),
+                        }
+                elif name == "read_page":
+                    data = _call_with_deadline(
+                        _read_page, arguments["slug"], deadline=operation_deadline
+                    )
+                elif name == "wiki_overview":
+                    data = _call_with_deadline(
+                        _wiki_overview, deadline=operation_deadline
+                    )
+                    data["_meta"] = _call_with_deadline(
+                        _meta, deadline=operation_deadline
+                    )
+                elif name == "vault_status":
+                    data = _call_with_deadline(
+                        _vault_status, deadline=operation_deadline
+                    )
+                elif name == "get_decisions":
+                    effective_limit, limit_clamped = _clamped_limit(
+                        arguments.get("limit", 10)
+                    )
+                    data = _call_with_deadline(
+                        _get_decisions,
+                        arguments.get("query"),
+                        limit=effective_limit,
+                        deadline=operation_deadline,
+                    )
+                elif name == "get_context":
+                    context_options = (
+                        {"token_budget": arguments["token_budget"]}
+                        if "token_budget" in arguments
+                        else {}
+                    )
+                    data = _call_with_deadline(
+                        _get_context,
+                        arguments["slugs"],
+                        arguments.get("include"),
+                        **context_options,
+                        deadline=operation_deadline,
+                    )
+                elif name == "check_contradiction":
+                    data = _call_with_deadline(
+                        _check_contradiction,
+                        arguments["claim"],
+                        deadline=operation_deadline,
+                    )
+                elif name == "log_decision":
+                    data = _call_with_deadline(
+                        _log_decision,
+                        arguments["summary"],
+                        arguments.get("rationale", ""),
+                        deadline=operation_deadline,
+                    )
+                elif name == "compile":
+                    data = _call_with_deadline(
+                        _trigger_compile, deadline=operation_deadline
+                    )
+                elif name == "find_dead_code":
+                    data = _call_with_deadline(
+                        _find_dead_code,
+                        arguments["directory"],
+                        live=arguments.get("live", False),
+                        deadline=operation_deadline,
+                    )
+                elif name == "get_architecture":
+                    if arguments.get("mode", "summary") == "impact":
+                        data = _analyze_impact(
+                            directory=arguments["directory"],
+                            comparison=arguments.get("comparison", "dirty"),
+                            base=arguments.get("base"),
+                            target=arguments.get("target"),
+                            branch=arguments.get("branch"),
+                            deadline=operation_deadline,
+                        )
+                    elif arguments.get("mode", "summary") == "summary":
+                        data = _call_with_deadline(
+                            _get_architecture,
+                            arguments["directory"],
+                            live=arguments.get("live", False),
+                            deadline=operation_deadline,
+                        )
+                    else:
+                        data = _get_architecture_mode(
+                            arguments["directory"],
+                            mode=arguments["mode"],
+                            symbol=arguments.get("symbol"),
+                            target=arguments.get("target"),
+                            reverse=arguments.get("reverse", False),
+                            live=arguments.get("live", False),
+                            deadline=operation_deadline,
+                        )
+                else:
+                    data = _call_with_deadline(
+                        _doctor, **arguments, deadline=operation_deadline
+                    )
+            except Exception as error:
+                data = {"error": _safe_exception_text(error)}
+
+        quality = _quality_for(
+            name,
+            data,
+            arguments if isinstance(arguments, dict) else None,
+            limit_clamped=limit_clamped,
+        )
+        envelope = _build_operation_envelope(
+            data,
+            quality,
+            components=_components_for(name, data),
+        )
+        return json.dumps(envelope, indent=2, ensure_ascii=False, allow_nan=False)
+    finally:
+        _OPERATION_DEADLINE.reset(deadline_token)
+
+
+async def _handle_tool_call(name: str, arguments) -> str:
+    """Handle a tool call without blocking unrelated MCP event-loop work."""
+    operation_deadline = time.monotonic() + MCP_OPERATION_SECONDS
+    try:
+        return await _run_bounded(
+            _execute_tool_call, name, arguments, operation_deadline, deadline=operation_deadline
+        )
+    except TimeoutError:
+        return _timeout_envelope_text()
 
 
 def _build_resource_definitions() -> list:
@@ -1714,21 +2113,35 @@ def _build_resource_definitions() -> list:
     ]
 
 
-def _handle_resource_read(uri: str) -> str:
+def _handle_resource_read(uri: str, deadline: float | None = None) -> str:
     """Return one resource as a JSON text envelope."""
     import json
 
+    operation_deadline = _operation_deadline(deadline)
+    deadline_token = _OPERATION_DEADLINE.set(operation_deadline)
     try:
         if uri == HEALTH_RESOURCE_URI:
-            data = _vault_status()
+            data = _call_with_deadline(
+                _vault_status, deadline=operation_deadline
+            )
         elif uri == CONTEXT_RESOURCE_URI:
-            data = {"overview": _wiki_overview(), "status": _vault_status()}
+            data = {
+                "overview": _call_with_deadline(
+                    _wiki_overview, deadline=operation_deadline
+                ),
+                "status": _call_with_deadline(
+                    _vault_status, deadline=operation_deadline
+                ),
+            }
         else:
             data = {"error": f"Unknown resource: {uri}"}
-    except Exception as e:
-        data = {"error": str(e)}
-    envelope = _build_operation_envelope(data, _resource_quality(data))
-    return json.dumps(envelope, indent=2, ensure_ascii=False, allow_nan=False)
+    except Exception as error:
+        data = {"error": _safe_exception_text(error)}
+    try:
+        envelope = _build_operation_envelope(data, _resource_quality(data))
+        return json.dumps(envelope, indent=2, ensure_ascii=False, allow_nan=False)
+    finally:
+        _OPERATION_DEADLINE.reset(deadline_token)
 
 
 def _register_resources(server) -> bool:
@@ -1747,11 +2160,21 @@ def _register_resources(server) -> bool:
 
     @read_resource_method()
     async def read_resource(uri):
+        operation_deadline = time.monotonic() + MCP_OPERATION_SECONDS
+        try:
+            text = await _run_bounded(
+                _handle_resource_read,
+                str(uri),
+                operation_deadline,
+                deadline=operation_deadline,
+            )
+        except TimeoutError:
+            text = _timeout_envelope_text()
         return [
             TextResourceContents(
                 uri=uri,
                 mimeType="application/json",
-                text=_handle_resource_read(str(uri)),
+                text=text,
             )
         ]
 
@@ -1789,10 +2212,14 @@ def _format_tool_result(result: str):
     return text_content
 
 
+def _execute_formatted_tool_call(name: str, arguments, operation_deadline: float):
+    result = _execute_tool_call(name, arguments, operation_deadline)
+    _check_deadline(operation_deadline)
+    return _format_tool_result(result)
+
+
 def _register_tools(server, tools):
     """Register tool callbacks while disabling SDK-side validation when supported."""
-    import inspect
-
     @server.list_tools()
     async def list_tools():
         return tools
@@ -1812,11 +2239,21 @@ def _register_tools(server, tools):
         if supports_validate_input
         else call_tool_method()
     )
+    timeout_result = _format_tool_result(_timeout_envelope_text())
 
     @decorator
     async def call_tool(name: str, arguments):
-        result = await _handle_tool_call(name, arguments)
-        return _format_tool_result(result)
+        operation_deadline = time.monotonic() + MCP_OPERATION_SECONDS
+        try:
+            return await _run_bounded(
+                _execute_formatted_tool_call,
+                name,
+                arguments,
+                operation_deadline,
+                deadline=operation_deadline,
+            )
+        except TimeoutError:
+            return timeout_result
 
     return call_tool
 
@@ -1829,8 +2266,6 @@ def run_server() -> int:
             file=sys.stderr,
         )
         return 1
-
-    import asyncio
 
     server = Server("llm-wiki")
     tools = _build_tool_definitions()

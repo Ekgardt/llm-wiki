@@ -82,14 +82,29 @@ def _create_claim_index(root: Path, state_root: Path) -> None:
     ClaimIndex(state_root, vault=root).rebuild([root / "knowledge" / "notes"])
 
 
-def _create_generation(state_root: Path) -> None:
+def _create_generation(root: Path, state_root: Path) -> None:
+    import corpus_snapshot
+    import doctor
     from evidence_graph_builder import build_full_generation
     from generation_catalog import GenerationCatalog
+    from repository_scope import resolve_repository_scope
 
+    snapshot = corpus_snapshot.collect_corpus(root)
     build_full_generation(
         GenerationCatalog(state_root),
-        sources=(),
-        source_bytes={},
+        sources=(
+            {
+                "source_id": source.record.logical_id,
+                "relative_path": source.record.relative_path,
+                "sha256": source.record.sha256,
+                "size": source.record.size,
+                "media_type": source.record.media_type,
+                "language": source.record.language,
+                "git_oid": source.record.git_oid,
+            }
+            for source in snapshot.sources
+        ),
+        source_bytes={source.record.logical_id: source.content for source in snapshot.sources},
         nodes=(),
         occurrences=(),
         assertions=(),
@@ -97,6 +112,10 @@ def _create_generation(state_root: Path) -> None:
         observations=(),
         dependencies=(),
         generation_id="healthy-generation",
+        graph_extractor_version=doctor._maintenance_extractor_identity(),
+        repository_scope=resolve_repository_scope(root),
+        snapshot=snapshot,
+        publication_root=root,
     )
 
 
@@ -190,7 +209,7 @@ def test_report_schema_and_all_check_classes_are_json_safe(tmp_path):
     index = state_root / "cache" / "index.sqlite"
     _create_index(index)
     _create_claim_index(root, state_root)
-    _create_generation(state_root)
+    _create_generation(root, state_root)
     os.utime(index, (now.timestamp(), now.timestamp()))
 
     report = run_doctor(root=root, state_root=state_root, home=home, now=now)
@@ -1327,7 +1346,7 @@ def test_cli_returns_zero_for_healthy_report(tmp_path):
     )
     _create_index(state_root / "cache" / "index.sqlite")
     _create_claim_index(root, state_root)
-    _create_generation(state_root)
+    _create_generation(root, state_root)
     env = os.environ.copy()
     env.update(
         LLM_WIKI_ROOT=str(root),
@@ -1836,6 +1855,44 @@ def test_index_check_honors_expired_deadline(tmp_path):
     assert time.perf_counter() - started < 0.2
     assert check["status"] == "degraded"
     assert check["details"]["budget_exhausted"] is True
+
+
+def test_run_doctor_uses_supplied_absolute_deadline_after_queue_delay(
+    tmp_path, monkeypatch
+):
+    import doctor
+
+    root = tmp_path / "vault"
+    state = tmp_path / "state"
+    root.mkdir()
+    state.mkdir()
+    now = [40.0]
+    captured = []
+
+    def monotonic():
+        return now[0]
+
+    def delayed_environment(*args, **kwargs):
+        now[0] = 49.0
+        return doctor._result("environment", "ok", "ok", {})
+
+    def filesystem(_state_root, deadline, **kwargs):
+        captured.append(deadline)
+        raise RuntimeError("stop after deadline capture")
+
+    monkeypatch.setattr(doctor.time, "monotonic", monotonic)
+    monkeypatch.setattr(doctor, "_environment_check", delayed_environment)
+    monkeypatch.setattr(
+        doctor,
+        "_runtime_check",
+        lambda *args, **kwargs: doctor._result("runtime", "ok", "ok", {}),
+    )
+    monkeypatch.setattr(doctor, "_filesystem_check", filesystem)
+
+    with pytest.raises(RuntimeError, match="deadline capture"):
+        doctor.run_doctor(root=root, state_root=state, deadline=50.0)
+
+    assert captured == [50.0]
 
 
 def test_budget_exhaustion_degrades_overall_and_health_summary(tmp_path):

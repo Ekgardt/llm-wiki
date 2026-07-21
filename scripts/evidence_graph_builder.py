@@ -39,14 +39,24 @@ import corpus_snapshot
 import evidence_graph
 import generation_catalog
 from reliable_memory import canonical_json_bytes, fsync_directory, fsync_file, read_runtime_bytes
+from repository_scope import RepositoryScope
 
 GRAPH_SCHEMA_VERSION = evidence_graph.GRAPH_SCHEMA_VERSION
 DEFAULT_GRAPH_EXTRACTOR_VERSION = "graph-extractor/v1"
 DEFAULT_TOKENIZER_VERSION = "tokenizer/v1"
 DEFAULT_TOKENIZER_CONFIG_SHA256 = "0" * 64
 CORPUS_GENERATION_SCHEMA_VERSION = "corpus-generation/v1"
-INCREMENTAL_MANIFEST_VERSION = "evidence-graph-incremental/v1"
+COMPLETE_CORPUS_GENERATION_SCHEMA_VERSION = "corpus-generation/v2"
+INCREMENTAL_MANIFEST_VERSION = "evidence-graph-incremental/v4"
+_LEGACY_INCREMENTAL_MANIFEST_VERSIONS = frozenset(
+    {
+        "evidence-graph-incremental/v1",
+        "evidence-graph-incremental/v2",
+        "evidence-graph-incremental/v3",
+    }
+)
 MAX_INCREMENTAL_MANIFEST_BYTES = 64 * 1024 * 1024
+MAX_LEGACY_WORKSPACE_SENSITIVE_SOURCES = 10_000
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _INVALIDATION_KEYS = frozenset(
     {"exports", "imports", "signatures", "aliases", "project_metadata"}
@@ -149,6 +159,7 @@ class SourceExtraction:
     observations: tuple[Mapping[str, object], ...] = ()
     dependencies: tuple[Mapping[str, object], ...] = ()
     source_dependencies: tuple[str, ...] = ()
+    workspace_sensitive: bool = False
     invalidation_fingerprints: Mapping[str, str] | None = None
 
 
@@ -193,6 +204,11 @@ def _build_manifest(
     database_size: int,
     database_sha256: str,
     source_manifest_bytes: bytes,
+    repository_scope: RepositoryScope | None,
+    schema_version: str = CORPUS_GENERATION_SCHEMA_VERSION,
+    tokenizer_version: str = DEFAULT_TOKENIZER_VERSION,
+    tokenizer_config_sha256: str = DEFAULT_TOKENIZER_CONFIG_SHA256,
+    search_artifact: Mapping[str, object] | None = None,
     incremental_manifest_bytes: bytes | None = None,
 ) -> Mapping[str, object]:
     artifacts = [
@@ -215,14 +231,16 @@ def _build_manifest(
                 "sha256": hashlib.sha256(incremental_manifest_bytes).hexdigest(),
             }
         )
+    if search_artifact is not None:
+        artifacts.append(dict(search_artifact))
     artifacts.sort(key=lambda item: str(item["path"]))
     return {
         "generation_id": generation_id,
-        "schema_version": CORPUS_GENERATION_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "collector_version": collector_version,
         "extractor_version": extractor_version,
-        "tokenizer_version": DEFAULT_TOKENIZER_VERSION,
-        "tokenizer_config_sha256": DEFAULT_TOKENIZER_CONFIG_SHA256,
+        "tokenizer_version": tokenizer_version,
+        "tokenizer_config_sha256": tokenizer_config_sha256,
         "embedding_model_id": None,
         "embedding_model_revision": None,
         "vector_dimensions": None,
@@ -232,6 +250,7 @@ def _build_manifest(
         "artifacts": artifacts,
         "vector_state": "absent",
         **({"parent_generation_id": parent_generation_id} if parent_generation_id else {}),
+        **({"repository_scope": repository_scope.as_dict()} if repository_scope else {}),
     }
 
 
@@ -251,6 +270,8 @@ def _check_stop(deadline: float | None, cancelled: Callable[[], bool] | None) ->
 def _materialize(
     records: Iterable[Mapping[str, object]],
     *,
+    label: str,
+    limit: int,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> list[Mapping[str, object]]:
@@ -262,6 +283,8 @@ def _materialize(
             record = next(iterator)
         except StopIteration:
             break
+        if len(materialized) >= limit:
+            raise ValueError(f"{label} row ceiling exceeded")
         materialized.append(record)
     _check_stop(deadline, cancelled)
     return materialized
@@ -392,6 +415,10 @@ def build_full_generation(
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
     incremental_manifest: Mapping[str, object] | None = None,
+    repository_scope: RepositoryScope | None = None,
+    snapshot: corpus_snapshot.CorpusSnapshot | None = None,
+    publication_root: Path | None = None,
+    coordinator: object | None = None,
 ) -> BuildResult:
     """Atomically build one full Evidence Graph generation.
 
@@ -409,32 +436,120 @@ def build_full_generation(
     _validate_kill_point(kill_point)
     if not isinstance(catalog, generation_catalog.GenerationCatalog):
         raise TypeError("catalog must be a GenerationCatalog")
+    if repository_scope is not None and not isinstance(repository_scope, RepositoryScope):
+        raise TypeError("repository_scope must be a RepositoryScope or None")
+    if repository_scope is not None:
+        repository_scope = RepositoryScope.from_dict(repository_scope.as_dict())
+    if snapshot is not None and not isinstance(snapshot, corpus_snapshot.CorpusSnapshot):
+        raise TypeError("snapshot must be a CorpusSnapshot or None")
+    if snapshot is not None and activate and publication_root is None:
+        raise ValueError("complete generation activation requires publication_root")
 
     sources_list = [
         dict(source)
-        for source in _materialize(sources, deadline=deadline, cancelled=cancelled)
+        for source in _materialize(
+            sources,
+            label="sources",
+            limit=evidence_graph.MAX_VALIDATION_ROWS,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
     ]
     source_bytes_snapshot = _verify_source_snapshot(
         sources_list, source_bytes, deadline=deadline, cancelled=cancelled
     )
 
+    if snapshot is not None:
+        snapshot_rows = [
+            {
+                "source_id": source.record.logical_id,
+                "relative_path": source.record.relative_path,
+                "sha256": source.record.sha256,
+                "size": source.record.size,
+                "media_type": source.record.media_type,
+                "language": source.record.language,
+                "git_oid": source.record.git_oid,
+            }
+            for source in snapshot.sources
+        ]
+        snapshot_bytes = {
+            source.record.logical_id: source.content for source in snapshot.sources
+        }
+        if sources_list != snapshot_rows or source_bytes_snapshot != snapshot_bytes:
+            raise ValueError("builder sources must be the exact supplied CorpusSnapshot")
+        if (
+            collector_version != snapshot.collector_version
+            or extractor_version != snapshot.extractor_version
+        ):
+            raise ValueError("corpus provenance must match the supplied CorpusSnapshot")
+
     # 1. Snapshot source membership and exact source SHA-256 hashes BEFORE
     # any extraction. The hash pins the source manifest in the generation
     # manifest so post-build validation can detect drift.
-    source_manifest, source_manifest_bytes, source_manifest_sha256 = _snapshot_source_manifest(
-        sources_list,
-        policy=policy,
-        collector_version=collector_version,
-        extractor_version=extractor_version,
-    )
+    if snapshot is None:
+        source_manifest, source_manifest_bytes, source_manifest_sha256 = _snapshot_source_manifest(
+            sources_list,
+            policy=policy,
+            collector_version=collector_version,
+            extractor_version=extractor_version,
+        )
+    else:
+        source_manifest = corpus_snapshot.canonical_source_manifest(
+            (source.record for source in snapshot.sources),
+            snapshot.policy,
+            collector_version=snapshot.collector_version,
+            extractor_version=snapshot.extractor_version,
+        )
+        source_manifest_bytes = canonical_json_bytes(source_manifest)
+        source_manifest_sha256 = _hash_bytes(
+            source_manifest_bytes, deadline=deadline, cancelled=cancelled
+        )
+        if source_manifest_sha256 != snapshot.corpus_sha256:
+            raise ValueError("CorpusSnapshot hash does not match its canonical source manifest")
     _check_stop(deadline, cancelled)
 
-    nodes_list = _materialize(nodes, deadline=deadline, cancelled=cancelled)
-    occurrences_list = _materialize(occurrences, deadline=deadline, cancelled=cancelled)
-    assertions_list = _materialize(assertions, deadline=deadline, cancelled=cancelled)
-    evidence_list = _materialize(evidence, deadline=deadline, cancelled=cancelled)
-    observations_list = _materialize(observations, deadline=deadline, cancelled=cancelled)
-    dependencies_list = _materialize(dependencies, deadline=deadline, cancelled=cancelled)
+    nodes_list = _materialize(
+        nodes,
+        label="nodes",
+        limit=evidence_graph.MAX_VALIDATION_ROWS,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    occurrences_list = _materialize(
+        occurrences,
+        label="occurrences",
+        limit=evidence_graph.MAX_VALIDATION_ROWS,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    assertions_list = _materialize(
+        assertions,
+        label="assertions",
+        limit=evidence_graph.MAX_VALIDATION_ROWS,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    evidence_list = _materialize(
+        evidence,
+        label="evidence",
+        limit=evidence_graph.MAX_VALIDATION_ROWS,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    observations_list = _materialize(
+        observations,
+        label="observations",
+        limit=evidence_graph.MAX_VALIDATION_ROWS,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+    dependencies_list = _materialize(
+        dependencies,
+        label="dependencies",
+        limit=evidence_graph.MAX_VALIDATION_ROWS,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
 
     if kill_point == "before_directory_create":
         raise KillPointError(kill_point)
@@ -448,7 +563,7 @@ def build_full_generation(
     # Track whether we've reached the registration phase. Kill-point aborts
     # leave partial state on disk (they simulate a crash); any other
     # exception during artifact build cleans up so retries are not blocked.
-    registered = False
+    publication_attempted = False
     try:
         if kill_point == "during_extraction":
             raise KillPointError(kill_point)
@@ -470,6 +585,17 @@ def build_full_generation(
         _check_stop(deadline, cancelled)
         fsync_file(database_path)
         fsync_directory(generation_path)
+
+        search_artifact = None
+        if snapshot is not None:
+            import search_memory
+
+            search_artifact = search_memory.build_generation_fts(
+                snapshot,
+                generation_path,
+                deadline=deadline,
+                cancelled=cancelled,
+            )
 
         if kill_point == "after_database_commit":
             raise KillPointError(kill_point)
@@ -507,20 +633,34 @@ def build_full_generation(
             database_size=database_size,
             database_sha256=database_sha256,
             source_manifest_bytes=source_manifest_bytes,
+            repository_scope=repository_scope,
+            schema_version=(
+                COMPLETE_CORPUS_GENERATION_SCHEMA_VERSION
+                if snapshot is not None
+                else CORPUS_GENERATION_SCHEMA_VERSION
+            ),
+            tokenizer_version=(
+                search_memory.GENERATION_TOKENIZER_VERSION
+                if snapshot is not None
+                else DEFAULT_TOKENIZER_VERSION
+            ),
+            tokenizer_config_sha256=(
+                search_memory.GENERATION_TOKENIZER_CONFIG_SHA256
+                if snapshot is not None
+                else DEFAULT_TOKENIZER_CONFIG_SHA256
+            ),
+            search_artifact=search_artifact,
             incremental_manifest_bytes=incremental_manifest_bytes,
         )
         manifest_path = generation_path / "manifest.json"
         _write_canonical_file(manifest_path, manifest, deadline=deadline, cancelled=cancelled)
         fsync_directory(generation_path)
 
-        # 5. Validate schema, FKs, integrity_check, evidence spans, artifact
-        # hashes, and source membership. validate_generation_artifact
-        # re-reads the on-disk artifacts and verifies them against the
-        # manifest.
-        evidence_graph.validate_generation_artifact(
-            generation_path,
-            manifest,
-            state_root=catalog.state_root,
+        # 5. Perform semantic validation once and carry the resulting
+        # process-local capability through registration and activation.
+        candidate = catalog._validate_candidate(  # noqa: SLF001
+            generation_id,
+            expected_repository_scope=repository_scope,
             deadline=deadline,
             cancelled=cancelled,
         )
@@ -531,10 +671,10 @@ def build_full_generation(
         # 6. Register the new generation. The catalog re-validates the
         # manifest and the on-disk seal before recording it; identical
         # retries are idempotent.
-        catalog.register(generation_id, deadline=deadline, cancelled=cancelled)
-        registered = True
-
         if not activate:
+            catalog._register_validated(  # noqa: SLF001
+                candidate, deadline=deadline, cancelled=cancelled
+            )
             return BuildResult(
                 generation_id=generation_id,
                 generation_path=generation_path,
@@ -542,16 +682,40 @@ def build_full_generation(
                 activated=False,
             )
 
-        if kill_point == "before_activation":
-            raise KillPointError(kill_point)
+        if snapshot is None:
+            catalog._register_validated(  # noqa: SLF001
+                candidate, deadline=deadline, cancelled=cancelled
+            )
+            if kill_point == "before_activation":
+                raise KillPointError(kill_point)
+            activated = catalog._activate_validated(  # noqa: SLF001
+                candidate,
+                expected_active=expected_active,
+                deadline=deadline,
+                cancelled=cancelled,
+            )
+            if not activated:
+                catalog.discard_unactivated(
+                    generation_id, deadline=deadline, cancelled=cancelled
+                )
+        else:
+            import search_memory
 
-        # 7. Compare-and-swap activation in one short catalog transaction.
-        activated = catalog.activate(
-            generation_id,
-            expected_active=expected_active,
-            deadline=deadline,
-            cancelled=cancelled,
-        )
+            if kill_point == "before_activation":
+                raise KillPointError(kill_point)
+            publication_attempted = True
+            activated = search_memory._publish_validated_generation(  # noqa: SLF001
+                snapshot,
+                Path(publication_root),
+                catalog,
+                generation_id,
+                candidate,
+                expected_repository_scope=repository_scope,
+                expected_active=expected_active,
+                coordinator=coordinator,
+                deadline=deadline,
+                cancelled=cancelled,
+            )
 
         result = BuildResult(
             generation_id=generation_id,
@@ -570,14 +734,15 @@ def build_full_generation(
         # generation stays readable.
         raise
     except BaseException:
-        if not registered:
-            # Validation / artifact failure: clean up the partial directory
-            # so a retry is not blocked by an orphan that the caller never
-            # asked for. Registered generations stay — the catalog owns
-            # them and the caller can retry activation explicitly.
-            import shutil
-
-            shutil.rmtree(generation_path, ignore_errors=True)
+        cleanup_options = {}
+        if publication_attempted:
+            cleanup_options = {"deadline": deadline, "cancelled": cancelled}
+        try:
+            catalog.discard_unactivated(generation_id, **cleanup_options)
+        except BaseException:
+            # Preserve the publication failure. Catalog cleanup is fail-safe:
+            # inability to prove the generation unreferenced leaves it on disk.
+            pass
         raise
 
 
@@ -598,6 +763,8 @@ def _validated_extraction(value: object) -> SourceExtraction:
         or tuple(sorted(set(value.source_dependencies))) != value.source_dependencies
     ):
         raise ValueError("source_dependencies must be a sorted unique tuple of source IDs")
+    if not isinstance(value.workspace_sensitive, bool):
+        raise TypeError("workspace_sensitive must be a boolean")
     for collection in _RECORD_COLLECTIONS:
         records = getattr(value, collection)
         if not isinstance(records, tuple) or any(not isinstance(record, Mapping) for record in records):
@@ -611,12 +778,12 @@ def _load_incremental_manifest(
     *,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
-) -> Mapping[str, object] | None:
+) -> tuple[Mapping[str, object] | None, Mapping[str, object] | None]:
     _check_stop(deadline, cancelled)
     generation_path = catalog.generations_path / generation_id
     if not (generation_path / "incremental-manifest.json").exists():
-        return None
-    generation_catalog._validate_generation(  # noqa: SLF001 - reuse must validate the sealed parent
+        return None, None
+    generation_manifest, _seal = generation_catalog._validate_generation(  # noqa: SLF001 - reuse must validate the sealed parent
         generation_path,
         catalog.state_root,
         deadline=deadline,
@@ -634,13 +801,17 @@ def _load_incremental_manifest(
         raise ValueError("incremental manifest must contain valid UTF-8 JSON") from exc
     if not isinstance(value, Mapping) or canonical_json_bytes(value) != raw:
         raise ValueError("incremental manifest must be a canonical JSON object")
-    return _validated_incremental_manifest(value)
+    return _validated_incremental_manifest(value), generation_manifest
 
 
 def _validated_incremental_manifest(value: Mapping[str, object]) -> Mapping[str, object]:
     if set(value) != {"version", "reuse_config", "sources", "record_dependencies"}:
         raise ValueError("incremental manifest must be a closed object")
-    if value["version"] != INCREMENTAL_MANIFEST_VERSION:
+    version = value["version"]
+    if version not in {
+        INCREMENTAL_MANIFEST_VERSION,
+        *_LEGACY_INCREMENTAL_MANIFEST_VERSIONS,
+    }:
         raise ValueError("incremental manifest has an unsupported version")
     config = value["reuse_config"]
     if not isinstance(config, Mapping) or set(config) != set(IncrementalReuseConfig.__dataclass_fields__):
@@ -651,14 +822,25 @@ def _validated_incremental_manifest(value: Mapping[str, object]) -> Mapping[str,
         raise TypeError("incremental manifest sources must be an array")
     seen_sources: set[str] = set()
     for entry in sources:
-        if not isinstance(entry, Mapping) or set(entry) != {
+        entry_keys = {
             "source_id",
             "relative_path",
             "sha256",
             "source_dependencies",
             "invalidation_fingerprints",
             "records",
+        }
+        if version in {
+            INCREMENTAL_MANIFEST_VERSION,
+            "evidence-graph-incremental/v2",
+            "evidence-graph-incremental/v3",
         }:
+            entry_keys.add("language")
+        if version == INCREMENTAL_MANIFEST_VERSION:
+            entry_keys.add("workspace_sensitive")
+        elif version == "evidence-graph-incremental/v3":
+            entry_keys.add("workspace_sensitive_sources")
+        if not isinstance(entry, Mapping) or set(entry) != entry_keys:
             raise ValueError("incremental source entries must be closed objects")
         source_id = entry["source_id"]
         if not isinstance(source_id, str) or not source_id or source_id in seen_sources:
@@ -666,6 +848,14 @@ def _validated_incremental_manifest(value: Mapping[str, object]) -> Mapping[str,
         seen_sources.add(source_id)
         if not isinstance(entry["relative_path"], str) or not entry["relative_path"]:
             raise ValueError("incremental source paths must be non-empty strings")
+        if version in {
+            INCREMENTAL_MANIFEST_VERSION,
+            "evidence-graph-incremental/v2",
+            "evidence-graph-incremental/v3",
+        } and not (
+            entry["language"] is None or isinstance(entry["language"], str)
+        ):
+            raise ValueError("incremental source language must be a string or null")
         if not isinstance(entry["sha256"], str) or _SHA256_RE.fullmatch(entry["sha256"]) is None:
             raise ValueError("incremental source hashes must be lowercase SHA-256 digests")
         dependencies = entry["source_dependencies"]
@@ -675,6 +865,20 @@ def _validated_incremental_manifest(value: Mapping[str, object]) -> Mapping[str,
             or dependencies != sorted(set(dependencies))
         ):
             raise ValueError("incremental source dependencies must be sorted and unique")
+        if version == INCREMENTAL_MANIFEST_VERSION:
+            if not isinstance(entry["workspace_sensitive"], bool):
+                raise TypeError("incremental workspace_sensitive must be a boolean")
+        elif version == "evidence-graph-incremental/v3":
+            sensitive_sources = entry["workspace_sensitive_sources"]
+            if (
+                not isinstance(sensitive_sources, list)
+                or any(not isinstance(item, str) or not item for item in sensitive_sources)
+                or sensitive_sources != sorted(set(sensitive_sources))
+                or len(sensitive_sources) > MAX_LEGACY_WORKSPACE_SENSITIVE_SOURCES
+            ):
+                raise ValueError(
+                    "incremental workspace-sensitive sources must be bounded, sorted, and unique"
+                )
         fingerprints = entry["invalidation_fingerprints"]
         if (
             not isinstance(fingerprints, Mapping)
@@ -698,6 +902,17 @@ def _validated_incremental_manifest(value: Mapping[str, object]) -> Mapping[str,
     if not isinstance(value["record_dependencies"], list):
         raise TypeError("incremental record dependencies must be an array")
     return value
+
+
+def _workspace_sensitive_source_ids(
+    entries: Mapping[str, Mapping[str, object]],
+) -> set[str]:
+    """Derive the workspace-sensitive owners in one pass over source entries."""
+    return {
+        source_id
+        for source_id, entry in entries.items()
+        if entry["workspace_sensitive"] is True
+    }
 
 
 def _row_record(collection: str, row: sqlite3.Row) -> dict[str, object]:
@@ -800,6 +1015,29 @@ def _renames(
     return tuple(sorted(pairs))
 
 
+def _record_ids_by_owner(
+    ownership: Mapping[tuple[str, str], set[str]],
+    source_ids: Iterable[str],
+    *,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> dict[str, dict[str, list[str]]]:
+    """Invert record ownership once, preserving sorted manifest record IDs."""
+    grouped = {
+        source_id: {collection: [] for collection in _RECORD_COLLECTIONS}
+        for source_id in source_ids
+    }
+    for (collection, record_id), owners in ownership.items():
+        _check_stop(deadline, cancelled)
+        for source_id in owners:
+            grouped[source_id][collection].append(record_id)
+    for records in grouped.values():
+        _check_stop(deadline, cancelled)
+        for record_ids in records.values():
+            record_ids.sort()
+    return grouped
+
+
 def build_incremental_generation(
     catalog: generation_catalog.GenerationCatalog,
     *,
@@ -816,6 +1054,10 @@ def build_incremental_generation(
     kill_point: str | None = None,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
+    repository_scope: RepositoryScope | None = None,
+    snapshot: corpus_snapshot.CorpusSnapshot | None = None,
+    publication_root: Path | None = None,
+    coordinator: object | None = None,
 ) -> IncrementalBuildResult:
     """Build a complete immutable generation while reusing exact parent records."""
     if not isinstance(catalog, generation_catalog.GenerationCatalog):
@@ -824,9 +1066,22 @@ def build_incremental_generation(
         raise TypeError("reuse_config must be IncrementalReuseConfig")
     if not callable(extractor):
         raise TypeError("extractor must be callable")
+    if repository_scope is not None and not isinstance(repository_scope, RepositoryScope):
+        raise TypeError("repository_scope must be a RepositoryScope or None")
+    if repository_scope is not None:
+        repository_scope = RepositoryScope.from_dict(repository_scope.as_dict())
+    repository_scope_object = (
+        None if repository_scope is None else repository_scope.as_dict()
+    )
     sources_list = [
         dict(source)
-        for source in _materialize(sources, deadline=deadline, cancelled=cancelled)
+        for source in _materialize(
+            sources,
+            label="sources",
+            limit=evidence_graph.MAX_VALIDATION_ROWS,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
     ]
     source_snapshot = _verify_source_snapshot(
         sources_list, source_bytes, deadline=deadline, cancelled=cancelled
@@ -845,20 +1100,35 @@ def build_incremental_generation(
     parent_entries: dict[str, Mapping[str, object]] = {}
     config_matches = False
     if parent_generation_id is not None:
-        parent_manifest = _load_incremental_manifest(
+        parent_manifest, parent_generation_manifest = _load_incremental_manifest(
             catalog,
             parent_generation_id,
             deadline=deadline,
             cancelled=cancelled,
         )
         if parent_manifest is not None:
-            if parent_manifest.get("version") != INCREMENTAL_MANIFEST_VERSION:
-                raise ValueError("incremental manifest has an unsupported version")
             parent_entries = {
                 str(entry["source_id"]): entry for entry in parent_manifest.get("sources", [])
             }
             parent_sources = parent_entries
-            config_matches = parent_manifest.get("reuse_config") == asdict(reuse_config)
+            parent_config = parent_manifest.get("reuse_config")
+            config_matches = (
+                parent_manifest.get("version") == INCREMENTAL_MANIFEST_VERSION
+                and isinstance(parent_config, Mapping)
+                and {
+                    key: value
+                    for key, value in parent_config.items()
+                    if key != "workspace_manifest_sha256"
+                }
+                == {
+                    key: value
+                    for key, value in asdict(reuse_config).items()
+                    if key != "workspace_manifest_sha256"
+                }
+                and parent_generation_manifest is not None
+                and parent_generation_manifest.get("repository_scope")
+                == repository_scope_object
+            )
 
     current_ids = set(current)
     previous_ids = set(parent_sources)
@@ -870,10 +1140,44 @@ def build_incremental_generation(
         if (
             current[source_id]["sha256"] != parent_sources[source_id].get("sha256")
             or current[source_id]["relative_path"] != parent_sources[source_id].get("relative_path")
+            or current[source_id].get("language") != parent_sources[source_id].get("language")
         )
     }
     renamed = _renames(parent_sources, current, added, deleted)
+    current_workspace_ids = {
+        source_id
+        for source_id, source in current.items()
+        if not str(source["relative_path"]).startswith("knowledge/")
+    }
+    previous_workspace_ids = {
+        source_id
+        for source_id, source in parent_sources.items()
+        if not str(source["relative_path"]).startswith("knowledge/")
+    }
+    workspace_ids = current_workspace_ids | previous_workspace_ids
+    workspace_membership_changed = False
+    if config_matches:
+        parent_workspace_manifest = str(
+            parent_manifest["reuse_config"]["workspace_manifest_sha256"]
+        )
+        workspace_membership_changed = bool(
+            parent_workspace_manifest != reuse_config.workspace_manifest_sha256
+            or added & current_workspace_ids
+            or deleted & previous_workspace_ids
+            or any(
+                source_id in workspace_ids
+                and (
+                    current[source_id]["relative_path"]
+                    != parent_sources[source_id].get("relative_path")
+                    or current[source_id].get("language")
+                    != parent_sources[source_id].get("language")
+                )
+                for source_id in changed
+            )
+        )
     rebuild = set(current_ids if not config_matches else added | changed)
+    if workspace_membership_changed:
+        rebuild.update(current_workspace_ids)
     extracted: dict[str, SourceExtraction] = {}
 
     def extract(source_id: str) -> SourceExtraction:
@@ -904,7 +1208,18 @@ def build_incremental_generation(
             if dict(extracted[source_id].invalidation_fingerprints or {})
             != parent_entries[source_id].get("invalidation_fingerprints")
         }
-        invalidated = set(semantic_changes | deleted)
+        workspace_surface_changed = bool(
+            semantic_changes and not workspace_membership_changed
+        )
+        workspace_invalidated = (
+            (_workspace_sensitive_source_ids(parent_entries) & current_ids) - rebuild
+            if workspace_surface_changed
+            else set()
+        )
+        for source_id in sorted(workspace_invalidated):
+            extract(source_id)
+        rebuild.update(workspace_invalidated)
+        invalidated = set(semantic_changes | deleted | workspace_invalidated)
         while invalidated:
             newly_invalidated = {
                 source_id
@@ -951,6 +1266,12 @@ def build_incremental_generation(
                 merged[collection][record_id] = candidate
                 ownership.setdefault((collection, record_id), set()).add(source_id)
 
+    records_by_owner = _record_ids_by_owner(
+        ownership,
+        sorted(current_ids),
+        deadline=deadline,
+        cancelled=cancelled,
+    )
     source_entries = []
     for source_id in sorted(current_ids):
         result = extracted.get(source_id)
@@ -958,9 +1279,11 @@ def build_incremental_generation(
             entry = parent_entries[source_id]
             source_dependencies = list(entry["source_dependencies"])
             fingerprints = dict(entry["invalidation_fingerprints"])
+            workspace_sensitive = bool(entry["workspace_sensitive"])
         else:
             source_dependencies = list(result.source_dependencies)
             fingerprints = dict(result.invalidation_fingerprints or {})
+            workspace_sensitive = result.workspace_sensitive
         source_entries.append(
             {
                 "source_id": source_id,
@@ -968,14 +1291,26 @@ def build_incremental_generation(
                 "sha256": str(current[source_id]["sha256"]),
                 "source_dependencies": source_dependencies,
                 "invalidation_fingerprints": fingerprints,
-                "records": {
-                    collection: sorted(
-                        record_id
-                        for (record_collection, record_id), owners in ownership.items()
-                        if record_collection == collection and source_id in owners
-                    )
-                    for collection in _RECORD_COLLECTIONS
-                },
+                "records": records_by_owner[source_id],
+                **(
+                    {"language": current[source_id].get("language")}
+                    if INCREMENTAL_MANIFEST_VERSION
+                    in {
+                        "evidence-graph-incremental/v2",
+                        "evidence-graph-incremental/v3",
+                        "evidence-graph-incremental/v4",
+                    }
+                    else {}
+                ),
+                **(
+                    {"workspace_sensitive": workspace_sensitive}
+                    if INCREMENTAL_MANIFEST_VERSION == "evidence-graph-incremental/v4"
+                    else {
+                        "workspace_sensitive_sources": []
+                    }
+                    if INCREMENTAL_MANIFEST_VERSION == "evidence-graph-incremental/v3"
+                    else {}
+                ),
             }
         )
     entry_by_id = {str(entry["source_id"]): entry for entry in source_entries}
@@ -1015,7 +1350,9 @@ def build_incremental_generation(
         parent_generation_id=parent_generation_id,
         policy=policy,
         collector_version=collector_version,
-        extractor_version=reuse_config.extractor_version,
+        extractor_version=(
+            snapshot.extractor_version if snapshot is not None else reuse_config.extractor_version
+        ),
         graph_extractor_version=reuse_config.extractor_version,
         expected_active=expected_active,
         activate=activate,
@@ -1023,6 +1360,10 @@ def build_incremental_generation(
         deadline=deadline,
         cancelled=cancelled,
         incremental_manifest=incremental_manifest,
+        repository_scope=repository_scope,
+        snapshot=snapshot,
+        publication_root=publication_root,
+        coordinator=coordinator,
     )
     return IncrementalBuildResult(
         generation_id=built.generation_id,

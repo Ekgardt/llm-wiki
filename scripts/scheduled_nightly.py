@@ -45,7 +45,7 @@ def _refresh_generation(log) -> int:
     status = result["status"]
     generation = result.get("generation_id") or "none"
     log(f"  generation: {status} (id={generation}, partial={bool(result.get('partial'))})")
-    return 1 if status == "error" else 0
+    return 0 if status in {"built", "current"} else 1
 
 
 def _record_nightly_result(today: str, failures: int, error: str | None = None) -> None:

@@ -130,10 +130,16 @@ def _read_active_link_graph(
 
         catalog = GenerationCatalog(STATE_ROOT, catalog_path=catalog_path)
     from evidence_graph import EvidenceGraph
+    from repository_scope import resolve_repository_scope
 
     graph = None
     try:
-        graph = EvidenceGraph.open_active(catalog, deadline=deadline)
+        scope = resolve_repository_scope(ROOT, deadline=deadline)
+        graph = EvidenceGraph.open_active_for_repository(
+            catalog,
+            scope,
+            deadline=deadline,
+        )
         if graph is None:
             return None
         rows = graph._execute(

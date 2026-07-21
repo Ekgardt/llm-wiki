@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import hashlib
+import json
 import os
 import stat
 from datetime import datetime, timezone
@@ -11,7 +12,32 @@ from types import SimpleNamespace
 
 import corpus_snapshot
 import pytest
+from code_languages import CODE_LANGUAGE_BY_SUFFIX, language_for_path
 from corpus_snapshot import CorpusChanged, collect_corpus, validate_live_snapshot
+
+EXPECTED_CODE_LANGUAGE_BY_SUFFIX = {
+    ".bash": "bash",
+    ".c": "c",
+    ".cc": "cpp",
+    ".cpp": "cpp",
+    ".cs": "c_sharp",
+    ".cxx": "cpp",
+    ".go": "go",
+    ".h": "c",
+    ".hh": "cpp",
+    ".hpp": "cpp",
+    ".hxx": "cpp",
+    ".java": "java",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".php": "php",
+    ".py": "python",
+    ".rb": "ruby",
+    ".rs": "rust",
+    ".sh": "bash",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+}
 
 
 @pytest.fixture
@@ -177,6 +203,125 @@ def test_projects_daily_and_code_are_explicitly_bounded_by_policy(vault: Path):
     ).metadata.type == "code"
 
 
+@pytest.mark.parametrize(
+    ("suffix", "language"),
+    sorted(EXPECTED_CODE_LANGUAGE_BY_SUFFIX.items()),
+)
+@pytest.mark.parametrize(
+    "body",
+    [
+        "english_identifier = another_identifier\n",
+        "пример = другой_идентификатор\n",
+    ],
+)
+def test_supported_code_suffixes_override_natural_language_inference(
+    vault: Path, suffix: str, language: str, body: str
+):
+    path = vault / f"scripts/example{suffix}"
+    write(path, body)
+
+    snapshot = collect_corpus(vault, code_roots=(path.relative_to(vault).as_posix(),))
+
+    assert snapshot.sources[0].record.language == language
+    assert snapshot.chunks[0].language == language
+
+
+def test_code_language_map_exactly_matches_independent_complete_contract():
+    assert dict(CODE_LANGUAGE_BY_SUFFIX) == EXPECTED_CODE_LANGUAGE_BY_SUFFIX
+
+
+def test_code_language_classifier_identity_binds_version_and_canonical_map():
+    from code_languages import (
+        CLASSIFIER_IDENTITY,
+        CLASSIFIER_MAP_SHA256,
+        CLASSIFIER_VERSION,
+    )
+
+    canonical = json.dumps(
+        EXPECTED_CODE_LANGUAGE_BY_SUFFIX,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    expected_digest = hashlib.sha256(canonical).hexdigest()
+
+    assert CLASSIFIER_VERSION == "code-language-classifier/v1"
+    assert CLASSIFIER_MAP_SHA256 == expected_digest
+    assert CLASSIFIER_IDENTITY == f"{CLASSIFIER_VERSION}+sha256:{expected_digest}"
+
+
+def test_corpus_and_code_graph_share_one_language_map():
+    from code_graph import LANGUAGE_MAP
+
+    assert LANGUAGE_MAP is CODE_LANGUAGE_BY_SUFFIX
+    assert corpus_snapshot.language_for_path is language_for_path
+
+
+def test_code_language_map_is_immutable():
+    from code_graph import LANGUAGE_MAP
+
+    try:
+        with pytest.raises(TypeError):
+            LANGUAGE_MAP[".unsupported"] = "python"
+    finally:
+        if isinstance(LANGUAGE_MAP, dict):
+            LANGUAGE_MAP.pop(".unsupported", None)
+
+
+@pytest.mark.parametrize(
+    ("name", "language"),
+    [("APP.PY", "python"), ("component.generated.D.TS", "typescript")],
+)
+def test_collect_corpus_uses_final_suffix_case_insensitively(
+    vault: Path, name: str, language: str
+):
+    path = vault / "scripts" / name
+    write(path, "EnglishIdentifier = AnotherIdentifier\n")
+
+    snapshot = collect_corpus(vault, code_roots=(path.relative_to(vault).as_posix(),))
+
+    assert snapshot.sources[0].record.language == language
+    assert snapshot.chunks[0].language == language
+
+
+def test_non_markdown_code_does_not_treat_yaml_looking_content_as_metadata(vault: Path):
+    path = vault / "scripts/example.py"
+    write(path, "---\nlanguage: custom\n---\nEnglishIdentifier = AnotherIdentifier\n")
+
+    source = collect_corpus(vault, code_roots=("scripts/example.py",)).sources[0]
+
+    assert source.metadata.language is None
+    assert source.record.language == "python"
+
+
+@pytest.mark.parametrize(
+    ("body", "language"),
+    [
+        ("English prose remains inferred.\n", "en"),
+        ("Русский текст по-прежнему определяется.\n", "ru"),
+    ],
+)
+def test_unknown_text_suffixes_retain_natural_language_inference(
+    vault: Path, body: str, language: str
+):
+    path = vault / "scripts/example.txt"
+    write(path, body)
+
+    snapshot = collect_corpus(vault, code_roots=("scripts/example.txt",))
+
+    assert snapshot.sources[0].record.language == language
+    assert snapshot.chunks[0].language == language
+
+
+def test_internal_language_classifier_prefers_explicit_metadata():
+    assert (
+        corpus_snapshot._classify_language(
+            explicit="custom", path=Path("example.py"), text="English text."
+        )
+        == "custom"
+    )
+
+
 def test_historical_policies_recover_archived_directory_sources(vault: Path):
     archived = vault / "knowledge/notes/archive/old.md"
     write(
@@ -266,6 +411,34 @@ def test_chunk_ids_are_stable_and_use_full_parent_identity(vault: Path):
     assert len({chunk.id for chunk in first.chunks}) == 2
 
 
+def test_public_chunk_identity_and_spans_match_snapshot_extraction(vault: Path):
+    from corpus_snapshot import canonical_chunk_id, canonical_retrieval_spans
+
+    raw = page("Intro.\n# Parent\nBody.\n## Child\nDetail.\n", type="concept").encode()
+    path = vault / "knowledge/notes/shared-algorithm.md"
+    path.write_bytes(raw)
+    snapshot = collect_corpus(vault)
+    source = snapshot.sources[0]
+
+    spans = canonical_retrieval_spans(source.record.relative_path, raw)
+
+    assert spans == tuple(
+        (chunk.byte_start, chunk.byte_end, chunk.heading_ancestry)
+        for chunk in snapshot.chunks
+    )
+    assert [
+        canonical_chunk_id(
+            source_id=source.record.logical_id,
+            source_path=source.record.relative_path,
+            byte_start=chunk.byte_start,
+            byte_end=chunk.byte_end,
+            span_sha256=chunk.span_sha256,
+            extractor_version=snapshot.extractor_version,
+        )
+        for chunk in snapshot.chunks
+    ] == [chunk.id for chunk in snapshot.chunks]
+
+
 def test_atx_headings_ignore_fences_and_preserve_meaningful_hashes(vault: Path):
     write(
         vault / "knowledge/notes/fences.md",
@@ -316,6 +489,29 @@ def test_empty_atx_heading_has_deterministic_ancestry_and_exact_offsets(vault: P
         b"#\nBody.\n",
         b"## Next\nMore.\n",
     ]
+
+
+def test_heading_bomb_is_rejected_before_chunk_materialization(vault: Path, monkeypatch):
+    monkeypatch.setattr(corpus_snapshot, "MAX_CORPUS_HEADINGS", 2)
+    write(vault / "knowledge/notes/bomb.md", "# One\na\n# Two\nb\n# Three\nc\n")
+
+    with pytest.raises(ValueError, match="heading.*ceiling"):
+        collect_corpus(vault)
+
+
+def test_cancellation_is_checked_inside_markdown_line_scan(vault: Path):
+    write(vault / "knowledge/notes/long.md", "".join(f"line {index}\n" for index in range(100)))
+    checks = 0
+
+    def cancelled() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks >= 10
+
+    with pytest.raises(TimeoutError, match="cancel"):
+        collect_corpus(vault, cancelled=cancelled)
+
+    assert checks == 10
 
 
 @pytest.mark.parametrize("mutation", ["edit", "add", "delete", "replace"])

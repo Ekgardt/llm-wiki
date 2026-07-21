@@ -10,6 +10,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import time
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from inspect import signature
@@ -1072,6 +1073,42 @@ def test_cancel_only_changes_nonterminal_tasks(queue: MemoryQueue) -> None:
     assert queue.get(ready).state == "cancelled"
     assert queue.cancel(succeeded) is False
     assert queue.get(succeeded).state == "succeeded"
+
+
+def test_cancel_expired_deadline_does_not_mutate_task(queue: MemoryQueue) -> None:
+    task_id = queue.enqueue("query", 1, {"n": 1})
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        queue.cancel(task_id, deadline=time.monotonic() - 1)
+
+    assert queue.get(task_id).state == "ready"
+
+
+def test_redrive_expired_deadline_does_not_create_replacement(queue: MemoryQueue) -> None:
+    task_id = queue.enqueue("query", 1, {})
+    lease = queue.claim("worker")
+    assert lease is not None
+    queue.fail(lease, QueueFailure("invalid_input", permanent=True))
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        queue.redrive(task_id, deadline=time.monotonic() - 1)
+
+    assert [task.id for task in queue.list_tasks()] == [task_id]
+
+
+def test_queue_mutations_commit_before_deadline(queue: MemoryQueue) -> None:
+    cancelled_id = queue.enqueue("query", 1, {"action": "cancel"})
+    dead_id = queue.enqueue("query", 1, {"action": "redrive"}, priority=1)
+    lease = queue.claim("worker")
+    assert lease is not None
+    queue.fail(lease, QueueFailure("invalid_input", permanent=True))
+    deadline = time.monotonic() + 5
+
+    assert queue.cancel(cancelled_id, deadline=deadline) is True
+    replacement = queue.redrive(dead_id, deadline=deadline)
+
+    assert queue.get(cancelled_id).state == "cancelled"
+    assert queue.get(replacement).redrive_of == dead_id
 
 
 def test_dead_tasks_are_retained(queue: MemoryQueue) -> None:

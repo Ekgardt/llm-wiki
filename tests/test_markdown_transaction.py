@@ -802,6 +802,75 @@ def test_live_writer_heartbeat_renews_before_expiry(
         assert renewed[2] == first[2]
 
 
+def test_late_writer_heartbeat_renews_expired_unchanged_owner(
+    vault: Path, state_root: Path
+):
+    coordinator = MarkdownCoordinator(vault, state_root)
+    token = "late-heartbeat-owner"
+    expired = "2000-01-01T00:00:00Z"
+    with coordinator._connect() as database:
+        database.execute(
+            "INSERT INTO writer_owners VALUES ('global', ?, ?, ?, ?, ?, ?, ?)",
+            (token, os.getpid(), threading.get_ident(), expired, expired, expired, 1),
+        )
+        database.commit()
+    waits = 0
+
+    def stop_after_one_heartbeat(_timeout: float) -> bool:
+        nonlocal waits
+        waits += 1
+        return waits > 1
+
+    lost = threading.Event()
+    coordinator._heartbeat_writer_gate(
+        token, 1, SimpleNamespace(wait=stop_after_one_heartbeat), lost
+    )
+
+    with coordinator._connect() as database:
+        renewed = database.execute(
+            "SELECT owner_token, heartbeat_at, expires_at, fencing_epoch "
+            "FROM writer_owners WHERE gate_name = 'global'"
+        ).fetchone()
+    assert not lost.is_set()
+    assert tuple(renewed) == (token, renewed[1], renewed[2], 1)
+    assert renewed[1] > expired
+    assert renewed[2] > renewed[1]
+
+
+def test_late_writer_heartbeat_after_takeover_is_lost_without_overwrite(
+    vault: Path, state_root: Path
+):
+    coordinator = MarkdownCoordinator(vault, state_root)
+    takeover = (
+        "new-owner",
+        os.getpid(),
+        threading.get_ident(),
+        "2026-07-20T12:00:00Z",
+        "2026-07-20T12:00:01Z",
+        "2099-01-01T00:00:00Z",
+        2,
+    )
+    with coordinator._connect() as database:
+        database.execute(
+            "INSERT INTO writer_owners VALUES ('global', ?, ?, ?, ?, ?, ?, ?)",
+            takeover,
+        )
+        database.commit()
+
+    lost = threading.Event()
+    coordinator._heartbeat_writer_gate(
+        "old-owner", 1, SimpleNamespace(wait=lambda _timeout: False), lost
+    )
+
+    with coordinator._connect() as database:
+        current = database.execute(
+            "SELECT owner_token, process_id, thread_id, acquired_at, heartbeat_at, "
+            "expires_at, fencing_epoch FROM writer_owners WHERE gate_name = 'global'"
+        ).fetchone()
+    assert lost.is_set()
+    assert tuple(current) == takeover
+
+
 @pytest.mark.parametrize(
     "contention",
     [

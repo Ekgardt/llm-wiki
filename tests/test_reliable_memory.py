@@ -83,6 +83,55 @@ def test_sha256_is_stable_for_equal_logical_objects():
     assert sha256_bytes(b"") == ("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
 
 
+def test_begin_immediate_rolls_back_when_precommit_fence_expires():
+    connection = sqlite3.connect(":memory:")
+    connection.execute("CREATE TABLE values_table(value INTEGER)")
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        with begin_immediate(
+            connection,
+            before_commit=lambda: (_ for _ in ()).throw(
+                TimeoutError("deadline expired before commit")
+            ),
+        ):
+            connection.execute("INSERT INTO values_table VALUES (1)")
+
+    assert connection.execute("SELECT value FROM values_table").fetchall() == []
+
+
+def test_begin_immediate_commits_when_precommit_fence_succeeds():
+    connection = sqlite3.connect(":memory:")
+    checked = []
+    connection.execute("CREATE TABLE values_table(value INTEGER)")
+
+    with begin_immediate(connection, before_commit=lambda: checked.append(True)):
+        connection.execute("INSERT INTO values_table VALUES (1)")
+
+    assert checked == [True]
+    assert connection.execute("SELECT value FROM values_table").fetchall() == [(1,)]
+
+
+def test_begin_immediate_preserves_body_exception_when_rollback_fails():
+    class BrokenRollbackConnection:
+        def execute(self, statement):
+            assert statement == "BEGIN IMMEDIATE"
+
+        def commit(self):
+            pytest.fail("commit must not run after a body failure")
+
+        def rollback(self):
+            raise OSError("rollback failed")
+
+    original = RuntimeError("body failed")
+
+    with pytest.raises(RuntimeError, match="body failed") as raised:
+        with begin_immediate(BrokenRollbackConnection()):
+            raise original
+
+    assert raised.value is original
+    assert isinstance(raised.value.__context__, OSError)
+
+
 @pytest.mark.parametrize(
     "value",
     ["", ".", "../x", "a/../../x", "/absolute", "C:/absolute", "a\\b", "a//b"],

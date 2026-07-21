@@ -156,10 +156,102 @@ ok "Dependencies installed (MCP server baseline included)"
 # ─── 4. Run tests ──────────────────────────────────────────────────
 
 info "Running test suite..."
-if uv run pytest -q 2>&1 | tail -1 | grep -qE "failed|error"; then
-  warn "Some tests failed — core features will still work, but please report issues"
+testPid=""
+testPgid=""
+testMonitorMode=""
+restore_test_monitor_mode() {
+  case "$testMonitorMode" in
+    on) set -m ;;
+    off) set +m ;;
+  esac
+  testMonitorMode=""
+}
+test_tree_alive() {
+  if [ -z "$testPid" ]; then
+    return 1
+  fi
+  case "$testPgid" in
+    ""|*[!0-9]*|0|1|"$$") kill -0 "$testPid" 2>/dev/null ;;
+    *) kill -0 -- "-$testPgid" 2>/dev/null ;;
+  esac
+}
+stop_test_child() {
+  local attempt
+  if [ -z "$testPid" ]; then
+    return
+  fi
+  case "$testPgid" in
+    ""|*[!0-9]*|0|1|"$$")
+      if test_tree_alive; then
+        if kill -s TERM "$testPid" 2>/dev/null; then :; fi
+        if kill -s CONT "$testPid" 2>/dev/null; then :; fi
+      fi
+      ;;
+    *)
+      if test_tree_alive; then
+        if kill -s TERM -- "-$testPgid" 2>/dev/null; then :; fi
+        if kill -s CONT -- "-$testPgid" 2>/dev/null; then :; fi
+        attempt=0
+        while [ "$attempt" -lt 5 ] && test_tree_alive; do
+          sleep 1
+          attempt=$((attempt + 1))
+        done
+        if test_tree_alive; then
+          if kill -s KILL -- "-$testPgid" 2>/dev/null; then :; fi
+        fi
+      fi
+      ;;
+  esac
+  if wait "$testPid" 2>/dev/null; then :; fi
+  testPid=""
+  testPgid=""
+}
+wait_test_child() {
+  local status
+  if wait "$testPid"; then
+    status=0
+  else
+    status=$?
+  fi
+  if test_tree_alive; then
+    stop_test_child
+  else
+    testPid=""
+    testPgid=""
+  fi
+  restore_test_monitor_mode
+  return "$status"
+}
+start_test_child() {
+  case "$-" in
+    *m*) testMonitorMode=on ;;
+    *) testMonitorMode=off; set -m ;;
+  esac
+  uv run pytest -q &
+  testPid=$! testPgid=$!
+}
+handle_test_signal() {
+  local status="$1"
+  trap - HUP INT TERM
+  stop_test_child
+  restore_test_monitor_mode
+  exit "$status"
+}
+trap 'stop_test_child; restore_test_monitor_mode' EXIT
+trap 'handle_test_signal 129' HUP
+trap 'handle_test_signal 130' INT
+trap 'handle_test_signal 143' TERM
+start_test_child
+if wait_test_child; then
+  testExit=0
 else
-  ok "All tests passed"
+  testExit=$?
+fi
+trap - EXIT HUP INT TERM
+if [ "$testExit" -ne 0 ]; then
+  warn "Some tests failed - core features will still work, but please report issues"
+else
+  ok "Test suite passed"
 fi
 
 # ─── 5. Set environment variables ──────────────────────────────────

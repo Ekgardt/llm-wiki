@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import difflib
 import math
 import os
 import re
+import stat
 import subprocess
 import sys
 import threading
@@ -15,7 +15,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from bounded_io import read_stable_bytes  # noqa: E402
+from corpus_snapshot import (  # noqa: E402
+    CorpusChanged,
+    _open_descriptor_chain,
+    _read_bounded_descriptor,
+    _seal_path,
+    _verify_seal,
+)
 from memory_state import ROOT, STATE_ROOT  # noqa: E402
+from repository_scope import sanitized_git_environment  # noqa: E402
 
 KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
 SKIP_NAMES = {"index.md", "log.md", "README.md", "state.md", "context.md"}
@@ -32,6 +41,11 @@ TRAVERSED_EDGES = {
 }
 CONFIRMED_CONFIDENCE = {"confirmed", "high"}
 ZERO_OID = frozenset("0")
+MAX_REVISION_LENGTH = 1024
+
+
+class InvalidRevisionError(ValueError):
+    """Raised when an impact endpoint is not a bounded verified commit."""
 
 
 @dataclass(frozen=True)
@@ -44,6 +58,10 @@ class ImpactLimits:
     max_graph_rows: int = 10_000
     max_symbols: int = 2_000
     max_depth: int = 8
+    max_note_files: int = 2_000
+    max_note_dirs: int = 256
+    max_note_bytes: int = 2 * 1024 * 1024
+    max_total_note_bytes: int = 32 * 1024 * 1024
     timeout_seconds: float = 5.0
 
     def __post_init__(self) -> None:
@@ -54,6 +72,10 @@ class ImpactLimits:
             self.max_graph_rows,
             self.max_symbols,
             self.max_depth,
+            self.max_note_files,
+            self.max_note_dirs,
+            self.max_note_bytes,
+            self.max_total_note_bytes,
         )
         if any(isinstance(value, bool) or not isinstance(value, int) or value < 1 for value in values):
             raise ValueError("impact limits must be positive integers")
@@ -73,14 +95,32 @@ def _remaining(deadline: float) -> float:
     return remaining
 
 
+def _check_impact_stop(
+    deadline: float | None, cancelled: Callable[[], bool] | None = None
+) -> None:
+    if cancelled is not None and cancelled():
+        raise TimeoutError("impact analysis cancelled")
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("impact analysis deadline reached")
+
+
 def _git(root: Path, arguments: list[str], *, deadline: float, max_bytes: int) -> bytes:
     """Run Git without a shell and stop reading at the declared ceiling."""
     process = subprocess.Popen(
-        ["git", *arguments],
+        [
+            "git",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "diff.external=false",
+            *arguments,
+        ],
         cwd=root,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        env=sanitized_git_environment(),
+        shell=False,
     )
     timed_out = threading.Event()
 
@@ -113,9 +153,37 @@ def _git(root: Path, arguments: list[str], *, deadline: float, max_bytes: int) -
 
 
 def _validate_revision(value: str | None, label: str) -> str:
-    if not isinstance(value, str) or not value or len(value) > 1024 or "\0" in value:
-        raise ValueError(f"{label} is required and must be a bounded Git revision")
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > MAX_REVISION_LENGTH
+        or value.startswith("-")
+        or any(character in value for character in "\0\r\n")
+    ):
+        raise InvalidRevisionError(
+            f"{label} revision is required and must be bounded and option-safe"
+        )
     return value
+
+
+def _resolve_revision(
+    root: Path, value: str | None, label: str, *, deadline: float
+) -> str:
+    revision = _validate_revision(value, label)
+    try:
+        resolved = _git(
+            root,
+            ["rev-parse", "--verify", "--end-of-options", f"{revision}^{{commit}}"],
+            deadline=deadline,
+            max_bytes=128,
+        ).decode("ascii", errors="strict").strip()
+    except (UnicodeError, ValueError) as exc:
+        raise InvalidRevisionError(f"{label} revision is not a valid commit") from exc
+    if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", resolved) is None:
+        raise InvalidRevisionError(
+            f"{label} revision did not resolve to a full commit object ID"
+        )
+    return resolved
 
 
 def _diff_arguments(
@@ -127,7 +195,15 @@ def _diff_arguments(
     root: Path,
     deadline: float,
 ) -> list[tuple[str, list[str], bool]]:
-    common = ["diff", "--raw", "--no-abbrev", "-z", "-M", "--no-ext-diff"]
+    common = [
+        "diff",
+        "--raw",
+        "--no-abbrev",
+        "-z",
+        "-M",
+        "--no-ext-diff",
+        "--no-textconv",
+    ]
     supplied = {
         name
         for name, value in (("base", base), ("target", target), ("branch", branch))
@@ -136,8 +212,9 @@ def _diff_arguments(
     if comparison == "dirty":
         if supplied:
             raise ValueError("dirty comparison does not accept base, target, or branch")
+        head = _resolve_revision(root, "HEAD", "HEAD", deadline=deadline)
         return [
-            ("index-HEAD", [*common, "--cached", "HEAD", "--"], False),
+            ("index-HEAD", [*common, "--cached", head, "--"], False),
             ("worktree-index", [*common, "--"], True),
         ]
     if comparison == "worktree-index":
@@ -147,22 +224,28 @@ def _diff_arguments(
     if comparison == "index-HEAD":
         if supplied:
             raise ValueError("index-HEAD comparison does not accept base, target, or branch")
-        return [(comparison, [*common, "--cached", "HEAD", "--"], False)]
+        head = _resolve_revision(root, "HEAD", "HEAD", deadline=deadline)
+        return [(comparison, [*common, "--cached", head, "--"], False)]
     if comparison == "two-commits":
         if branch is not None:
             raise ValueError("two-commits comparison does not accept branch")
         return [
             (
                 comparison,
-                [*common, _validate_revision(base, "base"), _validate_revision(target, "target"), "--"],
+                [
+                    *common,
+                    _resolve_revision(root, base, "base", deadline=deadline),
+                    _resolve_revision(root, target, "target", deadline=deadline),
+                    "--",
+                ],
                 False,
             )
         ]
     if comparison == "merge-base-branch":
         if target is not None:
             raise ValueError("merge-base-branch comparison does not accept target")
-        base_value = _validate_revision(base, "base")
-        branch_value = _validate_revision(branch, "branch")
+        base_value = _resolve_revision(root, base, "base", deadline=deadline)
+        branch_value = _resolve_revision(root, branch, "branch", deadline=deadline)
         merge_base = _git(
             root,
             ["merge-base", "--", base_value, branch_value],
@@ -228,20 +311,44 @@ def _object_blob(
 
 
 def _worktree_blob(root: Path, relative: str, limit: int) -> bytes | None:
-    path = root.joinpath(*relative.split("/"))
+    components = relative.split("/")
+    if not components or any(part in {"", ".", ".."} for part in components):
+        raise PermissionError("changed worktree path is not repository-relative")
+    path = root.joinpath(*components)
     try:
-        resolved = path.resolve(strict=True)
-        resolved.relative_to(root.resolve(strict=True))
-        size = resolved.stat().st_size
-        if size > limit:
-            raise ValueError(f"changed blob exceeds the per-file ceiling: {relative}")
-        with resolved.open("rb") as handle:
-            value = handle.read(limit + 1)
+        return read_stable_bytes(path, limit, label=f"changed worktree file {relative}")
     except FileNotFoundError:
         return None
-    if len(value) > limit:
-        raise ValueError(f"changed blob exceeds the per-file ceiling: {relative}")
-    return value
+
+
+def _capture_note_file(root: Path, path: Path, limit: int) -> bytes:
+    """Capture one note through a root-anchored stable descriptor chain."""
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise PermissionError("impact note path escapes the notes root") from exc
+    if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise PermissionError("impact note path is not root-relative")
+    seal = _seal_path(
+        root,
+        path,
+        target_directory=False,
+        max_components=len(relative.parts),
+    )
+    descriptor = -1
+    try:
+        if os.name == "posix":
+            descriptor = _open_descriptor_chain(seal, changed_error=PermissionError)
+            content = _read_bounded_descriptor(descriptor, limit)
+        else:
+            content = read_stable_bytes(path, limit, label="impact note")
+        _verify_seal(seal, changed_error=PermissionError)
+        return content
+    except CorpusChanged as exc:
+        raise PermissionError("impact note changed during capture") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def collect_git_changes(
@@ -338,18 +445,72 @@ def _textual_symbols(content: bytes | None) -> list[str]:
     return sorted({match.group(1) for pattern in patterns for match in re.finditer(pattern, text)})
 
 
-def find_stale_wiki_pages(changed_symbols: list[str]) -> list[dict]:
+def find_stale_wiki_pages(
+    changed_symbols: list[str],
+    *,
+    limits: ImpactLimits | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> list[dict]:
     """Legacy textual-name fallback; never represents graph evidence."""
     if not changed_symbols or not KNOWLEDGE_DIR.exists():
         return []
+    bounds = limits or ImpactLimits()
     results = []
-    for markdown in sorted(KNOWLEDGE_DIR.rglob("*.md")):
+    markdown_files: list[tuple[Path, int]] = []
+    pending = [KNOWLEDGE_DIR]
+    file_count = 0
+    directory_count = 0
+    total_bytes = 0
+    while pending:
+        _check_impact_stop(deadline, cancelled)
+        current = pending.pop()
+        try:
+            entries = os.scandir(current)
+        except OSError:
+            continue
+        with entries:
+            for entry in entries:
+                _check_impact_stop(deadline, cancelled)
+                try:
+                    metadata = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if stat.S_ISDIR(metadata.st_mode):
+                    directory_count += 1
+                    if directory_count > bounds.max_note_dirs:
+                        raise ValueError("impact note directory ceiling exceeded")
+                    pending.append(Path(entry.path))
+                    continue
+                if not stat.S_ISREG(metadata.st_mode):
+                    continue
+                file_count += 1
+                if file_count > bounds.max_note_files:
+                    raise ValueError("impact note file ceiling exceeded")
+                if not entry.name.casefold().endswith(".md"):
+                    continue
+                if metadata.st_size > bounds.max_note_bytes:
+                    raise ValueError("impact note file byte ceiling exceeded")
+                total_bytes += metadata.st_size
+                if total_bytes > bounds.max_total_note_bytes:
+                    raise ValueError("impact note total byte ceiling exceeded")
+                markdown_files.append((Path(entry.path), metadata.st_size))
+
+    for markdown, expected_size in sorted(markdown_files):
+        _check_impact_stop(deadline, cancelled)
         if markdown.name in SKIP_NAMES or "archive" in markdown.parts:
             continue
         try:
-            content = markdown.read_text(encoding="utf-8", errors="ignore")
+            raw = _capture_note_file(KNOWLEDGE_DIR, markdown, bounds.max_note_bytes)
+        except FileNotFoundError:
+            continue
+        except PermissionError:
+            raise
         except OSError:
             continue
+        if len(raw) != expected_size:
+            raise PermissionError("impact note changed after discovery")
+        content = raw.decode("utf-8", errors="ignore")
         if "status: superseded" in content:
             continue
         matched = [
@@ -395,52 +556,75 @@ def apply_significance_budget(pages: list[dict], threshold: float = 0.8) -> list
     return selected
 
 
-def _changed_ranges(old: bytes | None, new: bytes | None) -> list[dict]:
+def _changed_ranges(
+    old: bytes | None, new: bytes | None, *, deadline: float | None = None
+) -> list[dict]:
+    _check_impact_stop(deadline)
     old_lines = (old or b"").splitlines(keepends=True)
     new_lines = (new or b"").splitlines(keepends=True)
     old_offsets = [0]
     new_offsets = [0]
     for line in old_lines:
+        _check_impact_stop(deadline)
         old_offsets.append(old_offsets[-1] + len(line))
     for line in new_lines:
+        _check_impact_stop(deadline)
         new_offsets.append(new_offsets[-1] + len(line))
-    ranges = []
-    matcher = difflib.SequenceMatcher(None, old_lines, new_lines, autojunk=False)
-    for tag, old_start, old_end, new_start, new_end in matcher.get_opcodes():
-        if tag == "equal":
-            continue
-        ranges.append(
-            {
-                "old": {
-                    "line_start": old_start + 1,
-                    "line_end": max(old_start + 1, old_end),
-                    "byte_start": old_offsets[old_start],
-                    "byte_end": old_offsets[old_end],
-                },
-                "new": {
-                    "line_start": new_start + 1,
-                    "line_end": max(new_start + 1, new_end),
-                    "byte_start": new_offsets[new_start],
-                    "byte_end": new_offsets[new_end],
-                },
-            }
-        )
-    return ranges
+    prefix = 0
+    shared = min(len(old_lines), len(new_lines))
+    while prefix < shared and old_lines[prefix] == new_lines[prefix]:
+        _check_impact_stop(deadline)
+        prefix += 1
+    if prefix == len(old_lines) == len(new_lines):
+        return []
+    suffix = 0
+    while (
+        suffix < len(old_lines) - prefix
+        and suffix < len(new_lines) - prefix
+        and old_lines[len(old_lines) - suffix - 1]
+        == new_lines[len(new_lines) - suffix - 1]
+    ):
+        _check_impact_stop(deadline)
+        suffix += 1
+    old_end = len(old_lines) - suffix
+    new_end = len(new_lines) - suffix
+    return [
+        {
+            "old": {
+                "line_start": prefix + 1,
+                "line_end": max(prefix + 1, old_end),
+                "byte_start": old_offsets[prefix],
+                "byte_end": old_offsets[old_end],
+            },
+            "new": {
+                "line_start": prefix + 1,
+                "line_end": max(prefix + 1, new_end),
+                "byte_start": new_offsets[prefix],
+                "byte_end": new_offsets[new_end],
+            },
+        }
+    ]
 
 
 def _active_graph(root: Path, deadline: float):
     try:
         from evidence_graph import EvidenceGraph
         from generation_catalog import GenerationCatalog
+        from repository_scope import resolve_repository_scope
 
-        state_root = STATE_ROOT if root == ROOT.resolve() else root
+        state_root = STATE_ROOT
         catalog_path = state_root / "cache" / "evidence-graph" / "catalog.sqlite3"
         if not catalog_path.is_file():
             return None
-        return EvidenceGraph.open_active(
-            GenerationCatalog(state_root, catalog_path=catalog_path), deadline=deadline
+        scope = resolve_repository_scope(root, deadline=deadline)
+        return EvidenceGraph.open_active_for_repository(
+            GenerationCatalog(state_root, catalog_path=catalog_path),
+            scope,
+            deadline=deadline,
         )
-    except (OSError, PermissionError, TimeoutError, TypeError, ValueError):
+    except TimeoutError:
+        raise
+    except (OSError, PermissionError, TypeError, ValueError):
         return None
 
 
@@ -529,7 +713,9 @@ def _project_file_ids(graph, changes: list[dict], bounds: ImpactLimits, deadline
 def _edge_evidence(graph, assertion_id: str, bounds: ImpactLimits, deadline: float) -> list[dict]:
     try:
         rows = graph.evidence(assertion_id=assertion_id, max_rows=8, deadline=deadline)
-    except (OSError, TimeoutError, ValueError):
+    except TimeoutError:
+        raise
+    except (OSError, ValueError):
         return []
     return [
         {
@@ -612,6 +798,8 @@ def analyze_impact(
     branch: str | None = None,
     graph=None,
     limits: ImpactLimits | None = None,
+    deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> dict:
     """Map explicit Git endpoints through canonical graph symbols and edges."""
@@ -622,7 +810,8 @@ def analyze_impact(
             raise ValueError("legacy git_range must contain exactly two commit endpoints")
         comparison, base, target = "two-commits", match.group(1), match.group(2)
     root = Path(root).resolve(strict=True)
-    deadline = monotonic() + bounds.timeout_seconds
+    deadline = monotonic() + bounds.timeout_seconds if deadline is None else deadline
+    _check_impact_stop(deadline, cancelled)
     warnings: list[str] = []
     partial = False
     try:
@@ -635,14 +824,19 @@ def analyze_impact(
             limits=bounds,
             deadline=deadline,
         )
-    except (TimeoutError, ValueError) as exc:
+    except (InvalidRevisionError, TimeoutError):
+        raise
+    except ValueError as exc:
         changes = []
         warnings.append(str(exc))
         partial = True
     public_changes = []
     textual_names = set()
     for change in changes:
-        ranges = _changed_ranges(change["old_blob"], change["new_blob"])
+        _check_impact_stop(deadline, cancelled)
+        ranges = _changed_ranges(
+            change["old_blob"], change["new_blob"], deadline=deadline
+        )
         change["ranges"] = ranges
         textual_names.update(_textual_symbols(change["old_blob"]))
         textual_names.update(_textual_symbols(change["new_blob"]))
@@ -686,13 +880,20 @@ def analyze_impact(
             if changes and not changed_symbols:
                 warnings.append("Changed ranges did not resolve to canonical symbols in the active graph.")
                 partial = True
-        except (OSError, TimeoutError, ValueError) as exc:
+        except TimeoutError:
+            raise
+        except (OSError, ValueError) as exc:
             warnings.append(str(exc))
             partial = True
         finally:
             if owns_graph:
                 selected_graph.close()
-    fallback = find_stale_wiki_pages(sorted(textual_names))
+    fallback = find_stale_wiki_pages(
+        sorted(textual_names),
+        limits=bounds,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
     for item in fallback:
         item["confidence"] = "low"
         item["method"] = "textual-name-match"

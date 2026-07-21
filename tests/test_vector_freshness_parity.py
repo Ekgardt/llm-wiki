@@ -94,7 +94,7 @@ def test_lance_and_numpy_apply_identical_hard_filters() -> None:
     assert [r["path"] for r in filtered] == ["a.md", "c.md"]
 
 
-def test_stale_vector_state_refuses_dense_with_base_fallback(tmp_path) -> None:
+def test_stale_vector_state_refuses_dense_with_base_fallback(tmp_path, monkeypatch) -> None:
     np = pytest.importorskip("numpy")
     import search_memory
 
@@ -102,6 +102,18 @@ def test_stale_vector_state_refuses_dense_with_base_fallback(tmp_path) -> None:
     notes = vault / "knowledge" / "notes"
     notes.mkdir(parents=True)
     (notes / "page.md").write_text("# Page\nStale vector needle.\n", encoding="utf-8")
+    monkeypatch.setattr(search_memory, "ROOT", vault)
+    monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
+    monkeypatch.setattr(search_memory, "WIKI_DIR", notes)
+    monkeypatch.setattr(search_memory, "INDEX_DIR", tmp_path / "legacy-cache")
+    monkeypatch.setattr(
+        search_memory, "INDEX_FILE", tmp_path / "legacy-cache" / "index.sqlite"
+    )
+    monkeypatch.setattr(
+        search_memory,
+        "INDEX_MANIFEST",
+        tmp_path / "legacy-cache" / ".paths-manifest",
+    )
 
     from corpus_snapshot import collect_corpus
 
@@ -133,12 +145,15 @@ def test_stale_vector_state_refuses_dense_with_base_fallback(tmp_path) -> None:
         "source_manifest_sha256": snapshot.corpus_sha256,
         "artifacts": descriptors,
         "vector_state": "stale",
+        "repository_scope": __import__("repository_scope").resolve_repository_scope(
+            search_memory.ROOT
+        ).as_dict(),
     }
 
     class Catalog:
         generations_path = catalog.generations_path
 
-        def get_active(self):
+        def get_active_for_repository(self, _repository_scope, **_kwargs):
             return manifest
 
     results = search_memory.search(

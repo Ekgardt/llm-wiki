@@ -15,15 +15,18 @@ The compiler must:
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from context_budget import ContextBudget  # noqa: E402
+import context_compiler  # noqa: E402
+from context_budget import ContextBudget, ContextItem  # noqa: E402
 from context_compiler import (  # noqa: E402
     CompilationTrace,
     CompiledContext,
@@ -38,6 +41,153 @@ from corpus_snapshot import (  # noqa: E402
     SourceMetadata,
     SourceRecord,
 )
+
+
+def _context_item(
+    item_id: str,
+    text: str,
+    *,
+    priority_class: str,
+    mandatory: bool = False,
+) -> ContextItem:
+    return ContextItem(
+        item_id=item_id,
+        text=text,
+        source=f"test:{item_id}",
+        priority=1,
+        relevance=1.0,
+        confidence="high",
+        freshness="fresh",
+        token_cost=len(text.encode("utf-8")),
+        mandatory=mandatory,
+        representation="l1",
+        parent_id=item_id,
+        priority_class=priority_class,
+    )
+
+
+def test_compile_context_items_preserves_mandatory_items_and_drops_history_whole():
+    items = [
+        _context_item("health", "health-whole", priority_class="health", mandatory=True),
+        _context_item("handoff", "handoff-whole", priority_class="handoff", mandatory=True),
+        _context_item("history", "history-must-not-be-sliced", priority_class="history"),
+    ]
+
+    packed = context_compiler.compile_context_items(
+        items,
+        budget=ContextBudget(None, 31, 0, 0),
+    )
+
+    assert packed.text == "health-whole\n\nhandoff-whole"
+    assert [item.item_id for item in packed.items] == ["health", "handoff"]
+    assert packed.dropped == (context_compiler.DroppedItem("history", "budget"),)
+    assert "history-must-not-be-sliced" not in packed.text
+
+
+def _resolved_call_targets(source: str) -> set[str]:
+    tree = ast.parse(source)
+    bindings: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bindings[alias.asname or alias.name] = alias.name
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            for alias in node.names:
+                bindings[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+
+    def resolve(expression: ast.expr) -> str | None:
+        if isinstance(expression, ast.Name):
+            return bindings.get(expression.id, expression.id)
+        if isinstance(expression, ast.Attribute):
+            owner = resolve(expression.value)
+            return f"{owner}.{expression.attr}" if owner else None
+        return None
+
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+            ):
+                target = resolve(node.value)
+                name = node.targets[0].id
+                if target and bindings.get(name) != target:
+                    bindings[name] = target
+                    changed = True
+
+    return {
+        target
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        if (target := resolve(node.func)) is not None
+    }
+
+
+def _producer_boundary_errors(
+    source: str,
+    *,
+    approved_structured_apis: set[str] | None = None,
+) -> tuple[str, ...]:
+    calls = _resolved_call_targets(source)
+    errors = []
+    if "context_budget.pack_context" in calls or "pack_context" in calls:
+        errors.append("direct pack_context call")
+    approved = approved_structured_apis or set()
+    if "context_compiler.compile_context_items" not in calls and not calls & approved:
+        errors.append("missing compile_context_items boundary")
+    return tuple(errors)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from context_budget import pack_context as hidden\nhidden([], budget)",
+        "import context_budget as budgeter\nbudgeter.pack_context([], budget)",
+        (
+            "from context_budget import pack_context\n"
+            "qualified = pack_context\nqualified([], budget)"
+        ),
+    ],
+)
+def test_producer_guard_resolves_aliased_and_qualified_packers(source):
+    assert "direct pack_context call" in _producer_boundary_errors(source)
+
+
+def test_producer_guard_requires_facade_or_explicit_structured_api():
+    assert _producer_boundary_errors("def produce():\n    return []") == (
+        "missing compile_context_items boundary",
+    )
+    structured = (
+        "from project_journal import build_handoff_items\n"
+        "build_handoff_items(project)"
+    )
+    assert _producer_boundary_errors(
+        structured,
+        approved_structured_apis={"project_journal.build_handoff_items"},
+    ) == ()
+
+
+def test_session_start_producers_have_one_final_context_compiler_boundary():
+    scripts = Path(__file__).resolve().parent.parent / "scripts"
+    producers = (
+        "integration_adapter.py",
+        "build_context.py",
+        "project_journal.py",
+        "session_start_context.py",
+        "session_start_project_state.py",
+    )
+    approved_structured_apis: dict[str, set[str]] = {}
+
+    for filename in producers:
+        path = scripts / filename
+        errors = _producer_boundary_errors(
+            path.read_text(encoding="utf-8"),
+            approved_structured_apis=approved_structured_apis.get(filename),
+        )
+        assert errors == (), (filename, errors)
 
 
 def _source(
@@ -182,6 +332,24 @@ def test_l1_promotion_for_shortlisted_parents():
     assert "Auth summary." in l1_items[0].text
     # L1 includes the structured body excerpt.
     assert "Decision" in l1_items[0].text
+
+
+def test_compiler_materializations_use_evidence_semantic_class(monkeypatch):
+    page = _page("auth.md", "Auth", "Auth summary.", "## Decision\n\nWe chose JWT.\n")
+    snapshot = _snapshot((page,))
+    captured = []
+    real_compile_items = context_compiler.compile_context_items
+
+    def compile_spy(items, *, budget, **packing):
+        materialized = tuple(items)
+        captured.extend(materialized)
+        return real_compile_items(materialized, budget=budget, **packing)
+
+    monkeypatch.setattr(context_compiler, "compile_context_items", compile_spy)
+
+    compile_context(snapshot, shortlist=(page.record.logical_id,))
+
+    assert {item.priority_class for item in captured} == {"evidence"}
 
 
 def test_l2_source_span_materialized_for_final_evidence():
@@ -462,6 +630,57 @@ def test_l2_uses_fence_aware_headings_and_one_bounded_adjacent_section():
     assert "## Stop" not in l2.text
 
 
+def test_large_l2_heading_scan_honors_absolute_deadline():
+    body = "".join(f"## Section {index}\n\nvalue {index}\n" for index in range(1_000))
+    page = _page("deadline.md", "Deadline", "Summary.", body)
+    start = page.content.index(b"## Section 0")
+    end = page.content.index(b"## Section 1")
+    chunk = _chunk(
+        page,
+        chunk_id="deadline-section",
+        heading_ancestry=("Deadline", "Section 0"),
+        byte_start=start,
+        byte_end=end,
+    )
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        compile_context(
+            _snapshot((page,), (chunk,)),
+            evidence_chunk_ids=(chunk.id,),
+            small_parent_chars=1,
+            deadline=time.monotonic() - 1,
+        )
+
+
+def test_large_l2_heading_scan_honors_cancellation_callback():
+    body = "".join(f"## Section {index}\n\nvalue {index}\n" for index in range(1_000))
+    page = _page("cancelled.md", "Cancelled", "Summary.", body)
+    start = page.content.index(b"## Section 0")
+    end = page.content.index(b"## Section 1")
+    chunk = _chunk(
+        page,
+        chunk_id="cancelled-section",
+        heading_ancestry=("Cancelled", "Section 0"),
+        byte_start=start,
+        byte_end=end,
+    )
+    checks = 0
+
+    def cancelled() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks >= 100
+
+    with pytest.raises(TimeoutError, match="cancelled"):
+        compile_context(
+            _snapshot((page,), (chunk,)),
+            evidence_chunk_ids=(chunk.id,),
+            small_parent_chars=1,
+            cancelled=cancelled,
+        )
+    assert checks == 100
+
+
 def test_multiple_evidence_chunks_have_unique_ids_and_sorted_trace():
     page = _page("multi.md", "Multi", "Summary.", "## A\n\none\n## B\n\ntwo\n")
     first_start = page.content.index(b"## A")
@@ -605,6 +824,21 @@ def test_aliases_propagated_into_prefix_when_present():
 
     l1 = next(i for i in compiled.items if i.representation == "l1")
     assert "JWT" in l1.text or "JSON Web Token" in l1.text
+
+
+def test_yaml_flow_alias_list_is_parsed_by_canonical_frontmatter_reader():
+    raw = (
+        b'---\ntype: concept\nstatus: active\naliases: ["JWT", "JSON: Web Token"]\n---\n\n'
+        b"# Auth Token\n\nOne-sentence summary: Auth token summary.\n"
+    )
+    page = _source("auth.md", raw)
+
+    compiled = compile_context(
+        _snapshot((page,)), shortlist=(page.record.logical_id,)
+    )
+
+    l1 = next(item for item in compiled.items if item.representation == "l1")
+    assert "aliases=JWT, JSON: Web Token" in l1.text
 
 
 def test_shortlist_filters_to_only_requested_parents_for_l1():

@@ -164,7 +164,7 @@ def _publish_baseline(catalog, generation_id: str = "gen-1") -> None:
         "embedding_model_id": None,
         "embedding_model_revision": None,
         "vector_dimensions": None,
-        "graph_schema_version": "evidence-graph/v1",
+        "graph_schema_version": "evidence-graph/v2",
         "graph_extractor_version": "graph-extractor/v1",
         "source_manifest_sha256": hashlib.sha256(source_manifest_bytes).hexdigest(),
         "artifacts": [
@@ -190,6 +190,295 @@ def _catalog(tmp_path):
     from generation_catalog import GenerationCatalog
 
     return GenerationCatalog(tmp_path / "state")
+
+
+def test_complete_publication_semantically_validates_each_artifact_once(
+    tmp_path, monkeypatch
+):
+    import corpus_snapshot
+    import evidence_graph
+    import search_memory
+    from evidence_graph_builder import build_full_generation
+    from repository_scope import resolve_repository_scope
+
+    vault = tmp_path / "vault"
+    (vault / "knowledge/notes").mkdir(parents=True)
+    (vault / "knowledge/projects").mkdir(parents=True)
+    (vault / "knowledge/notes/page.md").write_text(
+        "---\ntype: concept\n---\n# Page\nBound content.\n", encoding="utf-8"
+    )
+    snapshot = corpus_snapshot.collect_corpus(vault)
+    sources = [
+        {
+            "source_id": source.record.logical_id,
+            "relative_path": source.record.relative_path,
+            "sha256": source.record.sha256,
+            "size": source.record.size,
+            "media_type": source.record.media_type,
+            "language": source.record.language,
+            "git_oid": source.record.git_oid,
+        }
+        for source in snapshot.sources
+    ]
+    calls = {"evidence": 0, "fts": 0}
+    real_evidence = evidence_graph.validate_generation_artifact
+    real_fts = search_memory.validate_generation_fts_artifact
+
+    def validate_evidence(*args, **kwargs):
+        calls["evidence"] += 1
+        return real_evidence(*args, **kwargs)
+
+    def validate_fts(*args, **kwargs):
+        calls["fts"] += 1
+        return real_fts(*args, **kwargs)
+
+    monkeypatch.setattr(evidence_graph, "validate_generation_artifact", validate_evidence)
+    monkeypatch.setattr(search_memory, "validate_generation_fts_artifact", validate_fts)
+
+    result = build_full_generation(
+        _catalog(tmp_path),
+        sources=sources,
+        source_bytes={source.record.logical_id: source.content for source in snapshot.sources},
+        nodes=(),
+        occurrences=(),
+        assertions=(),
+        evidence=(),
+        observations=(),
+        dependencies=(),
+        generation_id="one-validation",
+        snapshot=snapshot,
+        publication_root=vault,
+        repository_scope=resolve_repository_scope(vault),
+    )
+
+    assert result.activated is True
+    assert calls == {"evidence": 1, "fts": 1}
+
+
+def test_activation_commit_close_failure_preserves_authoritative_generation(
+    tmp_path, monkeypatch
+):
+    import sqlite3
+
+    import corpus_snapshot
+    import generation_catalog
+    from evidence_graph_builder import build_full_generation
+    from repository_scope import resolve_repository_scope
+
+    vault = tmp_path / "vault"
+    (vault / "knowledge/notes").mkdir(parents=True)
+    (vault / "knowledge/projects").mkdir(parents=True)
+    (vault / "knowledge/notes/page.md").write_text(
+        "---\ntype: concept\n---\n# Page\nBound content.\n", encoding="utf-8"
+    )
+    snapshot = corpus_snapshot.collect_corpus(vault)
+    sources = [
+        {
+            "source_id": source.record.logical_id,
+            "relative_path": source.record.relative_path,
+            "sha256": source.record.sha256,
+            "size": source.record.size,
+            "media_type": source.record.media_type,
+            "language": source.record.language,
+            "git_oid": source.record.git_oid,
+        }
+        for source in snapshot.sources
+    ]
+    catalog = _catalog(tmp_path)
+    real_close = generation_catalog._GenerationSealCapability.close
+    closes = 0
+
+    def fail_after_activation_close(capability):
+        nonlocal closes
+        closes += 1
+        real_close(capability)
+        if closes == 2:
+            raise OSError("activation descriptor close failure")
+
+    monkeypatch.setattr(
+        generation_catalog._GenerationSealCapability,
+        "close",
+        fail_after_activation_close,
+    )
+
+    with pytest.raises(OSError, match="activation descriptor close failure"):
+        build_full_generation(
+            catalog,
+            sources=sources,
+            source_bytes={source.record.logical_id: source.content for source in snapshot.sources},
+            nodes=(),
+            occurrences=(),
+            assertions=(),
+            evidence=(),
+            observations=(),
+            dependencies=(),
+            generation_id="committed-close-failure",
+            snapshot=snapshot,
+            publication_root=vault,
+            repository_scope=resolve_repository_scope(vault),
+        )
+
+    generation_path = catalog.generations_path / "committed-close-failure"
+    with sqlite3.connect(catalog.catalog_path) as database:
+        registered = database.execute(
+            "SELECT COUNT(*) FROM generations WHERE generation_id = ?",
+            ("committed-close-failure",),
+        ).fetchone()[0]
+        active = database.execute(
+            "SELECT active_generation_id FROM catalog_state WHERE singleton = 1"
+        ).fetchone()[0]
+        historical = database.execute(
+            "SELECT COUNT(*) FROM activation_history WHERE generation_id = ?",
+            ("committed-close-failure",),
+        ).fetchone()[0]
+    assert (registered, active, historical) == (1, "committed-close-failure", 1)
+    assert generation_path.is_dir()
+
+
+def test_complete_publication_rejects_wrong_repository_scope_after_validation(
+    tmp_path,
+):
+    import corpus_snapshot
+    from evidence_graph_builder import build_full_generation
+    from repository_scope import resolve_repository_scope
+
+    vault = tmp_path / "vault"
+    foreign = tmp_path / "foreign"
+    for root in (vault, foreign):
+        (root / "knowledge/notes").mkdir(parents=True)
+        (root / "knowledge/projects").mkdir(parents=True)
+    (vault / "knowledge/notes/page.md").write_text(
+        "---\ntype: concept\n---\n# Page\nBound content.\n", encoding="utf-8"
+    )
+    snapshot = corpus_snapshot.collect_corpus(vault)
+    sources = [
+        {
+            "source_id": source.record.logical_id,
+            "relative_path": source.record.relative_path,
+            "sha256": source.record.sha256,
+            "size": source.record.size,
+            "media_type": source.record.media_type,
+            "language": source.record.language,
+            "git_oid": source.record.git_oid,
+        }
+        for source in snapshot.sources
+    ]
+    catalog = _catalog(tmp_path)
+
+    with pytest.raises(ValueError, match="publication root.*repository scope"):
+        build_full_generation(
+            catalog,
+            sources=sources,
+            source_bytes={
+                source.record.logical_id: source.content for source in snapshot.sources
+            },
+            nodes=(),
+            occurrences=(),
+            assertions=(),
+            evidence=(),
+            observations=(),
+            dependencies=(),
+            generation_id="wrong-scope",
+            snapshot=snapshot,
+            publication_root=vault,
+            repository_scope=resolve_repository_scope(foreign),
+        )
+
+    assert catalog.get_active() is None
+    assert not (catalog.generations_path / "wrong-scope").exists()
+
+
+def test_complete_publication_rechecks_live_sources_after_semantic_validation(
+    tmp_path, monkeypatch
+):
+    import corpus_snapshot
+    import search_memory
+    from evidence_graph_builder import build_full_generation
+    from repository_scope import resolve_repository_scope
+
+    vault = tmp_path / "vault"
+    (vault / "knowledge/notes").mkdir(parents=True)
+    (vault / "knowledge/projects").mkdir(parents=True)
+    page = vault / "knowledge/notes/page.md"
+    page.write_text(
+        "---\ntype: concept\n---\n# Page\nBound content.\n", encoding="utf-8"
+    )
+    snapshot = corpus_snapshot.collect_corpus(vault)
+    sources = [
+        {
+            "source_id": source.record.logical_id,
+            "relative_path": source.record.relative_path,
+            "sha256": source.record.sha256,
+            "size": source.record.size,
+            "media_type": source.record.media_type,
+            "language": source.record.language,
+            "git_oid": source.record.git_oid,
+        }
+        for source in snapshot.sources
+    ]
+    catalog = _catalog(tmp_path)
+    real_publish = search_memory._publish_validated_generation
+
+    def mutate_then_publish(*args, **kwargs):
+        page.write_text(
+            "---\ntype: concept\n---\n# Page\nDrift content.\n", encoding="utf-8"
+        )
+        return real_publish(*args, **kwargs)
+
+    monkeypatch.setattr(
+        search_memory, "_publish_validated_generation", mutate_then_publish
+    )
+
+    with pytest.raises(corpus_snapshot.CorpusChanged):
+        build_full_generation(
+            catalog,
+            sources=sources,
+            source_bytes={
+                source.record.logical_id: source.content for source in snapshot.sources
+            },
+            nodes=(),
+            occurrences=(),
+            assertions=(),
+            evidence=(),
+            observations=(),
+            dependencies=(),
+            generation_id="live-source-drift",
+            snapshot=snapshot,
+            publication_root=vault,
+            repository_scope=resolve_repository_scope(vault),
+        )
+
+    assert catalog.get_active() is None
+    assert not (catalog.generations_path / "live-source-drift").exists()
+
+
+def test_build_manifest_emits_exact_canonical_repository_scope(tmp_path):
+    from evidence_graph_builder import build_full_generation
+    from repository_scope import RepositoryScope, resolve_repository_scope
+
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    scope = resolve_repository_scope(checkout)
+    catalog = _catalog(tmp_path)
+    records = _basic_records()
+
+    result = build_full_generation(
+        catalog,
+        generation_id="scoped",
+        sources=records["sources"],
+        source_bytes=records["source_bytes"],
+        nodes=records["nodes"],
+        occurrences=records["occurrences"],
+        assertions=records["assertions"],
+        evidence=records["evidence"],
+        observations=records["observations"],
+        dependencies=records["dependencies"],
+        repository_scope=scope,
+    )
+
+    on_disk = json.loads((result.generation_path / "manifest.json").read_bytes())
+    assert on_disk["repository_scope"] == scope.as_dict()
+    assert RepositoryScope.from_dict(on_disk["repository_scope"]) == scope
 
 
 def test_build_creates_valid_generation_and_activates_under_cas(tmp_path):
@@ -884,6 +1173,63 @@ def test_builder_cancellation_stops_lazy_iterable_materialization_before_disk_wr
         )
 
     assert not (catalog.generations_path / "gen-1").exists()
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "sources",
+        "nodes",
+        "occurrences",
+        "assertions",
+        "evidence",
+        "observations",
+        "dependencies",
+    ],
+)
+def test_builder_rejects_generator_overflow_before_generation_create(
+    tmp_path, monkeypatch, field
+):
+    import evidence_graph
+    from evidence_graph_builder import build_full_generation
+
+    catalog = _catalog(tmp_path)
+    records = _basic_records()
+    monkeypatch.setattr(evidence_graph, "MAX_VALIDATION_ROWS", 2)
+    records[field] = ({} for _ in range(3))
+
+    with pytest.raises(ValueError, match=f"{field}.*ceiling"):
+        build_full_generation(
+            catalog,
+            generation_id="gen-overflow",
+            expected_active=None,
+            **records,
+        )
+
+    assert not (catalog.generations_path / "gen-overflow").exists()
+
+
+def test_repeated_cas_losers_are_unregistered_and_removed_durably(tmp_path):
+    import sqlite3
+
+    from evidence_graph_builder import build_full_generation
+
+    catalog = _catalog(tmp_path)
+    records = _basic_records()
+
+    for generation_id in ("cas-loser-1", "cas-loser-2"):
+        result = build_full_generation(
+            catalog,
+            generation_id=generation_id,
+            expected_active="stale-active",
+            **records,
+        )
+        assert result.activated is False
+        assert not result.generation_path.exists()
+
+    with sqlite3.connect(catalog.catalog_path) as database:
+        assert database.execute("SELECT COUNT(*) FROM generations").fetchone()[0] == 0
+    assert catalog.recover_orphans() == []
 
 
 def test_builder_propagates_real_file_fsync_failure(tmp_path, monkeypatch):

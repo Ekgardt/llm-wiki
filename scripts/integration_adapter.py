@@ -26,7 +26,6 @@ from project_journal import (
     recover_project_handoff,
 )
 from secret_redact import redact_secrets
-from session_start_context import build_context as build_session_start_context
 from session_start_project_state import _compute_slug
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -40,6 +39,15 @@ SOURCES = frozenset({"claude", "opencode", "codex"})
 EVENTS = frozenset(
     {"session_start", "session_end", "pre_compact", "stop", "user_prompt", "post_tool_use"}
 )
+
+
+def build_session_start_context() -> Sequence[Any]:
+    """Build structured context without loading SessionStart on unrelated commands."""
+    from session_start_context import build_context_items
+
+    return build_context_items()
+
+
 OCCURRENCE_EVENTS = EVENTS - {"user_prompt"}
 CHECKPOINT_SIGNAL_FIELDS = frozenset(
     {
@@ -1290,44 +1298,61 @@ def _run_session_start_maintenance() -> int:
     return 0
 
 
-def _recover_project_handoff(slug: str | None, project_dir: Path | None) -> str:
+def _recover_project_handoff(slug: str | None, project_dir: Path | None) -> Sequence[Any]:
     if not slug or project_dir is None:
-        return ""
+        return ()
     try:
         store = ProjectStore(ROOT, STATE_ROOT)
-        return recover_project_handoff(store, slug, project_root=project_dir).context
+        return recover_project_handoff(
+            store,
+            slug,
+            project_root=project_dir,
+            render_context=False,
+        ).items
     except Exception as exc:  # noqa: BLE001
         _log_checkpoint_error(exc)
-        return ""
+        return ()
 
 
-def _append_context(context: str, handoff: str) -> str:
+def _append_context(
+    context_items: Sequence[Any] | str,
+    handoff: Sequence[Any] | str,
+    *,
+    trailing_newline: bool = False,
+) -> str:
     from context_budget import (
         DEFAULT_CONTEXT_BUDGET,
         BudgetExceededError,
         ContextItem,
-        pack_context,
     )
+    from context_compiler import compile_context_items
 
-    global_text = context.rstrip()
-    handoff_text = handoff.strip()
-    trailing_newline = context.endswith(("\n", "\r")) or handoff.endswith(("\n", "\r"))
-    items: list[ContextItem] = []
-    if global_text:
-        items.append(ContextItem(
-            item_id="session-start:global",
-            text=global_text,
-            source="session-start",
-            priority=1,
-            relevance=1.0,
-            confidence="high",
-            freshness="fresh",
-            token_cost=len(global_text.encode("utf-8")),
-            mandatory=True,
-            representation="l1",
-            parent_id="session-start",
-            priority_class="safety",
-        ))
+    items: list[ContextItem]
+    if isinstance(context_items, str):
+        global_text = context_items.strip()
+        items = []
+        if global_text:
+            items.append(ContextItem(
+                item_id="session-start:unstructured",
+                text=global_text,
+                source="session-start",
+                priority=5,
+                relevance=0.5,
+                confidence="medium",
+                freshness="fresh",
+                token_cost=len(global_text.encode("utf-8")),
+                mandatory=False,
+                representation="l1",
+                parent_id="session-start",
+                priority_class="evidence",
+            ))
+    else:
+        items = list(context_items)
+    if isinstance(handoff, str):
+        handoff_text = handoff.strip()
+    else:
+        handoff_text = ""
+        items.extend(handoff)
     if handoff_text:
         items.append(ContextItem(
             item_id="session-start:project-handoff",
@@ -1346,9 +1371,9 @@ def _append_context(context: str, handoff: str) -> str:
     if not items:
         return ""
     try:
-        rendered = pack_context(
+        rendered = compile_context_items(
             items,
-            DEFAULT_CONTEXT_BUDGET,
+            budget=DEFAULT_CONTEXT_BUDGET,
             emergency_byte_cap=DEFAULT_CONTEXT_BUDGET.available_input_tokens,
         ).text
     except BudgetExceededError as error:
@@ -1385,6 +1410,7 @@ def ingest_event(
         result["context"] = _append_context(
             build_session_start_context(),
             _recover_project_handoff(slug, project_dir),
+            trailing_newline=True,
         )
     elif envelope.event_type == "user_prompt":
         _run_delegate("user_prompt_capture.py", payload, forward_stdout=True, project_dir=project_dir)

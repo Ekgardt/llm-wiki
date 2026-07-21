@@ -34,14 +34,30 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   transactions/tasks/results, the 30-day undo window, and live owners.
 - Recorded the local-filesystem requirement, current `synchronous=FULL`/no-WAL
   policy, bounded defaults and CLI overrides, cooperating-writer CAS boundary, and
-  explicit non-goals. The suite now collects **3081 tests**.
-- Implemented Task 9 with `generation_catalog.py` and `corpus_snapshot.py`:
-  a bounded rollback-journal catalog with CAS activation, validated fallback,
-  orphan recovery, and deadlines, plus immutable source-hash corpus snapshots.
-- FTS, NumPy, Lance, contextual-retrieval, and tier builders are generation-aware.
-  POSIX collection is descriptor-authoritative; Windows reparse and identity checks
-  are best effort. Legacy caches remain readable fallback state; there is no daemon,
-  automatic migration, or automatic legacy-cache removal.
+  explicit non-goals. The suite now collects **3609 tests**.
+- Added canonical `repository-scope/v1` binding for repositories, linked worktrees,
+  checkout roots, Git common directories, and captured commits. Generation readers
+  reject the wrong repository/worktree scope instead of returning cross-checkout
+  evidence.
+- Implemented complete `corpus-generation/v2` publication. Canonical
+  `source-manifest.json` binds exact source membership and hashes;
+  `incremental-manifest.json` records source ownership, invalidation, and reuse.
+  Evidence Graph v2 and FTS are required artifacts built from the same immutable
+  snapshot, and no partial, stale, raced, or changed candidate can become active.
+  Catalog selection, CAS activation, same-scope fallback, orphan recovery, and
+  bounded nightly/doctor maintenance preserve the previous valid generation.
+- Added deterministic workspace-level code extraction and incremental invalidation
+  across supported source languages, including cross-file symbols, occurrences,
+  calls, imports, routes, and dependencies where the extractor can prove them.
+- Extended the existing MCP `recall` tool with opt-in grounded QA and verified
+  citations without changing the 12-tool surface. MCP context, grounded QA,
+  SessionStart, project handoff, and lifecycle injection now route final packing
+  through the shared Context Compiler and one bounded token budget.
+- Hardened deadlines, cancellation, bounded reads, repository resolution, generation
+  publication, retrieval errors, and cleanup paths. Installers now preserve the real
+  pytest exit status and clean up spawned test processes/process trees on interruption.
+  Legacy FTS, NumPy, and Lance caches remain readable fallback state; there is no
+  daemon, automatic migration, or automatic legacy-cache removal.
 
 ## [4.0.0] — Unreleased
 
@@ -83,7 +99,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - **SessionStart impact advisory** — stale wiki pages from code changes.
 - **MCP config in install scripts** — Claude Code + OpenCode auto-config.
 - **Optional extras** — `hybrid`, `code-graph`, `mcp-server`, `reranker`, `full`.
-- **3081 tests**.
+- **3609 tests**.
 
 ## [3.4.0] — 2026-07-11
 

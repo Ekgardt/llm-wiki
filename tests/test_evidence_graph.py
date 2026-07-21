@@ -192,7 +192,7 @@ def test_manifest_schema_is_closed_and_bounded():
         "embedding_model_id": None,
         "embedding_model_revision": None,
         "vector_dimensions": None,
-        "graph_schema_version": "evidence-graph/v1",
+        "graph_schema_version": "evidence-graph/v2",
         "graph_extractor_version": "graph-extractor/v1",
         "source_manifest_sha256": "1" * 64,
         "artifacts": [
@@ -213,6 +213,94 @@ def test_manifest_schema_is_closed_and_bounded():
     with pytest.raises(ValueError, match="unknown|additional"):
         validate_schema(
             {**valid, "sources": []}, SCRIPTS / "schemas/evidence-graph-manifest-v1.json"
+        )
+
+
+def _manifest_with_repository_scope(scope: dict[str, object]) -> dict[str, object]:
+    return {
+        "generation_id": "gen-1",
+        "schema_version": "corpus-generation/v1",
+        "collector_version": "collector/v1",
+        "extractor_version": "extractor/v1",
+        "tokenizer_version": "tokenizer/v1",
+        "tokenizer_config_sha256": "0" * 64,
+        "embedding_model_id": None,
+        "embedding_model_revision": None,
+        "vector_dimensions": None,
+        "graph_schema_version": "evidence-graph/v2",
+        "graph_extractor_version": "graph-extractor/v1",
+        "source_manifest_sha256": "1" * 64,
+        "repository_scope": scope,
+        "artifacts": [
+            {"path": "evidence.sqlite3", "size": 4096, "sha256": "2" * 64},
+        ],
+        "vector_state": "absent",
+    }
+
+
+def _valid_repository_scope_schema_value() -> dict[str, object]:
+    return {
+        "schema_version": "repository-scope/v1",
+        "repository_id": "repository:" + "a" * 64,
+        "checkout_id": "checkout:" + "b" * 64,
+        "checkout_root": "C:/repository",
+        "git_common_dir": "C:/repository/.git",
+        "git_commit": "c" * 40,
+    }
+
+
+def test_manifest_schema_accepts_closed_repository_scope():
+    from reliable_memory import validate_schema
+
+    validate_schema(
+        _manifest_with_repository_scope(_valid_repository_scope_schema_value()),
+        SCRIPTS / "schemas/evidence-graph-manifest-v1.json",
+    )
+
+
+def test_manifest_schema_accepts_non_git_scope_only_with_null_commit():
+    from reliable_memory import validate_schema
+
+    scope = _valid_repository_scope_schema_value()
+    scope["git_common_dir"] = None
+    scope["git_commit"] = None
+
+    validate_schema(
+        _manifest_with_repository_scope(scope),
+        SCRIPTS / "schemas/evidence-graph-manifest-v1.json",
+    )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda scope: scope.pop("checkout_id"),
+        lambda scope: scope.update(unknown=True),
+        lambda scope: scope.update(checkout_root="relative/repository"),
+        lambda scope: scope.update(git_common_dir="relative/.git"),
+        lambda scope: scope.update(repository_id="repository:bad"),
+        lambda scope: scope.update(checkout_id="checkout:" + "A" * 64),
+        lambda scope: scope.update(git_commit="not-a-commit"),
+        lambda scope: scope.update(checkout_root="C:/" + "x" * 4096),
+        lambda scope: scope.update(checkout_root="c:/repository"),
+        lambda scope: scope.update(checkout_root="C:\\repository"),
+        lambda scope: scope.update(checkout_root="C:/repository/../other"),
+        lambda scope: scope.update(git_common_dir="/repository//.git"),
+        lambda scope: scope.update(checkout_root="C:/repository\x00other"),
+        lambda scope: scope.update(git_common_dir="C:/repository/.git\x00other"),
+        lambda scope: scope.update(git_common_dir=None),
+    ],
+)
+def test_manifest_schema_rejects_invalid_repository_scope(mutate):
+    from reliable_memory import validate_schema
+
+    scope = _valid_repository_scope_schema_value()
+    mutate(scope)
+
+    with pytest.raises(ValueError):
+        validate_schema(
+            _manifest_with_repository_scope(scope),
+            SCRIPTS / "schemas/evidence-graph-manifest-v1.json",
         )
 
 
@@ -262,9 +350,26 @@ def test_generation_database_has_canonical_tables_indexes_and_pragmas(tmp_path):
                 "SELECT name FROM sqlite_master WHERE type='index' ORDER BY name"
             )
         }
+        evidence_indexes = {
+            row[1]: tuple(
+                column[2]
+                for column in database.execute(f"PRAGMA index_info({row[1]})")
+            )
+            for row in database.execute("PRAGMA index_list(evidence)")
+            if row[2] == 0
+        }
+        validation_plan = database.execute(
+            """
+EXPLAIN QUERY PLAN
+SELECT 1 FROM assertion a
+WHERE a.resolution='resolved'
+  AND NOT EXISTS (SELECT 1 FROM evidence e WHERE e.assertion_id=a.assertion_id)
+LIMIT 1
+"""
+        ).fetchall()
         assert database.execute("PRAGMA journal_mode").fetchone()[0].lower() == "delete"
         assert database.execute("PRAGMA synchronous").fetchone()[0] == 2
-        assert database.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert database.execute("PRAGMA user_version").fetchone()[0] == 2
         assert database.execute("PRAGMA foreign_key_check").fetchall() == []
 
     assert tables == {
@@ -282,11 +387,16 @@ def test_generation_database_has_canonical_tables_indexes_and_pragmas(tmp_path):
         "assertion_traversal",
         "dependency_invalidation",
         "dependency_reverse",
+        "evidence_assertion",
         "evidence_source_span",
         "node_kind",
         "observation_resolution",
         "occurrence_source_span",
     } <= indexes
+    assert evidence_indexes["evidence_assertion"][:1] == ("assertion_id",)
+    evidence_steps = [detail for *_prefix, detail in validation_plan if " e" in detail]
+    assert any("SEARCH e" in detail for detail in evidence_steps), evidence_steps
+    assert all("SCAN e" not in detail for detail in evidence_steps), evidence_steps
     assert not (tmp_path / "evidence.sqlite3-wal").exists()
 
 
@@ -340,6 +450,14 @@ def test_every_resolved_assertion_requires_nonempty_half_open_evidence(tmp_path)
     records["evidence"] = records["evidence"][:1]
     with pytest.raises(ValueError, match="resolved assertion.*evidence"):
         evidence_graph.create_generation_database(tmp_path / "missing.sqlite3", **records)
+
+    graph = _create(tmp_path)
+    graph.close()
+    with closing(sqlite3.connect(tmp_path / "evidence.sqlite3")) as database:
+        database.row_factory = sqlite3.Row
+        database.execute("DELETE FROM evidence WHERE assertion_id='documents'")
+        with pytest.raises(ValueError, match="integrity"):
+            evidence_graph._validate_connection(database)
 
     records = _records()
     records["evidence"][0].update(

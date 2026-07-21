@@ -34,6 +34,7 @@ from importlib import metadata
 from pathlib import Path, PurePath
 
 try:
+    from .code_languages import CODE_LANGUAGE_BY_SUFFIX, language_for_path
     from .import_resolver import (
         EMPTY_REGISTRY,
         SymbolRegistry,
@@ -41,6 +42,7 @@ try:
         resolve_python_imports_and_calls,
     )
 except ImportError:
+    from code_languages import CODE_LANGUAGE_BY_SUFFIX, language_for_path
     from import_resolver import (
         EMPTY_REGISTRY,
         SymbolRegistry,
@@ -66,29 +68,7 @@ GRAMMAR_LOADERS = {
     "bash": ("tree_sitter_bash", "language"),
 }
 
-LANGUAGE_MAP = {
-    ".py": "python",
-    ".js": "javascript",
-    ".ts": "typescript",
-    ".tsx": "typescript",
-    ".jsx": "javascript",
-    ".go": "go",
-    ".rs": "rust",
-    ".java": "java",
-    ".c": "c",
-    ".h": "c",
-    ".cc": "cpp",
-    ".cpp": "cpp",
-    ".cxx": "cpp",
-    ".hh": "cpp",
-    ".hpp": "cpp",
-    ".hxx": "cpp",
-    ".rb": "ruby",
-    ".php": "php",
-    ".cs": "c_sharp",
-    ".sh": "bash",
-    ".bash": "bash",
-}
+LANGUAGE_MAP = CODE_LANGUAGE_BY_SUFFIX
 
 MAX_DERIVED_COMMUNITY_CACHE = 4
 
@@ -133,7 +113,7 @@ def _get_parser(lang: str):
 
 def detect_language(file_path: Path) -> str | None:
     """Detect language from file extension."""
-    return LANGUAGE_MAP.get(file_path.suffix.lower())
+    return language_for_path(file_path)
 
 
 def _probe_version(args: list[str], timeout: float = 2) -> tuple[str | None, str | None]:
@@ -843,11 +823,18 @@ def index_directory(directory: Path, verbose: bool = True) -> dict:
 def _generation_catalog(directory: Path):
     """Open the shared generation catalog only when it already exists."""
     try:
+        from . import memory_state
         from .generation_catalog import GenerationCatalog
     except ImportError:
+        import memory_state
         from generation_catalog import GenerationCatalog
 
-    state_root = Path(os.environ.get("LLM_WIKI_STATE_ROOT", str(directory.resolve())))
+    configured_state_root = os.environ.get("LLM_WIKI_STATE_ROOT")
+    state_root = (
+        Path(configured_state_root).resolve()
+        if configured_state_root
+        else memory_state.STATE_ROOT
+    )
     catalog_path = state_root / "cache" / "evidence-graph" / "catalog.sqlite3"
     if not catalog_path.is_file():
         return None
@@ -857,32 +844,39 @@ def _generation_catalog(directory: Path):
 def _active_evidence_graph(directory: Path):
     try:
         from .evidence_graph import EvidenceGraph
+        from .repository_scope import resolve_repository_scope
     except ImportError:
         from evidence_graph import EvidenceGraph
+        from repository_scope import resolve_repository_scope
 
     try:
         catalog = _generation_catalog(directory)
-        return None if catalog is None else EvidenceGraph.open_active(catalog)
+        if catalog is None:
+            return None
+        scope = resolve_repository_scope(directory)
+        return EvidenceGraph.open_active_for_repository(catalog, scope)
     except (OSError, TypeError, ValueError, PermissionError, sqlite3.Error):
         return None
 
 
-def _stored_location(graph, node_id: str, directory: Path) -> tuple[str, int]:
+def _stored_location(graph, node_id: str, _directory: Path) -> tuple[str, int]:
+    source_root = Path(graph.repository_scope.checkout_root)
     occurrences = graph.occurrences(node_id, max_rows=1)
     if not occurrences:
         node = graph.node(node_id)
         path = "" if node is None else str(node["metadata"].get("path", ""))
-        return (str(directory / path) if path else "", 0)
+        return (str(source_root / path) if path else "", 0)
     occurrence = occurrences[0]
-    return str(directory / occurrence["relative_path"]), occurrence["line_start"]
+    return str(source_root / occurrence["relative_path"]), occurrence["line_start"]
 
 
-def _stored_edge_location(graph, assertion_id: str, directory: Path) -> tuple[str, int]:
+def _stored_edge_location(graph, assertion_id: str, _directory: Path) -> tuple[str, int]:
     evidence = graph.evidence(assertion_id=assertion_id, max_rows=1)
     if not evidence:
         return "", 0
     span = evidence[0]
-    return str(directory / span["relative_path"]), span["line_start"]
+    source_root = Path(graph.repository_scope.checkout_root)
+    return str(source_root / span["relative_path"]), span["line_start"]
 
 
 def _stored_qualified_name(node: dict[str, object]) -> str:
@@ -930,6 +924,8 @@ def _store_report(graph) -> dict[str, object]:
     ).fetchone()[0]
     return {
         "source_generation": graph.generation_id,
+        "source_scope": "checkout",
+        "source_root": graph.repository_scope.checkout_root,
         "graph_complete": unresolved_count == 0,
         "unresolved_count": unresolved_count,
         "fallback": False,

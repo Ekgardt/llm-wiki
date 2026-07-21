@@ -263,6 +263,69 @@ class TestToolDefinitions:
         assert "minimum" not in limit
         assert "maximum" not in limit
 
+    def test_recall_grounded_schema_matches_qa_profiles_without_adding_a_tool(self):
+        import mcp_server
+        import retrieval
+
+        recall = mcp_server.TOOL_INPUT_SCHEMAS["recall"]
+
+        assert recall["properties"]["grounded"] == {
+            "type": "boolean",
+            "default": False,
+            "description": "Return a verified evidence-grounded answer",
+        }
+        assert recall["properties"]["profile"]["enum"] == list(
+            retrieval.PROFILES
+        )
+        assert len(mcp_server.TOOL_INPUT_SCHEMAS) == 12
+
+    def test_importing_mcp_server_does_not_import_query_memory(self):
+        scripts = Path(__file__).resolve().parent.parent / "scripts"
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; "
+                f"sys.path.insert(0, {str(scripts)!r}); "
+                "import mcp_server; "
+                "assert 'query_memory' not in sys.modules",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            {"query": "test", "grounded": "true"},
+            {"query": "test", "grounded": 1},
+            {"query": "test", "grounded": True, "profile": 1},
+            {"query": "test", "grounded": True, "profile": "UNKNOWN"},
+        ],
+    )
+    def test_recall_rejects_invalid_grounded_types_and_profile_values(self, arguments):
+        import mcp_server
+
+        assert mcp_server._validate_tool_arguments("recall", arguments)
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            {"query": "test", "profile": "BASE"},
+            {"query": "test", "grounded": False, "profile": "BASE"},
+        ],
+    )
+    def test_recall_rejects_profile_without_grounded_true(self, arguments):
+        import mcp_server
+
+        error = mcp_server._validate_tool_arguments("recall", arguments)
+
+        assert error is not None
+        assert "grounded" in error
+
     def test_limit_and_context_include_descriptions_are_honest(self):
         import mcp_server
 
@@ -566,6 +629,88 @@ class TestHelperFunctions:
         assert "error" in result
         assert "exceeds" in result["error"]
 
+    def test_read_page_redacts_read_and_evidence_exception_details(
+        self, tmp_path, monkeypatch
+    ):
+        import evidence_resolver
+        import mcp_server
+        import memory_state
+
+        sensitive = r"api_key=sk-abcdefghijklmnopqrstuvwxyz C:\private\vault\secret.md"
+        notes = tmp_path / "knowledge/notes"
+        notes.mkdir(parents=True)
+        (notes / "page.md").write_text("evidence", encoding="utf-8")
+        monkeypatch.setattr(memory_state, "ROOT", tmp_path)
+        monkeypatch.setattr(
+            mcp_server,
+            "read_stable_bytes",
+            lambda *args, **kwargs: (_ for _ in ()).throw(OSError(sensitive)),
+        )
+        read_error = mcp_server._read_page("page")
+
+        monkeypatch.setattr(mcp_server, "read_stable_bytes", lambda *args, **kwargs: b"evidence")
+        monkeypatch.setattr(
+            evidence_resolver,
+            "extract_evidence_references",
+            lambda content: ["reference"],
+        )
+        monkeypatch.setattr(
+            evidence_resolver.EvidenceResolver,
+            "resolve",
+            lambda *args, **kwargs: (_ for _ in ()).throw(OSError(sensitive)),
+        )
+        evidence_error = mcp_server._read_page("page")
+
+        for result in (read_error, evidence_error):
+            encoded = json.dumps(result)
+            assert sensitive not in encoded
+            assert "sk-abcdefghijklmnopqrstuvwxyz" not in encoded
+            assert r"C:\private\vault" not in encoded
+            assert result["error"].endswith("operation_failed")
+
+    def test_log_decision_redacts_append_exception_details(self, monkeypatch):
+        import daily_log_append
+        import mcp_server
+
+        sensitive = r"api_key=sk-abcdefghijklmnopqrstuvwxyz C:\private\vault\secret.md"
+        monkeypatch.setattr(
+            daily_log_append,
+            "append_daily",
+            lambda *args, **kwargs: (_ for _ in ()).throw(OSError(sensitive)),
+        )
+
+        result = mcp_server._log_decision("decision")
+
+        encoded = json.dumps(result)
+        assert sensitive not in encoded
+        assert "sk-abcdefghijklmnopqrstuvwxyz" not in encoded
+        assert r"C:\private\vault" not in encoded
+        assert result == {"error": "operation_failed"}
+
+    def test_log_decision_propagates_deadline_and_cancellation_to_append(
+        self, monkeypatch
+    ):
+        import daily_log_append
+        import mcp_server
+
+        received = []
+
+        def cancelled():
+            return False
+
+        monkeypatch.setattr(mcp_server, "_operation_cancelled", lambda: cancelled)
+        monkeypatch.setattr(
+            daily_log_append,
+            "append_daily",
+            lambda *args, **kwargs: received.append(kwargs) or Path("daily.md"),
+        )
+        deadline = time.monotonic() + 5
+
+        result = mcp_server._log_decision("decision", deadline=deadline)
+
+        assert result["status"] == "logged"
+        assert received == [{"deadline": deadline, "cancelled": cancelled}]
+
     def test_read_page_caps_each_resolved_evidence_slice(self, tmp_path, monkeypatch):
         import mcp_server
         import memory_state
@@ -668,7 +813,7 @@ class TestHelperFunctions:
         assert calls[1][1]["semantic"] is False
         assert calls[1][1]["graph"] is False
         assert calls[1][1]["rerank"] is False
-        assert calls[1][1]["deadline_monotonic"] > calls[0][1]["deadline_monotonic"]
+        assert calls[1][1]["deadline_monotonic"] == calls[0][1]["deadline_monotonic"]
         assert results[0]["requested_mode"] == "HYBRID"
         assert results[0]["effective_mode"] == "BASE"
         assert results[0]["signals_used"] == ["lexical"]
@@ -677,6 +822,98 @@ class TestHelperFunctions:
         trace = mcp_server._retrieval_trace("test", results)
         assert trace["fallback_reason"] == "retrieval_deadline_exceeded"
         assert trace["partial"] is True
+
+    def test_search_vault_reuses_caller_operation_deadline(self, monkeypatch):
+        import mcp_server
+        import search_memory
+
+        calls = []
+
+        def search(_query, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise TimeoutError("semantic timeout")
+            return []
+
+        monkeypatch.setattr(search_memory, "search", search)
+        deadline = time.monotonic() + 5
+
+        mcp_server._search_vault("query", deadline=deadline)
+
+        assert len(calls) == 2
+        assert [call["deadline_monotonic"] for call in calls] == [deadline, deadline]
+
+    def test_search_vault_propagates_second_timeout(self, monkeypatch):
+        import mcp_server
+        import search_memory
+
+        calls = 0
+
+        def search(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            raise TimeoutError(f"attempt {calls} timed out")
+
+        monkeypatch.setattr(search_memory, "search", search)
+
+        with pytest.raises(TimeoutError, match="attempt 2"):
+            mcp_server._search_vault("query", deadline=time.monotonic() + 5)
+
+    def test_search_vault_preserves_hybrid_signals_completed_under_deadline(
+        self, monkeypatch
+    ):
+        import mcp_server
+        import search_memory
+
+        expected = [{
+            "candidate_id": "dense",
+            "path": "dense.md",
+            "requested_mode": "HYBRID",
+            "effective_mode": "HYBRID",
+            "signals_used": ["lexical", "dense"],
+            "fallback_reason": None,
+            "generation": "legacy",
+            "partial": False,
+        }]
+        calls = []
+
+        def search(*_args, **kwargs):
+            calls.append(kwargs)
+            return expected
+
+        monkeypatch.setattr(search_memory, "search", search)
+
+        rows = mcp_server._search_vault(
+            "query", deadline=time.monotonic() + 5
+        )
+
+        assert rows == expected
+        assert len(calls) == 1
+        assert calls[0]["semantic"] is True
+
+    def test_grounded_candidate_retrieval_preserves_hybrid_trace_under_deadline(
+        self, monkeypatch
+    ):
+        import query_memory
+        import retrieval
+
+        expected = [{"candidate_id": "dense", "signals_used": ["lexical", "dense"]}]
+        captured = []
+
+        def retrieve(*_args, **kwargs):
+            captured.append(kwargs)
+            return expected
+
+        monkeypatch.setattr(retrieval, "retrieve_via_search_memory", retrieve)
+        deadline = time.monotonic() + 5
+
+        rows = query_memory._default_candidates(
+            "question", profile="HYBRID", deadline=deadline
+        )
+
+        assert rows == tuple(expected)
+        assert captured[0]["deadline_monotonic"] == deadline
+        assert captured[0]["semantic"] is True
 
     def test_get_context_batch(self):
         from mcp_server import _get_context
@@ -895,11 +1132,46 @@ class TestHelperFunctions:
         assert "error" in mcp_server._read_page("missing")
         assert retrieval_telemetry.read_events(limit=10, db_path=database) == []
 
-    def test_trigger_compile_returns_dict(self):
+    def test_trigger_compile_returns_dict(self, monkeypatch):
+        import compile_memory
         from mcp_server import _trigger_compile
+
+        monkeypatch.setattr(compile_memory, "run_pending_compile", lambda **kwargs: 0)
         result = _trigger_compile()
         assert isinstance(result, dict)
-        assert "spawned" in result
+
+    def test_trigger_compile_runs_under_handler_deadline_and_cancellation(
+        self, monkeypatch
+    ):
+        import compile_memory
+        import maybe_compile
+        import mcp_server
+
+        received = []
+
+        def cancelled():
+            return False
+
+        monkeypatch.setattr(mcp_server, "_operation_cancelled", lambda: cancelled)
+        monkeypatch.setattr(
+            compile_memory,
+            "run_pending_compile",
+            lambda **kwargs: received.append(kwargs) or 0,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            maybe_compile,
+            "spawn_compile_if_idle",
+            lambda: pytest.fail("MCP compile must not detach unbounded work"),
+        )
+        deadline = time.monotonic() + 5
+
+        result = mcp_server._trigger_compile(deadline=deadline)
+
+        assert result == {"status": "completed", "returncode": 0}
+        assert received == [
+            {"trigger": "manual", "deadline": deadline, "cancelled": cancelled}
+        ]
 
     def test_code_tools_reject_empty_missing_file_and_drive_root(self, tmp_path):
         import mcp_server
@@ -999,6 +1271,751 @@ class TestHandleToolCall:
             "reranker_duration_ms", "reranker_fallback_reason",
         }
         assert "_meta" in data
+
+    @pytest.mark.parametrize("arguments", [{"query": "auth"}, {"query": "auth", "grounded": False}])
+    def test_recall_defaults_to_current_search(self, monkeypatch, arguments):
+        import mcp_server
+        import query_memory
+
+        searches = []
+        monkeypatch.setattr(
+            mcp_server,
+            "_search_vault",
+            lambda query, *, limit: searches.append((query, limit)) or [],
+        )
+        monkeypatch.setattr(
+            query_memory,
+            "grounded_qa",
+            lambda *args, **kwargs: pytest.fail("grounded QA must be opt-in"),
+        )
+        monkeypatch.setattr(mcp_server, "_meta", lambda: {})
+
+        envelope = json.loads(self._run("recall", arguments))
+
+        assert searches == [("auth", 8)]
+        assert "results" in envelope["data"]
+
+    def test_grounded_recall_calls_direct_api_with_root_profile_and_mcp_deadline(
+        self, monkeypatch, tmp_path
+    ):
+        import mcp_server
+        import memory_state
+        import query_memory
+
+        answer = {
+            "schema_version": "grounded-answer/v1",
+            "status": "answered",
+            "claims": [{"text": "Alpha is enabled.", "citation_ids": ["E1"]}],
+            "citations": [{"citation_id": "E1"}],
+            "reason": None,
+        }
+        calls = []
+
+        def grounded_qa(question, **kwargs):
+            calls.append((question, kwargs))
+            return answer
+
+        monkeypatch.setattr(memory_state, "ROOT", tmp_path)
+        monkeypatch.setattr(query_memory, "grounded_qa", grounded_qa)
+        monkeypatch.setattr(
+            query_memory,
+            "answer",
+            lambda *args, **kwargs: pytest.fail("CLI answer wrapper must not be used"),
+        )
+        monkeypatch.setattr(
+            mcp_server,
+            "_search_vault",
+            lambda *args, **kwargs: pytest.fail("search response must not wrap grounded QA"),
+        )
+        started = time.monotonic()
+
+        envelope = json.loads(
+            self._run(
+                "recall",
+                {"query": "Is alpha enabled?", "grounded": True, "profile": "EXACT"},
+            )
+        )
+
+        assert envelope["data"] == answer
+        assert calls[0][0] == "Is alpha enabled?"
+        assert calls[0][1]["vault"] == tmp_path
+        assert calls[0][1]["profile"] == "EXACT"
+        assert calls[0][1]["deadline"] > started
+        assert envelope["partial"] is False
+        assert all("abstain" not in warning.lower() for warning in envelope["warnings"])
+        assert envelope["coverage"] == 0
+        assert 0 < envelope["confidence"] <= 0.8
+        assert any("coverage is unknown" in warning.lower() for warning in envelope["warnings"])
+        assert envelope["components"] == {}
+
+    @pytest.mark.parametrize(
+        "status",
+        ["insufficient_evidence", "conflicting_evidence", "unsupported_time_scope"],
+    )
+    def test_grounded_recall_abstention_is_valid_partial_with_reason_warning(
+        self, monkeypatch, status
+    ):
+        import query_memory
+
+        reason = f"Cannot answer because status is {status}."
+        monkeypatch.setattr(
+            query_memory,
+            "grounded_qa",
+            lambda *args, **kwargs: {
+                "schema_version": "grounded-answer/v1",
+                "status": status,
+                "claims": [],
+                "citations": [],
+                "reason": reason,
+            },
+        )
+
+        envelope = json.loads(
+            self._run("recall", {"query": "question", "grounded": True})
+        )
+
+        assert envelope["data"]["status"] == status
+        assert "error" not in envelope["data"]
+        assert envelope["partial"] is True
+        assert envelope["coverage"] == 0
+        assert envelope["confidence"] == 0
+        assert reason in envelope["warnings"]
+        assert envelope["components"] == {}
+
+    @pytest.mark.parametrize(
+        "sensitive",
+        [
+            "api_key=sk-abcdefghijklmnopqrstuvwxyz123456",
+            r"C:\Users\operator\private\vault\knowledge\notes\secret.md",
+            "PROMPT_SENTINEL do not reveal this user question",
+        ],
+    )
+    def test_grounded_recall_exception_text_is_safe_and_bounded(
+        self, monkeypatch, sensitive
+    ):
+        import query_memory
+
+        def fail(*args, **kwargs):
+            raise query_memory.GroundedQAError((sensitive + " ") * 100)
+
+        monkeypatch.setattr(query_memory, "grounded_qa", fail)
+
+        envelope = json.loads(
+            self._run("recall", {"query": "question", "grounded": True})
+        )
+
+        error = envelope["data"]["error"]
+        assert sensitive not in json.dumps(envelope)
+        assert len(error) <= 256
+        assert all(len(warning) <= 256 for warning in envelope["warnings"])
+        assert envelope["partial"] is True
+        assert envelope["coverage"] == 0
+        assert error in envelope["warnings"]
+
+    @pytest.mark.parametrize("failure", ["provider failed", "schema validation failed"])
+    def test_grounded_recall_provider_and_schema_failures_use_error_envelope(
+        self, monkeypatch, failure
+    ):
+        import query_memory
+
+        monkeypatch.setattr(
+            query_memory,
+            "grounded_qa",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                query_memory.GroundedQAError(failure)
+            ),
+        )
+
+        envelope = json.loads(
+            self._run("recall", {"query": "question", "grounded": True})
+        )
+
+        assert "error" in envelope["data"]
+        assert failure not in json.dumps(envelope)
+        assert envelope["partial"] is True
+
+    def test_grounded_deadline_starts_at_handler_entry_before_validation(self, monkeypatch):
+        import mcp_server
+        import query_memory
+
+        real_validate = mcp_server._validate_tool_arguments
+        deadlines = []
+        now = [100.0]
+
+        class Clock:
+            @staticmethod
+            def monotonic():
+                return now[0]
+
+        def delayed_validate(name, arguments):
+            now[0] = 100.03
+            return real_validate(name, arguments)
+
+        def grounded_qa(*args, **kwargs):
+            deadlines.append(kwargs["deadline"])
+            return {
+                "schema_version": "grounded-answer/v1",
+                "status": "insufficient_evidence",
+                "claims": [],
+                "citations": [],
+                "reason": "No evidence.",
+            }
+
+        monkeypatch.setattr(mcp_server, "time", Clock)
+        monkeypatch.setattr(mcp_server, "_validate_tool_arguments", delayed_validate)
+        monkeypatch.setattr(query_memory, "grounded_qa", grounded_qa)
+        handler_start = now[0]
+
+        self._run("recall", {"query": "question", "grounded": True})
+
+        assert deadlines[0] <= handler_start + mcp_server.MCP_OPERATION_SECONDS
+
+    def test_recall_second_timeout_uses_normal_error_envelope(self, monkeypatch):
+        import mcp_server
+
+        monkeypatch.setattr(
+            mcp_server,
+            "_search_vault",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                TimeoutError("second retrieval timeout")
+            ),
+        )
+
+        envelope = json.loads(self._run("recall", {"query": "needle"}))
+
+        assert envelope["data"] == {"error": "operation_timeout"}
+        assert envelope["partial"] is True
+        assert envelope["coverage"] == 0
+
+    def test_impact_reuses_handler_operation_deadline(self, monkeypatch):
+        import mcp_server
+
+        captured = []
+        monkeypatch.setattr(
+            mcp_server,
+            "_analyze_impact",
+            lambda **kwargs: captured.append(kwargs) or {"changes": []},
+        )
+
+        self._run(
+            "get_architecture",
+            {"directory": ".", "mode": "impact", "comparison": "dirty"},
+        )
+
+        assert captured[0]["deadline"] is not None
+        assert captured[0]["deadline"] <= time.monotonic() + mcp_server.MCP_OPERATION_SECONDS
+
+    @pytest.mark.parametrize("tool_name", VALID_TOOL_CALLS)
+    def test_every_tool_receives_the_single_absolute_handler_deadline(
+        self, monkeypatch, tool_name
+    ):
+        import mcp_server
+
+        expected_data = {
+            "recall": [],
+            "read_page": {"ok": True},
+            "wiki_overview": {"ok": True},
+            "vault_status": {"ok": True},
+            "get_decisions": [],
+            "get_context": {},
+            "check_contradiction": {
+                "assessments": [],
+                "evidence": [],
+                "validity": {"status": "unverified"},
+                "recommendations": ["quarantine"],
+            },
+            "log_decision": {"ok": True},
+            "compile": {"ok": True},
+            "find_dead_code": {"ok": True},
+            "get_architecture": {"ok": True},
+            "doctor": {"overall_status": "ok"},
+        }
+        seen = []
+
+        class Clock:
+            @staticmethod
+            def monotonic():
+                return 100.0
+
+        def helper(*args, deadline, **kwargs):
+            seen.append(deadline)
+            return expected_data[tool_name]
+
+        monkeypatch.setattr(mcp_server, "time", Clock)
+        monkeypatch.setattr(mcp_server, TOOL_HELPERS[tool_name], helper)
+        monkeypatch.setattr(mcp_server, "_meta", lambda **kwargs: {})
+
+        envelope = json.loads(self._run(tool_name, VALID_TOOL_CALLS[tool_name]))
+
+        assert "error" not in envelope["data"]
+        assert seen == [100.0 + mcp_server.MCP_OPERATION_SECONDS]
+
+    def test_get_context_does_not_replace_the_handler_deadline(self, monkeypatch):
+        import corpus_snapshot
+        import mcp_server
+
+        seen = []
+        now = [200.0]
+
+        class Clock:
+            @staticmethod
+            def monotonic():
+                return now[0]
+
+        real_validate = mcp_server._validate_tool_arguments
+
+        def delayed_validate(name, arguments):
+            now[0] = 205.0
+            return real_validate(name, arguments)
+
+        def collect(*args, deadline, **kwargs):
+            seen.append(deadline)
+            raise TimeoutError("deadline reached")
+
+        monkeypatch.setattr(mcp_server, "time", Clock)
+        monkeypatch.setattr(mcp_server, "_validate_tool_arguments", delayed_validate)
+        monkeypatch.setattr(corpus_snapshot, "collect_corpus", collect)
+
+        envelope = json.loads(self._run("get_context", {"slugs": ["page"]}))
+
+        assert seen == [200.0 + mcp_server.MCP_OPERATION_SECONDS]
+        assert envelope["data"] == {"error": "operation_timeout"}
+
+    def test_blocking_tool_does_not_block_event_loop_and_times_out(self, monkeypatch):
+        import threading
+
+        import mcp_server
+
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+
+        def blocked(*, deadline):
+            started.set()
+            try:
+                release.wait(1.0)
+            finally:
+                finished.set()
+            return {"ok": True}
+
+        async def exercise():
+            task = asyncio.create_task(mcp_server._handle_tool_call("vault_status", {}))
+            await asyncio.sleep(0.01)
+            loop_progressed = started.is_set() and not finished.is_set()
+            return loop_progressed, await task
+
+        monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 0.2)
+        monkeypatch.setattr(mcp_server, "_MCP_WORKERS", set())
+        monkeypatch.setattr(mcp_server, "_MCP_WORKERS_LOCK", threading.Lock())
+        monkeypatch.setattr(mcp_server, "_vault_status", blocked)
+        try:
+            loop_progressed, text = asyncio.run(exercise())
+        finally:
+            release.set()
+            finished.wait(0.5)
+
+        envelope = json.loads(text)
+        assert loop_progressed is True
+        assert envelope["data"] == {"error": "operation_timeout"}
+        assert envelope["partial"] is True
+        assert envelope["coverage"] == 0
+
+    def test_timed_out_tool_workers_never_exceed_bounded_slots(self, monkeypatch):
+        import threading
+
+        import mcp_server
+
+        release = threading.Event()
+        all_done = threading.Event()
+        lock = threading.Lock()
+        active = 0
+        peak = 0
+
+        def blocked(*, deadline):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            try:
+                release.wait(1.0)
+            finally:
+                with lock:
+                    active -= 1
+                    if active == 0:
+                        all_done.set()
+            return {"ok": True}
+
+        async def exercise():
+            return await asyncio.gather(
+                *(mcp_server._handle_tool_call("vault_status", {}) for _ in range(12))
+            )
+
+        monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 0.2)
+        monkeypatch.setattr(mcp_server, "_MCP_WORKERS", set())
+        monkeypatch.setattr(mcp_server, "_MCP_WORKERS_LOCK", threading.Lock())
+        monkeypatch.setattr(mcp_server, "_vault_status", blocked)
+        try:
+            results = asyncio.run(exercise())
+        finally:
+            release.set()
+            all_done.wait(0.5)
+
+        assert peak <= mcp_server.MCP_WORKER_SLOTS
+        assert all(json.loads(item)["data"] == {"error": "operation_timeout"} for item in results)
+
+    def test_timed_out_blocked_worker_does_not_keep_process_alive(self):
+        scripts = Path(__file__).resolve().parent.parent / "scripts"
+        code = (
+            "import asyncio,json,sys,threading; "
+            f"sys.path.insert(0, {str(scripts)!r}); "
+            "import mcp_server; "
+            "mcp_server.MCP_OPERATION_SECONDS=0.05; "
+            "mcp_server._vault_status=lambda *,deadline: threading.Event().wait(); "
+            "result=asyncio.run(mcp_server._handle_tool_call('vault_status',{})); "
+            "assert json.loads(result)['data']=={'error':'operation_timeout'}; "
+            "print('TIMEOUT_RETURNED', flush=True)"
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-c", code],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert process.stdout is not None
+        assert process.stdout.readline().strip() == "TIMEOUT_RETURNED"
+        shutdown_started = time.perf_counter()
+        stdout, stderr = process.communicate(timeout=1.0)
+
+        assert process.returncode == 0, stderr
+        assert stdout == ""
+        assert time.perf_counter() - shutdown_started < 0.5
+
+    def test_thread_start_failure_releases_reserved_worker_slot(self, monkeypatch):
+        import threading
+
+        import mcp_server
+
+        class BrokenThread:
+            def __init__(self, **kwargs):
+                del kwargs
+
+            def start(self):
+                raise RuntimeError("cannot start thread")
+
+        workers = set()
+        monkeypatch.setattr(mcp_server, "_MCP_WORKERS", workers)
+        monkeypatch.setattr(mcp_server, "_MCP_WORKERS_LOCK", threading.Lock())
+        monkeypatch.setattr(mcp_server.threading, "Thread", BrokenThread)
+
+        for _ in range(mcp_server.MCP_WORKER_SLOTS + 1):
+            with pytest.raises(RuntimeError, match="cannot start"):
+                asyncio.run(
+                    mcp_server._run_bounded(
+                        lambda: None, deadline=time.monotonic() + 1
+                    )
+                )
+
+        assert workers == set()
+
+    def test_final_envelope_sanitizes_unknown_name_and_helper_diagnostics(self):
+        import mcp_server
+
+        sensitive = r"api_key=sk-abcdefghijklmnopqrstuvwxyz C:\private\vault\secret.md"
+        unknown = json.loads(
+            mcp_server._execute_tool_call(sensitive, {}, time.monotonic() + 1)
+        )
+        helper = mcp_server._build_operation_envelope(
+            {"nested": {"error": f"failed at {sensitive}"}},
+            {"warnings": [f"warning from {sensitive}"]},
+        )
+
+        for envelope in (unknown, helper):
+            encoded = json.dumps(envelope)
+            assert sensitive not in encoded
+            assert "sk-abcdefghijklmnopqrstuvwxyz" not in encoded
+            assert r"C:\private\vault" not in encoded
+        assert "Unknown tool:" in unknown["data"]["error"]
+        assert "failed at" in helper["data"]["nested"]["error"]
+
+    @pytest.mark.parametrize("action", ["queue-cancel", "queue-redrive"])
+    def test_queue_mutations_receive_exact_doctor_deadline(self, monkeypatch, action):
+        import mcp_server
+        import memory_queue
+
+        received = []
+
+        class Queue:
+            def __init__(self, root):
+                del root
+
+            def cancel(self, target_id, *, deadline, cancelled):
+                received.append((target_id, deadline, cancelled()))
+                return True
+
+            def redrive(self, target_id, *, deadline, cancelled):
+                received.append((target_id, deadline, cancelled()))
+                return "replacement"
+
+        monkeypatch.setattr(memory_queue, "MemoryQueue", Queue)
+        deadline = time.monotonic() + 5
+
+        result = mcp_server._doctor(
+            action=action, target_id="task", repair=True, deadline=deadline
+        )
+
+        assert result["overall_status"] == "ok"
+        assert received == [("task", deadline, False)]
+
+    def test_transaction_undo_and_apply_receive_exact_doctor_deadline(self, monkeypatch):
+        import markdown_transaction
+        import mcp_server
+
+        received = []
+
+        class Record:
+            id = "undo"
+            state = "prepared"
+            error_code = None
+
+        class AppliedRecord:
+            id = "undo"
+            state = "committed"
+            error_code = None
+
+        class Coordinator:
+            def __init__(self, *args):
+                del args
+
+            def undo(self, target_id, *, deadline, cancelled):
+                received.append(("undo", target_id, deadline, cancelled()))
+                return Record()
+
+            def apply(self, transaction_id, *, deadline, cancelled):
+                received.append(("apply", transaction_id, deadline, cancelled()))
+                return AppliedRecord()
+
+        monkeypatch.setattr(markdown_transaction, "MarkdownCoordinator", Coordinator)
+        deadline = time.monotonic() + 5
+
+        result = mcp_server._doctor(
+            action="transaction-undo",
+            target_id="original",
+            repair=True,
+            deadline=deadline,
+        )
+
+        assert result["overall_status"] == "ok"
+        assert received == [
+            ("undo", "original", deadline, False),
+            ("apply", "undo", deadline, False),
+        ]
+
+    @pytest.mark.parametrize("action", ["queue-cancel", "queue-redrive"])
+    def test_timed_out_queue_mutation_rolls_back_delayed_sql_commit(
+        self, tmp_path, monkeypatch, action
+    ):
+        import threading
+        from contextlib import contextmanager
+
+        import mcp_server
+        import memory_queue
+        import memory_state
+
+        state_root = tmp_path / "state"
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        queue = memory_queue.MemoryQueue(state_root)
+        task_id = queue.enqueue("query", 1, {})
+        if action == "queue-redrive":
+            lease = queue.claim("worker")
+            assert lease is not None
+            queue.fail(lease, memory_queue.QueueFailure("invalid_input", permanent=True))
+
+        commit_reached = threading.Event()
+        release_commit = threading.Event()
+
+        @contextmanager
+        def delayed_begin(connection, *, before_commit=None):
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                yield connection
+                commit_reached.set()
+                assert release_commit.wait(1.0)
+                if before_commit is not None:
+                    before_commit()
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+
+        monkeypatch.setattr(memory_queue, "begin_immediate", delayed_begin)
+        monkeypatch.setattr(memory_queue, "MemoryQueue", lambda _root: queue)
+        monkeypatch.setattr(memory_state, "ROOT", vault)
+        monkeypatch.setattr(memory_state, "STATE_ROOT", state_root)
+        monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 0.05)
+        monkeypatch.setattr(mcp_server, "_MCP_WORKERS", set())
+        monkeypatch.setattr(mcp_server, "_MCP_WORKERS_LOCK", threading.Lock())
+
+        try:
+            text = asyncio.run(
+                mcp_server._handle_tool_call(
+                    "doctor",
+                    {"action": action, "target_id": task_id, "repair": True},
+                )
+            )
+            assert commit_reached.is_set()
+            assert json.loads(text)["data"] == {"error": "operation_timeout"}
+            assert queue.get(task_id).state == (
+                "ready" if action == "queue-cancel" else "dead"
+            )
+        finally:
+            release_commit.set()
+
+        deadline = time.monotonic() + 2
+        while mcp_server._MCP_WORKERS and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not mcp_server._MCP_WORKERS
+        assert queue.get(task_id).state == (
+            "ready" if action == "queue-cancel" else "dead"
+        )
+        assert [task.redrive_of for task in queue.list_tasks() if task.redrive_of] == []
+
+    def test_timed_out_log_decision_never_appends_after_response(
+        self, tmp_path, monkeypatch
+    ):
+        import threading
+        from contextlib import contextmanager
+
+        import markdown_transaction
+        import mcp_server
+        import memory_state
+
+        vault = tmp_path / "vault"
+        state_root = tmp_path / "state"
+        daily = vault / "knowledge/daily" / f"{datetime.now():%Y-%m-%d}.md"
+        daily.parent.mkdir(parents=True)
+        daily.write_bytes(b"# existing\n")
+        commit_reached = threading.Event()
+        release_commit = threading.Event()
+
+        @contextmanager
+        def delayed_begin(connection, *, before_commit=None):
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                yield connection
+                commit_reached.set()
+                assert release_commit.wait(1.0)
+                if before_commit is not None:
+                    before_commit()
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+
+        monkeypatch.setenv("LLM_WIKI_ROOT", str(vault))
+        monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state_root))
+        monkeypatch.setattr(memory_state, "ROOT", vault)
+        monkeypatch.setattr(markdown_transaction, "begin_immediate", delayed_begin)
+        monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 0.5)
+        monkeypatch.setattr(mcp_server, "_MCP_WORKERS", set())
+        monkeypatch.setattr(mcp_server, "_MCP_WORKERS_LOCK", threading.Lock())
+
+        async def exercise():
+            task = asyncio.create_task(
+                mcp_server._handle_tool_call(
+                    "log_decision", {"summary": "must not append late"}
+                )
+            )
+            while not commit_reached.is_set() and not task.done():
+                await asyncio.sleep(0.01)
+            return commit_reached.is_set(), await task
+
+        try:
+            reached_commit, text = asyncio.run(exercise())
+            assert reached_commit is True
+            assert json.loads(text)["data"] == {"error": "operation_timeout"}
+            assert daily.read_bytes() == b"# existing\n"
+        finally:
+            release_commit.set()
+
+        deadline = time.monotonic() + 2
+        while mcp_server._MCP_WORKERS and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not mcp_server._MCP_WORKERS
+        assert daily.read_bytes() == b"# existing\n"
+
+    def test_late_worker_exception_is_observable_without_secret_text(
+        self, monkeypatch, capsys
+    ):
+        import threading
+
+        import mcp_server
+
+        finished = threading.Event()
+        sensitive = r"api_key=sk-abcdefghijklmnopqrstuvwxyz C:\private\vault\secret.md"
+        monkeypatch.setattr(mcp_server, "_MCP_WORKERS", set())
+        monkeypatch.setattr(mcp_server, "_MCP_WORKERS_LOCK", threading.Lock())
+
+        def fail_late():
+            time.sleep(0.3)
+            try:
+                raise RuntimeError(sensitive)
+            finally:
+                finished.set()
+
+        with pytest.raises(TimeoutError):
+            asyncio.run(
+                mcp_server._run_bounded(
+                    fail_late, deadline=time.monotonic() + 0.1
+                )
+            )
+        assert finished.wait(2.0)
+        deadline = time.monotonic() + 1.0
+        while mcp_server._MCP_WORKERS and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        stderr = capsys.readouterr().err
+        assert "RuntimeError" in stderr
+        assert sensitive not in stderr
+        assert "sk-abcdefghijklmnopqrstuvwxyz" not in stderr
+
+    def test_doctor_receives_exact_handler_deadline_after_dispatch_delay(
+        self, monkeypatch
+    ):
+        import doctor
+        import mcp_server
+
+        now = [100.0]
+        captured = []
+        real_validate = mcp_server._validate_tool_arguments
+
+        class Clock:
+            @staticmethod
+            def monotonic():
+                return now[0]
+
+        def delayed_validate(name, arguments):
+            now[0] = 104.0
+            return real_validate(name, arguments)
+
+        def run_doctor(**kwargs):
+            captured.append(kwargs)
+            return {
+                "overall_status": "ok",
+                "checks": [],
+                "counts": {"ok": 0, "degraded": 0, "error": 0},
+                "run_deletion": {"blockers": []},
+            }
+
+        monkeypatch.setattr(mcp_server, "time", Clock)
+        monkeypatch.setattr(mcp_server, "_validate_tool_arguments", delayed_validate)
+        monkeypatch.setattr(doctor, "run_doctor", run_doctor)
+
+        envelope = json.loads(self._run("doctor", {"action": "status"}))
+
+        assert envelope["data"]["overall_status"] == "ok"
+        assert captured[0]["deadline"] == 100.0 + mcp_server.MCP_OPERATION_SECONDS
+        assert "time_budget_seconds" not in captured[0]
 
     def test_recall_exposes_validated_planner_trace_and_component_generation(self, monkeypatch):
         import mcp_server
@@ -1135,6 +2152,51 @@ class TestHandleToolCall:
             "freshness": "fresh",
         }
 
+    def test_external_repository_never_receives_active_repository_graph(
+        self, tmp_path, monkeypatch
+    ):
+        from generation_catalog import GenerationCatalog
+        from repository_scope import resolve_repository_scope
+
+        from tests.test_evidence_graph_recovery import _publish, _rich_graph_records
+
+        repository_a = tmp_path / "owner-a" / "project"
+        repository_b = tmp_path / "owner-b" / "project"
+        repository_a.mkdir(parents=True)
+        repository_b.mkdir(parents=True)
+        (repository_b / "b.py").write_text(
+            "def b_only_symbol():\n    pass\n", encoding="utf-8"
+        )
+        records = _rich_graph_records()
+        for node in records["nodes"]:
+            node["metadata"]["name"] = "a_only_symbol"
+        state = tmp_path / "shared-state"
+        catalog = GenerationCatalog(state)
+        _publish(
+            catalog,
+            "repo-a",
+            graph_records=records,
+            repository_scope=resolve_repository_scope(repository_a).as_dict(),
+        )
+        catalog.register("repo-a")
+        assert catalog.activate("repo-a", expected_active=None)
+        monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(state))
+
+        dead = json.loads(
+            self._run("find_dead_code", {"directory": str(repository_b)})
+        )
+        architecture = json.loads(
+            self._run("get_architecture", {"directory": str(repository_b)})
+        )
+
+        for envelope in (dead, architecture):
+            encoded = json.dumps(envelope)
+            assert envelope["data"]["source_generation"] is None
+            assert envelope["data"]["fallback"] is True
+            assert "a_only_symbol" not in encoded
+            assert str(repository_a) not in encoded
+            assert str(repository_b / "app.py") not in encoded
+
     def test_wiki_overview_returns_json(self):
         data = self._data("wiki_overview", {})
         assert "page_count" in data
@@ -1152,9 +2214,12 @@ class TestHandleToolCall:
         assert envelope["confidence"] < 1
         assert envelope["warnings"]
 
-    def test_compile_returns_json(self):
+    def test_compile_returns_json(self, monkeypatch):
+        import compile_memory
+
+        monkeypatch.setattr(compile_memory, "run_pending_compile", lambda **kwargs: 0)
         data = self._data("compile", {})
-        assert "spawned" in data
+        assert data == {"status": "completed", "returncode": 0}
 
     @pytest.mark.parametrize("tool_name", VALID_TOOL_CALLS)
     def test_every_helper_exception_returns_degraded_envelope(self, monkeypatch, tool_name):
@@ -1167,7 +2232,9 @@ class TestHandleToolCall:
 
         envelope = json.loads(self._run(tool_name, VALID_TOOL_CALLS[tool_name]))
 
-        assert envelope["data"] == {"error": f"{tool_name} failed"}
+        assert "error" in envelope["data"]
+        assert f"{tool_name} failed" not in json.dumps(envelope)
+        assert len(envelope["data"]["error"]) <= 256
         assert envelope["partial"] is True
         assert envelope["coverage"] == 0
         assert envelope["confidence"] < 1
@@ -1638,10 +2705,12 @@ class TestHandleToolCall:
                 def __init__(self, root):
                     pass
 
-                def cancel(self, target_id):
+                def cancel(self, target_id, **kwargs):
+                    del kwargs
                     return False
 
-                def redrive(self, target_id):
+                def redrive(self, target_id, **kwargs):
+                    del kwargs
                     if behavior == "missing":
                         raise KeyError(target_id)
                     raise memory_queue.QueueOperationError("redrive_requires_dead")
@@ -1695,6 +2764,24 @@ class TestHandleToolCall:
 
 
 class TestResources:
+    def test_resource_inventory_remains_exactly_two(self, monkeypatch):
+        import mcp_server
+
+        class Model:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+
+        monkeypatch.setattr(mcp_server, "MCP_RESOURCES_AVAILABLE", True)
+        monkeypatch.setattr(mcp_server, "Resource", Model)
+
+        resources = mcp_server._build_resource_definitions()
+
+        assert len(resources) == 2
+        assert {resource.uri for resource in resources} == {
+            mcp_server.HEALTH_RESOURCE_URI,
+            mcp_server.CONTEXT_RESOURCE_URI,
+        }
+
     def test_resource_definitions_degrade_when_sdk_support_is_unavailable(self, monkeypatch):
         import mcp_server
 
@@ -1820,6 +2907,21 @@ class TestResources:
         assert set(envelope) == ENVELOPE_FIELDS
         assert "error" in envelope["data"]
 
+    def test_resource_exception_text_is_safe_and_bounded(self, monkeypatch):
+        import mcp_server
+
+        sensitive = r"api_key=sk-abcdefghijklmnopqrstuvwxyz C:\private\vault\prompt.txt"
+        monkeypatch.setattr(
+            mcp_server,
+            "_vault_status",
+            lambda: (_ for _ in ()).throw(RuntimeError(sensitive * 100)),
+        )
+
+        envelope = json.loads(mcp_server._handle_resource_read("llm-wiki://health"))
+
+        assert sensitive not in json.dumps(envelope)
+        assert len(envelope["data"]["error"]) <= 256
+
     def test_resource_registration_degrades_without_sdk_support(self, monkeypatch):
         import mcp_server
 
@@ -1858,8 +2960,178 @@ class TestResources:
         }
         assert json.loads(contents[0].text)["data"]["last_compile_status"]
 
+    @pytest.mark.parametrize(
+        "uri", ["llm-wiki://health", "llm-wiki://context"]
+    )
+    def test_registered_resources_share_one_deadline_and_run_off_loop(
+        self, monkeypatch, uri
+    ):
+        import threading
+
+        import mcp_server
+
+        seen = []
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+
+        class Model:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+
+        class FakeServer:
+            def __init__(self):
+                self.callbacks = {}
+
+            def list_resources(self):
+                return lambda function: self.callbacks.setdefault("list", function) or function
+
+            def read_resource(self):
+                return lambda function: self.callbacks.setdefault("read", function) or function
+
+        def blocked(*, deadline):
+            seen.append(deadline)
+            started.set()
+            try:
+                release.wait(1.0)
+            finally:
+                finished.set()
+            return {"last_compile": "never", "last_compile_status": "unknown"}
+
+        async def exercise(callback):
+            task = asyncio.create_task(callback(uri))
+            await asyncio.sleep(0.01)
+            loop_progressed = started.is_set() and not finished.is_set()
+            return loop_progressed, await task
+
+        server = FakeServer()
+        monkeypatch.setattr(mcp_server, "MCP_RESOURCES_AVAILABLE", True)
+        monkeypatch.setattr(mcp_server, "Resource", Model)
+        monkeypatch.setattr(mcp_server, "TextResourceContents", Model)
+        monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 0.2)
+        monkeypatch.setattr(mcp_server, "_MCP_WORKERS", set())
+        monkeypatch.setattr(mcp_server, "_MCP_WORKERS_LOCK", threading.Lock())
+        monkeypatch.setattr(mcp_server, "_vault_status", blocked)
+        monkeypatch.setattr(mcp_server, "_wiki_overview", lambda **kwargs: {"ok": True})
+        assert mcp_server._register_resources(server) is True
+        try:
+            loop_progressed, contents = asyncio.run(exercise(server.callbacks["read"]))
+        finally:
+            release.set()
+            finished.wait(0.5)
+
+        envelope = json.loads(contents[0].text)
+        assert loop_progressed is True
+        assert len(seen) == 1
+        assert envelope["data"] == {"error": "operation_timeout"}
+
 
 class TestCallbackCompatibility:
+    def test_registered_callback_formats_large_result_off_event_loop(self, monkeypatch):
+        import threading
+
+        import mcp_server
+
+        class Model:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+
+        class FakeServer:
+            def __init__(self):
+                self.callback = None
+
+            def list_tools(self):
+                return lambda callback: callback
+
+            def call_tool(self, **kwargs):
+                return lambda callback: setattr(self, "callback", callback) or callback
+
+        server = FakeServer()
+        monkeypatch.setattr(mcp_server, "TextContent", Model)
+        monkeypatch.setattr(mcp_server, "MCP_CALL_TOOL_RESULT_AVAILABLE", False)
+        monkeypatch.setattr(mcp_server, "MCP_STRUCTURED_OUTPUT_AVAILABLE", False)
+        mcp_server._register_tools(server, [])
+        payload = mcp_server._timeout_envelope_text().replace(
+            '"operation_timeout"', json.dumps("x" * (mcp_server.MAX_MCP_PAGE_BYTES - 1024)), 1
+        )
+        real_format = mcp_server._format_tool_result
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+
+        def slow_format(text):
+            started.set()
+            try:
+                release.wait(1.0)
+                return real_format(text)
+            finally:
+                finished.set()
+
+        monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 1.0)
+        monkeypatch.setattr(mcp_server, "_execute_tool_call", lambda *args: payload)
+        monkeypatch.setattr(mcp_server, "_format_tool_result", slow_format)
+
+        async def exercise():
+            task = asyncio.create_task(server.callback("read_page", {"slug": "page"}))
+            await asyncio.sleep(0.02)
+            heartbeat = started.is_set() and not finished.is_set()
+            release.set()
+            return heartbeat, await task
+
+        heartbeat, result = asyncio.run(exercise())
+
+        assert heartbeat is True
+        assert len(result[0].text) >= mcp_server.MAX_MCP_PAGE_BYTES - 2048
+
+    def test_registered_callback_formatter_deadline_returns_cached_timeout(
+        self, monkeypatch
+    ):
+        import threading
+
+        import mcp_server
+
+        class Model:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+
+        class FakeServer:
+            def __init__(self):
+                self.callback = None
+
+            def list_tools(self):
+                return lambda callback: callback
+
+            def call_tool(self, **kwargs):
+                return lambda callback: setattr(self, "callback", callback) or callback
+
+        server = FakeServer()
+        monkeypatch.setattr(mcp_server, "TextContent", Model)
+        monkeypatch.setattr(mcp_server, "MCP_CALL_TOOL_RESULT_AVAILABLE", False)
+        monkeypatch.setattr(mcp_server, "MCP_STRUCTURED_OUTPUT_AVAILABLE", False)
+        mcp_server._register_tools(server, [])
+        release = threading.Event()
+        real_format = mcp_server._format_tool_result
+
+        def blocked_format(text):
+            release.wait(0.5)
+            return real_format(text)
+
+        monkeypatch.setattr(mcp_server, "MCP_OPERATION_SECONDS", 0.05)
+        monkeypatch.setattr(
+            mcp_server,
+            "_execute_tool_call",
+            lambda *args: mcp_server._timeout_envelope_text(),
+        )
+        monkeypatch.setattr(mcp_server, "_format_tool_result", blocked_format)
+        started = time.perf_counter()
+        try:
+            result = asyncio.run(server.callback("read_page", {"slug": "page"}))
+        finally:
+            release.set()
+
+        assert time.perf_counter() - started < 0.2
+        assert json.loads(result[0].text)["data"] == {"error": "operation_timeout"}
+
     @pytest.mark.parametrize(
         ("arguments", "report", "expected_error"),
         [

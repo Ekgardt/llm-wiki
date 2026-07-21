@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 
 def test_failed_nightly_releases_claim_and_records_failure(tmp_path, monkeypatch):
     import memory_state
@@ -83,3 +85,22 @@ def test_nightly_source_compacts_telemetry_and_never_flushes_frontmatter():
     assert "from retrieval_telemetry import compact" in source
     assert "telemetry: compacted" in source
     assert "from access_tracking import flush_all" not in source
+
+
+@pytest.mark.parametrize("status", ["deferred", "error"])
+def test_generation_refresh_never_treats_deferred_or_error_as_success(monkeypatch, status):
+    import scheduled_nightly
+
+    monkeypatch.setattr(
+        scheduled_nightly,
+        "run_generation_maintenance",
+        lambda **kwargs: {
+            "status": status,
+            "generation_id": "candidate",
+            "partial": status == "deferred",
+        },
+    )
+    messages = []
+
+    assert scheduled_nightly._refresh_generation(messages.append) == 1
+    assert any(status in message for message in messages)

@@ -52,18 +52,8 @@ def test_corrupt_generation_still_goes_through_retrieve(tmp_path, monkeypatch):
     class Catalog:
         generations_path = tmp_path / "generations"
 
-        def get_active(self):
-            return {
-                "generation_id": "missing",
-                "schema_version": "corpus-generation/v1",
-                "collector_version": "collector/v1",
-                "extractor_version": "extractor/v1",
-                "tokenizer_version": search_memory.GENERATION_TOKENIZER_VERSION,
-                "tokenizer_config_sha256": search_memory.GENERATION_TOKENIZER_CONFIG_SHA256,
-                "source_manifest_sha256": "0" * 64,
-                "artifacts": [],
-                "vector_state": "absent",
-            }
+        def get_active_for_repository(self, _repository_scope, **_kwargs):
+            return None
 
     seen = {"retrieve": 0}
     real = retrieval.retrieve
@@ -100,6 +90,7 @@ def test_corrupt_generation_still_goes_through_retrieve(tmp_path, monkeypatch):
 
 def test_seal_change_refuses_dense_and_falls_back_base(tmp_path, monkeypatch):
     import search_memory
+    from repository_scope import resolve_repository_scope
 
     vault = tmp_path / "vault"
     notes = vault / "knowledge" / "notes"
@@ -129,9 +120,10 @@ def test_seal_change_refuses_dense_and_falls_back_base(tmp_path, monkeypatch):
     class Catalog:
         generations_path = tmp_path / "gens"
 
-        def get_active(self):
+        def get_active_for_repository(self, _repository_scope, **_kwargs):
             return {
                 "generation_id": "gen-1",
+                "repository_scope": resolve_repository_scope(vault).as_dict(),
                 "vector_state": "complete",
                 "embedding_model_id": "m",
                 "embedding_model_revision": "r",
@@ -146,6 +138,7 @@ def test_seal_change_refuses_dense_and_falls_back_base(tmp_path, monkeypatch):
 
     # Open generation fails connection → generation_unavailable path still retrieve.
     monkeypatch.setattr(search_memory, "_generation_connection", lambda *_a, **_k: None)
+    monkeypatch.setattr(search_memory, "_legacy_dense_hits", lambda *_a, **_k: None)
 
     results = search_memory.search(
         "seal needle",
@@ -166,6 +159,43 @@ def test_seal_change_refuses_dense_and_falls_back_base(tmp_path, monkeypatch):
         "generation_vectors_unavailable",
         "dense_unavailable",
     }
+
+
+def test_unbound_stale_generation_does_not_block_legacy_dense(
+    tmp_path, monkeypatch
+):
+    import search_memory
+
+    class Catalog:
+        generations_path = tmp_path / "generations"
+
+        def get_active_for_repository(self, _repository_scope, **_kwargs):
+            return None
+
+    monkeypatch.setattr(
+        search_memory,
+        "_legacy_lexical_hits",
+        lambda *_args, **_kwargs: [_hit("local", "local.md", 1.0)],
+    )
+    monkeypatch.setattr(
+        search_memory,
+        "_legacy_dense_hits",
+        lambda *_args, **_kwargs: [_hit("dense", "dense.md", 0.9)],
+    )
+
+    results = search_memory.search(
+        "stale needle",
+        catalog=Catalog(),
+        semantic=True,
+        graph=False,
+        rerank=False,
+        emit_telemetry=False,
+        profile="HYBRID",
+    )
+
+    assert {result["candidate_id"] for result in results} == {"local", "dense"}
+    assert results[0]["effective_mode"] == "HYBRID"
+    assert results[0]["signals_used"] == ["lexical", "dense"]
 
 
 def test_trace_includes_reranker_diagnostics(monkeypatch):
