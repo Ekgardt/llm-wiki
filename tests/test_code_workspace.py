@@ -88,6 +88,61 @@ def test_repository_contracts_are_frozen_slotted_normalized_and_deterministic(
         first.code_capture.membership_sha256 = "0" * 64
 
 
+def test_collected_policy_normalizes_every_text_value_to_nfc(tmp_path: Path) -> None:
+    from code_workspace import code_capture_as_dict
+
+    root = tmp_path / "repository"
+    composed = "caf\u00e9"
+    decomposed = "cafe\u0301"
+    _write(root / composed / f"app.{composed}", b"answer = 42\n")
+
+    snapshot = _capture(
+        root,
+        roots=(decomposed,),
+        include_globs=(f"{decomposed}/*.{decomposed}",),
+        ignore_globs=(f"{decomposed}/ignored.{decomposed}",),
+        suffixes=(f".{decomposed}",),
+    )
+    policy = code_capture_as_dict(snapshot.code_capture)["policy"]
+
+    assert policy == {
+        "roots": [composed],
+        "include_globs": [f"{composed}/*.{composed}"],
+        "ignore_globs": [f"{composed}/ignored.{composed}"],
+        "suffixes": [f".{composed}"],
+    }
+    assert [source.record.relative_path for source in snapshot.sources] == [
+        f"{composed}/app.{composed}"
+    ]
+
+
+@pytest.mark.parametrize(
+    "field", ("roots", "include_globs", "ignore_globs", "suffixes")
+)
+def test_policy_rejects_distinct_values_colliding_after_nfc_normalization(
+    tmp_path: Path, field: str
+) -> None:
+    root = tmp_path / "repository"
+    _write(root / "src/app.py", b"answer = 42\n")
+    composed = "caf\u00e9"
+    decomposed = "cafe\u0301"
+    options = {
+        "roots": ("src",),
+        "include_globs": ("**/*.py",),
+        "ignore_globs": (),
+        "suffixes": (".py",),
+    }
+    if field == "roots":
+        options[field] = (composed, decomposed)
+    elif field == "suffixes":
+        options[field] = (f".{composed}", f".{decomposed}")
+    else:
+        options[field] = (f"{composed}/**", f"{decomposed}/**")
+
+    with pytest.raises(ValueError, match="normalization.*collision"):
+        _capture(root, **options)
+
+
 def test_code_capture_files_and_membership_have_exact_canonical_shape(tmp_path: Path) -> None:
     from code_workspace import code_capture_as_dict
 
@@ -252,6 +307,47 @@ def test_repository_policy_accepts_bounded_glob_with_more_than_256_segments() ->
 
     assert not list(jsonschema.Draft202012Validator(schema).iter_errors(policy))
     assert RepositoryCodePolicy(("src",), (pattern,), (), (".py",))
+
+
+@pytest.mark.parametrize(
+    ("suffix", "accepted"),
+    (
+        ("", False),
+        (".", False),
+        ("py", False),
+        (".py", True),
+        (".PY", True),
+        (".caf\u00e9", True),
+        (".a/b", False),
+        (r".a\b", False),
+        ("." + "a" * 127, True),
+        ("." + "a" * 128, False),
+    ),
+)
+def test_repository_suffix_runtime_and_manifest_schema_agree(
+    suffix: str, accepted: bool
+) -> None:
+    import code_workspace
+    import jsonschema
+
+    schema = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "scripts/schemas/evidence-graph-manifest-v1.json"
+        ).read_text(encoding="utf-8")
+    )["properties"]["code_capture"]["properties"]["policy"]["properties"][
+        "suffixes"
+    ]["items"]
+    schema_accepted = not list(jsonschema.Draft202012Validator(schema).iter_errors(suffix))
+    try:
+        code_workspace._policy(("src",), ("**",), (), (suffix,))
+    except ValueError:
+        runtime_accepted = False
+    else:
+        runtime_accepted = True
+
+    assert schema_accepted is accepted
+    assert runtime_accepted is schema_accepted
 
 
 @pytest.mark.parametrize(

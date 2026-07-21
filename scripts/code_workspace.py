@@ -92,15 +92,14 @@ def _normalized_root(value: object) -> str:
     raw = os.fspath(value)
     if not isinstance(raw, str):
         raise TypeError("repository code root must be text")
-    windows = PureWindowsPath(raw)
-    pure = PurePosixPath(raw)
     normalized = unicodedata.normalize("NFC", raw)
+    windows = PureWindowsPath(normalized)
+    pure = PurePosixPath(normalized)
     if (
         not raw
-        or raw == "."
         or len(raw) > _MAX_POLICY_TEXT
-        or normalized != raw
-        or "\\" in raw
+        or normalized == "."
+        or "\\" in normalized
         or pure.is_absolute()
         or windows.drive
         or windows.root
@@ -120,6 +119,16 @@ def _normalized_values(
     materialized = tuple(values)
     if len(materialized) > maximum:
         raise ValueError(f"{label} has too many entries")
+    normalized_inputs: dict[str, str] = {}
+    for value in materialized:
+        raw = os.fspath(value) if isinstance(value, os.PathLike) else value
+        if not isinstance(raw, str):
+            continue
+        normalized_input = unicodedata.normalize("NFC", raw)
+        previous = normalized_inputs.get(normalized_input)
+        if previous is not None and previous != raw:
+            raise ValueError(f"{label} contains a Unicode normalization collision")
+        normalized_inputs[normalized_input] = raw
     normalized = tuple(sorted(set(transform(value) for value in materialized)))
     return normalized
 
@@ -147,27 +156,33 @@ def _policy(
     def pattern(value: object) -> str:
         if not isinstance(value, str) or not value or len(value) > _MAX_POLICY_TEXT:
             raise ValueError("repository code glob must be a bounded non-empty string")
-        windows = PureWindowsPath(value)
-        pure = PurePosixPath(value)
+        normalized = unicodedata.normalize("NFC", value)
+        windows = PureWindowsPath(normalized)
+        pure = PurePosixPath(normalized)
         if (
-            "\\" in value
+            "\\" in normalized
             or pure.is_absolute()
             or windows.drive
             or windows.root
-            or value.startswith("./")
-            or "//" in value
-            or any(part == "." for part in value.split("/"))
+            or normalized.startswith("./")
+            or "//" in normalized
+            or any(part == "." for part in normalized.split("/"))
         ):
             raise ValueError("repository code glob must be normalized relative POSIX text")
         if any(part == ".." for part in pure.parts):
             raise ValueError("repository code glob must not traverse parents")
-        return value
+        return normalized
 
     def suffix(value: object) -> str:
         if not isinstance(value, str) or not value or len(value) > 128:
             raise ValueError("repository code suffix must be bounded non-empty text")
         normalized = unicodedata.normalize("NFC", value).casefold()
-        if not normalized.startswith(".") or "/" in normalized or "\\" in normalized:
+        if (
+            len(normalized) < 2
+            or not normalized.startswith(".")
+            or "/" in normalized
+            or "\\" in normalized
+        ):
             raise ValueError("repository code suffix must begin with a dot")
         return normalized
 
@@ -819,7 +834,8 @@ def _collect_repository_code_from_root(
                 continue
             if ignored_directory or policy_ignored:
                 continue
-            if selected_policy.suffixes and path.suffix.casefold() not in selected_policy.suffixes:
+            normalized_suffix = unicodedata.normalize("NFC", path.suffix).casefold()
+            if selected_policy.suffixes and normalized_suffix not in selected_policy.suffixes:
                 continue
             if selected_policy.include_globs and not _matches(relative, selected_policy.include_globs):
                 continue

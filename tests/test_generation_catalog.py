@@ -509,6 +509,7 @@ def test_catalog_rejects_v3_database_with_v2_manifest(tmp_path: Path) -> None:
         "source-id",
         "source-hash",
         "stat-mtime",
+        "policy-nfc",
     ],
 )
 def test_catalog_rejects_damaged_or_noncanonical_v3_code_capture(
@@ -536,9 +537,21 @@ def test_catalog_rejects_damaged_or_noncanonical_v3_code_capture(
         capture["files"][0]["source_id"] = "source:wrong.py"
     elif damage == "source-hash":
         capture["files"][0]["sha256"] = "f" * 64
+    elif damage == "policy-nfc":
+        capture["policy"]["include_globs"] = ["cafe\u0301/**"]
     else:
         capture["files"][0]["stat"]["mtime_ns"] += 1
-    manifest_path.write_bytes(canonical_json_bytes(manifest))
+    if damage == "policy-nfc":
+        manifest_path.write_bytes(
+            json.dumps(
+                manifest,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+    else:
+        manifest_path.write_bytes(canonical_json_bytes(manifest))
 
     with pytest.raises(
         ValueError,

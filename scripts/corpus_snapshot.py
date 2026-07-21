@@ -184,6 +184,18 @@ class RepositoryCodePolicy:
             "ignore_globs": (0, 256),
             "suffixes": (1, 128),
         }
+        for name in bounds:
+            values = getattr(self, name)
+            if not isinstance(values, tuple) or any(
+                not isinstance(value, str) for value in values
+            ):
+                continue
+            nfc_values = tuple(unicodedata.normalize("NFC", value) for value in values)
+            if len(set(nfc_values)) < len(set(values)):
+                raise ValueError(f"{name} contains a Unicode normalization collision")
+            if name == "suffixes":
+                nfc_values = tuple(value.casefold() for value in nfc_values)
+            object.__setattr__(self, name, nfc_values)
         for name, (minimum, maximum) in bounds.items():
             values = getattr(self, name)
             if (
@@ -207,6 +219,7 @@ class RepositoryCodePolicy:
         for name in ("include_globs", "ignore_globs"):
             if any(
                 len(value) > 4096
+                or value != unicodedata.normalize("NFC", value)
                 or "\\" in value
                 or PurePosixPath(value).is_absolute()
                 or PureWindowsPath(value).drive
@@ -220,8 +233,10 @@ class RepositoryCodePolicy:
                 raise ValueError(f"{name} must contain normalized relative POSIX globs")
         if any(
             len(value) > 128
+            or value != unicodedata.normalize("NFC", value)
             or value != value.casefold()
             or not value.startswith(".")
+            or len(value) < 2
             or "/" in value
             or "\\" in value
             for value in self.suffixes
