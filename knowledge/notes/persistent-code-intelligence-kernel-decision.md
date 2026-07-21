@@ -19,10 +19,12 @@ This page records an approved target, not implemented behavior. The current
 checkpoint remains `corpus-generation/v2` with `evidence-graph/v2` until the
 implementation and verification tasks in the Plan A implementation plan pass.
 
-The approved target is `evidence-graph/v3` inside the existing generation,
-with v2 generations remaining readable for structural capabilities. It adds no
-second graph, catalog, active pointer, runtime root, persistent daemon, or MCP
-tool. It preserves exactly 12 task-shaped tools and Python 3.10 support.
+The approved target builds `evidence-graph/v3` in a newly built immutable generation
+within the existing `corpus-generation/v2` generation layout, catalog, and
+publication boundary. After complete validation, that new generation is atomically
+activated. v2 generations remain readable for structural capabilities. The target
+adds no second graph, catalog, active pointer, runtime root, persistent daemon, or
+MCP tool. It preserves exactly 12 task-shaped tools and Python 3.10 support.
 
 Precise analyzer execution requires repository/analyzer/exact-invocation consent
 in `run/code-analysis-consent.sqlite3`. Sealed analyzer scratch state uses
@@ -64,9 +66,14 @@ and recovery before any documentation may report v3 as current behavior. Until
 then, readers and operators continue to rely on `corpus-generation/v2` and
 `evidence-graph/v2`.
 
-Analyzer consent and scratch data are operational state under `run/`, so they
-inherit the existing runtime deletion and local-filesystem contracts. Evidence
-Graph v3 remains disposable derived state inside the existing generation layout.
+Analyzer consent and scratch data under `run/` are an approved target, not current
+behavior. Plan A must extend doctor and deletion eligibility for live or abandoned
+analyzer jobs, retained analyzer receipts, and consent, quarantine, or unreadable
+analyzer state before implementation is reported complete. Until those protections
+pass, the current runtime deletion contract must not be described as covering
+analyzer state. Evidence Graph v3 remains disposable derived state built in a new
+generation within the existing `corpus-generation/v2` generation layout and
+publication boundary.
 
 ## Source / Evidence
 

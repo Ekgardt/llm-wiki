@@ -161,11 +161,13 @@ This section records an approved target, not implemented behavior. The current
 checkpoint remains `corpus-generation/v2` with `evidence-graph/v2` until every
 implementation and verification task in Plan A passes.
 
-The approved target is `evidence-graph/v3` inside the existing immutable
-generation and existing catalog publication boundary. v2 generations remain readable
-for their structural capabilities. The target adds no second graph, catalog,
-active pointer, runtime root, persistent daemon, or MCP tool. Agent access remains
-exactly 12 task-shaped tools, and Plan A remains compatible with Python 3.10.
+The approved target builds `evidence-graph/v3` in a newly built immutable
+generation within the existing `corpus-generation/v2` generation layout, catalog,
+and publication boundary. After complete validation, that new generation is
+atomically activated. v2 generations remain readable for their structural
+capabilities. The target adds no second graph, catalog, active pointer, runtime
+root, persistent daemon, or MCP tool. Agent access remains exactly 12 task-shaped
+tools, and Plan A remains compatible with Python 3.10.
 
 Precise analyzer execution is gated by repository, analyzer, and exact invocation
 consent stored in `run/code-analysis-consent.sqlite3`. Each invocation receives

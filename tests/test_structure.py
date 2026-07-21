@@ -192,10 +192,13 @@ def test_code_kernel_target_is_approved_but_not_reported_as_current() -> None:
     decision_path = (
         ROOT / "knowledge/notes/persistent-code-intelligence-kernel-decision.md"
     )
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
 
     assert decision_path.is_file()
+    decision = decision_path.read_text(encoding="utf-8")
     _required_frontmatter_scalars(
-        decision_path.read_text(encoding="utf-8"),
+        decision,
         {
             "type": "decision",
             "status": "active",
@@ -206,6 +209,7 @@ def test_code_kernel_target_is_approved_but_not_reported_as_current() -> None:
     )
     assert "evidence-graph/v2" in current
     assert "evidence-graph/v3" not in current
+    target_words = " ".join(target.split())
     for value in (
         "evidence-graph/v3",
         "v2 generations remain readable",
@@ -215,7 +219,29 @@ def test_code_kernel_target_is_approved_but_not_reported_as_current() -> None:
         "Python 3.10",
         "approved target",
     ):
-        assert value in target
+        assert value in target_words
+    generation_terms = (
+        "newly built immutable generation",
+        "existing `corpus-generation/v2` generation layout, catalog, and publication boundary",
+        "atomically activated",
+    )
+    deletion_terms = (
+        "approved target, not current behavior",
+        "Plan A must extend doctor and deletion eligibility",
+        "live or abandoned analyzer jobs",
+        "retained analyzer receipts",
+        "consent, quarantine, or unreadable analyzer state",
+        "before implementation is reported complete",
+    )
+    for text in (target, agents, claude, decision):
+        text = " ".join(text.split())
+        for value in generation_terms:
+            assert value in text
+        assert "inside the existing immutable generation" not in text
+    for text in (agents, claude, decision):
+        text = " ".join(text.split())
+        for value in deletion_terms:
+            assert value in text
     assert (ROOT / "AGENTS.md").read_bytes() == (ROOT / "CLAUDE.md").read_bytes()
 
 
