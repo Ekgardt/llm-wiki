@@ -12,13 +12,21 @@ import stat
 import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from enum import Enum, unique
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 
+from code_intelligence import Capability, VerifiedAnalysisBatch
 from reliable_memory import canonical_json_bytes, validate_runtime_file
 from repository_scope import RepositoryScope
 
 GRAPH_SCHEMA_VERSION = "evidence-graph/v2"
+
+
+@unique
+class GraphSchema(str, Enum):
+    V2 = "evidence-graph/v2"
+    V3 = "evidence-graph/v3"
 MAX_DATABASE_BYTES = 16 * 1024 * 1024 * 1024
 MAX_SOURCE_BYTES = 16 * 1024 * 1024 * 1024
 MAX_ROWS = 10_000
@@ -277,6 +285,317 @@ CREATE INDEX dependency_invalidation ON dependency(dependency_node_id, kind, dep
 CREATE INDEX dependency_reverse ON dependency(dependent_node_id, kind, dependency_node_id, dependency_id);
 """
 
+_V3_EXTENSION_SCHEMA = """
+CREATE TABLE analyzer_run (
+  run_id TEXT PRIMARY KEY,
+  analysis_mode TEXT NOT NULL CHECK (analysis_mode IN ('precise','native-syntax')),
+  repository_id TEXT NOT NULL,
+  checkout_id TEXT NOT NULL,
+  source_generation_id TEXT NOT NULL,
+  source_manifest_sha256 TEXT NOT NULL,
+  manifest_sha256 TEXT NOT NULL,
+  lockfile_sha256 TEXT NOT NULL,
+  sdk_sha256 TEXT NOT NULL,
+  target_sha256 TEXT NOT NULL,
+  configuration_sha256 TEXT NOT NULL,
+  feature_sha256 TEXT NOT NULL,
+  invocation_sha256 TEXT NOT NULL,
+  environment_sha256 TEXT NOT NULL,
+  dependency_state_sha256 TEXT NOT NULL,
+  analysis_sha256 TEXT NOT NULL,
+  position_encoding TEXT NOT NULL CHECK (position_encoding IN ('utf-8','utf-16','utf-32')),
+  analyzer_family TEXT NOT NULL,
+  analyzer_version TEXT NOT NULL,
+  protocol TEXT NOT NULL CHECK (protocol IN ('scip','lsp','native')),
+  protocol_version TEXT NOT NULL,
+  executable_sha256 TEXT NOT NULL,
+  declared_capability_count INTEGER NOT NULL CHECK (declared_capability_count > 0),
+  declared_capabilities_sha256 TEXT NOT NULL,
+  expected_scope_count INTEGER NOT NULL CHECK (expected_scope_count > 0),
+  expected_scope_set_sha256 TEXT NOT NULL,
+  receipt_sha256 TEXT,
+  receipt_output_sha256 TEXT,
+  consent_grant_id TEXT,
+  consent_revision INTEGER,
+  lease_id TEXT,
+  publication_generation_id TEXT NOT NULL,
+  publication_expected_active TEXT,
+  evidence_level TEXT NOT NULL CHECK (evidence_level IN ('compiler','semantic','syntax','lexical')),
+  qualified INTEGER NOT NULL CHECK (qualified IN (0,1)),
+  outcome TEXT NOT NULL CHECK (outcome IN
+    ('complete','partial','failed','cancelled','rejected','superseded')),
+  started_at TEXT NOT NULL,
+  ended_at TEXT NOT NULL,
+  UNIQUE (run_id, source_manifest_sha256),
+  CHECK (
+    (analysis_mode='precise' AND evidence_level IN ('compiler','semantic')
+      AND receipt_sha256 IS NOT NULL AND receipt_output_sha256 IS NOT NULL
+      AND consent_grant_id IS NOT NULL AND consent_revision IS NOT NULL
+      AND consent_revision >= 1 AND lease_id IS NOT NULL)
+    OR
+    (analysis_mode='native-syntax' AND evidence_level IN ('syntax','lexical')
+      AND receipt_sha256 IS NULL AND receipt_output_sha256 IS NULL
+      AND consent_grant_id IS NULL AND consent_revision IS NULL AND lease_id IS NULL)
+  )
+) WITHOUT ROWID;
+
+CREATE TABLE run_capability (
+  run_id TEXT NOT NULL REFERENCES analyzer_run(run_id),
+  capability TEXT NOT NULL CHECK (capability IN
+    ('definitions','declarations','references','calls','imports','types',
+     'type_definitions','inheritance','implementations','diagnostics')),
+  PRIMARY KEY (run_id, capability)
+) WITHOUT ROWID;
+
+CREATE TABLE analysis_scope (
+  scope_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  source_manifest_sha256 TEXT NOT NULL,
+  build_target TEXT NOT NULL,
+  build_configuration TEXT NOT NULL,
+  expected_source_count INTEGER NOT NULL CHECK (expected_source_count >= 0),
+  expected_source_set_sha256 TEXT NOT NULL,
+  generated_sources TEXT NOT NULL CHECK (generated_sources IN
+    ('available','unavailable','not-required')),
+  dependency_resolution TEXT NOT NULL CHECK (dependency_resolution IN
+    ('complete','partial','unavailable')),
+  analyzer_support TEXT NOT NULL CHECK (analyzer_support IN
+    ('complete','partial','unsupported','unqualified')),
+  FOREIGN KEY (run_id, source_manifest_sha256)
+    REFERENCES analyzer_run(run_id, source_manifest_sha256),
+  UNIQUE (run_id, build_target, build_configuration),
+  UNIQUE (scope_id, run_id)
+) WITHOUT ROWID;
+
+CREATE TABLE expected_source (
+  scope_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  source_id TEXT NOT NULL REFERENCES source(source_id),
+  source_sha256 TEXT NOT NULL,
+  disposition TEXT NOT NULL CHECK (disposition IN ('included','excluded','generated')),
+  PRIMARY KEY (scope_id, source_id),
+  FOREIGN KEY (scope_id, run_id) REFERENCES analysis_scope(scope_id, run_id)
+) WITHOUT ROWID;
+
+CREATE TABLE coverage (
+  scope_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  capability TEXT NOT NULL CHECK (capability IN
+    ('definitions','declarations','references','calls','imports','types',
+     'type_definitions','inheritance','implementations','diagnostics')),
+  status TEXT NOT NULL CHECK (status IN
+    ('complete','partial','failed','cancelled','rejected','unsupported','excluded')),
+  closed_world_eligible INTEGER NOT NULL CHECK (closed_world_eligible IN (0,1)),
+  reason TEXT,
+  PRIMARY KEY (scope_id, source_id, capability),
+  FOREIGN KEY (scope_id, run_id) REFERENCES analysis_scope(scope_id, run_id),
+  FOREIGN KEY (scope_id, source_id) REFERENCES expected_source(scope_id, source_id),
+  FOREIGN KEY (run_id, capability) REFERENCES run_capability(run_id, capability),
+  CHECK ((status IN ('complete','excluded') AND reason IS NULL)
+      OR (status NOT IN ('complete','excluded') AND reason IS NOT NULL)),
+  CHECK (closed_world_eligible = 0 OR status IN ('complete','excluded'))
+) WITHOUT ROWID;
+
+CREATE TABLE symbol_claim (
+  claim_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  scope_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  capability TEXT NOT NULL CHECK (capability IN ('definitions','declarations')),
+  identity_scheme TEXT NOT NULL,
+  identity_value TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  symbol_kind TEXT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('definition','declaration')),
+  byte_start INTEGER NOT NULL CHECK (byte_start >= 0),
+  byte_end INTEGER NOT NULL CHECK (byte_end > byte_start),
+  evidence_level TEXT NOT NULL CHECK (evidence_level IN ('compiler','semantic','syntax','lexical')),
+  ambiguity INTEGER NOT NULL CHECK (ambiguity IN (0,1)),
+  FOREIGN KEY (scope_id, run_id) REFERENCES analysis_scope(scope_id, run_id),
+  FOREIGN KEY (scope_id, source_id) REFERENCES expected_source(scope_id, source_id),
+  FOREIGN KEY (run_id, capability) REFERENCES run_capability(run_id, capability),
+  CHECK ((capability='definitions' AND role='definition')
+      OR (capability='declarations' AND role='declaration'))
+) WITHOUT ROWID;
+
+CREATE TABLE relationship_claim (
+  claim_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  scope_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  source_identity_scheme TEXT NOT NULL,
+  source_identity_value TEXT NOT NULL,
+  relation TEXT NOT NULL CHECK (relation IN
+    ('REFERENCES_SYMBOL','CALLS','IMPORTS','HAS_TYPE',
+     'TYPE_DEFINITION','INHERITS','IMPLEMENTS')),
+  capability TEXT NOT NULL CHECK (capability IN
+    ('references','calls','imports','types','type_definitions','inheritance','implementations')),
+  target_identity_scheme TEXT,
+  target_identity_value TEXT,
+  target_text TEXT,
+  resolution TEXT NOT NULL CHECK (resolution IN ('resolved','unresolved','ambiguous')),
+  byte_start INTEGER NOT NULL CHECK (byte_start >= 0),
+  byte_end INTEGER NOT NULL CHECK (byte_end > byte_start),
+  evidence_level TEXT NOT NULL CHECK (evidence_level IN ('compiler','semantic','syntax','lexical')),
+  ambiguity INTEGER NOT NULL CHECK (ambiguity IN (0,1)),
+  FOREIGN KEY (scope_id, run_id) REFERENCES analysis_scope(scope_id, run_id),
+  FOREIGN KEY (scope_id, source_id) REFERENCES expected_source(scope_id, source_id),
+  FOREIGN KEY (run_id, capability) REFERENCES run_capability(run_id, capability),
+  CHECK ((resolution='resolved' AND target_identity_scheme IS NOT NULL
+          AND target_identity_value IS NOT NULL AND target_text IS NULL)
+      OR (resolution!='resolved' AND target_identity_scheme IS NULL
+          AND target_identity_value IS NULL AND target_text IS NOT NULL)),
+  CHECK ((resolution='ambiguous' AND ambiguity=1)
+      OR (resolution!='ambiguous' AND ambiguity=0)),
+  CHECK ((relation='REFERENCES_SYMBOL' AND capability='references')
+      OR (relation='CALLS' AND capability='calls')
+      OR (relation='IMPORTS' AND capability='imports')
+      OR (relation='HAS_TYPE' AND capability='types')
+      OR (relation='TYPE_DEFINITION' AND capability='type_definitions')
+      OR (relation='INHERITS' AND capability='inheritance')
+      OR (relation='IMPLEMENTS' AND capability='implementations'))
+) WITHOUT ROWID;
+
+CREATE TABLE diagnostic (
+  diagnostic_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  scope_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  capability TEXT NOT NULL CHECK (capability='diagnostics'),
+  severity TEXT NOT NULL CHECK (severity IN ('error','warning','information','hint')),
+  code TEXT,
+  message TEXT NOT NULL,
+  byte_start INTEGER NOT NULL CHECK (byte_start >= 0),
+  byte_end INTEGER NOT NULL CHECK (byte_end > byte_start),
+  evidence_level TEXT NOT NULL CHECK (evidence_level IN ('compiler','semantic','syntax')),
+  FOREIGN KEY (scope_id, run_id) REFERENCES analysis_scope(scope_id, run_id),
+  FOREIGN KEY (scope_id, source_id) REFERENCES expected_source(scope_id, source_id),
+  FOREIGN KEY (run_id, capability) REFERENCES run_capability(run_id, capability),
+  UNIQUE (diagnostic_id, scope_id)
+) WITHOUT ROWID;
+
+CREATE TABLE diagnostic_related (
+  diagnostic_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+  scope_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  message TEXT,
+  byte_start INTEGER NOT NULL CHECK (byte_start >= 0),
+  byte_end INTEGER NOT NULL CHECK (byte_end > byte_start),
+  PRIMARY KEY (diagnostic_id, ordinal),
+  FOREIGN KEY (diagnostic_id, scope_id) REFERENCES diagnostic(diagnostic_id, scope_id),
+  FOREIGN KEY (scope_id, source_id) REFERENCES expected_source(scope_id, source_id)
+) WITHOUT ROWID;
+
+CREATE TABLE slice_activation (
+  slice_id TEXT PRIMARY KEY,
+  slice_key TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  scope_id TEXT NOT NULL,
+  capability TEXT NOT NULL CHECK (capability IN
+    ('definitions','declarations','references','calls','imports','types',
+     'type_definitions','inheritance','implementations','diagnostics')),
+  selected INTEGER NOT NULL CHECK (selected IN (0,1)),
+  selection_reason TEXT NOT NULL CHECK (selection_reason IN
+    ('new-complete','new-partial-terminal','retained-parent','complete-empty')),
+  FOREIGN KEY (scope_id, run_id) REFERENCES analysis_scope(scope_id, run_id),
+  FOREIGN KEY (run_id, capability) REFERENCES run_capability(run_id, capability),
+  UNIQUE (slice_id, run_id, scope_id, capability)
+) WITHOUT ROWID;
+
+CREATE TABLE validity (
+  validity_id TEXT PRIMARY KEY,
+  symbol_claim_id TEXT REFERENCES symbol_claim(claim_id),
+  relationship_claim_id TEXT REFERENCES relationship_claim(claim_id),
+  diagnostic_id TEXT REFERENCES diagnostic(diagnostic_id),
+  status TEXT NOT NULL CHECK (status IN ('current','soft-stale','hard-stale')),
+  stale_reason TEXT,
+  CHECK ((symbol_claim_id IS NOT NULL) + (relationship_claim_id IS NOT NULL)
+       + (diagnostic_id IS NOT NULL) = 1),
+  CHECK ((status='current' AND stale_reason IS NULL)
+      OR (status!='current' AND stale_reason IS NOT NULL))
+) WITHOUT ROWID;
+
+CREATE INDEX analyzer_run_scope
+ON analyzer_run(repository_id, checkout_id, analysis_sha256, run_id);
+CREATE INDEX analyzer_run_publication
+ON analyzer_run(publication_generation_id, outcome, run_id);
+CREATE INDEX run_capability_reverse
+ON run_capability(capability, run_id);
+CREATE INDEX analysis_scope_run
+ON analysis_scope(run_id, build_target, build_configuration, scope_id);
+CREATE INDEX expected_source_reverse
+ON expected_source(source_id, source_sha256, scope_id);
+CREATE INDEX coverage_capability
+ON coverage(scope_id, capability, status, source_id);
+CREATE INDEX symbol_identity
+ON symbol_claim(identity_scheme, identity_value, capability, claim_id);
+CREATE INDEX symbol_source_span
+ON symbol_claim(source_id, byte_start, byte_end, claim_id);
+CREATE INDEX relationship_source
+ON relationship_claim(source_identity_scheme, source_identity_value, capability, claim_id);
+CREATE INDEX relationship_target
+ON relationship_claim(target_identity_scheme, target_identity_value, capability, claim_id);
+CREATE INDEX relationship_source_span
+ON relationship_claim(source_id, byte_start, byte_end, claim_id);
+CREATE INDEX diagnostic_source_span
+ON diagnostic(source_id, byte_start, byte_end, severity, diagnostic_id);
+CREATE INDEX diagnostic_related_source_span
+ON diagnostic_related(source_id, byte_start, byte_end, diagnostic_id, ordinal);
+CREATE UNIQUE INDEX one_selected_slice
+ON slice_activation(slice_key) WHERE selected=1;
+CREATE INDEX slice_run
+ON slice_activation(run_id, scope_id, capability, selected, slice_id);
+CREATE UNIQUE INDEX validity_symbol_once
+ON validity(symbol_claim_id) WHERE symbol_claim_id IS NOT NULL;
+CREATE UNIQUE INDEX validity_relationship_once
+ON validity(relationship_claim_id) WHERE relationship_claim_id IS NOT NULL;
+CREATE UNIQUE INDEX validity_diagnostic_once
+ON validity(diagnostic_id) WHERE diagnostic_id IS NOT NULL;
+CREATE INDEX validity_status
+ON validity(status, validity_id);
+"""
+
+_V3_TABLES = frozenset(
+    {
+        "analyzer_run",
+        "run_capability",
+        "analysis_scope",
+        "expected_source",
+        "coverage",
+        "symbol_claim",
+        "relationship_claim",
+        "diagnostic",
+        "diagnostic_related",
+        "slice_activation",
+        "validity",
+    }
+)
+_V3_INDEXES = frozenset(
+    {
+        "analyzer_run_scope",
+        "analyzer_run_publication",
+        "run_capability_reverse",
+        "analysis_scope_run",
+        "expected_source_reverse",
+        "coverage_capability",
+        "symbol_identity",
+        "symbol_source_span",
+        "relationship_source",
+        "relationship_target",
+        "relationship_source_span",
+        "diagnostic_source_span",
+        "diagnostic_related_source_span",
+        "one_selected_slice",
+        "slice_run",
+        "validity_symbol_once",
+        "validity_relationship_once",
+        "validity_diagnostic_once",
+        "validity_status",
+    }
+)
+
 
 def _schema_signature(database: sqlite3.Connection) -> tuple[tuple[object, ...], ...]:
     return tuple(
@@ -288,14 +607,262 @@ def _schema_signature(database: sqlite3.Connection) -> tuple[tuple[object, ...],
     )
 
 
-@lru_cache(maxsize=1)
-def _expected_schema_signature() -> tuple[tuple[object, ...], ...]:
+@lru_cache(maxsize=2)
+def _expected_schema_signature(schema: GraphSchema) -> tuple[tuple[object, ...], ...]:
     database = sqlite3.connect(":memory:")
     try:
-        database.executescript(_SCHEMA)
+        database.executescript(
+            _SCHEMA + (_V3_EXTENSION_SCHEMA if schema is GraphSchema.V3 else "")
+        )
         return _schema_signature(database)
     finally:
         database.close()
+
+
+def _set_sha256(rows: Sequence[Mapping[str, object]]) -> str:
+    return hashlib.sha256(canonical_json_bytes(list(rows))).hexdigest()
+
+
+def _slice_key(run_id: str, scope_id: str, capability: str) -> str:
+    return "slice:" + hashlib.sha256(
+        canonical_json_bytes(
+            {"run_id": run_id, "scope_id": scope_id, "capability": capability}
+        )
+    ).hexdigest()
+
+
+def _v3_rows(
+    verified_analyses: Sequence[VerifiedAnalysisBatch],
+) -> dict[str, list[tuple[object, ...]]]:
+    rows: dict[str, list[tuple[object, ...]]] = {
+        table: []
+        for table in (
+            "analyzer_run",
+            "run_capability",
+            "analysis_scope",
+            "expected_source",
+            "coverage",
+            "symbol_claim",
+            "relationship_claim",
+            "diagnostic",
+            "diagnostic_related",
+            "slice_activation",
+            "validity",
+        )
+    }
+    for batch in verified_analyses:
+        if not isinstance(batch, VerifiedAnalysisBatch):
+            raise TypeError("verified_analyses must contain VerifiedAnalysisBatch values")
+        analysis = batch.analysis
+        run = analysis.run
+        identity = run.identity
+        capability_rows = [
+            {"capability": capability.value}
+            for capability in run.declared_capabilities
+        ]
+        scope_rows = [
+            {
+                "scope_id": scope.scope_id,
+                "source_manifest_sha256": scope.source_manifest_sha256,
+                "target": scope.build_target,
+                "configuration": scope.build_configuration,
+            }
+            for scope in analysis.scopes
+        ]
+        if any(
+            scope.source_manifest_sha256 != run.source_manifest_sha256
+            for scope in analysis.scopes
+        ):
+            raise ValueError("analysis scope manifest must match its analyzer run")
+        rows["analyzer_run"].append(
+            (
+                run.run_id,
+                run.analysis_mode,
+                run.repository_id,
+                run.checkout_id,
+                run.source_generation_id,
+                run.source_manifest_sha256,
+                identity.manifest_sha256,
+                identity.lockfile_sha256,
+                identity.sdk_sha256,
+                identity.target_sha256,
+                identity.configuration_sha256,
+                identity.feature_sha256,
+                identity.invocation_sha256,
+                identity.environment_sha256,
+                identity.dependency_state_sha256,
+                identity.analysis_sha256,
+                identity.position_encoding.value,
+                run.analyzer_family,
+                run.analyzer_version,
+                run.protocol,
+                run.protocol_version,
+                run.executable_sha256,
+                len(capability_rows),
+                _set_sha256(capability_rows),
+                len(scope_rows),
+                _set_sha256(scope_rows),
+                run.receipt_sha256,
+                run.receipt_output_sha256,
+                run.consent_grant_id,
+                run.consent_revision,
+                run.lease_id,
+                run.source_generation_id,
+                None,
+                run.evidence_level.value,
+                int(run.qualified),
+                run.outcome.value,
+                run.started_at,
+                run.ended_at,
+            )
+        )
+        rows["run_capability"].extend(
+            (run.run_id, capability.value)
+            for capability in run.declared_capabilities
+        )
+        scope_run = {scope.scope_id: scope.run_id for scope in analysis.scopes}
+        for scope in analysis.scopes:
+            source_rows = [
+                {
+                    "source_id": source.source_id,
+                    "sha256": source.source_sha256,
+                    "disposition": source.disposition,
+                }
+                for source in scope.expected_sources
+            ]
+            rows["analysis_scope"].append(
+                (
+                    scope.scope_id,
+                    scope.run_id,
+                    scope.source_manifest_sha256,
+                    scope.build_target,
+                    scope.build_configuration,
+                    len(source_rows),
+                    _set_sha256(source_rows),
+                    scope.generated_sources,
+                    scope.dependency_resolution,
+                    scope.analyzer_support,
+                )
+            )
+            rows["expected_source"].extend(
+                (
+                    scope.scope_id,
+                    scope.run_id,
+                    source.source_id,
+                    source.source_sha256,
+                    source.disposition,
+                )
+                for source in scope.expected_sources
+            )
+            for capability in run.declared_capabilities:
+                slice_key = _slice_key(run.run_id, scope.scope_id, capability.value)
+                rows["slice_activation"].append(
+                    (
+                        slice_key,
+                        slice_key,
+                        run.run_id,
+                        scope.scope_id,
+                        capability.value,
+                        1,
+                        "new-complete"
+                        if run.outcome.value == "complete"
+                        else "new-partial-terminal",
+                    )
+                )
+        rows["coverage"].extend(
+            (
+                coverage.scope_id,
+                scope_run[coverage.scope_id],
+                coverage.source_id,
+                coverage.capability.value,
+                coverage.status.value,
+                int(coverage.closed_world_eligible),
+                coverage.reason,
+            )
+            for coverage in analysis.coverage
+        )
+        rows["symbol_claim"].extend(
+            (
+                claim.claim_id,
+                claim.run_id,
+                claim.scope_id,
+                claim.source_id,
+                claim.capability.value,
+                claim.identity.scheme,
+                claim.identity.value,
+                claim.display_name,
+                claim.symbol_kind,
+                claim.role.value,
+                claim.range.byte_start,
+                claim.range.byte_end,
+                claim.evidence_level.value,
+                int(claim.ambiguity),
+            )
+            for claim in analysis.symbols
+        )
+        rows["relationship_claim"].extend(
+            (
+                claim.claim_id,
+                claim.run_id,
+                claim.scope_id,
+                claim.source_id,
+                claim.source_identity.scheme,
+                claim.source_identity.value,
+                claim.relation.value,
+                claim.capability.value,
+                None if claim.target_identity is None else claim.target_identity.scheme,
+                None if claim.target_identity is None else claim.target_identity.value,
+                claim.target_text,
+                claim.resolution.value,
+                claim.range.byte_start,
+                claim.range.byte_end,
+                claim.evidence_level.value,
+                int(claim.ambiguity),
+            )
+            for claim in analysis.relationships
+        )
+        for diagnostic in analysis.diagnostics:
+            rows["diagnostic"].append(
+                (
+                    diagnostic.diagnostic_id,
+                    diagnostic.run_id,
+                    diagnostic.scope_id,
+                    diagnostic.source_id,
+                    diagnostic.capability.value,
+                    diagnostic.severity.value,
+                    diagnostic.code,
+                    diagnostic.message,
+                    diagnostic.range.byte_start,
+                    diagnostic.range.byte_end,
+                    diagnostic.evidence_level.value,
+                )
+            )
+            rows["diagnostic_related"].extend(
+                (
+                    diagnostic.diagnostic_id,
+                    ordinal,
+                    diagnostic.scope_id,
+                    related.source_id,
+                    related.message,
+                    related.range.byte_start,
+                    related.range.byte_end,
+                )
+                for ordinal, related in enumerate(diagnostic.related)
+            )
+        for validity in analysis.validity:
+            subject = [None, None, None]
+            subject[{"symbol": 0, "relationship": 1, "diagnostic": 2}[validity.subject_kind.value]] = (
+                validity.subject_id
+            )
+            rows["validity"].append(
+                (
+                    validity.validity_id,
+                    *subject,
+                    validity.status.value,
+                    validity.stale_reason,
+                )
+            )
+    return rows
 
 
 def _closed(record: Mapping[str, object], expected: frozenset[str], label: str) -> None:
@@ -438,12 +1005,12 @@ def _configure_write(database: sqlite3.Connection) -> None:
     database.execute("PRAGMA synchronous=FULL")
     database.execute("PRAGMA foreign_keys=ON")
     database.execute("PRAGMA trusted_schema=OFF")
-    database.execute("PRAGMA user_version=2")
 
 
 def create_generation_database(
     database_path: Path,
     *,
+    schema: GraphSchema = GraphSchema.V2,
     sources: Iterable[Mapping[str, object]],
     source_bytes: Mapping[str, bytes],
     nodes: Iterable[Mapping[str, object]],
@@ -452,11 +1019,23 @@ def create_generation_database(
     evidence: Iterable[Mapping[str, object]],
     observations: Iterable[Mapping[str, object]],
     dependencies: Iterable[Mapping[str, object]],
+    verified_analyses: Iterable[VerifiedAnalysisBatch] = (),
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
-) -> None:
-    """Create one complete graph database; existing artifacts are never replaced."""
+) -> GraphSchema:
+    """Create one immutable database using only the explicitly selected schema."""
+    if not isinstance(schema, GraphSchema):
+        raise TypeError("schema must be a GraphSchema")
+    verified_values: list[VerifiedAnalysisBatch] = []
+    for batch in verified_analyses:
+        if len(verified_values) >= MAX_VALIDATION_ROWS:
+            raise ValueError("verified analysis row ceiling exceeded")
+        verified_values.append(batch)
+    verified = tuple(verified_values)
+    if schema is GraphSchema.V2 and verified:
+        raise ValueError("verified analyses require explicit evidence-graph/v3")
+    extension_rows = _v3_rows(verified) if schema is GraphSchema.V3 else {}
     path = Path(database_path)
     if path.exists() or path.is_symlink():
         raise FileExistsError("Evidence Graph generation artifacts are immutable")
@@ -721,7 +1300,11 @@ def create_generation_database(
                 ),
                 PROGRESS_OPCODES,
             )
-            database.executescript(_SCHEMA)
+            database.executescript(
+                "BEGIN IMMEDIATE;\n"
+                + _SCHEMA
+                + (_V3_EXTENSION_SCHEMA if schema is GraphSchema.V3 else "")
+            )
             database.executemany(
                 "INSERT INTO source VALUES (?, ?, ?, ?, ?, ?, ?, ?)", normalized_sources
             )
@@ -741,6 +1324,27 @@ def create_generation_database(
             database.executemany(
                 "INSERT INTO dependency VALUES (?, ?, ?, ?, ?)", normalized_dependencies
             )
+            if schema is GraphSchema.V3:
+                for table in (
+                    "analyzer_run",
+                    "run_capability",
+                    "analysis_scope",
+                    "expected_source",
+                    "coverage",
+                    "symbol_claim",
+                    "relationship_claim",
+                    "diagnostic",
+                    "diagnostic_related",
+                    "slice_activation",
+                    "validity",
+                ):
+                    table_rows = extension_rows[table]
+                    if table_rows:
+                        slots = ", ".join("?" for _ in table_rows[0])
+                        database.executemany(
+                            f"INSERT INTO {table} VALUES ({slots})", table_rows
+                        )
+            database.execute(f"PRAGMA user_version={2 if schema is GraphSchema.V2 else 3}")
             violations = database.execute("PRAGMA foreign_key_check").fetchone()
             if violations is not None:
                 raise ValueError("Evidence Graph records violate referential integrity")
@@ -760,6 +1364,7 @@ def create_generation_database(
         finally:
             database.set_progress_handler(None, 0)
             database.close()
+        validate_generation_database(temporary, schema=schema)
         if temporary.stat().st_size > MAX_DATABASE_BYTES:
             raise ValueError("Evidence Graph database exceeds the supported byte ceiling")
         try:
@@ -767,6 +1372,7 @@ def create_generation_database(
         except FileExistsError:
             raise FileExistsError("Evidence Graph generation artifacts are immutable") from None
         temporary.unlink()
+        return schema
     except BaseException:
         try:
             temporary.unlink()
@@ -959,9 +1565,175 @@ def _validate_stored_records(
     _check_build_stop(deadline, cancelled, monotonic)
 
 
+def validate_persisted_scope(database: sqlite3.Connection, run_id: str) -> None:
+    run = database.execute(
+        "SELECT source_manifest_sha256,expected_scope_count,expected_scope_set_sha256,"
+        "declared_capability_count,declared_capabilities_sha256 "
+        "FROM analyzer_run WHERE run_id=?",
+        (run_id,),
+    ).fetchone()
+    if run is None:
+        raise ValueError("analyzer run is missing")
+    scopes = database.execute(
+        "SELECT scope_id,source_manifest_sha256,build_target,build_configuration "
+        "FROM analysis_scope WHERE run_id=? ORDER BY scope_id",
+        (run_id,),
+    ).fetchall()
+    scope_rows = [
+        {
+            "scope_id": row[0],
+            "source_manifest_sha256": row[1],
+            "target": row[2],
+            "configuration": row[3],
+        }
+        for row in scopes
+    ]
+    if (
+        any(row[1] != run[0] for row in scopes)
+        or len(scope_rows) != run[1]
+        or _set_sha256(scope_rows) != run[2]
+    ):
+        raise ValueError("persisted expected scope set is incomplete")
+    capabilities = [
+        {"capability": row[0]}
+        for row in database.execute(
+            "SELECT capability FROM run_capability WHERE run_id=? ORDER BY capability",
+            (run_id,),
+        ).fetchall()
+    ]
+    if len(capabilities) != run[3] or _set_sha256(capabilities) != run[4]:
+        raise ValueError("persisted declared capability set is incomplete")
+    capability_values = [row["capability"] for row in capabilities]
+    for scope_id, _manifest, _target, _configuration in scopes:
+        expected_count, expected_sha256 = database.execute(
+            "SELECT expected_source_count,expected_source_set_sha256 "
+            "FROM analysis_scope WHERE scope_id=?",
+            (scope_id,),
+        ).fetchone()
+        sources = database.execute(
+            "SELECT source_id,source_sha256,disposition FROM expected_source "
+            "WHERE scope_id=? ORDER BY source_id",
+            (scope_id,),
+        ).fetchall()
+        source_rows = [
+            {"source_id": row[0], "sha256": row[1], "disposition": row[2]}
+            for row in sources
+        ]
+        if len(source_rows) != expected_count or _set_sha256(source_rows) != expected_sha256:
+            raise ValueError("persisted expected source set is incomplete")
+        for source_id, source_sha256, _disposition in sources:
+            stored = database.execute(
+                "SELECT sha256 FROM source WHERE source_id=?", (source_id,)
+            ).fetchone()
+            if stored is None or stored[0] != source_sha256:
+                raise ValueError("persisted expected source hash does not match captured source")
+        expected_coverage = {
+            (source_id, capability)
+            for source_id, _sha256, _disposition in sources
+            for capability in capability_values
+        }
+        actual_coverage = {
+            (row[0], row[1])
+            for row in database.execute(
+                "SELECT source_id,capability FROM coverage WHERE scope_id=?",
+                (scope_id,),
+            ).fetchall()
+        }
+        coverage_count = database.execute(
+            "SELECT count(*) FROM coverage WHERE scope_id=?", (scope_id,)
+        ).fetchone()[0]
+        if actual_coverage != expected_coverage or coverage_count != len(expected_coverage):
+            raise ValueError("coverage does not span expected sources and capabilities")
+
+
+def database_closed_world(
+    database: sqlite3.Connection,
+    scope_id: str,
+    capability: Capability,
+) -> bool:
+    if not isinstance(capability, Capability):
+        return False
+    scope = database.execute(
+        "SELECT expected_source_count,expected_source_set_sha256,generated_sources,"
+        "dependency_resolution,analyzer_support FROM analysis_scope WHERE scope_id=?",
+        (scope_id,),
+    ).fetchone()
+    if scope is None:
+        return False
+    sources = database.execute(
+        "SELECT source_id,source_sha256,disposition FROM expected_source "
+        "WHERE scope_id=? ORDER BY source_id",
+        (scope_id,),
+    ).fetchall()
+    source_rows = [
+        {"source_id": row[0], "sha256": row[1], "disposition": row[2]}
+        for row in sources
+    ]
+    if len(source_rows) != scope[0] or _set_sha256(source_rows) != scope[1]:
+        return False
+    coverage = database.execute(
+        "SELECT source_id,status,closed_world_eligible FROM coverage "
+        "WHERE scope_id=? AND capability=? ORDER BY source_id",
+        (scope_id, capability.value),
+    ).fetchall()
+    if [row[0] for row in coverage] != [row["source_id"] for row in source_rows]:
+        return False
+    return (
+        scope[2] in {"available", "not-required"}
+        and scope[3] == "complete"
+        and scope[4] == "complete"
+        and all(row[1] in {"complete", "excluded"} and row[2] == 1 for row in coverage)
+    )
+
+
+def _validate_v3_sets(database: sqlite3.Connection) -> None:
+    run_ids = [row[0] for row in database.execute("SELECT run_id FROM analyzer_run ORDER BY run_id")]
+    for run_id in run_ids:
+        validate_persisted_scope(database, run_id)
+
+    required_slices = {
+        (_slice_key(row[0], row[1], row[2]), row[0], row[1], row[2])
+        for row in database.execute(
+            "SELECT s.run_id,s.scope_id,c.capability FROM analysis_scope s "
+            "JOIN run_capability c ON c.run_id=s.run_id"
+        )
+    }
+    stored_slices = list(
+        database.execute(
+            "SELECT slice_key,run_id,scope_id,capability,selected FROM slice_activation"
+        )
+    )
+    stored_keys = {(row[0], row[1], row[2], row[3]) for row in stored_slices}
+    selected_keys = {
+        (row[0], row[1], row[2], row[3]) for row in stored_slices if row[4] == 1
+    }
+    if stored_keys != required_slices or selected_keys != required_slices:
+        raise ValueError("selected slices do not exactly cover deterministic slice keys")
+
+    subjects = {
+        "symbol_claim_id": {row[0] for row in database.execute("SELECT claim_id FROM symbol_claim")},
+        "relationship_claim_id": {
+            row[0] for row in database.execute("SELECT claim_id FROM relationship_claim")
+        },
+        "diagnostic_id": {
+            row[0] for row in database.execute("SELECT diagnostic_id FROM diagnostic")
+        },
+    }
+    for column, expected in subjects.items():
+        actual = [
+            row[0]
+            for row in database.execute(
+                f"SELECT {column} FROM validity WHERE {column} IS NOT NULL"
+            )
+        ]
+        if len(actual) != len(set(actual)) or set(actual) != expected:
+            raise ValueError("validity must bind every claim subject exactly once")
+
+
 def _validate_connection(
     database: sqlite3.Connection,
     *,
+    schema: GraphSchema = GraphSchema.V2,
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     cancelled: Callable[[], bool] | None = None,
@@ -970,8 +1742,10 @@ def _validate_connection(
     _validation_deadline(database, deadline, monotonic, cancelled)
     try:
         signature = _schema_signature(database)
-        if signature != _expected_schema_signature():
-            raise ValueError("Evidence Graph sqlite_schema is not the exact v2 contract")
+        if not isinstance(schema, GraphSchema):
+            raise TypeError("schema must be a GraphSchema")
+        if signature != _expected_schema_signature(schema):
+            raise ValueError(f"Evidence Graph sqlite_schema is not the exact {schema.value} contract")
         schema_rows = database.execute(
             "SELECT type, name, tbl_name, sql FROM sqlite_schema "
             "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
@@ -979,8 +1753,10 @@ def _validate_connection(
         tables = {row["name"] for row in schema_rows if row["type"] == "table"}
         indexes = {row["name"] for row in schema_rows if row["type"] == "index"}
         other = {row["type"] for row in schema_rows if row["type"] not in {"table", "index"}}
-        if tables != set(_TABLE_COLUMNS) or indexes != _EXPLICIT_INDEXES or other:
-            raise ValueError("Evidence Graph sqlite_schema is not the exact v2 contract")
+        expected_tables = set(_TABLE_COLUMNS) | (_V3_TABLES if schema is GraphSchema.V3 else set())
+        expected_indexes = _EXPLICIT_INDEXES | (_V3_INDEXES if schema is GraphSchema.V3 else set())
+        if tables != expected_tables or indexes != expected_indexes or other:
+            raise ValueError(f"Evidence Graph sqlite_schema is not the exact {schema.value} contract")
         for table, expected in _TABLE_COLUMNS.items():
             _check_build_stop(deadline, cancelled, monotonic)
             columns = tuple(row["name"] for row in database.execute(f"PRAGMA table_info({table})"))
@@ -991,8 +1767,9 @@ def _validate_connection(
             columns = tuple(row["name"] for row in database.execute(f"PRAGMA index_info({index})"))
             if columns != expected:
                 raise ValueError(f"Evidence Graph index columns differ for {index}")
-        if database.execute("PRAGMA user_version").fetchone()[0] != 2:
-            raise ValueError("Evidence Graph schema version is not v2")
+        expected_user_version = 2 if schema is GraphSchema.V2 else 3
+        if database.execute("PRAGMA user_version").fetchone()[0] != expected_user_version:
+            raise ValueError("Evidence Graph schema version does not match selection")
         if str(database.execute("PRAGMA journal_mode").fetchone()[0]).casefold() != "delete":
             raise ValueError("Evidence Graph must use rollback-journal DELETE mode")
         if database.execute("PRAGMA foreign_key_check").fetchone() is not None:
@@ -1001,7 +1778,7 @@ def _validate_connection(
         if integrity is None or integrity[0] != "ok":
             raise ValueError("Evidence Graph integrity check failed")
 
-        for table in _TABLE_COLUMNS:
+        for table in expected_tables:
             _check_build_stop(deadline, cancelled, monotonic)
             count = database.execute(
                 f"SELECT COUNT(*) FROM (SELECT 1 FROM {table} LIMIT ?)",
@@ -1061,6 +1838,8 @@ LIMIT 1
             monotonic=monotonic,
             cancelled=cancelled,
         )
+        if schema is GraphSchema.V3:
+            _validate_v3_sets(database)
     except sqlite3.Error as exc:
         if bool(cancelled and cancelled()) or (
             deadline is not None and (monotonic() >= deadline or "interrupt" in str(exc).casefold())
@@ -1106,6 +1885,34 @@ def _stored_shared_source_membership(
         database.set_progress_handler(None, 0)
 
 
+def validate_generation_database(
+    database_path: Path,
+    *,
+    schema: GraphSchema,
+    deadline: float | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+    cancelled: Callable[[], bool] | None = None,
+) -> None:
+    """Reopen and validate one exact, closed Evidence Graph database contract."""
+    if not isinstance(schema, GraphSchema):
+        raise TypeError("schema must be a GraphSchema")
+    path = Path(database_path).resolve(strict=True)
+    database = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=0)
+    try:
+        database.row_factory = sqlite3.Row
+        database.execute("PRAGMA query_only=ON")
+        database.execute("PRAGMA trusted_schema=OFF")
+        _validate_connection(
+            database,
+            schema=schema,
+            deadline=deadline,
+            monotonic=monotonic,
+            cancelled=cancelled,
+        )
+    finally:
+        database.close()
+
+
 def validate_generation_artifact(
     generation_path: Path,
     manifest: Mapping[str, object],
@@ -1117,7 +1924,9 @@ def validate_generation_artifact(
 ) -> None:
     """Validate one graph artifact already bound by the shared generation manifest."""
     _check_build_stop(deadline, cancelled, monotonic)
-    if manifest.get("graph_schema_version") != GRAPH_SCHEMA_VERSION:
+    try:
+        schema = GraphSchema(manifest.get("graph_schema_version"))
+    except (TypeError, ValueError):
         raise ValueError("Evidence Graph manifest has the wrong graph schema version")
     graph_artifacts = [
         item for item in manifest.get("artifacts", []) if item.get("path") == "evidence.sqlite3"
@@ -1192,10 +2001,16 @@ def validate_generation_artifact(
         database.execute("PRAGMA trusted_schema=OFF")
         _validate_connection(
             database,
+            schema=schema,
             deadline=deadline,
             monotonic=monotonic,
             cancelled=cancelled,
         )
+        if schema is GraphSchema.V3 and database.execute(
+            "SELECT 1 FROM analyzer_run WHERE source_manifest_sha256 != ? LIMIT 1",
+            (manifest.get("source_manifest_sha256"),),
+        ).fetchone() is not None:
+            raise ValueError("analyzer run source manifest does not match generation manifest")
         stored_sources = _stored_shared_source_membership(
             database,
             deadline=deadline,
@@ -1218,6 +2033,7 @@ class EvidenceGraph:
         *,
         state_root: Path,
         generation_id: str | None = None,
+        schema: GraphSchema = GraphSchema.V2,
         max_database_bytes: int = MAX_DATABASE_BYTES,
         deadline: float | None = None,
         cancelled: Callable[[], bool] | None = None,
@@ -1226,6 +2042,9 @@ class EvidenceGraph:
         self.database_path = Path(database_path)
         self.state_root = Path(state_root)
         self.generation_id = generation_id
+        if not isinstance(schema, GraphSchema):
+            raise TypeError("schema must be a GraphSchema")
+        self.schema = schema
         try:
             expected = validate_runtime_file(
                 self.database_path, self.state_root, max_bytes=max_database_bytes
@@ -1243,7 +2062,9 @@ class EvidenceGraph:
             database.row_factory = sqlite3.Row
             database.execute("PRAGMA query_only=ON")
             database.execute("PRAGMA trusted_schema=OFF")
-            _validate_connection(database, deadline=deadline, cancelled=cancelled)
+            _validate_connection(
+                database, schema=schema, deadline=deadline, cancelled=cancelled
+            )
             self._database = database
         except BaseException:
             database.close()
@@ -1266,7 +2087,9 @@ class EvidenceGraph:
             manifest = catalog.get_active(**options)
             if manifest is None:
                 return None
-            if manifest.get("graph_schema_version") != GRAPH_SCHEMA_VERSION:
+            try:
+                schema = GraphSchema(manifest.get("graph_schema_version"))
+            except (TypeError, ValueError):
                 raise ValueError("active generation does not use the Evidence Graph schema")
             generation_id = manifest["generation_id"]
             artifacts = {item["path"] for item in manifest["artifacts"]}
@@ -1282,6 +2105,7 @@ class EvidenceGraph:
                     generation_path / "evidence.sqlite3",
                     state_root=catalog.state_root,
                     generation_id=generation_id,
+                    schema=schema,
                     deadline=deadline,
                     cancelled=cancelled,
                 )
@@ -1324,7 +2148,9 @@ class EvidenceGraph:
             manifest = catalog.get_active_for_repository(expected_scope, **options)
             if manifest is None:
                 return None
-            if manifest.get("graph_schema_version") != GRAPH_SCHEMA_VERSION:
+            try:
+                schema = GraphSchema(manifest.get("graph_schema_version"))
+            except (TypeError, ValueError):
                 return None
             generation_id = manifest["generation_id"]
             graph = None
@@ -1341,6 +2167,7 @@ class EvidenceGraph:
                     generation_path / "evidence.sqlite3",
                     state_root=catalog.state_root,
                     generation_id=generation_id,
+                    schema=schema,
                     deadline=deadline,
                     cancelled=cancelled,
                 )

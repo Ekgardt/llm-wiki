@@ -28,6 +28,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.code_kernel_helpers import build_fixture_generation
+
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
@@ -35,6 +37,40 @@ if str(SCRIPTS) not in sys.path:
 
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def test_builder_manifest_matches_database_schema_for_each_mode(tmp_path: Path) -> None:
+    from evidence_graph import GraphSchema
+
+    v2 = build_fixture_generation(
+        tmp_path / "v2", generation_id="v2", graph_schema=GraphSchema.V2
+    )
+    v3 = build_fixture_generation(
+        tmp_path / "v3", generation_id="v3", graph_schema=GraphSchema.V3
+    )
+
+    assert v2.manifest["graph_schema_version"] == "evidence-graph/v2"
+    assert v3.manifest["graph_schema_version"] == "evidence-graph/v3"
+    with __import__("sqlite3").connect(
+        v3.generation_path / "evidence.sqlite3"
+    ) as database:
+        run_manifests = {
+            row[0]
+            for row in database.execute(
+                "SELECT DISTINCT source_manifest_sha256 FROM analyzer_run"
+            )
+        }
+    assert run_manifests == {v3.manifest["source_manifest_sha256"]}
+
+
+def test_omitted_builder_schema_keeps_legacy_v2_manifest(tmp_path: Path) -> None:
+    result = build_fixture_generation(tmp_path, generation_id="legacy")
+
+    assert result.manifest["graph_schema_version"] == "evidence-graph/v2"
+    with __import__("sqlite3").connect(
+        result.generation_path / "evidence.sqlite3"
+    ) as database:
+        assert database.execute("PRAGMA user_version").fetchone()[0] == 2
 
 
 def _basic_records():

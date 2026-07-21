@@ -13,6 +13,49 @@ from pathlib import Path
 
 import pytest
 
+from tests.code_kernel_helpers import (
+    basic_graph_records,
+    make_normalized_analysis_for_records,
+    open_v3_fixture,
+    snapshot_for_records,
+)
+
+V3_EXTENSION_NAMES = frozenset(
+    {
+        "analyzer_run",
+        "run_capability",
+        "analysis_scope",
+        "expected_source",
+        "coverage",
+        "symbol_claim",
+        "relationship_claim",
+        "diagnostic",
+        "diagnostic_related",
+        "slice_activation",
+        "validity",
+        "analyzer_run_scope",
+        "analyzer_run_publication",
+        "run_capability_reverse",
+        "analysis_scope_run",
+        "expected_source_reverse",
+        "coverage_capability",
+        "symbol_identity",
+        "symbol_source_span",
+        "relationship_source",
+        "relationship_target",
+        "relationship_source_span",
+        "diagnostic_source_span",
+        "diagnostic_related_source_span",
+        "one_selected_slice",
+        "slice_run",
+        "validity_symbol_once",
+        "validity_relationship_once",
+        "validity_diagnostic_once",
+        "validity_status",
+    }
+)
+V3_EXTENSION_SCHEMA_SHA256 = "088316ec6aa481e52bdadb4534e8ab50bd7e76d8fbf2e6395da591214544efec"
+
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
@@ -146,6 +189,231 @@ def _create(tmp_path: Path, **overrides):
     path = tmp_path / "evidence.sqlite3"
     evidence_graph.create_generation_database(path, **records)
     return evidence_graph.EvidenceGraph(path, state_root=tmp_path)
+
+
+def test_database_schema_is_explicit_and_returned(tmp_path: Path) -> None:
+    from code_intelligence import verify_native_analysis
+    from evidence_graph import GraphSchema, create_generation_database
+
+    records = basic_graph_records()
+    v2 = create_generation_database(
+        tmp_path / "v2.sqlite3", schema=GraphSchema.V2, **records
+    )
+    verified = verify_native_analysis(
+        snapshot_for_records(records), make_normalized_analysis_for_records(records)
+    )
+    v3 = create_generation_database(
+        tmp_path / "v3.sqlite3",
+        schema=GraphSchema.V3,
+        verified_analyses=(verified,),
+        **records,
+    )
+
+    assert (v2, v3) == (GraphSchema.V2, GraphSchema.V3)
+    with sqlite3.connect(tmp_path / "v2.sqlite3") as database:
+        assert database.execute("PRAGMA user_version").fetchone()[0] == 2
+    with sqlite3.connect(tmp_path / "v3.sqlite3") as database:
+        assert database.execute("PRAGMA user_version").fetchone()[0] == 3
+
+
+def test_omitted_database_schema_remains_v2_for_legacy_callers(tmp_path: Path) -> None:
+    from evidence_graph import GraphSchema, create_generation_database
+
+    selected = create_generation_database(
+        tmp_path / "legacy.sqlite3", **basic_graph_records()
+    )
+
+    assert selected == GraphSchema.V2
+
+
+def test_v3_has_normalized_relationships_without_unresolved_v2_assertions(
+    tmp_path: Path,
+) -> None:
+    graph = open_v3_fixture(tmp_path)
+    try:
+        assert graph._database.execute(
+            "SELECT count(*) FROM relationship_claim"
+        ).fetchone()[0] > 0
+        assert graph._database.execute(
+            "SELECT count(*) FROM assertion WHERE resolution != 'resolved'"
+        ).fetchone()[0] == 0
+        assert graph._database.execute(
+            "SELECT count(*) FROM analysis_scope s JOIN analyzer_run r USING (run_id) "
+            "WHERE s.source_manifest_sha256 != r.source_manifest_sha256"
+        ).fetchone()[0] == 0
+    finally:
+        graph.close()
+
+
+def _verified_v3_database(tmp_path: Path) -> Path:
+    from code_intelligence import verify_native_analysis
+    from evidence_graph import GraphSchema, create_generation_database
+
+    records = basic_graph_records()
+    verified = verify_native_analysis(
+        snapshot_for_records(records), make_normalized_analysis_for_records(records)
+    )
+    path = tmp_path / "verified-v3.sqlite3"
+    create_generation_database(
+        path,
+        schema=GraphSchema.V3,
+        verified_analyses=(verified,),
+        **records,
+    )
+    return path
+
+
+def test_v3_extension_has_exact_table_index_and_fk_signature(tmp_path: Path) -> None:
+    path = _verified_v3_database(tmp_path)
+    bind_slots = ",".join("?" for _ in V3_EXTENSION_NAMES)
+    with sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True) as database:
+        rows = database.execute(
+            f"SELECT type,name,tbl_name,sql FROM sqlite_schema "
+            f"WHERE name IN ({bind_slots}) ORDER BY type,name",
+            sorted(V3_EXTENSION_NAMES),
+        ).fetchall()
+        encoded = json.dumps(rows, ensure_ascii=True, separators=(",", ":")).encode()
+        assert len(rows) == 30
+        assert hashlib.sha256(encoded).hexdigest() == V3_EXTENSION_SCHEMA_SHA256
+        assert database.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_v2_rejects_verified_analysis_batches(tmp_path: Path) -> None:
+    from code_intelligence import verify_native_analysis
+    from evidence_graph import GraphSchema, create_generation_database
+
+    records = basic_graph_records()
+    verified = verify_native_analysis(
+        snapshot_for_records(records), make_normalized_analysis_for_records(records)
+    )
+    with pytest.raises(ValueError, match="v3"):
+        create_generation_database(
+            tmp_path / "v2.sqlite3",
+            schema=GraphSchema.V2,
+            verified_analyses=(verified,),
+            **records,
+        )
+
+
+def _damage_v3(path: Path, damage: str) -> None:
+    with sqlite3.connect(path) as database:
+        if damage == "missing-scope":
+            database.execute("DELETE FROM analysis_scope")
+        elif damage == "extra-scope":
+            empty_set = hashlib.sha256(b"[]").hexdigest()
+            database.execute(
+                "INSERT INTO analysis_scope SELECT 'scope:extra',run_id,"
+                "source_manifest_sha256,build_target||'-extra',build_configuration,0,?,"
+                "generated_sources,dependency_resolution,analyzer_support "
+                "FROM analysis_scope LIMIT 1",
+                (empty_set,),
+            )
+        elif damage == "duplicate-target-configuration":
+            empty_set = hashlib.sha256(b"[]").hexdigest()
+            database.execute(
+                "INSERT INTO analysis_scope SELECT 'scope:duplicate',run_id,"
+                "source_manifest_sha256,build_target,build_configuration,0,?,"
+                "generated_sources,dependency_resolution,analyzer_support "
+                "FROM analysis_scope LIMIT 1",
+                (empty_set,),
+            )
+        elif damage == "scope-set-hash":
+            database.execute(
+                "UPDATE analyzer_run SET expected_scope_set_sha256=?", ("f" * 64,)
+            )
+        elif damage == "scope-source-manifest":
+            database.execute(
+                "UPDATE analysis_scope SET source_manifest_sha256=?", ("f" * 64,)
+            )
+        elif damage == "missing-capability":
+            database.execute(
+                "DELETE FROM run_capability WHERE capability="
+                "(SELECT capability FROM run_capability LIMIT 1)"
+            )
+        elif damage == "extra-capability":
+            run_id = database.execute("SELECT run_id FROM analyzer_run").fetchone()[0]
+            database.execute(
+                "INSERT INTO run_capability VALUES (?, 'diagnostics')", (run_id,)
+            )
+        elif damage == "capability-set-hash":
+            database.execute(
+                "UPDATE analyzer_run SET declared_capabilities_sha256=?", ("f" * 64,)
+            )
+        elif damage == "missing-source":
+            database.execute(
+                "DELETE FROM expected_source WHERE source_id="
+                "(SELECT source_id FROM expected_source LIMIT 1)"
+            )
+        elif damage == "extra-source":
+            empty_sha = hashlib.sha256(b"").hexdigest()
+            database.execute(
+                "INSERT INTO source VALUES "
+                "('source:extra','extra.py',?,0,'text/x-python','python',NULL,X'')",
+                (empty_sha,),
+            )
+            scope_id, run_id = database.execute(
+                "SELECT scope_id,run_id FROM analysis_scope"
+            ).fetchone()
+            database.execute(
+                "INSERT INTO expected_source VALUES (?,?, 'source:extra',?,'included')",
+                (scope_id, run_id, empty_sha),
+            )
+        elif damage == "source-set-hash":
+            database.execute(
+                "UPDATE analysis_scope SET expected_source_set_sha256=?", ("f" * 64,)
+            )
+        elif damage == "missing-coverage":
+            database.execute(
+                "DELETE FROM coverage WHERE capability="
+                "(SELECT capability FROM coverage LIMIT 1)"
+            )
+        elif damage == "extra-coverage":
+            database.execute("INSERT INTO coverage SELECT * FROM coverage LIMIT 1")
+        elif damage == "duplicate-selected-slice":
+            database.execute(
+                "INSERT INTO slice_activation SELECT slice_id||':duplicate',slice_key,"
+                "run_id,scope_id,capability,1,selection_reason "
+                "FROM slice_activation LIMIT 1"
+            )
+        elif damage == "missing-selected-slice":
+            database.execute("UPDATE slice_activation SET selected=0 WHERE selected=1")
+        elif damage == "invalid-validity-subject":
+            database.execute(
+                "INSERT INTO validity VALUES "
+                "('validity:invalid',NULL,NULL,NULL,'current',NULL)"
+            )
+        else:
+            raise AssertionError(damage)
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "missing-scope",
+        "extra-scope",
+        "duplicate-target-configuration",
+        "scope-set-hash",
+        "scope-source-manifest",
+        "missing-capability",
+        "extra-capability",
+        "capability-set-hash",
+        "missing-source",
+        "extra-source",
+        "source-set-hash",
+        "missing-coverage",
+        "extra-coverage",
+        "duplicate-selected-slice",
+        "missing-selected-slice",
+        "invalid-validity-subject",
+    ],
+)
+def test_v3_closed_world_storage_fails_closed(tmp_path: Path, damage: str) -> None:
+    from evidence_graph import GraphSchema, validate_generation_database
+
+    path = _verified_v3_database(tmp_path)
+    with pytest.raises((sqlite3.IntegrityError, ValueError)):
+        _damage_v3(path, damage)
+        validate_generation_database(path, schema=GraphSchema.V3)
 
 
 def test_database_construction_cancellation_stops_lazy_records_without_publish(tmp_path):

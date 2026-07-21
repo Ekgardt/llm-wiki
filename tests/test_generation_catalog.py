@@ -295,6 +295,21 @@ def test_v2_complete_generation_registers(tmp_path):
     assert catalog.register("v2-complete") == manifest
 
 
+def test_catalog_rejects_v3_database_with_v2_manifest(tmp_path: Path) -> None:
+    from reliable_memory import canonical_json_bytes
+
+    from tests.code_kernel_helpers import publish_v3_fixture
+
+    result = publish_v3_fixture(tmp_path, generation_id="mismatch")
+    manifest_path = result.generation_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest["graph_schema_version"] = "evidence-graph/v2"
+    manifest_path.write_bytes(canonical_json_bytes(manifest))
+
+    with pytest.raises(ValueError, match="schema|contract|version"):
+        _catalog(tmp_path).register("mismatch")
+
+
 @pytest.mark.parametrize("graph_schema", [None, "other-graph/v1"])
 def test_v2_requires_exact_evidence_graph_schema(tmp_path, graph_schema):
     from reliable_memory import canonical_json_bytes

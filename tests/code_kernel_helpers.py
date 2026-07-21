@@ -6,6 +6,7 @@ import hashlib
 import os
 import shutil
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,9 @@ from code_intelligence import (
     NormalizedAnalysis,
     PositionEncoding,
     PositionRange,
+    Relationship,
+    RelationshipClaim,
+    RelationshipResolution,
     SubjectKind,
     SymbolClaim,
     SymbolIdentity,
@@ -29,7 +33,14 @@ from code_intelligence import (
     Validity,
     ValidityStatus,
 )
-from corpus_snapshot import CapturedSource, CorpusSnapshot
+from corpus_snapshot import (
+    CapturedSource,
+    CorpusSnapshot,
+    SnapshotPolicy,
+    SourceMetadata,
+    SourceRecord,
+    canonical_source_manifest_sha256,
+)
 from reliable_memory import canonical_json_bytes, validate_state_root
 from repository_scope import sanitized_git_environment
 
@@ -274,7 +285,8 @@ def make_normalized_analysis(
             )
             validity = (
                 Validity(
-                    validity_id="validity:" + hashlib.sha256(claim_id.encode("utf-8")).hexdigest(),
+                    validity_id="validity:"
+                    + hashlib.sha256(claim_id.encode("utf-8")).hexdigest(),
                     subject_kind=SubjectKind.SYMBOL,
                     subject_id=claim_id,
                     status=ValidityStatus.CURRENT,
@@ -293,6 +305,255 @@ def make_normalized_analysis(
     )
 
 
+def basic_graph_records() -> dict[str, object]:
+    content = b"def caller():\n    callee()\n"
+    return {
+        "sources": [
+            {
+                "source_id": "source",
+                "relative_path": "app.py",
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "size": len(content),
+                "media_type": "text/x-python",
+                "language": "python",
+                "git_oid": None,
+            }
+        ],
+        "source_bytes": {"source": content},
+        "nodes": [
+            {
+                "node_id": "caller",
+                "kind": "function",
+                "identity_scheme": "python/v1",
+                "identity_key": "app:caller",
+                "metadata": {"name": "caller"},
+            },
+            {
+                "node_id": "callee",
+                "kind": "function",
+                "identity_scheme": "python/v1",
+                "identity_key": "app:callee",
+                "metadata": {"name": "callee"},
+            },
+        ],
+        "occurrences": [
+            {
+                "occurrence_id": "occurrence",
+                "node_id": "caller",
+                "source_id": "source",
+                "role": "definition",
+                "byte_start": 0,
+                "byte_end": 12,
+                "line_start": 1,
+                "line_end": 1,
+            }
+        ],
+        "assertions": [
+            {
+                "assertion_id": "assertion",
+                "source_node_id": "caller",
+                "edge_type": "CALLS",
+                "target_node_id": "callee",
+                "literal": None,
+                "confidence": "high",
+                "authority": "ai-derived",
+                "resolution": "resolved",
+                "extractor": "python/v1",
+            }
+        ],
+        "evidence": [
+            {
+                "evidence_id": "evidence",
+                "assertion_id": "assertion",
+                "observation_id": None,
+                "source_id": "source",
+                "byte_start": 18,
+                "byte_end": 26,
+                "span_sha256": hashlib.sha256(content[18:26]).hexdigest(),
+            }
+        ],
+        "observations": [],
+        "dependencies": [],
+    }
+
+
+def snapshot_for_records(records: dict[str, object]) -> CorpusSnapshot:
+    policy = SnapshotPolicy(
+        daily_paths=(),
+        code_roots=(),
+        include_historical=False,
+        as_of=None,
+        max_files=10_000,
+        max_file_bytes=16 * 1024 * 1024,
+        max_total_bytes=512 * 1024 * 1024,
+        max_entries=50_000,
+        max_directories=5_000,
+        max_depth=32,
+    )
+    source_bytes_by_id = records["source_bytes"]
+    captured = tuple(
+        CapturedSource(
+            record=SourceRecord(
+                logical_id=source["source_id"],
+                relative_path=source["relative_path"],
+                sha256=source["sha256"],
+                size=source["size"],
+                media_type=source["media_type"],
+                language=source["language"],
+                git_oid=source["git_oid"],
+            ),
+            metadata=SourceMetadata(type="code", language=source["language"]),
+            content=source_bytes_by_id[source["source_id"]],
+        )
+        for source in records["sources"]
+    )
+    return CorpusSnapshot(
+        sources=captured,
+        chunks=(),
+        corpus_sha256=canonical_source_manifest_sha256(
+            (source.record for source in captured), policy
+        ),
+        policy=policy,
+    )
+
+
+def make_normalized_analysis_for_records(records: dict[str, object]) -> NormalizedAnalysis:
+    snapshot = snapshot_for_records(records)
+    scope = make_analysis_scope(snapshot)
+    run = replace(
+        make_run(snapshot),
+        declared_capabilities=(Capability.CALLS, Capability.DEFINITIONS),
+    )
+    source = scope.expected_sources[0]
+    symbol_id = "claim:symbol"
+    relationship_id = "claim:relationship"
+    symbol_identity = SymbolIdentity("python/v1", "app:caller")
+    return NormalizedAnalysis(
+        run=run,
+        scopes=(scope,),
+        coverage=tuple(
+            Coverage(
+                scope_id=scope.scope_id,
+                source_id=expected.source_id,
+                capability=capability,
+                status=CoverageStatus.COMPLETE,
+                closed_world_eligible=True,
+                reason=None,
+            )
+            for expected in scope.expected_sources
+            for capability in run.declared_capabilities
+        ),
+        symbols=(
+            SymbolClaim(
+                claim_id=symbol_id,
+                run_id=run.run_id,
+                scope_id=scope.scope_id,
+                source_id=source.source_id,
+                capability=Capability.DEFINITIONS,
+                identity=symbol_identity,
+                display_name="caller",
+                symbol_kind="function",
+                role=SymbolRole.DEFINITION,
+                range=PositionRange(4, 10),
+                evidence_level=EvidenceLevel.SYNTAX,
+                ambiguity=False,
+            ),
+        ),
+        relationships=(
+            RelationshipClaim(
+                claim_id=relationship_id,
+                run_id=run.run_id,
+                scope_id=scope.scope_id,
+                source_id=source.source_id,
+                source_identity=symbol_identity,
+                relation=Relationship.CALLS,
+                capability=Capability.CALLS,
+                target_identity=None,
+                target_text="callee",
+                resolution=RelationshipResolution.UNRESOLVED,
+                range=PositionRange(18, 26),
+                evidence_level=EvidenceLevel.SYNTAX,
+                ambiguity=False,
+            ),
+        ),
+        diagnostics=(),
+        validity=(
+            Validity(
+                validity_id="validity:relationship",
+                subject_kind=SubjectKind.RELATIONSHIP,
+                subject_id=relationship_id,
+                status=ValidityStatus.CURRENT,
+                stale_reason=None,
+            ),
+            Validity(
+                validity_id="validity:symbol",
+                subject_kind=SubjectKind.SYMBOL,
+                subject_id=symbol_id,
+                status=ValidityStatus.CURRENT,
+                stale_reason=None,
+            ),
+        ),
+        receipt=None,
+    )
+
+
+def build_fixture_generation(
+    tmp_path: Path,
+    *,
+    generation_id: str,
+    graph_schema=None,
+):
+    from code_intelligence import verify_native_analysis
+    from evidence_graph import GraphSchema
+    from evidence_graph_builder import build_full_generation
+    from generation_catalog import GenerationCatalog
+
+    records = basic_graph_records()
+    options = {}
+    if graph_schema is not None:
+        options["graph_schema"] = graph_schema
+    if graph_schema is GraphSchema.V3:
+        options["verified_analyses"] = (
+            verify_native_analysis(
+                snapshot_for_records(records), make_normalized_analysis_for_records(records)
+            ),
+        )
+    return build_full_generation(
+        GenerationCatalog(tmp_path / "state"),
+        generation_id=generation_id,
+        activate=False,
+        **options,
+        **records,
+    )
+
+
+def publish_v2_fixture(tmp_path: Path, generation_id: str = "v2"):
+    from evidence_graph import GraphSchema
+
+    return build_fixture_generation(
+        tmp_path, generation_id=generation_id, graph_schema=GraphSchema.V2
+    )
+
+
+def publish_v3_fixture(tmp_path: Path, generation_id: str = "v3"):
+    from evidence_graph import GraphSchema
+
+    return build_fixture_generation(
+        tmp_path, generation_id=generation_id, graph_schema=GraphSchema.V3
+    )
+
+
+def open_v3_fixture(tmp_path: Path):
+    from evidence_graph import EvidenceGraph, GraphSchema
+
+    result = publish_v3_fixture(tmp_path)
+    return EvidenceGraph(
+        result.generation_path / "evidence.sqlite3",
+        state_root=tmp_path / "state",
+        schema=GraphSchema.V3,
+    )
+
+
 @pytest.fixture
 def state_root(tmp_path: Path) -> Path:
     root = tmp_path / "state"
@@ -303,3 +564,10 @@ def state_root(tmp_path: Path) -> Path:
 @pytest.fixture
 def repository(tmp_path: Path) -> Path:
     return create_python_repository(tmp_path / "repository")
+
+
+@pytest.fixture
+def catalog(state_root: Path):
+    from generation_catalog import GenerationCatalog
+
+    return GenerationCatalog(state_root)

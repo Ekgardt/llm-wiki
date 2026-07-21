@@ -38,6 +38,7 @@ from typing import Literal
 import corpus_snapshot
 import evidence_graph
 import generation_catalog
+from code_intelligence import VerifiedAnalysisBatch
 from reliable_memory import canonical_json_bytes, fsync_directory, fsync_file, read_runtime_bytes
 from repository_scope import RepositoryScope
 
@@ -205,6 +206,7 @@ def _build_manifest(
     database_sha256: str,
     source_manifest_bytes: bytes,
     repository_scope: RepositoryScope | None,
+    graph_schema: evidence_graph.GraphSchema = evidence_graph.GraphSchema.V2,
     schema_version: str = CORPUS_GENERATION_SCHEMA_VERSION,
     tokenizer_version: str = DEFAULT_TOKENIZER_VERSION,
     tokenizer_config_sha256: str = DEFAULT_TOKENIZER_CONFIG_SHA256,
@@ -244,7 +246,7 @@ def _build_manifest(
         "embedding_model_id": None,
         "embedding_model_revision": None,
         "vector_dimensions": None,
-        "graph_schema_version": GRAPH_SCHEMA_VERSION,
+        "graph_schema_version": graph_schema.value,
         "graph_extractor_version": graph_extractor_version,
         "source_manifest_sha256": source_manifest_sha256,
         "artifacts": artifacts,
@@ -287,6 +289,7 @@ def _materialize(
             raise ValueError(f"{label} row ceiling exceeded")
         materialized.append(record)
     _check_stop(deadline, cancelled)
+
     return materialized
 
 
@@ -403,6 +406,8 @@ def build_full_generation(
     evidence: Iterable[Mapping[str, object]],
     observations: Iterable[Mapping[str, object]],
     dependencies: Iterable[Mapping[str, object]],
+    graph_schema: evidence_graph.GraphSchema = evidence_graph.GraphSchema.V2,
+    verified_analyses: Iterable[VerifiedAnalysisBatch] = (),
     generation_id: str,
     parent_generation_id: str | None = None,
     policy: Mapping[str, object] | None = None,
@@ -436,6 +441,8 @@ def build_full_generation(
     _validate_kill_point(kill_point)
     if not isinstance(catalog, generation_catalog.GenerationCatalog):
         raise TypeError("catalog must be a GenerationCatalog")
+    if not isinstance(graph_schema, evidence_graph.GraphSchema):
+        raise TypeError("graph_schema must be a GraphSchema")
     if repository_scope is not None and not isinstance(repository_scope, RepositoryScope):
         raise TypeError("repository_scope must be a RepositoryScope or None")
     if repository_scope is not None:
@@ -508,6 +515,17 @@ def build_full_generation(
             raise ValueError("CorpusSnapshot hash does not match its canonical source manifest")
     _check_stop(deadline, cancelled)
 
+    verified_analysis_list: list[VerifiedAnalysisBatch] = []
+    for batch in verified_analyses:
+        _check_stop(deadline, cancelled)
+        if len(verified_analysis_list) >= evidence_graph.MAX_VALIDATION_ROWS:
+            raise ValueError("verified analysis row ceiling exceeded")
+        if not isinstance(batch, VerifiedAnalysisBatch):
+            raise TypeError("verified_analyses must contain VerifiedAnalysisBatch values")
+        if batch.source_manifest_sha256 != source_manifest_sha256:
+            raise ValueError("verified analysis source manifest must match generation manifest")
+        verified_analysis_list.append(batch)
+
     nodes_list = _materialize(
         nodes,
         label="nodes",
@@ -571,6 +589,7 @@ def build_full_generation(
         database_path = generation_path / "evidence.sqlite3"
         evidence_graph.create_generation_database(
             database_path,
+            schema=graph_schema,
             sources=sources_list,
             source_bytes=source_bytes_snapshot,
             nodes=nodes_list,
@@ -579,6 +598,7 @@ def build_full_generation(
             evidence=evidence_list,
             observations=observations_list,
             dependencies=dependencies_list,
+            verified_analyses=verified_analysis_list,
             deadline=deadline,
             cancelled=cancelled,
         )
@@ -634,6 +654,7 @@ def build_full_generation(
             database_sha256=database_sha256,
             source_manifest_bytes=source_manifest_bytes,
             repository_scope=repository_scope,
+            graph_schema=graph_schema,
             schema_version=(
                 COMPLETE_CORPUS_GENERATION_SCHEMA_VERSION
                 if snapshot is not None

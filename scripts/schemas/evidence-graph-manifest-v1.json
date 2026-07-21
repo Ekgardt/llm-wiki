@@ -14,7 +14,7 @@
     "embedding_model_id": {"oneOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 128}]},
     "embedding_model_revision": {"oneOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 128}]},
     "vector_dimensions": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 1, "maximum": 65536}]},
-    "graph_schema_version": {"oneOf": [{"type": "null"}, {"const": "evidence-graph/v2"}]},
+    "graph_schema_version": {"oneOf": [{"type": "null"}, {"enum": ["evidence-graph/v2", "evidence-graph/v3"]}]},
     "graph_extractor_version": {"oneOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 128}]},
     "source_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "repository_scope": {
@@ -82,7 +82,7 @@
       "then": {
         "required": ["repository_scope"],
         "properties": {
-          "graph_schema_version": {"const": "evidence-graph/v2"},
+          "graph_schema_version": {"enum": ["evidence-graph/v2", "evidence-graph/v3"]},
           "graph_extractor_version": {"type": "string", "minLength": 1, "maxLength": 128},
           "artifacts": {
             "contains": {"properties": {"path": {"const": "source-manifest.json"}}, "required": ["path"]},

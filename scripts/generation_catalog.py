@@ -637,8 +637,8 @@ def _validate_generation(
 
     graph_schema = _optional_version("graph_schema_version", value["graph_schema_version"])
     graph_extractor = _optional_version("graph_extractor_version", value["graph_extractor_version"])
-    if graph_schema not in {None, "evidence-graph/v2"}:
-        raise ValueError("graph schema must be null or evidence-graph/v2")
+    if graph_schema not in {None, "evidence-graph/v2", "evidence-graph/v3"}:
+        raise ValueError("graph schema must be null, evidence-graph/v2, or evidence-graph/v3")
     if (graph_schema is None) != (graph_extractor is None):
         raise ValueError("graph schema and extractor versions must be both set or null")
     normalized["graph_schema_version"] = graph_schema
@@ -730,7 +730,7 @@ def _validate_generation(
             _V2_REQUIRED_ARTIFACTS | _V2_OPTIONAL_ARTIFACTS
         ):
             raise ValueError("corpus-generation/v2 has an invalid artifact contract")
-        if graph_schema != "evidence-graph/v2":
+        if graph_schema not in {"evidence-graph/v2", "evidence-graph/v3"}:
             raise ValueError(
                 "corpus-generation/v2 requires the Evidence Graph schema"
             )
@@ -755,7 +755,7 @@ def _validate_generation(
             cancelled=cancelled,
         )
 
-    elif graph_schema == "evidence-graph/v2":
+    elif graph_schema in {"evidence-graph/v2", "evidence-graph/v3"}:
         from evidence_graph import validate_generation_artifact
 
         validate_generation_artifact(
