@@ -328,6 +328,7 @@ def test_v2_generation_accepts_only_known_graph_schema_strings(
     from repository_scope import resolve_repository_scope
 
     from tests.code_kernel_helpers import (
+        captured_snapshot_for_records,
         make_analysis_scope,
         make_normalized_analysis,
     )
@@ -365,6 +366,10 @@ def test_v2_generation_accepts_only_known_graph_schema_strings(
             "observations": (),
             "dependencies": (),
         }
+        snapshot = __import__("dataclasses").replace(
+            snapshot,
+            code_capture=captured_snapshot_for_records(records).code_capture,
+        )
         scope = make_analysis_scope(snapshot)
         repository_scope = resolve_repository_scope(repository)
         result = build_full_generation(
@@ -378,6 +383,7 @@ def test_v2_generation_accepts_only_known_graph_schema_strings(
                 ),
             ),
             snapshot=snapshot,
+            code_capture=snapshot.code_capture,
             repository_scope=repository_scope,
             activate=False,
             **records,
@@ -421,6 +427,51 @@ def test_catalog_rejects_v3_database_with_v2_manifest(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="schema|contract|version"):
         _catalog(tmp_path).register("mismatch")
+
+
+@pytest.mark.parametrize(
+    "damage",
+    ["missing", "unknown-top", "unknown-nested", "membership-hash", "directory-order"],
+)
+def test_catalog_rejects_damaged_or_noncanonical_v3_code_capture(
+    tmp_path: Path, damage: str
+) -> None:
+    from reliable_memory import canonical_json_bytes
+
+    from tests.code_kernel_helpers import publish_v3_fixture
+
+    result = publish_v3_fixture(tmp_path, generation_id=f"capture-{damage}")
+    manifest_path = result.generation_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    capture = manifest.get("code_capture")
+    if damage == "missing":
+        manifest.pop("code_capture")
+    elif damage == "unknown-top":
+        capture["unknown"] = True
+    elif damage == "unknown-nested":
+        capture["limits"]["unknown"] = 1
+    elif damage == "membership-hash":
+        capture["membership_sha256"] = "0" * 64
+    else:
+        capture["directories"] = list(reversed(capture["directories"]))
+    manifest_path.write_bytes(canonical_json_bytes(manifest))
+
+    with pytest.raises(ValueError, match="code.capture|v3|manifest|membership|order"):
+        _catalog(tmp_path).register(result.generation_id)
+
+
+def test_manifest_schema_requires_code_capture_only_for_graph_v3(tmp_path: Path) -> None:
+    import jsonschema
+
+    schema_path = SCRIPTS / "schemas/evidence-graph-manifest-v1.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    validator = jsonschema.Draft202012Validator(schema)
+    catalog = _catalog(tmp_path)
+    _directory, v2 = _publish_v2(catalog, "schema-v2")
+    assert not list(validator.iter_errors(v2))
+    v3 = dict(v2, graph_schema_version="evidence-graph/v3")
+    errors = list(validator.iter_errors(v3))
+    assert any("code_capture" in error.message for error in errors)
 
 
 @pytest.mark.parametrize("graph_schema", [None, "other-graph/v1"])

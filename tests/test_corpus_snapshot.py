@@ -74,6 +74,7 @@ def test_notes_keep_full_paths_and_exclude_historical_and_internals(vault: Path)
     ]
     assert snapshot.sources[0].record.logical_id != snapshot.sources[1].record.logical_id
     assert snapshot.sources[0].content.startswith(b"---\n")
+    assert snapshot.code_capture is None
 
     historical = collect_corpus(vault, include_historical=True)
     assert "knowledge/notes/old.md" in {

@@ -31,6 +31,7 @@ import pytest
 from tests.code_kernel_helpers import (
     basic_graph_records,
     build_fixture_generation,
+    captured_snapshot_for_records,
     make_unminted_verified_subclass,
     snapshot_for_records,
 )
@@ -78,6 +79,16 @@ def test_omitted_builder_schema_keeps_legacy_v2_manifest(tmp_path: Path) -> None
         assert database.execute("PRAGMA user_version").fetchone()[0] == 2
 
 
+def test_low_level_database_writer_has_no_code_capture_argument() -> None:
+    import inspect
+
+    import evidence_graph
+
+    assert "code_capture" not in inspect.signature(
+        evidence_graph.create_generation_database
+    ).parameters
+
+
 def test_v3_builder_rejects_unminted_verified_subclass_before_publication(
     tmp_path: Path,
 ) -> None:
@@ -91,13 +102,15 @@ def test_v3_builder_rejects_unminted_verified_subclass_before_publication(
     repository.mkdir()
     repository_scope = resolve_repository_scope(repository)
     catalog = GenerationCatalog(tmp_path / "state")
+    snapshot = captured_snapshot_for_records(records)
     with pytest.raises(TypeError, match="VerifiedAnalysisBatch"):
         build_full_generation(
             catalog,
             generation_id="forged",
             graph_schema=GraphSchema.V3,
             verified_analyses=(make_unminted_verified_subclass(records),),
-            snapshot=snapshot_for_records(records),
+            snapshot=snapshot,
+            code_capture=snapshot.code_capture,
             repository_scope=repository_scope,
             activate=False,
             **records,
@@ -118,6 +131,69 @@ def test_v3_builder_requires_complete_repository_scoped_generation(tmp_path: Pat
             graph_schema=GraphSchema.V3,
             **basic_graph_records(),
         )
+
+
+def test_v3_builder_requires_code_capture_before_creating_generation(tmp_path: Path) -> None:
+    from evidence_graph import GraphSchema
+    from evidence_graph_builder import build_full_generation
+    from generation_catalog import GenerationCatalog
+    from repository_scope import resolve_repository_scope
+
+    records = basic_graph_records()
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    catalog = GenerationCatalog(tmp_path / "state")
+    with pytest.raises(ValueError, match="code.capture"):
+        build_full_generation(
+            catalog,
+            generation_id="no-capture",
+            graph_schema=GraphSchema.V3,
+            snapshot=snapshot_for_records(records),
+            repository_scope=resolve_repository_scope(repository),
+            activate=False,
+            **records,
+        )
+    assert not (catalog.generations_path / "no-capture").exists()
+
+
+def test_build_manifest_emits_exact_closed_code_capture_contract(tmp_path: Path) -> None:
+    from code_workspace import code_capture_as_dict, collect_repository_code
+    from evidence_graph import GraphSchema
+    from evidence_graph_builder import _build_manifest
+
+    repository = tmp_path / "repository"
+    (repository / "src").mkdir(parents=True)
+    (repository / "src/app.py").write_text("answer = 42\n", encoding="utf-8")
+    snapshot = collect_repository_code(
+        repository,
+        roots=("src",),
+        include_globs=("**/*.py",),
+        ignore_globs=(),
+        suffixes=(".py",),
+    )
+    manifest = _build_manifest(
+        generation_id="capture",
+        parent_generation_id=None,
+        collector_version="collector/v1",
+        extractor_version="extractor/v1",
+        graph_extractor_version="graph/v1",
+        source_manifest_sha256="1" * 64,
+        database_size=1,
+        database_sha256="2" * 64,
+        source_manifest_bytes=b"{}",
+        repository_scope=None,
+        graph_schema=GraphSchema.V3,
+        code_capture=snapshot.code_capture,
+    )
+
+    assert manifest["code_capture"] == code_capture_as_dict(snapshot.code_capture)
+    assert set(manifest["code_capture"]) == {
+        "policy",
+        "limits",
+        "files",
+        "directories",
+        "membership_sha256",
+    }
 
 
 def test_v3_builder_rejects_run_outside_manifest_repository_scope(tmp_path: Path) -> None:

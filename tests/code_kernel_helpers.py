@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import stat
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -39,7 +40,12 @@ from code_intelligence import (
 )
 from corpus_snapshot import (
     CapturedSource,
+    CodeCaptureContract,
     CorpusSnapshot,
+    DirectoryMembership,
+    FileStatMetadata,
+    RepositoryCodeLimits,
+    RepositoryCodePolicy,
     SnapshotPolicy,
     SourceMetadata,
     SourceRecord,
@@ -442,6 +448,55 @@ def snapshot_for_records(records: dict[str, object]) -> CorpusSnapshot:
     )
 
 
+def captured_snapshot_for_records(records: dict[str, object]) -> CorpusSnapshot:
+    """Add the canonical capture fixture required for analyzer-backed generations."""
+    snapshot = snapshot_for_records(records)
+    files = tuple(
+        (
+            source.record.relative_path,
+            FileStatMetadata(source.record.size, 0, 0, stat.S_IFREG, 0, 0),
+        )
+        for source in snapshot.sources
+    )
+    empty_entries = hashlib.sha256(canonical_json_bytes([])).hexdigest()
+    directories = (
+        DirectoryMembership("fixture-a", 0, empty_entries),
+        DirectoryMembership("fixture-b", 0, empty_entries),
+    )
+    membership = hashlib.sha256(
+        canonical_json_bytes(
+            [
+                {
+                    "relative_path": item.relative_path,
+                    "entry_count": item.entry_count,
+                    "entries_sha256": item.entries_sha256,
+                }
+                for item in directories
+            ]
+        )
+    ).hexdigest()
+    contract = CodeCaptureContract(
+        policy=RepositoryCodePolicy(
+            roots=tuple(
+                sorted(
+                    {
+                        *(path for path, _metadata in files),
+                        *(item.relative_path for item in directories),
+                    }
+                )
+            ),
+            include_globs=("**",),
+            ignore_globs=(),
+            suffixes=tuple(sorted({Path(path).suffix.casefold() for path, _ in files})),
+        ),
+        limits=RepositoryCodeLimits(),
+        files=files,
+        directories=directories,
+        membership_sha256=membership,
+    )
+    return replace(snapshot, code_capture=contract)
+
+
 def make_normalized_analysis_for_records(
     records: dict[str, object], repository_scope=None
 ) -> NormalizedAnalysis:
@@ -603,14 +658,18 @@ def build_fixture_generation(
         repository = tmp_path / "repository"
         repository.mkdir(parents=True, exist_ok=True)
         repository_scope = resolve_repository_scope(repository)
-        snapshot = snapshot_for_records(records)
+        snapshot = captured_snapshot_for_records(records)
         options["verified_analyses"] = (
             verify_native_analysis(
                 snapshot,
                 make_normalized_analysis_for_records(records, repository_scope),
             ),
         )
-        options.update(snapshot=snapshot, repository_scope=repository_scope)
+        options.update(
+            snapshot=snapshot,
+            repository_scope=repository_scope,
+            code_capture=snapshot.code_capture,
+        )
     return build_full_generation(
         GenerationCatalog(tmp_path / "state"),
         generation_id=generation_id,
@@ -621,11 +680,18 @@ def build_fixture_generation(
 
 
 def publish_v2_fixture(tmp_path: Path, generation_id: str = "v2"):
+    return non_code_v2_generation(tmp_path, generation_id=generation_id)
+
+
+def non_code_v2_generation(tmp_path: Path, generation_id: str = "v2"):
+    """Publish ordinary graph-v2 records without a repository capture contract."""
     from evidence_graph import GraphSchema
 
-    return build_fixture_generation(
+    result = build_fixture_generation(
         tmp_path, generation_id=generation_id, graph_schema=GraphSchema.V2
     )
+    assert "code_capture" not in result.manifest
+    return result
 
 
 def publish_v3_fixture(tmp_path: Path, generation_id: str = "v3"):

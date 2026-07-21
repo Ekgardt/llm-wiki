@@ -107,8 +107,13 @@ _MANIFEST_KEYS = {
     "artifacts",
     "vector_state",
     "repository_scope",
+    "code_capture",
 }
-_REQUIRED_MANIFEST_KEYS = _MANIFEST_KEYS - {"parent_generation_id", "repository_scope"}
+_REQUIRED_MANIFEST_KEYS = _MANIFEST_KEYS - {
+    "parent_generation_id",
+    "repository_scope",
+    "code_capture",
+}
 _ARTIFACT_KEYS = {"path", "size", "sha256"}
 _VECTOR_FILES = {"vectors.npy", "vectors.json"}
 _V2_REQUIRED_ARTIFACTS = {
@@ -649,6 +654,10 @@ def _validate_generation(
         normalized["repository_scope"] = RepositoryScope.from_dict(
             value["repository_scope"]
         ).as_dict()
+    if "code_capture" in value:
+        from code_workspace import validate_code_capture
+
+        normalized["code_capture"] = validate_code_capture(value["code_capture"])
     source_hash = value["source_manifest_sha256"]
     if not isinstance(source_hash, str) or _SHA256_RE.fullmatch(source_hash) is None:
         raise ValueError("source_manifest_sha256 must be lowercase SHA-256")
@@ -727,6 +736,8 @@ def _validate_generation(
 
     if normalized["schema_version"] == "corpus-generation/v1" and graph_schema == "evidence-graph/v3":
         raise ValueError("evidence-graph/v3 requires corpus-generation/v2")
+    if graph_schema == "evidence-graph/v3" and "code_capture" not in normalized:
+        raise ValueError("evidence-graph/v3 requires code_capture")
 
     if normalized["schema_version"] == "corpus-generation/v2":
         if not _V2_REQUIRED_ARTIFACTS <= seen or not seen <= (
@@ -757,6 +768,32 @@ def _validate_generation(
             deadline=deadline,
             cancelled=cancelled,
         )
+        if graph_schema == "evidence-graph/v3":
+            import corpus_snapshot
+            import evidence_graph
+
+            source_manifest_raw = read_runtime_bytes(
+                generation_path / "source-manifest.json",
+                state_root,
+                max_bytes=evidence_graph.MAX_SOURCE_MANIFEST_BYTES,
+            )
+            try:
+                source_manifest = json.loads(source_manifest_raw)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError("source manifest must contain valid UTF-8 JSON") from exc
+            source_manifest = corpus_snapshot.validate_canonical_source_manifest(
+                source_manifest
+            )
+            source_paths = [
+                source["relative_path"] for source in source_manifest["sources"]
+            ]
+            captured_paths = [
+                item["relative_path"] for item in normalized["code_capture"]["files"]
+            ]
+            if captured_paths != source_paths:
+                raise ValueError(
+                    "code_capture file paths must match canonical source membership"
+                )
 
     elif graph_schema in {"evidence-graph/v2", "evidence-graph/v3"}:
         from evidence_graph import validate_generation_artifact

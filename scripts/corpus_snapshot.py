@@ -139,6 +139,169 @@ class SnapshotPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class RepositoryCodeLimits:
+    max_files: int = 10_000
+    max_file_bytes: int = 8 * 1024 * 1024
+    max_total_bytes: int = 512 * 1024 * 1024
+    max_entries: int = 50_000
+    max_directories: int = 5_000
+    max_depth: int = 32
+    chunk_bytes: int = 64 * 1024
+
+    def __post_init__(self) -> None:
+        maxima = {
+            "max_files": 10_000,
+            "max_file_bytes": 8 * 1024 * 1024,
+            "max_total_bytes": 512 * 1024 * 1024,
+            "max_entries": 50_000,
+            "max_directories": 5_000,
+            "max_depth": 32,
+            "chunk_bytes": 64 * 1024,
+        }
+        for field, maximum in maxima.items():
+            value = getattr(self, field)
+            minimum = 0 if field == "max_depth" else 1
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not minimum <= value <= maximum
+            ):
+                raise ValueError(f"{field} must be an integer from {minimum} to {maximum}")
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryCodePolicy:
+    roots: tuple[str, ...]
+    include_globs: tuple[str, ...]
+    ignore_globs: tuple[str, ...]
+    suffixes: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        for name in ("roots", "include_globs", "ignore_globs", "suffixes"):
+            values = getattr(self, name)
+            if (
+                not isinstance(values, tuple)
+                or len(values) > 256
+                or values != tuple(sorted(set(values)))
+                or any(not isinstance(value, str) or not value for value in values)
+            ):
+                raise ValueError(f"{name} must be a bounded sorted unique tuple")
+        if not self.roots:
+            raise ValueError("roots must not be empty")
+        for root in self.roots:
+            pure = PurePosixPath(root)
+            if (
+                len(root) > 4096
+                or root != unicodedata.normalize("NFC", root)
+                or "\\" in root
+                or pure.is_absolute()
+                or root == "."
+                or any(part in {"", ".", ".."} for part in pure.parts)
+            ):
+                raise ValueError("roots must contain normalized relative POSIX paths")
+        for name in ("include_globs", "ignore_globs"):
+            if any(
+                len(value) > 4096
+                or value != unicodedata.normalize("NFC", value)
+                or "\\" in value
+                or PurePosixPath(value).is_absolute()
+                or ".." in PurePosixPath(value).parts
+                for value in getattr(self, name)
+            ):
+                raise ValueError(f"{name} must contain normalized relative POSIX globs")
+        if any(
+            len(value) > 64
+            or value != value.casefold()
+            or not value.startswith(".")
+            or "/" in value
+            or "\\" in value
+            for value in self.suffixes
+        ):
+            raise ValueError("suffixes must contain normalized lowercase suffixes")
+
+
+@dataclass(frozen=True, slots=True)
+class FileStatMetadata:
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+    mode: int
+    device: int
+    inode: int
+
+    def __post_init__(self) -> None:
+        for name in self.__dataclass_fields__:
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+
+
+@dataclass(frozen=True, slots=True)
+class DirectoryMembership:
+    relative_path: str
+    entry_count: int
+    entries_sha256: str
+
+    def __post_init__(self) -> None:
+        pure = PurePosixPath(self.relative_path)
+        if (
+            not self.relative_path
+            or len(self.relative_path) > 4096
+            or self.relative_path != unicodedata.normalize("NFC", self.relative_path)
+            or "\\" in self.relative_path
+            or pure.is_absolute()
+            or self.relative_path == "."
+            or any(part in {"", ".", ".."} for part in pure.parts)
+        ):
+            raise ValueError("relative_path must be normalized relative POSIX text")
+        if (
+            isinstance(self.entry_count, bool)
+            or not isinstance(self.entry_count, int)
+            or self.entry_count < 0
+        ):
+            raise ValueError("entry_count must be a non-negative integer")
+        if re.fullmatch(r"[0-9a-f]{64}", self.entries_sha256) is None:
+            raise ValueError("entries_sha256 must be lowercase SHA-256")
+
+
+@dataclass(frozen=True, slots=True)
+class CodeCaptureContract:
+    policy: RepositoryCodePolicy
+    limits: RepositoryCodeLimits
+    files: tuple[tuple[str, FileStatMetadata], ...]
+    directories: tuple[DirectoryMembership, ...]
+    membership_sha256: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.policy, RepositoryCodePolicy):
+            raise TypeError("policy must be RepositoryCodePolicy")
+        if not isinstance(self.limits, RepositoryCodeLimits):
+            raise TypeError("limits must be RepositoryCodeLimits")
+        if (
+            not isinstance(self.files, tuple)
+            or any(
+                not isinstance(item, tuple)
+                or len(item) != 2
+                or not isinstance(item[0], str)
+                or not isinstance(item[1], FileStatMetadata)
+                for item in self.files
+            )
+            or tuple(path for path, _metadata in self.files)
+            != tuple(sorted(path for path, _metadata in self.files))
+        ):
+            raise ValueError("files must be an ordered tuple of path metadata pairs")
+        if (
+            not isinstance(self.directories, tuple)
+            or any(not isinstance(item, DirectoryMembership) for item in self.directories)
+            or tuple(item.relative_path for item in self.directories)
+            != tuple(sorted(item.relative_path for item in self.directories))
+        ):
+            raise ValueError("directories must be an ordered DirectoryMembership tuple")
+        if re.fullmatch(r"[0-9a-f]{64}", self.membership_sha256) is None:
+            raise ValueError("membership_sha256 must be lowercase SHA-256")
+
+
+@dataclass(frozen=True, slots=True)
 class CorpusSnapshot:
     sources: tuple[CapturedSource, ...]
     chunks: tuple[RetrievalChunk, ...]
@@ -146,6 +309,7 @@ class CorpusSnapshot:
     policy: SnapshotPolicy
     collector_version: str = COLLECTOR_VERSION
     extractor_version: str = EXTRACTOR_VERSION
+    code_capture: CodeCaptureContract | None = None
 
     @property
     def source_hashes(self) -> tuple[tuple[str, str], ...]:

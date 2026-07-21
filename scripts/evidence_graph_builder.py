@@ -212,7 +212,10 @@ def _build_manifest(
     tokenizer_config_sha256: str = DEFAULT_TOKENIZER_CONFIG_SHA256,
     search_artifact: Mapping[str, object] | None = None,
     incremental_manifest_bytes: bytes | None = None,
+    code_capture: corpus_snapshot.CodeCaptureContract | None = None,
 ) -> Mapping[str, object]:
+    if graph_schema is evidence_graph.GraphSchema.V3 and code_capture is None:
+        raise ValueError("evidence-graph/v3 manifests require code_capture")
     artifacts = [
         {
             "path": "evidence.sqlite3",
@@ -236,7 +239,7 @@ def _build_manifest(
     if search_artifact is not None:
         artifacts.append(dict(search_artifact))
     artifacts.sort(key=lambda item: str(item["path"]))
-    return {
+    manifest = {
         "generation_id": generation_id,
         "schema_version": schema_version,
         "collector_version": collector_version,
@@ -254,6 +257,11 @@ def _build_manifest(
         **({"parent_generation_id": parent_generation_id} if parent_generation_id else {}),
         **({"repository_scope": repository_scope.as_dict()} if repository_scope else {}),
     }
+    if code_capture is not None:
+        from code_workspace import code_capture_as_dict
+
+        manifest["code_capture"] = code_capture_as_dict(code_capture)
+    return manifest
 
 
 def _check_stop(deadline: float | None, cancelled: Callable[[], bool] | None) -> None:
@@ -424,6 +432,7 @@ def build_full_generation(
     snapshot: corpus_snapshot.CorpusSnapshot | None = None,
     publication_root: Path | None = None,
     coordinator: object | None = None,
+    code_capture: corpus_snapshot.CodeCaptureContract | None = None,
 ) -> BuildResult:
     """Atomically build one full Evidence Graph generation.
 
@@ -449,12 +458,24 @@ def build_full_generation(
         repository_scope = RepositoryScope.from_dict(repository_scope.as_dict())
     if snapshot is not None and not isinstance(snapshot, corpus_snapshot.CorpusSnapshot):
         raise TypeError("snapshot must be a CorpusSnapshot or None")
+    if code_capture is not None and not isinstance(
+        code_capture, corpus_snapshot.CodeCaptureContract
+    ):
+        raise TypeError("code_capture must be a CodeCaptureContract or None")
+    if code_capture is not None:
+        from code_workspace import code_capture_as_dict, validate_code_capture
+
+        validate_code_capture(code_capture_as_dict(code_capture))
+    if snapshot is not None and code_capture is not None and snapshot.code_capture != code_capture:
+        raise ValueError("code_capture must be the exact supplied CorpusSnapshot contract")
     if snapshot is not None and activate and publication_root is None:
         raise ValueError("complete generation activation requires publication_root")
     if graph_schema is evidence_graph.GraphSchema.V3 and (
-        snapshot is None or repository_scope is None
+        snapshot is None or repository_scope is None or code_capture is None
     ):
-        raise ValueError("evidence-graph/v3 requires a CorpusSnapshot and repository scope")
+        raise ValueError(
+            "evidence-graph/v3 requires a CorpusSnapshot, repository scope, and code_capture"
+        )
 
     sources_list = [
         dict(source)
@@ -469,6 +490,17 @@ def build_full_generation(
     source_bytes_snapshot = _verify_source_snapshot(
         sources_list, source_bytes, deadline=deadline, cancelled=cancelled
     )
+    if code_capture is not None:
+        capture_membership = [
+            (relative_path, metadata.size)
+            for relative_path, metadata in code_capture.files
+        ]
+        source_membership = sorted(
+            (str(source["relative_path"]), int(source["size"]))
+            for source in sources_list
+        )
+        if capture_membership != source_membership:
+            raise ValueError("code_capture files must match builder source membership")
 
     if snapshot is not None:
         snapshot_rows = [
@@ -534,6 +566,8 @@ def build_full_generation(
         ) != (repository_scope.repository_id, repository_scope.checkout_id):
             raise ValueError("verified analysis repository or checkout does not match publication")
         verified_analysis_list.append(batch)
+    if verified_analysis_list and code_capture is None:
+        raise ValueError("verified analyses require code_capture")
 
     nodes_list = _materialize(
         nodes,
@@ -690,6 +724,7 @@ def build_full_generation(
             ),
             search_artifact=search_artifact,
             incremental_manifest_bytes=incremental_manifest_bytes,
+            code_capture=code_capture,
         )
         manifest_path = generation_path / "manifest.json"
         _write_canonical_file(manifest_path, manifest, deadline=deadline, cancelled=cancelled)
