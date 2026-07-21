@@ -16,6 +16,7 @@ import pytest
 from tests.code_kernel_helpers import (
     basic_graph_records,
     make_normalized_analysis_for_records,
+    make_unminted_verified_subclass,
     open_v3_fixture,
     snapshot_for_records,
 )
@@ -295,6 +296,23 @@ def test_v2_rejects_verified_analysis_batches(tmp_path: Path) -> None:
         )
 
 
+def test_v3_writer_rejects_unminted_verified_subclass_before_publish(
+    tmp_path: Path,
+) -> None:
+    from evidence_graph import GraphSchema, create_generation_database
+
+    records = basic_graph_records()
+    path = tmp_path / "forged.sqlite3"
+    with pytest.raises(TypeError, match="VerifiedAnalysisBatch"):
+        create_generation_database(
+            path,
+            schema=GraphSchema.V3,
+            verified_analyses=(make_unminted_verified_subclass(records),),
+            **records,
+        )
+    assert not path.exists()
+
+
 def _damage_v3(path: Path, damage: str) -> None:
     with sqlite3.connect(path) as database:
         if damage == "missing-scope":
@@ -473,6 +491,37 @@ def test_manifest_schema_is_closed_and_bounded():
     assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
     assert schema["additionalProperties"] is False
     validate_schema(valid, SCRIPTS / "schemas/evidence-graph-manifest-v1.json")
+    validate_schema(
+        {
+            **valid,
+            "graph_schema_version": None,
+            "graph_extractor_version": None,
+        },
+        SCRIPTS / "schemas/evidence-graph-manifest-v1.json",
+    )
+    v2 = {
+        **valid,
+        "schema_version": "corpus-generation/v2",
+        "repository_scope": _valid_repository_scope_schema_value(),
+        "artifacts": [
+            *valid["artifacts"],
+            {"path": "search.sqlite3", "size": 4096, "sha256": "3" * 64},
+        ],
+    }
+    for graph_schema in ("evidence-graph/v2", "evidence-graph/v3"):
+        validate_schema(
+            {**v2, "graph_schema_version": graph_schema},
+            SCRIPTS / "schemas/evidence-graph-manifest-v1.json",
+        )
+    with pytest.raises(ValueError, match="oneOf|enum|graph_schema_version"):
+        validate_schema(
+            {
+                **v2,
+                "graph_schema_version": None,
+                "graph_extractor_version": None,
+            },
+            SCRIPTS / "schemas/evidence-graph-manifest-v1.json",
+        )
     with pytest.raises(ValueError, match="const|graph_schema_version"):
         validate_schema(
             {**valid, "graph_schema_version": "other/v1"},

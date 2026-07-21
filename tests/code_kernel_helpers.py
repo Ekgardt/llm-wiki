@@ -32,6 +32,7 @@ from code_intelligence import (
     SymbolRole,
     Validity,
     ValidityStatus,
+    VerifiedAnalysisBatch,
 )
 from corpus_snapshot import (
     CapturedSource,
@@ -495,6 +496,24 @@ def make_normalized_analysis_for_records(records: dict[str, object]) -> Normaliz
         ),
         receipt=None,
     )
+
+
+def make_unminted_verified_subclass(records: dict[str, object]) -> VerifiedAnalysisBatch:
+    from code_intelligence import verify_native_analysis
+
+    verified = verify_native_analysis(
+        snapshot_for_records(records), make_normalized_analysis_for_records(records)
+    )
+
+    class UnmintedVerifiedAnalysisBatch(VerifiedAnalysisBatch):
+        pass
+
+    forged = object.__new__(UnmintedVerifiedAnalysisBatch)
+    for name in VerifiedAnalysisBatch.__dataclass_fields__:
+        object.__setattr__(forged, name, getattr(verified, name))
+    assert isinstance(forged, VerifiedAnalysisBatch)
+    assert type(forged) is not VerifiedAnalysisBatch
+    return forged
 
 
 def build_fixture_generation(

@@ -295,6 +295,104 @@ def test_v2_complete_generation_registers(tmp_path):
     assert catalog.register("v2-complete") == manifest
 
 
+def test_v1_search_only_generation_accepts_null_graph_schema(tmp_path: Path) -> None:
+    catalog = _catalog(tmp_path)
+    _directory, manifest = _publish(catalog, "v1-search-only")
+
+    assert manifest["graph_schema_version"] is None
+    assert catalog.register("v1-search-only") == manifest
+
+
+@pytest.mark.parametrize("graph_schema", ["evidence-graph/v2", "evidence-graph/v3"])
+def test_v2_generation_accepts_only_known_graph_schema_strings(
+    tmp_path: Path, graph_schema: str
+) -> None:
+    from code_intelligence import verify_native_analysis
+    from corpus_snapshot import collect_corpus
+    from evidence_graph import GraphSchema
+    from evidence_graph_builder import build_full_generation
+    from reliable_memory import canonical_json_bytes
+    from repository_scope import resolve_repository_scope
+
+    from tests.code_kernel_helpers import (
+        make_analysis_scope,
+        make_normalized_analysis,
+    )
+
+    catalog = _catalog(tmp_path)
+    if graph_schema == "evidence-graph/v3":
+        repository = tmp_path / "repository"
+        (repository / "knowledge/notes").mkdir(parents=True)
+        (repository / "knowledge/projects").mkdir(parents=True)
+        (repository / "knowledge/notes/page.md").write_text(
+            "---\ntype: concept\n---\n# Page\nCanonical content.\n",
+            encoding="utf-8",
+        )
+        snapshot = collect_corpus(repository)
+        records = {
+            "sources": [
+                {
+                    "source_id": source.record.logical_id,
+                    "relative_path": source.record.relative_path,
+                    "sha256": source.record.sha256,
+                    "size": source.record.size,
+                    "media_type": source.record.media_type,
+                    "language": source.record.language,
+                    "git_oid": source.record.git_oid,
+                }
+                for source in snapshot.sources
+            ],
+            "source_bytes": {
+                source.record.logical_id: source.content for source in snapshot.sources
+            },
+            "nodes": (),
+            "occurrences": (),
+            "assertions": (),
+            "evidence": (),
+            "observations": (),
+            "dependencies": (),
+        }
+        scope = make_analysis_scope(snapshot)
+        result = build_full_generation(
+            catalog,
+            generation_id="known-v3",
+            graph_schema=GraphSchema.V3,
+            verified_analyses=(
+                verify_native_analysis(
+                    snapshot, make_normalized_analysis(snapshot, scope)
+                ),
+            ),
+            snapshot=snapshot,
+            repository_scope=resolve_repository_scope(repository),
+            activate=False,
+            **records,
+        )
+        assert result.manifest["schema_version"] == "corpus-generation/v2"
+        assert result.manifest["graph_schema_version"] == graph_schema
+        assert catalog.register("known-v3") == result.manifest
+        return
+    directory, manifest = _publish_v2(catalog, "known-v2")
+    (directory / "manifest.json").write_bytes(canonical_json_bytes(manifest))
+    assert catalog.register(directory.name)["graph_schema_version"] == graph_schema
+
+
+@pytest.mark.parametrize("graph_schema", [None, "unknown-graph/v1"])
+def test_v2_generation_rejects_null_and_unknown_graph_schema(
+    tmp_path: Path, graph_schema: str | None
+) -> None:
+    from reliable_memory import canonical_json_bytes
+
+    catalog = _catalog(tmp_path)
+    directory, manifest = _publish_v2(catalog, "invalid-v2-graph")
+    manifest["graph_schema_version"] = graph_schema
+    if graph_schema is None:
+        manifest["graph_extractor_version"] = None
+    (directory / "manifest.json").write_bytes(canonical_json_bytes(manifest))
+
+    with pytest.raises(ValueError, match="graph schema|Evidence Graph"):
+        catalog.register("invalid-v2-graph")
+
+
 def test_catalog_rejects_v3_database_with_v2_manifest(tmp_path: Path) -> None:
     from reliable_memory import canonical_json_bytes
 

@@ -76,25 +76,31 @@
     "vector_state": {"enum": ["absent", "complete", "stale"]}
   },
   "additionalProperties": false,
-  "allOf": [
+  "oneOf": [
     {
-      "if": {"properties": {"schema_version": {"const": "corpus-generation/v2"}}},
-      "then": {
-        "required": ["repository_scope"],
-        "properties": {
-          "graph_schema_version": {"enum": ["evidence-graph/v2", "evidence-graph/v3"]},
-          "graph_extractor_version": {"type": "string", "minLength": 1, "maxLength": 128},
-          "artifacts": {
-            "contains": {"properties": {"path": {"const": "source-manifest.json"}}, "required": ["path"]},
-            "allOf": [
-              {"contains": {"properties": {"path": {"const": "evidence.sqlite3"}}, "required": ["path"]}},
-              {"contains": {"properties": {"path": {"const": "search.sqlite3"}}, "required": ["path"]}}
-            ],
-            "items": {
-              "properties": {
-                "path": {
-                  "enum": ["source-manifest.json", "evidence.sqlite3", "search.sqlite3", "incremental-manifest.json", "vectors.npy", "vectors.json"]
-                }
+      "type": "object",
+      "required": ["schema_version"],
+      "properties": {
+        "schema_version": {"const": "corpus-generation/v1"}
+      }
+    },
+    {
+      "type": "object",
+      "required": ["schema_version", "repository_scope"],
+      "properties": {
+        "schema_version": {"const": "corpus-generation/v2"},
+        "graph_schema_version": {"enum": ["evidence-graph/v2", "evidence-graph/v3"]},
+        "graph_extractor_version": {"type": "string", "minLength": 1, "maxLength": 128},
+        "artifacts": {
+          "contains": {"properties": {"path": {"const": "source-manifest.json"}}, "required": ["path"]},
+          "allOf": [
+            {"contains": {"properties": {"path": {"const": "evidence.sqlite3"}}, "required": ["path"]}},
+            {"contains": {"properties": {"path": {"const": "search.sqlite3"}}, "required": ["path"]}}
+          ],
+          "items": {
+            "properties": {
+              "path": {
+                "enum": ["source-manifest.json", "evidence.sqlite3", "search.sqlite3", "incremental-manifest.json", "vectors.npy", "vectors.json"]
               }
             }
           }

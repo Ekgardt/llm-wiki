@@ -28,7 +28,11 @@ from pathlib import Path
 
 import pytest
 
-from tests.code_kernel_helpers import build_fixture_generation
+from tests.code_kernel_helpers import (
+    basic_graph_records,
+    build_fixture_generation,
+    make_unminted_verified_subclass,
+)
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS) not in sys.path:
@@ -71,6 +75,27 @@ def test_omitted_builder_schema_keeps_legacy_v2_manifest(tmp_path: Path) -> None
         result.generation_path / "evidence.sqlite3"
     ) as database:
         assert database.execute("PRAGMA user_version").fetchone()[0] == 2
+
+
+def test_v3_builder_rejects_unminted_verified_subclass_before_publication(
+    tmp_path: Path,
+) -> None:
+    from evidence_graph import GraphSchema
+    from evidence_graph_builder import build_full_generation
+    from generation_catalog import GenerationCatalog
+
+    records = basic_graph_records()
+    catalog = GenerationCatalog(tmp_path / "state")
+    with pytest.raises(TypeError, match="VerifiedAnalysisBatch"):
+        build_full_generation(
+            catalog,
+            generation_id="forged",
+            graph_schema=GraphSchema.V3,
+            verified_analyses=(make_unminted_verified_subclass(records),),
+            **records,
+        )
+    assert not (catalog.generations_path / "forged").exists()
+    assert catalog.get_active() is None
 
 
 def _basic_records():

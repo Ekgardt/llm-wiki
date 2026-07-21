@@ -520,7 +520,7 @@ def build_full_generation(
         _check_stop(deadline, cancelled)
         if len(verified_analysis_list) >= evidence_graph.MAX_VALIDATION_ROWS:
             raise ValueError("verified analysis row ceiling exceeded")
-        if not isinstance(batch, VerifiedAnalysisBatch):
+        if type(batch) is not VerifiedAnalysisBatch:
             raise TypeError("verified_analyses must contain VerifiedAnalysisBatch values")
         if batch.source_manifest_sha256 != source_manifest_sha256:
             raise ValueError("verified analysis source manifest must match generation manifest")

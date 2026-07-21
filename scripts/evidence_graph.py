@@ -651,7 +651,7 @@ def _v3_rows(
         )
     }
     for batch in verified_analyses:
-        if not isinstance(batch, VerifiedAnalysisBatch):
+        if type(batch) is not VerifiedAnalysisBatch:
             raise TypeError("verified_analyses must contain VerifiedAnalysisBatch values")
         analysis = batch.analysis
         run = analysis.run
