@@ -20,7 +20,7 @@ def create_python_repository(destination: Path) -> Path:
     shutil.copytree(FIXTURE_ROOT, destination)
     environment = sanitized_git_environment()
     for name in tuple(environment):
-        if name == "GIT_TEMPLATE_DIR" or name.startswith(
+        if name in {"GIT_DEFAULT_HASH", "GIT_TEMPLATE_DIR"} or name.startswith(
             ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
         ):
             environment.pop(name)

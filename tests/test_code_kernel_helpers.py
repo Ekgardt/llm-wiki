@@ -85,3 +85,33 @@ def test_fixture_repository_ignores_ambient_git_config_and_templates(
 
     assert global_config.read_text(encoding="utf-8").startswith("[commit]")
     assert not (repository / ".git" / "hooks" / "pre-commit").exists()
+
+
+def test_fixture_repository_ignores_ambient_default_hash(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("GIT_DEFAULT_HASH", raising=False)
+    baseline = create_python_repository(tmp_path / "baseline")
+    monkeypatch.setenv("GIT_DEFAULT_HASH", "sha256")
+    overridden = create_python_repository(tmp_path / "overridden")
+
+    baseline_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=baseline,
+        check=True,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    ).stdout.strip()
+    overridden_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=overridden,
+        check=True,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    ).stdout.strip()
+
+    assert baseline_head == overridden_head
+    assert len(baseline_head) == 40
+    assert set(baseline_head) <= set("0123456789abcdef")
