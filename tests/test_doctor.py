@@ -119,6 +119,19 @@ def _create_generation(root: Path, state_root: Path) -> None:
     )
 
 
+def test_doctor_accepts_active_graph_v2_without_code_capture(tmp_path: Path) -> None:
+    import doctor
+    from generation_catalog import GenerationCatalog
+
+    root, state_root, home = _build_root(tmp_path)
+    _create_generation(root, state_root)
+    manifest = GenerationCatalog(state_root)._registered_manifest("healthy-generation")
+    report = doctor.run_doctor(root=root, state_root=state_root, home=home)
+
+    assert "code_capture" not in manifest
+    assert _check(report, "generation")["status"] == "ok"
+
+
 def _write_lease(path: Path, *, pid: int | None, acquired_at: str) -> None:
     task = {
         "id": path.stem,

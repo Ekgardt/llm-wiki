@@ -150,17 +150,18 @@ class RepositoryCodeLimits:
 
     def __post_init__(self) -> None:
         maxima = {
-            "max_files": 10_000,
-            "max_file_bytes": 8 * 1024 * 1024,
-            "max_total_bytes": 512 * 1024 * 1024,
-            "max_entries": 50_000,
-            "max_directories": 5_000,
-            "max_depth": 32,
-            "chunk_bytes": 64 * 1024,
+            "max_files": 1_000_000,
+            "max_file_bytes": 1024**3,
+            "max_total_bytes": 16 * 1024**3,
+            "max_entries": 5_000_000,
+            "max_directories": 1_000_000,
+            "max_depth": 256,
+            "chunk_bytes": 8 * 1024 * 1024,
         }
+        minima = {"max_depth": 1, "chunk_bytes": 4096}
         for field, maximum in maxima.items():
             value = getattr(self, field)
-            minimum = 0 if field == "max_depth" else 1
+            minimum = minima.get(field, 1)
             if (
                 isinstance(value, bool)
                 or not isinstance(value, int)
@@ -177,17 +178,21 @@ class RepositoryCodePolicy:
     suffixes: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        for name in ("roots", "include_globs", "ignore_globs", "suffixes"):
+        bounds = {
+            "roots": (1, 128),
+            "include_globs": (1, 256),
+            "ignore_globs": (0, 256),
+            "suffixes": (1, 128),
+        }
+        for name, (minimum, maximum) in bounds.items():
             values = getattr(self, name)
             if (
                 not isinstance(values, tuple)
-                or len(values) > 256
+                or not minimum <= len(values) <= maximum
                 or values != tuple(sorted(set(values)))
                 or any(not isinstance(value, str) or not value for value in values)
             ):
                 raise ValueError(f"{name} must be a bounded sorted unique tuple")
-        if not self.roots:
-            raise ValueError("roots must not be empty")
         for root in self.roots:
             pure = PurePosixPath(root)
             if (
@@ -210,7 +215,7 @@ class RepositoryCodePolicy:
             ):
                 raise ValueError(f"{name} must contain normalized relative POSIX globs")
         if any(
-            len(value) > 64
+            len(value) > 128
             or value != value.casefold()
             or not value.startswith(".")
             or "/" in value
@@ -234,6 +239,32 @@ class FileStatMetadata:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
+
+
+@dataclass(frozen=True, slots=True)
+class CodeCaptureFile:
+    source_id: str
+    relative_path: str
+    sha256: str
+    stat: FileStatMetadata
+
+    def __post_init__(self) -> None:
+        pure = PurePosixPath(self.relative_path)
+        if (
+            not self.relative_path
+            or len(self.relative_path) > 4096
+            or self.relative_path != unicodedata.normalize("NFC", self.relative_path)
+            or "\\" in self.relative_path
+            or pure.is_absolute()
+            or any(part in {"", ".", ".."} for part in pure.parts)
+        ):
+            raise ValueError("relative_path must be normalized relative POSIX text")
+        if self.source_id != f"source:{self.relative_path}":
+            raise ValueError("source_id must be derived from relative_path")
+        if re.fullmatch(r"[0-9a-f]{64}", self.sha256) is None:
+            raise ValueError("sha256 must be lowercase SHA-256")
+        if not isinstance(self.stat, FileStatMetadata):
+            raise TypeError("stat must be FileStatMetadata")
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,7 +299,7 @@ class DirectoryMembership:
 class CodeCaptureContract:
     policy: RepositoryCodePolicy
     limits: RepositoryCodeLimits
-    files: tuple[tuple[str, FileStatMetadata], ...]
+    files: tuple[CodeCaptureFile, ...]
     directories: tuple[DirectoryMembership, ...]
     membership_sha256: str
 
@@ -279,17 +310,15 @@ class CodeCaptureContract:
             raise TypeError("limits must be RepositoryCodeLimits")
         if (
             not isinstance(self.files, tuple)
-            or any(
-                not isinstance(item, tuple)
-                or len(item) != 2
-                or not isinstance(item[0], str)
-                or not isinstance(item[1], FileStatMetadata)
-                for item in self.files
-            )
-            or tuple(path for path, _metadata in self.files)
-            != tuple(sorted(path for path, _metadata in self.files))
+            or any(not isinstance(item, CodeCaptureFile) for item in self.files)
+            or tuple(item.relative_path for item in self.files)
+            != tuple(sorted(item.relative_path for item in self.files))
         ):
-            raise ValueError("files must be an ordered tuple of path metadata pairs")
+            raise ValueError("files must be an ordered CodeCaptureFile tuple")
+        file_paths = [item.relative_path.casefold() for item in self.files]
+        source_ids = [item.source_id for item in self.files]
+        if len(file_paths) != len(set(file_paths)) or len(source_ids) != len(set(source_ids)):
+            raise ValueError("files contain a path or source ID collision")
         if (
             not isinstance(self.directories, tuple)
             or any(not isinstance(item, DirectoryMembership) for item in self.directories)

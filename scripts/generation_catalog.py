@@ -784,15 +784,17 @@ def _validate_generation(
             source_manifest = corpus_snapshot.validate_canonical_source_manifest(
                 source_manifest
             )
-            source_paths = [
-                source["relative_path"] for source in source_manifest["sources"]
+            source_membership = [
+                (source["logical_id"], source["relative_path"], source["sha256"])
+                for source in source_manifest["sources"]
             ]
-            captured_paths = [
-                item["relative_path"] for item in normalized["code_capture"]["files"]
+            captured_membership = [
+                (item["source_id"], item["relative_path"], item["sha256"])
+                for item in normalized["code_capture"]["files"]
             ]
-            if captured_paths != source_paths:
+            if captured_membership != source_membership:
                 raise ValueError(
-                    "code_capture file paths must match canonical source membership"
+                    "code_capture files must match canonical source membership"
                 )
 
     elif graph_schema in {"evidence-graph/v2", "evidence-graph/v3"}:

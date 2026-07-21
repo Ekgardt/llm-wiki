@@ -295,6 +295,17 @@ def test_v2_complete_generation_registers(tmp_path):
     assert catalog.register("v2-complete") == manifest
 
 
+def test_registered_non_code_v2_fixture_activates_without_capture(
+    non_code_v2_generation,
+) -> None:
+    from generation_catalog import GenerationCatalog
+
+    assert "code_capture" not in non_code_v2_generation.manifest
+    assert GenerationCatalog(
+        non_code_v2_generation.generation_path.parents[3]
+    ).get_active()["generation_id"] == non_code_v2_generation.generation_id
+
+
 def test_v1_search_only_generation_accepts_null_graph_schema(tmp_path: Path) -> None:
     catalog = _catalog(tmp_path)
     _directory, manifest = _publish(catalog, "v1-search-only")
@@ -431,7 +442,16 @@ def test_catalog_rejects_v3_database_with_v2_manifest(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "damage",
-    ["missing", "unknown-top", "unknown-nested", "membership-hash", "directory-order"],
+    [
+        "missing",
+        "unknown-top",
+        "unknown-nested",
+        "membership-hash",
+        "directory-order",
+        "source-id",
+        "source-hash",
+        "stat-mtime",
+    ],
 )
 def test_catalog_rejects_damaged_or_noncanonical_v3_code_capture(
     tmp_path: Path, damage: str
@@ -452,11 +472,54 @@ def test_catalog_rejects_damaged_or_noncanonical_v3_code_capture(
         capture["limits"]["unknown"] = 1
     elif damage == "membership-hash":
         capture["membership_sha256"] = "0" * 64
-    else:
+    elif damage == "directory-order":
         capture["directories"] = list(reversed(capture["directories"]))
+    elif damage == "source-id":
+        capture["files"][0]["source_id"] = "source:wrong.py"
+    elif damage == "source-hash":
+        capture["files"][0]["sha256"] = "f" * 64
+    else:
+        capture["files"][0]["stat"]["mtime_ns"] += 1
     manifest_path.write_bytes(canonical_json_bytes(manifest))
 
-    with pytest.raises(ValueError, match="code.capture|v3|manifest|membership|order"):
+    with pytest.raises(
+        ValueError,
+        match="code.capture|v3|manifest|membership|order|source_id|source membership",
+    ):
+        _catalog(tmp_path).register(result.generation_id)
+
+
+@pytest.mark.parametrize("damage", ["identity", "hash"])
+def test_catalog_matches_capture_identity_and_hash_to_source_manifest(
+    tmp_path: Path, damage: str
+) -> None:
+    from reliable_memory import canonical_json_bytes
+
+    from tests.code_kernel_helpers import publish_v3_fixture
+
+    result = publish_v3_fixture(tmp_path, generation_id=f"source-{damage}")
+    manifest_path = result.generation_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    capture = manifest["code_capture"]
+    file = capture["files"][0]
+    if damage == "hash":
+        file["sha256"] = "f" * 64
+    else:
+        old_path = file["relative_path"]
+        file["source_id"] = "source:other.py"
+        file["relative_path"] = "other.py"
+        capture["policy"]["roots"] = sorted(
+            "other.py" if root == old_path else root
+            for root in capture["policy"]["roots"]
+        )
+    capture["membership_sha256"] = hashlib.sha256(
+        canonical_json_bytes(
+            {"files": capture["files"], "directories": capture["directories"]}
+        )
+    ).hexdigest()
+    manifest_path.write_bytes(canonical_json_bytes(manifest))
+
+    with pytest.raises(ValueError, match="source membership"):
         _catalog(tmp_path).register(result.generation_id)
 
 
@@ -472,6 +535,39 @@ def test_manifest_schema_requires_code_capture_only_for_graph_v3(tmp_path: Path)
     v3 = dict(v2, graph_schema_version="evidence-graph/v3")
     errors = list(validator.iter_errors(v3))
     assert any("code_capture" in error.message for error in errors)
+
+
+def test_manifest_schema_uses_approved_capture_maxima_and_nested_file_shape() -> None:
+    schema = json.loads(
+        (SCRIPTS / "schemas/evidence-graph-manifest-v1.json").read_text(encoding="utf-8")
+    )["properties"]["code_capture"]
+    limits = schema["properties"]["limits"]["properties"]
+    assert {name: value["maximum"] for name, value in limits.items()} == {
+        "max_files": 1_000_000,
+        "max_file_bytes": 1024**3,
+        "max_total_bytes": 16 * 1024**3,
+        "max_entries": 5_000_000,
+        "max_directories": 1_000_000,
+        "max_depth": 256,
+        "chunk_bytes": 8 * 1024 * 1024,
+    }
+    assert limits["max_depth"]["minimum"] == 1
+    assert limits["chunk_bytes"]["minimum"] == 4096
+    file_schema = schema["properties"]["files"]["items"]
+    assert set(file_schema["required"]) == {
+        "source_id",
+        "relative_path",
+        "sha256",
+        "stat",
+    }
+    assert set(file_schema["properties"]["stat"]["required"]) == {
+        "size",
+        "mtime_ns",
+        "ctime_ns",
+        "mode",
+        "device",
+        "inode",
+    }
 
 
 @pytest.mark.parametrize("graph_schema", [None, "other-graph/v1"])

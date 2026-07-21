@@ -25,10 +25,10 @@
           "type": "object",
           "required": ["roots", "include_globs", "ignore_globs", "suffixes"],
           "properties": {
-            "roots": {"type": "array", "minItems": 1, "maxItems": 256, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 4096}},
-            "include_globs": {"type": "array", "maxItems": 256, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 4096}},
+            "roots": {"type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 4096}},
+            "include_globs": {"type": "array", "minItems": 1, "maxItems": 256, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 4096}},
             "ignore_globs": {"type": "array", "maxItems": 256, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 4096}},
-            "suffixes": {"type": "array", "maxItems": 256, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^\\.[^/\\\\]+$"}}
+            "suffixes": {"type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^\\.[^/\\\\]+$"}}
           },
           "additionalProperties": false
         },
@@ -36,43 +36,52 @@
           "type": "object",
           "required": ["max_files", "max_file_bytes", "max_total_bytes", "max_entries", "max_directories", "max_depth", "chunk_bytes"],
           "properties": {
-            "max_files": {"type": "integer", "minimum": 1, "maximum": 10000},
-            "max_file_bytes": {"type": "integer", "minimum": 1, "maximum": 8388608},
-            "max_total_bytes": {"type": "integer", "minimum": 1, "maximum": 536870912},
-            "max_entries": {"type": "integer", "minimum": 1, "maximum": 50000},
-            "max_directories": {"type": "integer", "minimum": 1, "maximum": 5000},
-            "max_depth": {"type": "integer", "minimum": 0, "maximum": 32},
-            "chunk_bytes": {"type": "integer", "minimum": 1, "maximum": 65536}
+            "max_files": {"type": "integer", "minimum": 1, "maximum": 1000000},
+            "max_file_bytes": {"type": "integer", "minimum": 1, "maximum": 1073741824},
+            "max_total_bytes": {"type": "integer", "minimum": 1, "maximum": 17179869184},
+            "max_entries": {"type": "integer", "minimum": 1, "maximum": 5000000},
+            "max_directories": {"type": "integer", "minimum": 1, "maximum": 1000000},
+            "max_depth": {"type": "integer", "minimum": 1, "maximum": 256},
+            "chunk_bytes": {"type": "integer", "minimum": 4096, "maximum": 8388608}
           },
           "additionalProperties": false
         },
         "files": {
           "type": "array",
-          "maxItems": 10000,
+          "maxItems": 1000000,
           "items": {
             "type": "object",
-            "required": ["relative_path", "size", "mtime_ns", "ctime_ns", "mode", "device", "inode"],
+            "required": ["source_id", "relative_path", "sha256", "stat"],
             "properties": {
+              "source_id": {"type": "string", "minLength": 1, "maxLength": 4103},
               "relative_path": {"type": "string", "minLength": 1, "maxLength": 4096},
-              "size": {"type": "integer", "minimum": 0, "maximum": 8388608},
-              "mtime_ns": {"type": "integer", "minimum": 0},
-              "ctime_ns": {"type": "integer", "minimum": 0},
-              "mode": {"type": "integer", "minimum": 0},
-              "device": {"type": "integer", "minimum": 0},
-              "inode": {"type": "integer", "minimum": 0}
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "stat": {
+                "type": "object",
+                "required": ["size", "mtime_ns", "ctime_ns", "mode", "device", "inode"],
+                "properties": {
+                  "size": {"type": "integer", "minimum": 0, "maximum": 1073741824},
+                  "mtime_ns": {"type": "integer", "minimum": 0},
+                  "ctime_ns": {"type": "integer", "minimum": 0},
+                  "mode": {"type": "integer", "minimum": 0},
+                  "device": {"type": "integer", "minimum": 0},
+                  "inode": {"type": "integer", "minimum": 0}
+                },
+                "additionalProperties": false
+              }
             },
             "additionalProperties": false
           }
         },
         "directories": {
           "type": "array",
-          "maxItems": 5000,
+          "maxItems": 1000000,
           "items": {
             "type": "object",
             "required": ["relative_path", "entry_count", "entries_sha256"],
             "properties": {
               "relative_path": {"type": "string", "minLength": 1, "maxLength": 4096},
-              "entry_count": {"type": "integer", "minimum": 0, "maximum": 50000},
+              "entry_count": {"type": "integer", "minimum": 0, "maximum": 5000000},
               "entries_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
             },
             "additionalProperties": false

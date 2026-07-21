@@ -492,8 +492,7 @@ def build_full_generation(
     )
     if code_capture is not None:
         capture_membership = [
-            (relative_path, metadata.size)
-            for relative_path, metadata in code_capture.files
+            (item.relative_path, item.stat.size) for item in code_capture.files
         ]
         source_membership = sorted(
             (str(source["relative_path"]), int(source["size"]))

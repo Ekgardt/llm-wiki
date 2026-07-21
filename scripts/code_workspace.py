@@ -16,6 +16,7 @@ from code_languages import language_for_path
 from corpus_snapshot import (
     CapturedSource,
     CodeCaptureContract,
+    CodeCaptureFile,
     CorpusSnapshot,
     DirectoryMembership,
     FileStatMetadata,
@@ -27,14 +28,13 @@ from corpus_snapshot import (
     canonical_retrieval_chunks,
     canonical_source_manifest_sha256,
 )
-from reliable_memory import canonical_json_bytes, fsync_directory
+from reliable_memory import canonical_json_bytes
 from repository_scope import resolve_repository_scope
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _ALWAYS_IGNORED = frozenset(
     {".git", ".venv", "venv", "env", "cache", "logs", "run", "__pycache__"}
 )
-_MAX_POLICY_ITEMS = 256
 _MAX_POLICY_TEXT = 4096
 
 
@@ -49,6 +49,26 @@ class SealedWorkspace:
     entries: tuple[tuple[str, int, str], ...]
     owner_only: bool
     read_only_requested: bool
+
+
+def _seal_component_barrier(_component: str) -> None:
+    return
+
+
+def _verify_component_barrier(_component: str) -> None:
+    return
+
+
+def workspace_sealing_supported() -> bool:
+    """Return whether this platform has a root-relative no-follow boundary."""
+    return os.name == "posix" and all(
+        (
+            hasattr(os, "O_NOFOLLOW"),
+            hasattr(os, "O_DIRECTORY"),
+            os.open in os.supports_dir_fd,
+            os.mkdir in os.supports_dir_fd,
+        )
+    )
 
 
 def _canonical_hash(value: object) -> str:
@@ -90,10 +110,14 @@ def _normalized_root(value: object) -> str:
 
 
 def _normalized_values(
-    values: Iterable[object], *, label: str, transform: Callable[[object], str]
+    values: Iterable[object],
+    *,
+    label: str,
+    maximum: int,
+    transform: Callable[[object], str],
 ) -> tuple[str, ...]:
     materialized = tuple(values)
-    if len(materialized) > _MAX_POLICY_ITEMS:
+    if len(materialized) > maximum:
         raise ValueError(f"{label} has too many entries")
     normalized = tuple(sorted(set(transform(value) for value in materialized)))
     return normalized
@@ -105,7 +129,9 @@ def _policy(
     ignore_globs: Iterable[str],
     suffixes: Iterable[str],
 ) -> RepositoryCodePolicy:
-    normalized_roots = _normalized_values(roots, label="roots", transform=_normalized_root)
+    normalized_roots = _normalized_values(
+        roots, label="roots", maximum=128, transform=_normalized_root
+    )
     if not normalized_roots:
         raise ValueError("at least one repository code root is required")
     if any(
@@ -128,7 +154,7 @@ def _policy(
         return value
 
     def suffix(value: object) -> str:
-        if not isinstance(value, str) or not value or len(value) > 64:
+        if not isinstance(value, str) or not value or len(value) > 128:
             raise ValueError("repository code suffix must be bounded non-empty text")
         normalized = unicodedata.normalize("NFC", value).casefold()
         if not normalized.startswith(".") or "/" in normalized or "\\" in normalized:
@@ -137,9 +163,15 @@ def _policy(
 
     return RepositoryCodePolicy(
         roots=normalized_roots,
-        include_globs=_normalized_values(include_globs, label="include_globs", transform=pattern),
-        ignore_globs=_normalized_values(ignore_globs, label="ignore_globs", transform=pattern),
-        suffixes=_normalized_values(suffixes, label="suffixes", transform=suffix),
+        include_globs=_normalized_values(
+            include_globs, label="include_globs", maximum=256, transform=pattern
+        ),
+        ignore_globs=_normalized_values(
+            ignore_globs, label="ignore_globs", maximum=256, transform=pattern
+        ),
+        suffixes=_normalized_values(
+            suffixes, label="suffixes", maximum=128, transform=suffix
+        ),
     )
 
 
@@ -199,6 +231,10 @@ def _open_read(path: Path) -> int:
     return _open_read_descriptor(path)
 
 
+def _capture_read_barrier(_descriptor: int) -> None:
+    return
+
+
 def _read_candidate(
     path: Path,
     expected: os.stat_result,
@@ -206,7 +242,7 @@ def _read_candidate(
     *,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
-) -> bytes:
+) -> tuple[bytes, FileStatMetadata]:
     if expected.st_size > limits.max_file_bytes:
         raise ValueError("repository code file byte limit exceeded")
     descriptor = _open_read(path)
@@ -214,6 +250,9 @@ def _read_candidate(
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode) or not _same_file(expected, before):
             raise PermissionError("repository code file changed before no-follow open")
+        from generation_catalog import _stable_descriptor_state
+
+        before_state = _stable_descriptor_state(descriptor)
         content = bytearray()
         while True:
             _check_stop(deadline, cancelled)
@@ -223,15 +262,31 @@ def _read_candidate(
             content.extend(chunk)
             if len(content) > limits.max_file_bytes:
                 raise ValueError("repository code file byte limit exceeded")
+        _capture_read_barrier(descriptor)
         after = os.fstat(descriptor)
-        if not _same_file(before, after) or len(content) != before.st_size:
+        if (
+            before_state != _stable_descriptor_state(descriptor)
+            or not _same_file(before, after)
+            or len(content) != before.st_size
+        ):
             raise RuntimeError("repository code file changed during capture")
+        current = path.lstat()
+        if _is_unsafe(current):
+            raise RuntimeError("repository code file changed during capture")
+        named_descriptor = _open_read(path)
+        try:
+            named = os.fstat(named_descriptor)
+            if (
+                (before.st_dev, before.st_ino, stat.S_IFMT(before.st_mode))
+                != (named.st_dev, named.st_ino, stat.S_IFMT(named.st_mode))
+                or _stat_metadata(before) != _stat_metadata(named)
+            ):
+                raise RuntimeError("repository code file changed during capture")
+        finally:
+            os.close(named_descriptor)
     finally:
         os.close(descriptor)
-    current = path.lstat()
-    if _is_unsafe(current) or not _same_file(after, current):
-        raise RuntimeError("repository code file changed during capture")
-    return bytes(content)
+    return bytes(content), _stat_metadata(before)
 
 
 def _matches(path: str, patterns: tuple[str, ...]) -> bool:
@@ -251,8 +306,16 @@ def _capture_contract_dict(contract: CodeCaptureContract) -> dict[str, object]:
             for name in contract.limits.__dataclass_fields__
         },
         "files": [
-            {"relative_path": path, **{name: getattr(metadata, name) for name in metadata.__dataclass_fields__}}
-            for path, metadata in contract.files
+            {
+                "source_id": item.source_id,
+                "relative_path": item.relative_path,
+                "sha256": item.sha256,
+                "stat": {
+                    name: getattr(item.stat, name)
+                    for name in item.stat.__dataclass_fields__
+                },
+            }
+            for item in contract.files
         ],
         "directories": [
             {
@@ -271,6 +334,12 @@ def code_capture_as_dict(contract: CodeCaptureContract) -> dict[str, object]:
     if not isinstance(contract, CodeCaptureContract):
         raise TypeError("code_capture must be a CodeCaptureContract")
     return _capture_contract_dict(contract)
+
+
+def _membership_sha256(
+    files: list[dict[str, object]], directories: list[dict[str, object]]
+) -> str:
+    return _canonical_hash({"files": files, "directories": directories})
 
 
 def validate_code_capture(value: object) -> dict[str, object]:
@@ -318,12 +387,21 @@ def validate_code_capture(value: object) -> dict[str, object]:
         raise ValueError("code_capture files exceed their row ceiling")
     files = []
     total_bytes = 0
-    file_keys = {"relative_path", *FileStatMetadata.__dataclass_fields__}
+    file_keys = {"source_id", "relative_path", "sha256", "stat"}
     for item in files_value:
         if not isinstance(item, dict) or set(item) != file_keys:
             raise ValueError("code_capture files must be closed objects")
         path = relative_path(item["relative_path"])
-        metadata_values = {name: item[name] for name in FileStatMetadata.__dataclass_fields__}
+        source_id = item["source_id"]
+        digest = item["sha256"]
+        stat_value = item["stat"]
+        if not isinstance(stat_value, dict) or set(stat_value) != set(
+            FileStatMetadata.__dataclass_fields__
+        ):
+            raise ValueError("code_capture file stat must be a closed object")
+        metadata_values = {
+            name: stat_value[name] for name in FileStatMetadata.__dataclass_fields__
+        }
         if any(isinstance(field, bool) or not isinstance(field, int) or field < 0 for field in metadata_values.values()):
             raise ValueError("code_capture file metadata must contain non-negative integers")
         metadata = FileStatMetadata(**metadata_values)
@@ -332,10 +410,12 @@ def validate_code_capture(value: object) -> dict[str, object]:
         total_bytes += metadata.size
         if total_bytes > limits.max_total_bytes:
             raise ValueError("code_capture file bytes exceed their ceiling")
-        files.append((path, metadata))
-    if [path for path, _metadata in files] != sorted(path for path, _metadata in files):
+        files.append(CodeCaptureFile(source_id, path, digest, metadata))
+    if [item.relative_path for item in files] != sorted(
+        item.relative_path for item in files
+    ):
         raise ValueError("code_capture files must use deterministic ordering")
-    folded_files = [unicodedata.normalize("NFC", path).casefold() for path, _ in files]
+    folded_files = [item.relative_path.casefold() for item in files]
     if len(folded_files) != len(set(folded_files)):
         raise ValueError("code_capture files contain a path collision")
 
@@ -369,7 +449,7 @@ def validate_code_capture(value: object) -> dict[str, object]:
     folded_directories = [item.relative_path.casefold() for item in directories]
     if len(folded_directories) != len(set(folded_directories)):
         raise ValueError("code_capture directories contain a path collision")
-    captured_paths = [path for path, _metadata in files] + [
+    captured_paths = [item.relative_path for item in files] + [
         item.relative_path for item in directories
     ]
     if any(
@@ -377,15 +457,20 @@ def validate_code_capture(value: object) -> dict[str, object]:
         for path in captured_paths
     ):
         raise ValueError("code_capture paths must remain under declared roots")
-    membership = _canonical_hash(
-        [
-            {
-                "relative_path": item.relative_path,
-                "entry_count": item.entry_count,
-                "entries_sha256": item.entries_sha256,
-            }
-            for item in directories
-        ]
+    normalized_files = _capture_contract_dict(
+        CodeCaptureContract(policy, limits, tuple(files), tuple(directories), "0" * 64)
+    )["files"]
+    normalized_directories = [
+        {
+            "relative_path": item.relative_path,
+            "entry_count": item.entry_count,
+            "entries_sha256": item.entries_sha256,
+        }
+        for item in directories
+    ]
+    membership = _membership_sha256(
+        normalized_files,
+        normalized_directories,
     )
     if value["membership_sha256"] != membership:
         raise ValueError("code_capture membership_sha256 is not canonical")
@@ -398,6 +483,7 @@ def validate_code_capture(value: object) -> dict[str, object]:
 
 def collect_repository_code(
     checkout_root: Path,
+    *,
     roots: Iterable[str | Path],
     include_globs: Iterable[str],
     ignore_globs: Iterable[str],
@@ -407,7 +493,11 @@ def collect_repository_code(
     cancelled: Callable[[], bool] | None = None,
 ) -> CorpusSnapshot:
     """Capture exact repository bytes and a complete bounded membership contract."""
-    root = Path(checkout_root).resolve(strict=True)
+    original_root = Path(checkout_root)
+    original_info = original_root.lstat()
+    if _is_unsafe(original_info) or not stat.S_ISDIR(original_info.st_mode):
+        raise PermissionError("checkout root must be a regular non-link directory")
+    root = original_root.resolve(strict=True)
     resolve_repository_scope(root)
     selected_policy = _policy(roots, include_globs, ignore_globs, suffixes)
     if not isinstance(limits, RepositoryCodeLimits):
@@ -417,7 +507,7 @@ def collect_repository_code(
         raise PermissionError("checkout root must be a regular directory")
 
     captured: list[CapturedSource] = []
-    file_stats: list[tuple[str, FileStatMetadata]] = []
+    captured_files: list[CodeCaptureFile] = []
     directories: list[DirectoryMembership] = []
     seen_names: dict[str, str] = {}
     entries_seen = 0
@@ -494,7 +584,7 @@ def collect_repository_code(
                 continue
             if len(captured) >= limits.max_files:
                 raise ValueError("repository code file limit exceeded")
-            content = _read_candidate(
+            content, descriptor_stat = _read_candidate(
                 path, info, limits, deadline=deadline, cancelled=cancelled
             )
             content.decode("utf-8", errors="strict")
@@ -512,7 +602,9 @@ def collect_repository_code(
                 git_oid=None,
             )
             captured.append(CapturedSource(record, SourceMetadata(type="code"), content))
-            file_stats.append((relative, _stat_metadata(info)))
+            captured_files.append(
+                CodeCaptureFile(record.logical_id, relative, digest, descriptor_stat)
+            )
 
     for relative_root in selected_policy.roots:
         candidate = root.joinpath(*PurePosixPath(relative_root).parts)
@@ -563,31 +655,50 @@ def collect_repository_code(
         path = root.joinpath(*PurePosixPath(source.record.relative_path).parts)
         try:
             info = path.lstat()
-            current = _read_candidate(
+            current, current_stat = _read_candidate(
                 path, info, limits, deadline=deadline, cancelled=cancelled
             )
         except OSError as exc:
             raise RuntimeError("repository code source changed during capture") from exc
         if hashlib.sha256(current).hexdigest() != source.record.sha256:
             raise RuntimeError("repository code source changed during capture")
+        original_file = next(
+            item for item in captured_files if item.source_id == source.record.logical_id
+        )
+        if current_stat != original_file.stat:
+            raise RuntimeError("repository code source changed during capture")
 
     captured.sort(key=lambda source: source.record.relative_path)
-    file_stats.sort(key=lambda item: item[0])
+    captured_files.sort(key=lambda item: item.relative_path)
     directories.sort(key=lambda item: item.relative_path)
-    membership_hash = _canonical_hash(
-        [
-            {
-                "relative_path": item.relative_path,
-                "entry_count": item.entry_count,
-                "entries_sha256": item.entries_sha256,
-            }
-            for item in directories
-        ]
+    directory_values = [
+        {
+            "relative_path": item.relative_path,
+            "entry_count": item.entry_count,
+            "entries_sha256": item.entries_sha256,
+        }
+        for item in directories
+    ]
+    file_values = [
+        {
+            "source_id": item.source_id,
+            "relative_path": item.relative_path,
+            "sha256": item.sha256,
+            "stat": {
+                name: getattr(item.stat, name)
+                for name in item.stat.__dataclass_fields__
+            },
+        }
+        for item in captured_files
+    ]
+    membership_hash = _membership_sha256(
+        file_values,
+        directory_values,
     )
     contract = CodeCaptureContract(
         selected_policy,
         limits,
-        tuple(file_stats),
+        tuple(captured_files),
         tuple(directories),
         membership_hash,
     )
@@ -626,138 +737,229 @@ def collect_repository_code(
     )
 
 
-def seal_workspace(snapshot: CorpusSnapshot, root: Path) -> SealedWorkspace:
-    """Write captured bytes to a new owner-only tree and request read-only files."""
-    if not isinstance(snapshot, CorpusSnapshot) or snapshot.code_capture is None:
-        raise TypeError("seal_workspace requires a repository CorpusSnapshot")
-    destination = Path(root)
-    destination.mkdir(mode=0o700, parents=False, exist_ok=False)
-    owner_only = os.name == "posix"
-    entries = []
+def _write_all(descriptor: int, content: bytes) -> None:
+    written = 0
+    while written < len(content):
+        count = os.write(descriptor, content[written : written + 64 * 1024])
+        if count <= 0:
+            raise OSError("sealed workspace write made no progress")
+        written += count
+
+
+def _posix_directory_flags() -> int:
+    if os.name != "posix" or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        raise RuntimeError("safe sealed workspaces require POSIX no-follow directory opens")
+    if os.open not in os.supports_dir_fd or os.mkdir not in os.supports_dir_fd:
+        raise RuntimeError("safe sealed workspaces require descriptor-relative filesystem APIs")
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+
+def _open_posix_directory_path(path: Path) -> tuple[list[int], int]:
+    absolute = path.absolute()
+    flags = _posix_directory_flags()
+    descriptors = [os.open(absolute.anchor, flags)]
     try:
+        for part in absolute.parts[1:]:
+            descriptors.append(os.open(part, flags, dir_fd=descriptors[-1]))
+        return descriptors, descriptors[-1]
+    except BaseException:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+        raise
+
+
+def _seal_posix(snapshot: CorpusSnapshot, destination: Path) -> None:
+    parent_descriptors, parent_fd = _open_posix_directory_path(destination.parent)
+    directory_fds: dict[tuple[str, ...], int] = {}
+    try:
+        os.mkdir(destination.name, 0o700, dir_fd=parent_fd)
+        root_fd = os.open(destination.name, _posix_directory_flags(), dir_fd=parent_fd)
+        directory_fds[()] = root_fd
         for source in snapshot.sources:
-            relative = PurePosixPath(source.record.relative_path)
-            if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
-                raise ValueError("captured source path is unsafe")
-            parent = destination
-            for part in relative.parts[:-1]:
-                parent /= part
-                if not parent.exists():
-                    parent.mkdir(mode=0o700)
-                    fsync_directory(parent.parent)
-                info = parent.lstat()
-                if _is_unsafe(info) or not stat.S_ISDIR(info.st_mode):
-                    raise PermissionError("sealed workspace parent is unsafe")
-            target = parent / relative.name
+            parts = PurePosixPath(source.record.relative_path).parts
+            parent_parts: tuple[str, ...] = ()
+            for part in parts[:-1]:
+                child_parts = (*parent_parts, part)
+                if child_parts not in directory_fds:
+                    _seal_component_barrier(part)
+                    os.mkdir(part, 0o700, dir_fd=directory_fds[parent_parts])
+                    directory_fds[child_parts] = os.open(
+                        part, _posix_directory_flags(), dir_fd=directory_fds[parent_parts]
+                    )
+                parent_parts = child_parts
             descriptor = os.open(
-                target,
+                parts[-1],
                 os.O_WRONLY
                 | os.O_CREAT
                 | os.O_EXCL
-                | getattr(os, "O_BINARY", 0)
-                | getattr(os, "O_NOFOLLOW", 0),
+                | os.O_NOFOLLOW
+                | getattr(os, "O_CLOEXEC", 0),
                 0o400,
+                dir_fd=directory_fds[parent_parts],
             )
             try:
-                written = 0
-                while written < len(source.content):
-                    written += os.write(descriptor, source.content[written : written + 64 * 1024])
+                _write_all(descriptor, source.content)
                 os.fsync(descriptor)
-                try:
-                    os.fchmod(descriptor, 0o400)
-                except (AttributeError, OSError):
-                    os.chmod(target, stat.S_IREAD)
+                os.fchmod(descriptor, 0o400)
             finally:
                 os.close(descriptor)
-            fsync_directory(parent)
-            entries.append((source.record.relative_path, source.record.size, source.record.sha256))
-        fsync_directory(destination)
-    except BaseException:
-        # Preserve partial state for forensic inspection; callers choose cleanup.
-        raise
+        for descriptor in reversed(tuple(directory_fds.values())):
+            os.fsync(descriptor)
+        named = os.open(destination.name, _posix_directory_flags(), dir_fd=parent_fd)
+        try:
+            if not os.path.samestat(os.fstat(named), os.fstat(root_fd)):
+                raise PermissionError("sealed workspace root changed during creation")
+        finally:
+            os.close(named)
+        os.fsync(parent_fd)
+    finally:
+        for descriptor in reversed(tuple(directory_fds.values())):
+            os.close(descriptor)
+        for descriptor in reversed(parent_descriptors):
+            os.close(descriptor)
+
+
+def seal_workspace(snapshot: CorpusSnapshot, root: Path) -> SealedWorkspace:
+    """Write captured bytes through an exclusive component-safe filesystem boundary."""
+    if not isinstance(snapshot, CorpusSnapshot) or snapshot.code_capture is None:
+        raise TypeError("seal_workspace requires a repository CorpusSnapshot")
+    if not workspace_sealing_supported():
+        raise RuntimeError(
+            "sealed workspaces require a root-relative no-follow filesystem boundary"
+        )
+    destination = Path(root).absolute()
+    for source in snapshot.sources:
+        relative = PurePosixPath(source.record.relative_path)
+        if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+            raise ValueError("captured source path is unsafe")
+    _seal_posix(snapshot, destination)
     workspace = SealedWorkspace(
-        destination.resolve(strict=True),
+        destination,
         snapshot.corpus_sha256,
-        tuple(entries),
-        owner_only,
+        tuple(
+            (source.record.relative_path, source.record.size, source.record.sha256)
+            for source in snapshot.sources
+        ),
+        os.name == "posix",
         True,
     )
     verify_workspace_seal(workspace, snapshot)
     return workspace
 
 
+def _verify_descriptor_file(
+    descriptor: int, size: int, digest: str, chunk_bytes: int
+) -> None:
+    before = os.fstat(descriptor)
+    if not stat.S_ISREG(before.st_mode) or before.st_size != size:
+        raise WorkspaceChanged("sealed workspace file size changed")
+    hasher = hashlib.sha256()
+    total = 0
+    while True:
+        chunk = os.read(descriptor, chunk_bytes)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > size:
+            raise WorkspaceChanged("sealed workspace file exceeded captured range")
+        hasher.update(chunk)
+    after = os.fstat(descriptor)
+    if not _same_file(before, after) or total != size or hasher.hexdigest() != digest:
+        raise WorkspaceChanged("sealed workspace file content changed")
+
+
+def _verify_posix(workspace: SealedWorkspace, snapshot: CorpusSnapshot) -> tuple[str, ...]:
+    chains, root_fd = _open_posix_directory_path(workspace.root)
+    opened = [root_fd]
+    paths = []
+    visited = 0
+    expected = {
+        source.record.relative_path: (
+            source.record.size,
+            source.record.sha256,
+        )
+        for source in snapshot.sources
+    }
+    try:
+        pending = [((), root_fd)]
+        while pending:
+            prefix, directory_fd = pending.pop()
+            with os.scandir(directory_fd) as iterator:
+                entries = sorted(iterator, key=lambda item: item.name)
+            visited += len(entries)
+            if visited > snapshot.code_capture.limits.max_entries:
+                raise WorkspaceChanged("sealed workspace entry range exceeded")
+            for entry in entries:
+                _verify_component_barrier(entry.name)
+                metadata = os.stat(entry.name, dir_fd=directory_fd, follow_symlinks=False)
+                if _is_unsafe(metadata):
+                    raise WorkspaceChanged("sealed workspace member became a link")
+                relative = "/".join((*prefix, entry.name))
+                if stat.S_ISDIR(metadata.st_mode):
+                    child = os.open(entry.name, _posix_directory_flags(), dir_fd=directory_fd)
+                    opened.append(child)
+                    pending.append(((*prefix, entry.name), child))
+                elif stat.S_ISREG(metadata.st_mode):
+                    paths.append(relative)
+                    if relative in expected:
+                        descriptor = os.open(
+                            entry.name,
+                            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                            dir_fd=directory_fd,
+                        )
+                        try:
+                            size, digest = expected[relative]
+                            _verify_descriptor_file(
+                                descriptor,
+                                size,
+                                digest,
+                                snapshot.code_capture.limits.chunk_bytes,
+                            )
+                        finally:
+                            os.close(descriptor)
+                else:
+                    raise WorkspaceChanged("sealed workspace contains a device")
+        named_chains, named = _open_posix_directory_path(workspace.root)
+        try:
+            if not os.path.samestat(os.fstat(named), os.fstat(root_fd)):
+                raise WorkspaceChanged("sealed workspace root changed during verification")
+        finally:
+            for descriptor in reversed(named_chains):
+                os.close(descriptor)
+        return tuple(sorted(paths))
+    except (OSError, PermissionError) as exc:
+        raise WorkspaceChanged("sealed workspace directory cannot be verified") from exc
+    finally:
+        for descriptor in reversed(opened[1:]):
+            os.close(descriptor)
+        for descriptor in reversed(chains):
+            os.close(descriptor)
+
+
 def verify_workspace_seal(workspace: SealedWorkspace, snapshot: CorpusSnapshot) -> None:
-    """Reopen every sealed file no-follow and reject any membership or byte change."""
+    """Verify exact membership and bytes through held no-reparse components."""
     if not isinstance(workspace, SealedWorkspace):
         raise TypeError("workspace must be SealedWorkspace")
     if not isinstance(snapshot, CorpusSnapshot) or snapshot.code_capture is None:
         raise TypeError("snapshot must be a repository CorpusSnapshot")
+    if not workspace_sealing_supported():
+        raise WorkspaceChanged(
+            "sealed workspace verification requires a root-relative no-follow boundary"
+        )
     expected = tuple(
         (source.record.relative_path, source.record.size, source.record.sha256)
         for source in snapshot.sources
     )
     if workspace.source_manifest_sha256 != snapshot.corpus_sha256 or workspace.entries != expected:
         raise WorkspaceChanged("sealed workspace source manifest changed")
-    actual_paths = []
-    pending = [workspace.root]
-    visited = 0
-    while pending:
-        directory = pending.pop()
-        info = directory.lstat()
-        if _is_unsafe(info) or not stat.S_ISDIR(info.st_mode):
-            raise WorkspaceChanged("sealed workspace directory changed or became a link/reparse point")
-        with os.scandir(directory) as iterator:
-            entries = list(iterator)
-        visited += len(entries)
-        if visited > snapshot.code_capture.limits.max_entries:
-            raise WorkspaceChanged("sealed workspace entry range exceeded")
-        for entry in entries:
-            path = Path(entry.path)
-            metadata = entry.stat(follow_symlinks=False)
-            if _is_unsafe(metadata):
-                raise WorkspaceChanged("sealed workspace member became a link or reparse point")
-            if stat.S_ISDIR(metadata.st_mode):
-                pending.append(path)
-            elif stat.S_ISREG(metadata.st_mode):
-                actual_paths.append(path.relative_to(workspace.root).as_posix())
-            else:
-                raise WorkspaceChanged("sealed workspace contains a device")
-    if tuple(sorted(actual_paths)) != tuple(item[0] for item in expected):
+    actual_paths = _verify_posix(workspace, snapshot)
+    if actual_paths != tuple(item[0] for item in expected):
         raise WorkspaceChanged("sealed workspace has extra or missing files")
-    for relative, size, digest in expected:
-        path = workspace.root.joinpath(*PurePosixPath(relative).parts)
-        try:
-            descriptor = _open_read(path)
-            try:
-                before = os.fstat(descriptor)
-                if not stat.S_ISREG(before.st_mode) or before.st_size != size:
-                    raise WorkspaceChanged("sealed workspace file size changed")
-                hasher = hashlib.sha256()
-                total = 0
-                while True:
-                    chunk = os.read(descriptor, snapshot.code_capture.limits.chunk_bytes)
-                    if not chunk:
-                        break
-                    total += len(chunk)
-                    if total > size:
-                        raise WorkspaceChanged("sealed workspace file exceeded captured range")
-                    hasher.update(chunk)
-                after = os.fstat(descriptor)
-                if not _same_file(before, after) or total != size or hasher.hexdigest() != digest:
-                    raise WorkspaceChanged("sealed workspace file content changed")
-            finally:
-                os.close(descriptor)
-            current = path.lstat()
-            if _is_unsafe(current) or not _same_file(after, current):
-                raise WorkspaceChanged("sealed workspace file identity changed")
-        except WorkspaceChanged:
-            raise
-        except (OSError, PermissionError) as exc:
-            raise WorkspaceChanged("sealed workspace file cannot be verified") from exc
 
 
 __all__ = [
     "CodeCaptureContract",
+    "CodeCaptureFile",
     "DirectoryMembership",
     "FileStatMetadata",
     "RepositoryCodeLimits",
@@ -769,4 +971,5 @@ __all__ = [
     "seal_workspace",
     "validate_code_capture",
     "verify_workspace_seal",
+    "workspace_sealing_supported",
 ]
