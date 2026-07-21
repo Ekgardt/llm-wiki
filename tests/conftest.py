@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 pytest_plugins = ("tests.code_kernel_helpers",)
+collect_ignore_glob = ["fixtures/code_kernel/python/tests/test_service.py"]
 
 VAULT_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = VAULT_ROOT / "scripts"

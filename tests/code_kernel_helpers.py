@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -18,51 +19,56 @@ FIXTURE_ROOT = Path(__file__).parent / "fixtures/code_kernel/python"
 def create_python_repository(destination: Path) -> Path:
     shutil.copytree(FIXTURE_ROOT, destination)
     environment = sanitized_git_environment()
-    subprocess.run(
-        ["git", "init"],
-        cwd=destination,
-        env=environment,
-        check=True,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        timeout=10,
+    for name in tuple(environment):
+        if name == "GIT_TEMPLATE_DIR" or name.startswith(
+            ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
+        ):
+            environment.pop(name)
+    isolation = destination / ".git-test-isolation"
+    hooks = isolation / "hooks"
+    template = isolation / "template"
+    hooks.mkdir(parents=True)
+    template.mkdir(parents=True)
+    environment.update(
+        GIT_AUTHOR_DATE="@946684800 +0000",
+        GIT_AUTHOR_EMAIL="fixture@example.test",
+        GIT_AUTHOR_NAME="Code Kernel Fixture",
+        GIT_COMMITTER_DATE="@946684800 +0000",
+        GIT_COMMITTER_EMAIL="fixture@example.test",
+        GIT_COMMITTER_NAME="Code Kernel Fixture",
+        GIT_CONFIG_GLOBAL=os.devnull,
+        GIT_CONFIG_NOSYSTEM="1",
+        GIT_CONFIG_SYSTEM=os.devnull,
+        GIT_TEMPLATE_DIR=str(template.resolve()),
+        GIT_TERMINAL_PROMPT="0",
     )
-    subprocess.run(
-        ["git", "config", "user.email", "fixture@example.test"],
-        cwd=destination,
-        env=environment,
-        check=True,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        timeout=10,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Code Kernel Fixture"],
-        cwd=destination,
-        env=environment,
-        check=True,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        timeout=10,
-    )
-    subprocess.run(
-        ["git", "add", "."],
-        cwd=destination,
-        env=environment,
-        check=True,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        timeout=10,
-    )
-    subprocess.run(
-        ["git", "commit", "-m", "fixture"],
-        cwd=destination,
-        env=environment,
-        check=True,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        timeout=10,
-    )
+
+    def run_git(*arguments: str) -> None:
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                f"core.hooksPath={hooks.resolve()}",
+                "-c",
+                "commit.gpgSign=false",
+                "-c",
+                "tag.gpgSign=false",
+                *arguments,
+            ],
+            cwd=destination,
+            env=environment,
+            check=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=10,
+        )
+
+    run_git("init", "--initial-branch=main", f"--template={template.resolve()}")
+    run_git("config", "user.email", "fixture@example.test")
+    run_git("config", "user.name", "Code Kernel Fixture")
+    run_git("add", ".")
+    run_git("commit", "-m", "fixture")
     return destination
 
 
