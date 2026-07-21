@@ -223,6 +223,89 @@ def normalized(**changes: object) -> NormalizedAnalysis:
     return NormalizedAnalysis(**values)  # type: ignore[arg-type]
 
 
+def normalized_with_relationship(claim_range: PositionRange) -> NormalizedAnalysis:
+    current_run = run(
+        declared_capabilities=(Capability.DEFINITIONS, Capability.REFERENCES)
+    )
+    rows = tuple(
+        Coverage(
+            "scope:" + SHA[1],
+            source_id,
+            capability,
+            CoverageStatus.COMPLETE,
+            True,
+            None,
+        )
+        for source_id in ("source:a", "source:b")
+        for capability in (Capability.DEFINITIONS, Capability.REFERENCES)
+    )
+    relation = relationship(range=claim_range)
+    return normalized(
+        run=current_run,
+        coverage=rows,
+        relationships=(relation,),
+        validity=(
+            Validity(
+                "validity:relationship",
+                SubjectKind.RELATIONSHIP,
+                relation.claim_id,
+                ValidityStatus.CURRENT,
+                None,
+            ),
+            Validity(
+                "validity:symbol",
+                SubjectKind.SYMBOL,
+                "claim:symbol",
+                ValidityStatus.CURRENT,
+                None,
+            ),
+        ),
+    )
+
+
+def normalized_with_diagnostic(
+    claim_range: PositionRange = PositionRange(0, 4),
+    related: tuple[RelatedLocation, ...] = (),
+) -> NormalizedAnalysis:
+    current_run = run(
+        declared_capabilities=(Capability.DEFINITIONS, Capability.DIAGNOSTICS)
+    )
+    rows = tuple(
+        Coverage(
+            "scope:" + SHA[1],
+            source_id,
+            capability,
+            CoverageStatus.COMPLETE,
+            True,
+            None,
+        )
+        for source_id in ("source:a", "source:b")
+        for capability in (Capability.DEFINITIONS, Capability.DIAGNOSTICS)
+    )
+    item = diagnostic(range=claim_range, related=related)
+    return normalized(
+        run=current_run,
+        coverage=rows,
+        diagnostics=(item,),
+        validity=(
+            Validity(
+                "validity:diagnostic",
+                SubjectKind.DIAGNOSTIC,
+                item.diagnostic_id,
+                ValidityStatus.CURRENT,
+                None,
+            ),
+            Validity(
+                "validity:symbol",
+                SubjectKind.SYMBOL,
+                "claim:symbol",
+                ValidityStatus.CURRENT,
+                None,
+            ),
+        ),
+    )
+
+
 def test_closed_enums_have_exact_values() -> None:
     expected = {
         Capability: {
@@ -534,6 +617,37 @@ def test_normalized_analysis_enforces_one_sorted_unique_universe() -> None:
         normalized(coverage=())
 
 
+def test_normalized_analysis_rejects_unknown_related_source() -> None:
+    with pytest.raises(ValueError, match="related.*source_id"):
+        normalized_with_diagnostic(
+            related=(RelatedLocation("source:unknown", PositionRange(0, 1), None),)
+        )
+
+
+def test_normalized_analysis_rejects_duplicate_build_scope() -> None:
+    first = scope(scope_id="scope:" + SHA[1])
+    second = scope(scope_id="scope:" + SHA[2])
+    rows = tuple(
+        Coverage(
+            current_scope.scope_id,
+            source_id,
+            Capability.DEFINITIONS,
+            CoverageStatus.COMPLETE,
+            True,
+            None,
+        )
+        for current_scope in (first, second)
+        for source_id in current_scope.expected_source_ids
+    )
+    with pytest.raises(ValueError, match="build_target.*build_configuration"):
+        normalized(
+            scopes=(first, second),
+            coverage=rows,
+            symbols=(),
+            validity=(),
+        )
+
+
 def test_helper_round_trips(snapshot: CorpusSnapshot) -> None:
     current_scope = make_analysis_scope(snapshot)
     current_identity = make_analysis_identity(snapshot, current_scope)
@@ -566,6 +680,44 @@ def test_verify_native_analysis_accepts_valid_fixture(snapshot: CorpusSnapshot) 
     assert batch.source_manifest_sha256 == snapshot.corpus_sha256
     assert batch.analysis_sha256 == analysis.run.identity.analysis_sha256
     assert batch.receipt_sha256 is batch.consent_grant_id is batch.consent_revision is batch.lease_id is None
+
+
+def test_verify_native_analysis_rejects_uncaptured_expected_source(
+    snapshot: CorpusSnapshot,
+) -> None:
+    analysis = make_normalized_analysis(snapshot, make_analysis_scope(snapshot))
+    incomplete_snapshot = replace(snapshot, sources=snapshot.sources[:1])
+    with pytest.raises(ValueError, match="source:b.*captured"):
+        verify_native_analysis(incomplete_snapshot, analysis)
+
+
+@pytest.mark.parametrize("kind", ["symbol", "relationship", "diagnostic", "related"])
+def test_verify_native_analysis_rejects_ranges_beyond_captured_bytes(
+    snapshot: CorpusSnapshot,
+    kind: str,
+) -> None:
+    out_of_bounds = PositionRange(0, 5)
+    if kind == "symbol":
+        analysis = normalized(symbols=(symbol(range=out_of_bounds),))
+    elif kind == "relationship":
+        analysis = normalized_with_relationship(out_of_bounds)
+    elif kind == "diagnostic":
+        analysis = normalized_with_diagnostic(claim_range=out_of_bounds)
+    else:
+        analysis = normalized_with_diagnostic(
+            related=(RelatedLocation("source:b", out_of_bounds, None),)
+        )
+    with pytest.raises(ValueError, match=f"{kind}.*range.*captured bytes"):
+        verify_native_analysis(snapshot, analysis)
+
+
+def test_verify_native_analysis_rejects_lexical_run_evidence(
+    snapshot: CorpusSnapshot,
+) -> None:
+    analysis = make_normalized_analysis(snapshot, make_analysis_scope(snapshot))
+    lexical_run = replace(analysis.run, evidence_level=EvidenceLevel.LEXICAL)
+    with pytest.raises(ValueError, match="run.*syntax evidence"):
+        verify_native_analysis(snapshot, replace(analysis, run=lexical_run))
 
 
 def test_verify_native_analysis_rejects_manifest_evidence_and_mode_mismatch(

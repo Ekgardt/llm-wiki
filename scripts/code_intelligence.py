@@ -667,6 +667,7 @@ class NormalizedAnalysis:
         if not self.scopes:
             raise ValueError("scopes must not be empty")
         scope_by_id: dict[str, AnalysisScope] = {}
+        build_scopes: set[tuple[str, str, str]] = set()
         for item in self.scopes:
             if not isinstance(item, AnalysisScope):
                 raise TypeError("scopes must contain AnalysisScope")
@@ -674,6 +675,12 @@ class NormalizedAnalysis:
                 raise ValueError("scope run_id must match analysis run_id")
             if item.source_manifest_sha256 != self.run.identity.source_manifest_sha256:
                 raise ValueError("scope source_manifest_sha256 must match analysis identity")
+            build_scope = (item.run_id, item.build_target, item.build_configuration)
+            if build_scope in build_scopes:
+                raise ValueError(
+                    "analysis scopes must have unique run_id, build_target, and build_configuration"
+                )
+            build_scopes.add(build_scope)
             scope_by_id[item.scope_id] = item
 
         claims = self.all_claims()
@@ -692,6 +699,10 @@ class NormalizedAnalysis:
             if claim_id in claim_by_id:
                 raise ValueError("claim IDs must be unique across claim kinds")
             claim_by_id[claim_id] = claim
+        for item in self.diagnostics:
+            expected_source_ids = scope_by_id[item.scope_id].expected_source_ids
+            if any(related.source_id not in expected_source_ids for related in item.related):
+                raise ValueError("diagnostic related source_id must be expected by its scope")
 
         validity_subjects: set[str] = set()
         subject_types = {
@@ -822,6 +833,37 @@ def verify_native_analysis(
         raise ValueError("native verification requires a native-syntax run")
     if analysis.run.identity.source_manifest_sha256 != snapshot.corpus_sha256:
         raise ValueError("native analysis does not match captured source manifest")
+    if analysis.run.evidence_level is not EvidenceLevel.SYNTAX:
+        raise ValueError("native verification requires run syntax evidence")
+    source_by_id = {source.record.logical_id: source for source in snapshot.sources}
+
+    def require_captured(source_id: str, label: str) -> int:
+        source = source_by_id.get(source_id)
+        if source is None:
+            raise ValueError(f"{source_id} is not captured for {label}")
+        return len(source.captured_bytes)
+
+    def require_captured_range(
+        source_id: str,
+        position: PositionRange,
+        label: str,
+    ) -> None:
+        if position.byte_end > require_captured(source_id, label):
+            raise ValueError(f"{label} range exceeds captured bytes for {source_id}")
+
+    for scope in analysis.scopes:
+        for source_id in scope.expected_source_ids:
+            require_captured(source_id, "analysis scope")
+    for row in analysis.coverage:
+        require_captured(row.source_id, "coverage")
+    for item in analysis.symbols:
+        require_captured_range(item.source_id, item.range, "symbol")
+    for item in analysis.relationships:
+        require_captured_range(item.source_id, item.range, "relationship")
+    for item in analysis.diagnostics:
+        require_captured_range(item.source_id, item.range, "diagnostic")
+        for related in item.related:
+            require_captured_range(related.source_id, related.range, "related")
     if any(item.evidence_level is not EvidenceLevel.SYNTAX for item in analysis.all_claims()):
         raise ValueError("native verification accepts syntax evidence only")
     return VerifiedAnalysisBatch(
