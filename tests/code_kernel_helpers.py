@@ -18,11 +18,14 @@ from code_intelligence import (
     Capability,
     Coverage,
     CoverageStatus,
+    Diagnostic,
+    DiagnosticSeverity,
     EvidenceLevel,
     ExpectedSource,
     NormalizedAnalysis,
     PositionEncoding,
     PositionRange,
+    RelatedLocation,
     Relationship,
     RelationshipClaim,
     RelationshipResolution,
@@ -40,6 +43,7 @@ from corpus_snapshot import (
     SnapshotPolicy,
     SourceMetadata,
     SourceRecord,
+    canonical_retrieval_chunks,
     canonical_source_manifest_sha256,
 )
 from reliable_memory import canonical_json_bytes, validate_state_root
@@ -209,7 +213,9 @@ def make_analysis_identity(
     )
 
 
-def make_run(snapshot: CorpusSnapshot, outcome: str = "complete") -> AnalysisRun:
+def make_run(
+    snapshot: CorpusSnapshot, outcome: str = "complete", repository_scope=None
+) -> AnalysisRun:
     scope = make_analysis_scope(snapshot)
     identity = make_analysis_identity(snapshot, scope)
     return AnalysisRun(
@@ -217,8 +223,16 @@ def make_run(snapshot: CorpusSnapshot, outcome: str = "complete") -> AnalysisRun
         identity=identity,
         source_manifest_sha256=snapshot.corpus_sha256,
         analysis_mode="native-syntax",
-        repository_id="repository:test-fixture",
-        checkout_id="checkout:test-fixture",
+        repository_id=(
+            repository_scope.repository_id
+            if repository_scope is not None
+            else "repository:test-fixture"
+        ),
+        checkout_id=(
+            repository_scope.checkout_id
+            if repository_scope is not None
+            else "checkout:test-fixture"
+        ),
         source_generation_id="generation:test-fixture",
         analyzer_family="native-test",
         analyzer_version="1",
@@ -242,8 +256,9 @@ def make_run(snapshot: CorpusSnapshot, outcome: str = "complete") -> AnalysisRun
 def make_normalized_analysis(
     snapshot: CorpusSnapshot,
     scope: AnalysisScope,
+    repository_scope=None,
 ) -> NormalizedAnalysis:
-    run = make_run(snapshot)
+    run = make_run(snapshot, repository_scope=repository_scope)
     if scope.run_id != run.run_id:
         raise ValueError("scope run_id must match fixture run")
     coverage = tuple(
@@ -311,7 +326,7 @@ def basic_graph_records() -> dict[str, object]:
     return {
         "sources": [
             {
-                "source_id": "source",
+                "source_id": "source:app.py",
                 "relative_path": "app.py",
                 "sha256": hashlib.sha256(content).hexdigest(),
                 "size": len(content),
@@ -320,7 +335,7 @@ def basic_graph_records() -> dict[str, object]:
                 "git_oid": None,
             }
         ],
-        "source_bytes": {"source": content},
+        "source_bytes": {"source:app.py": content},
         "nodes": [
             {
                 "node_id": "caller",
@@ -341,7 +356,7 @@ def basic_graph_records() -> dict[str, object]:
             {
                 "occurrence_id": "occurrence",
                 "node_id": "caller",
-                "source_id": "source",
+                "source_id": "source:app.py",
                 "role": "definition",
                 "byte_start": 0,
                 "byte_end": 12,
@@ -367,7 +382,7 @@ def basic_graph_records() -> dict[str, object]:
                 "evidence_id": "evidence",
                 "assertion_id": "assertion",
                 "observation_id": None,
-                "source_id": "source",
+                "source_id": "source:app.py",
                 "byte_start": 18,
                 "byte_end": 26,
                 "span_sha256": hashlib.sha256(content[18:26]).hexdigest(),
@@ -410,7 +425,16 @@ def snapshot_for_records(records: dict[str, object]) -> CorpusSnapshot:
     )
     return CorpusSnapshot(
         sources=captured,
-        chunks=(),
+        chunks=tuple(
+            chunk
+            for source in captured
+            for chunk in canonical_retrieval_chunks(
+                source_id=source.record.logical_id,
+                source_path=source.record.relative_path,
+                source_sha256=source.record.sha256,
+                content=source.content,
+            )
+        ),
         corpus_sha256=canonical_source_manifest_sha256(
             (source.record for source in captured), policy
         ),
@@ -418,16 +442,31 @@ def snapshot_for_records(records: dict[str, object]) -> CorpusSnapshot:
     )
 
 
-def make_normalized_analysis_for_records(records: dict[str, object]) -> NormalizedAnalysis:
+def make_normalized_analysis_for_records(
+    records: dict[str, object], repository_scope=None
+) -> NormalizedAnalysis:
     snapshot = snapshot_for_records(records)
     scope = make_analysis_scope(snapshot)
     run = replace(
         make_run(snapshot),
-        declared_capabilities=(Capability.CALLS, Capability.DEFINITIONS),
+        declared_capabilities=(
+            Capability.CALLS,
+            Capability.DEFINITIONS,
+            Capability.DIAGNOSTICS,
+        ),
+        **(
+            {
+                "repository_id": repository_scope.repository_id,
+                "checkout_id": repository_scope.checkout_id,
+            }
+            if repository_scope is not None
+            else {}
+        ),
     )
     source = scope.expected_sources[0]
     symbol_id = "claim:symbol"
     relationship_id = "claim:relationship"
+    diagnostic_id = "diagnostic:fixture"
     symbol_identity = SymbolIdentity("python/v1", "app:caller")
     return NormalizedAnalysis(
         run=run,
@@ -477,8 +516,35 @@ def make_normalized_analysis_for_records(records: dict[str, object]) -> Normaliz
                 ambiguity=False,
             ),
         ),
-        diagnostics=(),
+        diagnostics=(
+            Diagnostic(
+                diagnostic_id=diagnostic_id,
+                run_id=run.run_id,
+                scope_id=scope.scope_id,
+                source_id=source.source_id,
+                capability=Capability.DIAGNOSTICS,
+                severity=DiagnosticSeverity.WARNING,
+                code="fixture",
+                message="fixture diagnostic",
+                range=PositionRange(0, 3),
+                evidence_level=EvidenceLevel.SYNTAX,
+                related=(
+                    RelatedLocation(
+                        source_id=source.source_id,
+                        range=PositionRange(4, 10),
+                        message="related fixture",
+                    ),
+                ),
+            ),
+        ),
         validity=(
+            Validity(
+                validity_id="validity:diagnostic",
+                subject_kind=SubjectKind.DIAGNOSTIC,
+                subject_id=diagnostic_id,
+                status=ValidityStatus.CURRENT,
+                stale_reason=None,
+            ),
             Validity(
                 validity_id="validity:relationship",
                 subject_kind=SubjectKind.RELATIONSHIP,
@@ -532,11 +598,19 @@ def build_fixture_generation(
     if graph_schema is not None:
         options["graph_schema"] = graph_schema
     if graph_schema is GraphSchema.V3:
+        from repository_scope import resolve_repository_scope
+
+        repository = tmp_path / "repository"
+        repository.mkdir(parents=True, exist_ok=True)
+        repository_scope = resolve_repository_scope(repository)
+        snapshot = snapshot_for_records(records)
         options["verified_analyses"] = (
             verify_native_analysis(
-                snapshot_for_records(records), make_normalized_analysis_for_records(records)
+                snapshot,
+                make_normalized_analysis_for_records(records, repository_scope),
             ),
         )
+        options.update(snapshot=snapshot, repository_scope=repository_scope)
     return build_full_generation(
         GenerationCatalog(tmp_path / "state"),
         generation_id=generation_id,

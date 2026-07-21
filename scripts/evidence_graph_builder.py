@@ -451,6 +451,10 @@ def build_full_generation(
         raise TypeError("snapshot must be a CorpusSnapshot or None")
     if snapshot is not None and activate and publication_root is None:
         raise ValueError("complete generation activation requires publication_root")
+    if graph_schema is evidence_graph.GraphSchema.V3 and (
+        snapshot is None or repository_scope is None
+    ):
+        raise ValueError("evidence-graph/v3 requires a CorpusSnapshot and repository scope")
 
     sources_list = [
         dict(source)
@@ -524,6 +528,11 @@ def build_full_generation(
             raise TypeError("verified_analyses must contain VerifiedAnalysisBatch values")
         if batch.source_manifest_sha256 != source_manifest_sha256:
             raise ValueError("verified analysis source manifest must match generation manifest")
+        if graph_schema is evidence_graph.GraphSchema.V3 and (
+            batch.analysis.run.repository_id,
+            batch.analysis.run.checkout_id,
+        ) != (repository_scope.repository_id, repository_scope.checkout_id):
+            raise ValueError("verified analysis repository or checkout does not match publication")
         verified_analysis_list.append(batch)
 
     nodes_list = _materialize(
@@ -599,6 +608,15 @@ def build_full_generation(
             observations=observations_list,
             dependencies=dependencies_list,
             verified_analyses=verified_analysis_list,
+            publication_generation_id=(
+                generation_id if graph_schema is evidence_graph.GraphSchema.V3 else None
+            ),
+            publication_expected_active=(
+                expected_active if graph_schema is evidence_graph.GraphSchema.V3 else None
+            ),
+            repository_scope=(
+                repository_scope if graph_schema is evidence_graph.GraphSchema.V3 else None
+            ),
             deadline=deadline,
             cancelled=cancelled,
         )

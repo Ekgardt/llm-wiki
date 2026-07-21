@@ -32,6 +32,7 @@ from tests.code_kernel_helpers import (
     basic_graph_records,
     build_fixture_generation,
     make_unminted_verified_subclass,
+    snapshot_for_records,
 )
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
@@ -83,8 +84,12 @@ def test_v3_builder_rejects_unminted_verified_subclass_before_publication(
     from evidence_graph import GraphSchema
     from evidence_graph_builder import build_full_generation
     from generation_catalog import GenerationCatalog
+    from repository_scope import resolve_repository_scope
 
     records = basic_graph_records()
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    repository_scope = resolve_repository_scope(repository)
     catalog = GenerationCatalog(tmp_path / "state")
     with pytest.raises(TypeError, match="VerifiedAnalysisBatch"):
         build_full_generation(
@@ -92,10 +97,58 @@ def test_v3_builder_rejects_unminted_verified_subclass_before_publication(
             generation_id="forged",
             graph_schema=GraphSchema.V3,
             verified_analyses=(make_unminted_verified_subclass(records),),
+            snapshot=snapshot_for_records(records),
+            repository_scope=repository_scope,
+            activate=False,
             **records,
         )
     assert not (catalog.generations_path / "forged").exists()
     assert catalog.get_active() is None
+
+
+def test_v3_builder_requires_complete_repository_scoped_generation(tmp_path: Path) -> None:
+    from evidence_graph import GraphSchema
+    from evidence_graph_builder import build_full_generation
+    from generation_catalog import GenerationCatalog
+
+    with pytest.raises(ValueError, match="snapshot|repository scope|v3"):
+        build_full_generation(
+            GenerationCatalog(tmp_path / "state"),
+            generation_id="invalid-v3",
+            graph_schema=GraphSchema.V3,
+            **basic_graph_records(),
+        )
+
+
+def test_v3_builder_rejects_run_outside_manifest_repository_scope(tmp_path: Path) -> None:
+    from code_intelligence import verify_native_analysis
+    from evidence_graph import GraphSchema
+    from evidence_graph_builder import build_full_generation
+    from generation_catalog import GenerationCatalog
+    from repository_scope import resolve_repository_scope
+
+    from tests.code_kernel_helpers import (
+        make_normalized_analysis_for_records,
+        snapshot_for_records,
+    )
+
+    records = basic_graph_records()
+    snapshot = snapshot_for_records(records)
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    with pytest.raises(ValueError, match="repository|checkout"):
+        build_full_generation(
+            GenerationCatalog(tmp_path / "state"),
+            generation_id="wrong-scope",
+            graph_schema=GraphSchema.V3,
+            verified_analyses=(
+                verify_native_analysis(snapshot, make_normalized_analysis_for_records(records)),
+            ),
+            snapshot=snapshot,
+            repository_scope=resolve_repository_scope(repository),
+            activate=False,
+            **records,
+        )
 
 
 def _basic_records():

@@ -16,7 +16,7 @@ from enum import Enum, unique
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 
-from code_intelligence import Capability, VerifiedAnalysisBatch
+from code_intelligence import AnalysisIdentity, Capability, PositionEncoding, VerifiedAnalysisBatch
 from reliable_memory import canonical_json_bytes, validate_runtime_file
 from repository_scope import RepositoryScope
 
@@ -37,6 +37,7 @@ PROGRESS_OPCODES = 1000
 MAX_VALIDATION_ROWS = 1_000_000
 MAX_SOURCE_MANIFEST_BYTES = 256 * 1024 * 1024
 IO_CHUNK_BYTES = 64 * 1024
+_UNSET = object()
 
 _SHA256 = frozenset("0123456789abcdef")
 _NODE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/#@+\-]{0,511}")
@@ -633,6 +634,10 @@ def _slice_key(run_id: str, scope_id: str, capability: str) -> str:
 
 def _v3_rows(
     verified_analyses: Sequence[VerifiedAnalysisBatch],
+    *,
+    publication_generation_id: str,
+    publication_expected_active: str | None,
+    repository_scope: RepositoryScope,
 ) -> dict[str, list[tuple[object, ...]]]:
     rows: dict[str, list[tuple[object, ...]]] = {
         table: []
@@ -650,12 +655,39 @@ def _v3_rows(
             "validity",
         )
     }
+    total_rows = 0
     for batch in verified_analyses:
         if type(batch) is not VerifiedAnalysisBatch:
             raise TypeError("verified_analyses must contain VerifiedAnalysisBatch values")
         analysis = batch.analysis
         run = analysis.run
+        if (run.repository_id, run.checkout_id) != (
+            repository_scope.repository_id,
+            repository_scope.checkout_id,
+        ):
+            raise ValueError("analyzer run repository or checkout does not match publication scope")
         identity = run.identity
+        related_count = sum(len(item.related) for item in analysis.diagnostics)
+        expected_source_count = sum(len(scope.expected_sources) for scope in analysis.scopes)
+        additions = {
+            "analyzer_run": 1,
+            "run_capability": len(run.declared_capabilities),
+            "analysis_scope": len(analysis.scopes),
+            "expected_source": expected_source_count,
+            "coverage": len(analysis.coverage),
+            "symbol_claim": len(analysis.symbols),
+            "relationship_claim": len(analysis.relationships),
+            "diagnostic": len(analysis.diagnostics),
+            "diagnostic_related": related_count,
+            "slice_activation": len(analysis.scopes) * len(run.declared_capabilities),
+            "validity": len(analysis.validity),
+        }
+        for table, count in additions.items():
+            if count > MAX_VALIDATION_ROWS - len(rows[table]):
+                raise ValueError(f"{table} row ceiling exceeded")
+        total_rows += sum(additions.values())
+        if total_rows > MAX_VALIDATION_ROWS * len(rows):
+            raise ValueError("v3 aggregate row ceiling exceeded")
         capability_rows = [
             {"capability": capability.value}
             for capability in run.declared_capabilities
@@ -707,8 +739,8 @@ def _v3_rows(
                 run.consent_grant_id,
                 run.consent_revision,
                 run.lease_id,
-                run.source_generation_id,
-                None,
+                publication_generation_id,
+                publication_expected_active,
                 run.evidence_level.value,
                 int(run.qualified),
                 run.outcome.value,
@@ -1020,6 +1052,9 @@ def create_generation_database(
     observations: Iterable[Mapping[str, object]],
     dependencies: Iterable[Mapping[str, object]],
     verified_analyses: Iterable[VerifiedAnalysisBatch] = (),
+    publication_generation_id: str | None = None,
+    publication_expected_active: str | None = None,
+    repository_scope: RepositoryScope | None = None,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
@@ -1035,7 +1070,37 @@ def create_generation_database(
     verified = tuple(verified_values)
     if schema is GraphSchema.V2 and verified:
         raise ValueError("verified analyses require explicit evidence-graph/v3")
-    extension_rows = _v3_rows(verified) if schema is GraphSchema.V3 else {}
+    if schema is GraphSchema.V3:
+        generation_id = _text(
+            publication_generation_id, "publication_generation_id", maximum=128
+        )
+        expected_active = _text(
+            publication_expected_active,
+            "publication_expected_active",
+            maximum=128,
+            optional=True,
+        )
+        if not isinstance(repository_scope, RepositoryScope):
+            raise TypeError("repository_scope must be a RepositoryScope for evidence-graph/v3")
+        repository_scope = RepositoryScope.from_dict(repository_scope.as_dict())
+        assert generation_id is not None
+        extension_rows = _v3_rows(
+            verified,
+            publication_generation_id=generation_id,
+            publication_expected_active=expected_active,
+            repository_scope=repository_scope,
+        )
+    else:
+        if any(
+            value is not None
+            for value in (
+                publication_generation_id,
+                publication_expected_active,
+                repository_scope,
+            )
+        ):
+            raise ValueError("publication context is only valid for evidence-graph/v3")
+        extension_rows = {}
     path = Path(database_path)
     if path.exists() or path.is_symlink():
         raise FileExistsError("Evidence Graph generation artifacts are immutable")
@@ -1364,7 +1429,15 @@ def create_generation_database(
         finally:
             database.set_progress_handler(None, 0)
             database.close()
-        validate_generation_database(temporary, schema=schema)
+        validate_generation_database(
+            temporary,
+            schema=schema,
+            publication_generation_id=publication_generation_id,
+            publication_expected_active=(
+                publication_expected_active if schema is GraphSchema.V3 else _UNSET
+            ),
+            repository_scope=repository_scope,
+        )
         if temporary.stat().st_size > MAX_DATABASE_BYTES:
             raise ValueError("Evidence Graph database exceeds the supported byte ceiling")
         try:
@@ -1686,10 +1759,68 @@ def database_closed_world(
     )
 
 
-def _validate_v3_sets(database: sqlite3.Connection) -> None:
-    run_ids = [row[0] for row in database.execute("SELECT run_id FROM analyzer_run ORDER BY run_id")]
+def _validate_v3_sets(
+    database: sqlite3.Connection,
+    *,
+    publication_generation_id: str | None = None,
+    publication_expected_active: object = _UNSET,
+    repository_scope: RepositoryScope | None = None,
+    source_manifest_sha256: str | None = None,
+) -> None:
+    run_rows = database.execute("SELECT * FROM analyzer_run ORDER BY run_id").fetchall()
+    run_ids = [row["run_id"] for row in run_rows]
+    component_names = AnalysisIdentity._component_names()
+    for row in run_rows:
+        identity = AnalysisIdentity(
+            **{name: _digest(row[name], name) for name in component_names},
+            position_encoding=PositionEncoding(row["position_encoding"]),
+            analysis_sha256=_digest(row["analysis_sha256"], "analysis_sha256"),
+        )
+        if identity.recompute_analysis_sha256() != identity.analysis_sha256:
+            raise ValueError("persisted analysis_sha256 does not match its components")
+        for column in (
+            "executable_sha256",
+            "declared_capabilities_sha256",
+            "expected_scope_set_sha256",
+        ):
+            _digest(row[column], column)
+        for column in ("receipt_sha256", "receipt_output_sha256"):
+            if row[column] is not None:
+                _digest(row[column], column)
+        if source_manifest_sha256 is not None and row["source_manifest_sha256"] != source_manifest_sha256:
+            raise ValueError("analyzer run source manifest does not match generation manifest")
+        if publication_generation_id is not None and (
+            row["publication_generation_id"] != publication_generation_id
+        ):
+            raise ValueError("analyzer run publication generation does not match generation manifest")
+        if publication_expected_active is not _UNSET and (
+            row["publication_expected_active"] != publication_expected_active
+        ):
+            raise ValueError("analyzer run expected active generation does not match publication")
+        if repository_scope is not None and (
+            row["repository_id"],
+            row["checkout_id"],
+        ) != (repository_scope.repository_id, repository_scope.checkout_id):
+            raise ValueError("analyzer run repository or checkout does not match publication scope")
+
     for run_id in run_ids:
         validate_persisted_scope(database, run_id)
+
+    for table in ("symbol_claim", "relationship_claim", "diagnostic"):
+        invalid_range = database.execute(
+            f"SELECT 1 FROM {table} c JOIN source s USING(source_id) "
+            "WHERE c.byte_start < 0 OR c.byte_end <= c.byte_start "
+            "OR c.byte_end > s.size LIMIT 1"
+        ).fetchone()
+        if invalid_range is not None:
+            raise ValueError(f"persisted {table} range is outside its captured source")
+    invalid_related_range = database.execute(
+        "SELECT 1 FROM diagnostic_related r JOIN source s USING(source_id) "
+        "WHERE r.byte_start < 0 OR r.byte_end <= r.byte_start "
+        "OR r.byte_end > s.size LIMIT 1"
+    ).fetchone()
+    if invalid_related_range is not None:
+        raise ValueError("persisted diagnostic_related range is outside its captured source")
 
     required_slices = {
         (_slice_key(row[0], row[1], row[2]), row[0], row[1], row[2])
@@ -1737,6 +1868,10 @@ def _validate_connection(
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     cancelled: Callable[[], bool] | None = None,
+    publication_generation_id: str | None = None,
+    publication_expected_active: object = _UNSET,
+    repository_scope: RepositoryScope | None = None,
+    source_manifest_sha256: str | None = None,
 ) -> None:
     """Validate the closed Evidence Graph file format and all stored integrity invariants."""
     _validation_deadline(database, deadline, monotonic, cancelled)
@@ -1839,7 +1974,13 @@ LIMIT 1
             cancelled=cancelled,
         )
         if schema is GraphSchema.V3:
-            _validate_v3_sets(database)
+            _validate_v3_sets(
+                database,
+                publication_generation_id=publication_generation_id,
+                publication_expected_active=publication_expected_active,
+                repository_scope=repository_scope,
+                source_manifest_sha256=source_manifest_sha256,
+            )
     except sqlite3.Error as exc:
         if bool(cancelled and cancelled()) or (
             deadline is not None and (monotonic() >= deadline or "interrupt" in str(exc).casefold())
@@ -1892,6 +2033,10 @@ def validate_generation_database(
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     cancelled: Callable[[], bool] | None = None,
+    publication_generation_id: str | None = None,
+    publication_expected_active: object = _UNSET,
+    repository_scope: RepositoryScope | None = None,
+    source_manifest_sha256: str | None = None,
 ) -> None:
     """Reopen and validate one exact, closed Evidence Graph database contract."""
     if not isinstance(schema, GraphSchema):
@@ -1908,6 +2053,10 @@ def validate_generation_database(
             deadline=deadline,
             monotonic=monotonic,
             cancelled=cancelled,
+            publication_generation_id=publication_generation_id,
+            publication_expected_active=publication_expected_active,
+            repository_scope=repository_scope,
+            source_manifest_sha256=source_manifest_sha256,
         )
     finally:
         database.close()
@@ -2005,12 +2154,18 @@ def validate_generation_artifact(
             deadline=deadline,
             monotonic=monotonic,
             cancelled=cancelled,
+            publication_generation_id=(
+                manifest.get("generation_id") if schema is GraphSchema.V3 else None
+            ),
+            repository_scope=(
+                RepositoryScope.from_dict(manifest.get("repository_scope"))
+                if schema is GraphSchema.V3
+                else None
+            ),
+            source_manifest_sha256=(
+                manifest.get("source_manifest_sha256") if schema is GraphSchema.V3 else None
+            ),
         )
-        if schema is GraphSchema.V3 and database.execute(
-            "SELECT 1 FROM analyzer_run WHERE source_manifest_sha256 != ? LIMIT 1",
-            (manifest.get("source_manifest_sha256"),),
-        ).fetchone() is not None:
-            raise ValueError("analyzer run source manifest does not match generation manifest")
         stored_sources = _stored_shared_source_membership(
             database,
             deadline=deadline,

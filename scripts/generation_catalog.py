@@ -725,6 +725,9 @@ def _validate_generation(
         raise ValueError("vector artifacts require embedding metadata")
     normalized["vector_state"] = vector_state
 
+    if normalized["schema_version"] == "corpus-generation/v1" and graph_schema == "evidence-graph/v3":
+        raise ValueError("evidence-graph/v3 requires corpus-generation/v2")
+
     if normalized["schema_version"] == "corpus-generation/v2":
         if not _V2_REQUIRED_ARTIFACTS <= seen or not seen <= (
             _V2_REQUIRED_ARTIFACTS | _V2_OPTIONAL_ARTIFACTS

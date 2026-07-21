@@ -303,6 +303,19 @@ def test_v1_search_only_generation_accepts_null_graph_schema(tmp_path: Path) -> 
     assert catalog.register("v1-search-only") == manifest
 
 
+def test_v1_generation_rejects_graph_v3(tmp_path: Path) -> None:
+    from reliable_memory import canonical_json_bytes
+
+    catalog = _catalog(tmp_path)
+    directory, manifest = _publish(catalog, "v1-v3")
+    manifest["graph_schema_version"] = "evidence-graph/v3"
+    manifest["graph_extractor_version"] = "graph/v3"
+    (directory / "manifest.json").write_bytes(canonical_json_bytes(manifest))
+
+    with pytest.raises(ValueError, match="v3|corpus-generation/v2"):
+        catalog.register("v1-v3")
+
+
 @pytest.mark.parametrize("graph_schema", ["evidence-graph/v2", "evidence-graph/v3"])
 def test_v2_generation_accepts_only_known_graph_schema_strings(
     tmp_path: Path, graph_schema: str
@@ -353,17 +366,19 @@ def test_v2_generation_accepts_only_known_graph_schema_strings(
             "dependencies": (),
         }
         scope = make_analysis_scope(snapshot)
+        repository_scope = resolve_repository_scope(repository)
         result = build_full_generation(
             catalog,
             generation_id="known-v3",
             graph_schema=GraphSchema.V3,
             verified_analyses=(
                 verify_native_analysis(
-                    snapshot, make_normalized_analysis(snapshot, scope)
+                    snapshot,
+                    make_normalized_analysis(snapshot, scope, repository_scope),
                 ),
             ),
             snapshot=snapshot,
-            repository_scope=resolve_repository_scope(repository),
+            repository_scope=repository_scope,
             activate=False,
             **records,
         )

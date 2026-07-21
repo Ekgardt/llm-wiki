@@ -81,7 +81,8 @@
       "type": "object",
       "required": ["schema_version"],
       "properties": {
-        "schema_version": {"const": "corpus-generation/v1"}
+        "schema_version": {"const": "corpus-generation/v1"},
+        "graph_schema_version": {"oneOf": [{"type": "null"}, {"const": "evidence-graph/v2"}]}
       }
     },
     {

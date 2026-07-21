@@ -200,13 +200,21 @@ def test_database_schema_is_explicit_and_returned(tmp_path: Path) -> None:
     v2 = create_generation_database(
         tmp_path / "v2.sqlite3", schema=GraphSchema.V2, **records
     )
+    from repository_scope import resolve_repository_scope
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    scope = resolve_repository_scope(repository)
     verified = verify_native_analysis(
-        snapshot_for_records(records), make_normalized_analysis_for_records(records)
+        snapshot_for_records(records), make_normalized_analysis_for_records(records, scope)
     )
     v3 = create_generation_database(
         tmp_path / "v3.sqlite3",
         schema=GraphSchema.V3,
         verified_analyses=(verified,),
+        publication_generation_id="v3",
+        publication_expected_active=None,
+        repository_scope=scope,
         **records,
     )
 
@@ -249,16 +257,23 @@ def test_v3_has_normalized_relationships_without_unresolved_v2_assertions(
 def _verified_v3_database(tmp_path: Path) -> Path:
     from code_intelligence import verify_native_analysis
     from evidence_graph import GraphSchema, create_generation_database
+    from repository_scope import resolve_repository_scope
 
     records = basic_graph_records()
+    repository = tmp_path / "repository"
+    repository.mkdir(exist_ok=True)
+    scope = resolve_repository_scope(repository)
     verified = verify_native_analysis(
-        snapshot_for_records(records), make_normalized_analysis_for_records(records)
+        snapshot_for_records(records), make_normalized_analysis_for_records(records, scope)
     )
     path = tmp_path / "verified-v3.sqlite3"
     create_generation_database(
         path,
         schema=GraphSchema.V3,
         verified_analyses=(verified,),
+        publication_generation_id="verified-v3",
+        publication_expected_active="prior",
+        repository_scope=scope,
         **records,
     )
     return path
@@ -300,14 +315,60 @@ def test_v3_writer_rejects_unminted_verified_subclass_before_publish(
     tmp_path: Path,
 ) -> None:
     from evidence_graph import GraphSchema, create_generation_database
+    from repository_scope import resolve_repository_scope
 
     records = basic_graph_records()
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    scope = resolve_repository_scope(repository)
     path = tmp_path / "forged.sqlite3"
     with pytest.raises(TypeError, match="VerifiedAnalysisBatch"):
         create_generation_database(
             path,
             schema=GraphSchema.V3,
             verified_analyses=(make_unminted_verified_subclass(records),),
+            publication_generation_id="forged",
+            publication_expected_active=None,
+            repository_scope=scope,
+            **records,
+        )
+    assert not path.exists()
+
+
+def test_v3_expansion_ceiling_rejects_before_database_creation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from dataclasses import replace
+
+    import evidence_graph
+    from code_intelligence import verify_native_analysis
+    from repository_scope import resolve_repository_scope
+
+    records = basic_graph_records()
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    scope = resolve_repository_scope(repository)
+    analysis = make_normalized_analysis_for_records(records)
+    analysis = replace(
+        analysis,
+        run=replace(
+            analysis.run,
+            repository_id=scope.repository_id,
+            checkout_id=scope.checkout_id,
+        ),
+    )
+    verified = verify_native_analysis(snapshot_for_records(records), analysis)
+    monkeypatch.setattr(evidence_graph, "MAX_VALIDATION_ROWS", 1)
+    path = tmp_path / "bounded.sqlite3"
+
+    with pytest.raises(ValueError, match="row ceiling"):
+        evidence_graph.create_generation_database(
+            path,
+            schema=evidence_graph.GraphSchema.V3,
+            verified_analyses=(verified,),
+            publication_generation_id="generation",
+            publication_expected_active=None,
+            repository_scope=scope,
             **records,
         )
     assert not path.exists()
@@ -400,6 +461,48 @@ def _damage_v3(path: Path, damage: str) -> None:
                 "INSERT INTO validity VALUES "
                 "('validity:invalid',NULL,NULL,NULL,'current',NULL)"
             )
+        elif damage in {"wrong-repository", "wrong-checkout"}:
+            column = "repository_id" if damage == "wrong-repository" else "checkout_id"
+            database.execute(f"UPDATE analyzer_run SET {column}={column}||':wrong'")
+        elif damage == "wrong-publication-generation":
+            database.execute(
+                "UPDATE analyzer_run SET publication_generation_id='wrong-generation'"
+            )
+        elif damage == "wrong-expected-active":
+            database.execute(
+                "UPDATE analyzer_run SET publication_expected_active='wrong-active'"
+            )
+        elif damage in {"bad-analysis-hash", "bad-component-hash"}:
+            column = "analysis_sha256" if damage == "bad-analysis-hash" else "manifest_sha256"
+            database.execute(f"UPDATE analyzer_run SET {column}=?", ("f" * 64,))
+        elif damage == "expected-source-hash-mismatch":
+            from reliable_memory import canonical_json_bytes
+
+            database.execute("UPDATE expected_source SET source_sha256=?", ("f" * 64,))
+            scope_id = database.execute("SELECT scope_id FROM analysis_scope").fetchone()[0]
+            rows = database.execute(
+                "SELECT source_id,source_sha256,disposition FROM expected_source "
+                "WHERE scope_id=? ORDER BY source_id",
+                (scope_id,),
+            ).fetchall()
+            digest = hashlib.sha256(
+                canonical_json_bytes(
+                    [
+                        {"source_id": row[0], "sha256": row[1], "disposition": row[2]}
+                        for row in rows
+                    ]
+                )
+            ).hexdigest()
+            database.execute(
+                "UPDATE analysis_scope SET expected_source_set_sha256=? WHERE scope_id=?",
+                (digest, scope_id),
+            )
+        elif damage.startswith("eof-"):
+            table = damage.removeprefix("eof-")
+            database.execute(
+                f"UPDATE {table} SET byte_end="
+                f"(SELECT size + 1 FROM source WHERE source_id={table}.source_id)"
+            )
         else:
             raise AssertionError(damage)
 
@@ -423,15 +526,33 @@ def _damage_v3(path: Path, damage: str) -> None:
         "duplicate-selected-slice",
         "missing-selected-slice",
         "invalid-validity-subject",
+        "wrong-repository",
+        "wrong-checkout",
+        "wrong-publication-generation",
+        "wrong-expected-active",
+        "bad-analysis-hash",
+        "bad-component-hash",
+        "expected-source-hash-mismatch",
+        "eof-symbol_claim",
+        "eof-relationship_claim",
+        "eof-diagnostic",
+        "eof-diagnostic_related",
     ],
 )
 def test_v3_closed_world_storage_fails_closed(tmp_path: Path, damage: str) -> None:
     from evidence_graph import GraphSchema, validate_generation_database
+    from repository_scope import resolve_repository_scope
 
     path = _verified_v3_database(tmp_path)
     with pytest.raises((sqlite3.IntegrityError, ValueError)):
         _damage_v3(path, damage)
-        validate_generation_database(path, schema=GraphSchema.V3)
+        validate_generation_database(
+            path,
+            schema=GraphSchema.V3,
+            publication_generation_id="verified-v3",
+            publication_expected_active="prior",
+            repository_scope=resolve_repository_scope(tmp_path / "repository"),
+        )
 
 
 def test_database_construction_cancellation_stops_lazy_records_without_publish(tmp_path):
@@ -522,7 +643,7 @@ def test_manifest_schema_is_closed_and_bounded():
             },
             SCRIPTS / "schemas/evidence-graph-manifest-v1.json",
         )
-    with pytest.raises(ValueError, match="const|graph_schema_version"):
+    with pytest.raises(ValueError, match="oneOf|const|graph_schema_version"):
         validate_schema(
             {**valid, "graph_schema_version": "other/v1"},
             SCRIPTS / "schemas/evidence-graph-manifest-v1.json",
