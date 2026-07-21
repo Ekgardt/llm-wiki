@@ -44,6 +44,15 @@ if os.name == "nt":
             ("file_attributes", wintypes.DWORD),
         )
 
+    class _FileId128(ctypes.Structure):
+        _fields_ = (("identifier", ctypes.c_ubyte * 16),)
+
+    class _FileIdInfo(ctypes.Structure):
+        _fields_ = (
+            ("volume_serial_number", ctypes.c_ulonglong),
+            ("file_id", _FileId128),
+        )
+
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _get_file_information_by_handle_ex = _kernel32.GetFileInformationByHandleEx
     _get_file_information_by_handle_ex.argtypes = (
@@ -451,8 +460,44 @@ def _windows_change_time(descriptor: int) -> int | None:
     return int(information.change_time)
 
 
+def _windows_handle_file_identity(handle: int) -> tuple[str, int, bytes]:
+    if os.name != "nt":
+        raise OSError("Windows handle identity is unavailable")
+    information = _FileIdInfo()
+    if not _get_file_information_by_handle_ex(
+        handle,
+        18,  # FileIdInfo
+        ctypes.byref(information),
+        ctypes.sizeof(information),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    file_id = bytes(information.file_id.identifier)
+    volume = int(information.volume_serial_number)
+    if volume <= 0 or not any(file_id):
+        raise OSError("Windows stable file identity is unavailable")
+    return ("windows", volume, file_id)
+
+
+def _descriptor_file_identity(descriptor: int) -> tuple[object, ...]:
+    if os.name == "nt":
+        handle = msvcrt.get_osfhandle(descriptor)
+        if handle == -1:
+            raise OSError("invalid Windows file handle")
+        return _windows_handle_file_identity(handle)
+    if os.name == "posix":
+        metadata = os.fstat(descriptor)
+        if metadata.st_dev <= 0 or metadata.st_ino <= 0:
+            raise OSError("POSIX stable file identity is unavailable")
+        return ("posix", metadata.st_dev, metadata.st_ino, stat.S_IFMT(metadata.st_mode))
+    raise OSError("stable file identity is unavailable")
+
+
 def _stable_descriptor_state(descriptor: int) -> tuple[object, ...]:
-    return (*_stable_file_stat(os.fstat(descriptor)), _windows_change_time(descriptor))
+    return (
+        *_stable_file_stat(os.fstat(descriptor)),
+        _descriptor_file_identity(descriptor),
+        _windows_change_time(descriptor),
+    )
 
 
 def _open_read_descriptor(path: Path) -> int:
@@ -768,55 +813,6 @@ def _validate_generation(
             deadline=deadline,
             cancelled=cancelled,
         )
-        if "code_capture" in normalized:
-            import corpus_snapshot
-            import evidence_graph
-
-            source_manifest_raw = read_runtime_bytes(
-                generation_path / "source-manifest.json",
-                state_root,
-                max_bytes=evidence_graph.MAX_SOURCE_MANIFEST_BYTES,
-            )
-            try:
-                source_manifest = json.loads(source_manifest_raw)
-            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise ValueError("source manifest must contain valid UTF-8 JSON") from exc
-            source_manifest = corpus_snapshot.validate_canonical_source_manifest(
-                source_manifest
-            )
-            database_path = generation_path / "evidence.sqlite3"
-            with closing(
-                sqlite3.connect(f"{database_path.as_uri()}?mode=ro", uri=True, timeout=0)
-            ) as database:
-                source_sizes = {
-                    row[0]: row[1]
-                    for row in database.execute(
-                        "SELECT source_id, size FROM source ORDER BY source_id"
-                    ).fetchall()
-                }
-            source_membership = [
-                (
-                    source["logical_id"],
-                    source["relative_path"],
-                    source["sha256"],
-                    source_sizes.get(source["logical_id"]),
-                )
-                for source in source_manifest["sources"]
-            ]
-            captured_membership = [
-                (
-                    item["source_id"],
-                    item["relative_path"],
-                    item["sha256"],
-                    item["stat"]["size"],
-                )
-                for item in normalized["code_capture"]["files"]
-            ]
-            if captured_membership != source_membership:
-                raise ValueError(
-                    "code_capture files must match canonical source membership"
-                )
-
     elif graph_schema in {"evidence-graph/v2", "evidence-graph/v3"}:
         from evidence_graph import validate_generation_artifact
 
@@ -828,6 +824,51 @@ def _validate_generation(
             monotonic=monotonic,
             cancelled=cancelled,
         )
+
+    if "code_capture" in normalized:
+        import corpus_snapshot
+        import evidence_graph
+
+        source_manifest_raw = read_runtime_bytes(
+            generation_path / "source-manifest.json",
+            state_root,
+            max_bytes=evidence_graph.MAX_SOURCE_MANIFEST_BYTES,
+        )
+        try:
+            source_manifest = json.loads(source_manifest_raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("source manifest must contain valid UTF-8 JSON") from exc
+        source_manifest = corpus_snapshot.validate_canonical_source_manifest(source_manifest)
+        database_path = generation_path / "evidence.sqlite3"
+        with closing(
+            sqlite3.connect(f"{database_path.as_uri()}?mode=ro", uri=True, timeout=0)
+        ) as database:
+            source_sizes = {
+                row[0]: row[1]
+                for row in database.execute(
+                    "SELECT source_id, size FROM source ORDER BY source_id"
+                ).fetchall()
+            }
+        source_membership = [
+            (
+                source["logical_id"],
+                source["relative_path"],
+                source["sha256"],
+                source_sizes.get(source["logical_id"]),
+            )
+            for source in source_manifest["sources"]
+        ]
+        captured_membership = [
+            (
+                item["source_id"],
+                item["relative_path"],
+                item["sha256"],
+                item["stat"]["size"],
+            )
+            for item in normalized["code_capture"]["files"]
+        ]
+        if captured_membership != source_membership:
+            raise ValueError("code_capture files must match canonical source membership")
 
     final_seal, actual_files = _scan_generation(
         generation_path,

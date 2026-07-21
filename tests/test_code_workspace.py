@@ -6,7 +6,9 @@ import inspect
 import os
 import stat
 import subprocess
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from reliable_memory import canonical_json_bytes
@@ -227,17 +229,37 @@ def test_contract_rejects_casefold_collision_on_every_platform() -> None:
         )
 
 
-def test_code_capture_file_source_id_enforces_512_utf8_byte_boundary() -> None:
+@pytest.mark.parametrize("value", ["x" * 512, "界" * 512])
+def test_code_capture_file_source_id_accepts_512_unicode_characters(value: str) -> None:
     from code_workspace import CodeCaptureFile
     from corpus_snapshot import FileStatMetadata
 
     metadata = FileStatMetadata(1, 1, 1, stat.S_IFREG, 1, 1)
-    accepted = CodeCaptureFile("x" * 512, "src/a.py", "a" * 64, metadata)
-    assert len(accepted.source_id.encode("utf-8")) == 512
+    assert CodeCaptureFile(value, "src/a.py", "a" * 64, metadata).source_id == value
+
+
+@pytest.mark.parametrize("value", ["x" * 513, "界" * 513])
+def test_code_capture_file_source_id_rejects_513_unicode_characters(value: str) -> None:
+    from code_workspace import CodeCaptureFile
+    from corpus_snapshot import FileStatMetadata
+
+    metadata = FileStatMetadata(1, 1, 1, stat.S_IFREG, 1, 1)
     with pytest.raises(ValueError, match="source_id"):
-        CodeCaptureFile("x" * 513, "src/a.py", "a" * 64, metadata)
-    with pytest.raises(ValueError, match="source_id"):
-        CodeCaptureFile("é" * 257, "src/a.py", "a" * 64, metadata)
+        CodeCaptureFile(value, "src/a.py", "a" * 64, metadata)
+
+
+def test_same_file_fails_closed_without_device_or_inode() -> None:
+    from code_workspace import _same_file
+
+    metadata = SimpleNamespace(
+        st_dev=0,
+        st_ino=0,
+        st_mode=stat.S_IFREG,
+        st_size=1,
+        st_mtime_ns=1,
+        st_ctime_ns=1,
+    )
+    assert _same_file(metadata, metadata) is False
 
 
 def test_manifest_capture_source_id_enforces_512_byte_boundary(tmp_path: Path) -> None:
@@ -264,9 +286,10 @@ def test_manifest_capture_source_id_enforces_512_byte_boundary(tmp_path: Path) -
         validate_code_capture(capture)
 
 
-def test_collector_rejects_generated_source_id_over_512_utf8_bytes(tmp_path: Path) -> None:
+def test_collector_rejects_generated_source_id_over_512_characters(tmp_path: Path) -> None:
     root = tmp_path / "repository"
-    _write(root / "src" / (("界" * 170) + ".py"), b"answer = 42\n")
+    deep = root / "src" / ("a" * 250) / ("b" * 250)
+    _write(deep / "long.py", b"answer = 42\n")
     with pytest.raises(ValueError, match="source_id.*512"):
         _capture(root)
 
@@ -438,8 +461,9 @@ def test_capture_persists_stat_from_hashed_descriptor(tmp_path: Path) -> None:
     assert captured.stat == expected
 
 
-def test_capture_rejects_replacement_between_stat_and_open(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("_attempt", range(10))
+def test_capture_rejects_replacement_between_stat_and_open_at_barrier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _attempt: int
 ) -> None:
     import code_workspace
 
@@ -448,20 +472,53 @@ def test_capture_rejects_replacement_between_stat_and_open(
     replacement = tmp_path / "replacement.py"
     _write(target, b"answer = 42\n")
     _write(replacement, b"answer = 43\n")
-    real_open = code_workspace._open_read
-    replaced = False
+    replaced = threading.Event()
 
-    def replacing_open(path: Path) -> int:
-        nonlocal replaced
-        if not replaced:
-            replaced = True
-            os.replace(replacement, target)
-        return real_open(path)
+    def replace_before_open(path: Path) -> None:
+        if not replaced.is_set():
+            assert path.name == target.name
+            replaced.set()
+            try:
+                os.replace(replacement, target)
+            except OSError as exc:
+                raise PermissionError("file changed before no-follow open") from exc
 
-    monkeypatch.setattr(code_workspace, "_open_read", replacing_open)
+    monkeypatch.setattr(code_workspace, "_capture_open_barrier", replace_before_open, raising=False)
     with pytest.raises(PermissionError, match="changed before"):
         _capture(root)
-    assert replaced
+    assert replaced.is_set()
+
+
+def test_capture_rejects_unavailable_descriptor_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import code_workspace
+
+    root = tmp_path / "repository"
+    _write(root / "src/app.py", b"answer = 42\n")
+
+    def unavailable(_descriptor: int):
+        raise RuntimeError("identity unavailable")
+
+    monkeypatch.setattr(code_workspace, "_descriptor_identity", unavailable, raising=False)
+    with pytest.raises(RuntimeError, match="identity"):
+        _capture(root)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle file IDs only")
+def test_windows_descriptor_identity_is_stable(tmp_path: Path) -> None:
+    import code_workspace
+
+    target = tmp_path / "source.py"
+    _write(target, b"answer = 42\n")
+    descriptor = code_workspace._open_read(target)
+    try:
+        first = code_workspace._descriptor_identity(descriptor)
+        second = code_workspace._descriptor_identity(descriptor)
+    finally:
+        os.close(descriptor)
+    assert first == second
+    assert first[0] == "windows"
 
 
 def test_capture_rejects_changed_then_restored_file(

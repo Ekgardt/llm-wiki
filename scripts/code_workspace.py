@@ -205,14 +205,9 @@ def _stat_metadata(info: os.stat_result) -> FileStatMetadata:
 
 
 def _same_file(left: os.stat_result, right: os.stat_result) -> bool:
-    identity_matches = (
-        not left.st_dev
-        or not left.st_ino
-        or not right.st_dev
-        or not right.st_ino
-        or (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
-    )
-    return identity_matches and (
+    if min(left.st_dev, left.st_ino, right.st_dev, right.st_ino) <= 0:
+        return False
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino) and (
         stat.S_IFMT(left.st_mode),
         left.st_size,
         left.st_mtime_ns,
@@ -236,8 +231,65 @@ def _capture_read_barrier(_descriptor: int) -> None:
     return
 
 
+def _capture_open_barrier(_path: Path) -> None:
+    return
+
+
 def _capture_root_barrier(_root: Path) -> None:
     return
+
+
+def _descriptor_identity(descriptor: int) -> tuple[object, ...]:
+    from generation_catalog import _descriptor_file_identity
+
+    try:
+        return _descriptor_file_identity(descriptor)
+    except OSError as exc:
+        raise RuntimeError("stable descriptor identity is unavailable") from exc
+
+
+@contextmanager
+def _hold_directory_identity(path: Path):
+    if os.name == "nt":
+        from generation_catalog import _windows_handle_file_identity
+        from markdown_transaction import _close_windows_handle, _open_windows_directory
+
+        handle = _open_windows_directory(path)
+        try:
+            identity = _windows_handle_file_identity(handle)
+            yield
+            current = _open_windows_directory(path)
+            try:
+                if identity != _windows_handle_file_identity(current):
+                    raise RuntimeError("repository code directory changed during capture")
+            finally:
+                _close_windows_handle(current)
+        except OSError as exc:
+            raise RuntimeError("stable directory identity is unavailable") from exc
+        finally:
+            _close_windows_handle(handle)
+        return
+    if os.name == "posix":
+        flags = (
+            os.O_RDONLY
+            | os.O_DIRECTORY
+            | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        descriptor = os.open(path, flags)
+        try:
+            identity = _descriptor_identity(descriptor)
+            yield
+            current = os.open(path, flags)
+            try:
+                if identity != _descriptor_identity(current):
+                    raise RuntimeError("repository code directory changed during capture")
+            finally:
+                os.close(current)
+        finally:
+            os.close(descriptor)
+        return
+    raise RuntimeError("stable directory identity is unavailable")
 
 
 @contextmanager
@@ -255,20 +307,21 @@ def _hold_capture_root(path: Path):
         descriptor = os.open(absolute, flags)
         try:
             held = os.fstat(descriptor)
+            held_identity = _descriptor_identity(descriptor)
             if _is_unsafe(held) or not stat.S_ISDIR(held.st_mode):
                 raise PermissionError("checkout root must be a regular non-link directory")
             _capture_root_barrier(absolute)
             resolved = absolute.resolve(strict=True)
             named = os.open(resolved, flags)
             try:
-                if not os.path.samestat(held, os.fstat(named)):
+                if held_identity != _descriptor_identity(named):
                     raise PermissionError("checkout root changed during canonicalization")
             finally:
                 os.close(named)
             yield resolved
             current = os.open(absolute, flags)
             try:
-                if not os.path.samestat(held, os.fstat(current)):
+                if held_identity != _descriptor_identity(current):
                     raise RuntimeError("checkout root changed during capture")
             finally:
                 os.close(current)
@@ -276,6 +329,7 @@ def _hold_capture_root(path: Path):
             os.close(descriptor)
         return
     if os.name == "nt":
+        from generation_catalog import _windows_handle_file_identity
         from markdown_transaction import _close_windows_handle, _open_windows_directory
 
         try:
@@ -283,22 +337,29 @@ def _hold_capture_root(path: Path):
         except RuntimeError as exc:
             raise PermissionError("checkout root is a link or reparse point") from exc
         try:
-            held = absolute.lstat()
+            try:
+                held_identity = _windows_handle_file_identity(handle)
+            except OSError as exc:
+                raise PermissionError("stable checkout root identity is unavailable") from exc
             _capture_root_barrier(absolute)
             resolved = absolute.resolve(strict=True)
             current = absolute.lstat()
             canonical = resolved.lstat()
-            if (
-                _is_unsafe(current)
-                or _is_unsafe(canonical)
-                or not _same_file(held, current)
-                or not _same_file(held, canonical)
-            ):
+            if _is_unsafe(current) or _is_unsafe(canonical):
                 raise PermissionError("checkout root changed during canonicalization")
+            named = _open_windows_directory(resolved)
+            try:
+                if held_identity != _windows_handle_file_identity(named):
+                    raise PermissionError("checkout root changed during canonicalization")
+            finally:
+                _close_windows_handle(named)
             yield resolved
-            after = absolute.lstat()
-            if _is_unsafe(after) or not _same_file(held, after):
-                raise RuntimeError("checkout root changed during capture")
+            current_handle = _open_windows_directory(absolute)
+            try:
+                if held_identity != _windows_handle_file_identity(current_handle):
+                    raise RuntimeError("checkout root changed during capture")
+            finally:
+                _close_windows_handle(current_handle)
         finally:
             _close_windows_handle(handle)
         return
@@ -315,47 +376,62 @@ def _read_candidate(
 ) -> tuple[bytes, FileStatMetadata]:
     if expected.st_size > limits.max_file_bytes:
         raise ValueError("repository code file byte limit exceeded")
-    descriptor = _open_read(path)
+    expected_descriptor = _open_read(path)
     try:
-        before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode) or not _same_file(expected, before):
+        expected_open = os.fstat(expected_descriptor)
+        if not stat.S_ISREG(expected_open.st_mode):
+            raise PermissionError("repository code path is not a regular file")
+        if os.name == "posix" and not _same_file(expected, expected_open):
             raise PermissionError("repository code file changed before no-follow open")
-        from generation_catalog import _stable_descriptor_state
-
-        before_state = _stable_descriptor_state(descriptor)
-        content = bytearray()
-        while True:
-            _check_stop(deadline, cancelled)
-            chunk = os.read(descriptor, limits.chunk_bytes)
-            if not chunk:
-                break
-            content.extend(chunk)
-            if len(content) > limits.max_file_bytes:
-                raise ValueError("repository code file byte limit exceeded")
-        _capture_read_barrier(descriptor)
-        after = os.fstat(descriptor)
-        if (
-            before_state != _stable_descriptor_state(descriptor)
-            or not _same_file(before, after)
-            or len(content) != before.st_size
-        ):
-            raise RuntimeError("repository code file changed during capture")
-        current = path.lstat()
-        if _is_unsafe(current):
-            raise RuntimeError("repository code file changed during capture")
-        named_descriptor = _open_read(path)
+        expected_identity = _descriptor_identity(expected_descriptor)
+        _capture_open_barrier(path)
+        descriptor = _open_read(path)
         try:
-            named = os.fstat(named_descriptor)
+            before = os.fstat(descriptor)
+            before_identity = _descriptor_identity(descriptor)
             if (
-                (before.st_dev, before.st_ino, stat.S_IFMT(before.st_mode))
-                != (named.st_dev, named.st_ino, stat.S_IFMT(named.st_mode))
-                or _stat_metadata(before) != _stat_metadata(named)
+                not stat.S_ISREG(before.st_mode)
+                or expected_identity != before_identity
+            ):
+                raise PermissionError("repository code file changed before no-follow open")
+            from generation_catalog import _stable_descriptor_state
+
+            before_state = _stable_descriptor_state(descriptor)
+            content = bytearray()
+            while True:
+                _check_stop(deadline, cancelled)
+                chunk = os.read(descriptor, limits.chunk_bytes)
+                if not chunk:
+                    break
+                content.extend(chunk)
+                if len(content) > limits.max_file_bytes:
+                    raise ValueError("repository code file byte limit exceeded")
+            _capture_read_barrier(descriptor)
+            after = os.fstat(descriptor)
+            if (
+                before_state != _stable_descriptor_state(descriptor)
+                or before_identity != _descriptor_identity(descriptor)
+                or _stat_metadata(before) != _stat_metadata(after)
+                or len(content) != before.st_size
             ):
                 raise RuntimeError("repository code file changed during capture")
+            current = path.lstat()
+            if _is_unsafe(current):
+                raise RuntimeError("repository code file changed during capture")
+            named_descriptor = _open_read(path)
+            try:
+                named = os.fstat(named_descriptor)
+                if (
+                    before_identity != _descriptor_identity(named_descriptor)
+                    or _stat_metadata(before) != _stat_metadata(named)
+                ):
+                    raise RuntimeError("repository code file changed during capture")
+            finally:
+                os.close(named_descriptor)
         finally:
-            os.close(named_descriptor)
+            os.close(descriptor)
     finally:
-        os.close(descriptor)
+        os.close(expected_descriptor)
     return bytes(content), _stat_metadata(before)
 
 
@@ -614,17 +690,15 @@ def _collect_repository_code_from_root(
         if _is_unsafe(before) or not stat.S_ISDIR(before.st_mode):
             raise PermissionError("repository code directory is a link, reparse point, or device")
         raw_entries = []
-        with os.scandir(directory) as iterator:
-            for entry in iterator:
-                _check_stop(deadline, cancelled)
-                entries_seen += 1
-                if entries_seen > limits.max_entries:
-                    raise ValueError("repository code entry limit exceeded")
-                info = entry.stat(follow_symlinks=False)
-                raw_entries.append((entry.name, Path(entry.path), info))
-        after_scan = directory.lstat()
-        if not _same_file(before, after_scan):
-            raise RuntimeError("repository code directory changed during capture")
+        with _hold_directory_identity(directory):
+            with os.scandir(directory) as iterator:
+                for entry in iterator:
+                    _check_stop(deadline, cancelled)
+                    entries_seen += 1
+                    if entries_seen > limits.max_entries:
+                        raise ValueError("repository code entry limit exceeded")
+                    info = entry.stat(follow_symlinks=False)
+                    raw_entries.append((entry.name, Path(entry.path), info))
         membership_entries = []
         normalized_names: dict[str, str] = {}
         for name, _path, info in raw_entries:
@@ -673,8 +747,8 @@ def _collect_repository_code_from_root(
                 raise ValueError("repository code total byte limit exceeded")
             digest = hashlib.sha256(content).hexdigest()
             source_id = f"source:{relative}"
-            if len(source_id.encode("utf-8")) > 512:
-                raise ValueError("generated repository code source_id exceeds 512 UTF-8 bytes")
+            if len(source_id) > 512:
+                raise ValueError("generated repository code source_id exceeds 512 characters")
             record = SourceRecord(
                 logical_id=source_id,
                 relative_path=relative,
@@ -890,7 +964,7 @@ def _seal_posix(snapshot: CorpusSnapshot, destination: Path) -> None:
             os.fsync(descriptor)
         named = os.open(destination.name, _posix_directory_flags(), dir_fd=parent_fd)
         try:
-            if not os.path.samestat(os.fstat(named), os.fstat(root_fd)):
+            if _descriptor_identity(named) != _descriptor_identity(root_fd):
                 raise PermissionError("sealed workspace root changed during creation")
         finally:
             os.close(named)
@@ -934,6 +1008,7 @@ def _verify_descriptor_file(
     descriptor: int, size: int, digest: str, chunk_bytes: int
 ) -> None:
     before = os.fstat(descriptor)
+    before_identity = _descriptor_identity(descriptor)
     if not stat.S_ISREG(before.st_mode) or before.st_size != size:
         raise WorkspaceChanged("sealed workspace file size changed")
     hasher = hashlib.sha256()
@@ -947,7 +1022,12 @@ def _verify_descriptor_file(
             raise WorkspaceChanged("sealed workspace file exceeded captured range")
         hasher.update(chunk)
     after = os.fstat(descriptor)
-    if not _same_file(before, after) or total != size or hasher.hexdigest() != digest:
+    if (
+        before_identity != _descriptor_identity(descriptor)
+        or not _same_file(before, after)
+        or total != size
+        or hasher.hexdigest() != digest
+    ):
         raise WorkspaceChanged("sealed workspace file content changed")
 
 
@@ -1004,7 +1084,7 @@ def _verify_posix(workspace: SealedWorkspace, snapshot: CorpusSnapshot) -> tuple
                     raise WorkspaceChanged("sealed workspace contains a device")
         named_chains, named = _open_posix_directory_path(workspace.root)
         try:
-            if not os.path.samestat(os.fstat(named), os.fstat(root_fd)):
+            if _descriptor_identity(named) != _descriptor_identity(root_fd):
                 raise WorkspaceChanged("sealed workspace root changed during verification")
         finally:
             for descriptor in reversed(named_chains):

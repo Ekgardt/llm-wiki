@@ -314,6 +314,64 @@ def test_v1_search_only_generation_accepts_null_graph_schema(tmp_path: Path) -> 
     assert catalog.register("v1-search-only") == manifest
 
 
+@pytest.mark.parametrize("damage", ["source_id", "relative_path", "sha256"])
+def test_catalog_binds_v1_graph_v2_capture_to_sources(tmp_path: Path, damage: str) -> None:
+    import stat
+
+    from code_workspace import code_capture_as_dict
+    from corpus_snapshot import (
+        CodeCaptureContract,
+        CodeCaptureFile,
+        FileStatMetadata,
+        RepositoryCodeLimits,
+        RepositoryCodePolicy,
+    )
+    from reliable_memory import canonical_json_bytes
+
+    catalog = _catalog(tmp_path)
+    directory, manifest = _publish_v2(catalog, f"v1-capture-{damage}")
+    manifest["schema_version"] = "corpus-generation/v1"
+    source_manifest = json.loads((directory / "source-manifest.json").read_bytes())
+    source = source_manifest["sources"][0]
+    with closing(sqlite3.connect(directory / "evidence.sqlite3")) as database:
+        size = database.execute(
+            "SELECT size FROM source WHERE source_id=?", (source["logical_id"],)
+        ).fetchone()[0]
+    capture_file = CodeCaptureFile(
+        source["logical_id"],
+        source["relative_path"],
+        source["sha256"],
+        FileStatMetadata(size, 0, 0, stat.S_IFREG, 1, 1),
+    )
+    contract = CodeCaptureContract(
+        RepositoryCodePolicy(
+            (source["relative_path"],), ("**",), (), (Path(source["relative_path"]).suffix,)
+        ),
+        RepositoryCodeLimits(),
+        (capture_file,),
+        (),
+        "0" * 64,
+    )
+    capture = code_capture_as_dict(contract)
+    if damage == "source_id":
+        capture["files"][0]["source_id"] = "source:other"
+    elif damage == "relative_path":
+        capture["files"][0]["relative_path"] = "other.md"
+        capture["policy"]["roots"] = ["other.md"]
+    else:
+        capture["files"][0]["sha256"] = "f" * 64
+    capture["membership_sha256"] = hashlib.sha256(
+        canonical_json_bytes(
+            {"files": capture["files"], "directories": capture["directories"]}
+        )
+    ).hexdigest()
+    manifest["code_capture"] = capture
+    (directory / "manifest.json").write_bytes(canonical_json_bytes(manifest))
+
+    with pytest.raises(ValueError, match="source membership"):
+        catalog.register(directory.name)
+
+
 def test_v1_generation_rejects_graph_v3(tmp_path: Path) -> None:
     from reliable_memory import canonical_json_bytes
 
@@ -621,8 +679,8 @@ def test_manifest_schema_uses_approved_capture_maxima_and_nested_file_shape() ->
     assert file_schema["properties"]["source_id"]["maxLength"] == 512
     import jsonschema
 
-    assert list(jsonschema.Draft202012Validator(file_schema).iter_errors({
-        "source_id": "x" * 513,
+    validator = jsonschema.Draft202012Validator(file_schema)
+    base_file = {
         "relative_path": "src/a.py",
         "sha256": "a" * 64,
         "stat": {
@@ -633,7 +691,11 @@ def test_manifest_schema_uses_approved_capture_maxima_and_nested_file_shape() ->
             "device": 1,
             "inode": 1,
         },
-    }))
+    }
+    for source_id in ("x" * 512, "界" * 512):
+        assert not list(validator.iter_errors({**base_file, "source_id": source_id}))
+    for source_id in ("x" * 513, "界" * 513):
+        assert list(validator.iter_errors({**base_file, "source_id": source_id}))
     assert set(file_schema["required"]) == {
         "source_id",
         "relative_path",

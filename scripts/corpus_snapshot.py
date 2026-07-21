@@ -249,12 +249,18 @@ class CodeCaptureFile:
     stat: FileStatMetadata
 
     def __post_init__(self) -> None:
+        try:
+            encoded_source_id = self.source_id.encode("utf-8")
+        except (AttributeError, UnicodeEncodeError) as exc:
+            raise ValueError("source_id must be valid UTF-8 text") from exc
         if (
             not isinstance(self.source_id, str)
             or not self.source_id
-            or len(self.source_id.encode("utf-8")) > 512
+            or not encoded_source_id
+            or len(self.source_id) > 512
+            or self.source_id != unicodedata.normalize("NFC", self.source_id)
         ):
-            raise ValueError("source_id must be a non-empty UTF-8 string of at most 512 bytes")
+            raise ValueError("source_id must be normalized UTF-8 text of at most 512 characters")
         pure = PurePosixPath(self.relative_path)
         if (
             not self.relative_path
