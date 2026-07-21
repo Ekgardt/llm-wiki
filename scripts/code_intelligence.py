@@ -874,8 +874,6 @@ def verify_native_analysis(
         raise ValueError("snapshot corpus_sha256 does not match canonical source manifest")
     if analysis.run.analysis_mode != "native-syntax":
         raise ValueError("native verification requires a native-syntax run")
-    if not analysis.run.qualified:
-        raise ValueError("native verification requires a qualified run")
     if analysis.run.identity.source_manifest_sha256 != snapshot.corpus_sha256:
         raise ValueError("native analysis does not match captured source manifest")
     if analysis.run.evidence_level is not EvidenceLevel.SYNTAX:

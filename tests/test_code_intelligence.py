@@ -918,7 +918,7 @@ def test_verify_native_analysis_rejects_lexical_run_evidence(
         verify_native_analysis(snapshot, replace(analysis, run=lexical_run))
 
 
-def test_verify_native_analysis_rejects_unqualified_run(
+def test_unqualified_native_syntax_mints_without_closed_world_negatives(
     snapshot: CorpusSnapshot,
 ) -> None:
     current_scope = replace(make_analysis_scope(snapshot), analyzer_support="unqualified")
@@ -927,8 +927,14 @@ def test_verify_native_analysis_rejects_unqualified_run(
         run=replace(make_run(snapshot), qualified=False),
         scopes=(current_scope,),
     )
-    with pytest.raises(ValueError, match="qualified"):
-        verify_native_analysis(snapshot, analysis)
+    batch = verify_native_analysis(snapshot, analysis)
+
+    assert batch.analysis.run.qualified is False
+    assert batch.analysis.scopes[0].analyzer_support == "unqualified"
+    assert all(
+        closed_world(batch.analysis.scopes[0], batch.analysis.coverage, capability) is False
+        for capability in Capability
+    )
 
 
 def test_verify_native_analysis_rejects_manifest_evidence_and_mode_mismatch(
