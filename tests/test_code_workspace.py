@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import inspect
+import json
 import os
 import stat
 import subprocess
@@ -179,12 +180,78 @@ def test_capture_globs_match_complete_posix_path_segments(tmp_path: Path) -> Non
     ]
 
 
-@pytest.mark.parametrize("pattern", ("./src/*.py", "src//*.py", "src/**name.py", "src/"))
-def test_repository_policy_rejects_noncanonical_globs(pattern: str) -> None:
+@pytest.mark.parametrize(
+    ("pattern", "accepted"),
+    (
+        ("**", True),
+        ("src/**name.py", True),
+        ("src/", True),
+        ("/src/*.py", False),
+        ("C:/src/*.py", False),
+        ("../src/*.py", False),
+        ("src/../*.py", False),
+        (r"src\*.py", False),
+        ("./src/*.py", False),
+        ("src/./*.py", False),
+        ("src//*.py", False),
+    ),
+)
+@pytest.mark.parametrize("field", ("include_globs", "ignore_globs"))
+def test_repository_policy_glob_runtime_and_manifest_schema_agree(
+    pattern: str, accepted: bool, field: str
+) -> None:
+    import jsonschema
     from code_workspace import RepositoryCodePolicy
 
-    with pytest.raises(ValueError, match="glob"):
-        RepositoryCodePolicy(("src",), (pattern,), (), (".py",))
+    schema = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "scripts/schemas/evidence-graph-manifest-v1.json"
+        ).read_text(encoding="utf-8")
+    )["properties"]["code_capture"]["properties"]["policy"]
+    policy = {
+        "roots": ["src"],
+        "include_globs": [pattern] if field == "include_globs" else ["**"],
+        "ignore_globs": [pattern] if field == "ignore_globs" else [],
+        "suffixes": [".py"],
+    }
+    schema_accepted = not list(jsonschema.Draft202012Validator(schema).iter_errors(policy))
+    try:
+        RepositoryCodePolicy(
+            ("src",),
+            (pattern,) if field == "include_globs" else ("**",),
+            (pattern,) if field == "ignore_globs" else (),
+            (".py",),
+        )
+    except ValueError:
+        runtime_accepted = False
+    else:
+        runtime_accepted = True
+
+    assert schema_accepted is accepted
+    assert runtime_accepted is schema_accepted
+
+
+def test_repository_policy_accepts_bounded_glob_with_more_than_256_segments() -> None:
+    import jsonschema
+    from code_workspace import RepositoryCodePolicy
+
+    pattern = "/".join("x" for _ in range(257))
+    schema = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "scripts/schemas/evidence-graph-manifest-v1.json"
+        ).read_text(encoding="utf-8")
+    )["properties"]["code_capture"]["properties"]["policy"]
+    policy = {
+        "roots": ["src"],
+        "include_globs": [pattern],
+        "ignore_globs": [],
+        "suffixes": [".py"],
+    }
+
+    assert not list(jsonschema.Draft202012Validator(schema).iter_errors(policy))
+    assert RepositoryCodePolicy(("src",), (pattern,), (), (".py",))
 
 
 @pytest.mark.parametrize(
@@ -853,6 +920,30 @@ def test_verification_directory_limit_excludes_synthetic_workspace_root(
 
     workspace = code_workspace.seal_workspace(snapshot, tmp_path / "sealed")
     code_workspace.verify_workspace_seal(workspace, snapshot)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor-relative sealing only")
+def test_seal_rejects_internal_directory_injected_before_exclusive_mkdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import code_workspace
+
+    repository = tmp_path / "repository"
+    _write(repository / "src/app.py", b"answer = 42\n")
+    snapshot = _capture(repository)
+    destination = tmp_path / "sealed"
+    injected = destination / "src"
+
+    def inject(component: str) -> None:
+        if component == "src" and not injected.exists():
+            injected.mkdir()
+
+    monkeypatch.setattr(code_workspace, "_seal_component_barrier", inject)
+    with pytest.raises(FileExistsError):
+        code_workspace.seal_workspace(snapshot, destination)
+
+    assert injected.is_dir()
+    assert not (injected / "app.py").exists()
 
 
 def test_sealed_workspace_rejects_symlink_substitution(tmp_path: Path) -> None:

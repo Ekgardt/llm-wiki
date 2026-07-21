@@ -207,19 +207,14 @@ class RepositoryCodePolicy:
         for name in ("include_globs", "ignore_globs"):
             if any(
                 len(value) > 4096
-                or value != unicodedata.normalize("NFC", value)
                 or "\\" in value
                 or PurePosixPath(value).is_absolute()
+                or PureWindowsPath(value).drive
+                or PureWindowsPath(value).root
                 or ".." in PurePosixPath(value).parts
                 or value.startswith("./")
-                or value.endswith("/")
-                or any(
-                    not part
-                    or part == "."
-                    or ("**" in part and part != "**")
-                    for part in value.split("/")
-                )
-                or len(value.split("/")) > 256
+                or "//" in value
+                or any(part == "." for part in value.split("/"))
                 for value in getattr(self, name)
             ):
                 raise ValueError(f"{name} must contain normalized relative POSIX globs")

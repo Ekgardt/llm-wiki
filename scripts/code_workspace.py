@@ -147,10 +147,19 @@ def _policy(
     def pattern(value: object) -> str:
         if not isinstance(value, str) or not value or len(value) > _MAX_POLICY_TEXT:
             raise ValueError("repository code glob must be a bounded non-empty string")
-        normalized = unicodedata.normalize("NFC", value)
-        if normalized != value or "\\" in value or PurePosixPath(value).is_absolute():
+        windows = PureWindowsPath(value)
+        pure = PurePosixPath(value)
+        if (
+            "\\" in value
+            or pure.is_absolute()
+            or windows.drive
+            or windows.root
+            or value.startswith("./")
+            or "//" in value
+            or any(part == "." for part in value.split("/"))
+        ):
             raise ValueError("repository code glob must be normalized relative POSIX text")
-        if any(part == ".." for part in PurePosixPath(value).parts):
+        if any(part == ".." for part in pure.parts):
             raise ValueError("repository code glob must not traverse parents")
         return value
 
@@ -1070,6 +1079,7 @@ def _open_posix_directory_path(path: Path) -> tuple[list[int], int]:
 def _seal_posix(snapshot: CorpusSnapshot, destination: Path) -> None:
     parent_descriptors, parent_fd = _open_posix_directory_path(destination.parent)
     root_fd: int | None = None
+    created_directories: dict[tuple[str, ...], tuple[object, ...]] = {}
     try:
         os.mkdir(destination.name, 0o700, dir_fd=parent_fd)
         root_fd = os.open(destination.name, _posix_directory_flags(), dir_fd=parent_fd)
@@ -1077,17 +1087,26 @@ def _seal_posix(snapshot: CorpusSnapshot, destination: Path) -> None:
             parts = PurePosixPath(source.record.relative_path).parts
             chain: list[int] = []
             directory_fd = root_fd
+            directory_parts: tuple[str, ...] = ()
             try:
                 for part in parts[:-1]:
-                    _seal_component_barrier(part)
-                    try:
+                    child_parts = (*directory_parts, part)
+                    expected_identity = created_directories.get(child_parts)
+                    if expected_identity is None:
+                        _seal_component_barrier(part)
                         os.mkdir(part, 0o700, dir_fd=directory_fd)
-                    except FileExistsError:
-                        pass
                     directory_fd = os.open(
                         part, _posix_directory_flags(), dir_fd=directory_fd
                     )
                     chain.append(directory_fd)
+                    identity = _descriptor_identity(directory_fd)
+                    if expected_identity is None:
+                        created_directories[child_parts] = identity
+                    elif identity != expected_identity:
+                        raise PermissionError(
+                            "sealed workspace directory changed during creation"
+                        )
+                    directory_parts = child_parts
                 descriptor = os.open(
                     parts[-1],
                     os.O_WRONLY

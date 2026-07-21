@@ -26,8 +26,8 @@
           "required": ["roots", "include_globs", "ignore_globs", "suffixes"],
           "properties": {
             "roots": {"type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 4096}},
-            "include_globs": {"type": "array", "minItems": 1, "maxItems": 256, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 4096}},
-            "ignore_globs": {"type": "array", "maxItems": 256, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 4096}},
+            "include_globs": {"type": "array", "minItems": 1, "maxItems": 256, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^(?!/)(?![A-Za-z]:)(?!\\./)(?![\\s\\S]*//)(?![\\s\\S]*\\\\)(?!(?:[\\s\\S]*?/)?\\.{1,2}(?:/|$))[\\s\\S]+$"}},
+            "ignore_globs": {"type": "array", "maxItems": 256, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^(?!/)(?![A-Za-z]:)(?!\\./)(?![\\s\\S]*//)(?![\\s\\S]*\\\\)(?!(?:[\\s\\S]*?/)?\\.{1,2}(?:/|$))[\\s\\S]+$"}},
             "suffixes": {"type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^\\.[^/\\\\]+$"}}
           },
           "additionalProperties": false
