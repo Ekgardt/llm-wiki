@@ -18,6 +18,7 @@ from code_intelligence import (
     Coverage,
     CoverageStatus,
     EvidenceLevel,
+    ExpectedSource,
     NormalizedAnalysis,
     PositionEncoding,
     PositionRange,
@@ -123,7 +124,16 @@ def source_by_path(snapshot: CorpusSnapshot, relative_path: str) -> CapturedSour
 
 
 def make_analysis_scope(snapshot: CorpusSnapshot) -> AnalysisScope:
-    source_ids = tuple(sorted(source.record.logical_id for source in snapshot.sources))
+    expected_sources = tuple(
+        sorted(
+            (
+                ExpectedSource(source.record.logical_id, source.record.sha256, "included")
+                for source in snapshot.sources
+            ),
+            key=lambda item: item.source_id,
+        )
+    )
+    source_ids = tuple(item.source_id for item in expected_sources)
     run_id = "run:" + hashlib.sha256(
         canonical_json_bytes(
             {"kind": "native-test-run", "source_manifest_sha256": snapshot.corpus_sha256}
@@ -145,7 +155,7 @@ def make_analysis_scope(snapshot: CorpusSnapshot) -> AnalysisScope:
         source_manifest_sha256=snapshot.corpus_sha256,
         build_target="default",
         build_configuration="default",
-        expected_source_ids=source_ids,
+        expected_sources=expected_sources,
         generated_sources="not-required",
         dependency_resolution="complete",
         analyzer_support="complete",

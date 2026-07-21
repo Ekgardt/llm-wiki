@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum, unique
 
-from corpus_snapshot import CorpusSnapshot
+from corpus_snapshot import CorpusSnapshot, canonical_source_manifest_sha256
 from reliable_memory import canonical_json_bytes
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -18,6 +18,8 @@ _DEPENDENCY_RESOLUTION = frozenset({"complete", "partial", "unavailable"})
 _ANALYZER_SUPPORT = frozenset({"complete", "partial", "unsupported", "unqualified"})
 _ANALYSIS_MODES = frozenset({"precise", "native-syntax"})
 _PROTOCOLS = frozenset({"scip", "lsp", "native"})
+_SOURCE_DISPOSITIONS = frozenset({"included", "excluded", "generated"})
+_SQLITE_INT64_MAX = 2**63 - 1
 
 
 @unique
@@ -160,6 +162,16 @@ def _require_bool(value: object, label: str) -> None:
         raise TypeError(f"{label} must be bool")
 
 
+def _require_sqlite_int(value: object, label: str, *, minimum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{label} must be an integer")
+    if value < minimum:
+        raise ValueError(f"{label} must be at least {minimum}")
+    if value > _SQLITE_INT64_MAX:
+        raise ValueError(f"{label} must fit a signed int64")
+    return value
+
+
 def _require_choice(value: object, choices: frozenset[str], label: str) -> None:
     if not isinstance(value, str):
         raise TypeError(f"{label} must be a string")
@@ -271,13 +283,25 @@ class AnalysisIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class ExpectedSource:
+    source_id: str
+    source_sha256: str
+    disposition: str
+
+    def __post_init__(self) -> None:
+        _require_id(self.source_id, "source_id")
+        _require_sha256(self.source_sha256, "source_sha256")
+        _require_choice(self.disposition, _SOURCE_DISPOSITIONS, "disposition")
+
+
+@dataclass(frozen=True, slots=True)
 class AnalysisScope:
     scope_id: str
     run_id: str
     source_manifest_sha256: str
     build_target: str
     build_configuration: str
-    expected_source_ids: tuple[str, ...]
+    expected_sources: tuple[ExpectedSource, ...]
     generated_sources: str
     dependency_resolution: str
     analyzer_support: str
@@ -288,12 +312,22 @@ class AnalysisScope:
         _require_sha256(self.source_manifest_sha256, "source_manifest_sha256")
         _require_text(self.build_target, "build_target", maximum=256)
         _require_text(self.build_configuration, "build_configuration", maximum=256)
-        _require_sorted_unique(self.expected_source_ids, "expected_source_ids", key=lambda item: item)
-        for source_id in self.expected_source_ids:
-            _require_id(source_id, "expected source_id")
+        if not isinstance(self.expected_sources, tuple):
+            raise TypeError("expected_sources must be a tuple")
+        if any(not isinstance(item, ExpectedSource) for item in self.expected_sources):
+            raise TypeError("expected_sources must contain ExpectedSource records")
+        _require_sorted_unique(
+            self.expected_sources,
+            "expected_sources",
+            key=lambda item: item.source_id,
+        )
         _require_choice(self.generated_sources, _GENERATED_SOURCES, "generated_sources")
         _require_choice(self.dependency_resolution, _DEPENDENCY_RESOLUTION, "dependency_resolution")
         _require_choice(self.analyzer_support, _ANALYZER_SUPPORT, "analyzer_support")
+
+    @property
+    def expected_source_ids(self) -> tuple[str, ...]:
+        return tuple(item.source_id for item in self.expected_sources)
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,11 +337,7 @@ class PositionRange:
 
     def __post_init__(self) -> None:
         for name in ("byte_start", "byte_end"):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int):
-                raise TypeError(f"{name} must be an integer")
-            if value < 0:
-                raise ValueError(f"{name} must be nonnegative")
+            _require_sqlite_int(getattr(self, name), name, minimum=0)
         if self.byte_end < self.byte_start:
             raise ValueError("byte_end must not precede byte_start")
 
@@ -417,10 +447,7 @@ class AnalysisRun:
             _require_sha256(self.receipt_output_sha256, "receipt_output_sha256")
             _require_id(self.consent_grant_id, "consent_grant_id")
             _require_id(self.lease_id, "lease_id")
-            if isinstance(self.consent_revision, bool) or not isinstance(self.consent_revision, int):
-                raise TypeError("consent_revision must be an integer")
-            if self.consent_revision < 1:
-                raise ValueError("consent_revision must be positive")
+            _require_sqlite_int(self.consent_revision, "consent_revision", minimum=1)
             return
         if self.evidence_level not in {EvidenceLevel.SYNTAX, EvidenceLevel.LEXICAL}:
             raise ValueError("native-syntax analysis requires syntax or lexical evidence")
@@ -675,6 +702,9 @@ class NormalizedAnalysis:
                 raise ValueError("scope run_id must match analysis run_id")
             if item.source_manifest_sha256 != self.run.identity.source_manifest_sha256:
                 raise ValueError("scope source_manifest_sha256 must match analysis identity")
+            scope_qualified = item.analyzer_support != "unqualified"
+            if scope_qualified is not self.run.qualified:
+                raise ValueError("run qualified state must agree with scope analyzer_support")
             build_scope = (item.run_id, item.build_target, item.build_configuration)
             if build_scope in build_scopes:
                 raise ValueError(
@@ -829,8 +859,23 @@ def verify_native_analysis(
         raise TypeError("snapshot must be CorpusSnapshot")
     if not isinstance(analysis, NormalizedAnalysis):
         raise TypeError("analysis must be NormalizedAnalysis")
+    for source in snapshot.sources:
+        if type(source.record.size) is not int or source.record.size != len(source.content):
+            raise ValueError(f"captured source content size mismatch: {source.record.logical_id}")
+        if source.record.sha256 != hashlib.sha256(source.content).hexdigest():
+            raise ValueError(f"captured source content sha256 mismatch: {source.record.logical_id}")
+    canonical_manifest = canonical_source_manifest_sha256(
+        (source.record for source in snapshot.sources),
+        snapshot.policy,
+        collector_version=snapshot.collector_version,
+        extractor_version=snapshot.extractor_version,
+    )
+    if canonical_manifest != snapshot.corpus_sha256:
+        raise ValueError("snapshot corpus_sha256 does not match canonical source manifest")
     if analysis.run.analysis_mode != "native-syntax":
         raise ValueError("native verification requires a native-syntax run")
+    if not analysis.run.qualified:
+        raise ValueError("native verification requires a qualified run")
     if analysis.run.identity.source_manifest_sha256 != snapshot.corpus_sha256:
         raise ValueError("native analysis does not match captured source manifest")
     if analysis.run.evidence_level is not EvidenceLevel.SYNTAX:
@@ -852,8 +897,12 @@ def verify_native_analysis(
             raise ValueError(f"{label} range exceeds captured bytes for {source_id}")
 
     for scope in analysis.scopes:
-        for source_id in scope.expected_source_ids:
-            require_captured(source_id, "analysis scope")
+        for expected in scope.expected_sources:
+            require_captured(expected.source_id, "analysis scope")
+            if source_by_id[expected.source_id].record.sha256 != expected.source_sha256:
+                raise ValueError(
+                    f"expected source sha256 does not match capture: {expected.source_id}"
+                )
     for row in analysis.coverage:
         require_captured(row.source_id, "coverage")
     for item in analysis.symbols:

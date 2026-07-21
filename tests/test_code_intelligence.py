@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import FrozenInstanceError, fields, replace
 
 import pytest
@@ -17,6 +18,7 @@ from code_intelligence import (
     Diagnostic,
     DiagnosticSeverity,
     EvidenceLevel,
+    ExpectedSource,
     NormalizedAnalysis,
     PositionEncoding,
     PositionRange,
@@ -34,7 +36,14 @@ from code_intelligence import (
     closed_world,
     verify_native_analysis,
 )
-from corpus_snapshot import CorpusSnapshot, SnapshotPolicy, SourceMetadata, SourceRecord
+from corpus_snapshot import (
+    CapturedSource,
+    CorpusSnapshot,
+    SnapshotPolicy,
+    SourceMetadata,
+    SourceRecord,
+    canonical_source_manifest_sha256,
+)
 
 from tests.code_kernel_helpers import (
     make_analysis_identity,
@@ -44,26 +53,40 @@ from tests.code_kernel_helpers import (
 )
 
 SHA = tuple(character * 64 for character in "0123456789abcdef")
+SQLITE_INT64_MAX = 2**63 - 1
+SOURCE_CONTENT = {"source:a": b"name", "source:b": b"node"}
+SOURCE_RECORDS = tuple(
+    SourceRecord(
+        source_id,
+        f"{source_id[-1]}.py",
+        hashlib.sha256(content).hexdigest(),
+        len(content),
+        "text/x-python",
+        "python",
+        None,
+    )
+    for source_id, content in SOURCE_CONTENT.items()
+)
+SNAPSHOT_POLICY = SnapshotPolicy((), (".",), False, None, 10, 100, 1000, 100, 100, 10)
+SOURCE_MANIFEST_SHA256 = canonical_source_manifest_sha256(SOURCE_RECORDS, SNAPSHOT_POLICY)
 
 
 @pytest.fixture
 def snapshot() -> CorpusSnapshot:
-    from corpus_snapshot import CapturedSource
-
-    records = (
-        SourceRecord("source:a", "a.py", SHA[1], 4, "text/x-python", "python", None),
-        SourceRecord("source:b", "b.py", SHA[2], 4, "text/x-python", "python", None),
-    )
     sources = tuple(
-        CapturedSource(record, SourceMetadata(type="code"), b"name") for record in records
+        CapturedSource(
+            record,
+            SourceMetadata(type="code"),
+            SOURCE_CONTENT[record.logical_id],
+        )
+        for record in SOURCE_RECORDS
     )
-    policy = SnapshotPolicy((), (".",), False, None, 10, 100, 1000, 100, 100, 10)
-    return CorpusSnapshot(sources, (), SHA[0], policy)
+    return CorpusSnapshot(sources, (), SOURCE_MANIFEST_SHA256, SNAPSHOT_POLICY)
 
 
 def identity(**changes: object) -> AnalysisIdentity:
     values: dict[str, object] = {
-        "source_manifest_sha256": SHA[0],
+        "source_manifest_sha256": SOURCE_MANIFEST_SHA256,
         "manifest_sha256": SHA[1],
         "lockfile_sha256": SHA[2],
         "sdk_sha256": SHA[3],
@@ -83,10 +106,13 @@ def scope(**changes: object) -> AnalysisScope:
     values: dict[str, object] = {
         "scope_id": "scope:" + SHA[1],
         "run_id": "run:" + SHA[2],
-        "source_manifest_sha256": SHA[0],
+        "source_manifest_sha256": SOURCE_MANIFEST_SHA256,
         "build_target": "default",
         "build_configuration": "default",
-        "expected_source_ids": ("source:a", "source:b"),
+        "expected_sources": tuple(
+            ExpectedSource(record.logical_id, record.sha256, "included")
+            for record in SOURCE_RECORDS
+        ),
         "generated_sources": "available",
         "dependency_resolution": "complete",
         "analyzer_support": "complete",
@@ -331,6 +357,22 @@ def test_closed_enums_have_exact_values() -> None:
         assert {item.value for item in enum_type} == values
 
 
+def test_expected_source_is_frozen_bounded_graph_membership() -> None:
+    item = ExpectedSource("source:a", SOURCE_RECORDS[0].sha256, "included")
+    assert item.source_id == "source:a"
+    assert item.source_sha256 == SOURCE_RECORDS[0].sha256
+    assert item.disposition == "included"
+    assert scope().expected_source_ids == ("source:a", "source:b")
+    assert "expected_source_ids" not in {item.name for item in fields(AnalysisScope)}
+    assert "__dict__" not in dir(item)
+    with pytest.raises(FrozenInstanceError):
+        item.disposition = "excluded"  # type: ignore[misc]
+    with pytest.raises(ValueError, match="sha256"):
+        ExpectedSource("source:a", "bad", "included")
+    with pytest.raises(ValueError, match="disposition"):
+        ExpectedSource("source:a", SOURCE_RECORDS[0].sha256, "unknown")
+
+
 def test_all_records_are_frozen_and_slotted() -> None:
     item = PositionRange(0, 1)
     assert "__dict__" not in dir(item)
@@ -419,9 +461,19 @@ def test_closed_world_ignores_neither_wrong_scope_nor_capability() -> None:
 @pytest.mark.parametrize(
     "changes",
     [
-        {"expected_source_ids": ["source:a"]},
-        {"expected_source_ids": ("source:b", "source:a")},
-        {"expected_source_ids": ("source:a", "source:a")},
+        {"expected_sources": [ExpectedSource("source:a", SHA[1], "included")]},
+        {
+            "expected_sources": (
+                ExpectedSource("source:b", SHA[2], "included"),
+                ExpectedSource("source:a", SHA[1], "included"),
+            )
+        },
+        {
+            "expected_sources": (
+                ExpectedSource("source:a", SHA[1], "included"),
+                ExpectedSource("source:a", SHA[2], "excluded"),
+            )
+        },
         {"generated_sources": "sometimes"},
         {"dependency_resolution": "unknown"},
         {"analyzer_support": "unknown"},
@@ -445,6 +497,14 @@ def test_position_range_nonempty_boundary() -> None:
     with pytest.raises(ValueError, match="claim.*non-empty"):
         PositionRange(0, 0).require_nonempty("claim range")
     assert PositionRange(0, 1).require_nonempty("claim range") == PositionRange(0, 1)
+
+
+def test_position_range_accepts_signed_int64_max_and_rejects_overflow() -> None:
+    assert PositionRange(SQLITE_INT64_MAX - 1, SQLITE_INT64_MAX).byte_end == SQLITE_INT64_MAX
+    with pytest.raises(ValueError, match="byte_start.*signed int64"):
+        PositionRange(SQLITE_INT64_MAX + 1, SQLITE_INT64_MAX + 1)
+    with pytest.raises(ValueError, match="byte_end.*signed int64"):
+        PositionRange(0, SQLITE_INT64_MAX + 1)
 
 
 @pytest.mark.parametrize(
@@ -508,6 +568,20 @@ def test_precise_consent_revision_is_positive_integer(revision: object) -> None:
             receipt_sha256=SHA[11], receipt_output_sha256=SHA[12],
             consent_grant_id="grant:test", consent_revision=revision, lease_id="lease:test",
         )
+
+
+def test_consent_revision_accepts_signed_int64_max_and_rejects_overflow() -> None:
+    values = {
+        "analysis_mode": "precise",
+        "evidence_level": EvidenceLevel.COMPILER,
+        "receipt_sha256": SHA[11],
+        "receipt_output_sha256": SHA[12],
+        "consent_grant_id": "grant:test",
+        "lease_id": "lease:test",
+    }
+    assert run(consent_revision=SQLITE_INT64_MAX, **values).consent_revision == SQLITE_INT64_MAX
+    with pytest.raises(ValueError, match="consent_revision.*signed int64"):
+        run(consent_revision=SQLITE_INT64_MAX + 1, **values)
 
 
 def test_symbol_claim_validates_role_capability_range_and_ids() -> None:
@@ -648,6 +722,37 @@ def test_normalized_analysis_rejects_duplicate_build_scope() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("qualified", "analyzer_support"),
+    [(False, "complete"), (True, "unqualified")],
+)
+def test_normalized_analysis_rejects_qualification_mismatch(
+    qualified: bool,
+    analyzer_support: str,
+) -> None:
+    with pytest.raises(ValueError, match="qualified.*analyzer_support"):
+        normalized(
+            run=run(qualified=qualified),
+            scopes=(scope(analyzer_support=analyzer_support),),
+        )
+
+
+def test_unqualified_scope_cannot_support_closed_world_negative() -> None:
+    current = scope(analyzer_support="unqualified")
+    rows = tuple(
+        Coverage(
+            current.scope_id,
+            source_id,
+            Capability.REFERENCES,
+            CoverageStatus.COMPLETE,
+            True,
+            None,
+        )
+        for source_id in current.expected_source_ids
+    )
+    assert closed_world(current, rows, Capability.REFERENCES) is False
+
+
 def test_helper_round_trips(snapshot: CorpusSnapshot) -> None:
     current_scope = make_analysis_scope(snapshot)
     current_identity = make_analysis_identity(snapshot, current_scope)
@@ -685,10 +790,103 @@ def test_verify_native_analysis_accepts_valid_fixture(snapshot: CorpusSnapshot) 
 def test_verify_native_analysis_rejects_uncaptured_expected_source(
     snapshot: CorpusSnapshot,
 ) -> None:
-    analysis = make_normalized_analysis(snapshot, make_analysis_scope(snapshot))
-    incomplete_snapshot = replace(snapshot, sources=snapshot.sources[:1])
+    incomplete_sources = snapshot.sources[:1]
+    incomplete_manifest = canonical_source_manifest_sha256(
+        (source.record for source in incomplete_sources),
+        snapshot.policy,
+        collector_version=snapshot.collector_version,
+        extractor_version=snapshot.extractor_version,
+    )
+    incomplete_snapshot = replace(
+        snapshot,
+        sources=incomplete_sources,
+        corpus_sha256=incomplete_manifest,
+    )
+    current_scope = make_analysis_scope(incomplete_snapshot)
+    expected_b = ExpectedSource(
+        snapshot.sources[1].record.logical_id,
+        snapshot.sources[1].record.sha256,
+        "included",
+    )
+    current_scope = replace(
+        current_scope,
+        expected_sources=(*current_scope.expected_sources, expected_b),
+    )
+    analysis = make_normalized_analysis(incomplete_snapshot, current_scope)
     with pytest.raises(ValueError, match="source:b.*captured"):
         verify_native_analysis(incomplete_snapshot, analysis)
+
+
+def test_verify_native_analysis_rejects_expected_source_hash_mismatch(
+    snapshot: CorpusSnapshot,
+) -> None:
+    current_scope = make_analysis_scope(snapshot)
+    expected = current_scope.expected_sources[0]
+    forged_scope = replace(
+        current_scope,
+        expected_sources=(
+            replace(expected, source_sha256=SHA[15]),
+            *current_scope.expected_sources[1:],
+        ),
+    )
+    analysis = replace(
+        make_normalized_analysis(snapshot, current_scope),
+        scopes=(forged_scope,),
+    )
+    with pytest.raises(ValueError, match="expected source sha256"):
+        verify_native_analysis(snapshot, analysis)
+
+
+def test_verify_native_analysis_rejects_same_length_content_tamper(
+    snapshot: CorpusSnapshot,
+) -> None:
+    analysis = make_normalized_analysis(snapshot, make_analysis_scope(snapshot))
+    tampered_source = replace(snapshot.sources[0], content=b"evil")
+    tampered = replace(snapshot, sources=(tampered_source, *snapshot.sources[1:]))
+    with pytest.raises(ValueError, match="content sha256"):
+        verify_native_analysis(tampered, analysis)
+
+
+@pytest.mark.parametrize("field", ["size", "sha256"])
+def test_verify_native_analysis_rejects_forged_source_metadata(
+    snapshot: CorpusSnapshot,
+    field: str,
+) -> None:
+    source = snapshot.sources[0]
+    damage = len(source.content) + 1 if field == "size" else SHA[15]
+    forged_record = replace(source.record, **{field: damage})
+    forged_sources = (replace(source, record=forged_record), *snapshot.sources[1:])
+    forged_manifest = canonical_source_manifest_sha256(
+        (item.record for item in forged_sources),
+        snapshot.policy,
+        collector_version=snapshot.collector_version,
+        extractor_version=snapshot.extractor_version,
+    )
+    forged = replace(snapshot, sources=forged_sources, corpus_sha256=forged_manifest)
+    analysis = make_normalized_analysis(forged, make_analysis_scope(forged))
+    with pytest.raises(ValueError, match=f"content {field}"):
+        verify_native_analysis(forged, analysis)
+
+
+def test_verify_native_analysis_rejects_non_integer_source_size(
+    snapshot: CorpusSnapshot,
+) -> None:
+    source = snapshot.sources[0]
+    forged_record = replace(source.record, size=float(len(source.content)))
+    forged_sources = (replace(source, record=forged_record), *snapshot.sources[1:])
+    forged = replace(snapshot, sources=forged_sources)
+    analysis = make_normalized_analysis(forged, make_analysis_scope(forged))
+    with pytest.raises(ValueError, match="content size"):
+        verify_native_analysis(forged, analysis)
+
+
+def test_verify_native_analysis_rejects_forged_corpus_manifest(
+    snapshot: CorpusSnapshot,
+) -> None:
+    forged = replace(snapshot, corpus_sha256=SHA[15])
+    analysis = make_normalized_analysis(forged, make_analysis_scope(forged))
+    with pytest.raises(ValueError, match="canonical source manifest"):
+        verify_native_analysis(forged, analysis)
 
 
 @pytest.mark.parametrize("kind", ["symbol", "relationship", "diagnostic", "related"])
@@ -718,6 +916,19 @@ def test_verify_native_analysis_rejects_lexical_run_evidence(
     lexical_run = replace(analysis.run, evidence_level=EvidenceLevel.LEXICAL)
     with pytest.raises(ValueError, match="run.*syntax evidence"):
         verify_native_analysis(snapshot, replace(analysis, run=lexical_run))
+
+
+def test_verify_native_analysis_rejects_unqualified_run(
+    snapshot: CorpusSnapshot,
+) -> None:
+    current_scope = replace(make_analysis_scope(snapshot), analyzer_support="unqualified")
+    analysis = replace(
+        make_normalized_analysis(snapshot, make_analysis_scope(snapshot)),
+        run=replace(make_run(snapshot), qualified=False),
+        scopes=(current_scope,),
+    )
+    with pytest.raises(ValueError, match="qualified"):
+        verify_native_analysis(snapshot, analysis)
 
 
 def test_verify_native_analysis_rejects_manifest_evidence_and_mode_mismatch(
