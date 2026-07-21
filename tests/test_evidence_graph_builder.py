@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -157,7 +158,7 @@ def test_v3_builder_requires_code_capture_before_creating_generation(tmp_path: P
 
 
 def test_build_manifest_emits_exact_closed_code_capture_contract(tmp_path: Path) -> None:
-    from code_workspace import code_capture_as_dict, collect_repository_code
+    from code_workspace import RepositoryCodeLimits, code_capture_as_dict, collect_repository_code
     from evidence_graph import GraphSchema
     from evidence_graph_builder import _build_manifest
 
@@ -170,6 +171,7 @@ def test_build_manifest_emits_exact_closed_code_capture_contract(tmp_path: Path)
         include_globs=("**/*.py",),
         ignore_globs=(),
         suffixes=(".py",),
+        limits=RepositoryCodeLimits(),
     )
     manifest = _build_manifest(
         generation_id="capture",
@@ -194,6 +196,86 @@ def test_build_manifest_emits_exact_closed_code_capture_contract(tmp_path: Path)
         "directories",
         "membership_sha256",
     }
+
+
+@pytest.mark.parametrize(
+    "damage", ["missing", "extra", "source_id", "relative_path", "sha256", "size"]
+)
+def test_builder_binds_present_capture_to_exact_sources_before_construction(
+    tmp_path: Path, damage: str
+) -> None:
+    from code_workspace import CodeCaptureFile, code_capture_as_dict
+    from evidence_graph import GraphSchema
+    from evidence_graph_builder import build_full_generation
+    from generation_catalog import GenerationCatalog
+    from reliable_memory import canonical_json_bytes
+
+    records = basic_graph_records()
+    snapshot = captured_snapshot_for_records(records)
+    contract = snapshot.code_capture
+    original = contract.files[0]
+    damaged_policy = contract.policy
+    if damage == "missing":
+        files = ()
+    elif damage == "extra":
+        extra = CodeCaptureFile("source:extra", "extra.py", "e" * 64, original.stat)
+        files = tuple(sorted((*contract.files, extra), key=lambda item: item.relative_path))
+        damaged_policy = replace(
+            contract.policy, roots=tuple(sorted((*contract.policy.roots, "extra.py")))
+        )
+    else:
+        values = {
+            name: getattr(original, name)
+            for name in ("source_id", "relative_path", "sha256", "stat")
+        }
+        if damage == "source_id":
+            values["source_id"] = "source:other"
+        elif damage == "relative_path":
+            values["relative_path"] = "other.py"
+            damaged_policy = replace(
+                contract.policy,
+                roots=tuple(
+                    sorted(
+                        {
+                            "other.py",
+                            *(item.relative_path for item in contract.directories),
+                        }
+                    )
+                ),
+            )
+        elif damage == "sha256":
+            values["sha256"] = "f" * 64
+        else:
+            values["stat"] = replace(original.stat, size=original.stat.size + 1)
+        damaged_file = object.__new__(CodeCaptureFile)
+        for name, value in values.items():
+            object.__setattr__(damaged_file, name, value)
+        files = (damaged_file,)
+    damaged = replace(contract, policy=damaged_policy, files=files)
+    serialized = code_capture_as_dict(damaged)
+    damaged = replace(
+        damaged,
+        membership_sha256=hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "files": serialized["files"],
+                    "directories": serialized["directories"],
+                }
+            )
+        ).hexdigest(),
+    )
+    catalog = GenerationCatalog(tmp_path / "state")
+
+    with pytest.raises(ValueError, match="source membership"):
+        build_full_generation(
+            catalog,
+            generation_id=f"bad-capture-{damage}",
+            graph_schema=GraphSchema.V2,
+            code_capture=damaged,
+            activate=False,
+            **records,
+        )
+    assert not (catalog.generations_path / f"bad-capture-{damage}").exists()
 
 
 def test_v3_builder_rejects_run_outside_manifest_repository_scope(tmp_path: Path) -> None:

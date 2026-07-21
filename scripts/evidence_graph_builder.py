@@ -491,11 +491,17 @@ def build_full_generation(
         sources_list, source_bytes, deadline=deadline, cancelled=cancelled
     )
     if code_capture is not None:
-        capture_membership = [
-            (item.relative_path, item.stat.size) for item in code_capture.files
-        ]
+        capture_membership = sorted(
+            (item.source_id, item.relative_path, item.sha256, item.stat.size)
+            for item in code_capture.files
+        )
         source_membership = sorted(
-            (str(source["relative_path"]), int(source["size"]))
+            (
+                str(source["source_id"]),
+                str(source["relative_path"]),
+                str(source["sha256"]),
+                int(source["size"]),
+            )
             for source in sources_list
         )
         if capture_membership != source_membership:

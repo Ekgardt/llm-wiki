@@ -523,6 +523,70 @@ def test_catalog_matches_capture_identity_and_hash_to_source_manifest(
         _catalog(tmp_path).register(result.generation_id)
 
 
+@pytest.mark.parametrize(
+    "damage", ["missing", "extra", "source_id", "relative_path", "sha256", "size"]
+)
+def test_catalog_binds_present_v2_capture_to_exact_source_membership(
+    tmp_path: Path, damage: str
+) -> None:
+    from evidence_graph import GraphSchema
+    from evidence_graph_builder import build_full_generation
+    from generation_catalog import GenerationCatalog
+    from reliable_memory import canonical_json_bytes
+    from repository_scope import resolve_repository_scope
+
+    from tests.code_kernel_helpers import basic_graph_records, captured_snapshot_for_records
+
+    records = basic_graph_records()
+    snapshot = captured_snapshot_for_records(records)
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    result = build_full_generation(
+        GenerationCatalog(tmp_path / "state"),
+        generation_id=f"v2-capture-{damage}",
+        graph_schema=GraphSchema.V2,
+        snapshot=snapshot,
+        code_capture=snapshot.code_capture,
+        repository_scope=resolve_repository_scope(repository),
+        activate=False,
+        **records,
+    )
+    manifest_path = result.generation_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    capture = manifest["code_capture"]
+    file = capture["files"][0]
+    if damage == "missing":
+        capture["files"] = []
+    elif damage == "extra":
+        extra = __import__("copy").deepcopy(file)
+        extra.update(source_id="source:extra", relative_path="extra.py", sha256="e" * 64)
+        capture["files"].append(extra)
+        capture["files"].sort(key=lambda item: item["relative_path"])
+        capture["policy"]["roots"] = sorted((*capture["policy"]["roots"], "extra.py"))
+    elif damage == "source_id":
+        file["source_id"] = "source:other"
+    elif damage == "relative_path":
+        old_path = file["relative_path"]
+        file["relative_path"] = "other.py"
+        capture["policy"]["roots"] = sorted(
+            "other.py" if root == old_path else root
+            for root in capture["policy"]["roots"]
+        )
+    elif damage == "sha256":
+        file["sha256"] = "f" * 64
+    else:
+        file["stat"]["size"] += 1
+    capture["membership_sha256"] = hashlib.sha256(
+        canonical_json_bytes(
+            {"files": capture["files"], "directories": capture["directories"]}
+        )
+    ).hexdigest()
+    manifest_path.write_bytes(canonical_json_bytes(manifest))
+
+    with pytest.raises(ValueError, match="source membership"):
+        GenerationCatalog(tmp_path / "state").register(result.generation_id)
+
+
 def test_manifest_schema_requires_code_capture_only_for_graph_v3(tmp_path: Path) -> None:
     import jsonschema
 
@@ -554,6 +618,22 @@ def test_manifest_schema_uses_approved_capture_maxima_and_nested_file_shape() ->
     assert limits["max_depth"]["minimum"] == 1
     assert limits["chunk_bytes"]["minimum"] == 4096
     file_schema = schema["properties"]["files"]["items"]
+    assert file_schema["properties"]["source_id"]["maxLength"] == 512
+    import jsonschema
+
+    assert list(jsonschema.Draft202012Validator(file_schema).iter_errors({
+        "source_id": "x" * 513,
+        "relative_path": "src/a.py",
+        "sha256": "a" * 64,
+        "stat": {
+            "size": 1,
+            "mtime_ns": 1,
+            "ctime_ns": 1,
+            "mode": 1,
+            "device": 1,
+            "inode": 1,
+        },
+    }))
     assert set(file_schema["required"]) == {
         "source_id",
         "relative_path",

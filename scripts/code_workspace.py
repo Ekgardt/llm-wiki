@@ -9,6 +9,7 @@ import stat
 import time
 import unicodedata
 from collections.abc import Callable, Iterable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -233,6 +234,75 @@ def _open_read(path: Path) -> int:
 
 def _capture_read_barrier(_descriptor: int) -> None:
     return
+
+
+def _capture_root_barrier(_root: Path) -> None:
+    return
+
+
+@contextmanager
+def _hold_capture_root(path: Path):
+    absolute = path.absolute()
+    if os.name == "posix":
+        if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+            raise RuntimeError("stable checkout root identity is unavailable")
+        flags = (
+            os.O_RDONLY
+            | os.O_DIRECTORY
+            | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        descriptor = os.open(absolute, flags)
+        try:
+            held = os.fstat(descriptor)
+            if _is_unsafe(held) or not stat.S_ISDIR(held.st_mode):
+                raise PermissionError("checkout root must be a regular non-link directory")
+            _capture_root_barrier(absolute)
+            resolved = absolute.resolve(strict=True)
+            named = os.open(resolved, flags)
+            try:
+                if not os.path.samestat(held, os.fstat(named)):
+                    raise PermissionError("checkout root changed during canonicalization")
+            finally:
+                os.close(named)
+            yield resolved
+            current = os.open(absolute, flags)
+            try:
+                if not os.path.samestat(held, os.fstat(current)):
+                    raise RuntimeError("checkout root changed during capture")
+            finally:
+                os.close(current)
+        finally:
+            os.close(descriptor)
+        return
+    if os.name == "nt":
+        from markdown_transaction import _close_windows_handle, _open_windows_directory
+
+        try:
+            handle = _open_windows_directory(absolute)
+        except RuntimeError as exc:
+            raise PermissionError("checkout root is a link or reparse point") from exc
+        try:
+            held = absolute.lstat()
+            _capture_root_barrier(absolute)
+            resolved = absolute.resolve(strict=True)
+            current = absolute.lstat()
+            canonical = resolved.lstat()
+            if (
+                _is_unsafe(current)
+                or _is_unsafe(canonical)
+                or not _same_file(held, current)
+                or not _same_file(held, canonical)
+            ):
+                raise PermissionError("checkout root changed during canonicalization")
+            yield resolved
+            after = absolute.lstat()
+            if _is_unsafe(after) or not _same_file(held, after):
+                raise RuntimeError("checkout root changed during capture")
+        finally:
+            _close_windows_handle(handle)
+        return
+    raise RuntimeError("stable checkout root identity is unavailable")
 
 
 def _read_candidate(
@@ -484,27 +554,37 @@ def validate_code_capture(value: object) -> dict[str, object]:
 def collect_repository_code(
     checkout_root: Path,
     *,
-    roots: Iterable[str | Path],
-    include_globs: Iterable[str],
-    ignore_globs: Iterable[str],
-    suffixes: Iterable[str],
-    limits: RepositoryCodeLimits = RepositoryCodeLimits(),
+    roots: tuple[str, ...],
+    include_globs: tuple[str, ...],
+    ignore_globs: tuple[str, ...],
+    suffixes: tuple[str, ...],
+    limits: RepositoryCodeLimits,
     deadline: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> CorpusSnapshot:
     """Capture exact repository bytes and a complete bounded membership contract."""
-    original_root = Path(checkout_root)
-    original_info = original_root.lstat()
-    if _is_unsafe(original_info) or not stat.S_ISDIR(original_info.st_mode):
-        raise PermissionError("checkout root must be a regular non-link directory")
-    root = original_root.resolve(strict=True)
-    resolve_repository_scope(root)
-    selected_policy = _policy(roots, include_globs, ignore_globs, suffixes)
     if not isinstance(limits, RepositoryCodeLimits):
         raise TypeError("limits must be RepositoryCodeLimits")
-    root_info = root.lstat()
-    if _is_unsafe(root_info) or not stat.S_ISDIR(root_info.st_mode):
-        raise PermissionError("checkout root must be a regular directory")
+    with _hold_capture_root(Path(checkout_root)) as root:
+        resolve_repository_scope(root)
+        selected_policy = _policy(roots, include_globs, ignore_globs, suffixes)
+        return _collect_repository_code_from_root(
+            root,
+            selected_policy,
+            limits,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+
+
+def _collect_repository_code_from_root(
+    root: Path,
+    selected_policy: RepositoryCodePolicy,
+    limits: RepositoryCodeLimits,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> CorpusSnapshot:
 
     captured: list[CapturedSource] = []
     captured_files: list[CodeCaptureFile] = []
@@ -592,8 +672,11 @@ def collect_repository_code(
             if total_bytes > limits.max_total_bytes:
                 raise ValueError("repository code total byte limit exceeded")
             digest = hashlib.sha256(content).hexdigest()
+            source_id = f"source:{relative}"
+            if len(source_id.encode("utf-8")) > 512:
+                raise ValueError("generated repository code source_id exceeds 512 UTF-8 bytes")
             record = SourceRecord(
-                logical_id=f"source:{relative}",
+                logical_id=source_id,
                 relative_path=relative,
                 sha256=digest,
                 size=len(content),

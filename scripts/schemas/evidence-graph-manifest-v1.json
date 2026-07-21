@@ -53,7 +53,7 @@
             "type": "object",
             "required": ["source_id", "relative_path", "sha256", "stat"],
             "properties": {
-              "source_id": {"type": "string", "minLength": 1, "maxLength": 4103},
+              "source_id": {"type": "string", "minLength": 1, "maxLength": 512},
               "relative_path": {"type": "string", "minLength": 1, "maxLength": 4096},
               "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
               "stat": {

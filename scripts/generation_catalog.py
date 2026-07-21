@@ -768,7 +768,7 @@ def _validate_generation(
             deadline=deadline,
             cancelled=cancelled,
         )
-        if graph_schema == "evidence-graph/v3":
+        if "code_capture" in normalized:
             import corpus_snapshot
             import evidence_graph
 
@@ -784,12 +784,32 @@ def _validate_generation(
             source_manifest = corpus_snapshot.validate_canonical_source_manifest(
                 source_manifest
             )
+            database_path = generation_path / "evidence.sqlite3"
+            with closing(
+                sqlite3.connect(f"{database_path.as_uri()}?mode=ro", uri=True, timeout=0)
+            ) as database:
+                source_sizes = {
+                    row[0]: row[1]
+                    for row in database.execute(
+                        "SELECT source_id, size FROM source ORDER BY source_id"
+                    ).fetchall()
+                }
             source_membership = [
-                (source["logical_id"], source["relative_path"], source["sha256"])
+                (
+                    source["logical_id"],
+                    source["relative_path"],
+                    source["sha256"],
+                    source_sizes.get(source["logical_id"]),
+                )
                 for source in source_manifest["sources"]
             ]
             captured_membership = [
-                (item["source_id"], item["relative_path"], item["sha256"])
+                (
+                    item["source_id"],
+                    item["relative_path"],
+                    item["sha256"],
+                    item["stat"]["size"],
+                )
                 for item in normalized["code_capture"]["files"]
             ]
             if captured_membership != source_membership:

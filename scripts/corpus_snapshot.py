@@ -249,6 +249,12 @@ class CodeCaptureFile:
     stat: FileStatMetadata
 
     def __post_init__(self) -> None:
+        if (
+            not isinstance(self.source_id, str)
+            or not self.source_id
+            or len(self.source_id.encode("utf-8")) > 512
+        ):
+            raise ValueError("source_id must be a non-empty UTF-8 string of at most 512 bytes")
         pure = PurePosixPath(self.relative_path)
         if (
             not self.relative_path
@@ -259,8 +265,6 @@ class CodeCaptureFile:
             or any(part in {"", ".", ".."} for part in pure.parts)
         ):
             raise ValueError("relative_path must be normalized relative POSIX text")
-        if self.source_id != f"source:{self.relative_path}":
-            raise ValueError("source_id must be derived from relative_path")
         if re.fullmatch(r"[0-9a-f]{64}", self.sha256) is None:
             raise ValueError("sha256 must be lowercase SHA-256")
         if not isinstance(self.stat, FileStatMetadata):

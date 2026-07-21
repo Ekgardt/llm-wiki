@@ -18,16 +18,38 @@ def _write(path: Path, content: bytes) -> None:
 
 
 def _capture(root: Path, **options):
-    from code_workspace import collect_repository_code
+    from code_workspace import RepositoryCodeLimits, collect_repository_code
 
     options.setdefault("roots", ("src",))
     options.setdefault("include_globs", ("**/*.py",))
     options.setdefault("ignore_globs", ("**/ignored.py",))
     options.setdefault("suffixes", (".py",))
+    options.setdefault("limits", RepositoryCodeLimits())
     return collect_repository_code(
         root,
         **options,
     )
+
+
+def test_collect_repository_code_has_exact_keyword_only_api() -> None:
+    from code_workspace import collect_repository_code
+
+    parameters = inspect.signature(collect_repository_code).parameters
+    assert parameters["checkout_root"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    for name in ("roots", "include_globs", "ignore_globs", "suffixes", "limits"):
+        assert parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameters[name].default is inspect.Parameter.empty
+    annotations = {
+        name: str(parameters[name].annotation).replace(" ", "")
+        for name in ("roots", "include_globs", "ignore_globs", "suffixes")
+    }
+    assert annotations == {
+        "roots": "tuple[str,...]",
+        "include_globs": "tuple[str,...]",
+        "ignore_globs": "tuple[str,...]",
+        "suffixes": "tuple[str,...]",
+    }
+    assert str(parameters["limits"].annotation) == "RepositoryCodeLimits"
 
 
 def test_repository_contracts_are_frozen_slotted_normalized_and_deterministic(
@@ -166,6 +188,7 @@ def test_capture_rejects_empty_or_unsafe_roots_before_traversal(
             include_globs=("**/*.py",),
             ignore_globs=(),
             suffixes=(".py",),
+            limits=__import__("code_workspace").RepositoryCodeLimits(),
         )
 
 
@@ -202,6 +225,50 @@ def test_contract_rejects_casefold_collision_on_every_platform() -> None:
             (),
             "0" * 64,
         )
+
+
+def test_code_capture_file_source_id_enforces_512_utf8_byte_boundary() -> None:
+    from code_workspace import CodeCaptureFile
+    from corpus_snapshot import FileStatMetadata
+
+    metadata = FileStatMetadata(1, 1, 1, stat.S_IFREG, 1, 1)
+    accepted = CodeCaptureFile("x" * 512, "src/a.py", "a" * 64, metadata)
+    assert len(accepted.source_id.encode("utf-8")) == 512
+    with pytest.raises(ValueError, match="source_id"):
+        CodeCaptureFile("x" * 513, "src/a.py", "a" * 64, metadata)
+    with pytest.raises(ValueError, match="source_id"):
+        CodeCaptureFile("é" * 257, "src/a.py", "a" * 64, metadata)
+
+
+def test_manifest_capture_source_id_enforces_512_byte_boundary(tmp_path: Path) -> None:
+    from code_workspace import code_capture_as_dict, validate_code_capture
+
+    root = tmp_path / "repository"
+    _write(root / "src/app.py", b"answer = 42\n")
+    capture = code_capture_as_dict(_capture(root).code_capture)
+    capture["files"][0]["source_id"] = "x" * 512
+    capture["membership_sha256"] = hashlib.sha256(
+        canonical_json_bytes(
+            {"files": capture["files"], "directories": capture["directories"]}
+        )
+    ).hexdigest()
+    assert validate_code_capture(capture)["files"][0]["source_id"] == "x" * 512
+
+    capture["files"][0]["source_id"] += "x"
+    capture["membership_sha256"] = hashlib.sha256(
+        canonical_json_bytes(
+            {"files": capture["files"], "directories": capture["directories"]}
+        )
+    ).hexdigest()
+    with pytest.raises(ValueError, match="source_id"):
+        validate_code_capture(capture)
+
+
+def test_collector_rejects_generated_source_id_over_512_utf8_bytes(tmp_path: Path) -> None:
+    root = tmp_path / "repository"
+    _write(root / "src" / (("界" * 170) + ".py"), b"answer = 42\n")
+    with pytest.raises(ValueError, match="source_id.*512"):
+        _capture(root)
 
 def test_capture_rejects_symlinks_even_when_ignored(tmp_path: Path) -> None:
     root = tmp_path / "repository"
@@ -312,6 +379,50 @@ def test_capture_rejects_windows_reparse_checkout_root(tmp_path: Path) -> None:
         _capture(linked)
 
 
+def test_capture_rejects_root_substitution_before_canonicalization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import code_workspace
+
+    root = tmp_path / "repository"
+    parked = tmp_path / "parked"
+    target = tmp_path / "target"
+    _write(root / "src/app.py", b"safe = True\n")
+    _write(target / "src/app.py", b"secret = True\n")
+    substituted = False
+
+    def substitute(_root: Path) -> None:
+        nonlocal substituted
+        try:
+            root.rename(parked)
+        except OSError as exc:
+            raise PermissionError("held root rejected substitution") from exc
+        if os.name == "nt":
+            result = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(root), str(target)],
+                capture_output=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                pytest.skip("Windows junction creation is unavailable")
+        else:
+            root.symlink_to(target, target_is_directory=True)
+        substituted = True
+
+    real_read = code_workspace._read_candidate
+
+    def reject_target(path, *args, **kwargs):
+        if target in path.parents:
+            pytest.fail("capture read from substituted checkout target")
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(code_workspace, "_capture_root_barrier", substitute, raising=False)
+    monkeypatch.setattr(code_workspace, "_read_candidate", reject_target)
+    with pytest.raises((PermissionError, RuntimeError), match="root|substitution|changed"):
+        _capture(root)
+    assert substituted or os.name == "nt"
+
+
 def test_capture_persists_stat_from_hashed_descriptor(tmp_path: Path) -> None:
     import code_workspace
 
@@ -342,7 +453,7 @@ def test_capture_rejects_replacement_between_stat_and_open(
 
     def replacing_open(path: Path) -> int:
         nonlocal replaced
-        if path == target and not replaced:
+        if not replaced:
             replaced = True
             os.replace(replacement, target)
         return real_open(path)
