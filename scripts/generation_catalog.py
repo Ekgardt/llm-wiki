@@ -505,7 +505,7 @@ def _open_read_descriptor(path: Path) -> int:
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
         return os.open(path, flags)
 
-    absolute = str(path.resolve(strict=False))
+    absolute = str(path.absolute())
     if not absolute.startswith("\\\\?\\"):
         if absolute.startswith("\\\\"):
             absolute = "\\\\?\\UNC\\" + absolute[2:]

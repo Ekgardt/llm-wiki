@@ -249,7 +249,9 @@ def _descriptor_identity(descriptor: int) -> tuple[object, ...]:
 
 
 @contextmanager
-def _hold_directory_identity(path: Path):
+def _hold_directory_identity(
+    path: Path, expected_identity: tuple[object, ...] | None = None
+):
     if os.name == "nt":
         from generation_catalog import _windows_handle_file_identity
         from markdown_transaction import _close_windows_handle, _open_windows_directory
@@ -257,6 +259,8 @@ def _hold_directory_identity(path: Path):
         handle = _open_windows_directory(path)
         try:
             identity = _windows_handle_file_identity(handle)
+            if expected_identity is not None and identity != expected_identity:
+                raise PermissionError("repository code directory changed before traversal")
             yield
             current = _open_windows_directory(path)
             try:
@@ -279,6 +283,8 @@ def _hold_directory_identity(path: Path):
         descriptor = os.open(path, flags)
         try:
             identity = _descriptor_identity(descriptor)
+            if expected_identity is not None and identity != expected_identity:
+                raise PermissionError("repository code directory changed before traversal")
             yield
             current = os.open(path, flags)
             try:
@@ -304,7 +310,16 @@ def _hold_capture_root(path: Path):
             | os.O_NOFOLLOW
             | getattr(os, "O_CLOEXEC", 0)
         )
-        descriptor = os.open(absolute, flags)
+        try:
+            descriptor = os.open(absolute, flags)
+        except OSError as exc:
+            try:
+                unsafe = _is_unsafe(absolute.lstat())
+            except OSError:
+                unsafe = False
+            if unsafe:
+                raise PermissionError("checkout root is a link or reparse point") from exc
+            raise
         try:
             held = os.fstat(descriptor)
             held_identity = _descriptor_identity(descriptor)
@@ -369,6 +384,7 @@ def _hold_capture_root(path: Path):
 def _read_candidate(
     path: Path,
     expected: os.stat_result,
+    expected_identity: tuple[object, ...],
     limits: RepositoryCodeLimits,
     *,
     deadline: float | None,
@@ -376,67 +392,119 @@ def _read_candidate(
 ) -> tuple[bytes, FileStatMetadata]:
     if expected.st_size > limits.max_file_bytes:
         raise ValueError("repository code file byte limit exceeded")
-    expected_descriptor = _open_read(path)
+    _capture_open_barrier(path)
+    descriptor = _open_read(path)
     try:
-        expected_open = os.fstat(expected_descriptor)
-        if not stat.S_ISREG(expected_open.st_mode):
-            raise PermissionError("repository code path is not a regular file")
-        if os.name == "posix" and not _same_file(expected, expected_open):
+        before = os.fstat(descriptor)
+        before_identity = _descriptor_identity(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or expected_identity != before_identity
+            or (os.name == "posix" and not _same_file(expected, before))
+        ):
             raise PermissionError("repository code file changed before no-follow open")
-        expected_identity = _descriptor_identity(expected_descriptor)
-        _capture_open_barrier(path)
-        descriptor = _open_read(path)
-        try:
-            before = os.fstat(descriptor)
-            before_identity = _descriptor_identity(descriptor)
-            if (
-                not stat.S_ISREG(before.st_mode)
-                or expected_identity != before_identity
-            ):
-                raise PermissionError("repository code file changed before no-follow open")
-            from generation_catalog import _stable_descriptor_state
+        from generation_catalog import _stable_descriptor_state
 
-            before_state = _stable_descriptor_state(descriptor)
-            content = bytearray()
-            while True:
-                _check_stop(deadline, cancelled)
-                chunk = os.read(descriptor, limits.chunk_bytes)
-                if not chunk:
-                    break
-                content.extend(chunk)
-                if len(content) > limits.max_file_bytes:
-                    raise ValueError("repository code file byte limit exceeded")
-            _capture_read_barrier(descriptor)
-            after = os.fstat(descriptor)
+        before_state = _stable_descriptor_state(descriptor)
+        content = bytearray()
+        while True:
+            _check_stop(deadline, cancelled)
+            chunk = os.read(descriptor, limits.chunk_bytes)
+            if not chunk:
+                break
+            content.extend(chunk)
+            if len(content) > limits.max_file_bytes:
+                raise ValueError("repository code file byte limit exceeded")
+        _capture_read_barrier(descriptor)
+        after = os.fstat(descriptor)
+        if (
+            before_state != _stable_descriptor_state(descriptor)
+            or before_identity != _descriptor_identity(descriptor)
+            or _stat_metadata(before) != _stat_metadata(after)
+            or len(content) != before.st_size
+        ):
+            raise RuntimeError("repository code file changed during capture")
+        current = path.lstat()
+        if _is_unsafe(current):
+            raise RuntimeError("repository code file changed during capture")
+        named_descriptor = _open_read(path)
+        try:
+            named = os.fstat(named_descriptor)
             if (
-                before_state != _stable_descriptor_state(descriptor)
-                or before_identity != _descriptor_identity(descriptor)
-                or _stat_metadata(before) != _stat_metadata(after)
-                or len(content) != before.st_size
+                before_identity != _descriptor_identity(named_descriptor)
+                or _stat_metadata(before) != _stat_metadata(named)
             ):
                 raise RuntimeError("repository code file changed during capture")
-            current = path.lstat()
-            if _is_unsafe(current):
-                raise RuntimeError("repository code file changed during capture")
-            named_descriptor = _open_read(path)
-            try:
-                named = os.fstat(named_descriptor)
-                if (
-                    before_identity != _descriptor_identity(named_descriptor)
-                    or _stat_metadata(before) != _stat_metadata(named)
-                ):
-                    raise RuntimeError("repository code file changed during capture")
-            finally:
-                os.close(named_descriptor)
         finally:
-            os.close(descriptor)
+            os.close(named_descriptor)
     finally:
-        os.close(expected_descriptor)
+        os.close(descriptor)
     return bytes(content), _stat_metadata(before)
 
 
+def _entry_identity(path: Path, info: os.stat_result) -> tuple[object, ...] | None:
+    kind = _kind(info)
+    if kind == "file":
+        descriptor = _open_read(path)
+        try:
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode) or (
+                os.name == "posix" and not _same_file(info, opened)
+            ):
+                raise PermissionError("repository code file changed during enumeration")
+            return _descriptor_identity(descriptor)
+        finally:
+            os.close(descriptor)
+    if kind == "directory":
+        if os.name == "nt":
+            from generation_catalog import _windows_handle_file_identity
+            from markdown_transaction import _close_windows_handle, _open_windows_directory
+
+            handle = _open_windows_directory(path)
+            try:
+                return _windows_handle_file_identity(handle)
+            finally:
+                _close_windows_handle(handle)
+        descriptor = os.open(path, _posix_directory_flags())
+        try:
+            opened = os.fstat(descriptor)
+            if not _same_file(info, opened):
+                raise PermissionError("repository code directory changed during enumeration")
+            return _descriptor_identity(descriptor)
+        finally:
+            os.close(descriptor)
+    return None
+
+
 def _matches(path: str, patterns: tuple[str, ...]) -> bool:
-    return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
+    path_parts = path.split("/")
+
+    def matches(pattern: str) -> bool:
+        pattern_parts = pattern.split("/")
+        path_index = pattern_index = 0
+        globstar_index = -1
+        globstar_path_index = 0
+        while path_index < len(path_parts):
+            if (
+                pattern_index < len(pattern_parts)
+                and pattern_parts[pattern_index] != "**"
+                and fnmatch.fnmatchcase(path_parts[path_index], pattern_parts[pattern_index])
+            ):
+                path_index += 1
+                pattern_index += 1
+            elif pattern_index < len(pattern_parts) and pattern_parts[pattern_index] == "**":
+                globstar_index = pattern_index
+                globstar_path_index = path_index
+                pattern_index += 1
+            elif globstar_index >= 0:
+                globstar_path_index += 1
+                path_index = globstar_path_index
+                pattern_index = globstar_index + 1
+            else:
+                return False
+        return all(part == "**" for part in pattern_parts[pattern_index:])
+
+    return any(matches(pattern) for pattern in patterns)
 
 
 def _capture_contract_dict(contract: CodeCaptureContract) -> dict[str, object]:
@@ -664,6 +732,7 @@ def _collect_repository_code_from_root(
 
     captured: list[CapturedSource] = []
     captured_files: list[CodeCaptureFile] = []
+    captured_identities: dict[str, tuple[object, ...]] = {}
     directories: list[DirectoryMembership] = []
     seen_names: dict[str, str] = {}
     entries_seen = 0
@@ -679,7 +748,11 @@ def _collect_repository_code_from_root(
         seen_names[collision_key] = raw
         return normalized
 
-    def walk(directory: Path, depth: int) -> None:
+    def walk(
+        directory: Path,
+        depth: int,
+        expected_identity: tuple[object, ...] | None = None,
+    ) -> None:
         nonlocal entries_seen, total_bytes
         _check_stop(deadline, cancelled)
         if depth > limits.max_depth:
@@ -690,7 +763,7 @@ def _collect_repository_code_from_root(
         if _is_unsafe(before) or not stat.S_ISDIR(before.st_mode):
             raise PermissionError("repository code directory is a link, reparse point, or device")
         raw_entries = []
-        with _hold_directory_identity(directory):
+        with _hold_directory_identity(directory, expected_identity):
             with os.scandir(directory) as iterator:
                 for entry in iterator:
                     _check_stop(deadline, cancelled)
@@ -698,10 +771,11 @@ def _collect_repository_code_from_root(
                     if entries_seen > limits.max_entries:
                         raise ValueError("repository code entry limit exceeded")
                     info = entry.stat(follow_symlinks=False)
-                    raw_entries.append((entry.name, Path(entry.path), info))
+                    path = Path(entry.path)
+                    raw_entries.append((entry.name, path, info, _entry_identity(path, info)))
         membership_entries = []
         normalized_names: dict[str, str] = {}
-        for name, _path, info in raw_entries:
+        for name, _path, info, _identity in raw_entries:
             normalized_name = unicodedata.normalize("NFC", name)
             key = normalized_name.casefold()
             if key in normalized_names and normalized_names[key] != name:
@@ -717,7 +791,9 @@ def _collect_repository_code_from_root(
                 entries_sha256=_canonical_hash(membership_entries),
             )
         )
-        for name, path, info in sorted(raw_entries, key=lambda item: unicodedata.normalize("NFC", item[0])):
+        for name, path, info, identity in sorted(
+            raw_entries, key=lambda item: unicodedata.normalize("NFC", item[0])
+        ):
             relative = canonical_relative(path)
             kind = _kind(info)
             if kind == "link":
@@ -728,7 +804,9 @@ def _collect_repository_code_from_root(
             policy_ignored = _matches(relative, selected_policy.ignore_globs)
             if kind == "directory":
                 if not ignored_directory and not policy_ignored:
-                    walk(path, depth + 1)
+                    if identity is None:
+                        raise RuntimeError("stable directory identity is unavailable")
+                    walk(path, depth + 1, identity)
                 continue
             if ignored_directory or policy_ignored:
                 continue
@@ -738,8 +816,15 @@ def _collect_repository_code_from_root(
                 continue
             if len(captured) >= limits.max_files:
                 raise ValueError("repository code file limit exceeded")
+            if identity is None:
+                raise RuntimeError("stable file identity is unavailable")
             content, descriptor_stat = _read_candidate(
-                path, info, limits, deadline=deadline, cancelled=cancelled
+                path,
+                info,
+                identity,
+                limits,
+                deadline=deadline,
+                cancelled=cancelled,
             )
             content.decode("utf-8", errors="strict")
             total_bytes += len(content)
@@ -762,18 +847,22 @@ def _collect_repository_code_from_root(
             captured_files.append(
                 CodeCaptureFile(record.logical_id, relative, digest, descriptor_stat)
             )
+            captured_identities[record.logical_id] = identity
 
     for relative_root in selected_policy.roots:
         candidate = root.joinpath(*PurePosixPath(relative_root).parts)
+        info = candidate.lstat()
+        if _is_unsafe(info):
+            raise PermissionError("repository code root is a link or reparse point")
+        identity = _entry_identity(candidate, info)
         try:
             candidate.resolve(strict=True).relative_to(root)
         except (OSError, ValueError) as exc:
             raise PermissionError("repository code root escapes checkout") from exc
-        info = candidate.lstat()
-        if _is_unsafe(info):
-            raise PermissionError("repository code root is a link or reparse point")
         if stat.S_ISDIR(info.st_mode):
-            walk(candidate, 0)
+            if identity is None:
+                raise RuntimeError("stable repository code root identity is unavailable")
+            walk(candidate, 0, identity)
         elif stat.S_ISREG(info.st_mode):
             raise ValueError("repository code roots must be directories")
         else:
@@ -813,7 +902,12 @@ def _collect_repository_code_from_root(
         try:
             info = path.lstat()
             current, current_stat = _read_candidate(
-                path, info, limits, deadline=deadline, cancelled=cancelled
+                path,
+                info,
+                captured_identities[source.record.logical_id],
+                limits,
+                deadline=deadline,
+                cancelled=cancelled,
             )
         except OSError as exc:
             raise RuntimeError("repository code source changed during capture") from exc
@@ -903,6 +997,54 @@ def _write_all(descriptor: int, content: bytes) -> None:
         written += count
 
 
+def _validated_snapshot_entries(
+    snapshot: CorpusSnapshot,
+) -> tuple[str, tuple[tuple[str, int, str], ...]]:
+    try:
+        validate_code_capture(code_capture_as_dict(snapshot.code_capture))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("snapshot code capture contract is invalid") from exc
+    source_entries = []
+    capture_entries = []
+    for source in snapshot.sources:
+        content = source.content
+        record = source.record
+        relative = PurePosixPath(record.relative_path)
+        if (
+            not isinstance(content, bytes)
+            or relative.is_absolute()
+            or any(part in {"", ".", ".."} for part in relative.parts)
+            or isinstance(record.size, bool)
+            or not isinstance(record.size, int)
+            or record.size < 0
+            or len(content) != record.size
+            or hashlib.sha256(content).hexdigest() != record.sha256
+        ):
+            raise ValueError("snapshot source bytes do not match their record")
+        source_entries.append(
+            (record.logical_id, record.relative_path, record.size, record.sha256)
+        )
+    for item in snapshot.code_capture.files:
+        capture_entries.append(
+            (item.source_id, item.relative_path, item.stat.size, item.sha256)
+        )
+    if tuple(source_entries) != tuple(capture_entries):
+        raise ValueError("snapshot sources do not match the code capture contract")
+    manifest_sha256 = canonical_source_manifest_sha256(
+        (source.record for source in snapshot.sources),
+        snapshot.policy,
+        collector_version=snapshot.collector_version,
+        extractor_version=snapshot.extractor_version,
+    )
+    if manifest_sha256 != snapshot.corpus_sha256:
+        raise ValueError("snapshot source manifest hash is not canonical")
+    entries = tuple(
+        (relative_path, size, digest)
+        for _source_id, relative_path, size, digest in source_entries
+    )
+    return manifest_sha256, entries
+
+
 def _posix_directory_flags() -> int:
     if os.name != "posix" or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
         raise RuntimeError("safe sealed workspaces require POSIX no-follow directory opens")
@@ -927,41 +1069,47 @@ def _open_posix_directory_path(path: Path) -> tuple[list[int], int]:
 
 def _seal_posix(snapshot: CorpusSnapshot, destination: Path) -> None:
     parent_descriptors, parent_fd = _open_posix_directory_path(destination.parent)
-    directory_fds: dict[tuple[str, ...], int] = {}
+    root_fd: int | None = None
     try:
         os.mkdir(destination.name, 0o700, dir_fd=parent_fd)
         root_fd = os.open(destination.name, _posix_directory_flags(), dir_fd=parent_fd)
-        directory_fds[()] = root_fd
         for source in snapshot.sources:
             parts = PurePosixPath(source.record.relative_path).parts
-            parent_parts: tuple[str, ...] = ()
-            for part in parts[:-1]:
-                child_parts = (*parent_parts, part)
-                if child_parts not in directory_fds:
-                    _seal_component_barrier(part)
-                    os.mkdir(part, 0o700, dir_fd=directory_fds[parent_parts])
-                    directory_fds[child_parts] = os.open(
-                        part, _posix_directory_flags(), dir_fd=directory_fds[parent_parts]
-                    )
-                parent_parts = child_parts
-            descriptor = os.open(
-                parts[-1],
-                os.O_WRONLY
-                | os.O_CREAT
-                | os.O_EXCL
-                | os.O_NOFOLLOW
-                | getattr(os, "O_CLOEXEC", 0),
-                0o400,
-                dir_fd=directory_fds[parent_parts],
-            )
+            chain: list[int] = []
+            directory_fd = root_fd
             try:
-                _write_all(descriptor, source.content)
-                os.fsync(descriptor)
-                os.fchmod(descriptor, 0o400)
+                for part in parts[:-1]:
+                    _seal_component_barrier(part)
+                    try:
+                        os.mkdir(part, 0o700, dir_fd=directory_fd)
+                    except FileExistsError:
+                        pass
+                    directory_fd = os.open(
+                        part, _posix_directory_flags(), dir_fd=directory_fd
+                    )
+                    chain.append(directory_fd)
+                descriptor = os.open(
+                    parts[-1],
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | os.O_NOFOLLOW
+                    | getattr(os, "O_CLOEXEC", 0),
+                    0o400,
+                    dir_fd=directory_fd,
+                )
+                try:
+                    _write_all(descriptor, source.content)
+                    os.fsync(descriptor)
+                    os.fchmod(descriptor, 0o400)
+                finally:
+                    os.close(descriptor)
+                for opened_directory in reversed(chain):
+                    os.fsync(opened_directory)
             finally:
-                os.close(descriptor)
-        for descriptor in reversed(tuple(directory_fds.values())):
-            os.fsync(descriptor)
+                for opened_directory in reversed(chain):
+                    os.close(opened_directory)
+        os.fsync(root_fd)
         named = os.open(destination.name, _posix_directory_flags(), dir_fd=parent_fd)
         try:
             if _descriptor_identity(named) != _descriptor_identity(root_fd):
@@ -970,8 +1118,8 @@ def _seal_posix(snapshot: CorpusSnapshot, destination: Path) -> None:
             os.close(named)
         os.fsync(parent_fd)
     finally:
-        for descriptor in reversed(tuple(directory_fds.values())):
-            os.close(descriptor)
+        if root_fd is not None:
+            os.close(root_fd)
         for descriptor in reversed(parent_descriptors):
             os.close(descriptor)
 
@@ -980,23 +1128,17 @@ def seal_workspace(snapshot: CorpusSnapshot, root: Path) -> SealedWorkspace:
     """Write captured bytes through an exclusive component-safe filesystem boundary."""
     if not isinstance(snapshot, CorpusSnapshot) or snapshot.code_capture is None:
         raise TypeError("seal_workspace requires a repository CorpusSnapshot")
+    manifest_sha256, entries = _validated_snapshot_entries(snapshot)
     if not workspace_sealing_supported():
         raise RuntimeError(
             "sealed workspaces require a root-relative no-follow filesystem boundary"
         )
     destination = Path(root).absolute()
-    for source in snapshot.sources:
-        relative = PurePosixPath(source.record.relative_path)
-        if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
-            raise ValueError("captured source path is unsafe")
     _seal_posix(snapshot, destination)
     workspace = SealedWorkspace(
         destination,
-        snapshot.corpus_sha256,
-        tuple(
-            (source.record.relative_path, source.record.size, source.record.sha256)
-            for source in snapshot.sources
-        ),
+        manifest_sha256,
+        entries,
         os.name == "posix",
         True,
     )
@@ -1033,9 +1175,9 @@ def _verify_descriptor_file(
 
 def _verify_posix(workspace: SealedWorkspace, snapshot: CorpusSnapshot) -> tuple[str, ...]:
     chains, root_fd = _open_posix_directory_path(workspace.root)
-    opened = [root_fd]
     paths = []
     visited = 0
+    visited_directories = 0
     expected = {
         source.record.relative_path: (
             source.record.size,
@@ -1044,44 +1186,59 @@ def _verify_posix(workspace: SealedWorkspace, snapshot: CorpusSnapshot) -> tuple
         for source in snapshot.sources
     }
     try:
-        pending = [((), root_fd)]
-        while pending:
-            prefix, directory_fd = pending.pop()
-            with os.scandir(directory_fd) as iterator:
-                entries = sorted(iterator, key=lambda item: item.name)
-            visited += len(entries)
-            if visited > snapshot.code_capture.limits.max_entries:
-                raise WorkspaceChanged("sealed workspace entry range exceeded")
-            for entry in entries:
-                _verify_component_barrier(entry.name)
-                metadata = os.stat(entry.name, dir_fd=directory_fd, follow_symlinks=False)
-                if _is_unsafe(metadata):
-                    raise WorkspaceChanged("sealed workspace member became a link")
-                relative = "/".join((*prefix, entry.name))
-                if stat.S_ISDIR(metadata.st_mode):
-                    child = os.open(entry.name, _posix_directory_flags(), dir_fd=directory_fd)
-                    opened.append(child)
-                    pending.append(((*prefix, entry.name), child))
-                elif stat.S_ISREG(metadata.st_mode):
-                    paths.append(relative)
-                    if relative in expected:
-                        descriptor = os.open(
-                            entry.name,
-                            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
-                            dir_fd=directory_fd,
+        stack: list[list[object]] = [[(), root_fd, None, 0]]
+        while stack:
+            frame = stack[-1]
+            prefix = frame[0]
+            directory_fd = frame[1]
+            entries = frame[2]
+            if entries is None:
+                with os.scandir(directory_fd) as iterator:
+                    entries = sorted(iterator, key=lambda item: item.name)
+                frame[2] = entries
+                visited += len(entries)
+                if visited > snapshot.code_capture.limits.max_entries:
+                    raise WorkspaceChanged("sealed workspace entry range exceeded")
+            index = frame[3]
+            if index >= len(entries):
+                stack.pop()
+                if directory_fd != root_fd:
+                    os.close(directory_fd)
+                continue
+            entry = entries[index]
+            frame[3] = index + 1
+            _verify_component_barrier(entry.name)
+            metadata = os.stat(entry.name, dir_fd=directory_fd, follow_symlinks=False)
+            if _is_unsafe(metadata):
+                raise WorkspaceChanged("sealed workspace member became a link")
+            relative_parts = (*prefix, entry.name)
+            relative = "/".join(relative_parts)
+            if stat.S_ISDIR(metadata.st_mode):
+                visited_directories += 1
+                if visited_directories > snapshot.code_capture.limits.max_directories:
+                    raise WorkspaceChanged("sealed workspace directory range exceeded")
+                child = os.open(entry.name, _posix_directory_flags(), dir_fd=directory_fd)
+                stack.append([relative_parts, child, None, 0])
+            elif stat.S_ISREG(metadata.st_mode):
+                paths.append(relative)
+                if relative in expected:
+                    descriptor = os.open(
+                        entry.name,
+                        os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                        dir_fd=directory_fd,
+                    )
+                    try:
+                        size, digest = expected[relative]
+                        _verify_descriptor_file(
+                            descriptor,
+                            size,
+                            digest,
+                            snapshot.code_capture.limits.chunk_bytes,
                         )
-                        try:
-                            size, digest = expected[relative]
-                            _verify_descriptor_file(
-                                descriptor,
-                                size,
-                                digest,
-                                snapshot.code_capture.limits.chunk_bytes,
-                            )
-                        finally:
-                            os.close(descriptor)
-                else:
-                    raise WorkspaceChanged("sealed workspace contains a device")
+                    finally:
+                        os.close(descriptor)
+            else:
+                raise WorkspaceChanged("sealed workspace contains a device")
         named_chains, named = _open_posix_directory_path(workspace.root)
         try:
             if _descriptor_identity(named) != _descriptor_identity(root_fd):
@@ -1093,8 +1250,9 @@ def _verify_posix(workspace: SealedWorkspace, snapshot: CorpusSnapshot) -> tuple
     except (OSError, PermissionError) as exc:
         raise WorkspaceChanged("sealed workspace directory cannot be verified") from exc
     finally:
-        for descriptor in reversed(opened[1:]):
-            os.close(descriptor)
+        if "stack" in locals():
+            for frame in reversed(stack[1:]):
+                os.close(frame[1])
         for descriptor in reversed(chains):
             os.close(descriptor)
 
@@ -1105,15 +1263,12 @@ def verify_workspace_seal(workspace: SealedWorkspace, snapshot: CorpusSnapshot) 
         raise TypeError("workspace must be SealedWorkspace")
     if not isinstance(snapshot, CorpusSnapshot) or snapshot.code_capture is None:
         raise TypeError("snapshot must be a repository CorpusSnapshot")
+    manifest_sha256, expected = _validated_snapshot_entries(snapshot)
     if not workspace_sealing_supported():
         raise WorkspaceChanged(
             "sealed workspace verification requires a root-relative no-follow boundary"
         )
-    expected = tuple(
-        (source.record.relative_path, source.record.size, source.record.sha256)
-        for source in snapshot.sources
-    )
-    if workspace.source_manifest_sha256 != snapshot.corpus_sha256 or workspace.entries != expected:
+    if workspace.source_manifest_sha256 != manifest_sha256 or workspace.entries != expected:
         raise WorkspaceChanged("sealed workspace source manifest changed")
     actual_paths = _verify_posix(workspace, snapshot)
     if actual_paths != tuple(item[0] for item in expected):

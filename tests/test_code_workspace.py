@@ -161,6 +161,32 @@ def test_capture_filters_suffix_include_ignore_and_always_ignored_directories(
     assert root_membership["src"].entry_count == 5
 
 
+def test_capture_globs_match_complete_posix_path_segments(tmp_path: Path) -> None:
+    root = tmp_path / "repository"
+    _write(root / "src/app.py", b"app = True\n")
+    _write(root / "src/pkg/generated.py", b"direct = True\n")
+    _write(root / "src/pkg/deep/generated.py", b"deep = True\n")
+
+    snapshot = _capture(
+        root,
+        include_globs=("src/*.py", "src/**/*.py"),
+        ignore_globs=("src/*/generated.py",),
+    )
+
+    assert [source.record.relative_path for source in snapshot.sources] == [
+        "src/app.py",
+        "src/pkg/deep/generated.py",
+    ]
+
+
+@pytest.mark.parametrize("pattern", ("./src/*.py", "src//*.py", "src/**name.py", "src/"))
+def test_repository_policy_rejects_noncanonical_globs(pattern: str) -> None:
+    from code_workspace import RepositoryCodePolicy
+
+    with pytest.raises(ValueError, match="glob"):
+        RepositoryCodePolicy(("src",), (pattern,), (), (".py",))
+
+
 @pytest.mark.parametrize(
     "roots",
     [
@@ -521,6 +547,69 @@ def test_windows_descriptor_identity_is_stable(tmp_path: Path) -> None:
     assert first[0] == "windows"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows lexical no-follow open only")
+def test_windows_no_follow_open_does_not_resolve_path_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import code_workspace
+
+    target = tmp_path / "source.py"
+    _write(target, b"answer = 42\n")
+
+    def reject_resolution(*_args, **_kwargs):
+        pytest.fail("no-follow open resolved the path before CreateFileW")
+
+    monkeypatch.setattr(Path, "resolve", reject_resolution)
+    descriptor = code_workspace._open_read(target)
+    try:
+        assert os.read(descriptor, 64) == b"answer = 42\n"
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows pre-read identity race")
+def test_windows_capture_rejects_pre_read_replacement_without_reading_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import code_workspace
+
+    root = tmp_path / "repository"
+    target = root / "src/app.py"
+    replacement = tmp_path / "replacement.py"
+    _write(target, b"safe = True\n")
+    _write(replacement, b"secret = True\n")
+    descriptor = code_workspace._open_read(replacement)
+    try:
+        replacement_identity = code_workspace._descriptor_identity(descriptor)
+    finally:
+        os.close(descriptor)
+
+    real_candidate_read = code_workspace._read_candidate
+    real_read = code_workspace.os.read
+    replaced = False
+    replacement_reads = 0
+
+    def replace_before_candidate_read(*args, **kwargs):
+        nonlocal replaced
+        if not replaced:
+            os.replace(replacement, target)
+            replaced = True
+        return real_candidate_read(*args, **kwargs)
+
+    def reject_replacement_read(descriptor: int, size: int) -> bytes:
+        nonlocal replacement_reads
+        if code_workspace._descriptor_identity(descriptor) == replacement_identity:
+            replacement_reads += 1
+        return real_read(descriptor, size)
+
+    monkeypatch.setattr(code_workspace, "_read_candidate", replace_before_candidate_read)
+    monkeypatch.setattr(code_workspace.os, "read", reject_replacement_read)
+    with pytest.raises(PermissionError, match="changed before"):
+        _capture(root)
+    assert replaced
+    assert replacement_reads == 0
+
+
 def test_capture_rejects_changed_then_restored_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -556,13 +645,23 @@ def test_capture_rejects_file_growth_during_chunked_read(
     root = tmp_path / "repository"
     target = root / "src/app.py"
     _write(target, b"a" * 5000)
+    target_descriptor = code_workspace._open_read(target)
+    try:
+        target_identity = code_workspace._descriptor_identity(target_descriptor)
+    finally:
+        os.close(target_descriptor)
     real_read = code_workspace.os.read
     changed = False
 
     def growing_read(descriptor: int, size: int) -> bytes:
         nonlocal changed
         chunk = real_read(descriptor, size)
-        if chunk and not changed:
+        if (
+            chunk
+            and not changed
+            and stat.S_ISREG(os.fstat(descriptor).st_mode)
+            and code_workspace._descriptor_identity(descriptor) == target_identity
+        ):
             with target.open("ab") as handle:
                 handle.write(b"growth")
             changed = True
@@ -628,6 +727,132 @@ def test_sealed_workspace_verifies_and_detects_file_membership_changes(tmp_path:
             (target.parent / "extra.py").write_bytes(b"extra = True\n")
         with pytest.raises(WorkspaceChanged):
             verify_workspace_seal(workspace, snapshot)
+
+
+@pytest.mark.parametrize("operation", ("seal", "verify"))
+@pytest.mark.parametrize("mutation", ("content", "size", "hash", "manifest"))
+def test_workspace_boundaries_reject_forged_snapshot_before_filesystem_access(
+    tmp_path: Path, operation: str, mutation: str
+) -> None:
+    from code_workspace import SealedWorkspace, seal_workspace, verify_workspace_seal
+
+    repository = tmp_path / "repository"
+    _write(repository / "src/app.py", b"answer = 42\n")
+    snapshot = _capture(repository)
+    source = snapshot.sources[0]
+    record = source.record
+    if mutation == "content":
+        damaged_source = dataclasses.replace(source, content=b"answer = 43\n")
+        damaged = dataclasses.replace(snapshot, sources=(damaged_source,))
+    elif mutation == "size":
+        damaged_record = dataclasses.replace(record, size=record.size + 1)
+        damaged = dataclasses.replace(
+            snapshot, sources=(dataclasses.replace(source, record=damaged_record),)
+        )
+    elif mutation == "hash":
+        damaged_record = dataclasses.replace(record, sha256="f" * 64)
+        damaged = dataclasses.replace(
+            snapshot, sources=(dataclasses.replace(source, record=damaged_record),)
+        )
+    else:
+        damaged = dataclasses.replace(snapshot, corpus_sha256="f" * 64)
+
+    destination = tmp_path / f"sealed-{operation}-{mutation}"
+    entries = tuple(
+        (item.record.relative_path, item.record.size, item.record.sha256)
+        for item in damaged.sources
+    )
+    workspace = SealedWorkspace(
+        destination,
+        damaged.corpus_sha256,
+        entries,
+        owner_only=True,
+        read_only_requested=True,
+    )
+    with pytest.raises(ValueError, match="snapshot"):
+        if operation == "seal":
+            seal_workspace(damaged, destination)
+        else:
+            verify_workspace_seal(workspace, damaged)
+    assert not destination.exists()
+
+
+def test_workspace_boundary_rejects_boolean_source_size(tmp_path: Path) -> None:
+    from code_workspace import seal_workspace
+
+    repository = tmp_path / "repository"
+    _write(repository / "src/app.py", b"x")
+    snapshot = _capture(repository)
+    source = snapshot.sources[0]
+    damaged_record = dataclasses.replace(source.record, size=True)
+    damaged = dataclasses.replace(
+        snapshot,
+        sources=(dataclasses.replace(source, record=damaged_record),),
+    )
+
+    with pytest.raises(ValueError, match="snapshot"):
+        seal_workspace(damaged, tmp_path / "sealed")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor-relative sealing only")
+def test_seal_and_verify_descriptor_peak_is_bounded_by_depth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import code_workspace
+
+    repository = tmp_path / "repository"
+    for index in range(100):
+        _write(repository / f"src/pkg-{index:03d}/app.py", b"answer = 42\n")
+    limits = code_workspace.RepositoryCodeLimits(max_depth=8)
+    snapshot = _capture(repository, limits=limits)
+
+    real_open = code_workspace.os.open
+    real_close = code_workspace.os.close
+    active: set[int] = set()
+    peak = 0
+
+    def tracked_open(*args, **kwargs) -> int:
+        nonlocal peak
+        descriptor = real_open(*args, **kwargs)
+        active.add(descriptor)
+        peak = max(peak, len(active))
+        return descriptor
+
+    def tracked_close(descriptor: int) -> None:
+        try:
+            real_close(descriptor)
+        finally:
+            active.discard(descriptor)
+
+    monkeypatch.setattr(code_workspace.os, "open", tracked_open)
+    monkeypatch.setattr(code_workspace.os, "close", tracked_close)
+    monkeypatch.setattr(
+        code_workspace.os,
+        "supports_dir_fd",
+        {*code_workspace.os.supports_dir_fd, tracked_open},
+    )
+    workspace = code_workspace.seal_workspace(snapshot, tmp_path / "sealed")
+    code_workspace.verify_workspace_seal(workspace, snapshot)
+
+    assert not active
+    assert peak <= limits.max_depth + 12
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor-relative sealing only")
+def test_verification_directory_limit_excludes_synthetic_workspace_root(
+    tmp_path: Path,
+) -> None:
+    import code_workspace
+
+    repository = tmp_path / "repository"
+    _write(repository / "src/app.py", b"answer = 42\n")
+    snapshot = _capture(
+        repository,
+        limits=code_workspace.RepositoryCodeLimits(max_directories=1),
+    )
+
+    workspace = code_workspace.seal_workspace(snapshot, tmp_path / "sealed")
+    code_workspace.verify_workspace_seal(workspace, snapshot)
 
 
 def test_sealed_workspace_rejects_symlink_substitution(tmp_path: Path) -> None:

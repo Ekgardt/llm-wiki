@@ -211,6 +211,15 @@ class RepositoryCodePolicy:
                 or "\\" in value
                 or PurePosixPath(value).is_absolute()
                 or ".." in PurePosixPath(value).parts
+                or value.startswith("./")
+                or value.endswith("/")
+                or any(
+                    not part
+                    or part == "."
+                    or ("**" in part and part != "**")
+                    for part in value.split("/")
+                )
+                or len(value.split("/")) > 256
                 for value in getattr(self, name)
             ):
                 raise ValueError(f"{name} must contain normalized relative POSIX globs")
