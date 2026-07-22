@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, fields
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
+from typing import get_type_hints
 
 import pytest
 from code_intelligence import PositionEncoding, PositionRange
@@ -169,6 +170,43 @@ def test_lsp_range_rejects_out_of_range_positions() -> None:
         )
 
 
+def test_repeated_large_line_ranges_reuse_sparse_boundary_index(monkeypatch) -> None:
+    original = SourceDocument._build_line_boundary_index
+    builds = 0
+
+    def counted(line: bytes):
+        nonlocal builds
+        builds += 1
+        return original(line)
+
+    monkeypatch.setattr(
+        SourceDocument, "_build_line_boundary_index", staticmethod(counted)
+    )
+    document = SourceDocument.from_bytes("large.py", ("a😀" * 10_000).encode())
+    value = LspRange(LspPosition(0, 15_000), LspPosition(0, 15_003))
+
+    for _ in range(100):
+        assert document.to_byte_range(value, PositionEncoding.UTF16) == PositionRange(
+            25_000, 25_005
+        )
+
+    assert builds == 1
+    index = document._line_boundary_indexes[0]
+    assert len(index.byte_offsets) <= 10_000 // 100
+
+
+def test_line_boundary_cache_has_fixed_line_limit() -> None:
+    document = SourceDocument.from_bytes("many-lines.py", b"x\n" * 200)
+
+    for line in range(200):
+        position = LspPosition(line, 0)
+        document.to_byte_range(
+            LspRange(position, position), PositionEncoding.UTF16
+        )
+
+    assert len(document._line_boundary_indexes) <= 128
+
+
 def test_file_uri_round_trips_windows_drive_case_space_and_unicode() -> None:
     path = PureWindowsPath("c:/repo name/pkg/β.py")
     uri = path_to_file_uri(path)
@@ -193,6 +231,42 @@ def test_file_uri_round_trips_unc_path() -> None:
 
     assert uri == "file://server/share%20name/pkg/api.py"
     assert file_uri_to_path(uri, platform="nt") == path
+
+
+def test_path_to_file_uri_is_typed_for_pure_paths() -> None:
+    assert get_type_hints(path_to_file_uri)["path"] is PurePath
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        PureWindowsPath(r"\\.\GLOBALROOT\Device\HarddiskVolume1\secret.py"),
+        PureWindowsPath(r"\\?\C:\repo\secret.py"),
+    ],
+)
+def test_path_to_file_uri_rejects_windows_device_namespaces(path: PureWindowsPath) -> None:
+    with pytest.raises(ValueError):
+        path_to_file_uri(path)
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "file://./GLOBALROOT/Device/HarddiskVolume1/secret.py",
+        "file://%3F/C:/repo/secret.py",
+    ],
+)
+def test_file_uri_rejects_windows_device_authorities(uri: str) -> None:
+    with pytest.raises(ValueError):
+        file_uri_to_path(uri, platform="nt")
+
+
+@pytest.mark.parametrize(
+    "uri", ["file:///repo/pkg.py", "file://localhost/repo/pkg.py", "file:///C:"]
+)
+def test_windows_file_uri_requires_drive_or_unc_authority(uri: str) -> None:
+    with pytest.raises(ValueError):
+        file_uri_to_path(uri, platform="nt")
 
 
 @pytest.mark.parametrize(

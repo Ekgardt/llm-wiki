@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-from dataclasses import dataclass
-from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
+from bisect import bisect_right
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from pathlib import PurePath, PurePosixPath, PureWindowsPath
 from urllib.parse import quote, unquote_to_bytes, urlsplit
 
 from code_intelligence import PositionEncoding, PositionRange
@@ -14,6 +16,8 @@ from code_intelligence import PositionEncoding, PositionRange
 _MALFORMED_PERCENT = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _ENCODED_PATH_SEPARATOR = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:$")
+_BOUNDARY_CHECKPOINT_STRIDE = 256
+_BOUNDARY_INDEX_CACHE_LINES = 128
 
 
 def _require_coordinate(value: object, label: str, *, minimum: int = 0) -> int:
@@ -75,11 +79,21 @@ class LspRange:
 
 
 @dataclass(frozen=True, slots=True)
+class _LineBoundaryIndex:
+    byte_offsets: tuple[int, ...]
+    utf16_offsets: tuple[int, ...]
+    utf32_offsets: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class SourceDocument:
     path: str
     content: bytes
     source_sha256: str
     line_spans: tuple[tuple[int, int], ...]
+    _line_boundary_indexes: OrderedDict[int, _LineBoundaryIndex] = field(
+        default_factory=OrderedDict, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         _require_path(self.path)
@@ -170,27 +184,88 @@ class SourceDocument:
         if position.line >= len(self.line_spans):
             raise ValueError("line is outside the document")
         start, end = self.line_spans[position.line]
-        text = self.content[start:end].decode("utf-8")
-        units = 0
-        byte_offset = 0
-        boundaries = {0: 0}
-        for character in text:
-            byte_offset += len(character.encode("utf-8"))
+        line = self.content[start:end]
+        index = self._line_boundary_indexes.get(position.line)
+        if index is None:
+            index = self._build_line_boundary_index(line)
+            self._line_boundary_indexes[position.line] = index
+            if len(self._line_boundary_indexes) > _BOUNDARY_INDEX_CACHE_LINES:
+                self._line_boundary_indexes.popitem(last=False)
+        else:
+            self._line_boundary_indexes.move_to_end(position.line)
+
+        if encoding is PositionEncoding.UTF8:
+            offsets = index.byte_offsets
+        elif encoding is PositionEncoding.UTF16:
+            offsets = index.utf16_offsets
+        else:
+            offsets = index.utf32_offsets
+        checkpoint = bisect_right(offsets, position.character) - 1
+        byte_offset = index.byte_offsets[checkpoint]
+        utf16_offset = index.utf16_offsets[checkpoint]
+        utf32_offset = index.utf32_offsets[checkpoint]
+
+        while byte_offset < len(line):
             if encoding is PositionEncoding.UTF8:
                 units = byte_offset
             elif encoding is PositionEncoding.UTF16:
-                units += len(character.encode("utf-16-le")) // 2
+                units = utf16_offset
             else:
-                units += 1
-            boundaries[units] = byte_offset
-        try:
-            relative = boundaries[position.character]
-        except KeyError as exc:
-            raise ValueError("character is not a valid code-unit boundary") from exc
-        return start + relative
+                units = utf32_offset
+            if units >= position.character:
+                break
+            width = self._utf8_code_point_width(line[byte_offset])
+            byte_offset += width
+            utf16_offset += 2 if width == 4 else 1
+            utf32_offset += 1
+
+        if encoding is PositionEncoding.UTF8:
+            units = byte_offset
+        elif encoding is PositionEncoding.UTF16:
+            units = utf16_offset
+        else:
+            units = utf32_offset
+        if units != position.character:
+            raise ValueError("character is not a valid code-unit boundary")
+        return start + byte_offset
+
+    @staticmethod
+    def _build_line_boundary_index(line: bytes) -> _LineBoundaryIndex:
+        byte_offsets = [0]
+        utf16_offsets = [0]
+        utf32_offsets = [0]
+        byte_offset = 0
+        utf16_offset = 0
+        utf32_offset = 0
+        while byte_offset < len(line):
+            width = SourceDocument._utf8_code_point_width(line[byte_offset])
+            byte_offset += width
+            utf16_offset += 2 if width == 4 else 1
+            utf32_offset += 1
+            if utf32_offset % _BOUNDARY_CHECKPOINT_STRIDE == 0:
+                byte_offsets.append(byte_offset)
+                utf16_offsets.append(utf16_offset)
+                utf32_offsets.append(utf32_offset)
+        if byte_offsets[-1] != byte_offset:
+            byte_offsets.append(byte_offset)
+            utf16_offsets.append(utf16_offset)
+            utf32_offsets.append(utf32_offset)
+        return _LineBoundaryIndex(
+            tuple(byte_offsets), tuple(utf16_offsets), tuple(utf32_offsets)
+        )
+
+    @staticmethod
+    def _utf8_code_point_width(first_byte: int) -> int:
+        if first_byte < 0x80:
+            return 1
+        if first_byte < 0xE0:
+            return 2
+        if first_byte < 0xF0:
+            return 3
+        return 4
 
 
-def path_to_file_uri(path: Path) -> str:
+def path_to_file_uri(path: PurePath) -> str:
     """Convert an absolute POSIX, drive, or UNC path to a normalized file URI."""
     if not isinstance(path, (PurePosixPath, PureWindowsPath)):
         raise TypeError("path must be a pathlib path")
@@ -201,6 +276,8 @@ def path_to_file_uri(path: Path) -> str:
         raise ValueError("path must be absolute")
 
     if isinstance(path, PureWindowsPath):
+        if raw.startswith(("\\\\.\\", "\\\\?\\")):
+            raise ValueError("Windows device namespaces are not supported")
         if path.drive.startswith("\\\\"):
             server, share = path.drive[2:].split("\\", 1)
             tail = "/".join(path.parts[1:])
@@ -252,6 +329,8 @@ def file_uri_to_path(uri: str, *, platform: str | None = None) -> PurePath:
         raise ValueError("file uri path must not contain backslashes")
     if "@" in authority:
         raise ValueError("file uri authority must not contain userinfo")
+    if authority in {".", "?"}:
+        raise ValueError("Windows device authorities are not supported")
     if authority.startswith("["):
         if re.fullmatch(r"\[[^]]+\]", authority) is None:
             raise ValueError("file uri authority must not contain a port")
@@ -270,9 +349,9 @@ def file_uri_to_path(uri: str, *, platform: str | None = None) -> PurePath:
     if not decoded_path.startswith("/"):
         raise ValueError("file uri path must be absolute")
     if target_platform == "nt":
-        drive_match = re.match(r"^/([A-Za-z]):(?:/|$)", decoded_path)
+        drive_match = re.match(r"^/([A-Za-z]):/", decoded_path)
         if drive_match:
             normalized = drive_match.group(1).upper() + decoded_path[2:]
             return PureWindowsPath(normalized)
-        return PureWindowsPath(decoded_path.replace("/", "\\"))
+        raise ValueError("Windows file uri must include a drive or UNC authority")
     return PurePosixPath(decoded_path)
