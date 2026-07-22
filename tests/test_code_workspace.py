@@ -58,6 +58,12 @@ def test_collect_repository_code_has_exact_keyword_only_api() -> None:
     assert str(parameters["limits"].annotation) == "RepositoryCodeLimits"
 
 
+def test_verify_workspace_seal_has_boolean_result_contract() -> None:
+    from code_workspace import verify_workspace_seal
+
+    assert str(inspect.signature(verify_workspace_seal).return_annotation) == "bool"
+
+
 @pytest.mark.parametrize("deadline", (True, math.nan, math.inf, -math.inf, "later"))
 def test_capture_rejects_invalid_deadline_before_root_acquisition(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, deadline
@@ -1208,6 +1214,20 @@ def test_sealed_workspace_verifies_and_detects_file_membership_changes(tmp_path:
             verify_workspace_seal(workspace, snapshot)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="real POSIX sealed workspace required")
+def test_posix_workspace_verification_returns_exact_true(tmp_path: Path) -> None:
+    import code_workspace
+
+    repository = tmp_path / "repository"
+    _write(repository / "src/app.py", b"answer = 42\n")
+    snapshot = _capture(repository)
+
+    assert code_workspace.workspace_sealing_supported()
+    workspace = code_workspace.seal_workspace(snapshot, tmp_path / "sealed")
+
+    assert code_workspace.verify_workspace_seal(workspace, snapshot) is True
+
+
 @pytest.mark.parametrize("operation", ("seal", "verify"))
 @pytest.mark.parametrize("mutation", ("content", "size", "hash", "manifest"))
 def test_workspace_boundaries_reject_forged_snapshot_before_filesystem_access(
@@ -1976,6 +1996,20 @@ def test_windows_sealed_workspace_reports_only_applied_controls(tmp_path: Path) 
     assert workspace.platform_identities
     assert (workspace.root / "src/app.py").stat().st_file_attributes & stat.FILE_ATTRIBUTE_READONLY
     code_workspace.verify_workspace_seal(workspace, snapshot)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real Windows sealed workspace required")
+def test_windows_workspace_verification_returns_exact_true(tmp_path: Path) -> None:
+    import code_workspace
+
+    repository = tmp_path / "repository"
+    _write(repository / "src/app.py", b"answer = 42\n")
+    snapshot = _capture(repository)
+
+    assert code_workspace.workspace_sealing_supported()
+    workspace = code_workspace.seal_workspace(snapshot, tmp_path / "sealed")
+
+    assert code_workspace.verify_workspace_seal(workspace, snapshot) is True
 
 
 @pytest.mark.skipif(os.name != "nt", reason="real Windows sealed workspace required")

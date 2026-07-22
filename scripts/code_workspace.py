@@ -2023,7 +2023,7 @@ def _verify_windows(
             _windows_workspace.close_handle(parent_handle)
 
 
-def verify_workspace_seal(workspace: SealedWorkspace, snapshot: CorpusSnapshot) -> None:
+def verify_workspace_seal(workspace: SealedWorkspace, snapshot: CorpusSnapshot) -> bool:
     """Verify exact membership and bytes through held no-reparse components."""
     if not isinstance(workspace, SealedWorkspace):
         raise TypeError("workspace must be SealedWorkspace")
@@ -2044,6 +2044,7 @@ def verify_workspace_seal(workspace: SealedWorkspace, snapshot: CorpusSnapshot) 
     )
     if actual_members != expected_members:
         raise WorkspaceChanged("sealed workspace has extra or missing entries")
+    return True
 
 
 __all__ = [
