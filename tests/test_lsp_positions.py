@@ -208,6 +208,10 @@ def test_file_uri_round_trips_unc_path() -> None:
         "file://user@server/share/api.py",
         "file://server:80/share/api.py",
         r"file:///tmp/a\b.py",
+        "file:///tmp/a%5Cb.py",
+        "file://server%5Cevil/share/a.py",
+        "file://server%2Fevil/share/a.py",
+        "file://server%0Aevil/share/a.py",
     ],
 )
 def test_file_uri_rejects_invalid_inputs(uri: str) -> None:

@@ -239,8 +239,14 @@ def file_uri_to_path(uri: str, *, platform: str | None = None) -> PurePath:
         decoded_path = unquote_to_bytes(parsed.path).decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
         raise ValueError("file uri must contain valid UTF-8") from exc
-    if "\0" in authority or "\0" in decoded_path:
-        raise ValueError("file uri must not contain NUL")
+    if any(ord(character) < 32 or ord(character) == 127 for character in authority):
+        raise ValueError("file uri authority must not contain control characters")
+    if any(ord(character) < 32 or ord(character) == 127 for character in decoded_path):
+        raise ValueError("file uri path must not contain control characters")
+    if "/" in authority or "\\" in authority:
+        raise ValueError("file uri authority must not contain separators")
+    if "\\" in decoded_path:
+        raise ValueError("file uri path must not contain backslashes")
     if "@" in authority:
         raise ValueError("file uri authority must not contain userinfo")
     if authority.startswith("["):
