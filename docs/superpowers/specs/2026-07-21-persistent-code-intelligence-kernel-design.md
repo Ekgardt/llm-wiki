@@ -1,6 +1,11 @@
 # Persistent Code-Intelligence Kernel Design
 
-**Status:** Proposed implementation design, approved in conversation on 2026-07-21.
+> **Superseded after foundation Tasks 1-5:** The one-shot consent/SCIP/publication
+> direction in this design was replaced on 2026-07-22 by
+> `docs/superpowers/specs/2026-07-22-read-only-lsp-navigation-design.md`. This file
+> remains historical design evidence.
+
+**Status:** Superseded after foundation Tasks 1-5 on 2026-07-22.
 
 **Product phase:** Phase 2 of
 `docs/superpowers/plans/2026-07-19-solo-operator-superset-roadmap.md`.

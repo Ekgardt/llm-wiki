@@ -181,22 +181,27 @@ def test_superset_contract_is_canonical() -> None:
         assert unimplemented_path not in implemented_checkpoint
 
 
-def test_code_kernel_target_is_approved_but_not_reported_as_current() -> None:
+def test_code_navigation_target_is_approved_but_not_reported_as_current() -> None:
     structure = (ROOT / "docs/STRUCTURE.md").read_text(encoding="utf-8")
     current = structure.split("## Implemented corpus-generation checkpoint", 1)[
         1
     ].split("\n## ", 1)[0]
-    target = structure.split("## Approved code-kernel target", 1)[1].split(
+    target = structure.split("## Approved code-navigation target", 1)[1].split(
         "\n## ", 1
     )[0]
-    decision_path = (
+    old_decision_path = (
         ROOT / "knowledge/notes/persistent-code-intelligence-kernel-decision.md"
+    )
+    decision_path = (
+        ROOT / "knowledge/notes/read-only-lsp-navigation-engine-decision.md"
     )
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
 
     assert decision_path.is_file()
+    assert old_decision_path.is_file()
     decision = decision_path.read_text(encoding="utf-8")
+    old_decision = old_decision_path.read_text(encoding="utf-8")
     _required_frontmatter_scalars(
         decision,
         {
@@ -204,44 +209,37 @@ def test_code_kernel_target_is_approved_but_not_reported_as_current() -> None:
             "status": "active",
             "confidence": "high",
             "source_authority": "user",
-            "date": "2026-07-21",
+            "date": "2026-07-22",
+        },
+    )
+    _required_frontmatter_scalars(
+        old_decision,
+        {
+            "type": "decision",
+            "status": "superseded",
+            "superseded_by": "[[read-only-lsp-navigation-engine-decision]]",
         },
     )
     assert "evidence-graph/v2" in current
     assert "evidence-graph/v3" not in current
     target_words = " ".join(target.split())
     for value in (
-        "evidence-graph/v3",
-        "v2 generations remain readable",
-        "run/code-analysis-consent.sqlite3",
-        "run/analyzer-runs/<filesystem-run-id>/",
-        "exactly 12 task-shaped tools",
+        "existing structural Evidence Graph",
+        "read-only LSP runtime owned by LLM Wiki",
+        "production-quality Python/Pyright slice",
+        "existing 12 task-shaped MCP tools",
+        "no Serena runtime dependency",
+        "not written into an active generation",
         "Python 3.10",
         "approved target",
     ):
         assert value in target_words
-    generation_terms = (
-        "newly built immutable generation",
-        "existing `corpus-generation/v2` generation layout, catalog, and publication boundary",
-        "atomically activated",
-    )
-    deletion_terms = (
-        "approved target, not current behavior",
-        "Plan A must extend doctor and deletion eligibility",
-        "live or abandoned analyzer jobs",
-        "retained analyzer receipts",
-        "consent, quarantine, or unreadable analyzer state",
-        "before implementation is reported complete",
-    )
-    for text in (target, agents, claude, decision):
-        text = " ".join(text.split())
-        for value in generation_terms:
-            assert value in text
-        assert "inside the existing immutable generation" not in text
     for text in (agents, claude, decision):
-        text = " ".join(text.split())
-        for value in deletion_terms:
-            assert value in text
+        normalized = " ".join(text.split())
+        assert "read-only LSP" in normalized
+        assert "Serena runtime dependency" in normalized
+        assert "persistent daemon" in normalized
+    assert "Tasks 6-16 are superseded" in " ".join(decision.split())
     assert (ROOT / "AGENTS.md").read_bytes() == (ROOT / "CLAUDE.md").read_bytes()
 
 

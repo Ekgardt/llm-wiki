@@ -22,6 +22,7 @@
 - 2026-07-17 — Recorded the public decision that evidence retrieval uses disposable immutable cache generations while Markdown, Git, and project journals remain authoritative.
 - 2026-07-19 — Recorded the approved product contract: LLM Wiki becomes one local-first memory, code-intelligence, and agent-control system for a single operator managing many agents and sessions, with Graphify and codebase-memory-mcp workflow replacement proven by paired benchmarks rather than feature counts.
 - 2026-07-21 — Recorded the approved persistent code-intelligence kernel target while preserving corpus-generation/v2 and Evidence Graph v2 as the current implemented checkpoint until Plan A passes.
+- 2026-07-22 — Superseded the one-shot consent/SCIP/publication direction after completed foundation Tasks 1-5. Approved an owned read-only LSP navigation engine, starting with production-quality Python/Pyright while retaining the existing structural Evidence Graph and 12-tool MCP boundary.
 
 ## Editorial note
 This log is vault metadata — an append-only editorial changelog of compile passes and hygiene actions over `knowledge/`, not content derived from `knowledge/raw/` or `knowledge/inbox/`. New entries are appended at the bottom by compile passes and by hand; entries are never rewritten or removed.

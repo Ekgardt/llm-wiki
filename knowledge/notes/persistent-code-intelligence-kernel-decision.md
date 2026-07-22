@@ -5,9 +5,14 @@ description: "LLM Wiki will add a persistent code-intelligence kernel through Ev
 date: 2026-07-21
 confidence: high
 source_authority: user
-status: active
+status: superseded
+superseded_by: "[[read-only-lsp-navigation-engine-decision]]"
 ---
 # Persistent Code-Intelligence Kernel Target
+
+> Superseded on 2026-07-22 by [[read-only-lsp-navigation-engine-decision]] after
+> implementation Tasks 1-5. The completed foundation remains; the one-shot
+> consent/SCIP/publication direction in Tasks 6-16 does not.
 
 One-sentence summary: LLM Wiki will add a persistent code-intelligence kernel through Evidence Graph v3 without adding another publication or agent interface boundary.
 
@@ -85,5 +90,6 @@ publication boundary.
 
 ## Related
 
+- [[read-only-lsp-navigation-engine-decision]]
 - [[solo-operator-superset-product-decision]]
 - [[derived-evidence-generation-decision]]

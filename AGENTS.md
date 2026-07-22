@@ -137,23 +137,19 @@ Legacy `cache/index.sqlite`, `cache/vectors.npy`, `cache/vectors_meta.json`, and
 caches, not members of a generation. They must not be removed until installed-vault
 migration evidence makes that safe.
 
-**Approved code-kernel target (not implemented):** The current checkpoint remains
-`corpus-generation/v2` with `evidence-graph/v2` until Plan A passes. The approved
-target builds `evidence-graph/v3` in a newly built immutable generation within the
-existing `corpus-generation/v2` generation layout, catalog, and publication
-boundary. After complete validation, that new generation is atomically activated.
-v2 generations remain readable for structural capabilities. It adds no second
-graph, catalog, active pointer, runtime root, persistent daemon, or MCP tool. The
-interface remains exactly 12 task-shaped tools with Python 3.10 support. Precise
-analyzer execution requires repository, analyzer, and exact invocation consent in
-`run/code-analysis-consent.sqlite3`; sealed scratch state lives under
-`run/analyzer-runs/<filesystem-run-id>/`, not the live checkout. Operational SQLite
-uses rollback-journal, `synchronous=FULL`, and no WAL. This deletion language is an
-approved target, not current behavior. Plan A must extend doctor and deletion
-eligibility for live or abandoned analyzer jobs, retained analyzer receipts, and
-consent, quarantine, or unreadable analyzer state before implementation is reported
-complete. See
-`knowledge/notes/persistent-code-intelligence-kernel-decision.md`.
+**Approved code-navigation target (not implemented):** The current checkpoint
+remains `corpus-generation/v2` with `evidence-graph/v2`. Foundation Tasks 1-5 of
+the 2026-07-21 Plan A remain implemented, but its one-shot
+consent/SCIP/publication Tasks 6-16 are superseded. The approved target keeps the
+existing structural Evidence Graph and adds an owned, Python 3.10-compatible,
+read-only LSP runtime, starting with a production-quality Python/Pyright slice.
+It adds no Serena runtime dependency, Rust rewrite, second graph, catalog, active
+pointer, runtime root, persistent daemon, or MCP tool. Query-time LSP observations
+are not written into active generations. Language servers start lazily inside the
+owning MCP process, expose only allowlisted read operations, report readiness and
+capability limits, and fall back to existing structural evidence. Installation is
+a separate explicit operator action. See
+`knowledge/notes/read-only-lsp-navigation-engine-decision.md`.
 
 **Forbidden at vault root:** `wiki/`, `memory/`, `outputs/`, `state/`,
 `LLM-wiki-state/` (legacy sibling layout — removed). Runtime lives **inside**

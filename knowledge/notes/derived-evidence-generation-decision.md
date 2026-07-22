@@ -81,5 +81,6 @@ undo artifacts retain their existing protections.
 
 ## Related
 
+- [[read-only-lsp-navigation-engine-decision]]
 - [[persistent-code-intelligence-kernel-decision]]
 - [[solo-operator-superset-product-decision]]

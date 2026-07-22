@@ -155,26 +155,30 @@ success. This checkpoint does not document a native code-index kernel, multi-rep
 portfolio generation, temporal/control-plane services, or an operator console as
 implemented.
 
-## Approved code-kernel target
+## Approved code-navigation target
 
 This section records an approved target, not implemented behavior. The current
-checkpoint remains `corpus-generation/v2` with `evidence-graph/v2` until every
-implementation and verification task in Plan A passes.
+checkpoint remains `corpus-generation/v2` with `evidence-graph/v2`. Foundation
+Tasks 1-5 of the 2026-07-21 Plan A remain implemented, including explicit Graph v3
+selection contracts and bounded sealed-workspace utilities, but its one-shot
+consent/SCIP/publication Tasks 6-16 are superseded.
 
-The approved target builds `evidence-graph/v3` in a newly built immutable
-generation within the existing `corpus-generation/v2` generation layout, catalog,
-and publication boundary. After complete validation, that new generation is
-atomically activated. v2 generations remain readable for their structural
-capabilities. The target adds no second graph, catalog, active pointer, runtime
-root, persistent daemon, or MCP tool. Agent access remains exactly 12 task-shaped
-tools, and Plan A remains compatible with Python 3.10.
+The approved target keeps the existing structural Evidence Graph and adds a small,
+Python 3.10-compatible, read-only LSP runtime owned by LLM Wiki. It starts with a
+production-quality Python/Pyright slice and serves precise live navigation through
+new modes of the existing 12 task-shaped MCP tools. It adds no Serena runtime
+dependency, Rust rewrite, second graph, catalog, active pointer, runtime root, or
+persistent daemon. Query-time LSP observations are not written into an active
+generation.
 
-Precise analyzer execution is gated by repository, analyzer, and exact invocation
-consent stored in `run/code-analysis-consent.sqlite3`. Each invocation receives
-sealed scratch state under `run/analyzer-runs/<filesystem-run-id>/`, not the live
-checkout. These operational databases use rollback-journal, `synchronous=FULL`,
-and no WAL. The code index remains disposable derived evidence; Markdown, Git,
-project journals, and captured source bytes remain authoritative.
+The runtime starts language servers lazily within the owning MCP process, exposes
+only allowlisted read operations, reports readiness and capability limitations, and
+falls back to the existing structural graph when unavailable. Exact small results
+use a deterministic compact renderer; the Context Compiler remains responsible for
+broad multi-source synthesis. Language-server installation is a separate explicit
+operator action. See
+`knowledge/notes/read-only-lsp-navigation-engine-decision.md` and
+`docs/superpowers/specs/2026-07-22-read-only-lsp-navigation-design.md`.
 
 ## What lives where
 

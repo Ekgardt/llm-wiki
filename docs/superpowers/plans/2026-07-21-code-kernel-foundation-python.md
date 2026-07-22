@@ -1,6 +1,16 @@
 # Code Kernel Foundation and Python Vertical Slice Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Superseded after Task 5:** Tasks 1-5 were completed and remain valid. On
+> 2026-07-22 the user approved the read-only LSP navigation design in
+> `docs/superpowers/specs/2026-07-22-read-only-lsp-navigation-design.md`.
+> Tasks 6-16 below are retained as historical planning evidence and must not be
+> executed. A replacement implementation plan will cover the owned Python/Pyright
+> LSP runtime.
+
+> **Historical worker instruction:** This plan must no longer be executed. Its
+> unchecked boxes are preserved as historical task text; repository commits and
+> the superseding notice above establish that Tasks 1-5 completed before the
+> remaining work was replaced.
 
 **Goal:** Build Plan A of the persistent code-intelligence kernel: a repository-scoped Python vertical slice with consent-gated precise analysis, lease-free native syntax fallback, recoverable job ownership, complete freshness identity, and honest coverage published in Evidence Graph v3 through the existing 12 MCP tools.
 
