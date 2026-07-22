@@ -371,8 +371,17 @@ def test_cancellation_sends_cancel_and_drops_late_response(fake_server: FakeLspS
 def test_timeout_cleans_pending_without_waiting_past_original_deadline(
     fake_server: FakeLspServer,
 ) -> None:
+    cancel_seen = threading.Event()
+
     def handler(peer: FakeLspPeer) -> None:
-        peer.read()
+        request = peer.read()
+        cancellation = peer.read()
+        assert cancellation == {
+            "jsonrpc": "2.0",
+            "method": "$/cancelRequest",
+            "params": {"id": request["id"]},
+        }
+        cancel_seen.set()
 
     protocol = fake_server.start(handler)
     started = time.monotonic()
@@ -380,6 +389,7 @@ def test_timeout_cleans_pending_without_waiting_past_original_deadline(
         protocol.request("slow", {}, deadline=started + 0.05)
     assert time.monotonic() - started < 0.25
     assert protocol.pending_count == 0
+    assert cancel_seen.wait(1)
 
 
 def test_close_fails_an_active_request_instead_of_returning_a_result(
@@ -438,6 +448,7 @@ def test_pending_identity_contains_generation_and_request_id(fake_server: FakeLs
         "textDocument/declaration",
         "textDocument/typeDefinition",
         "textDocument/implementation",
+        "textDocument/prepareCallHierarchy",
         "textDocument/references",
         "textDocument/documentSymbol",
         "workspace/symbol",
@@ -696,12 +707,16 @@ def test_response_winning_cancellation_race_removes_pending_without_tombstone_le
         )
         return True
 
-    assert protocol.request(
-        "race", {}, deadline=time.monotonic() + 1, cancelled=cancelled
-    ) == "response-won"
+    with pytest.raises(RequestCancelled):
+        protocol.request("race", {}, deadline=time.monotonic() + 1, cancelled=cancelled)
     assert callback_calls == 1
     assert protocol.pending_count == 0
     assert protocol.pending_keys == ()
+    deadline = time.monotonic() + 1
+    while len(writer.frames) < 2 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert len(writer.frames) == 2
+    assert b'"method":"$/cancelRequest"' in writer.frames[1]
     protocol.close()
 
 
@@ -779,8 +794,12 @@ def test_blocked_cancellation_write_never_extends_original_deadline() -> None:
     assert time.monotonic() < deadline + 0.2
     assert writer.started.wait(1)
     assert protocol.pending_count == 0
-    assert protocol.fatal is True
     writer.released.set()
+    delivery_deadline = time.monotonic() + 1
+    while len(writer.frames) < 2 and time.monotonic() < delivery_deadline:
+        time.sleep(0.005)
+    assert len(writer.frames) == 2
+    assert protocol.fatal is False
     timer.join()
     protocol.close()
 
@@ -970,8 +989,13 @@ def test_cancelled_callback_exception_remains_bounded_when_cancel_write_blocks()
 
     assert time.monotonic() < deadline + 0.2
     assert protocol.pending_count == 0
-    assert protocol.fatal is True
     writer.released.set()
+    delivery_deadline = time.monotonic() + 1
+    while len(writer.frames) < 2 and time.monotonic() < delivery_deadline:
+        time.sleep(0.005)
+    assert len(writer.frames) == 2
+    assert b'"method":"$/cancelRequest"' in writer.frames[1]
+    assert protocol.fatal is False
     protocol.close()
 
 
@@ -1010,3 +1034,165 @@ def test_duplicate_cancel_finalization_emits_only_one_cancel_frame() -> None:
     assert len([frame for frame in writer.frames if b"$/cancelRequest" in frame]) == 1
     assert protocol.pending_count == 0
     protocol.close()
+
+
+@pytest.mark.parametrize("method", ["callHierarchy/incomingCalls", "callHierarchy/outgoingCalls"])
+def test_call_hierarchy_result_ceiling_accepts_10000_and_rejects_10001(
+    method: str,
+    fake_server: FakeLspServer,
+) -> None:
+    def handler(peer: FakeLspPeer) -> None:
+        for count in (MAX_LOCATIONS, MAX_LOCATIONS + 1):
+            request = peer.read()
+            peer.send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "result": [{"from": {}}] * count,
+                }
+            )
+
+    protocol = fake_server.start(handler)
+    result = protocol.request(method, {}, deadline=time.monotonic() + 2)
+    assert len(result) == MAX_LOCATIONS
+    with pytest.raises(ProtocolViolation, match="location"):
+        protocol.request(method, {}, deadline=time.monotonic() + 2)
+
+
+def _nested_symbols(count: int) -> list[dict[str, object]]:
+    roots: list[dict[str, object]] = []
+    remaining = count
+    while remaining:
+        children = min(99, remaining - 1)
+        roots.append({"name": "root", "children": [{"name": "child"}] * children})
+        remaining -= children + 1
+    return roots
+
+
+def test_nested_document_symbol_ceiling_counts_all_children(
+    fake_server: FakeLspServer,
+) -> None:
+    def handler(peer: FakeLspPeer) -> None:
+        for count in (MAX_LOCATIONS, MAX_LOCATIONS + 1):
+            request = peer.read()
+            peer.send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "result": _nested_symbols(count),
+                }
+            )
+
+    protocol = fake_server.start(handler)
+    accepted = protocol.request(
+        "textDocument/documentSymbol", {}, deadline=time.monotonic() + 2
+    )
+    assert sum(1 + len(root["children"]) for root in accepted) == MAX_LOCATIONS
+    with pytest.raises(ProtocolViolation, match="location"):
+        protocol.request("textDocument/documentSymbol", {}, deadline=time.monotonic() + 2)
+
+
+def test_unrelated_result_is_not_subject_to_location_ceiling(
+    fake_server: FakeLspServer,
+) -> None:
+    def handler(peer: FakeLspPeer) -> None:
+        request = peer.read()
+        peer.send(
+            {
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "result": [None] * (MAX_LOCATIONS + 1),
+            }
+        )
+
+    protocol = fake_server.start(handler)
+    result = protocol.request("custom/arbitrary", {}, deadline=time.monotonic() + 2)
+    assert len(result) == MAX_LOCATIONS + 1
+    assert protocol.fatal is False
+
+
+def test_callback_finishing_after_deadline_cannot_return_a_late_response() -> None:
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=100)
+    protocol = _protocol_with_streams(reader, writer)
+
+    def cancelled() -> bool:
+        protocol._dispatch_message(
+            {"jsonrpc": "2.0", "id": 1, "result": "late"},
+            generation_nonce="stream-probe",
+        )
+        time.sleep(0.08)
+        return False
+
+    deadline = time.monotonic() + 0.04
+    with pytest.raises(TimeoutError):
+        protocol.request("delayed-callback", {}, deadline=deadline, cancelled=cancelled)
+    assert time.monotonic() < deadline + 0.15
+    assert protocol.pending_count == 0
+    delivery_deadline = time.monotonic() + 1
+    while len(writer.frames) < 2 and time.monotonic() < delivery_deadline:
+        time.sleep(0.005)
+    assert len(writer.frames) == 2
+    assert b'"method":"$/cancelRequest"' in writer.frames[1]
+    protocol.close()
+
+
+def test_never_returning_callback_cannot_block_request_or_close() -> None:
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=100)
+    protocol = _protocol_with_streams(reader, writer)
+    callback_started = threading.Event()
+    release_callback = threading.Event()
+
+    def cancelled() -> bool:
+        callback_started.set()
+        release_callback.wait(2)
+        return False
+
+    deadline = time.monotonic() + 0.05
+    with pytest.raises(TimeoutError):
+        protocol.request("stuck-callback", {}, deadline=deadline, cancelled=cancelled)
+    assert callback_started.is_set()
+    assert time.monotonic() < deadline + 0.15
+    started_close = time.monotonic()
+    protocol.close()
+    assert time.monotonic() - started_close < 0.2
+    assert all(thread.daemon for thread in protocol.callback_threads)
+    release_callback.set()
+    for thread in protocol.callback_threads:
+        thread.join(1)
+
+
+def test_callback_worker_threads_remain_fixed_under_concurrent_stuck_callbacks() -> None:
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=100)
+    protocol = _protocol_with_streams(reader, writer)
+    release_callbacks = threading.Event()
+
+    def cancelled() -> bool:
+        release_callbacks.wait(2)
+        return False
+
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [
+            pool.submit(
+                protocol.request,
+                "bounded-callbacks",
+                {},
+                deadline=time.monotonic() + 0.1,
+                cancelled=cancelled,
+            )
+            for _ in range(8)
+        ]
+        for future in futures:
+            with pytest.raises(TimeoutError):
+                future.result(timeout=0.5)
+    assert time.monotonic() - started < 0.5
+    assert len(protocol.callback_threads) == 2
+    assert all(thread.is_alive() and thread.daemon for thread in protocol.callback_threads)
+    assert len({thread.ident for thread in protocol.callback_threads}) == 2
+    protocol.close()
+    release_callbacks.set()
+    for thread in protocol.callback_threads:
+        thread.join(1)

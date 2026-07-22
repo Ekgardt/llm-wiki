@@ -41,12 +41,14 @@ SERVER_NOTIFICATIONS = frozenset(
     }
 )
 
-_LOCATION_METHODS = frozenset(
+_FLAT_SEMANTIC_RESULT_METHODS = frozenset(
     {
+        "callHierarchy/incomingCalls",
+        "callHierarchy/outgoingCalls",
         "textDocument/declaration",
         "textDocument/definition",
-        "textDocument/documentSymbol",
         "textDocument/implementation",
+        "textDocument/prepareCallHierarchy",
         "textDocument/references",
         "textDocument/typeDefinition",
         "workspace/symbol",
@@ -59,6 +61,8 @@ _CANCELLATION_POLL_SECONDS = 0.01
 _UNKNOWN_NOTIFICATION_WARNING = "dropped unknown server notification"
 _MAX_JSON_VALUES = MAX_FRAME_BYTES // 2
 _MAX_QUEUED_WRITES = MAX_PENDING_REQUESTS * 4
+_CALLBACK_WORKERS = 2
+_MAX_QUEUED_CALLBACKS = MAX_PENDING_REQUESTS
 _INTERNAL_WRITE_SECONDS = 1.0
 _OWNER_JOIN_SECONDS = 1.0
 
@@ -107,6 +111,15 @@ class _WriteTask:
     frame: bytes
     deadline: float
     completed: threading.Event
+    error: BaseException | None = None
+
+
+@dataclass(slots=True, eq=False)
+class _CallbackTask:
+    callback: Callable[[], bool]
+    completed: threading.Event
+    abandoned: threading.Event
+    result: bool = False
     error: BaseException | None = None
 
 
@@ -390,8 +403,12 @@ class LspProtocol:
         self._reader_started = threading.Event()
         self._writer_started = threading.Event()
         self._io_stopped = threading.Event()
+        self._callbacks_stopped = threading.Event()
         self._write_queue: queue.Queue[_WriteTask | None] = queue.Queue(
             maxsize=_MAX_QUEUED_WRITES
+        )
+        self._callback_queue: queue.Queue[_CallbackTask] = queue.Queue(
+            maxsize=_MAX_QUEUED_CALLBACKS
         )
         self._write_tasks: list[_WriteTask] = []
         self.stdout_reader_owner: int | None = None
@@ -406,8 +423,18 @@ class LspProtocol:
             name=f"lsp-stdout-{generation_nonce}",
             daemon=True,
         )
+        self.callback_threads = tuple(
+            threading.Thread(
+                target=self._callback_loop,
+                name=f"lsp-cancel-{generation_nonce}-{index}",
+                daemon=True,
+            )
+            for index in range(_CALLBACK_WORKERS)
+        )
         self.writer_thread.start()
         self.reader_thread.start()
+        for thread in self.callback_threads:
+            thread.start()
         self._writer_started.wait()
         self._reader_started.wait()
 
@@ -466,6 +493,9 @@ class LspProtocol:
                 deadline=float(deadline),
                 wait=True,
             )
+        except TimeoutError:
+            self._cancel_pending(key, pending, force=True)
+            raise
         except BaseException:
             self._abandon_pending(key, pending)
             raise
@@ -473,24 +503,37 @@ class LspProtocol:
         while True:
             remaining = float(deadline) - time.monotonic()
             if remaining <= 0:
-                if not self._cancel_pending(key, pending, deadline=float(deadline)):
-                    break
+                self._cancel_pending(key, pending, force=True)
                 raise TimeoutError(f"LSP request timed out: {method}")
             if cancelled is not None:
                 try:
-                    is_cancelled = cancelled()
+                    is_cancelled, callback_timed_out = self._evaluate_cancelled(
+                        cancelled, float(deadline)
+                    )
                 except BaseException:
                     self._cancel_pending(
                         key,
                         pending,
-                        deadline=float(deadline),
                         force=True,
                     )
                     raise
+                if callback_timed_out or time.monotonic() >= deadline:
+                    self._cancel_pending(
+                        key,
+                        pending,
+                        force=True,
+                    )
+                    raise TimeoutError(f"LSP request timed out: {method}")
                 if is_cancelled:
-                    if not self._cancel_pending(key, pending, deadline=float(deadline)):
-                        break
+                    self._cancel_pending(
+                        key,
+                        pending,
+                        force=True,
+                    )
                     raise RequestCancelled(f"LSP request cancelled: {method}")
+                remaining = float(deadline) - time.monotonic()
+            if pending.completed.is_set():
+                break
             wait_for = remaining
             if cancelled is not None:
                 wait_for = min(wait_for, _CANCELLATION_POLL_SECONDS)
@@ -526,6 +569,7 @@ class LspProtocol:
                     task.error = closed_error
                 task.completed.set()
             self._io_stopped.set()
+            self._callbacks_stopped.set()
             self._cancel_owner_io(self.reader_thread)
             self._cancel_owner_io(self.writer_thread)
             self._interrupt_stream(self._reader)
@@ -613,6 +657,51 @@ class LspProtocol:
         finally:
             self._close_stream(self._writer)
 
+    def _callback_loop(self) -> None:
+        while True:
+            try:
+                task = self._callback_queue.get(timeout=0.05)
+            except queue.Empty:
+                if self._callbacks_stopped.is_set():
+                    return
+                continue
+            if self._callbacks_stopped.is_set() or task.abandoned.is_set():
+                task.completed.set()
+                continue
+            try:
+                task.result = bool(task.callback())
+            except BaseException as exc:
+                task.error = exc
+            finally:
+                task.completed.set()
+
+    def _evaluate_cancelled(
+        self,
+        callback: Callable[[], bool],
+        deadline: float,
+    ) -> tuple[bool, bool]:
+        if time.monotonic() >= deadline:
+            return False, True
+        task = _CallbackTask(
+            callback,
+            threading.Event(),
+            threading.Event(),
+        )
+        try:
+            self._callback_queue.put_nowait(task)
+        except queue.Full:
+            return False, True
+        remaining = max(0.0, deadline - time.monotonic())
+        if not task.completed.wait(remaining):
+            task.abandoned.set()
+            return False, True
+        if time.monotonic() >= deadline:
+            task.abandoned.set()
+            return False, True
+        if task.error is not None:
+            raise task.error
+        return task.result, False
+
     def _dispatch_message(self, message: dict[str, Any], *, generation_nonce: str) -> None:
         if generation_nonce != self.generation_nonce:
             return
@@ -660,8 +749,11 @@ class LspProtocol:
             self._become_fatal(str(violation), cause=violation)
 
     def _validate_result(self, method: str, result: object) -> None:
-        if method in _LOCATION_METHODS and isinstance(result, list) and len(result) > MAX_LOCATIONS:
-            raise ProtocolViolation("location result exceeds 10,000 items")
+        if method in _FLAT_SEMANTIC_RESULT_METHODS:
+            if isinstance(result, list) and len(result) > MAX_LOCATIONS:
+                raise ProtocolViolation("location result exceeds 10,000 items")
+        elif method == "textDocument/documentSymbol":
+            self._validate_document_symbol_count(result)
         if method == "textDocument/hover":
             try:
                 size = len(
@@ -676,6 +768,32 @@ class LspProtocol:
                 raise ProtocolViolation("hover result is not strict JSON") from exc
             if size > MAX_HOVER_BYTES:
                 raise ProtocolViolation("hover result exceeds 256 KiB")
+
+    @staticmethod
+    def _validate_document_symbol_count(result: object) -> None:
+        if not isinstance(result, list):
+            return
+        if len(result) > MAX_LOCATIONS:
+            raise ProtocolViolation("location result exceeds 10,000 items")
+        count = 0
+        seen: set[int] = set()
+        stack: list[object] = list(result)
+        while stack:
+            symbol = stack.pop()
+            count += 1
+            if count > MAX_LOCATIONS:
+                raise ProtocolViolation("location result exceeds 10,000 items")
+            if not isinstance(symbol, dict):
+                continue
+            identity = id(symbol)
+            if identity in seen:
+                raise ProtocolViolation("document symbol result contains a cycle")
+            seen.add(identity)
+            children = symbol.get("children")
+            if isinstance(children, list):
+                if count + len(stack) + len(children) > MAX_LOCATIONS:
+                    raise ProtocolViolation("location result exceeds 10,000 items")
+                stack.extend(children)
 
     def _handle_server_request(self, message: dict[str, Any]) -> None:
         method = message["method"]
@@ -742,10 +860,8 @@ class LspProtocol:
         key: tuple[str, int],
         pending: PendingRequest,
         *,
-        deadline: float | None = None,
         force: bool = False,
     ) -> bool:
-        deadline = pending.deadline if deadline is None else deadline
         with self._state_lock:
             current = self._pending.get(key)
             if current is not pending:
@@ -757,19 +873,18 @@ class LspProtocol:
             self._pending.pop(key, None)
             self._responded_keys.discard(key)
             self._remember_key(key, self._cancelled_keys, self._cancelled_order)
-        if time.monotonic() < deadline:
-            try:
-                self._write_message(
-                    {
-                        "jsonrpc": "2.0",
-                        "method": "$/cancelRequest",
-                        "params": {"id": pending.request_id},
-                    },
-                    deadline=deadline,
-                    wait=True,
-                )
-            except BaseException:
-                pass
+        try:
+            self._write_message(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "$/cancelRequest",
+                    "params": {"id": pending.request_id},
+                },
+                deadline=time.monotonic() + _INTERNAL_WRITE_SECONDS,
+                wait=False,
+            )
+        except BaseException:
+            pass
         return True
 
     def _abandon_pending(self, key: tuple[str, int], pending: PendingRequest) -> None:
