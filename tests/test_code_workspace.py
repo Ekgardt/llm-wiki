@@ -1364,6 +1364,47 @@ def test_posix_verification_rechecks_membership_after_initial_walk(
     assert changed
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor-relative verification only")
+def test_posix_verification_rechecks_child_frame_before_root_final_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import code_workspace
+
+    repository = tmp_path / "repository"
+    _write(repository / "src/a.py", b"a = 1\n")
+    _write(repository / "src/z.py", b"z = 1\n")
+    snapshot = _capture(repository)
+    workspace = code_workspace.seal_workspace(snapshot, tmp_path / "sealed")
+    extra = workspace.root / "src/extra.py"
+    root_info = workspace.root.stat()
+    real_scandir = code_workspace.os.scandir
+    root_scans = 0
+    changed = False
+
+    def mutate_child_frame(component: str) -> None:
+        nonlocal changed
+        if component == "z.py" and not changed:
+            _write(extra, b"extra = True\n")
+            changed = True
+
+    def restore_before_late_tree_scan(path):
+        nonlocal root_scans
+        if isinstance(path, int) and os.path.samestat(os.fstat(path), root_info):
+            root_scans += 1
+            if root_scans == 2 and extra.exists():
+                extra.unlink()
+        return real_scandir(path)
+
+    monkeypatch.setattr(code_workspace, "_verify_component_barrier", mutate_child_frame)
+    monkeypatch.setattr(code_workspace.os, "scandir", restore_before_late_tree_scan)
+
+    with pytest.raises(code_workspace.WorkspaceChanged, match="directory.*changed|membership"):
+        code_workspace.verify_workspace_seal(workspace, snapshot)
+
+    assert changed
+    assert root_scans == 1
+
+
 def test_verification_directory_limit_excludes_synthetic_workspace_root(
     tmp_path: Path,
 ) -> None:
