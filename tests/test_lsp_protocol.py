@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import gc
 import io
 import json
 import os
 import threading
 import time
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -1120,7 +1122,7 @@ def test_unrelated_result_is_not_subject_to_location_ceiling(
     assert protocol.fatal is False
 
 
-def test_callback_finishing_after_deadline_cannot_return_a_late_response() -> None:
+def test_response_can_complete_while_cancellation_callback_is_still_running() -> None:
     reader = _BlockingReader()
     writer = _BlockingWriter(block_after=100)
     protocol = _protocol_with_streams(reader, writer)
@@ -1134,15 +1136,12 @@ def test_callback_finishing_after_deadline_cannot_return_a_late_response() -> No
         return False
 
     deadline = time.monotonic() + 0.04
-    with pytest.raises(TimeoutError):
-        protocol.request("delayed-callback", {}, deadline=deadline, cancelled=cancelled)
+    assert protocol.request(
+        "delayed-callback", {}, deadline=deadline, cancelled=cancelled
+    ) == "late"
     assert time.monotonic() < deadline + 0.15
     assert protocol.pending_count == 0
-    delivery_deadline = time.monotonic() + 1
-    while len(writer.frames) < 2 and time.monotonic() < delivery_deadline:
-        time.sleep(0.005)
-    assert len(writer.frames) == 2
-    assert b'"method":"$/cancelRequest"' in writer.frames[1]
+    assert len(writer.frames) == 1
     protocol.close()
 
 
@@ -1204,30 +1203,48 @@ def test_callback_worker_threads_remain_fixed_under_concurrent_stuck_callbacks()
     release_callbacks.set()
 
 
-def test_callback_workers_remain_global_and_bounded_across_closed_generations() -> None:
+def test_stuck_callbacks_do_not_retain_or_block_later_generations(
+    fake_server: FakeLspServer,
+) -> None:
     release_callbacks = threading.Event()
-    protocols: list[LspProtocol] = []
+    stuck_protocols: list[LspProtocol] = []
+    callback_refs: list[weakref.ReferenceType[object]] = []
 
-    def cancelled() -> bool:
-        release_callbacks.wait()
-        return False
+    class StuckCancellation:
+        def __init__(self) -> None:
+            self.started = threading.Event()
+
+        def __call__(self) -> bool:
+            self.started.set()
+            release_callbacks.wait()
+            return False
+
+    class LaterCancellation:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self) -> bool:
+            self.calls += 1
+            return False
 
     try:
-        for index in range(MAX_PENDING_REQUESTS + 4):
+        for index in range(2):
             protocol = _protocol_with_streams(
                 _BlockingReader(),
                 _BlockingWriter(block_after=100),
-                generation_nonce=f"callback-generation-{index}",
+                generation_nonce=f"stuck-callback-generation-{index}",
             )
-            protocols.append(protocol)
-            deadline = time.monotonic() + 0.02
+            stuck_protocols.append(protocol)
+            callback = StuckCancellation()
+            deadline = time.monotonic() + 0.05
             with pytest.raises(TimeoutError):
                 protocol.request(
                     "stuck-generation-callback",
                     {},
                     deadline=deadline,
-                    cancelled=cancelled,
+                    cancelled=callback,
                 )
+            assert callback.started.is_set()
             assert time.monotonic() < deadline + 0.2
             assert protocol.pending_count == 0
 
@@ -1235,10 +1252,33 @@ def test_callback_workers_remain_global_and_bounded_across_closed_generations() 
             protocol.close()
             assert time.monotonic() - started_close < 0.2
 
+        for index in range(12):
+            def handler(peer: FakeLspPeer, result: int = index) -> None:
+                request = peer.read()
+                peer.send({"jsonrpc": "2.0", "id": request["id"], "result": result})
+
+            protocol = fake_server.start(
+                handler,
+                generation_nonce=f"later-callback-generation-{index}",
+            )
+            callback = LaterCancellation()
+            callback_refs.append(weakref.ref(callback))
+            assert protocol.request(
+                "immediate-response",
+                {},
+                deadline=time.monotonic() + 0.5,
+                cancelled=callback,
+            ) == index
+            assert callback.calls == 0
+            protocol.close()
+            del callback
+
+        gc.collect()
+        assert all(callback_ref() is None for callback_ref in callback_refs)
         callback_threads = _callback_worker_threads()
         assert len(callback_threads) == 2
         assert all(thread.is_alive() and thread.daemon for thread in callback_threads)
     finally:
         release_callbacks.set()
-        for protocol in protocols:
+        for protocol in stuck_protocols:
             protocol.close()

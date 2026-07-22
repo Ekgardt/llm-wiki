@@ -62,7 +62,6 @@ _UNKNOWN_NOTIFICATION_WARNING = "dropped unknown server notification"
 _MAX_JSON_VALUES = MAX_FRAME_BYTES // 2
 _MAX_QUEUED_WRITES = MAX_PENDING_REQUESTS * 4
 _CALLBACK_WORKERS = 2
-_MAX_QUEUED_CALLBACKS = MAX_PENDING_REQUESTS
 _INTERNAL_WRITE_SECONDS = 1.0
 _OWNER_JOIN_SECONDS = 1.0
 
@@ -123,34 +122,63 @@ class _CallbackTask:
     error: BaseException | None = None
 
 
-_CALLBACK_QUEUE: queue.Queue[_CallbackTask] = queue.Queue(
-    maxsize=_MAX_QUEUED_CALLBACKS
-)
+class _CallbackWorker:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._ready = threading.Event()
+        self._task: _CallbackTask | None = None
 
-
-def _callback_loop() -> None:
-    while True:
-        task = _CALLBACK_QUEUE.get()
+    def submit(self, task: _CallbackTask) -> bool:
+        if not self._lock.acquire(blocking=False):
+            return False
         try:
-            if task.abandoned.is_set():
+            if self._task is not None:
+                return False
+            self._task = task
+            self._ready.set()
+            return True
+        finally:
+            self._lock.release()
+
+    def run(self) -> None:
+        while True:
+            self._ready.wait()
+            with self._lock:
+                task = self._task
+                self._ready.clear()
+            if task is None:  # pragma: no cover - guarded by submit
                 continue
             try:
-                task.result = bool(task.callback())
-            except BaseException as exc:
-                task.error = exc
-        finally:
-            task.completed.set()
-            _CALLBACK_QUEUE.task_done()
-            del task
+                if not task.abandoned.is_set():
+                    try:
+                        task.result = bool(task.callback())
+                    except BaseException as exc:
+                        task.error = exc
+            finally:
+                task.completed.set()
+                with self._lock:
+                    self._task = None
+                del task
+
+
+_CALLBACK_SLOTS = tuple(_CallbackWorker() for _ in range(_CALLBACK_WORKERS))
+
+
+def _submit_callback(callback: Callable[[], bool]) -> _CallbackTask | None:
+    task = _CallbackTask(callback, threading.Event(), threading.Event())
+    for worker in _CALLBACK_SLOTS:
+        if worker.submit(task):
+            return task
+    return None
 
 
 _CALLBACK_THREADS = tuple(
     threading.Thread(
-        target=_callback_loop,
+        target=worker.run,
         name=f"lsp-cancel-{index}",
         daemon=True,
     )
-    for index in range(_CALLBACK_WORKERS)
+    for index, worker in enumerate(_CALLBACK_SLOTS)
 )
 for _callback_thread in _CALLBACK_THREADS:
     _callback_thread.start()
@@ -520,45 +548,55 @@ class LspProtocol:
             self._abandon_pending(key, pending)
             raise
 
-        while True:
-            remaining = float(deadline) - time.monotonic()
-            if remaining <= 0:
-                self._cancel_pending(key, pending, force=True)
-                raise TimeoutError(f"LSP request timed out: {method}")
-            if cancelled is not None:
-                try:
-                    is_cancelled, callback_timed_out = self._evaluate_cancelled(
-                        cancelled, float(deadline)
-                    )
-                except BaseException:
-                    self._cancel_pending(
-                        key,
-                        pending,
-                        force=True,
-                    )
-                    raise
-                if callback_timed_out or time.monotonic() >= deadline:
-                    self._cancel_pending(
-                        key,
-                        pending,
-                        force=True,
-                    )
-                    raise TimeoutError(f"LSP request timed out: {method}")
-                if is_cancelled:
-                    self._cancel_pending(
-                        key,
-                        pending,
-                        force=True,
-                    )
-                    raise RequestCancelled(f"LSP request cancelled: {method}")
+        callback_task: _CallbackTask | None = None
+        try:
+            while True:
                 remaining = float(deadline) - time.monotonic()
-            if pending.completed.is_set():
-                break
-            wait_for = remaining
-            if cancelled is not None:
-                wait_for = min(wait_for, _CANCELLATION_POLL_SECONDS)
-            if pending.completed.wait(wait_for):
-                break
+                if remaining <= 0:
+                    self._cancel_pending(key, pending, force=True)
+                    raise TimeoutError(f"LSP request timed out: {method}")
+                if cancelled is not None:
+                    if callback_task is None:
+                        callback_task = _submit_callback(cancelled)
+                    if callback_task is not None:
+                        try:
+                            is_cancelled, callback_finished, callback_timed_out = (
+                                self._evaluate_cancelled(callback_task, float(deadline))
+                            )
+                        except BaseException:
+                            self._cancel_pending(
+                                key,
+                                pending,
+                                force=True,
+                            )
+                            raise
+                        if callback_finished:
+                            callback_task = None
+                        if callback_timed_out or time.monotonic() >= deadline:
+                            self._cancel_pending(
+                                key,
+                                pending,
+                                force=True,
+                            )
+                            raise TimeoutError(f"LSP request timed out: {method}")
+                        if is_cancelled:
+                            self._cancel_pending(
+                                key,
+                                pending,
+                                force=True,
+                            )
+                            raise RequestCancelled(f"LSP request cancelled: {method}")
+                        remaining = float(deadline) - time.monotonic()
+                if pending.completed.is_set():
+                    break
+                wait_for = remaining
+                if cancelled is not None:
+                    wait_for = min(wait_for, _CANCELLATION_POLL_SECONDS)
+                if pending.completed.wait(wait_for):
+                    break
+        finally:
+            if callback_task is not None:
+                callback_task.abandoned.set()
 
         with self._state_lock:
             self._pending.pop(key, None)
@@ -678,30 +716,17 @@ class LspProtocol:
 
     def _evaluate_cancelled(
         self,
-        callback: Callable[[], bool],
+        task: _CallbackTask,
         deadline: float,
-    ) -> tuple[bool, bool]:
-        if time.monotonic() >= deadline:
-            return False, True
-        task = _CallbackTask(
-            callback,
-            threading.Event(),
-            threading.Event(),
-        )
-        try:
-            _CALLBACK_QUEUE.put_nowait(task)
-        except queue.Full:
-            return False, True
+    ) -> tuple[bool, bool, bool]:
         remaining = max(0.0, deadline - time.monotonic())
-        if not task.completed.wait(remaining):
-            task.abandoned.set()
-            return False, True
+        if not task.completed.wait(min(remaining, _CANCELLATION_POLL_SECONDS)):
+            return False, False, time.monotonic() >= deadline
         if time.monotonic() >= deadline:
-            task.abandoned.set()
-            return False, True
+            return False, True, True
         if task.error is not None:
             raise task.error
-        return task.result, False
+        return task.result, True, False
 
     def _dispatch_message(self, message: dict[str, Any], *, generation_nonce: str) -> None:
         if generation_nonce != self.generation_nonce:
