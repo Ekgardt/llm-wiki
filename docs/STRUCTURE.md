@@ -180,6 +180,11 @@ operator action. See
 `knowledge/notes/read-only-lsp-navigation-engine-decision.md` and
 `docs/superpowers/specs/2026-07-22-read-only-lsp-navigation-design.md`.
 
+The approved managed Pyright artifact path is
+`cache/code-tools/pyright/1.1.411/`. Live LSP process scratch is bounded under
+`run/lsp/<owner-nonce>/`; doctor and deletion eligibility must treat a live owner
+or retained failure evidence as protected operational state.
+
 ## What lives where
 
 ### CODE zone (tracked in git)

@@ -284,6 +284,13 @@ Version or digest mismatch is `degraded` and is reported by doctor; it is never
 silently treated as the qualified profile. Exact packaging and tested Node versions
 belong to the implementation plan and lockfiles, not a floating `latest` command.
 
+The user-approved runtime paths are
+`cache/code-tools/pyright/1.1.411/` for the regenerable managed installation and
+`run/lsp/<owner-nonce>/` for process-owned temporary files, cancellation markers,
+and cleanup evidence. The latter follows the existing `run/` deletion contract and
+must not outlive an active owner except as bounded failure evidence reported by
+doctor.
+
 Other language families are future candidates, not part of this approved target.
 Each requires separate capability, installation, execution-risk, platform, and
 benchmark qualification after Python passes its release gates.

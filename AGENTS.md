@@ -148,7 +148,9 @@ pointer, runtime root, persistent daemon, or MCP tool. Query-time LSP observatio
 are not written into active generations. Language servers start lazily inside the
 owning MCP process, expose only allowlisted read operations, report readiness and
 capability limits, and fall back to existing structural evidence. Installation is
-a separate explicit operator action. See
+a separate explicit operator action. The managed Pyright artifact lives at
+`cache/code-tools/pyright/1.1.411/`; bounded process scratch lives under
+`run/lsp/<owner-nonce>/` and follows the existing `run/` deletion contract. See
 `knowledge/notes/read-only-lsp-navigation-engine-decision.md`.
 
 **Forbidden at vault root:** `wiki/`, `memory/`, `outputs/`, `state/`,

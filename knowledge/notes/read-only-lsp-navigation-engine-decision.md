@@ -60,6 +60,9 @@ valid; the one-shot consent/SCIP/publication direction in Tasks 6-16 does not.
 - Tasks 6-16 are superseded and must not be executed.
 - No Serena or SolidLSP runtime package becomes part of LLM Wiki.
 - No new MCP tool, graph store, active pointer, runtime root, or daemon is added.
+- The managed Pyright installation lives under
+  `cache/code-tools/pyright/1.1.411/`; process-owned scratch lives under
+  `run/lsp/<owner-nonce>/` and follows the existing `run/` deletion contract.
 - The existing code graph remains available when Pyright is missing, not ready, or
   failed.
 - The first release is Python-only at the precise semantic tier; existing 12-language

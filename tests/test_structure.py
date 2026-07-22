@@ -230,6 +230,8 @@ def test_code_navigation_target_is_approved_but_not_reported_as_current() -> Non
         "existing 12 task-shaped MCP tools",
         "no Serena runtime dependency",
         "not written into an active generation",
+        "cache/code-tools/pyright/1.1.411/",
+        "run/lsp/<owner-nonce>/",
         "Python 3.10",
         "approved target",
     ):
