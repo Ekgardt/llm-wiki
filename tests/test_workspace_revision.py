@@ -31,6 +31,13 @@ def _entries(revision: WorkspaceRevision) -> dict[str, RevisionEntry]:
     return {entry.path: entry for entry in revision.entries}
 
 
+def _symlink_or_skip(link: Path, target: Path, *, directory: bool = False) -> None:
+    try:
+        os.symlink(target, link, target_is_directory=directory)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+
+
 def test_public_contract_has_exact_constants_dataclass_fields_and_signatures() -> None:
     assert PYTHON_CONFIG_NAMES == frozenset(
         {
@@ -102,6 +109,33 @@ def test_revision_changes_for_dirty_untracked_deleted_and_config(repository: Pat
     assert delta.configuration_changed is True
 
 
+def test_reused_scope_observes_live_head_after_empty_commit(repository: Path) -> None:
+    scope = resolve_repository_scope(repository)
+    before = compute_workspace_revision(scope)
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "move head"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        timeout=10,
+    )
+    current_head = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD^{commit}"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    ).stdout.strip()
+
+    after = compute_workspace_revision(scope)
+
+    assert before.git_head == scope.git_commit
+    assert after.git_head == current_head
+    assert after.git_head != before.git_head
+    assert after.revision_sha256 != before.revision_sha256
+
+
 def test_delta_detects_content_identical_rename(repository: Path) -> None:
     scope = resolve_repository_scope(repository)
     before = compute_workspace_revision(scope)
@@ -113,6 +147,38 @@ def test_delta_detects_content_identical_rename(repository: Path) -> None:
     assert delta.renamed == (("pkg/rename_target.py", "pkg/renamed.py"),)
     assert delta.created == ()
     assert delta.deleted == ()
+
+
+@pytest.mark.parametrize(
+    ("source", "destination"),
+    [
+        ("pyrightconfig.json", "pkg/settings.json"),
+        ("pkg/settings.py", "pyrightconfig.json"),
+    ],
+)
+def test_content_rename_reports_configuration_change_for_either_path(
+    source: str, destination: str
+) -> None:
+    digest = "a" * 64
+    before = WorkspaceRevision(
+        "repository:test",
+        "checkout:test",
+        None,
+        (RevisionEntry(source, "configuration", digest, 1),),
+        "before",
+    )
+    after = WorkspaceRevision(
+        "repository:test",
+        "checkout:test",
+        None,
+        (RevisionEntry(destination, "configuration", digest, 1),),
+        "after",
+    )
+
+    delta = diff_workspace_revisions(before, after)
+
+    assert delta.renamed == ((source, destination),)
+    assert delta.configuration_changed is True
 
 
 def test_ambiguous_content_matches_remain_created_and_deleted(repository: Path) -> None:
@@ -174,6 +240,115 @@ def test_non_git_manifest_includes_only_sources_and_root_configs(tmp_path: Path)
     assert all(entry.kind in {"source", "configuration"} for entry in revision.entries)
 
 
+def test_non_git_manifest_prunes_file_and_directory_symlinks(tmp_path: Path) -> None:
+    root = tmp_path / "plain"
+    root.mkdir()
+    (root / "inside.py").write_text("inside = True\n", encoding="utf-8")
+    outside_file = tmp_path / "outside.py"
+    outside_file.write_text("secret = 1\n", encoding="utf-8")
+    outside_directory = tmp_path / "outside"
+    outside_directory.mkdir()
+    (outside_directory / "nested.py").write_text("secret = 2\n", encoding="utf-8")
+    _symlink_or_skip(root / "linked.py", outside_file)
+    _symlink_or_skip(root / "linked-directory", outside_directory, directory=True)
+    scope = resolve_repository_scope(root)
+
+    before = compute_workspace_revision(scope)
+    outside_file.write_text("secret = 3\n", encoding="utf-8")
+    (outside_directory / "nested.py").write_text("secret = 4\n", encoding="utf-8")
+    after = compute_workspace_revision(scope)
+
+    assert tuple(entry.path for entry in before.entries) == ("inside.py",)
+    assert after == before
+
+
+def test_hash_rejects_file_replaced_by_symlink_before_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "plain"
+    root.mkdir()
+    candidate = root / "candidate.py"
+    candidate.write_text("safe = True\n", encoding="utf-8")
+    outside = tmp_path / "outside.py"
+    outside.write_text("secret = True\n", encoding="utf-8")
+    scope = resolve_repository_scope(root)
+    real_hash = workspace_revision._hash_file
+    replaced = False
+
+    def replace_then_hash(path: Path, **kwargs):
+        nonlocal replaced
+        if not replaced and path == candidate:
+            candidate.unlink()
+            _symlink_or_skip(candidate, outside)
+            replaced = True
+        return real_hash(path, **kwargs)
+
+    monkeypatch.setattr(workspace_revision, "_hash_file", replace_then_hash)
+
+    with pytest.raises(PermissionError, match="symlink|escape|changed|regular"):
+        compute_workspace_revision(scope)
+
+
+def test_hash_rejects_parent_replaced_by_internal_directory_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "plain"
+    package = root / "pkg"
+    replacement = root / "replacement"
+    package.mkdir(parents=True)
+    replacement.mkdir()
+    candidate = package / "candidate.py"
+    candidate.write_text("safe = True\n", encoding="utf-8")
+    (replacement / "candidate.py").write_text("secret = True\n", encoding="utf-8")
+    scope = resolve_repository_scope(root)
+    real_hash = workspace_revision._hash_file
+    replaced = False
+
+    def replace_then_hash(path: Path, **kwargs):
+        nonlocal replaced
+        if not replaced and path == candidate:
+            candidate.unlink()
+            package.rmdir()
+            _symlink_or_skip(package, replacement, directory=True)
+            replaced = True
+        return real_hash(path, **kwargs)
+
+    monkeypatch.setattr(workspace_revision, "_hash_file", replace_then_hash)
+
+    with pytest.raises(PermissionError, match="symlink|directory|changed"):
+        compute_workspace_revision(scope)
+
+
+def test_hash_rejects_symlink_swap_at_descriptor_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "plain"
+    root.mkdir()
+    candidate = root / "candidate.py"
+    candidate.write_text("safe = True\n", encoding="utf-8")
+    outside = tmp_path / "outside.py"
+    outside.write_text("secret = True\n", encoding="utf-8")
+    probe = root / "probe.py"
+    _symlink_or_skip(probe, outside)
+    probe.unlink()
+    scope = resolve_repository_scope(root)
+    real_open = os.open
+    replaced = False
+
+    def replace_during_open(path, flags, *args, **kwargs):
+        nonlocal replaced
+        if not replaced and Path(path) == candidate:
+            candidate.unlink()
+            os.symlink(outside, candidate)
+            replaced = True
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(workspace_revision.os, "open", replace_during_open)
+
+    with pytest.raises(PermissionError, match="open|symlink|changed"):
+        compute_workspace_revision(scope)
+
+
 def test_all_relevant_root_configuration_names_are_in_deterministic_order(tmp_path: Path) -> None:
     root = tmp_path / "plain"
     root.mkdir()
@@ -211,7 +386,9 @@ def test_git_status_is_nul_bounded_noninteractive_and_uses_sanitized_environment
     compute_workspace_revision(scope)
 
     status_calls = [call for call in calls if "status" in call[0]]
+    head_calls = [call for call in calls if "rev-parse" in call[0]]
     assert len(status_calls) == 1
+    assert len(head_calls) == 1
     command, options = status_calls[0]
     assert command == [
         "git",
@@ -230,6 +407,20 @@ def test_git_status_is_nul_bounded_noninteractive_and_uses_sanitized_environment
     assert options["env"]["GIT_OPTIONAL_LOCKS"] == "0"
     assert "GIT_DIR" not in options["env"]
     assert not any(name.startswith("GIT_CONFIG_") for name in options["env"])
+    head_command, head_options = head_calls[0]
+    assert head_command == [
+        "git",
+        "-C",
+        scope.checkout_root,
+        "rev-parse",
+        "--verify",
+        "HEAD^{commit}",
+    ]
+    assert head_options["stdin"] is subprocess.DEVNULL
+    assert head_options["stdout"] is subprocess.PIPE
+    assert head_options["stderr"] is subprocess.DEVNULL
+    assert head_options["shell"] is False
+    assert head_options["env"] == options["env"]
 
 
 def test_git_status_output_is_read_to_a_fixed_ceiling_and_overflow_kills_process(
@@ -272,6 +463,52 @@ def test_git_status_output_is_read_to_a_fixed_ceiling_and_overflow_kills_process
 
     assert reads == [9]
     assert process.killed
+
+
+def test_live_git_head_output_is_bounded(repository: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    scope = resolve_repository_scope(repository)
+    reads: list[int] = []
+
+    class Output:
+        def __init__(self, overflow: bool) -> None:
+            self.overflow = overflow
+
+        def read(self, size: int) -> bytes:
+            reads.append(size)
+            return b"x" * size if self.overflow else b""
+
+        def close(self) -> None:
+            pass
+
+    class Process:
+        def __init__(self, overflow: bool) -> None:
+            self.stdout = Output(overflow)
+            self.returncode = None
+            self.killed = False
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self):
+            if self.returncode is None:
+                self.returncode = 0
+            return self.returncode
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+    processes = iter((Process(False), Process(True)))
+    monkeypatch.setattr(
+        workspace_revision.subprocess,
+        "Popen",
+        lambda *args, **kwargs: next(processes),
+    )
+
+    with pytest.raises(ValueError, match="Git HEAD.*byte ceiling"):
+        compute_workspace_revision(scope)
+
+    assert reads == [workspace_revision.MAX_GIT_STATUS_BYTES + 1, 66]
 
 
 @pytest.mark.parametrize("stop", ["deadline", "cancelled"])
@@ -415,6 +652,19 @@ def test_revision_enforces_file_count_ceiling(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setattr(workspace_revision, "MAX_REVISION_FILES", 1)
 
     with pytest.raises(ValueError, match="file-count ceiling"):
+        compute_workspace_revision(resolve_repository_scope(root))
+
+
+def test_revision_bounds_examined_irrelevant_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "plain"
+    root.mkdir()
+    for index in range(3):
+        (root / f"irrelevant-{index}.txt").write_text("ignored", encoding="utf-8")
+    monkeypatch.setattr(workspace_revision, "MAX_REVISION_FILES", 2)
+
+    with pytest.raises(ValueError, match="examined.*ceiling|entry.*ceiling"):
         compute_workspace_revision(resolve_repository_scope(root))
 
 
