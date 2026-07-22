@@ -23,6 +23,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── contradiction_pipeline.py     claim contradiction policy
 │   ├── generation_catalog.py         immutable generation catalog + activation
 │   ├── corpus_snapshot.py            source-hash corpus snapshots + chunks
+│   ├── lsp_paths.py                  pure managed Pyright/LSP path derivation
 │   ├── schemas/                      transaction/queue/compile/archive/claim schemas
 │   ├── lance_store.py               v4.0: LanceDB embedded vector backend (HNSW)
 │   ├── reranker.py                  v4.0: cross-encoder reranker (ONNX)
@@ -71,6 +72,8 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── models/                      v4.0: ML model cache (reranker, embeddings)
 │   ├── compile/                     validated content-addressed compile plans
 │   ├── claims.sqlite3               derived claim candidate index
+│   ├── code-tools/                  managed code-tool artifacts
+│   │   └── pyright/1.1.411/           reserved pinned Pyright installation root
 │   ├── access_log.jsonl             legacy bounded read-only access history
 │   ├── code_tools.json               v4.0: atomic code-tool capability manifest
 │   ├── vectors.npy                  v4.0: numpy binary vector cache (memory-mapped)
@@ -85,6 +88,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── queue/                        legacy migration input only
 │   ├── queue-migrated-v2             migration completion marker
 │   ├── state.json                    automation + compile receipts
+│   ├── lsp/<owner-nonce>/             reserved bounded LSP process scratch
 │   └── state.json.lock
 │
 ├── AGENTS.md                     ROOT — agent contract (byte-identical to CLAUDE.md)
@@ -157,7 +161,8 @@ implemented.
 
 ## Approved code-navigation target
 
-This section records an approved target, not implemented behavior. The current
+This section records an approved target. Its runtime paths are reserved and pure
+path helpers are implemented, but navigation is not implemented. The current
 checkpoint remains `corpus-generation/v2` with `evidence-graph/v2`. Foundation
 Tasks 1-5 of the 2026-07-21 Plan A remain implemented, including explicit Graph v3
 selection contracts and bounded sealed-workspace utilities, but its one-shot
@@ -255,6 +260,9 @@ or retained failure evidence as protected operational state.
 - `cache/` — `index.sqlite` (FTS5), `vectors.npy` (binary numpy, mmap),
   `vectors_meta.json` (metadata),
   `code_tools.json` (fresh code-tool detection and active semantic capabilities).
+  `cache/code-tools/pyright/1.1.411/` is the reserved managed Pyright artifact
+  root; `scripts/lsp_paths.py` derives it without installation or directory
+  creation.
   v4.0: `lancedb/` (LanceDB vector store, optional), `models/` (ML model cache),
   legacy bounded read-only `access_log.jsonl`, `cache/compile/` (validated compile-plan
   action cache), and `cache/claims.sqlite3` (derived claim index).
@@ -327,7 +335,9 @@ graph-dependent code tools use bounded live extraction and label it incomplete.
 - `logs/` — `lint-YYYY-MM-DD.md`, `compile-last.log`, `session-start-last.txt`.
 - `run/` — `state.json`, `compile.pid`, `run/markdown-transactions.sqlite3`,
   `run/transactions/`, `run/queue.sqlite3`, `run/queue-results/`, receipts, and
-  locks. Existing `run/queue/*.json` is one-time migration input only.
+  locks. `run/lsp/<owner-nonce>/` is reserved for bounded process scratch and is
+  derived without directory creation. Existing `run/queue/*.json` is one-time
+  migration input only.
 - `cache/cognee/` — optional semantic graph data (only if Cognee installed).
 
 **Runtime deletion contract.** `cache/` and `logs/` are regenerated on demand.
@@ -335,7 +345,8 @@ graph-dependent code tools use bounded live extraction and label it incomplete.
 work. Delete it only after `doctor` reports no nonterminal, conflicted, or
 quarantined transaction, no transaction inside the 30-day undo window, and no
 retained queue task or result, and no live project lease, writer, queue worker, or
-maintenance owner. Deleting eligible committed artifacts loses undo history.
+maintenance or LSP owner, and no retained LSP failure evidence. Deleting eligible
+committed artifacts loses undo history.
 Installers and repair commands never remove it silently.
 
 ## Forbidden at vault root

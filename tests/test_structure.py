@@ -360,6 +360,24 @@ def test_imported_memory_state_uses_the_hermetic_test_root():
     assert early_memory_state.STATE_ROOT == Path(os.environ["LLM_WIKI_STATE_ROOT"]).resolve()
 
 
+def test_lsp_runtime_paths_are_canonical_but_navigation_is_not_current() -> None:
+    state_root = Path(os.environ["LLM_WIKI_STATE_ROOT"]).resolve()
+    structure = (ROOT / "docs/STRUCTURE.md").read_text(encoding="utf-8")
+    current = structure.split("## Implemented corpus-generation checkpoint", 1)[
+        1
+    ].split("\n## Approved code-navigation target", 1)[0]
+    target = structure.split("## Approved code-navigation target", 1)[1].split(
+        "\n## ", 1
+    )[0]
+
+    assert early_memory_state.CODE_TOOLS_DIR == state_root / "cache/code-tools"
+    assert early_memory_state.LSP_RUN_DIR == state_root / "run/lsp"
+    assert "scripts/lsp_paths.py" in structure
+    assert "path helpers are implemented" in target
+    assert "navigation is not implemented" in target
+    assert "Pyright navigation" not in current
+
+
 # ---------------------------------------------------------------------------
 # README i18n structural parity (section count + claims).
 # ---------------------------------------------------------------------------

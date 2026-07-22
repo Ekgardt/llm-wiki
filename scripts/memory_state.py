@@ -78,6 +78,8 @@ STATE_ROOT = Path(
 ).resolve()
 STATE_DIR = STATE_ROOT / "run"
 REPORTS_DIR = STATE_ROOT / "logs"
+CODE_TOOLS_DIR = STATE_ROOT / "cache/code-tools"
+LSP_RUN_DIR = STATE_ROOT / "run/lsp"
 STATE_FILE = STATE_DIR / "state.json"
 LOCK_FILE = STATE_DIR / "state.json.lock"
 

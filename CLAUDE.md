@@ -137,7 +137,8 @@ Legacy `cache/index.sqlite`, `cache/vectors.npy`, `cache/vectors_meta.json`, and
 caches, not members of a generation. They must not be removed until installed-vault
 migration evidence makes that safe.
 
-**Approved code-navigation target (not implemented):** The current checkpoint
+**Approved code-navigation target (navigation not implemented):** Runtime paths
+are reserved and pure derivation helpers are implemented. The current checkpoint
 remains `corpus-generation/v2` with `evidence-graph/v2`. Foundation Tasks 1-5 of
 the 2026-07-21 Plan A remain implemented, but its one-shot
 consent/SCIP/publication Tasks 6-16 are superseded. The approved target keeps the
@@ -150,7 +151,8 @@ owning MCP process, expose only allowlisted read operations, report readiness an
 capability limits, and fall back to existing structural evidence. Installation is
 a separate explicit operator action. The managed Pyright artifact lives at
 `cache/code-tools/pyright/1.1.411/`; bounded process scratch lives under
-`run/lsp/<owner-nonce>/` and follows the existing `run/` deletion contract. See
+`run/lsp/<owner-nonce>/` and follows the existing `run/` deletion contract, which
+protects live LSP owners and retained LSP failure evidence. See
 `knowledge/notes/read-only-lsp-navigation-engine-decision.md`.
 
 **Forbidden at vault root:** `wiki/`, `memory/`, `outputs/`, `state/`,
