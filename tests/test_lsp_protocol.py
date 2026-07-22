@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -367,23 +368,18 @@ def test_cancellation_sends_cancel_and_drops_late_response(fake_server: FakeLspS
     timer.join()
 
 
-def test_timeout_sends_cancel_without_waiting_past_original_deadline(
+def test_timeout_cleans_pending_without_waiting_past_original_deadline(
     fake_server: FakeLspServer,
 ) -> None:
-    cancel_seen = threading.Event()
-
     def handler(peer: FakeLspPeer) -> None:
-        request = peer.read()
-        cancellation = peer.read()
-        assert cancellation["params"] == {"id": request["id"]}
-        cancel_seen.set()
+        peer.read()
 
     protocol = fake_server.start(handler)
     started = time.monotonic()
     with pytest.raises(TimeoutError):
         protocol.request("slow", {}, deadline=started + 0.05)
     assert time.monotonic() - started < 0.25
-    assert cancel_seen.wait(1)
+    assert protocol.pending_count == 0
 
 
 def test_close_fails_an_active_request_instead_of_returning_a_result(
@@ -624,3 +620,393 @@ def test_one_reader_thread_owns_stdout(fake_server: FakeLspServer) -> None:
     assert protocol.reader_thread.is_alive()
     assert protocol.reader_thread.name == "lsp-stdout-generation-a"
     assert protocol.stdout_reader_owner == protocol.reader_thread.ident
+    assert protocol.writer_thread.is_alive()
+    assert protocol.writer_thread.name == "lsp-stdin-generation-a"
+    assert protocol.stdin_writer_owner == protocol.writer_thread.ident
+
+
+class _BlockingReader:
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.released = threading.Event()
+        self.closed = False
+
+    def read(self, _size: int = -1) -> bytes:
+        self.started.set()
+        self.released.wait(2)
+        return b""
+
+    def close(self) -> None:
+        self.closed = True
+        self.released.set()
+
+
+class _BlockingWriter:
+    def __init__(self, *, block_after: int = 0, fail: bool = False) -> None:
+        self.block_after = block_after
+        self.fail = fail
+        self.frames: list[bytes] = []
+        self.started = threading.Event()
+        self.released = threading.Event()
+        self.closed = False
+
+    def write(self, value: bytes) -> int:
+        if len(self.frames) >= self.block_after:
+            self.started.set()
+            self.released.wait(2)
+            if self.fail or self.closed:
+                raise OSError("blocked writer stopped")
+        self.frames.append(value)
+        return len(value)
+
+    def flush(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+        self.released.set()
+
+
+def _protocol_with_streams(
+    reader: object,
+    writer: object,
+    *,
+    fatal_callback=lambda _reason: None,
+) -> LspProtocol:
+    return LspProtocol(
+        reader,  # type: ignore[arg-type]
+        writer,  # type: ignore[arg-type]
+        "stream-probe",
+        fatal_callback=fatal_callback,
+    )
+
+
+def test_response_winning_cancellation_race_removes_pending_without_tombstone_leak() -> None:
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=100)
+    protocol = _protocol_with_streams(reader, writer)
+    callback_calls = 0
+
+    def cancelled() -> bool:
+        nonlocal callback_calls
+        callback_calls += 1
+        protocol._dispatch_message(
+            {"jsonrpc": "2.0", "id": 1, "result": "response-won"},
+            generation_nonce="stream-probe",
+        )
+        return True
+
+    assert protocol.request(
+        "race", {}, deadline=time.monotonic() + 1, cancelled=cancelled
+    ) == "response-won"
+    assert callback_calls == 1
+    assert protocol.pending_count == 0
+    assert protocol.pending_keys == ()
+    protocol.close()
+
+
+def test_fatal_dispatch_stops_before_later_notification_handler(
+    fake_server: FakeLspServer,
+) -> None:
+    handled: list[object] = []
+    sent = threading.Event()
+
+    def handler(peer: FakeLspPeer) -> None:
+        peer.send_raw(
+            _raw_frame(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/publishDiagnostics",
+                    "params": {"diagnostics": [None] * (MAX_DIAGNOSTICS + 1)},
+                }
+            )
+            + _raw_frame({"jsonrpc": "2.0", "method": "$/progress", "params": {}})
+        )
+        sent.set()
+
+    protocol = fake_server.start(
+        handler,
+        server_notification_handlers={"$/progress": handled.append},
+    )
+    assert sent.wait(1)
+    deadline = time.monotonic() + 1
+    while not protocol.fatal and time.monotonic() < deadline:
+        time.sleep(0.005)
+    time.sleep(0.02)
+    assert protocol.fatal is True
+    assert handled == []
+    assert not protocol.reader_thread.is_alive()
+    assert not protocol.writer_thread.is_alive()
+
+
+def _raw_frame(message: object) -> bytes:
+    body = json.dumps(message, separators=(",", ":")).encode()
+    return f"Content-Length: {len(body)}\r\n\r\n".encode() + body
+
+
+def test_initial_blocked_write_is_bounded_by_request_deadline_and_fatal() -> None:
+    reader = _BlockingReader()
+    writer = _BlockingWriter()
+    callbacks: list[str] = []
+    protocol = _protocol_with_streams(reader, writer, fatal_callback=callbacks.append)
+    deadline = time.monotonic() + 0.05
+
+    with pytest.raises((TimeoutError, ProtocolViolation)):
+        protocol.request("blocked", {}, deadline=deadline)
+
+    assert time.monotonic() < deadline + 0.2
+    assert writer.started.wait(1)
+    assert protocol.fatal is True
+    assert protocol.pending_count == 0
+    assert len(callbacks) == 1
+    assert protocol.writer_thread is not threading.current_thread()
+    writer.released.set()
+    protocol.close()
+
+
+def test_blocked_cancellation_write_never_extends_original_deadline() -> None:
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=1)
+    protocol = _protocol_with_streams(reader, writer)
+    cancel = threading.Event()
+    timer = threading.Timer(0.02, cancel.set)
+    deadline = time.monotonic() + 0.08
+    timer.start()
+
+    with pytest.raises(RequestCancelled):
+        protocol.request("cancel", {}, deadline=deadline, cancelled=cancel.is_set)
+
+    assert time.monotonic() < deadline + 0.2
+    assert writer.started.wait(1)
+    assert protocol.pending_count == 0
+    assert protocol.fatal is True
+    writer.released.set()
+    timer.join()
+    protocol.close()
+
+
+def test_writer_failure_is_fatal_and_cleans_pending_once() -> None:
+    reader = _BlockingReader()
+    writer = _BlockingWriter(fail=True)
+    callbacks: list[str] = []
+    protocol = _protocol_with_streams(reader, writer, fatal_callback=callbacks.append)
+    writer.released.set()
+
+    with pytest.raises(ProtocolViolation):
+        protocol.request("write-failure", {}, deadline=time.monotonic() + 1)
+
+    assert protocol.pending_count == 0
+    deadline = time.monotonic() + 1
+    while not callbacks and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert len(callbacks) == 1
+    protocol.close()
+
+
+def test_close_unblocks_and_joins_socket_reader_and_writer_owners(
+    fake_server: FakeLspServer,
+) -> None:
+    protocol = fake_server.start()
+    assert protocol.reader_thread.is_alive()
+    protocol.close()
+    assert not protocol.reader_thread.is_alive()
+    assert not protocol.writer_thread.is_alive()
+
+
+def test_close_unblocks_native_pipe_reader_and_stops_owners() -> None:
+    read_fd, write_fd = os.pipe()
+    reader = os.fdopen(read_fd, "rb", buffering=0)
+    peer_writer = os.fdopen(write_fd, "wb", buffering=0)
+    writer = _BlockingWriter(block_after=100)
+    protocol = _protocol_with_streams(reader, writer)
+    try:
+        protocol.close()
+        assert not protocol.reader_thread.is_alive()
+        assert not protocol.writer_thread.is_alive()
+    finally:
+        peer_writer.close()
+
+
+def test_native_pipe_write_is_bounded_by_deadline_on_every_platform() -> None:
+    peer_read_fd, write_fd = os.pipe()
+    peer_reader = os.fdopen(peer_read_fd, "rb", buffering=0)
+    writer = os.fdopen(write_fd, "wb", buffering=0)
+    reader = _BlockingReader()
+    protocol = _protocol_with_streams(reader, writer)
+    deadline = time.monotonic() + 0.1
+    try:
+        with pytest.raises((TimeoutError, ProtocolViolation)):
+            protocol.request(
+                "pipe-block",
+                {"payload": "x" * (1024 * 1024)},
+                deadline=deadline,
+            )
+        assert time.monotonic() < deadline + 0.3
+        assert protocol.fatal is True
+        assert protocol.pending_count == 0
+    finally:
+        protocol.close()
+        peer_reader.close()
+
+
+def test_close_during_blocked_initial_write_cleans_request_and_owners() -> None:
+    reader = _BlockingReader()
+    writer = _BlockingWriter()
+    protocol = _protocol_with_streams(reader, writer)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(
+            protocol.request,
+            "close-race",
+            {},
+            deadline=time.monotonic() + 2,
+        )
+        assert writer.started.wait(1)
+        protocol.close()
+        with pytest.raises(ProtocolViolation, match="closed"):
+            future.result(timeout=1)
+    assert protocol.pending_count == 0
+    assert not protocol.reader_thread.is_alive()
+    assert not protocol.writer_thread.is_alive()
+
+
+def test_close_from_reader_handler_does_not_deadlock(fake_server: FakeLspServer) -> None:
+    handler_returned = threading.Event()
+
+    def peer_handler(peer: FakeLspPeer) -> None:
+        peer.send({"jsonrpc": "2.0", "method": "$/progress", "params": {}})
+
+    def notification_handler(_params: object) -> None:
+        protocol.close()
+        handler_returned.set()
+
+    protocol = fake_server.start(
+        peer_handler,
+        server_notification_handlers={"$/progress": notification_handler},
+    )
+    assert handler_returned.wait(1)
+    protocol.reader_thread.join(1)
+    assert not protocol.reader_thread.is_alive()
+    assert not protocol.writer_thread.is_alive()
+
+
+def test_encode_frame_rejects_cycles_quickly() -> None:
+    cyclic: list[object] = []
+    cyclic.append(cyclic)
+    started = time.monotonic()
+    with pytest.raises(ProtocolViolation, match="cyclic"):
+        encode_frame({"jsonrpc": "2.0", "method": "x", "params": cyclic})
+    assert time.monotonic() - started < 0.2
+
+
+@pytest.mark.parametrize("number", [float("nan"), float("inf"), float("-inf")])
+def test_encode_frame_rejects_non_finite_numbers_in_values_and_keys(number: float) -> None:
+    for params in ({"number": number}, {number: "value"}):
+        with pytest.raises(ProtocolViolation, match="finite"):
+            encode_frame({"jsonrpc": "2.0", "method": "x", "params": params})
+
+
+@pytest.mark.parametrize("location", ["value", "key"])
+def test_encode_frame_rejects_lone_surrogates_everywhere(location: str) -> None:
+    params = {"value": "\ud800"} if location == "value" else {"\udfff": "value"}
+    with pytest.raises(ProtocolViolation, match="surrogate"):
+        encode_frame({"jsonrpc": "2.0", "method": "x", "params": params})
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"jsonrpc":"2.0","method":"x","params":{"number":1e999}}',
+        b'{"jsonrpc":"2.0","method":"x","params":{"value":"\\ud800"}}',
+        b'{"jsonrpc":"2.0","method":"x","params":{"\\udfff":"value"}}',
+    ],
+)
+def test_frame_reader_rejects_non_finite_numbers_and_lone_surrogates(body: bytes) -> None:
+    with pytest.raises(ProtocolViolation):
+        JsonRpcFrameReader(_framed(body)).read()
+
+
+def test_frame_reader_accepts_a_valid_escaped_surrogate_pair() -> None:
+    body = b'{"jsonrpc":"2.0","method":"x","params":{"value":"\\ud83d\\ude00"}}'
+    message = JsonRpcFrameReader(_framed(body)).read()
+    assert message["params"]["value"] == "😀"
+
+
+def test_cancelled_callback_exception_cleans_pending_sends_one_cancel_and_propagates() -> None:
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=100)
+    protocol = _protocol_with_streams(reader, writer)
+
+    def cancelled() -> bool:
+        raise LookupError("callback failed")
+
+    with pytest.raises(LookupError, match="callback failed"):
+        protocol.request(
+            "callback-error",
+            {},
+            deadline=time.monotonic() + 1,
+            cancelled=cancelled,
+        )
+
+    deadline = time.monotonic() + 1
+    while len(writer.frames) < 2 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert protocol.pending_count == 0
+    assert len(writer.frames) == 2
+    assert b'"method":"$/cancelRequest"' in writer.frames[1]
+    protocol.close()
+
+
+def test_cancelled_callback_exception_remains_bounded_when_cancel_write_blocks() -> None:
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=1)
+    protocol = _protocol_with_streams(reader, writer)
+
+    def cancelled() -> bool:
+        raise LookupError("callback failed during blocked cancel")
+
+    deadline = time.monotonic() + 0.08
+    with pytest.raises(LookupError, match="blocked cancel"):
+        protocol.request("callback-error", {}, deadline=deadline, cancelled=cancelled)
+
+    assert time.monotonic() < deadline + 0.2
+    assert protocol.pending_count == 0
+    assert protocol.fatal is True
+    writer.released.set()
+    protocol.close()
+
+
+def test_duplicate_cancel_finalization_emits_only_one_cancel_frame() -> None:
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=100)
+    protocol = _protocol_with_streams(reader, writer)
+    pending_ready = threading.Event()
+    release_callback = threading.Event()
+
+    def cancelled() -> bool:
+        pending_ready.set()
+        assert release_callback.wait(1)
+        return True
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(
+            protocol.request,
+            "duplicate-cancel",
+            {},
+            deadline=time.monotonic() + 1,
+            cancelled=cancelled,
+        )
+        assert pending_ready.wait(1)
+        key = protocol.pending_keys[0]
+        pending = protocol._pending[key]
+        protocol._cancel_pending(key, pending)
+        protocol._cancel_pending(key, pending)
+        release_callback.set()
+        with pytest.raises(RequestCancelled):
+            future.result(timeout=1)
+
+    deadline = time.monotonic() + 1
+    while len(writer.frames) < 2 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert len([frame for frame in writer.frames if b"$/cancelRequest" in frame]) == 1
+    assert protocol.pending_count == 0
+    protocol.close()

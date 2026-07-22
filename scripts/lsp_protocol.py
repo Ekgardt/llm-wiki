@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import queue
+import select
 import threading
 import time
 from collections import deque
@@ -54,6 +57,10 @@ _JSON_RPC_INTEGER_MAX = 2**31 - 1
 _TOMBSTONE_LIMIT = MAX_PENDING_REQUESTS * 4
 _CANCELLATION_POLL_SECONDS = 0.01
 _UNKNOWN_NOTIFICATION_WARNING = "dropped unknown server notification"
+_MAX_JSON_VALUES = MAX_FRAME_BYTES // 2
+_MAX_QUEUED_WRITES = MAX_PENDING_REQUESTS * 4
+_INTERNAL_WRITE_SECONDS = 1.0
+_OWNER_JOIN_SECONDS = 1.0
 
 
 class ProtocolViolation(RuntimeError):
@@ -95,19 +102,95 @@ class JsonRpcError:
     data: object | None
 
 
+@dataclass(slots=True, eq=False)
+class _WriteTask:
+    frame: bytes
+    deadline: float
+    completed: threading.Event
+    error: BaseException | None = None
+
+
+class _OwnedReader:
+    def __init__(self, stream: BinaryIO, stopped: threading.Event) -> None:
+        self._stream = stream
+        self._stopped = stopped
+
+    def read(self, size: int = -1) -> bytes:
+        if os.name == "nt":
+            return self._stream.read(size)
+        try:
+            descriptor = self._stream.fileno()
+        except (AttributeError, OSError):
+            return self._stream.read(size)
+        while not self._stopped.is_set():
+            try:
+                readable, _, _ = select.select([descriptor], [], [], 0.05)
+            except (OSError, ValueError):
+                return b""
+            if readable:
+                try:
+                    return os.read(descriptor, size)
+                except OSError:
+                    return b""
+        return b""
+
+
+def _strict_string_size(value: str) -> int:
+    try:
+        return len(value.encode("utf-8", errors="strict"))
+    except UnicodeEncodeError as exc:
+        raise ProtocolViolation("JSON strings must not contain lone surrogates") from exc
+
+
 def json_depth(value: object) -> int:
-    """Return container nesting depth without using Python recursion."""
-    if not isinstance(value, (dict, list)):
-        return 0
+    """Validate a strict JSON value and return its bounded container depth."""
     maximum = 0
-    stack: list[tuple[object, int]] = [(value, 1)]
+    values_seen = 0
+    string_bytes = 0
+    active_containers: set[int] = set()
+    stack: list[tuple[object, int, bool]] = [(value, 0, False)]
     while stack:
-        current, depth = stack.pop()
+        current, parent_depth, exiting = stack.pop()
+        if exiting:
+            active_containers.remove(id(current))
+            continue
+        values_seen += 1
+        if values_seen > _MAX_JSON_VALUES:
+            raise ProtocolViolation("JSON value count exceeds the frame bound")
+        if isinstance(current, str):
+            string_bytes += _strict_string_size(current)
+            if string_bytes > MAX_FRAME_BYTES:
+                raise ProtocolViolation("JSON strings exceed the frame bound")
+            continue
+        if isinstance(current, float):
+            if not math.isfinite(current):
+                raise ProtocolViolation("JSON numbers must be finite")
+            continue
+        if current is None or isinstance(current, (bool, int)):
+            continue
+        if not isinstance(current, (dict, list)):
+            raise ProtocolViolation("value is not a strict JSON type")
+
+        identity = id(current)
+        if identity in active_containers:
+            raise ProtocolViolation("cyclic JSON values are not supported")
+        active_containers.add(identity)
+        depth = parent_depth + 1
         maximum = max(maximum, depth)
-        children = current.values() if isinstance(current, dict) else current
-        for child in children:
-            if isinstance(child, (dict, list)):
-                stack.append((child, depth + 1))
+        stack.append((current, depth, True))
+        if isinstance(current, dict):
+            for key, child in current.items():
+                if isinstance(key, float) and not math.isfinite(key):
+                    raise ProtocolViolation("JSON numbers must be finite")
+                if not isinstance(key, str):
+                    raise ProtocolViolation("JSON object keys must be strings")
+                string_bytes += _strict_string_size(key)
+                if string_bytes > MAX_FRAME_BYTES:
+                    raise ProtocolViolation("JSON strings exceed the frame bound")
+                stack.append((child, depth, False))
+        else:
+            for child in reversed(current):
+                stack.append((child, depth, False))
     return maximum
 
 
@@ -295,7 +378,6 @@ class LspProtocol:
         self._server_request_handlers = dict(server_request_handlers or {})
         self._server_notification_handlers = dict(server_notification_handlers or {})
         self._state_lock = threading.Lock()
-        self._write_lock = threading.Lock()
         self._pending: dict[tuple[str, int], PendingRequest] = {}
         self._cancelled_keys: set[tuple[str, int]] = set()
         self._cancelled_order: deque[tuple[str, int]] = deque()
@@ -306,13 +388,27 @@ class LspProtocol:
         self._closed = False
         self._unknown_notification_warned = False
         self._reader_started = threading.Event()
+        self._writer_started = threading.Event()
+        self._io_stopped = threading.Event()
+        self._write_queue: queue.Queue[_WriteTask | None] = queue.Queue(
+            maxsize=_MAX_QUEUED_WRITES
+        )
+        self._write_tasks: list[_WriteTask] = []
         self.stdout_reader_owner: int | None = None
+        self.stdin_writer_owner: int | None = None
+        self.writer_thread = threading.Thread(
+            target=self._writer_loop,
+            name=f"lsp-stdin-{generation_nonce}",
+            daemon=True,
+        )
         self.reader_thread = threading.Thread(
             target=self._reader_loop,
             name=f"lsp-stdout-{generation_nonce}",
             daemon=True,
         )
+        self.writer_thread.start()
         self.reader_thread.start()
+        self._writer_started.wait()
         self._reader_started.wait()
 
     @property
@@ -366,19 +462,35 @@ class LspProtocol:
 
         try:
             self._write_message(
-                {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
+                {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params},
+                deadline=float(deadline),
+                wait=True,
             )
-        except BaseException as exc:
-            self._become_fatal("failed to write LSP request", cause=exc)
+        except BaseException:
+            self._abandon_pending(key, pending)
+            raise
 
         while True:
             remaining = float(deadline) - time.monotonic()
             if remaining <= 0:
-                self._cancel_pending(key, pending)
+                if not self._cancel_pending(key, pending, deadline=float(deadline)):
+                    break
                 raise TimeoutError(f"LSP request timed out: {method}")
-            if cancelled is not None and cancelled():
-                self._cancel_pending(key, pending)
-                raise RequestCancelled(f"LSP request cancelled: {method}")
+            if cancelled is not None:
+                try:
+                    is_cancelled = cancelled()
+                except BaseException:
+                    self._cancel_pending(
+                        key,
+                        pending,
+                        deadline=float(deadline),
+                        force=True,
+                    )
+                    raise
+                if is_cancelled:
+                    if not self._cancel_pending(key, pending, deadline=float(deadline)):
+                        break
+                    raise RequestCancelled(f"LSP request cancelled: {method}")
             wait_for = remaining
             if cancelled is not None:
                 wait_for = min(wait_for, _CANCELLATION_POLL_SECONDS)
@@ -401,16 +513,29 @@ class LspProtocol:
 
     def close(self) -> None:
         with self._state_lock:
-            if self._closed:
-                return
+            first_close = not self._closed
             self._closed = True
-            pending = tuple(self._pending.values())
-        for request in pending:
-            request.completed.set()
-        try:
-            self._writer.close()
-        except OSError:
-            pass
+            pending = tuple(self._pending.values()) if first_close else ()
+            writes = tuple(self._write_tasks) if first_close else ()
+        if first_close:
+            for request in pending:
+                request.completed.set()
+            closed_error = ProtocolViolation("LSP protocol is closed")
+            for task in writes:
+                if task.error is None:
+                    task.error = closed_error
+                task.completed.set()
+            self._io_stopped.set()
+            self._cancel_owner_io(self.reader_thread)
+            self._cancel_owner_io(self.writer_thread)
+            self._interrupt_stream(self._reader)
+            self._interrupt_stream(self._writer)
+            try:
+                self._write_queue.put_nowait(None)
+            except queue.Full:
+                pass
+        self._join_owner(self.reader_thread)
+        self._join_owner(self.writer_thread)
 
     def _allocate_request_id_locked(self) -> int:
         if self._next_request_id > _JSON_RPC_INTEGER_MAX:
@@ -428,26 +553,65 @@ class LspProtocol:
     def _reader_loop(self) -> None:
         self.stdout_reader_owner = threading.get_ident()
         self._reader_started.set()
-        frame_reader = JsonRpcFrameReader(self._reader)
-        while True:
-            with self._state_lock:
-                if self._closed:
-                    return
-            try:
+        frame_reader = JsonRpcFrameReader(_OwnedReader(self._reader, self._io_stopped))
+        try:
+            while True:
+                with self._state_lock:
+                    if self._closed or self._fatal_error is not None:
+                        return
                 message = frame_reader.read()
                 self._dispatch_message(message, generation_nonce=self.generation_nonce)
-            except ProtocolViolation as exc:
                 with self._state_lock:
-                    closed = self._closed
-                if not closed:
-                    self._become_fatal(str(exc), cause=exc)
-                return
-            except (OSError, ValueError) as exc:
+                    if self._closed or self._fatal_error is not None:
+                        return
+        except ProtocolViolation as exc:
+            with self._state_lock:
+                closed = self._closed
+            if not closed:
+                self._become_fatal(str(exc), cause=exc)
+        except (OSError, ValueError) as exc:
+            with self._state_lock:
+                closed = self._closed
+            if not closed:
+                self._become_fatal("failed to read LSP stdout", cause=exc)
+        finally:
+            self._close_stream(self._reader)
+
+    def _writer_loop(self) -> None:
+        self.stdin_writer_owner = threading.get_ident()
+        self._writer_started.set()
+        try:
+            while True:
+                task = self._write_queue.get()
+                if task is None:
+                    return
                 with self._state_lock:
-                    closed = self._closed
-                if not closed:
-                    self._become_fatal("failed to read LSP stdout", cause=exc)
-                return
+                    stopped = self._closed or self._fatal_error is not None
+                if stopped:
+                    self._complete_write(task, ProtocolViolation("LSP protocol stopped"))
+                    return
+                if time.monotonic() >= task.deadline:
+                    error = TimeoutError("LSP write deadline expired")
+                    self._become_fatal("LSP write deadline expired", cause=error)
+                    self._complete_write(task, error)
+                    return
+                try:
+                    self._write_frame(task)
+                except BaseException as exc:
+                    with self._state_lock:
+                        closed = self._closed
+                    if not closed:
+                        self._become_fatal("failed to write LSP message", cause=exc)
+                    self._complete_write(task, exc)
+                    return
+                if time.monotonic() > task.deadline:
+                    error = TimeoutError("LSP write exceeded its deadline")
+                    self._become_fatal("LSP write exceeded its deadline", cause=error)
+                    self._complete_write(task, error)
+                    return
+                self._complete_write(task, None)
+        finally:
+            self._close_stream(self._writer)
 
     def _dispatch_message(self, message: dict[str, Any], *, generation_nonce: str) -> None:
         if generation_nonce != self.generation_nonce:
@@ -573,24 +737,47 @@ class LspProtocol:
             except BaseException:
                 pass
 
-    def _cancel_pending(self, key: tuple[str, int], pending: PendingRequest) -> None:
+    def _cancel_pending(
+        self,
+        key: tuple[str, int],
+        pending: PendingRequest,
+        *,
+        deadline: float | None = None,
+        force: bool = False,
+    ) -> bool:
+        deadline = pending.deadline if deadline is None else deadline
         with self._state_lock:
             current = self._pending.get(key)
-            if current is not pending or pending.completed.is_set():
-                return
+            if current is not pending:
+                return pending.cancelled
+            if pending.completed.is_set() and not force:
+                self._pending.pop(key, None)
+                return False
             pending.cancelled = True
             self._pending.pop(key, None)
+            self._responded_keys.discard(key)
             self._remember_key(key, self._cancelled_keys, self._cancelled_order)
-        try:
-            self._write_message(
-                {
-                    "jsonrpc": "2.0",
-                    "method": "$/cancelRequest",
-                    "params": {"id": pending.request_id},
-                }
-            )
-        except BaseException as exc:
-            self._become_fatal("failed to write LSP cancellation", cause=exc)
+        if time.monotonic() < deadline:
+            try:
+                self._write_message(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "$/cancelRequest",
+                        "params": {"id": pending.request_id},
+                    },
+                    deadline=deadline,
+                    wait=True,
+                )
+            except BaseException:
+                pass
+        return True
+
+    def _abandon_pending(self, key: tuple[str, int], pending: PendingRequest) -> None:
+        with self._state_lock:
+            if self._pending.get(key) is pending:
+                pending.cancelled = True
+                self._pending.pop(key, None)
+                self._remember_key(key, self._cancelled_keys, self._cancelled_order)
 
     @staticmethod
     def _remember_key(
@@ -598,16 +785,102 @@ class LspProtocol:
         values: set[tuple[str, int]],
         order: deque[tuple[str, int]],
     ) -> None:
+        if key in values:
+            return
         values.add(key)
         order.append(key)
         if len(order) > _TOMBSTONE_LIMIT:
             values.discard(order.popleft())
 
-    def _write_message(self, message: object) -> None:
+    def _write_message(
+        self,
+        message: object,
+        *,
+        deadline: float | None = None,
+        wait: bool = False,
+    ) -> None:
+        if deadline is None:
+            deadline = time.monotonic() + _INTERNAL_WRITE_SECONDS
         frame = encode_frame(message)
-        with self._write_lock:
-            self._writer.write(frame)
+        if time.monotonic() >= deadline:
+            error = TimeoutError("LSP write deadline expired")
+            self._become_fatal("LSP write deadline expired", cause=error)
+            raise error
+        task = _WriteTask(frame, deadline, threading.Event())
+        queue_full = False
+        with self._state_lock:
+            self._raise_if_unavailable_locked()
+            self._write_tasks.append(task)
+            try:
+                self._write_queue.put_nowait(task)
+            except queue.Full:
+                self._write_tasks.remove(task)
+                queue_full = True
+        if queue_full:
+            exc = queue.Full()
+            self._complete_write(task, exc)
+            self._become_fatal("LSP write queue deadline expired", cause=exc)
+            raise TimeoutError("LSP write queue deadline expired") from exc
+        if not wait:
+            return
+        remaining = max(0.0, deadline - time.monotonic())
+        if not task.completed.wait(remaining):
+            error = TimeoutError("LSP write exceeded its deadline")
+            self._become_fatal("LSP write exceeded its deadline", cause=error)
+            raise error
+        if task.error is not None:
+            with self._state_lock:
+                fatal_error = self._fatal_error
+                closed = self._closed
+            if fatal_error is not None:
+                raise fatal_error
+            if closed:
+                raise ProtocolViolation("LSP protocol is closed")
+            raise ProtocolViolation("failed to write LSP message") from task.error
+
+    def _complete_write(self, task: _WriteTask, error: BaseException | None) -> None:
+        with self._state_lock:
+            if task in self._write_tasks:
+                self._write_tasks.remove(task)
+            if task.error is None:
+                task.error = error
+        task.completed.set()
+
+    def _write_frame(self, task: _WriteTask) -> None:
+        if os.name == "nt":
+            self._writer.write(task.frame)
             self._writer.flush()
+            return
+        try:
+            descriptor = self._writer.fileno()
+        except (AttributeError, OSError):
+            self._writer.write(task.frame)
+            self._writer.flush()
+            return
+        was_blocking = os.get_blocking(descriptor)
+        os.set_blocking(descriptor, False)
+        offset = 0
+        frame = memoryview(task.frame)
+        try:
+            while offset < len(task.frame):
+                if self._io_stopped.is_set() or time.monotonic() >= task.deadline:
+                    raise TimeoutError("LSP write exceeded its deadline")
+                remaining = min(0.05, max(0.0, task.deadline - time.monotonic()))
+                _, writable, _ = select.select([], [descriptor], [], remaining)
+                if not writable:
+                    continue
+                try:
+                    written = os.write(descriptor, frame[offset:])
+                except BlockingIOError:
+                    continue
+                if written <= 0:
+                    raise OSError("LSP writer made no progress")
+                offset += written
+        finally:
+            try:
+                os.set_blocking(descriptor, was_blocking)
+            except OSError:
+                pass
 
     def _become_fatal(self, reason: str, *, cause: BaseException | None = None) -> None:
         callback: Callable[[str], None] | None = None
@@ -622,10 +895,89 @@ class LspProtocol:
                     error.__cause__ = cause
             self._fatal_error = error
             pending = tuple(self._pending.values())
+            writes = tuple(self._write_tasks)
             callback = self._fatal_callback
         for request in pending:
             request.completed.set()
+        for task in writes:
+            if task.error is None:
+                task.error = error
+            task.completed.set()
+        self._io_stopped.set()
+        self._cancel_owner_io(self.reader_thread)
+        self._cancel_owner_io(self.writer_thread)
+        self._interrupt_stream(self._reader)
+        self._interrupt_stream(self._writer)
+        try:
+            self._write_queue.put_nowait(None)
+        except queue.Full:
+            pass
         try:
             callback(reason)
         except BaseException:
             pass
+
+    @staticmethod
+    def _stream_layers(stream: BinaryIO) -> tuple[object, ...]:
+        layers: list[object] = []
+        identities: set[int] = set()
+        current: object | None = stream
+        while current is not None and id(current) not in identities:
+            layers.append(current)
+            identities.add(id(current))
+            next_layer = getattr(current, "raw", None)
+            if next_layer is None:
+                next_layer = getattr(current, "buffer", None)
+            current = next_layer
+        return tuple(layers)
+
+    @classmethod
+    def _interrupt_stream(cls, stream: BinaryIO) -> None:
+        layers = cls._stream_layers(stream)
+        for layer in reversed(layers):
+            sock = getattr(layer, "_sock", None)
+            if sock is not None:
+                try:
+                    sock.shutdown(2)
+                except OSError:
+                    pass
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+            close = getattr(layer, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except (OSError, ValueError):
+                    pass
+                break
+
+    @staticmethod
+    def _close_stream(stream: BinaryIO) -> None:
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+
+    @staticmethod
+    def _join_owner(owner: threading.Thread) -> None:
+        if owner is threading.current_thread():
+            return
+        owner.join(_OWNER_JOIN_SECONDS)
+
+    @staticmethod
+    def _cancel_owner_io(owner: threading.Thread) -> None:
+        if os.name != "nt" or owner is threading.current_thread() or owner.native_id is None:
+            return
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenThread.restype = ctypes.c_void_p
+        handle = kernel32.OpenThread(0x0001, False, owner.native_id)
+        if not handle:
+            return
+        try:
+            kernel32.CancelSynchronousIo(ctypes.c_void_p(handle))
+        finally:
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
