@@ -53,6 +53,20 @@ if os.name == "nt":
             ("file_id", _FileId128),
         )
 
+    class _ByHandleFileInformation(ctypes.Structure):
+        _fields_ = (
+            ("file_attributes", wintypes.DWORD),
+            ("creation_time", wintypes.FILETIME),
+            ("last_access_time", wintypes.FILETIME),
+            ("last_write_time", wintypes.FILETIME),
+            ("volume_serial_number", wintypes.DWORD),
+            ("file_size_high", wintypes.DWORD),
+            ("file_size_low", wintypes.DWORD),
+            ("number_of_links", wintypes.DWORD),
+            ("file_index_high", wintypes.DWORD),
+            ("file_index_low", wintypes.DWORD),
+        )
+
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _get_file_information_by_handle_ex = _kernel32.GetFileInformationByHandleEx
     _get_file_information_by_handle_ex.argtypes = (
@@ -62,6 +76,12 @@ if os.name == "nt":
         wintypes.DWORD,
     )
     _get_file_information_by_handle_ex.restype = wintypes.BOOL
+    _get_file_information_by_handle = _kernel32.GetFileInformationByHandle
+    _get_file_information_by_handle.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(_ByHandleFileInformation),
+    )
+    _get_file_information_by_handle.restype = wintypes.BOOL
     _create_file = _kernel32.CreateFileW
     _create_file.argtypes = (
         wintypes.LPCWSTR,
@@ -476,6 +496,34 @@ def _windows_handle_file_identity(handle: int) -> tuple[str, int, bytes]:
     if volume <= 0 or not any(file_id):
         raise OSError("Windows stable file identity is unavailable")
     return ("windows", volume, file_id)
+
+
+def _windows_stat_matches_identity(
+    metadata: os.stat_result, identity: tuple[int, int]
+) -> bool:
+    values = (
+        getattr(metadata, "st_dev", 0),
+        getattr(metadata, "st_ino", 0),
+        *identity,
+    )
+    if any(type(value) is not int or value <= 0 for value in values):
+        return False
+    return values[:2] == values[2:]
+
+
+def _windows_handle_stat_identity(handle: int) -> tuple[int, int]:
+    if os.name != "nt":
+        raise OSError("Windows handle stat identity is unavailable")
+    information = _ByHandleFileInformation()
+    if not _get_file_information_by_handle(handle, ctypes.byref(information)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    volume = int(information.volume_serial_number)
+    file_index = (int(information.file_index_high) << 32) | int(
+        information.file_index_low
+    )
+    if volume <= 0 or file_index <= 0:
+        raise OSError("Windows stable handle stat identity is unavailable")
+    return volume, file_index
 
 
 def _descriptor_file_identity(descriptor: int) -> tuple[object, ...]:

@@ -488,11 +488,25 @@ def _entry_identity(path: Path, info: os.stat_result) -> tuple[object, ...] | No
             os.close(descriptor)
     if kind == "directory":
         if os.name == "nt":
-            from generation_catalog import _windows_handle_file_identity
+            from generation_catalog import (
+                _windows_handle_file_identity,
+                _windows_handle_stat_identity,
+                _windows_stat_matches_identity,
+            )
             from markdown_transaction import _close_windows_handle, _open_windows_directory
 
             handle = _open_windows_directory(path)
             try:
+                try:
+                    opened_identity = _windows_handle_stat_identity(handle)
+                except OSError as exc:
+                    raise RuntimeError(
+                        "stable Windows directory identity is unavailable"
+                    ) from exc
+                if not _windows_stat_matches_identity(info, opened_identity):
+                    raise PermissionError(
+                        "repository code directory changed during enumeration"
+                    )
                 return _windows_handle_file_identity(handle)
             finally:
                 _close_windows_handle(handle)

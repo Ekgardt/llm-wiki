@@ -730,6 +730,80 @@ def test_windows_capture_rejects_replacement_between_enumeration_stat_and_identi
     assert attacker_reads == 0
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows directory enumeration identity race")
+@pytest.mark.parametrize("_attempt", range(20))
+def test_windows_capture_rejects_directory_replacement_before_identity_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _attempt: int
+) -> None:
+    import code_workspace
+
+    root = tmp_path / "repository"
+    target = root / "src/pkg"
+    parked = tmp_path / "parked"
+    attacker = tmp_path / "attacker"
+    _write(target / "safe.py", b"safe = True\n")
+    _write(attacker / "secret.py", b"secret = True\n")
+
+    real_scandir = code_workspace.os.scandir
+    replaced = False
+    attacker_traversals = 0
+
+    def replace_after_directory_stat(path: Path) -> None:
+        nonlocal replaced
+        if path == target and not replaced:
+            target.rename(parked)
+            attacker.rename(target)
+            replaced = True
+
+    def track_attacker_traversal(path):
+        nonlocal attacker_traversals
+        if Path(path) == target and replaced:
+            attacker_traversals += 1
+        return real_scandir(path)
+
+    monkeypatch.setattr(
+        code_workspace,
+        "_capture_entry_identity_barrier",
+        replace_after_directory_stat,
+    )
+    monkeypatch.setattr(code_workspace.os, "scandir", track_attacker_traversal)
+    with pytest.raises(PermissionError, match="directory changed during enumeration"):
+        _capture(root)
+
+    assert replaced
+    assert attacker_traversals == 0
+
+
+def test_windows_stat_identity_comparison_fails_closed() -> None:
+    from generation_catalog import _windows_stat_matches_identity
+
+    metadata = SimpleNamespace(st_dev=11, st_ino=22)
+    assert _windows_stat_matches_identity(metadata, (11, 22))
+    assert not _windows_stat_matches_identity(metadata, (11, 23))
+    assert not _windows_stat_matches_identity(metadata, (12, 22))
+    assert not _windows_stat_matches_identity(SimpleNamespace(st_dev=0, st_ino=22), (11, 22))
+    assert not _windows_stat_matches_identity(SimpleNamespace(st_dev=11, st_ino=0), (11, 22))
+    assert not _windows_stat_matches_identity(metadata, (0, 22))
+    assert not _windows_stat_matches_identity(metadata, (11, 0))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows directory handle identity only")
+def test_windows_capture_rejects_unavailable_directory_handle_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import generation_catalog
+
+    root = tmp_path / "repository"
+    _write(root / "src/pkg/safe.py", b"safe = True\n")
+
+    def unavailable(_handle: int) -> tuple[int, int]:
+        raise OSError("identity unavailable")
+
+    monkeypatch.setattr(generation_catalog, "_windows_handle_stat_identity", unavailable)
+    with pytest.raises(RuntimeError, match="stable Windows directory identity"):
+        _capture(root)
+
+
 def test_capture_rejects_unavailable_descriptor_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
