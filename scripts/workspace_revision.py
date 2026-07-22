@@ -541,6 +541,7 @@ def compute_workspace_revision(
     normalized_inputs: dict[str, str] = {}
     directory_snapshots: list[_DirectorySnapshot] = []
     file_snapshots: list[_FileSnapshot] = []
+    git_status: bytes | None = None
 
     def add(raw: str, kind: str, path: Path | None) -> None:
         normalized = _normalized_path(raw)
@@ -561,9 +562,8 @@ def compute_workspace_revision(
             deadline=deadline,
             cancelled=cancelled,
         )
-        for raw, status in _status_paths(
-            _git_status(root, deadline=deadline, cancelled=cancelled)
-        ):
+        git_status = _git_status(root, deadline=deadline, cancelled=cancelled)
+        for raw, status in _status_paths(git_status):
             _check_stop(deadline, cancelled)
             normalized = _normalized_path(raw)
             path = root / PurePosixPath(normalized)
@@ -628,6 +628,18 @@ def compute_workspace_revision(
         file_snapshots.append(snapshot)
         entries.append(RevisionEntry(relative, kind, sha256, size))
 
+    if repository.git_common_dir is not None:
+        final_head = _git_head(
+            root,
+            allow_missing=git_head is None,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+        final_status = _git_status(root, deadline=deadline, cancelled=cancelled)
+        if final_head != git_head:
+            raise RuntimeError("Git HEAD changed during workspace revision")
+        if final_status != git_status:
+            raise RuntimeError("Git status changed during workspace revision")
     for snapshot in directory_snapshots:
         _check_stop(deadline, cancelled)
         _validate_directory_snapshot(root, snapshot)
@@ -637,15 +649,6 @@ def compute_workspace_revision(
     for relative, (_kind, path) in raw_entries.items():
         if path is None and os.path.lexists(root / PurePosixPath(relative)):
             raise PermissionError("workspace revision deleted path changed before consistency fence")
-    if repository.git_common_dir is not None:
-        final_head = _git_head(
-            root,
-            allow_missing=git_head is None,
-            deadline=deadline,
-            cancelled=cancelled,
-        )
-        if final_head != git_head:
-            raise RuntimeError("Git HEAD changed during workspace revision")
 
     values = {
         "repository_id": repository.repository_id,

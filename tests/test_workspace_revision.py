@@ -411,6 +411,76 @@ def test_final_fence_rejects_git_head_change(repository: Path, monkeypatch: pyte
         compute_workspace_revision(scope)
 
 
+@pytest.mark.parametrize(
+    ("probe", "expected_error", "expected_match"),
+    [
+        ("head", RuntimeError, "Git status changed"),
+        ("status", PermissionError, "file snapshot changed"),
+    ],
+)
+def test_final_git_probe_file_mutation_is_rejected(
+    repository: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: str,
+    expected_error: type[Exception],
+    expected_match: str,
+) -> None:
+    scope = resolve_repository_scope(repository)
+    target = repository / "pkg" / "api.py"
+    if probe == "head":
+        real_probe = workspace_revision._git_head
+    else:
+        real_probe = workspace_revision._git_status
+    calls = 0
+
+    def mutate_on_second_probe(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        result = real_probe(*args, **kwargs)
+        if calls == 2:
+            target.write_text("class ChangedDuringFinalProbe:\n    pass\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(workspace_revision, f"_git_{probe}", mutate_on_second_probe)
+
+    with pytest.raises(expected_error, match=expected_match):
+        compute_workspace_revision(scope)
+
+    assert calls == 2
+
+
+def test_final_status_rejects_index_only_transition(
+    repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = repository / "pkg" / "api.py"
+    changed = b"class IndexOnlyTransition:\n    pass\n"
+    target.write_bytes(changed)
+    scope = resolve_repository_scope(repository)
+    real_status = workspace_revision._git_status
+    calls = 0
+
+    def stage_during_second_status(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            subprocess.run(
+                ["git", "add", "pkg/api.py"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                timeout=10,
+            )
+        return real_status(*args, **kwargs)
+
+    monkeypatch.setattr(workspace_revision, "_git_status", stage_during_second_status)
+
+    with pytest.raises(RuntimeError, match="status.*changed|changed.*status"):
+        compute_workspace_revision(scope)
+
+    assert calls == 2
+    assert target.read_bytes() == changed
+
+
 def test_hash_rejects_symlink_swap_at_descriptor_open(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -479,34 +549,35 @@ def test_git_status_is_nul_bounded_noninteractive_and_uses_sanitized_environment
 
     status_calls = [call for call in calls if "status" in call[0]]
     head_calls = [call for call in calls if "rev-parse" in call[0]]
-    assert len(status_calls) == 1
+    assert len(status_calls) == 2
     assert len(head_calls) == 2
-    command, options = status_calls[0]
-    assert command == [
-        "git",
-        "--no-optional-locks",
-        "-c",
-        "core.fsmonitor=false",
-        "-C",
-        scope.checkout_root,
-        "status",
-        "--porcelain=v2",
-        "-z",
-        "--untracked-files=all",
-        "--ignore-submodules=all",
-    ]
-    assert options["stdin"] is subprocess.DEVNULL
-    assert options["stdout"] is subprocess.PIPE
-    assert options["stderr"] is subprocess.DEVNULL
-    assert options["shell"] is False
-    if os.name == "nt":
-        assert options["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        assert options["start_new_session"] is True
-    assert options["env"]["GIT_TERMINAL_PROMPT"] == "0"
-    assert options["env"]["GIT_OPTIONAL_LOCKS"] == "0"
-    assert "GIT_DIR" not in options["env"]
-    assert not any(name.startswith("GIT_CONFIG_") for name in options["env"])
+    for command, options in status_calls:
+        assert command == [
+            "git",
+            "--no-optional-locks",
+            "-c",
+            "core.fsmonitor=false",
+            "-C",
+            scope.checkout_root,
+            "status",
+            "--porcelain=v2",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=all",
+        ]
+        assert options["stdin"] is subprocess.DEVNULL
+        assert options["stdout"] is subprocess.PIPE
+        assert options["stderr"] is subprocess.DEVNULL
+        assert options["shell"] is False
+        if os.name == "nt":
+            assert options["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            assert options["start_new_session"] is True
+        assert options["env"]["GIT_TERMINAL_PROMPT"] == "0"
+        assert options["env"]["GIT_OPTIONAL_LOCKS"] == "0"
+        assert "GIT_DIR" not in options["env"]
+        assert not any(name.startswith("GIT_CONFIG_") for name in options["env"])
+    options = status_calls[0][1]
     for head_command, head_options in head_calls:
         assert head_command == [
             "git",
