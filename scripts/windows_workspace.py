@@ -399,7 +399,7 @@ def open_file(parent: int, name: str) -> int:
     return _relative_handle(parent, name, directory=False, create=False)
 
 
-def open_directory_path(path: Path) -> list[int]:
+def open_directory_path(path: Path) -> int:
     """Open a local absolute directory one no-follow component at a time."""
     require_capability()
     absolute = Path(path).absolute()
@@ -418,15 +418,27 @@ def open_directory_path(path: Path) -> list[int]:
     )
     if root == _INVALID_HANDLE_VALUE:
         raise ctypes.WinError(ctypes.get_last_error())
-    handles = [int(root)]
+    current: int | None = int(root)
     try:
-        identity(handles[0], directory=True)
+        identity(current, directory=True)
         for part in pure.parts[1:]:
-            handles.append(open_directory(handles[-1], part))
-        return handles
+            child = open_directory(current, part)
+            try:
+                close_handle(current)
+            except BaseException:
+                current = None
+                try:
+                    close_handle(child)
+                except BaseException:
+                    pass
+                raise
+            current = child
+        if current is None:
+            raise OSError("Windows absolute directory ownership was lost")
+        return current
     except BaseException:
-        for handle in reversed(handles):
-            close_handle(handle)
+        if current is not None:
+            close_handle(current)
         raise
 
 

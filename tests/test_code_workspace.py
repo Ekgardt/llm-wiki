@@ -1159,6 +1159,10 @@ def test_seal_and_verify_descriptor_peak_is_bounded_by_depth(
         _write(repository / f"src/pkg-{index:03d}/app.py", b"answer = 42\n")
     limits = code_workspace.RepositoryCodeLimits(max_depth=8)
     snapshot = _capture(repository, limits=limits)
+    deep_base = tmp_path
+    for index in range(24):
+        deep_base /= f"base-{index:02d}"
+    deep_base.mkdir(parents=True)
 
     real_open = code_workspace.os.open
     real_close = code_workspace.os.close
@@ -1185,7 +1189,7 @@ def test_seal_and_verify_descriptor_peak_is_bounded_by_depth(
         "supports_dir_fd",
         {*code_workspace.os.supports_dir_fd, tracked_open},
     )
-    workspace = code_workspace.seal_workspace(snapshot, tmp_path / "sealed")
+    workspace = code_workspace.seal_workspace(snapshot, deep_base / "sealed")
     code_workspace.verify_workspace_seal(workspace, snapshot)
 
     assert not active
@@ -1239,6 +1243,89 @@ def test_posix_verification_rejects_over_depth_before_opening_child(
     assert "two" not in opened_names
     assert not active
     assert peak <= limits.max_depth + 12
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor-relative verification only")
+def test_posix_verification_stops_directory_enumeration_at_global_entry_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import code_workspace
+
+    repository = tmp_path / "repository"
+    _write(repository / "src/app.py", b"answer = 42\n")
+    limits = code_workspace.RepositoryCodeLimits(max_entries=3)
+    snapshot = _capture(repository, limits=limits)
+    workspace = code_workspace.seal_workspace(snapshot, tmp_path / "sealed")
+    for index in range(20):
+        _write(workspace.root / f"extra-{index:02d}.txt", b"extra\n")
+
+    real_scandir = code_workspace.os.scandir
+    yielded = 0
+
+    class TrackingScandir:
+        def __init__(self, path) -> None:
+            self._iterator = real_scandir(path)
+
+        def __enter__(self):
+            self._iterator.__enter__()
+            return self
+
+        def __exit__(self, *args) -> None:
+            self._iterator.__exit__(*args)
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            nonlocal yielded
+            entry = next(self._iterator)
+            yielded += 1
+            return entry
+
+    monkeypatch.setattr(code_workspace.os, "scandir", TrackingScandir)
+
+    with pytest.raises(code_workspace.WorkspaceChanged, match="entry range"):
+        code_workspace.verify_workspace_seal(workspace, snapshot)
+
+    assert yielded == limits.max_entries + 1
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor-relative verification only")
+def test_posix_verification_rejects_directory_replacement_between_stat_and_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import code_workspace
+
+    repository = tmp_path / "repository"
+    _write(repository / "src/app.py", b"answer = 42\n")
+    snapshot = _capture(repository)
+    workspace = code_workspace.seal_workspace(snapshot, tmp_path / "sealed")
+    original = workspace.root / "src"
+    displaced = workspace.root / "src-original"
+    replacement = tmp_path / "replacement-src"
+    _write(replacement / "app.py", b"answer = 42\n")
+    real_open = code_workspace.os.open
+    replaced = False
+
+    def replacing_open(path, *args, **kwargs) -> int:
+        nonlocal replaced
+        if path == "src" and kwargs.get("dir_fd") is not None and not replaced:
+            original.rename(displaced)
+            replacement.rename(original)
+            replaced = True
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(code_workspace.os, "open", replacing_open)
+    monkeypatch.setattr(
+        code_workspace.os,
+        "supports_dir_fd",
+        {*code_workspace.os.supports_dir_fd, replacing_open},
+    )
+
+    with pytest.raises(code_workspace.WorkspaceChanged, match="identity|changed"):
+        code_workspace.verify_workspace_seal(workspace, snapshot)
+
+    assert replaced
 
 
 def test_verification_directory_limit_excludes_synthetic_workspace_root(
@@ -1303,8 +1390,66 @@ def test_sealing_rejects_over_depth_before_child_creation(
     with pytest.raises(ValueError, match="depth"):
         code_workspace.seal_workspace(shallow_snapshot, tmp_path / "sealed")
 
-    assert touched == ["src", "pkg"]
-    assert not (tmp_path / "sealed/src/pkg/deep").exists()
+    assert touched == []
+    assert not (tmp_path / "sealed").exists()
+
+
+@pytest.mark.parametrize(
+    "damage", ("missing-parent", "direct-count", "depth", "file-directory-collision")
+)
+def test_sealing_rejects_forged_topology_before_creating_root(
+    tmp_path: Path, damage: str
+) -> None:
+    import code_workspace
+
+    repository = tmp_path / "repository"
+    _write(repository / "src/pkg/deep/app.py", b"answer = 42\n")
+    snapshot = _capture(
+        repository, limits=code_workspace.RepositoryCodeLimits(max_depth=8)
+    )
+    contract = snapshot.code_capture
+    directories = list(contract.directories)
+    limits = contract.limits
+    if damage == "missing-parent":
+        directories = [item for item in directories if item.relative_path != "src/pkg/deep"]
+    elif damage == "direct-count":
+        directories = [
+            dataclasses.replace(item, entry_count=0)
+            if item.relative_path == "src/pkg"
+            else item
+            for item in directories
+        ]
+    elif damage == "depth":
+        limits = dataclasses.replace(limits, max_depth=1)
+    else:
+        directories.append(
+            code_workspace.DirectoryMembership(
+                contract.files[0].relative_path,
+                0,
+                "0" * 64,
+            )
+        )
+        directories.sort(key=lambda item: item.relative_path)
+    forged = dataclasses.replace(
+        contract,
+        limits=limits,
+        directories=tuple(directories),
+        membership_sha256="0" * 64,
+    )
+    payload = code_workspace.code_capture_as_dict(forged)
+    membership = hashlib.sha256(
+        canonical_json_bytes(
+            {"files": payload["files"], "directories": payload["directories"]}
+        )
+    ).hexdigest()
+    forged = dataclasses.replace(forged, membership_sha256=membership)
+    damaged = dataclasses.replace(snapshot, code_capture=forged)
+    destination = tmp_path / f"sealed-{damage}"
+
+    with pytest.raises(ValueError, match="topology"):
+        code_workspace.seal_workspace(damaged, destination)
+
+    assert not destination.exists()
 
 
 def test_sealed_workspace_rejects_symlink_substitution(tmp_path: Path) -> None:
@@ -1439,10 +1584,9 @@ def test_windows_workspace_native_operations_are_relative_exclusive_and_bound(
 ) -> None:
     import windows_workspace
 
-    chains = windows_workspace.open_directory_path(tmp_path)
+    parent = windows_workspace.open_directory_path(tmp_path)
     root = directory = file_handle = reopened = None
     try:
-        parent = chains[-1]
         for unsafe in ("..", "file:stream", "CON", "trailing."):
             with pytest.raises(ValueError, match="path component"):
                 windows_workspace.create_directory(parent, unsafe)
@@ -1471,8 +1615,115 @@ def test_windows_workspace_native_operations_are_relative_exclusive_and_bound(
         for handle in (reopened, file_handle, directory, root):
             if handle is not None:
                 windows_workspace.close_handle(handle)
-        for handle in reversed(chains):
-            windows_workspace.close_handle(handle)
+        windows_workspace.close_handle(parent)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real Windows handle boundary required")
+def test_windows_absolute_walk_keeps_constant_handle_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import windows_workspace
+
+    deep = tmp_path
+    for index in range(32):
+        deep /= f"base-{index:02d}"
+    deep.mkdir(parents=True)
+    real_open = windows_workspace.open_directory
+    real_close = windows_workspace.close_handle
+    active: set[int] = set()
+    peak = 0
+
+    def tracked_open(parent: int, name: str) -> int:
+        nonlocal peak
+        handle = real_open(parent, name)
+        active.add(handle)
+        peak = max(peak, len(active))
+        return handle
+
+    def tracked_close(handle: int) -> None:
+        try:
+            real_close(handle)
+        finally:
+            active.discard(handle)
+
+    monkeypatch.setattr(windows_workspace, "open_directory", tracked_open)
+    monkeypatch.setattr(windows_workspace, "close_handle", tracked_close)
+
+    handle = windows_workspace.open_directory_path(deep)
+    assert isinstance(handle, int)
+    windows_workspace.close_handle(handle)
+
+    assert not active
+    assert peak <= 2
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real Windows handle boundary required")
+def test_windows_absolute_walk_does_not_retry_ambiguous_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import windows_workspace
+
+    child = tmp_path / "child"
+    child.mkdir()
+    real_close = windows_workspace.close_handle
+    close_attempts: list[int] = []
+
+    def close_then_report_error(handle: int) -> None:
+        close_attempts.append(handle)
+        real_close(handle)
+        if len(close_attempts) == 1:
+            raise OSError("simulated ambiguous close result")
+
+    monkeypatch.setattr(windows_workspace, "close_handle", close_then_report_error)
+
+    with pytest.raises(OSError, match="ambiguous close"):
+        windows_workspace.open_directory_path(child)
+
+    assert close_attempts.count(close_attempts[0]) == 1
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor boundary required")
+def test_posix_absolute_walk_keeps_constant_descriptor_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import code_workspace
+
+    deep = tmp_path
+    for index in range(32):
+        deep /= f"base-{index:02d}"
+    deep.mkdir(parents=True)
+    real_open = code_workspace.os.open
+    real_close = code_workspace.os.close
+    active: set[int] = set()
+    peak = 0
+
+    def tracked_open(*args, **kwargs) -> int:
+        nonlocal peak
+        descriptor = real_open(*args, **kwargs)
+        active.add(descriptor)
+        peak = max(peak, len(active))
+        return descriptor
+
+    def tracked_close(descriptor: int) -> None:
+        try:
+            real_close(descriptor)
+        finally:
+            active.discard(descriptor)
+
+    monkeypatch.setattr(code_workspace.os, "open", tracked_open)
+    monkeypatch.setattr(code_workspace.os, "close", tracked_close)
+    monkeypatch.setattr(
+        code_workspace.os,
+        "supports_dir_fd",
+        {*code_workspace.os.supports_dir_fd, tracked_open},
+    )
+
+    descriptor = code_workspace._open_posix_directory_path(deep)
+    assert isinstance(descriptor, int)
+    code_workspace.os.close(descriptor)
+
+    assert not active
+    assert peak <= 2
 
 
 @pytest.mark.skipif(os.name != "nt", reason="real Windows sealed workspace required")
@@ -1599,6 +1850,10 @@ def test_windows_seal_and_verify_handle_peak_is_bounded_by_depth(
         _write(repository / f"src/pkg-{index:03d}/app.py", b"answer = 42\n")
     limits = code_workspace.RepositoryCodeLimits(max_depth=8)
     snapshot = _capture(repository, limits=limits)
+    deep_base = tmp_path
+    for index in range(24):
+        deep_base /= f"base-{index:02d}"
+    deep_base.mkdir(parents=True)
 
     open_names = ("create_directory", "create_file", "open_directory", "open_file")
     real_opens = {name: getattr(windows_workspace, name) for name in open_names}
@@ -1626,7 +1881,7 @@ def test_windows_seal_and_verify_handle_peak_is_bounded_by_depth(
         monkeypatch.setattr(windows_workspace, name, tracked(name))
     monkeypatch.setattr(windows_workspace, "close_handle", tracked_close)
 
-    workspace = code_workspace.seal_workspace(snapshot, tmp_path / "sealed")
+    workspace = code_workspace.seal_workspace(snapshot, deep_base / "sealed")
     code_workspace.verify_workspace_seal(workspace, snapshot)
 
     assert not active

@@ -1219,6 +1219,7 @@ def _validated_snapshot_entries(
         validate_code_capture(code_capture_as_dict(snapshot.code_capture))
     except (TypeError, ValueError) as exc:
         raise ValueError("snapshot code capture contract is invalid") from exc
+    _validate_snapshot_topology(snapshot.code_capture)
     source_entries = []
     capture_entries = []
     for source in snapshot.sources:
@@ -1260,6 +1261,67 @@ def _validated_snapshot_entries(
     return manifest_sha256, entries
 
 
+def _validate_snapshot_topology(contract: CodeCaptureContract) -> None:
+    limits = contract.limits
+    directory_rows = {
+        item.relative_path: item.entry_count for item in contract.directories
+    }
+    folded_directories = {path.casefold(): path for path in directory_rows}
+    folded_files = {item.relative_path.casefold(): item.relative_path for item in contract.files}
+    if set(folded_directories) & set(folded_files):
+        raise ValueError("snapshot code capture topology has a file/directory collision")
+    if any(root not in directory_rows for root in contract.policy.roots):
+        raise ValueError("snapshot code capture topology omits a selected root")
+
+    def selected_root(path: str) -> str:
+        roots = tuple(
+            root
+            for root in contract.policy.roots
+            if path == root or path.startswith(root + "/")
+        )
+        if len(roots) != 1:
+            raise ValueError("snapshot code capture topology has an ambiguous root")
+        return roots[0]
+
+    direct_children = {path: 0 for path in directory_rows}
+    required_directories: set[str] = set()
+    for path in directory_rows:
+        root = selected_root(path)
+        relative_parts = PurePosixPath(path).parts[len(PurePosixPath(root).parts) :]
+        if len(relative_parts) > limits.max_depth:
+            raise ValueError("snapshot code capture topology exceeds max_depth")
+        if path != root:
+            parent = str(PurePosixPath(path).parent)
+            if parent not in directory_rows:
+                raise ValueError("snapshot code capture topology omits a directory parent")
+            direct_children[parent] += 1
+
+    for item in contract.files:
+        path = item.relative_path
+        root = selected_root(path)
+        parent = str(PurePosixPath(path).parent)
+        if parent not in directory_rows:
+            raise ValueError("snapshot code capture topology omits a file parent")
+        parent_depth = len(PurePosixPath(parent).parts) - len(PurePosixPath(root).parts)
+        if parent_depth > limits.max_depth:
+            raise ValueError("snapshot code capture topology exceeds max_depth")
+        direct_children[parent] += 1
+        current = PurePosixPath(parent)
+        root_path = PurePosixPath(root)
+        while True:
+            required_directories.add(current.as_posix())
+            if current == root_path:
+                break
+            current = current.parent
+
+    if any(direct_children[path] > count for path, count in directory_rows.items()):
+        raise ValueError("snapshot code capture topology contradicts directory entry_count")
+    if len(required_directories) > limits.max_directories:
+        raise ValueError("snapshot code capture topology exceeds max_directories")
+    if len(required_directories) + len(contract.files) > limits.max_entries:
+        raise ValueError("snapshot code capture topology exceeds max_entries")
+
+
 def _posix_directory_flags() -> int:
     if os.name != "posix" or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
         raise RuntimeError("safe sealed workspaces require POSIX no-follow directory opens")
@@ -1268,24 +1330,45 @@ def _posix_directory_flags() -> int:
     return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
 
 
-def _open_posix_directory_path(path: Path) -> tuple[list[int], int]:
+def _open_posix_directory_path(path: Path) -> int:
     absolute = path.absolute()
     flags = _posix_directory_flags()
-    descriptors = [os.open(absolute.anchor, flags)]
+    current: int | None = os.open(absolute.anchor, flags)
     try:
+        _descriptor_identity(current)
         for part in absolute.parts[1:]:
-            descriptors.append(os.open(part, flags, dir_fd=descriptors[-1]))
-        return descriptors, descriptors[-1]
+            child = os.open(part, flags, dir_fd=current)
+            try:
+                child_info = os.fstat(child)
+                if not stat.S_ISDIR(child_info.st_mode):
+                    raise PermissionError("absolute path component is not a directory")
+                _descriptor_identity(child)
+                os.close(current)
+            except BaseException:
+                current = None
+                try:
+                    os.close(child)
+                except BaseException:
+                    pass
+                raise
+            current = child
+        if current is None:
+            raise OSError("POSIX absolute directory ownership was lost")
+        return current
     except BaseException:
-        for descriptor in reversed(descriptors):
-            os.close(descriptor)
+        if current is not None:
+            os.close(current)
         raise
 
 
 def _seal_posix(snapshot: CorpusSnapshot, destination: Path) -> None:
-    parent_descriptors, parent_fd = _open_posix_directory_path(destination.parent)
+    parent_fd = _open_posix_directory_path(destination.parent)
     root_fd: int | None = None
     created_directories: dict[tuple[str, ...], tuple[object, ...]] = {}
+    created_files = 0
+    created_entries = 0
+    written_bytes = 0
+    limits = snapshot.code_capture.limits
     try:
         os.mkdir(destination.name, 0o700, dir_fd=parent_fd)
         root_fd = os.open(destination.name, _posix_directory_flags(), dir_fd=parent_fd)
@@ -1301,8 +1384,13 @@ def _seal_posix(snapshot: CorpusSnapshot, destination: Path) -> None:
                     child_parts = (*directory_parts, part)
                     expected_identity = created_directories.get(child_parts)
                     if expected_identity is None:
+                        if len(created_directories) >= limits.max_directories:
+                            raise ValueError("sealed workspace directory limit exceeded")
+                        if created_entries >= limits.max_entries:
+                            raise ValueError("sealed workspace entry limit exceeded")
                         _seal_component_barrier(part)
                         os.mkdir(part, 0o700, dir_fd=directory_fd)
+                        created_entries += 1
                     directory_fd = os.open(
                         part, _posix_directory_flags(), dir_fd=directory_fd
                     )
@@ -1315,6 +1403,14 @@ def _seal_posix(snapshot: CorpusSnapshot, destination: Path) -> None:
                             "sealed workspace directory changed during creation"
                         )
                     directory_parts = child_parts
+                if created_files >= limits.max_files:
+                    raise ValueError("sealed workspace file limit exceeded")
+                if created_entries >= limits.max_entries:
+                    raise ValueError("sealed workspace entry limit exceeded")
+                if len(source.content) > limits.max_file_bytes:
+                    raise ValueError("sealed workspace file byte limit exceeded")
+                if written_bytes + len(source.content) > limits.max_total_bytes:
+                    raise ValueError("sealed workspace total byte limit exceeded")
                 descriptor = os.open(
                     parts[-1],
                     os.O_WRONLY
@@ -1331,6 +1427,9 @@ def _seal_posix(snapshot: CorpusSnapshot, destination: Path) -> None:
                     os.fchmod(descriptor, 0o400)
                 finally:
                     os.close(descriptor)
+                created_files += 1
+                created_entries += 1
+                written_bytes += len(source.content)
                 for opened_directory in reversed(chain):
                     os.fsync(opened_directory)
             finally:
@@ -1347,8 +1446,7 @@ def _seal_posix(snapshot: CorpusSnapshot, destination: Path) -> None:
     finally:
         if root_fd is not None:
             os.close(root_fd)
-        for descriptor in reversed(parent_descriptors):
-            os.close(descriptor)
+        os.close(parent_fd)
 
 
 def _windows_identity_record(
@@ -1361,15 +1459,19 @@ def _windows_identity_record(
 def _seal_windows(
     snapshot: CorpusSnapshot, destination: Path
 ) -> tuple[tuple[tuple[str, int, str, bool], ...], bool, bool]:
-    parent_handles = _windows_workspace.open_directory_path(destination.parent)
+    parent_handle = _windows_workspace.open_directory_path(destination.parent)
     root_handle: int | None = None
     identities: dict[str, tuple[int, bytes, bool]] = {}
+    created_directories = 0
+    created_files = 0
+    created_entries = 0
+    written_bytes = 0
     read_only = True
     directory_flush = True
     limits = snapshot.code_capture.limits
     try:
         root_handle = _windows_workspace.create_directory(
-            parent_handles[-1], destination.name
+            parent_handle, destination.name
         )
         identities[""] = _windows_workspace.identity(root_handle, directory=True)
         for source in snapshot.sources:
@@ -1385,10 +1487,16 @@ def _seal_windows(
                     relative = "/".join(child_parts)
                     expected_identity = identities.get(relative)
                     if expected_identity is None:
+                        if created_directories >= limits.max_directories:
+                            raise ValueError("sealed workspace directory limit exceeded")
+                        if created_entries >= limits.max_entries:
+                            raise ValueError("sealed workspace entry limit exceeded")
                         _seal_component_barrier(part)
                         child = _windows_workspace.create_directory(
                             directory_handle, part
                         )
+                        created_directories += 1
+                        created_entries += 1
                     else:
                         child = _windows_workspace.open_directory(directory_handle, part)
                     chain.append(child)
@@ -1402,6 +1510,14 @@ def _seal_windows(
                     directory_handle = child
                     directory_parts = child_parts
 
+                if created_files >= limits.max_files:
+                    raise ValueError("sealed workspace file limit exceeded")
+                if created_entries >= limits.max_entries:
+                    raise ValueError("sealed workspace entry limit exceeded")
+                if len(source.content) > limits.max_file_bytes:
+                    raise ValueError("sealed workspace file byte limit exceeded")
+                if written_bytes + len(source.content) > limits.max_total_bytes:
+                    raise ValueError("sealed workspace total byte limit exceeded")
                 file_handle = _windows_workspace.create_file(
                     directory_handle, parts[-1]
                 )
@@ -1430,6 +1546,9 @@ def _seal_windows(
                     identities[relative] = after
                 finally:
                     _windows_workspace.close_handle(file_handle)
+                created_files += 1
+                created_entries += 1
+                written_bytes += len(source.content)
                 for opened_directory in reversed(chain):
                     directory_flush = (
                         _windows_workspace.flush_directory(opened_directory)
@@ -1443,7 +1562,7 @@ def _seal_windows(
             _windows_workspace.flush_directory(root_handle) and directory_flush
         )
         named = _windows_workspace.open_directory(
-            parent_handles[-1], destination.name
+            parent_handle, destination.name
         )
         try:
             if _windows_workspace.identity(named, directory=True) != identities[""]:
@@ -1451,13 +1570,12 @@ def _seal_windows(
         finally:
             _windows_workspace.close_handle(named)
         directory_flush = (
-            _windows_workspace.flush_directory(parent_handles[-1]) and directory_flush
+            _windows_workspace.flush_directory(parent_handle) and directory_flush
         )
     finally:
         if root_handle is not None:
             _windows_workspace.close_handle(root_handle)
-        for handle in reversed(parent_handles):
-            _windows_workspace.close_handle(handle)
+        _windows_workspace.close_handle(parent_handle)
     records = tuple(
         _windows_identity_record(relative, identity)
         for relative, identity in sorted(identities.items())
@@ -1533,7 +1651,8 @@ def _verify_descriptor_file(
 def _verify_posix(
     workspace: SealedWorkspace, snapshot: CorpusSnapshot
 ) -> tuple[tuple[str, str], ...]:
-    chains, root_fd = _open_posix_directory_path(workspace.root)
+    parent_fd = _open_posix_directory_path(workspace.root.parent)
+    root_fd: int | None = None
     members = []
     visited = 0
     visited_directories = 0
@@ -1545,6 +1664,9 @@ def _verify_posix(
         for source in snapshot.sources
     }
     try:
+        root_fd = os.open(
+            workspace.root.name, _posix_directory_flags(), dir_fd=parent_fd
+        )
         stack: list[list[object]] = [[(), -1, root_fd, None, 0]]
         while stack:
             frame = stack[-1]
@@ -1553,12 +1675,17 @@ def _verify_posix(
             directory_fd = frame[2]
             entries = frame[3]
             if entries is None:
+                entries = []
                 with os.scandir(directory_fd) as iterator:
-                    entries = sorted(iterator, key=lambda item: item.name)
+                    for entry in iterator:
+                        visited += 1
+                        if visited > snapshot.code_capture.limits.max_entries:
+                            raise WorkspaceChanged(
+                                "sealed workspace entry range exceeded"
+                            )
+                        entries.append(entry)
+                entries.sort(key=lambda item: item.name)
                 frame[3] = entries
-                visited += len(entries)
-                if visited > snapshot.code_capture.limits.max_entries:
-                    raise WorkspaceChanged("sealed workspace entry range exceeded")
             index = frame[4]
             if index >= len(entries):
                 stack.pop()
@@ -1582,6 +1709,12 @@ def _verify_posix(
                 if child_depth > snapshot.code_capture.limits.max_depth:
                     raise WorkspaceChanged("sealed workspace depth range exceeded")
                 child = os.open(entry.name, _posix_directory_flags(), dir_fd=directory_fd)
+                opened = os.fstat(child)
+                if not stat.S_ISDIR(opened.st_mode) or not _same_file(metadata, opened):
+                    os.close(child)
+                    raise WorkspaceChanged(
+                        "sealed workspace directory identity changed before traversal"
+                    )
                 stack.append([relative_parts, child_depth, child, None, 0])
             elif stat.S_ISREG(metadata.st_mode):
                 members.append((relative, "file"))
@@ -1603,13 +1736,14 @@ def _verify_posix(
                         os.close(descriptor)
             else:
                 raise WorkspaceChanged("sealed workspace contains a device")
-        named_chains, named = _open_posix_directory_path(workspace.root)
+        named = os.open(
+            workspace.root.name, _posix_directory_flags(), dir_fd=parent_fd
+        )
         try:
             if _descriptor_identity(named) != _descriptor_identity(root_fd):
                 raise WorkspaceChanged("sealed workspace root changed during verification")
         finally:
-            for descriptor in reversed(named_chains):
-                os.close(descriptor)
+            os.close(named)
         return tuple(sorted(members))
     except (OSError, PermissionError) as exc:
         raise WorkspaceChanged("sealed workspace directory cannot be verified") from exc
@@ -1617,8 +1751,9 @@ def _verify_posix(
         if "stack" in locals():
             for frame in reversed(stack[1:]):
                 os.close(frame[2])
-        for descriptor in reversed(chains):
-            os.close(descriptor)
+        if root_fd is not None:
+            os.close(root_fd)
+        os.close(parent_fd)
 
 
 def _expected_workspace_members(
@@ -1703,7 +1838,8 @@ def _verify_windows(
     expected_members: tuple[tuple[str, str], ...],
 ) -> tuple[tuple[str, str], ...]:
     persisted = _validated_windows_identities(workspace, expected_members)
-    chains: list[int] = []
+    parent_handle: int | None = None
+    root_handle: int | None = None
     members: list[tuple[str, str]] = []
     visited = 0
     visited_directories = 0
@@ -1713,8 +1849,10 @@ def _verify_windows(
     }
     limits = snapshot.code_capture.limits
     try:
-        chains = _windows_workspace.open_directory_path(workspace.root)
-        root_handle = chains[-1]
+        parent_handle = _windows_workspace.open_directory_path(workspace.root.parent)
+        root_handle = _windows_workspace.open_directory(
+            parent_handle, workspace.root.name
+        )
         if persisted.get("") != _windows_workspace.identity(
             root_handle, directory=True
         ):
@@ -1806,7 +1944,7 @@ def _verify_windows(
             else:
                 raise WorkspaceChanged("sealed workspace contains a device")
 
-        named = _windows_workspace.open_directory(chains[-2], workspace.root.name)
+        named = _windows_workspace.open_directory(parent_handle, workspace.root.name)
         try:
             if _windows_workspace.identity(named, directory=True) != persisted.get(""):
                 raise WorkspaceChanged("sealed workspace root changed during verification")
@@ -1819,8 +1957,10 @@ def _verify_windows(
         if "stack" in locals():
             for frame in reversed(stack[1:]):
                 _windows_workspace.close_handle(frame[2])
-        for handle in reversed(chains):
-            _windows_workspace.close_handle(handle)
+        if root_handle is not None:
+            _windows_workspace.close_handle(root_handle)
+        if parent_handle is not None:
+            _windows_workspace.close_handle(parent_handle)
 
 
 def verify_workspace_seal(workspace: SealedWorkspace, snapshot: CorpusSnapshot) -> None:
