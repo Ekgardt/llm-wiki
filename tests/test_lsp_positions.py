@@ -212,6 +212,10 @@ def test_file_uri_round_trips_unc_path() -> None:
         "file://server%5Cevil/share/a.py",
         "file://server%2Fevil/share/a.py",
         "file://server%0Aevil/share/a.py",
+        "file:///repo/pkg%2Fsecret.py",
+        "file:///repo/pkg%2fsecret.py",
+        "file:///repo/pkg%5Csecret.py",
+        "file:///repo/pkg%5csecret.py",
     ],
 )
 def test_file_uri_rejects_invalid_inputs(uri: str) -> None:

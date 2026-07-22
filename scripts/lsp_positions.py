@@ -12,6 +12,7 @@ from urllib.parse import quote, unquote_to_bytes, urlsplit
 from code_intelligence import PositionEncoding, PositionRange
 
 _MALFORMED_PERCENT = re.compile(r"%(?![0-9A-Fa-f]{2})")
+_ENCODED_PATH_SEPARATOR = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:$")
 
 
@@ -233,6 +234,8 @@ def file_uri_to_path(uri: str, *, platform: str | None = None) -> PurePath:
         raise ValueError("uri must use the file scheme")
     if parsed.query or parsed.fragment:
         raise ValueError("file uri must not contain a query or fragment")
+    if _ENCODED_PATH_SEPARATOR.search(parsed.path):
+        raise ValueError("file uri path must not contain encoded separators")
 
     try:
         authority = unquote_to_bytes(parsed.netloc).decode("utf-8", errors="strict")
