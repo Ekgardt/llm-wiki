@@ -1293,6 +1293,243 @@ def test_workspace_boundary_rejects_boolean_source_size(tmp_path: Path) -> None:
         seal_workspace(damaged, tmp_path / "sealed")
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor-relative capture only")
+def test_posix_captured_directory_closes_child_when_identity_fails_repeatedly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import code_workspace
+
+    root = tmp_path / "repository"
+    (root / "src").mkdir(parents=True)
+    real_open = code_workspace.os.open
+    real_close = code_workspace.os.close
+    real_identity = code_workspace._descriptor_identity
+    root_fd = real_open(root, code_workspace._posix_directory_flags())
+    active: set[int] = set()
+    opened = 0
+    closed = 0
+
+    def tracked_open(*args, **kwargs) -> int:
+        nonlocal opened
+        descriptor = real_open(*args, **kwargs)
+        assert descriptor not in active
+        active.add(descriptor)
+        opened += 1
+        return descriptor
+
+    def tracked_close(descriptor: int) -> None:
+        nonlocal closed
+        assert descriptor in active
+        real_close(descriptor)
+        active.remove(descriptor)
+        closed += 1
+
+    def failing_identity(descriptor: int):
+        if descriptor in active:
+            raise RuntimeError("injected child identity failure")
+        return real_identity(descriptor)
+
+    monkeypatch.setattr(code_workspace.os, "open", tracked_open)
+    monkeypatch.setattr(code_workspace.os, "close", tracked_close)
+    monkeypatch.setattr(code_workspace, "_descriptor_identity", failing_identity)
+    monkeypatch.setattr(
+        code_workspace.os,
+        "supports_dir_fd",
+        {*code_workspace.os.supports_dir_fd, tracked_open},
+    )
+    try:
+        for _ in range(32):
+            with pytest.raises(RuntimeError, match="injected child identity"):
+                with code_workspace._open_captured_directory(
+                    root_fd, "src", {"src": ("expected",)}
+                ):
+                    pytest.fail("identity failure must prevent traversal")
+
+        assert not active
+        assert opened == closed == 32
+    finally:
+        for descriptor in tuple(active):
+            real_close(descriptor)
+        real_close(root_fd)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle-relative capture only")
+def test_windows_captured_directory_closes_child_when_identity_fails_repeatedly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import code_workspace
+    import generation_catalog
+    import markdown_transaction
+
+    root = tmp_path / "repository"
+    (root / "src").mkdir(parents=True)
+    root_handle = markdown_transaction._open_windows_directory(root)
+    real_open = generation_catalog._windows_open_relative_handle
+    real_close = markdown_transaction._close_windows_handle
+    real_identity = generation_catalog._windows_handle_file_identity
+    active: set[int] = set()
+    opened = 0
+    closed = 0
+
+    def tracked_open(*args, **kwargs) -> int:
+        nonlocal opened
+        handle = real_open(*args, **kwargs)
+        assert handle not in active
+        active.add(handle)
+        opened += 1
+        return handle
+
+    def tracked_close(handle: int) -> None:
+        nonlocal closed
+        assert handle in active
+        real_close(handle)
+        active.remove(handle)
+        closed += 1
+
+    def failing_identity(handle: int):
+        if handle in active:
+            raise OSError("injected child identity failure")
+        return real_identity(handle)
+
+    monkeypatch.setattr(generation_catalog, "_windows_open_relative_handle", tracked_open)
+    monkeypatch.setattr(generation_catalog, "_windows_handle_file_identity", failing_identity)
+    monkeypatch.setattr(markdown_transaction, "_close_windows_handle", tracked_close)
+    try:
+        for _ in range(32):
+            with pytest.raises(OSError, match="injected child identity"):
+                with code_workspace._open_captured_directory(
+                    root_handle, "src", {"src": ("expected",)}
+                ):
+                    pytest.fail("identity failure must prevent traversal")
+
+        assert not active
+        assert opened == closed == 32
+    finally:
+        for handle in tuple(active):
+            real_close(handle)
+        real_close(root_handle)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor-relative sealing only")
+def test_posix_absolute_chain_closes_parent_and_child_when_stat_fails_repeatedly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import code_workspace
+
+    target = tmp_path / "target"
+    target.mkdir()
+    real_open = code_workspace.os.open
+    real_close = code_workspace.os.close
+    real_fstat = code_workspace.os.fstat
+    active: set[int] = set()
+    children: set[int] = set()
+    opened = 0
+    closed = 0
+
+    def tracked_open(*args, **kwargs) -> int:
+        nonlocal opened
+        descriptor = real_open(*args, **kwargs)
+        assert descriptor not in active
+        active.add(descriptor)
+        if kwargs.get("dir_fd") is not None:
+            children.add(descriptor)
+        opened += 1
+        return descriptor
+
+    def tracked_close(descriptor: int) -> None:
+        nonlocal closed
+        assert descriptor in active
+        real_close(descriptor)
+        active.remove(descriptor)
+        children.discard(descriptor)
+        closed += 1
+
+    def failing_fstat(descriptor: int):
+        if descriptor in children:
+            raise OSError("injected child stat failure")
+        return real_fstat(descriptor)
+
+    monkeypatch.setattr(code_workspace.os, "open", tracked_open)
+    monkeypatch.setattr(code_workspace.os, "close", tracked_close)
+    monkeypatch.setattr(code_workspace.os, "fstat", failing_fstat)
+    monkeypatch.setattr(
+        code_workspace.os,
+        "supports_dir_fd",
+        {*code_workspace.os.supports_dir_fd, tracked_open},
+    )
+    try:
+        for _ in range(32):
+            with pytest.raises(OSError, match="injected child stat"):
+                code_workspace._open_posix_directory_path(target)
+
+        assert not active
+        assert opened == closed == 64
+    finally:
+        for descriptor in tuple(active):
+            real_close(descriptor)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor-relative verification only")
+def test_posix_verification_closes_child_when_opened_stat_fails_repeatedly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import code_workspace
+
+    repository = tmp_path / "repository"
+    _write(repository / "src/app.py", b"answer = 42\n")
+    snapshot = _capture(repository)
+    workspace = code_workspace.seal_workspace(snapshot, tmp_path / "sealed")
+    real_open = code_workspace.os.open
+    real_close = code_workspace.os.close
+    real_fstat = code_workspace.os.fstat
+    active: set[int] = set()
+    failing_children: set[int] = set()
+    opened = 0
+    closed = 0
+
+    def tracked_open(path, *args, **kwargs) -> int:
+        nonlocal opened
+        descriptor = real_open(path, *args, **kwargs)
+        assert descriptor not in active
+        active.add(descriptor)
+        if path == "src" and kwargs.get("dir_fd") is not None:
+            failing_children.add(descriptor)
+        opened += 1
+        return descriptor
+
+    def tracked_close(descriptor: int) -> None:
+        nonlocal closed
+        assert descriptor in active
+        real_close(descriptor)
+        active.remove(descriptor)
+        failing_children.discard(descriptor)
+        closed += 1
+
+    def failing_fstat(descriptor: int):
+        if descriptor in failing_children:
+            raise OSError("injected child stat failure")
+        return real_fstat(descriptor)
+
+    monkeypatch.setattr(code_workspace.os, "open", tracked_open)
+    monkeypatch.setattr(code_workspace.os, "close", tracked_close)
+    monkeypatch.setattr(code_workspace.os, "fstat", failing_fstat)
+    monkeypatch.setattr(
+        code_workspace.os,
+        "supports_dir_fd",
+        {*code_workspace.os.supports_dir_fd, tracked_open},
+    )
+    try:
+        for _ in range(32):
+            with pytest.raises(code_workspace.WorkspaceChanged, match="cannot be verified"):
+                code_workspace.verify_workspace_seal(workspace, snapshot)
+
+        assert not active
+        assert opened == closed
+    finally:
+        for descriptor in tuple(active):
+            real_close(descriptor)
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor-relative sealing only")
 def test_seal_and_verify_descriptor_peak_is_bounded_by_depth(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

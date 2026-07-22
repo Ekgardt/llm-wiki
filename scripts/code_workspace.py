@@ -573,6 +573,7 @@ def _open_captured_directory(
                 raise RuntimeError("captured directory identity is unavailable")
             if os.name == "posix":
                 child = os.open(part, _posix_directory_flags(), dir_fd=current)
+                opened.append(child)
                 identity = _descriptor_identity(child)
             elif os.name == "nt":
                 from generation_catalog import (
@@ -581,10 +582,10 @@ def _open_captured_directory(
                 )
 
                 child = _windows_open_relative_handle(current, part, directory=True)
+                opened.append(child)
                 identity = _windows_handle_file_identity(child)
             else:
                 raise RuntimeError("stable directory traversal is unavailable")
-            opened.append(child)
             if identity != expected:
                 raise PermissionError("repository code directory changed before revalidation")
             current = child
@@ -1357,20 +1358,22 @@ def _open_posix_directory_path(path: Path) -> int:
         _descriptor_identity(current)
         for part in absolute.parts[1:]:
             child = os.open(part, flags, dir_fd=current)
+            child_owned = True
             try:
                 child_info = os.fstat(child)
                 if not stat.S_ISDIR(child_info.st_mode):
                     raise PermissionError("absolute path component is not a directory")
                 _descriptor_identity(child)
-                os.close(current)
-            except BaseException:
-                current = None
                 try:
-                    os.close(child)
+                    os.close(current)
                 except BaseException:
-                    pass
-                raise
-            current = child
+                    current = None
+                    raise
+                current = child
+                child_owned = False
+            finally:
+                if child_owned:
+                    os.close(child)
         if current is None:
             raise OSError("POSIX absolute directory ownership was lost")
         return current
@@ -1769,13 +1772,18 @@ def _verify_posix(
                 child = os.open(
                     entry_name, _posix_directory_flags(), dir_fd=directory_fd
                 )
-                opened = os.fstat(child)
-                if not stat.S_ISDIR(opened.st_mode) or not _same_file(metadata, opened):
-                    os.close(child)
-                    raise WorkspaceChanged(
-                        "sealed workspace directory identity changed before traversal"
-                    )
-                stack.append([relative_parts, child_depth, child, None, 0])
+                child_owned = True
+                try:
+                    opened = os.fstat(child)
+                    if not stat.S_ISDIR(opened.st_mode) or not _same_file(metadata, opened):
+                        raise WorkspaceChanged(
+                            "sealed workspace directory identity changed before traversal"
+                        )
+                    stack.append([relative_parts, child_depth, child, None, 0])
+                    child_owned = False
+                finally:
+                    if child_owned:
+                        os.close(child)
             elif stat.S_ISREG(metadata.st_mode):
                 members.append((relative, "file"))
                 if relative in expected:
