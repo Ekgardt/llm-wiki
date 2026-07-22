@@ -1,0 +1,244 @@
+"""Strict conversion between source bytes, LSP positions, and file URIs."""
+
+from __future__ import annotations
+
+import hashlib
+import re
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from urllib.parse import quote, unquote_to_bytes, urlsplit
+
+from code_intelligence import PositionEncoding, PositionRange
+
+_MALFORMED_PERCENT = re.compile(r"%(?![0-9A-Fa-f]{2})")
+_WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:$")
+
+
+def _require_coordinate(value: object, label: str, *, minimum: int = 0) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{label} must be an integer")
+    if value < minimum:
+        raise ValueError(f"{label} must be at least {minimum}")
+    return value
+
+
+def _require_path(value: object) -> str:
+    if not isinstance(value, str):
+        raise TypeError("path must be a string")
+    if not value:
+        raise ValueError("path must not be empty")
+    if "\0" in value:
+        raise ValueError("path must not contain NUL")
+    return value
+
+
+def _require_encoding(value: object) -> PositionEncoding:
+    if not isinstance(value, PositionEncoding):
+        raise TypeError("encoding must be PositionEncoding")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class SourceAnchor:
+    path: str
+    line: int
+    character: int
+
+    def __post_init__(self) -> None:
+        _require_path(self.path)
+        _require_coordinate(self.line, "line", minimum=1)
+        _require_coordinate(self.character, "character")
+
+
+@dataclass(frozen=True, slots=True)
+class LspPosition:
+    line: int
+    character: int
+
+    def __post_init__(self) -> None:
+        _require_coordinate(self.line, "line")
+        _require_coordinate(self.character, "character")
+
+
+@dataclass(frozen=True, slots=True)
+class LspRange:
+    start: LspPosition
+    end: LspPosition
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.start, LspPosition) or not isinstance(self.end, LspPosition):
+            raise TypeError("range endpoints must be LspPosition")
+
+
+@dataclass(frozen=True, slots=True)
+class SourceDocument:
+    path: str
+    content: bytes
+    source_sha256: str
+    line_spans: tuple[tuple[int, int], ...]
+
+    def __post_init__(self) -> None:
+        _require_path(self.path)
+        if not isinstance(self.content, bytes):
+            raise TypeError("content must be bytes")
+        self.content.decode("utf-8", errors="strict")
+        if self.source_sha256 != hashlib.sha256(self.content).hexdigest():
+            raise ValueError("source_sha256 does not match content")
+        if self.line_spans != self._scan_line_spans(self.content):
+            raise ValueError("line_spans do not match content")
+
+    @classmethod
+    def from_bytes(cls, path: str, content: bytes) -> SourceDocument:
+        _require_path(path)
+        if not isinstance(content, bytes):
+            raise TypeError("content must be bytes")
+        content.decode("utf-8", errors="strict")
+        return cls(
+            path,
+            content,
+            hashlib.sha256(content).hexdigest(),
+            cls._scan_line_spans(content),
+        )
+
+    @staticmethod
+    def _scan_line_spans(content: bytes) -> tuple[tuple[int, int], ...]:
+        spans: list[tuple[int, int]] = []
+        start = 0
+        index = 0
+        while index < len(content):
+            if content[index] not in (10, 13):
+                index += 1
+                continue
+            spans.append((start, index))
+            if content[index : index + 2] == b"\r\n":
+                index += 2
+            else:
+                index += 1
+            start = index
+        spans.append((start, len(content)))
+        return tuple(spans)
+
+    def validate_anchor(self, *, line: int, character: int) -> SourceAnchor:
+        _require_coordinate(line, "line", minimum=1)
+        _require_coordinate(character, "character")
+        if line > len(self.line_spans):
+            raise ValueError("line is outside the document")
+        start, end = self.line_spans[line - 1]
+        if character > end - start:
+            raise ValueError("character is outside the line")
+        self.content[start : start + character].decode("utf-8", errors="strict")
+        return SourceAnchor(self.path, line, character)
+
+    def to_lsp(self, anchor: SourceAnchor, encoding: PositionEncoding) -> LspPosition:
+        if not isinstance(anchor, SourceAnchor):
+            raise TypeError("anchor must be SourceAnchor")
+        _require_encoding(encoding)
+        if anchor.path != self.path:
+            raise TypeError("anchor belongs to a different document")
+        validated = self.validate_anchor(line=anchor.line, character=anchor.character)
+        start, _ = self.line_spans[validated.line - 1]
+        prefix = self.content[start : start + validated.character].decode("utf-8")
+        if encoding is PositionEncoding.UTF8:
+            character = validated.character
+        elif encoding is PositionEncoding.UTF16:
+            character = len(prefix.encode("utf-16-le")) // 2
+        else:
+            character = len(prefix)
+        return LspPosition(validated.line - 1, character)
+
+    def to_byte_range(self, value: LspRange, encoding: PositionEncoding) -> PositionRange:
+        if not isinstance(value, LspRange):
+            raise TypeError("value must be LspRange")
+        _require_encoding(encoding)
+        start = self._lsp_to_byte_offset(value.start, encoding)
+        end = self._lsp_to_byte_offset(value.end, encoding)
+        if end < start:
+            raise ValueError("range end must not precede range start")
+        return PositionRange(start, end)
+
+    def _lsp_to_byte_offset(
+        self, position: LspPosition, encoding: PositionEncoding
+    ) -> int:
+        if position.line >= len(self.line_spans):
+            raise ValueError("line is outside the document")
+        start, end = self.line_spans[position.line]
+        text = self.content[start:end].decode("utf-8")
+        units = 0
+        byte_offset = 0
+        boundaries = {0: 0}
+        for character in text:
+            byte_offset += len(character.encode("utf-8"))
+            if encoding is PositionEncoding.UTF8:
+                units = byte_offset
+            elif encoding is PositionEncoding.UTF16:
+                units += len(character.encode("utf-16-le")) // 2
+            else:
+                units += 1
+            boundaries[units] = byte_offset
+        try:
+            relative = boundaries[position.character]
+        except KeyError as exc:
+            raise ValueError("character is not a valid code-unit boundary") from exc
+        return start + relative
+
+
+def path_to_file_uri(path: Path) -> str:
+    """Convert an absolute POSIX, drive, or UNC path to a normalized file URI."""
+    if not isinstance(path, (PurePosixPath, PureWindowsPath)):
+        raise TypeError("path must be a pathlib path")
+    raw = str(path)
+    if "\0" in raw:
+        raise ValueError("path must not contain NUL")
+    if not path.is_absolute():
+        raise ValueError("path must be absolute")
+
+    if isinstance(path, PureWindowsPath):
+        if path.drive.startswith("\\\\"):
+            server, share = path.drive[2:].split("\\", 1)
+            tail = "/".join(path.parts[1:])
+            uri_path = "/" + quote(share + ("/" + tail if tail else ""), safe="/")
+            return f"file://{quote(server, safe='-._~[]:')}{uri_path}"
+        if not _WINDOWS_DRIVE.fullmatch(path.drive):
+            raise ValueError("Windows path must use a drive letter or UNC share")
+        normalized = path.as_posix()
+        normalized = path.drive[0].upper() + normalized[1:]
+        return "file:///" + quote(normalized, safe="/:")
+
+    return "file://" + quote(path.as_posix(), safe="/")
+
+
+def file_uri_to_path(uri: str) -> Path:
+    """Convert a validated file URI to a local path without containment checks."""
+    if not isinstance(uri, str):
+        raise TypeError("uri must be a string")
+    if not uri or any(ord(character) < 32 for character in uri):
+        raise ValueError("uri must not contain control characters")
+    if _MALFORMED_PERCENT.search(uri):
+        raise ValueError("uri contains malformed percent encoding")
+
+    parsed = urlsplit(uri)
+    if parsed.scheme.lower() != "file":
+        raise ValueError("uri must use the file scheme")
+    if parsed.query or parsed.fragment:
+        raise ValueError("file uri must not contain a query or fragment")
+
+    try:
+        authority = unquote_to_bytes(parsed.netloc).decode("utf-8", errors="strict")
+        decoded_path = unquote_to_bytes(parsed.path).decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ValueError("file uri must contain valid UTF-8") from exc
+    if "\0" in authority or "\0" in decoded_path:
+        raise ValueError("file uri must not contain NUL")
+
+    if authority and authority.lower() != "localhost":
+        if not decoded_path.startswith("/"):
+            raise ValueError("UNC file uri path must be absolute")
+        return Path("\\\\" + authority + decoded_path.replace("/", "\\"))
+
+    drive_match = re.match(r"^/([A-Za-z]):(?:/|$)", decoded_path)
+    if drive_match:
+        normalized = drive_match.group(1).upper() + decoded_path[2:]
+        return Path(normalized.replace("/", "\\"))
+    if not decoded_path.startswith("/"):
+        raise ValueError("file uri path must be absolute")
+    return Path(decoded_path)
