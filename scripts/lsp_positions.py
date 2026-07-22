@@ -6,9 +6,10 @@ import hashlib
 import os
 import re
 from bisect import bisect_right
+from collections import OrderedDict
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import PurePath, PurePosixPath, PureWindowsPath
+from threading import Lock
 from urllib.parse import quote, unquote_to_bytes, urlsplit
 
 from code_intelligence import PositionEncoding, PositionRange
@@ -85,16 +86,21 @@ class _LineBoundaryIndex:
     utf32_offsets: tuple[int, ...]
 
 
-@lru_cache(maxsize=_BOUNDARY_INDEX_CACHE_LINES)
-def _line_boundary_index(line: bytes) -> _LineBoundaryIndex:
+_LINE_BOUNDARY_INDEXES: OrderedDict[tuple[str, int], _LineBoundaryIndex] = OrderedDict()
+_LINE_BOUNDARY_CACHE_LOCK = Lock()
+
+
+def _build_line_boundary_index(
+    content: bytes, start: int, end: int
+) -> _LineBoundaryIndex:
     byte_offsets = [0]
     utf16_offsets = [0]
     utf32_offsets = [0]
     byte_offset = 0
     utf16_offset = 0
     utf32_offset = 0
-    while byte_offset < len(line):
-        width = _utf8_code_point_width(line[byte_offset])
+    while start + byte_offset < end:
+        width = _utf8_code_point_width(content[start + byte_offset])
         byte_offset += width
         utf16_offset += 2 if width == 4 else 1
         utf32_offset += 1
@@ -109,6 +115,31 @@ def _line_boundary_index(line: bytes) -> _LineBoundaryIndex:
     return _LineBoundaryIndex(
         tuple(byte_offsets), tuple(utf16_offsets), tuple(utf32_offsets)
     )
+
+
+def _line_boundary_index(
+    source_sha256: str,
+    line_number: int,
+    content: bytes,
+    start: int,
+    end: int,
+) -> _LineBoundaryIndex:
+    key = (source_sha256, line_number)
+    with _LINE_BOUNDARY_CACHE_LOCK:
+        index = _LINE_BOUNDARY_INDEXES.get(key)
+        if index is not None:
+            _LINE_BOUNDARY_INDEXES.move_to_end(key)
+            return index
+        index = _build_line_boundary_index(content, start, end)
+        _LINE_BOUNDARY_INDEXES[key] = index
+        if len(_LINE_BOUNDARY_INDEXES) > _BOUNDARY_INDEX_CACHE_LINES:
+            _LINE_BOUNDARY_INDEXES.popitem(last=False)
+        return index
+
+
+def _clear_line_boundary_cache() -> None:
+    with _LINE_BOUNDARY_CACHE_LOCK:
+        _LINE_BOUNDARY_INDEXES.clear()
 
 
 def _utf8_code_point_width(first_byte: int) -> int:
@@ -217,8 +248,10 @@ class SourceDocument:
         if position.line >= len(self.line_spans):
             raise ValueError("line is outside the document")
         start, end = self.line_spans[position.line]
-        line = self.content[start:end]
-        index = _line_boundary_index(line)
+        line_length = end - start
+        index = _line_boundary_index(
+            self.source_sha256, position.line, self.content, start, end
+        )
 
         if encoding is PositionEncoding.UTF8:
             offsets = index.byte_offsets
@@ -231,7 +264,7 @@ class SourceDocument:
         utf16_offset = index.utf16_offsets[checkpoint]
         utf32_offset = index.utf32_offsets[checkpoint]
 
-        while byte_offset < len(line):
+        while byte_offset < line_length:
             if encoding is PositionEncoding.UTF8:
                 units = byte_offset
             elif encoding is PositionEncoding.UTF16:
@@ -240,7 +273,7 @@ class SourceDocument:
                 units = utf32_offset
             if units >= position.character:
                 break
-            width = _utf8_code_point_width(line[byte_offset])
+            width = _utf8_code_point_width(self.content[start + byte_offset])
             byte_offset += width
             utf16_offset += 2 if width == 4 else 1
             utf32_offset += 1
