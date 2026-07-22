@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import math
 import os
 import re
 import stat
@@ -85,11 +86,17 @@ def _canonical_hash(value: object) -> str:
 
 
 def _check_stop(deadline: float | None, cancelled: Callable[[], bool] | None) -> None:
-    if bool(cancelled and cancelled()):
+    if deadline is not None and (
+        isinstance(deadline, bool)
+        or not isinstance(deadline, (int, float))
+        or not math.isfinite(deadline)
+    ):
+        raise ValueError("deadline must be a finite monotonic timestamp or None")
+    if cancelled is not None and not callable(cancelled):
+        raise TypeError("cancelled must be callable or None")
+    if cancelled is not None and cancelled():
         raise TimeoutError("repository code capture cancelled")
     if deadline is not None:
-        if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
-            raise ValueError("deadline must be a monotonic timestamp")
         if time.monotonic() >= deadline:
             raise TimeoutError("repository code capture deadline reached")
 
@@ -886,6 +893,7 @@ def validate_code_capture(value: object) -> dict[str, object]:
     if value["membership_sha256"] != membership:
         raise ValueError("code_capture membership_sha256 is not canonical")
     contract = CodeCaptureContract(policy, limits, tuple(files), tuple(directories), membership)
+    _validate_snapshot_topology(contract)
     normalized = code_capture_as_dict(contract)
     if value != normalized:
         raise ValueError("code_capture must use canonical values")
@@ -904,10 +912,13 @@ def collect_repository_code(
     cancelled: Callable[[], bool] | None = None,
 ) -> CorpusSnapshot:
     """Capture exact repository bytes and a complete bounded membership contract."""
+    _check_stop(deadline, cancelled)
     if not isinstance(limits, RepositoryCodeLimits):
         raise TypeError("limits must be RepositoryCodeLimits")
     with _hold_capture_root(Path(checkout_root)) as (root, root_anchor):
-        resolve_repository_scope(root)
+        _check_stop(deadline, cancelled)
+        resolve_repository_scope(root, deadline=deadline, cancelled=cancelled)
+        _check_stop(deadline, cancelled)
         selected_policy = _policy(roots, include_globs, ignore_globs, suffixes)
         return _collect_repository_code_from_root(
             root,
@@ -1218,8 +1229,7 @@ def _validated_snapshot_entries(
     try:
         validate_code_capture(code_capture_as_dict(snapshot.code_capture))
     except (TypeError, ValueError) as exc:
-        raise ValueError("snapshot code capture contract is invalid") from exc
-    _validate_snapshot_topology(snapshot.code_capture)
+        raise ValueError(f"snapshot code capture contract is invalid: {exc}") from exc
     source_entries = []
     capture_entries = []
     for source in snapshot.sources:
@@ -1270,8 +1280,15 @@ def _validate_snapshot_topology(contract: CodeCaptureContract) -> None:
     folded_files = {item.relative_path.casefold(): item.relative_path for item in contract.files}
     if set(folded_directories) & set(folded_files):
         raise ValueError("snapshot code capture topology has a file/directory collision")
-    if any(root not in directory_rows for root in contract.policy.roots):
-        raise ValueError("snapshot code capture topology omits a selected root")
+    file_rows = {item.relative_path for item in contract.files}
+    if any(
+        root not in directory_rows and root not in file_rows
+        for root in contract.policy.roots
+    ):
+        raise ValueError(
+            "snapshot code capture topology has missing source membership "
+            "for a selected root"
+        )
 
     def selected_root(path: str) -> str:
         roots = tuple(
@@ -1299,6 +1316,8 @@ def _validate_snapshot_topology(contract: CodeCaptureContract) -> None:
     for item in contract.files:
         path = item.relative_path
         root = selected_root(path)
+        if path == root:
+            continue
         parent = str(PurePosixPath(path).parent)
         if parent not in directory_rows:
             raise ValueError("snapshot code capture topology omits a file parent")
@@ -1648,10 +1667,27 @@ def _verify_descriptor_file(
         raise WorkspaceChanged("sealed workspace file content changed")
 
 
+def _posix_member_identity(
+    name: str, metadata: os.stat_result
+) -> tuple[str, str, int, int, int, int, int, int]:
+    if metadata.st_dev <= 0 or metadata.st_ino <= 0:
+        raise WorkspaceChanged("sealed workspace member identity is unavailable")
+    return (
+        name,
+        _kind(metadata),
+        metadata.st_dev,
+        metadata.st_ino,
+        stat.S_IFMT(metadata.st_mode),
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
 def _posix_directory_members(
     directory_fd: int, max_entries: int
-) -> tuple[tuple[str, str], ...]:
-    entries: list[tuple[str, str]] = []
+) -> tuple[tuple[str, str, int, int, int, int, int, int], ...]:
+    entries: list[tuple[str, str, int, int, int, int, int, int]] = []
     count = 0
     with os.scandir(directory_fd) as iterator:
         for entry in iterator:
@@ -1661,7 +1697,7 @@ def _posix_directory_members(
             metadata = os.stat(
                 entry.name, dir_fd=directory_fd, follow_symlinks=False
             )
-            entries.append((entry.name, _kind(metadata)))
+            entries.append(_posix_member_identity(entry.name, metadata))
     return tuple(sorted(entries))
 
 
@@ -1710,7 +1746,7 @@ def _verify_posix(
                 if directory_fd != root_fd:
                     os.close(directory_fd)
                 continue
-            entry_name, entry_kind = entries[index]
+            entry_name = entries[index][0]
             frame[4] = index + 1
             _verify_component_barrier(entry_name)
             metadata = os.stat(
@@ -1718,8 +1754,8 @@ def _verify_posix(
             )
             if _is_unsafe(metadata):
                 raise WorkspaceChanged("sealed workspace member became a link")
-            if _kind(metadata) != entry_kind:
-                raise WorkspaceChanged("sealed workspace member kind changed")
+            if _posix_member_identity(entry_name, metadata) != entries[index]:
+                raise WorkspaceChanged("sealed workspace member identity changed")
             relative_parts = (*prefix, entry_name)
             relative = "/".join(relative_parts)
             if stat.S_ISDIR(metadata.st_mode):

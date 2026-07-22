@@ -4,10 +4,13 @@ import dataclasses
 import hashlib
 import inspect
 import json
+import math
 import os
 import stat
 import subprocess
 import threading
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -53,6 +56,81 @@ def test_collect_repository_code_has_exact_keyword_only_api() -> None:
         "suffixes": "tuple[str,...]",
     }
     assert str(parameters["limits"].annotation) == "RepositoryCodeLimits"
+
+
+@pytest.mark.parametrize("deadline", (True, math.nan, math.inf, -math.inf, "later"))
+def test_capture_rejects_invalid_deadline_before_root_acquisition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, deadline
+) -> None:
+    import code_workspace
+
+    def forbidden_root(_path):
+        raise AssertionError("invalid deadline must fail before root acquisition")
+
+    monkeypatch.setattr(code_workspace, "_hold_capture_root", forbidden_root)
+
+    with pytest.raises(ValueError, match="finite monotonic"):
+        _capture(tmp_path, deadline=deadline)
+
+
+@pytest.mark.parametrize("mode", ("cancelled", "expired"))
+def test_stopped_capture_does_not_acquire_root_or_resolve_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    import code_workspace
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("stopped capture must not perform setup")
+
+    monkeypatch.setattr(code_workspace, "_hold_capture_root", forbidden)
+    monkeypatch.setattr(code_workspace, "resolve_repository_scope", forbidden)
+    options = (
+        {"cancelled": lambda: True}
+        if mode == "cancelled"
+        else {"deadline": time.monotonic() - 1}
+    )
+
+    with pytest.raises(TimeoutError, match="cancelled|deadline"):
+        _capture(tmp_path, **options)
+
+
+def test_capture_forwards_stop_controls_and_rechecks_after_scope_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import code_workspace
+
+    root = tmp_path / "repository"
+    _write(root / "src/app.py", b"answer = 42\n")
+    started = time.monotonic()
+    deadline = started + 5
+    ticks = iter((started, started, deadline + 1))
+    received = {}
+
+    def cancelled() -> bool:
+        return False
+
+    @contextmanager
+    def held_root(path: Path):
+        assert path == root
+        yield root, 123
+
+    def resolve(path: Path, **kwargs):
+        received.update(kwargs)
+        assert path == root
+        return object()
+
+    def forbidden_traversal(*_args, **_kwargs):
+        raise AssertionError("expired setup must abort before traversal")
+
+    monkeypatch.setattr(code_workspace, "_hold_capture_root", held_root)
+    monkeypatch.setattr(code_workspace, "resolve_repository_scope", resolve)
+    monkeypatch.setattr(code_workspace, "_collect_repository_code_from_root", forbidden_traversal)
+    monkeypatch.setattr(code_workspace.time, "monotonic", lambda: next(ticks))
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        _capture(root, deadline=deadline, cancelled=cancelled)
+
+    assert received == {"deadline": deadline, "cancelled": cancelled}
 
 
 def test_repository_contracts_are_frozen_slotted_normalized_and_deterministic(
@@ -197,6 +275,53 @@ def test_membership_hash_changes_for_every_file_contract_field(tmp_path: Path) -
             target["stat"][field] = value
         with pytest.raises(ValueError):
             validate_code_capture(damaged)
+
+
+@pytest.mark.parametrize(
+    "damage", ("empty-directories", "orphan", "missing-parent", "over-depth")
+)
+def test_validate_code_capture_rejects_impossible_topology(
+    tmp_path: Path, damage: str
+) -> None:
+    import copy
+
+    import code_workspace
+
+    root = tmp_path / "repository"
+    _write(root / "src/pkg/deep/app.py", b"answer = 42\n")
+    capture = code_workspace.code_capture_as_dict(
+        _capture(
+            root, limits=code_workspace.RepositoryCodeLimits(max_depth=8)
+        ).code_capture
+    )
+    damaged = copy.deepcopy(capture)
+    if damage == "empty-directories":
+        damaged["directories"] = []
+    elif damage == "orphan":
+        damaged["directories"].append(
+            {
+                "relative_path": "src/orphan/deep",
+                "entry_count": 0,
+                "entries_sha256": "0" * 64,
+            }
+        )
+        damaged["directories"].sort(key=lambda item: item["relative_path"])
+    elif damage == "missing-parent":
+        damaged["directories"] = [
+            item
+            for item in damaged["directories"]
+            if item["relative_path"] != "src/pkg"
+        ]
+    else:
+        damaged["limits"]["max_depth"] = 1
+    damaged["membership_sha256"] = hashlib.sha256(
+        canonical_json_bytes(
+            {"files": damaged["files"], "directories": damaged["directories"]}
+        )
+    ).hexdigest()
+
+    with pytest.raises(ValueError, match="topology"):
+        code_workspace.validate_code_capture(damaged)
 
 
 def test_capture_filters_suffix_include_ignore_and_always_ignored_directories(
@@ -1403,6 +1528,37 @@ def test_posix_verification_rechecks_child_frame_before_root_final_scan(
 
     assert changed
     assert root_scans == 1
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor-relative verification only")
+def test_posix_parent_frame_rejects_same_shaped_child_tree_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import code_workspace
+
+    repository = tmp_path / "repository"
+    _write(repository / "src/app.py", b"answer = 42\n")
+    _write(repository / "trigger/z.py", b"z = 1\n")
+    snapshot = _capture(repository, roots=("src", "trigger"))
+    workspace = code_workspace.seal_workspace(snapshot, tmp_path / "sealed")
+    replacement = tmp_path / "replacement-src"
+    displaced = tmp_path / "displaced-src"
+    _write(replacement / "app.py", b"answer = 42\n")
+    swapped = False
+
+    def swap_verified_child(component: str) -> None:
+        nonlocal swapped
+        if component == "trigger" and not swapped:
+            (workspace.root / "src").rename(displaced)
+            replacement.rename(workspace.root / "src")
+            swapped = True
+
+    monkeypatch.setattr(code_workspace, "_verify_component_barrier", swap_verified_child)
+
+    with pytest.raises(code_workspace.WorkspaceChanged, match="identity|membership|changed"):
+        code_workspace.verify_workspace_seal(workspace, snapshot)
+
+    assert swapped
 
 
 def test_verification_directory_limit_excludes_synthetic_workspace_root(
