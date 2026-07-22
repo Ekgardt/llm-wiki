@@ -6,6 +6,7 @@ from dataclasses import FrozenInstanceError, fields
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import get_type_hints
 
+import lsp_positions
 import pytest
 from code_intelligence import PositionEncoding, PositionRange
 from lsp_positions import (
@@ -36,6 +37,15 @@ def test_source_anchor_has_exact_contract_fields() -> None:
         "line",
         "utf8_character",
         "byte_offset",
+    )
+
+
+def test_source_document_has_exact_contract_fields() -> None:
+    assert tuple(field.name for field in fields(SourceDocument)) == (
+        "path",
+        "content",
+        "source_sha256",
+        "line_spans",
     )
 
 
@@ -170,19 +180,10 @@ def test_lsp_range_rejects_out_of_range_positions() -> None:
         )
 
 
-def test_repeated_large_line_ranges_reuse_sparse_boundary_index(monkeypatch) -> None:
-    original = SourceDocument._build_line_boundary_index
-    builds = 0
-
-    def counted(line: bytes):
-        nonlocal builds
-        builds += 1
-        return original(line)
-
-    monkeypatch.setattr(
-        SourceDocument, "_build_line_boundary_index", staticmethod(counted)
-    )
-    document = SourceDocument.from_bytes("large.py", ("a😀" * 10_000).encode())
+def test_repeated_large_line_ranges_reuse_sparse_boundary_index() -> None:
+    lsp_positions._line_boundary_index.cache_clear()
+    line = ("a😀" * 10_000).encode()
+    document = SourceDocument.from_bytes("large.py", line)
     value = LspRange(LspPosition(0, 15_000), LspPosition(0, 15_003))
 
     for _ in range(100):
@@ -190,13 +191,16 @@ def test_repeated_large_line_ranges_reuse_sparse_boundary_index(monkeypatch) -> 
             25_000, 25_005
         )
 
-    assert builds == 1
-    index = document._line_boundary_indexes[0]
+    cache = lsp_positions._line_boundary_index.cache_info()
+    assert (cache.misses, cache.hits) == (1, 199)
+    index = lsp_positions._line_boundary_index(line)
     assert len(index.byte_offsets) <= 10_000 // 100
 
 
 def test_line_boundary_cache_has_fixed_line_limit() -> None:
-    document = SourceDocument.from_bytes("many-lines.py", b"x\n" * 200)
+    lsp_positions._line_boundary_index.cache_clear()
+    content = b"\n".join(str(line).encode() for line in range(200))
+    document = SourceDocument.from_bytes("many-lines.py", content)
 
     for line in range(200):
         position = LspPosition(line, 0)
@@ -204,7 +208,9 @@ def test_line_boundary_cache_has_fixed_line_limit() -> None:
             LspRange(position, position), PositionEncoding.UTF16
         )
 
-    assert len(document._line_boundary_indexes) <= 128
+    cache = lsp_positions._line_boundary_index.cache_info()
+    assert cache.maxsize == 128
+    assert cache.currsize <= 128
 
 
 def test_file_uri_round_trips_windows_drive_case_space_and_unicode() -> None:

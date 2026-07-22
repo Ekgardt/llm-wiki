@@ -6,8 +6,8 @@ import hashlib
 import os
 import re
 from bisect import bisect_right
-from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import PurePath, PurePosixPath, PureWindowsPath
 from urllib.parse import quote, unquote_to_bytes, urlsplit
 
@@ -85,15 +85,48 @@ class _LineBoundaryIndex:
     utf32_offsets: tuple[int, ...]
 
 
+@lru_cache(maxsize=_BOUNDARY_INDEX_CACHE_LINES)
+def _line_boundary_index(line: bytes) -> _LineBoundaryIndex:
+    byte_offsets = [0]
+    utf16_offsets = [0]
+    utf32_offsets = [0]
+    byte_offset = 0
+    utf16_offset = 0
+    utf32_offset = 0
+    while byte_offset < len(line):
+        width = _utf8_code_point_width(line[byte_offset])
+        byte_offset += width
+        utf16_offset += 2 if width == 4 else 1
+        utf32_offset += 1
+        if utf32_offset % _BOUNDARY_CHECKPOINT_STRIDE == 0:
+            byte_offsets.append(byte_offset)
+            utf16_offsets.append(utf16_offset)
+            utf32_offsets.append(utf32_offset)
+    if byte_offsets[-1] != byte_offset:
+        byte_offsets.append(byte_offset)
+        utf16_offsets.append(utf16_offset)
+        utf32_offsets.append(utf32_offset)
+    return _LineBoundaryIndex(
+        tuple(byte_offsets), tuple(utf16_offsets), tuple(utf32_offsets)
+    )
+
+
+def _utf8_code_point_width(first_byte: int) -> int:
+    if first_byte < 0x80:
+        return 1
+    if first_byte < 0xE0:
+        return 2
+    if first_byte < 0xF0:
+        return 3
+    return 4
+
+
 @dataclass(frozen=True, slots=True)
 class SourceDocument:
     path: str
     content: bytes
     source_sha256: str
     line_spans: tuple[tuple[int, int], ...]
-    _line_boundary_indexes: OrderedDict[int, _LineBoundaryIndex] = field(
-        default_factory=OrderedDict, init=False, repr=False, compare=False
-    )
 
     def __post_init__(self) -> None:
         _require_path(self.path)
@@ -185,14 +218,7 @@ class SourceDocument:
             raise ValueError("line is outside the document")
         start, end = self.line_spans[position.line]
         line = self.content[start:end]
-        index = self._line_boundary_indexes.get(position.line)
-        if index is None:
-            index = self._build_line_boundary_index(line)
-            self._line_boundary_indexes[position.line] = index
-            if len(self._line_boundary_indexes) > _BOUNDARY_INDEX_CACHE_LINES:
-                self._line_boundary_indexes.popitem(last=False)
-        else:
-            self._line_boundary_indexes.move_to_end(position.line)
+        index = _line_boundary_index(line)
 
         if encoding is PositionEncoding.UTF8:
             offsets = index.byte_offsets
@@ -214,7 +240,7 @@ class SourceDocument:
                 units = utf32_offset
             if units >= position.character:
                 break
-            width = self._utf8_code_point_width(line[byte_offset])
+            width = _utf8_code_point_width(line[byte_offset])
             byte_offset += width
             utf16_offset += 2 if width == 4 else 1
             utf32_offset += 1
@@ -228,42 +254,6 @@ class SourceDocument:
         if units != position.character:
             raise ValueError("character is not a valid code-unit boundary")
         return start + byte_offset
-
-    @staticmethod
-    def _build_line_boundary_index(line: bytes) -> _LineBoundaryIndex:
-        byte_offsets = [0]
-        utf16_offsets = [0]
-        utf32_offsets = [0]
-        byte_offset = 0
-        utf16_offset = 0
-        utf32_offset = 0
-        while byte_offset < len(line):
-            width = SourceDocument._utf8_code_point_width(line[byte_offset])
-            byte_offset += width
-            utf16_offset += 2 if width == 4 else 1
-            utf32_offset += 1
-            if utf32_offset % _BOUNDARY_CHECKPOINT_STRIDE == 0:
-                byte_offsets.append(byte_offset)
-                utf16_offsets.append(utf16_offset)
-                utf32_offsets.append(utf32_offset)
-        if byte_offsets[-1] != byte_offset:
-            byte_offsets.append(byte_offset)
-            utf16_offsets.append(utf16_offset)
-            utf32_offsets.append(utf32_offset)
-        return _LineBoundaryIndex(
-            tuple(byte_offsets), tuple(utf16_offsets), tuple(utf32_offsets)
-        )
-
-    @staticmethod
-    def _utf8_code_point_width(first_byte: int) -> int:
-        if first_byte < 0x80:
-            return 1
-        if first_byte < 0xE0:
-            return 2
-        if first_byte < 0xF0:
-            return 3
-        return 4
-
 
 def path_to_file_uri(path: PurePath) -> str:
     """Convert an absolute POSIX, drive, or UNC path to a normalized file URI."""
