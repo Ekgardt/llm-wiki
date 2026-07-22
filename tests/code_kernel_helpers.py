@@ -59,8 +59,13 @@ from repository_scope import sanitized_git_environment
 FIXTURE_ROOT = Path(__file__).parent / "fixtures/code_kernel/python"
 
 
-def create_python_repository(destination: Path) -> Path:
+def copy_python_fixture(destination: Path) -> Path:
     shutil.copytree(FIXTURE_ROOT, destination)
+    return destination
+
+
+def create_python_repository(destination: Path) -> Path:
+    copy_python_fixture(destination)
     environment = sanitized_git_environment()
     for name in tuple(environment):
         if name in {"GIT_DEFAULT_HASH", "GIT_TEMPLATE_DIR"} or name.startswith(

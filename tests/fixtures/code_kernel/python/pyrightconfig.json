@@ -1,0 +1,4 @@
+{
+  "include": ["pkg", "tests"],
+  "typeCheckingMode": "basic"
+}

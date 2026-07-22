@@ -1,0 +1,450 @@
+"""Live Git and non-Git workspace revision contracts."""
+
+from __future__ import annotations
+
+import inspect
+import os
+import subprocess
+import time
+import unicodedata
+from dataclasses import fields
+from pathlib import Path
+
+import pytest
+import workspace_revision
+from repository_scope import resolve_repository_scope
+from workspace_revision import (
+    MAX_REVISION_BYTES,
+    MAX_REVISION_FILES,
+    PYTHON_CONFIG_NAMES,
+    RevisionEntry,
+    WorkspaceDelta,
+    WorkspaceRevision,
+    compute_workspace_revision,
+    diff_workspace_revisions,
+)
+
+from tests.code_kernel_helpers import copy_python_fixture
+
+
+def _entries(revision: WorkspaceRevision) -> dict[str, RevisionEntry]:
+    return {entry.path: entry for entry in revision.entries}
+
+
+def test_public_contract_has_exact_constants_dataclass_fields_and_signatures() -> None:
+    assert PYTHON_CONFIG_NAMES == frozenset(
+        {
+            ".python-version",
+            "Pipfile",
+            "Pipfile.lock",
+            "poetry.lock",
+            "pyproject.toml",
+            "pyrightconfig.json",
+            "setup.cfg",
+            "tox.ini",
+            "uv.lock",
+        }
+    )
+    assert MAX_REVISION_FILES == 100_000
+    assert MAX_REVISION_BYTES == 2 * 1024 * 1024 * 1024
+    assert [field.name for field in fields(RevisionEntry)] == ["path", "kind", "sha256", "size"]
+    assert [field.name for field in fields(WorkspaceRevision)] == [
+        "repository_id",
+        "checkout_id",
+        "git_head",
+        "entries",
+        "revision_sha256",
+    ]
+    assert [field.name for field in fields(WorkspaceDelta)] == [
+        "created",
+        "changed",
+        "renamed",
+        "deleted",
+        "configuration_changed",
+    ]
+    assert RevisionEntry.__dataclass_params__.frozen
+    assert WorkspaceRevision.__dataclass_params__.frozen
+    assert WorkspaceDelta.__dataclass_params__.frozen
+    assert RevisionEntry.__slots__ == ("path", "kind", "sha256", "size")
+    assert str(inspect.signature(compute_workspace_revision)) == (
+        "(repository: 'RepositoryScope', *, deadline: 'float | None' = None, "
+        "cancelled: 'Callable[[], bool] | None' = None) -> 'WorkspaceRevision'"
+    )
+    assert str(inspect.signature(diff_workspace_revisions)) == (
+        "(before: 'WorkspaceRevision', after: 'WorkspaceRevision') -> 'WorkspaceDelta'"
+    )
+
+
+def test_revision_changes_for_dirty_untracked_deleted_and_config(repository: Path) -> None:
+    scope = resolve_repository_scope(repository)
+    before = compute_workspace_revision(scope)
+    (repository / "pkg/api.py").write_text("class Changed:\n    pass\n", encoding="utf-8")
+    (repository / "pkg/new.py").write_text("value = 1\n", encoding="utf-8")
+    (repository / "pkg/base.py").unlink()
+    (repository / "pyrightconfig.json").write_text(
+        '{"typeCheckingMode":"strict"}', encoding="utf-8"
+    )
+
+    after = compute_workspace_revision(scope)
+
+    assert after.revision_sha256 != before.revision_sha256
+    assert {item.kind for item in after.entries} >= {
+        "modified",
+        "untracked",
+        "deleted",
+        "configuration",
+    }
+    assert _entries(after)["pkg/base.py"] == RevisionEntry("pkg/base.py", "deleted", None, 0)
+    delta = diff_workspace_revisions(before, after)
+    assert delta.created == ("pkg/new.py",)
+    assert delta.changed == ("pkg/api.py", "pyrightconfig.json")
+    assert delta.deleted == ("pkg/base.py",)
+    assert delta.configuration_changed is True
+
+
+def test_delta_detects_content_identical_rename(repository: Path) -> None:
+    scope = resolve_repository_scope(repository)
+    before = compute_workspace_revision(scope)
+    (repository / "pkg/rename_target.py").rename(repository / "pkg/renamed.py")
+
+    after = compute_workspace_revision(scope)
+    delta = diff_workspace_revisions(before, after)
+
+    assert delta.renamed == (("pkg/rename_target.py", "pkg/renamed.py"),)
+    assert delta.created == ()
+    assert delta.deleted == ()
+
+
+def test_ambiguous_content_matches_remain_created_and_deleted(repository: Path) -> None:
+    scope = resolve_repository_scope(repository)
+    original = repository / "pkg/rename_target.py"
+    duplicate = repository / "pkg/rename_duplicate.py"
+    duplicate.write_bytes(original.read_bytes())
+    subprocess.run(["git", "add", "."], cwd=repository, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "duplicate"], cwd=repository, check=True, capture_output=True
+    )
+    scope = resolve_repository_scope(repository)
+    before = compute_workspace_revision(scope)
+    original.unlink()
+    duplicate.unlink()
+    first = repository / "pkg/renamed_a.py"
+    second = repository / "pkg/renamed_b.py"
+    first.write_text('RENAME_VALUE = "stable"\n', encoding="utf-8")
+    second.write_bytes(first.read_bytes())
+
+    delta = diff_workspace_revisions(before, compute_workspace_revision(scope))
+
+    assert delta.renamed == ()
+    assert delta.created == ("pkg/renamed_a.py", "pkg/renamed_b.py")
+    assert delta.deleted == ("pkg/rename_duplicate.py", "pkg/rename_target.py")
+
+
+def test_porcelain_type_two_marks_only_rename_sources_deleted() -> None:
+    metadata = b"R. N... 100644 100644 100644 " + b"a" * 40 + b" " + b"b" * 40
+    rename = b"2 " + metadata + b" R100 pkg/renamed.py\0pkg/original.py\0"
+    copy = b"2 " + metadata + b" C100 pkg/copied.py\0pkg/source.py\0"
+
+    assert workspace_revision._status_paths(rename) == [
+        ("pkg/original.py", "deleted"),
+        ("pkg/renamed.py", "modified"),
+    ]
+    assert workspace_revision._status_paths(copy) == [("pkg/copied.py", "modified")]
+
+
+def test_non_git_manifest_includes_only_sources_and_root_configs(tmp_path: Path) -> None:
+    root = copy_python_fixture(tmp_path / "plain")
+    (root / "pkg/types.pyi").write_text("value: int\n", encoding="utf-8")
+    (root / "requirements-dev.txt").write_text("pytest\n", encoding="utf-8")
+    (root / "notes.txt").write_text("not relevant\n", encoding="utf-8")
+    (root / "pkg/pyrightconfig.json").write_text("{}", encoding="utf-8")
+
+    revision = compute_workspace_revision(resolve_repository_scope(root))
+    paths = tuple(entry.path for entry in revision.entries)
+
+    assert revision.git_head is None
+    assert paths == tuple(sorted(paths))
+    assert "pkg/types.pyi" in paths
+    assert "pyproject.toml" in paths
+    assert "pyrightconfig.json" in paths
+    assert "requirements-dev.txt" in paths
+    assert "uv.lock" in paths
+    assert "notes.txt" not in paths
+    assert "pkg/pyrightconfig.json" not in paths
+    assert all(entry.kind in {"source", "configuration"} for entry in revision.entries)
+
+
+def test_all_relevant_root_configuration_names_are_in_deterministic_order(tmp_path: Path) -> None:
+    root = tmp_path / "plain"
+    root.mkdir()
+    for name in reversed(sorted(PYTHON_CONFIG_NAMES)):
+        (root / name).write_text(name, encoding="utf-8")
+    for name in ("requirements-z.txt", "requirements.txt", "requirements-a.txt"):
+        (root / name).write_text(name, encoding="utf-8")
+
+    first = compute_workspace_revision(resolve_repository_scope(root))
+    second = compute_workspace_revision(resolve_repository_scope(root))
+    expected = tuple(sorted((*PYTHON_CONFIG_NAMES, "requirements-a.txt", "requirements-z.txt", "requirements.txt")))
+
+    assert tuple(entry.path for entry in first.entries) == expected
+    assert all(entry.kind == "configuration" for entry in first.entries)
+    assert first == second
+
+
+def test_git_status_is_nul_bounded_noninteractive_and_uses_sanitized_environment(
+    repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scope = resolve_repository_scope(repository)
+    real_popen = subprocess.Popen
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    monkeypatch.setenv("GIT_DIR", str(repository.parent / "hostile.git"))
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.worktree")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(repository.parent))
+
+    def recording_popen(command, **kwargs):
+        calls.append((command, kwargs))
+        return real_popen(command, **kwargs)
+
+    monkeypatch.setattr(workspace_revision.subprocess, "Popen", recording_popen)
+
+    compute_workspace_revision(scope)
+
+    status_calls = [call for call in calls if "status" in call[0]]
+    assert len(status_calls) == 1
+    command, options = status_calls[0]
+    assert command == [
+        "git",
+        "-C",
+        scope.checkout_root,
+        "status",
+        "--porcelain=v2",
+        "-z",
+        "--untracked-files=all",
+    ]
+    assert options["stdin"] is subprocess.DEVNULL
+    assert options["stdout"] is subprocess.PIPE
+    assert options["stderr"] is subprocess.DEVNULL
+    assert options["shell"] is False
+    assert options["env"]["GIT_TERMINAL_PROMPT"] == "0"
+    assert options["env"]["GIT_OPTIONAL_LOCKS"] == "0"
+    assert "GIT_DIR" not in options["env"]
+    assert not any(name.startswith("GIT_CONFIG_") for name in options["env"])
+
+
+def test_git_status_output_is_read_to_a_fixed_ceiling_and_overflow_kills_process(
+    repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scope = resolve_repository_scope(repository)
+    reads: list[int] = []
+
+    class Output:
+        def read(self, size: int) -> bytes:
+            reads.append(size)
+            return b"x" * size
+
+        def close(self) -> None:
+            pass
+
+    class Process:
+        stdout = Output()
+        returncode = None
+        killed = False
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self):
+            if self.returncode is None:
+                self.returncode = 0
+            return self.returncode
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+    process = Process()
+    monkeypatch.setattr(workspace_revision, "MAX_GIT_STATUS_BYTES", 8)
+    monkeypatch.setattr(workspace_revision.subprocess, "Popen", lambda *args, **kwargs: process)
+
+    with pytest.raises(ValueError, match="Git status.*byte ceiling"):
+        compute_workspace_revision(scope)
+
+    assert reads == [9]
+    assert process.killed
+
+
+@pytest.mark.parametrize("stop", ["deadline", "cancelled"])
+def test_revision_honors_preflight_deadline_and_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str
+) -> None:
+    root = tmp_path / "plain"
+    root.mkdir()
+    scope = resolve_repository_scope(root)
+    probes = []
+    monkeypatch.setattr(workspace_revision.subprocess, "Popen", lambda *args, **kwargs: probes.append(args))
+    options = {"deadline": time.monotonic() - 1} if stop == "deadline" else {"cancelled": lambda: True}
+
+    with pytest.raises(TimeoutError, match="deadline|cancel"):
+        compute_workspace_revision(scope, **options)
+
+    assert probes == []
+
+
+def test_revision_checks_cancellation_during_manifest_hashing(tmp_path: Path) -> None:
+    root = tmp_path / "plain"
+    root.mkdir()
+    for index in range(4):
+        (root / f"{index}.py").write_text(str(index), encoding="utf-8")
+    calls = 0
+
+    def cancelled() -> bool:
+        nonlocal calls
+        calls += 1
+        return calls >= 4
+
+    with pytest.raises(TimeoutError, match="cancel"):
+        compute_workspace_revision(resolve_repository_scope(root), cancelled=cancelled)
+
+    assert calls == 4
+
+
+def test_revision_checks_cancellation_during_recursive_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "plain"
+    root.mkdir()
+    first = root / "first.py"
+    second = root / "second.py"
+    first.write_text("first", encoding="utf-8")
+    second.write_text("second", encoding="utf-8")
+    scope = resolve_repository_scope(root)
+    calls = 0
+
+    def cancelled() -> bool:
+        nonlocal calls
+        calls += 1
+        return False
+
+    def paths(_path: Path, _pattern: str):
+        yield first
+        if calls < 2:
+            raise AssertionError("recursive discovery did not check cancellation")
+        yield second
+
+    monkeypatch.setattr(Path, "rglob", paths)
+
+    compute_workspace_revision(scope, cancelled=cancelled)
+
+
+def test_revision_checks_cancellation_between_hash_chunks(tmp_path: Path) -> None:
+    root = tmp_path / "plain"
+    root.mkdir()
+    (root / "large.py").write_bytes(b"x" * (2 * 1024 * 1024))
+    calls = 0
+
+    def cancelled() -> bool:
+        nonlocal calls
+        calls += 1
+        return calls >= 5
+
+    with pytest.raises(TimeoutError, match="cancel"):
+        compute_workspace_revision(resolve_repository_scope(root), cancelled=cancelled)
+
+    assert calls == 5
+
+
+def test_git_status_uses_only_remaining_deadline_and_kills_blocked_process(
+    repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    scope = resolve_repository_scope(repository)
+    killed = threading.Event()
+
+    class Output:
+        def read(self, _size: int) -> bytes:
+            killed.wait(1)
+            return b""
+
+        def close(self) -> None:
+            pass
+
+    class Process:
+        stdout = Output()
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+            killed.set()
+
+    monkeypatch.setattr(workspace_revision.subprocess, "Popen", lambda *args, **kwargs: Process())
+    started = time.monotonic()
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        compute_workspace_revision(scope, deadline=started + 0.03)
+
+    assert time.monotonic() - started < 0.5
+    assert killed.is_set()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="distinct NFC-equivalent names require POSIX")
+def test_manifest_rejects_unicode_normalization_collisions(tmp_path: Path) -> None:
+    root = tmp_path / "plain"
+    root.mkdir()
+    composed = "caf\u00e9.py"
+    decomposed = unicodedata.normalize("NFD", composed)
+    (root / composed).write_text("one", encoding="utf-8")
+    (root / decomposed).write_text("two", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="normalization collision"):
+        compute_workspace_revision(resolve_repository_scope(root))
+
+
+def test_revision_enforces_file_count_ceiling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "plain"
+    root.mkdir()
+    (root / "a.py").write_text("a", encoding="utf-8")
+    (root / "b.py").write_text("b", encoding="utf-8")
+    monkeypatch.setattr(workspace_revision, "MAX_REVISION_FILES", 1)
+
+    with pytest.raises(ValueError, match="file-count ceiling"):
+        compute_workspace_revision(resolve_repository_scope(root))
+
+
+def test_revision_enforces_total_byte_ceiling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "plain"
+    root.mkdir()
+    (root / "a.py").write_bytes(b"123")
+    (root / "b.py").write_bytes(b"456")
+    monkeypatch.setattr(workspace_revision, "MAX_REVISION_BYTES", 5)
+
+    with pytest.raises(ValueError, match="byte ceiling"):
+        compute_workspace_revision(resolve_repository_scope(root))
+
+
+def test_revision_rejects_known_oversized_file_before_reading_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "plain"
+    root.mkdir()
+    oversized = root / "oversized.py"
+    oversized.write_bytes(b"123456")
+    monkeypatch.setattr(workspace_revision, "MAX_REVISION_BYTES", 5)
+    real_read_bytes = Path.read_bytes
+
+    def guarded_read_bytes(path: Path) -> bytes:
+        if path == oversized:
+            raise AssertionError("known oversized file must not be allocated")
+        return real_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+
+    with pytest.raises(ValueError, match="byte ceiling"):
+        compute_workspace_revision(resolve_repository_scope(root))

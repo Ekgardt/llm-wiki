@@ -1,0 +1,1 @@
+RENAME_VALUE = "stable"
