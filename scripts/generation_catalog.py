@@ -67,6 +67,48 @@ if os.name == "nt":
             ("file_index_low", wintypes.DWORD),
         )
 
+    class _UnicodeString(ctypes.Structure):
+        _fields_ = (
+            ("length", wintypes.USHORT),
+            ("maximum_length", wintypes.USHORT),
+            ("buffer", wintypes.LPWSTR),
+        )
+
+    class _ObjectAttributes(ctypes.Structure):
+        _fields_ = (
+            ("length", wintypes.ULONG),
+            ("root_directory", wintypes.HANDLE),
+            ("object_name", ctypes.POINTER(_UnicodeString)),
+            ("attributes", wintypes.ULONG),
+            ("security_descriptor", wintypes.LPVOID),
+            ("security_quality_of_service", wintypes.LPVOID),
+        )
+
+    class _IoStatusBlock(ctypes.Structure):
+        _fields_ = (
+            ("status", ctypes.c_ssize_t),
+            ("information", ctypes.c_size_t),
+        )
+
+    class _FileIdBothDirInfo(ctypes.Structure):
+        _fields_ = (
+            ("next_entry_offset", wintypes.DWORD),
+            ("file_index", wintypes.DWORD),
+            ("creation_time", ctypes.c_longlong),
+            ("last_access_time", ctypes.c_longlong),
+            ("last_write_time", ctypes.c_longlong),
+            ("change_time", ctypes.c_longlong),
+            ("end_of_file", ctypes.c_longlong),
+            ("allocation_size", ctypes.c_longlong),
+            ("file_attributes", wintypes.DWORD),
+            ("file_name_length", wintypes.DWORD),
+            ("ea_size", wintypes.DWORD),
+            ("short_name_length", ctypes.c_byte),
+            ("short_name", wintypes.WCHAR * 12),
+            ("file_id", ctypes.c_longlong),
+            ("file_name", wintypes.WCHAR * 1),
+        )
+
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _get_file_information_by_handle_ex = _kernel32.GetFileInformationByHandleEx
     _get_file_information_by_handle_ex.argtypes = (
@@ -96,6 +138,20 @@ if os.name == "nt":
     _close_handle = _kernel32.CloseHandle
     _close_handle.argtypes = (wintypes.HANDLE,)
     _close_handle.restype = wintypes.BOOL
+    _ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+    _nt_open_file = _ntdll.NtOpenFile
+    _nt_open_file.argtypes = (
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.DWORD,
+        ctypes.POINTER(_ObjectAttributes),
+        ctypes.POINTER(_IoStatusBlock),
+        wintypes.ULONG,
+        wintypes.ULONG,
+    )
+    _nt_open_file.restype = ctypes.c_long
+    _rtl_nt_status_to_dos_error = _ntdll.RtlNtStatusToDosError
+    _rtl_nt_status_to_dos_error.argtypes = (ctypes.c_long,)
+    _rtl_nt_status_to_dos_error.restype = wintypes.ULONG
 
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_ARTIFACTS = 1024
@@ -524,6 +580,141 @@ def _windows_handle_stat_identity(handle: int) -> tuple[int, int]:
     if volume <= 0 or file_index <= 0:
         raise OSError("Windows stable handle stat identity is unavailable")
     return volume, file_index
+
+
+def _windows_open_relative_handle(
+    parent_handle: int, name: str, *, directory: bool
+) -> int:
+    if os.name != "nt":
+        raise OSError("Windows relative handle open is unavailable")
+    if not name or name in {".", ".."} or "/" in name or "\\" in name:
+        raise ValueError("Windows relative handle name must be one path component")
+    name_buffer = ctypes.create_unicode_buffer(name)
+    name_bytes = len(name.encode("utf-16-le"))
+    object_name = _UnicodeString(
+        name_bytes,
+        name_bytes + 2,
+        ctypes.cast(name_buffer, wintypes.LPWSTR),
+    )
+    attributes = _ObjectAttributes(
+        ctypes.sizeof(_ObjectAttributes),
+        parent_handle,
+        ctypes.pointer(object_name),
+        0x00000040,  # OBJ_CASE_INSENSITIVE
+        None,
+        None,
+    )
+    io_status = _IoStatusBlock()
+    handle = wintypes.HANDLE()
+    desired_access = 0x00100000 | 0x00000080  # SYNCHRONIZE | FILE_READ_ATTRIBUTES
+    if directory:
+        desired_access |= 0x00000001  # FILE_LIST_DIRECTORY
+    else:
+        desired_access |= 0x80000000  # GENERIC_READ
+    open_options = (
+        0x00200000  # FILE_OPEN_REPARSE_POINT
+        | 0x00000020  # FILE_SYNCHRONOUS_IO_NONALERT
+        | (0x00000001 if directory else 0x00000040)  # DIRECTORY | NON_DIRECTORY
+    )
+    status = _nt_open_file(
+        ctypes.byref(handle),
+        desired_access,
+        ctypes.byref(attributes),
+        ctypes.byref(io_status),
+        0x00000001 | 0x00000002 | 0x00000004,
+        open_options,
+    )
+    if status < 0:
+        error = int(_rtl_nt_status_to_dos_error(status))
+        raise OSError(error, f"cannot open Windows relative path component: {name}")
+    value = int(handle.value)
+    try:
+        information = _ByHandleFileInformation()
+        if not _get_file_information_by_handle(value, ctypes.byref(information)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if information.file_attributes & 0x00000400:
+            raise PermissionError("Windows relative path component is a reparse point")
+        is_directory = bool(information.file_attributes & 0x00000010)
+        if is_directory != directory:
+            raise PermissionError("Windows relative path component has the wrong kind")
+    except BaseException:
+        _close_handle(value)
+        raise
+    return value
+
+
+def _windows_relative_file_descriptor(parent_handle: int, name: str) -> int:
+    handle = _windows_open_relative_handle(parent_handle, name, directory=False)
+    try:
+        descriptor = msvcrt.open_osfhandle(
+            handle, os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        )
+    except BaseException:
+        _close_handle(handle)
+        raise
+    try:
+        os.set_inheritable(descriptor, False)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _windows_list_directory(handle: int, *, max_entries: int) -> list[tuple[str, str]]:
+    if os.name != "nt":
+        raise OSError("Windows handle directory enumeration is unavailable")
+    if isinstance(max_entries, bool) or not isinstance(max_entries, int) or max_entries < 0:
+        raise ValueError("max_entries must be a non-negative integer")
+    entries: list[tuple[str, str]] = []
+    restart = True
+    buffer_size = 64 * 1024
+    name_offset = _FileIdBothDirInfo.file_name.offset
+    while True:
+        buffer = ctypes.create_string_buffer(buffer_size)
+        information_class = 11 if restart else 10
+        if not _get_file_information_by_handle_ex(
+            handle,
+            information_class,
+            ctypes.byref(buffer),
+            buffer_size,
+        ):
+            error = ctypes.get_last_error()
+            if error in {18, 38}:  # ERROR_NO_MORE_FILES | ERROR_HANDLE_EOF
+                break
+            raise ctypes.WinError(error)
+        offset = 0
+        while True:
+            information = _FileIdBothDirInfo.from_buffer(buffer, offset)
+            name_length = int(information.file_name_length)
+            if (
+                name_length <= 0
+                or name_length % 2
+                or offset + name_offset + name_length > buffer_size
+            ):
+                raise OSError("Windows directory enumeration returned invalid data")
+            name = ctypes.wstring_at(
+                ctypes.addressof(buffer) + offset + name_offset,
+                name_length // 2,
+            )
+            if name not in {".", ".."}:
+                attributes = int(information.file_attributes)
+                if attributes & 0x00000400:
+                    kind = "link"
+                elif attributes & 0x00000010:
+                    kind = "directory"
+                else:
+                    kind = "file"
+                entries.append((name, kind))
+                if len(entries) > max_entries:
+                    raise ValueError("repository code entry limit exceeded")
+            next_offset = int(information.next_entry_offset)
+            if next_offset == 0:
+                break
+            if next_offset < name_offset or offset + next_offset >= buffer_size:
+                raise OSError("Windows directory enumeration returned invalid offsets")
+            offset += next_offset
+        restart = False
+    return entries
 
 
 def _descriptor_file_identity(descriptor: int) -> tuple[object, ...]:

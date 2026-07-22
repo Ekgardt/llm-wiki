@@ -804,6 +804,71 @@ def test_windows_capture_rejects_unavailable_directory_handle_identity(
         _capture(root)
 
 
+@pytest.mark.parametrize("_attempt", range(20))
+def test_capture_rejects_directory_link_inserted_during_final_revalidation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _attempt: int
+) -> None:
+    import code_workspace
+
+    root = tmp_path / "repository"
+    target = root / "src/pkg"
+    moved = tmp_path / "moved"
+    source = target / "safe.py"
+    _write(source, b"safe = True\n")
+
+    real_read_candidate = code_workspace._read_candidate
+    real_read = code_workspace.os.read
+    initial_read_complete = False
+    replaced = False
+    reads_after_replacement = 0
+
+    def arm_after_initial_read(path, *args, **kwargs):
+        nonlocal initial_read_complete
+        result = real_read_candidate(path, *args, **kwargs)
+        if path == source and not initial_read_complete:
+            initial_read_complete = True
+        return result
+
+    def replace_before_final_revalidation(_root: Path) -> None:
+        nonlocal replaced
+        assert initial_read_complete
+        target.rename(moved)
+        if os.name == "nt":
+            result = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(target), str(moved)],
+                capture_output=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                pytest.skip("Windows junction creation is unavailable")
+        else:
+            try:
+                target.symlink_to(moved, target_is_directory=True)
+            except OSError:
+                pytest.skip("directory symlink creation is unavailable")
+        replaced = True
+
+    def track_read(descriptor: int, size: int) -> bytes:
+        nonlocal reads_after_replacement
+        if replaced:
+            reads_after_replacement += 1
+        return real_read(descriptor, size)
+
+    monkeypatch.setattr(code_workspace, "_read_candidate", arm_after_initial_read)
+    monkeypatch.setattr(
+        code_workspace,
+        "_capture_final_revalidation_barrier",
+        replace_before_final_revalidation,
+    )
+    monkeypatch.setattr(code_workspace.os, "read", track_read)
+    with pytest.raises((PermissionError, RuntimeError), match="directory|membership|source"):
+        _capture(root)
+
+    assert initial_read_complete
+    assert replaced
+    assert reads_after_replacement == 0
+
+
 def test_capture_rejects_unavailable_descriptor_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

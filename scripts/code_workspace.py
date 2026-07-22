@@ -263,6 +263,10 @@ def _capture_entry_identity_barrier(_path: Path) -> None:
     return
 
 
+def _capture_final_revalidation_barrier(_root: Path) -> None:
+    return
+
+
 def _capture_root_barrier(_root: Path) -> None:
     return
 
@@ -366,7 +370,7 @@ def _hold_capture_root(path: Path):
                     raise PermissionError("checkout root changed during canonicalization")
             finally:
                 os.close(named)
-            yield resolved
+            yield resolved, descriptor
             current = os.open(absolute, flags)
             try:
                 if held_identity != _descriptor_identity(current):
@@ -401,7 +405,7 @@ def _hold_capture_root(path: Path):
                     raise PermissionError("checkout root changed during canonicalization")
             finally:
                 _close_windows_handle(named)
-            yield resolved
+            yield resolved, handle
             current_handle = _open_windows_directory(absolute)
             try:
                 if held_identity != _windows_handle_file_identity(current_handle):
@@ -519,6 +523,146 @@ def _entry_identity(path: Path, info: os.stat_result) -> tuple[object, ...] | No
         finally:
             os.close(descriptor)
     return None
+
+
+@contextmanager
+def _open_captured_directory(
+    root_anchor: int,
+    relative_path: str,
+    captured_identities: dict[str, tuple[object, ...]],
+):
+    parts = () if relative_path in {"", "."} else PurePosixPath(relative_path).parts
+    opened: list[int] = []
+    current = root_anchor
+    try:
+        if not parts:
+            expected = captured_identities.get(".")
+            if expected is not None:
+                if os.name == "posix":
+                    identity = _descriptor_identity(current)
+                elif os.name == "nt":
+                    from generation_catalog import _windows_handle_file_identity
+
+                    identity = _windows_handle_file_identity(current)
+                else:
+                    raise RuntimeError("stable directory traversal is unavailable")
+                if identity != expected:
+                    raise PermissionError("repository code directory changed before revalidation")
+            yield current
+            return
+        prefix: list[str] = []
+        for part in parts:
+            prefix.append(part)
+            expected = captured_identities.get("/".join(prefix))
+            if expected is None:
+                raise RuntimeError("captured directory identity is unavailable")
+            if os.name == "posix":
+                child = os.open(part, _posix_directory_flags(), dir_fd=current)
+                identity = _descriptor_identity(child)
+            elif os.name == "nt":
+                from generation_catalog import (
+                    _windows_handle_file_identity,
+                    _windows_open_relative_handle,
+                )
+
+                child = _windows_open_relative_handle(current, part, directory=True)
+                identity = _windows_handle_file_identity(child)
+            else:
+                raise RuntimeError("stable directory traversal is unavailable")
+            opened.append(child)
+            if identity != expected:
+                raise PermissionError("repository code directory changed before revalidation")
+            current = child
+        yield current
+    finally:
+        for opened_handle in reversed(opened):
+            if os.name == "nt":
+                from markdown_transaction import _close_windows_handle
+
+                _close_windows_handle(opened_handle)
+            else:
+                os.close(opened_handle)
+
+
+def _held_directory_entries(
+    directory_anchor: int,
+    *,
+    max_entries: int,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = []
+    if os.name == "nt":
+        from generation_catalog import _windows_list_directory
+
+        raw_entries = _windows_list_directory(directory_anchor, max_entries=max_entries)
+        for name, kind in raw_entries:
+            _check_stop(deadline, cancelled)
+            entries.append({"name": unicodedata.normalize("NFC", name), "kind": kind})
+        return entries
+    if os.name == "posix":
+        with os.scandir(directory_anchor) as iterator:
+            for entry in iterator:
+                _check_stop(deadline, cancelled)
+                if len(entries) >= max_entries:
+                    raise ValueError("repository code entry limit exceeded")
+                info = os.stat(entry.name, dir_fd=directory_anchor, follow_symlinks=False)
+                entries.append(
+                    {"name": unicodedata.normalize("NFC", entry.name), "kind": _kind(info)}
+                )
+        return entries
+    raise RuntimeError("stable directory enumeration is unavailable")
+
+
+def _read_held_candidate(
+    parent_anchor: int,
+    name: str,
+    expected_identity: tuple[object, ...],
+    limits: RepositoryCodeLimits,
+    *,
+    deadline: float | None,
+    cancelled: Callable[[], bool] | None,
+) -> tuple[bytes, FileStatMetadata]:
+    if os.name == "posix":
+        flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        descriptor = os.open(name, flags, dir_fd=parent_anchor)
+    elif os.name == "nt":
+        from generation_catalog import _windows_relative_file_descriptor
+
+        descriptor = _windows_relative_file_descriptor(parent_anchor, name)
+    else:
+        raise RuntimeError("stable relative file open is unavailable")
+    try:
+        before = os.fstat(descriptor)
+        before_identity = _descriptor_identity(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before_identity != expected_identity:
+            raise PermissionError("repository code source changed before revalidation")
+        if before.st_size > limits.max_file_bytes:
+            raise ValueError("repository code file byte limit exceeded")
+        from generation_catalog import _stable_descriptor_state
+
+        before_state = _stable_descriptor_state(descriptor)
+        content = bytearray()
+        while True:
+            _check_stop(deadline, cancelled)
+            chunk = os.read(descriptor, limits.chunk_bytes)
+            if not chunk:
+                break
+            content.extend(chunk)
+            if len(content) > limits.max_file_bytes:
+                raise ValueError("repository code file byte limit exceeded")
+        _capture_read_barrier(descriptor)
+        after = os.fstat(descriptor)
+        if (
+            before_state != _stable_descriptor_state(descriptor)
+            or before_identity != _descriptor_identity(descriptor)
+            or _stat_metadata(before) != _stat_metadata(after)
+            or len(content) != before.st_size
+        ):
+            raise RuntimeError("repository code source changed during revalidation")
+        return bytes(content), _stat_metadata(before)
+    finally:
+        os.close(descriptor)
 
 
 def _matches(path: str, patterns: tuple[str, ...]) -> bool:
@@ -754,13 +898,14 @@ def collect_repository_code(
     """Capture exact repository bytes and a complete bounded membership contract."""
     if not isinstance(limits, RepositoryCodeLimits):
         raise TypeError("limits must be RepositoryCodeLimits")
-    with _hold_capture_root(Path(checkout_root)) as root:
+    with _hold_capture_root(Path(checkout_root)) as (root, root_anchor):
         resolve_repository_scope(root)
         selected_policy = _policy(roots, include_globs, ignore_globs, suffixes)
         return _collect_repository_code_from_root(
             root,
             selected_policy,
             limits,
+            root_anchor=root_anchor,
             deadline=deadline,
             cancelled=cancelled,
         )
@@ -771,6 +916,7 @@ def _collect_repository_code_from_root(
     selected_policy: RepositoryCodePolicy,
     limits: RepositoryCodeLimits,
     *,
+    root_anchor: int,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> CorpusSnapshot:
@@ -778,6 +924,7 @@ def _collect_repository_code_from_root(
     captured: list[CapturedSource] = []
     captured_files: list[CodeCaptureFile] = []
     captured_identities: dict[str, tuple[object, ...]] = {}
+    captured_directory_identities: dict[str, tuple[object, ...]] = {}
     directories: list[DirectoryMembership] = []
     seen_names: dict[str, str] = {}
     entries_seen = 0
@@ -832,6 +979,9 @@ def _collect_repository_code_from_root(
             membership_entries.append({"name": normalized_name, "kind": _kind(info)})
         membership_entries.sort(key=lambda item: (item["name"], item["kind"]))
         relative_directory = canonical_relative(directory)
+        if expected_identity is None:
+            raise RuntimeError("stable directory identity is unavailable")
+        captured_directory_identities[relative_directory] = expected_identity
         directories.append(
             DirectoryMembership(
                 relative_path=relative_directory,
@@ -917,25 +1067,28 @@ def _collect_repository_code_from_root(
         else:
             raise PermissionError("repository code root is not a regular directory")
 
+    _capture_final_revalidation_barrier(root)
     for expected in directories:
         _check_stop(deadline, cancelled)
-        directory = root.joinpath(*PurePosixPath(expected.relative_path).parts)
         try:
-            info = directory.lstat()
-            if _is_unsafe(info) or not stat.S_ISDIR(info.st_mode):
-                raise RuntimeError("repository code membership changed during capture")
-            current_entries = []
+            with _open_captured_directory(
+                root_anchor,
+                expected.relative_path,
+                captured_directory_identities,
+            ) as directory_anchor:
+                current_entries = _held_directory_entries(
+                    directory_anchor,
+                    max_entries=limits.max_entries,
+                    deadline=deadline,
+                    cancelled=cancelled,
+                )
             current_names: dict[str, str] = {}
-            with os.scandir(directory) as iterator:
-                for entry in iterator:
-                    _check_stop(deadline, cancelled)
-                    entry_info = entry.stat(follow_symlinks=False)
-                    name = unicodedata.normalize("NFC", entry.name)
-                    key = name.casefold()
-                    if key in current_names and current_names[key] != entry.name:
-                        raise RuntimeError("repository code membership changed by collision")
-                    current_names[key] = entry.name
-                    current_entries.append({"name": name, "kind": _kind(entry_info)})
+            for entry in current_entries:
+                name = entry["name"]
+                key = name.casefold()
+                if key in current_names:
+                    raise RuntimeError("repository code membership changed by collision")
+                current_names[key] = name
             current_entries.sort(key=lambda item: (item["name"], item["kind"]))
             if (
                 len(current_entries) != expected.entry_count
@@ -947,17 +1100,22 @@ def _collect_repository_code_from_root(
 
     for source in captured:
         _check_stop(deadline, cancelled)
-        path = root.joinpath(*PurePosixPath(source.record.relative_path).parts)
+        relative = PurePosixPath(source.record.relative_path)
+        parent_relative = relative.parent.as_posix()
         try:
-            info = path.lstat()
-            current, current_stat = _read_candidate(
-                path,
-                info,
-                captured_identities[source.record.logical_id],
-                limits,
-                deadline=deadline,
-                cancelled=cancelled,
-            )
+            with _open_captured_directory(
+                root_anchor,
+                parent_relative,
+                captured_directory_identities,
+            ) as parent_anchor:
+                current, current_stat = _read_held_candidate(
+                    parent_anchor,
+                    relative.name,
+                    captured_identities[source.record.logical_id],
+                    limits,
+                    deadline=deadline,
+                    cancelled=cancelled,
+                )
         except OSError as exc:
             raise RuntimeError("repository code source changed during capture") from exc
         if hashlib.sha256(current).hexdigest() != source.record.sha256:
