@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, fields
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
@@ -18,7 +18,7 @@ from lsp_positions import (
 
 
 def test_position_contracts_are_frozen_and_slotted() -> None:
-    anchor = SourceAnchor("pkg/unicode_api.py", 1, 0)
+    anchor = SourceAnchor("pkg/unicode_api.py", 1, 0, 0)
     position = LspPosition(0, 0)
     value = LspRange(position, position)
 
@@ -29,11 +29,20 @@ def test_position_contracts_are_frozen_and_slotted() -> None:
     assert not hasattr(value, "__dict__")
 
 
+def test_source_anchor_has_exact_contract_fields() -> None:
+    assert tuple(field.name for field in fields(SourceAnchor)) == (
+        "path",
+        "line",
+        "utf8_character",
+        "byte_offset",
+    )
+
+
 def test_utf8_anchor_converts_to_each_negotiated_encoding() -> None:
     document = SourceDocument.from_bytes("pkg/unicode_api.py", "a😀β\r\n".encode())
     anchor = document.validate_anchor(line=1, character=len("a😀".encode()))
 
-    assert anchor == SourceAnchor("pkg/unicode_api.py", 1, 5)
+    assert anchor == SourceAnchor("pkg/unicode_api.py", 1, 5, 5)
     assert document.to_lsp(anchor, PositionEncoding.UTF8) == LspPosition(0, 5)
     assert document.to_lsp(anchor, PositionEncoding.UTF16) == LspPosition(0, 3)
     assert document.to_lsp(anchor, PositionEncoding.UTF32) == LspPosition(0, 2)
@@ -102,9 +111,19 @@ def test_document_rejects_wrong_path_content_and_encoding_types() -> None:
 
     document = SourceDocument.from_bytes("example.py", b"x")
     with pytest.raises(TypeError):
-        document.to_lsp(SourceAnchor("other.py", 1, 0), PositionEncoding.UTF8)
+        document.to_lsp(SourceAnchor("other.py", 1, 0, 0), PositionEncoding.UTF8)
     with pytest.raises(TypeError):
-        document.to_lsp(SourceAnchor("example.py", 1, 0), "utf-8")  # type: ignore[arg-type]
+        document.to_lsp(SourceAnchor("example.py", 1, 0, 0), "utf-8")  # type: ignore[arg-type]
+
+
+def test_anchor_byte_offset_is_absolute_and_verified_by_document() -> None:
+    document = SourceDocument.from_bytes("example.py", "first\n😀".encode())
+
+    assert document.validate_anchor(line=2, character=4) == SourceAnchor(
+        "example.py", 2, 4, 10
+    )
+    with pytest.raises(ValueError):
+        document.to_lsp(SourceAnchor("example.py", 2, 4, 9), PositionEncoding.UTF8)
 
 
 def test_lsp_range_rejects_utf16_surrogate_midpoint_and_reversed_range() -> None:
@@ -118,6 +137,21 @@ def test_lsp_range_rejects_utf16_surrogate_midpoint_and_reversed_range() -> None
         document.to_byte_range(
             LspRange(LspPosition(1, 0), LspPosition(0, 0)), PositionEncoding.UTF8
         )
+
+
+@pytest.mark.parametrize(
+    ("encoding", "value"),
+    [
+        (PositionEncoding.UTF16, LspRange(LspPosition(0, 1), LspPosition(0, 3))),
+        (PositionEncoding.UTF32, LspRange(LspPosition(0, 1), LspPosition(0, 2))),
+    ],
+)
+def test_astral_lsp_ranges_convert_back_to_utf8_bytes(
+    encoding: PositionEncoding, value: LspRange
+) -> None:
+    document = SourceDocument.from_bytes("example.py", "a😀β\n".encode())
+
+    assert document.to_byte_range(value, encoding) == PositionRange(1, 5)
 
 
 @pytest.mark.parametrize("line,character", [(-1, 0), (0, -1), (True, 0), (0, True)])
@@ -140,7 +174,9 @@ def test_file_uri_round_trips_windows_drive_case_space_and_unicode() -> None:
     uri = path_to_file_uri(path)
 
     assert uri == "file:///C:/repo%20name/pkg/%CE%B2.py"
-    assert file_uri_to_path(uri) == Path("C:/repo name/pkg/β.py")
+    assert file_uri_to_path(uri, platform="nt") == PureWindowsPath(
+        "C:/repo name/pkg/β.py"
+    )
 
 
 def test_file_uri_round_trips_posix_absolute_path() -> None:
@@ -148,7 +184,7 @@ def test_file_uri_round_trips_posix_absolute_path() -> None:
     uri = path_to_file_uri(path)
 
     assert uri == "file:///repo%20name/pkg/%CE%B2.py"
-    assert file_uri_to_path(uri).as_posix() == "/repo name/pkg/β.py"
+    assert file_uri_to_path(uri, platform="posix") == path
 
 
 def test_file_uri_round_trips_unc_path() -> None:
@@ -156,7 +192,7 @@ def test_file_uri_round_trips_unc_path() -> None:
     uri = path_to_file_uri(path)
 
     assert uri == "file://server/share%20name/pkg/api.py"
-    assert file_uri_to_path(uri) == Path(r"\\server\share name\pkg\api.py")
+    assert file_uri_to_path(uri, platform="nt") == path
 
 
 @pytest.mark.parametrize(
@@ -169,6 +205,9 @@ def test_file_uri_round_trips_unc_path() -> None:
         "file:///tmp/bad\0.py",
         "file:///tmp/file.py?query",
         "file:///tmp/file.py#fragment",
+        "file://user@server/share/api.py",
+        "file://server:80/share/api.py",
+        r"file:///tmp/a\b.py",
     ],
 )
 def test_file_uri_rejects_invalid_inputs(uri: str) -> None:
@@ -177,9 +216,16 @@ def test_file_uri_rejects_invalid_inputs(uri: str) -> None:
 
 
 def test_file_uri_conversion_does_not_enforce_containment() -> None:
-    assert file_uri_to_path("file:///repo/%2E%2E/outside.py").as_posix() == (
+    assert file_uri_to_path(
+        "file:///repo/%2E%2E/outside.py", platform="posix"
+    ) == PurePosixPath(
         "/repo/../outside.py"
     )
+
+
+def test_file_uri_rejects_unknown_platform() -> None:
+    with pytest.raises(ValueError):
+        file_uri_to_path("file:///tmp/api.py", platform="other")
 
 
 @pytest.mark.parametrize(

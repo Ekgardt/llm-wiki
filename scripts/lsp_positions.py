@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from urllib.parse import quote, unquote_to_bytes, urlsplit
 
 from code_intelligence import PositionEncoding, PositionRange
@@ -42,12 +43,14 @@ def _require_encoding(value: object) -> PositionEncoding:
 class SourceAnchor:
     path: str
     line: int
-    character: int
+    utf8_character: int
+    byte_offset: int
 
     def __post_init__(self) -> None:
         _require_path(self.path)
         _require_coordinate(self.line, "line", minimum=1)
-        _require_coordinate(self.character, "character")
+        _require_coordinate(self.utf8_character, "utf8_character")
+        _require_coordinate(self.byte_offset, "byte_offset")
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,7 +130,7 @@ class SourceDocument:
         if character > end - start:
             raise ValueError("character is outside the line")
         self.content[start : start + character].decode("utf-8", errors="strict")
-        return SourceAnchor(self.path, line, character)
+        return SourceAnchor(self.path, line, character, start + character)
 
     def to_lsp(self, anchor: SourceAnchor, encoding: PositionEncoding) -> LspPosition:
         if not isinstance(anchor, SourceAnchor):
@@ -135,11 +138,15 @@ class SourceDocument:
         _require_encoding(encoding)
         if anchor.path != self.path:
             raise TypeError("anchor belongs to a different document")
-        validated = self.validate_anchor(line=anchor.line, character=anchor.character)
+        validated = self.validate_anchor(
+            line=anchor.line, character=anchor.utf8_character
+        )
+        if anchor != validated:
+            raise ValueError("anchor byte_offset does not match the document")
         start, _ = self.line_spans[validated.line - 1]
-        prefix = self.content[start : start + validated.character].decode("utf-8")
+        prefix = self.content[start : validated.byte_offset].decode("utf-8")
         if encoding is PositionEncoding.UTF8:
-            character = validated.character
+            character = validated.utf8_character
         elif encoding is PositionEncoding.UTF16:
             character = len(prefix.encode("utf-16-le")) // 2
         else:
@@ -207,14 +214,19 @@ def path_to_file_uri(path: Path) -> str:
     return "file://" + quote(path.as_posix(), safe="/")
 
 
-def file_uri_to_path(uri: str) -> Path:
+def file_uri_to_path(uri: str, *, platform: str | None = None) -> PurePath:
     """Convert a validated file URI to a local path without containment checks."""
     if not isinstance(uri, str):
         raise TypeError("uri must be a string")
     if not uri or any(ord(character) < 32 for character in uri):
         raise ValueError("uri must not contain control characters")
+    if "\\" in uri:
+        raise ValueError("file uri must not contain raw backslashes")
     if _MALFORMED_PERCENT.search(uri):
         raise ValueError("uri contains malformed percent encoding")
+    target_platform = os.name if platform is None else platform
+    if target_platform not in {"nt", "posix"}:
+        raise ValueError("platform must be 'nt' or 'posix'")
 
     parsed = urlsplit(uri)
     if parsed.scheme.lower() != "file":
@@ -229,16 +241,29 @@ def file_uri_to_path(uri: str) -> Path:
         raise ValueError("file uri must contain valid UTF-8") from exc
     if "\0" in authority or "\0" in decoded_path:
         raise ValueError("file uri must not contain NUL")
+    if "@" in authority:
+        raise ValueError("file uri authority must not contain userinfo")
+    if authority.startswith("["):
+        if re.fullmatch(r"\[[^]]+\]", authority) is None:
+            raise ValueError("file uri authority must not contain a port")
+    elif ":" in authority:
+        raise ValueError("file uri authority must not contain a port")
 
     if authority and authority.lower() != "localhost":
         if not decoded_path.startswith("/"):
             raise ValueError("UNC file uri path must be absolute")
-        return Path("\\\\" + authority + decoded_path.replace("/", "\\"))
+        if target_platform == "nt":
+            return PureWindowsPath(
+                "\\\\" + authority + decoded_path.replace("/", "\\")
+            )
+        return PurePosixPath("//" + authority + decoded_path)
 
-    drive_match = re.match(r"^/([A-Za-z]):(?:/|$)", decoded_path)
-    if drive_match:
-        normalized = drive_match.group(1).upper() + decoded_path[2:]
-        return Path(normalized.replace("/", "\\"))
     if not decoded_path.startswith("/"):
         raise ValueError("file uri path must be absolute")
-    return Path(decoded_path)
+    if target_platform == "nt":
+        drive_match = re.match(r"^/([A-Za-z]):(?:/|$)", decoded_path)
+        if drive_match:
+            normalized = drive_match.group(1).upper() + decoded_path[2:]
+            return PureWindowsPath(normalized)
+        return PureWindowsPath(decoded_path.replace("/", "\\"))
+    return PurePosixPath(decoded_path)
