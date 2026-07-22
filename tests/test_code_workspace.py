@@ -1328,6 +1328,42 @@ def test_posix_verification_rejects_directory_replacement_between_stat_and_open(
     assert replaced
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor-relative verification only")
+@pytest.mark.parametrize("mutation", ("add", "remove"))
+def test_posix_verification_rechecks_membership_after_initial_walk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    import code_workspace
+
+    repository = tmp_path / "repository"
+    _write(repository / "src/a.py", b"a = 1\n")
+    _write(repository / "src/z.py", b"z = 1\n")
+    snapshot = _capture(repository)
+    workspace = code_workspace.seal_workspace(snapshot, tmp_path / "sealed")
+    changed = False
+
+    def mutate_after_first_enumeration(component: str) -> None:
+        nonlocal changed
+        if component != "z.py" or changed:
+            return
+        if mutation == "add":
+            _write(workspace.root / "src/extra.py", b"extra = True\n")
+        else:
+            (workspace.root / "src/a.py").unlink()
+        changed = True
+
+    monkeypatch.setattr(
+        code_workspace,
+        "_verify_component_barrier",
+        mutate_after_first_enumeration,
+    )
+
+    with pytest.raises(code_workspace.WorkspaceChanged, match="membership|extra|missing"):
+        code_workspace.verify_workspace_seal(workspace, snapshot)
+
+    assert changed
+
+
 def test_verification_directory_limit_excludes_synthetic_workspace_root(
     tmp_path: Path,
 ) -> None:

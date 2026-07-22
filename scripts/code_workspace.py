@@ -1648,8 +1648,83 @@ def _verify_descriptor_file(
         raise WorkspaceChanged("sealed workspace file content changed")
 
 
+def _scan_posix_members(
+    root_fd: int, limits: RepositoryCodeLimits
+) -> tuple[tuple[str, str], ...]:
+    members: list[tuple[str, str]] = []
+    visited = 0
+    visited_directories = 0
+    stack: list[list[object]] = [[(), -1, root_fd, None, 0]]
+    try:
+        while stack:
+            frame = stack[-1]
+            prefix = frame[0]
+            depth = frame[1]
+            directory_fd = frame[2]
+            entries = frame[3]
+            if entries is None:
+                entries = []
+                with os.scandir(directory_fd) as iterator:
+                    for entry in iterator:
+                        visited += 1
+                        if visited > limits.max_entries:
+                            raise WorkspaceChanged(
+                                "sealed workspace entry range exceeded"
+                            )
+                        entries.append(entry)
+                entries.sort(key=lambda item: item.name)
+                frame[3] = entries
+            index = frame[4]
+            if index >= len(entries):
+                stack.pop()
+                if directory_fd != root_fd:
+                    os.close(directory_fd)
+                continue
+            entry = entries[index]
+            frame[4] = index + 1
+            metadata = os.stat(
+                entry.name, dir_fd=directory_fd, follow_symlinks=False
+            )
+            if _is_unsafe(metadata):
+                raise WorkspaceChanged("sealed workspace member became a link")
+            relative_parts = (*prefix, entry.name)
+            relative = "/".join(relative_parts)
+            if stat.S_ISDIR(metadata.st_mode):
+                members.append((relative, "directory"))
+                visited_directories += 1
+                if visited_directories > limits.max_directories:
+                    raise WorkspaceChanged(
+                        "sealed workspace directory range exceeded"
+                    )
+                child_depth = depth + 1
+                if child_depth > limits.max_depth:
+                    raise WorkspaceChanged("sealed workspace depth range exceeded")
+                child = os.open(
+                    entry.name, _posix_directory_flags(), dir_fd=directory_fd
+                )
+                opened = os.fstat(child)
+                if not stat.S_ISDIR(opened.st_mode) or not _same_file(
+                    metadata, opened
+                ):
+                    os.close(child)
+                    raise WorkspaceChanged(
+                        "sealed workspace directory identity changed during final scan"
+                    )
+                stack.append([relative_parts, child_depth, child, None, 0])
+            elif stat.S_ISREG(metadata.st_mode):
+                members.append((relative, "file"))
+            else:
+                raise WorkspaceChanged("sealed workspace contains a device")
+        return tuple(sorted(members))
+    finally:
+        for frame in reversed(stack[1:]):
+            os.close(frame[2])
+
+
 def _verify_posix(
-    workspace: SealedWorkspace, snapshot: CorpusSnapshot
+    workspace: SealedWorkspace,
+    snapshot: CorpusSnapshot,
+    expected_members: tuple[tuple[str, str], ...],
 ) -> tuple[tuple[str, str], ...]:
     parent_fd = _open_posix_directory_path(workspace.root.parent)
     root_fd: int | None = None
@@ -1736,6 +1811,8 @@ def _verify_posix(
                         os.close(descriptor)
             else:
                 raise WorkspaceChanged("sealed workspace contains a device")
+        if _scan_posix_members(root_fd, snapshot.code_capture.limits) != expected_members:
+            raise WorkspaceChanged("sealed workspace membership changed after verification")
         named = os.open(
             workspace.root.name, _posix_directory_flags(), dir_fd=parent_fd
         )
@@ -1980,7 +2057,7 @@ def verify_workspace_seal(workspace: SealedWorkspace, snapshot: CorpusSnapshot) 
     actual_members = (
         _verify_windows(workspace, snapshot, expected_members)
         if os.name == "nt"
-        else _verify_posix(workspace, snapshot)
+        else _verify_posix(workspace, snapshot, expected_members)
     )
     if actual_members != expected_members:
         raise WorkspaceChanged("sealed workspace has extra or missing entries")
