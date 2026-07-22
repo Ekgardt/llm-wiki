@@ -683,12 +683,21 @@ def _protocol_with_streams(
     writer: object,
     *,
     fatal_callback=lambda _reason: None,
+    generation_nonce: str = "stream-probe",
 ) -> LspProtocol:
     return LspProtocol(
         reader,  # type: ignore[arg-type]
         writer,  # type: ignore[arg-type]
-        "stream-probe",
+        generation_nonce,
         fatal_callback=fatal_callback,
+    )
+
+
+def _callback_worker_threads() -> tuple[threading.Thread, ...]:
+    return tuple(
+        thread
+        for thread in threading.enumerate()
+        if thread.name.startswith("lsp-cancel-")
     )
 
 
@@ -1157,10 +1166,8 @@ def test_never_returning_callback_cannot_block_request_or_close() -> None:
     started_close = time.monotonic()
     protocol.close()
     assert time.monotonic() - started_close < 0.2
-    assert all(thread.daemon for thread in protocol.callback_threads)
+    assert all(thread.daemon for thread in _callback_worker_threads())
     release_callback.set()
-    for thread in protocol.callback_threads:
-        thread.join(1)
 
 
 def test_callback_worker_threads_remain_fixed_under_concurrent_stuck_callbacks() -> None:
@@ -1189,10 +1196,49 @@ def test_callback_worker_threads_remain_fixed_under_concurrent_stuck_callbacks()
             with pytest.raises(TimeoutError):
                 future.result(timeout=0.5)
     assert time.monotonic() - started < 0.5
-    assert len(protocol.callback_threads) == 2
-    assert all(thread.is_alive() and thread.daemon for thread in protocol.callback_threads)
-    assert len({thread.ident for thread in protocol.callback_threads}) == 2
+    callback_threads = _callback_worker_threads()
+    assert len(callback_threads) == 2
+    assert all(thread.is_alive() and thread.daemon for thread in callback_threads)
+    assert len({thread.ident for thread in callback_threads}) == 2
     protocol.close()
     release_callbacks.set()
-    for thread in protocol.callback_threads:
-        thread.join(1)
+
+
+def test_callback_workers_remain_global_and_bounded_across_closed_generations() -> None:
+    release_callbacks = threading.Event()
+    protocols: list[LspProtocol] = []
+
+    def cancelled() -> bool:
+        release_callbacks.wait()
+        return False
+
+    try:
+        for index in range(MAX_PENDING_REQUESTS + 4):
+            protocol = _protocol_with_streams(
+                _BlockingReader(),
+                _BlockingWriter(block_after=100),
+                generation_nonce=f"callback-generation-{index}",
+            )
+            protocols.append(protocol)
+            deadline = time.monotonic() + 0.02
+            with pytest.raises(TimeoutError):
+                protocol.request(
+                    "stuck-generation-callback",
+                    {},
+                    deadline=deadline,
+                    cancelled=cancelled,
+                )
+            assert time.monotonic() < deadline + 0.2
+            assert protocol.pending_count == 0
+
+            started_close = time.monotonic()
+            protocol.close()
+            assert time.monotonic() - started_close < 0.2
+
+        callback_threads = _callback_worker_threads()
+        assert len(callback_threads) == 2
+        assert all(thread.is_alive() and thread.daemon for thread in callback_threads)
+    finally:
+        release_callbacks.set()
+        for protocol in protocols:
+            protocol.close()

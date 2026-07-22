@@ -123,6 +123,40 @@ class _CallbackTask:
     error: BaseException | None = None
 
 
+_CALLBACK_QUEUE: queue.Queue[_CallbackTask] = queue.Queue(
+    maxsize=_MAX_QUEUED_CALLBACKS
+)
+
+
+def _callback_loop() -> None:
+    while True:
+        task = _CALLBACK_QUEUE.get()
+        try:
+            if task.abandoned.is_set():
+                continue
+            try:
+                task.result = bool(task.callback())
+            except BaseException as exc:
+                task.error = exc
+        finally:
+            task.completed.set()
+            _CALLBACK_QUEUE.task_done()
+            del task
+
+
+_CALLBACK_THREADS = tuple(
+    threading.Thread(
+        target=_callback_loop,
+        name=f"lsp-cancel-{index}",
+        daemon=True,
+    )
+    for index in range(_CALLBACK_WORKERS)
+)
+for _callback_thread in _CALLBACK_THREADS:
+    _callback_thread.start()
+del _callback_thread
+
+
 class _OwnedReader:
     def __init__(self, stream: BinaryIO, stopped: threading.Event) -> None:
         self._stream = stream
@@ -403,12 +437,8 @@ class LspProtocol:
         self._reader_started = threading.Event()
         self._writer_started = threading.Event()
         self._io_stopped = threading.Event()
-        self._callbacks_stopped = threading.Event()
         self._write_queue: queue.Queue[_WriteTask | None] = queue.Queue(
             maxsize=_MAX_QUEUED_WRITES
-        )
-        self._callback_queue: queue.Queue[_CallbackTask] = queue.Queue(
-            maxsize=_MAX_QUEUED_CALLBACKS
         )
         self._write_tasks: list[_WriteTask] = []
         self.stdout_reader_owner: int | None = None
@@ -423,18 +453,8 @@ class LspProtocol:
             name=f"lsp-stdout-{generation_nonce}",
             daemon=True,
         )
-        self.callback_threads = tuple(
-            threading.Thread(
-                target=self._callback_loop,
-                name=f"lsp-cancel-{generation_nonce}-{index}",
-                daemon=True,
-            )
-            for index in range(_CALLBACK_WORKERS)
-        )
         self.writer_thread.start()
         self.reader_thread.start()
-        for thread in self.callback_threads:
-            thread.start()
         self._writer_started.wait()
         self._reader_started.wait()
 
@@ -569,7 +589,6 @@ class LspProtocol:
                     task.error = closed_error
                 task.completed.set()
             self._io_stopped.set()
-            self._callbacks_stopped.set()
             self._cancel_owner_io(self.reader_thread)
             self._cancel_owner_io(self.writer_thread)
             self._interrupt_stream(self._reader)
@@ -657,24 +676,6 @@ class LspProtocol:
         finally:
             self._close_stream(self._writer)
 
-    def _callback_loop(self) -> None:
-        while True:
-            try:
-                task = self._callback_queue.get(timeout=0.05)
-            except queue.Empty:
-                if self._callbacks_stopped.is_set():
-                    return
-                continue
-            if self._callbacks_stopped.is_set() or task.abandoned.is_set():
-                task.completed.set()
-                continue
-            try:
-                task.result = bool(task.callback())
-            except BaseException as exc:
-                task.error = exc
-            finally:
-                task.completed.set()
-
     def _evaluate_cancelled(
         self,
         callback: Callable[[], bool],
@@ -688,7 +689,7 @@ class LspProtocol:
             threading.Event(),
         )
         try:
-            self._callback_queue.put_nowait(task)
+            _CALLBACK_QUEUE.put_nowait(task)
         except queue.Full:
             return False, True
         remaining = max(0.0, deadline - time.monotonic())
