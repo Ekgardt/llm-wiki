@@ -1192,7 +1192,55 @@ def test_seal_and_verify_descriptor_peak_is_bounded_by_depth(
     assert peak <= limits.max_depth + 12
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor-relative sealing only")
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor-relative verification only")
+def test_posix_verification_rejects_over_depth_before_opening_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import code_workspace
+
+    repository = tmp_path / "repository"
+    _write(repository / "src/pkg/app.py", b"answer = 42\n")
+    limits = code_workspace.RepositoryCodeLimits(max_depth=1)
+    snapshot = _capture(repository, limits=limits)
+    workspace = code_workspace.seal_workspace(snapshot, tmp_path / "sealed")
+    (workspace.root / "z-depth/one/two").mkdir(parents=True)
+
+    real_open = code_workspace.os.open
+    real_close = code_workspace.os.close
+    active: set[int] = set()
+    opened_names: list[str] = []
+    peak = 0
+
+    def tracked_open(path, *args, **kwargs) -> int:
+        nonlocal peak
+        descriptor = real_open(path, *args, **kwargs)
+        opened_names.append(os.fspath(path))
+        active.add(descriptor)
+        peak = max(peak, len(active))
+        return descriptor
+
+    def tracked_close(descriptor: int) -> None:
+        try:
+            real_close(descriptor)
+        finally:
+            active.discard(descriptor)
+
+    monkeypatch.setattr(code_workspace.os, "open", tracked_open)
+    monkeypatch.setattr(code_workspace.os, "close", tracked_close)
+    monkeypatch.setattr(
+        code_workspace.os,
+        "supports_dir_fd",
+        {*code_workspace.os.supports_dir_fd, tracked_open},
+    )
+
+    with pytest.raises(code_workspace.WorkspaceChanged, match="depth"):
+        code_workspace.verify_workspace_seal(workspace, snapshot)
+
+    assert "two" not in opened_names
+    assert not active
+    assert peak <= limits.max_depth + 12
+
+
 def test_verification_directory_limit_excludes_synthetic_workspace_root(
     tmp_path: Path,
 ) -> None:
@@ -1209,7 +1257,6 @@ def test_verification_directory_limit_excludes_synthetic_workspace_root(
     code_workspace.verify_workspace_seal(workspace, snapshot)
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor-relative sealing only")
 def test_seal_rejects_internal_directory_injected_before_exclusive_mkdir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1231,6 +1278,33 @@ def test_seal_rejects_internal_directory_injected_before_exclusive_mkdir(
 
     assert injected.is_dir()
     assert not (injected / "app.py").exists()
+
+
+def test_sealing_rejects_over_depth_before_child_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import code_workspace
+
+    if not code_workspace.workspace_sealing_supported():
+        pytest.skip("root-relative no-follow workspace primitive is unavailable")
+    repository = tmp_path / "repository"
+    _write(repository / "src/pkg/deep/app.py", b"answer = 42\n")
+    snapshot = _capture(
+        repository, limits=code_workspace.RepositoryCodeLimits(max_depth=8)
+    )
+    shallow_contract = dataclasses.replace(
+        snapshot.code_capture,
+        limits=code_workspace.RepositoryCodeLimits(max_depth=1),
+    )
+    shallow_snapshot = dataclasses.replace(snapshot, code_capture=shallow_contract)
+    touched: list[str] = []
+    monkeypatch.setattr(code_workspace, "_seal_component_barrier", touched.append)
+
+    with pytest.raises(ValueError, match="depth"):
+        code_workspace.seal_workspace(shallow_snapshot, tmp_path / "sealed")
+
+    assert touched == ["src", "pkg"]
+    assert not (tmp_path / "sealed/src/pkg/deep").exists()
 
 
 def test_sealed_workspace_rejects_symlink_substitution(tmp_path: Path) -> None:
@@ -1337,3 +1411,223 @@ def test_verification_holds_parent_against_substitution(
     else:
         code_workspace.verify_workspace_seal(workspace, snapshot)
         assert blocked
+
+
+def test_windows_workspace_capability_fails_closed_with_precise_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import windows_workspace
+
+    monkeypatch.setattr(windows_workspace, "_API", None)
+    monkeypatch.setattr(
+        windows_workspace,
+        "_API_ERROR",
+        "Windows sealed workspaces require native API: NtCreateFile",
+    )
+
+    assert windows_workspace.capability() == (
+        False,
+        "Windows sealed workspaces require native API: NtCreateFile",
+    )
+    with pytest.raises(RuntimeError, match="NtCreateFile"):
+        windows_workspace.require_capability()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real Windows handle boundary required")
+def test_windows_workspace_native_operations_are_relative_exclusive_and_bound(
+    tmp_path: Path,
+) -> None:
+    import windows_workspace
+
+    chains = windows_workspace.open_directory_path(tmp_path)
+    root = directory = file_handle = reopened = None
+    try:
+        parent = chains[-1]
+        for unsafe in ("..", "file:stream", "CON", "trailing."):
+            with pytest.raises(ValueError, match="path component"):
+                windows_workspace.create_directory(parent, unsafe)
+        root = windows_workspace.create_directory(parent, "sealed")
+        with pytest.raises(FileExistsError):
+            windows_workspace.create_directory(parent, "sealed")
+        directory = windows_workspace.create_directory(root, "src")
+        file_handle = windows_workspace.create_file(directory, "app.py")
+        windows_workspace.write_all(file_handle, b"answer = 42\n", chunk_bytes=4096)
+        windows_workspace.flush_file(file_handle)
+        assert windows_workspace.set_read_only(file_handle)
+        file_identity = windows_workspace.identity(file_handle, directory=False)
+        windows_workspace.close_handle(file_handle)
+        file_handle = None
+
+        entries = windows_workspace.list_directory(directory, max_entries=8)
+        assert [(entry.name, entry.kind) for entry in entries] == [("app.py", "file")]
+        assert entries[0].file_id == file_identity[1]
+        reopened = windows_workspace.open_file(directory, "app.py")
+        assert windows_workspace.identity(reopened, directory=False) == file_identity
+        assert windows_workspace.file_size(reopened) == len(b"answer = 42\n")
+        assert b"".join(
+            windows_workspace.read_chunks(reopened, chunk_bytes=4096, max_bytes=4096)
+        ) == b"answer = 42\n"
+    finally:
+        for handle in (reopened, file_handle, directory, root):
+            if handle is not None:
+                windows_workspace.close_handle(handle)
+        for handle in reversed(chains):
+            windows_workspace.close_handle(handle)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real Windows sealed workspace required")
+def test_windows_sealed_workspace_reports_only_applied_controls(tmp_path: Path) -> None:
+    import code_workspace
+
+    repository = tmp_path / "repository"
+    _write(repository / "src/app.py", b"answer = 42\n")
+    snapshot = _capture(repository)
+
+    assert code_workspace.workspace_sealing_supported()
+    workspace = code_workspace.seal_workspace(snapshot, tmp_path / "sealed")
+
+    assert workspace.owner_only is False
+    assert workspace.read_only_requested is True
+    assert isinstance(workspace.directory_flush, bool)
+    assert workspace.platform_identities
+    assert (workspace.root / "src/app.py").stat().st_file_attributes & stat.FILE_ATTRIBUTE_READONLY
+    code_workspace.verify_workspace_seal(workspace, snapshot)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real Windows sealed workspace required")
+def test_windows_sealing_rejects_preexisting_destination(tmp_path: Path) -> None:
+    import code_workspace
+
+    repository = tmp_path / "repository"
+    _write(repository / "src/app.py", b"answer = 42\n")
+    snapshot = _capture(repository)
+    destination = tmp_path / "sealed"
+    destination.mkdir()
+
+    with pytest.raises(FileExistsError):
+        code_workspace.seal_workspace(snapshot, destination)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real Windows sealed workspace required")
+def test_windows_verification_rejects_junction_without_symlink_privilege(
+    tmp_path: Path,
+) -> None:
+    import code_workspace
+
+    repository = tmp_path / "repository"
+    _write(repository / "src/pkg/app.py", b"answer = 42\n")
+    snapshot = _capture(repository)
+    workspace = code_workspace.seal_workspace(snapshot, tmp_path / "sealed")
+    target = workspace.root / "src/pkg"
+    (target / "app.py").chmod(stat.S_IWRITE)
+    (target / "app.py").unlink()
+    target.rmdir()
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(target), str(repository / "src/pkg")],
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, (result.stderr or result.stdout).decode(errors="replace")
+
+    with pytest.raises(code_workspace.WorkspaceChanged, match="reparse|link"):
+        code_workspace.verify_workspace_seal(workspace, snapshot)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real Windows sealed workspace required")
+def test_windows_verification_rejects_over_depth_before_opening_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import code_workspace
+    import windows_workspace
+
+    repository = tmp_path / "repository"
+    _write(repository / "src/pkg/app.py", b"answer = 42\n")
+    limits = code_workspace.RepositoryCodeLimits(max_depth=1)
+    snapshot = _capture(repository, limits=limits)
+    workspace = code_workspace.seal_workspace(snapshot, tmp_path / "sealed")
+    (workspace.root / "z-depth/one/two").mkdir(parents=True)
+
+    real_open_directory = windows_workspace.open_directory
+    real_open_file = windows_workspace.open_file
+    real_close = windows_workspace.close_handle
+    active: set[int] = set()
+    opened_names: list[str] = []
+    peak = 0
+
+    def tracked_open_directory(parent: int, name: str) -> int:
+        nonlocal peak
+        handle = real_open_directory(parent, name)
+        opened_names.append(name)
+        active.add(handle)
+        peak = max(peak, len(active))
+        return handle
+
+    def tracked_open_file(parent: int, name: str) -> int:
+        nonlocal peak
+        handle = real_open_file(parent, name)
+        active.add(handle)
+        peak = max(peak, len(active))
+        return handle
+
+    def tracked_close(handle: int) -> None:
+        try:
+            real_close(handle)
+        finally:
+            active.discard(handle)
+
+    monkeypatch.setattr(windows_workspace, "open_directory", tracked_open_directory)
+    monkeypatch.setattr(windows_workspace, "open_file", tracked_open_file)
+    monkeypatch.setattr(windows_workspace, "close_handle", tracked_close)
+
+    with pytest.raises(code_workspace.WorkspaceChanged, match="depth"):
+        code_workspace.verify_workspace_seal(workspace, snapshot)
+
+    assert "two" not in opened_names
+    assert not active
+    assert peak <= limits.max_depth + 12
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real Windows sealed workspace required")
+def test_windows_seal_and_verify_handle_peak_is_bounded_by_depth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import code_workspace
+    import windows_workspace
+
+    repository = tmp_path / "repository"
+    for index in range(100):
+        _write(repository / f"src/pkg-{index:03d}/app.py", b"answer = 42\n")
+    limits = code_workspace.RepositoryCodeLimits(max_depth=8)
+    snapshot = _capture(repository, limits=limits)
+
+    open_names = ("create_directory", "create_file", "open_directory", "open_file")
+    real_opens = {name: getattr(windows_workspace, name) for name in open_names}
+    real_close = windows_workspace.close_handle
+    active: set[int] = set()
+    peak = 0
+
+    def tracked(name: str):
+        def open_handle(*args, **kwargs) -> int:
+            nonlocal peak
+            handle = real_opens[name](*args, **kwargs)
+            active.add(handle)
+            peak = max(peak, len(active))
+            return handle
+
+        return open_handle
+
+    def tracked_close(handle: int) -> None:
+        try:
+            real_close(handle)
+        finally:
+            active.discard(handle)
+
+    for name in open_names:
+        monkeypatch.setattr(windows_workspace, name, tracked(name))
+    monkeypatch.setattr(windows_workspace, "close_handle", tracked_close)
+
+    workspace = code_workspace.seal_workspace(snapshot, tmp_path / "sealed")
+    code_workspace.verify_workspace_seal(workspace, snapshot)
+
+    assert not active
+    assert peak <= limits.max_depth + 12

@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+import windows_workspace as _windows_workspace
 from code_languages import language_for_path
 from corpus_snapshot import (
     CapturedSource,
@@ -33,6 +34,7 @@ from reliable_memory import canonical_json_bytes
 from repository_scope import resolve_repository_scope
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_WINDOWS_FILE_ID_RE = re.compile(r"[0-9a-f]{32}")
 _ALWAYS_IGNORED = frozenset(
     {".git", ".venv", "venv", "env", "cache", "logs", "run", "__pycache__"}
 )
@@ -50,6 +52,8 @@ class SealedWorkspace:
     entries: tuple[tuple[str, int, str], ...]
     owner_only: bool
     read_only_requested: bool
+    platform_identities: tuple[tuple[str, int, str, bool], ...] = ()
+    directory_flush: bool = False
 
 
 def _seal_component_barrier(_component: str) -> None:
@@ -62,14 +66,18 @@ def _verify_component_barrier(_component: str) -> None:
 
 def workspace_sealing_supported() -> bool:
     """Return whether this platform has a root-relative no-follow boundary."""
-    return os.name == "posix" and all(
-        (
-            hasattr(os, "O_NOFOLLOW"),
-            hasattr(os, "O_DIRECTORY"),
-            os.open in os.supports_dir_fd,
-            os.mkdir in os.supports_dir_fd,
+    if os.name == "nt":
+        return _windows_workspace.capability()[0]
+    if os.name == "posix":
+        return all(
+            (
+                hasattr(os, "O_NOFOLLOW"),
+                hasattr(os, "O_DIRECTORY"),
+                os.open in os.supports_dir_fd,
+                os.mkdir in os.supports_dir_fd,
+            )
         )
-    )
+    return False
 
 
 def _canonical_hash(value: object) -> str:
@@ -1287,7 +1295,9 @@ def _seal_posix(snapshot: CorpusSnapshot, destination: Path) -> None:
             directory_fd = root_fd
             directory_parts: tuple[str, ...] = ()
             try:
-                for part in parts[:-1]:
+                for depth, part in enumerate(parts[:-1]):
+                    if depth > snapshot.code_capture.limits.max_depth:
+                        raise ValueError("repository code depth limit exceeded")
                     child_parts = (*directory_parts, part)
                     expected_identity = created_directories.get(child_parts)
                     if expected_identity is None:
@@ -1341,23 +1351,153 @@ def _seal_posix(snapshot: CorpusSnapshot, destination: Path) -> None:
             os.close(descriptor)
 
 
+def _windows_identity_record(
+    relative: str, identity: tuple[int, bytes, bool]
+) -> tuple[str, int, str, bool]:
+    volume, file_id, directory = identity
+    return relative, volume, file_id.hex(), directory
+
+
+def _seal_windows(
+    snapshot: CorpusSnapshot, destination: Path
+) -> tuple[tuple[tuple[str, int, str, bool], ...], bool, bool]:
+    parent_handles = _windows_workspace.open_directory_path(destination.parent)
+    root_handle: int | None = None
+    identities: dict[str, tuple[int, bytes, bool]] = {}
+    read_only = True
+    directory_flush = True
+    limits = snapshot.code_capture.limits
+    try:
+        root_handle = _windows_workspace.create_directory(
+            parent_handles[-1], destination.name
+        )
+        identities[""] = _windows_workspace.identity(root_handle, directory=True)
+        for source in snapshot.sources:
+            parts = PurePosixPath(source.record.relative_path).parts
+            chain: list[int] = []
+            directory_handle = root_handle
+            directory_parts: tuple[str, ...] = ()
+            try:
+                for depth, part in enumerate(parts[:-1]):
+                    if depth > limits.max_depth:
+                        raise ValueError("repository code depth limit exceeded")
+                    child_parts = (*directory_parts, part)
+                    relative = "/".join(child_parts)
+                    expected_identity = identities.get(relative)
+                    if expected_identity is None:
+                        _seal_component_barrier(part)
+                        child = _windows_workspace.create_directory(
+                            directory_handle, part
+                        )
+                    else:
+                        child = _windows_workspace.open_directory(directory_handle, part)
+                    chain.append(child)
+                    current_identity = _windows_workspace.identity(child, directory=True)
+                    if expected_identity is None:
+                        identities[relative] = current_identity
+                    elif current_identity != expected_identity:
+                        raise PermissionError(
+                            "sealed workspace directory changed during creation"
+                        )
+                    directory_handle = child
+                    directory_parts = child_parts
+
+                file_handle = _windows_workspace.create_file(
+                    directory_handle, parts[-1]
+                )
+                try:
+                    relative = source.record.relative_path
+                    before = _windows_workspace.identity(file_handle, directory=False)
+                    _windows_workspace.write_all(
+                        file_handle,
+                        source.content,
+                        chunk_bytes=limits.chunk_bytes,
+                    )
+                    if _windows_workspace.file_size(file_handle) != source.record.size:
+                        raise OSError("sealed workspace file size changed during creation")
+                    _windows_workspace.flush_file(file_handle)
+                    applied = _windows_workspace.set_read_only(file_handle)
+                    if not applied:
+                        raise PermissionError(
+                            "sealed workspace read-only control is unavailable"
+                        )
+                    read_only = read_only and applied
+                    after = _windows_workspace.identity(file_handle, directory=False)
+                    if before != after:
+                        raise PermissionError(
+                            "sealed workspace file changed during creation"
+                        )
+                    identities[relative] = after
+                finally:
+                    _windows_workspace.close_handle(file_handle)
+                for opened_directory in reversed(chain):
+                    directory_flush = (
+                        _windows_workspace.flush_directory(opened_directory)
+                        and directory_flush
+                    )
+            finally:
+                for opened_directory in reversed(chain):
+                    _windows_workspace.close_handle(opened_directory)
+
+        directory_flush = (
+            _windows_workspace.flush_directory(root_handle) and directory_flush
+        )
+        named = _windows_workspace.open_directory(
+            parent_handles[-1], destination.name
+        )
+        try:
+            if _windows_workspace.identity(named, directory=True) != identities[""]:
+                raise PermissionError("sealed workspace root changed during creation")
+        finally:
+            _windows_workspace.close_handle(named)
+        directory_flush = (
+            _windows_workspace.flush_directory(parent_handles[-1]) and directory_flush
+        )
+    finally:
+        if root_handle is not None:
+            _windows_workspace.close_handle(root_handle)
+        for handle in reversed(parent_handles):
+            _windows_workspace.close_handle(handle)
+    records = tuple(
+        _windows_identity_record(relative, identity)
+        for relative, identity in sorted(identities.items())
+    )
+    return records, read_only, directory_flush
+
+
 def seal_workspace(snapshot: CorpusSnapshot, root: Path) -> SealedWorkspace:
     """Write captured bytes through an exclusive component-safe filesystem boundary."""
     if not isinstance(snapshot, CorpusSnapshot) or snapshot.code_capture is None:
         raise TypeError("seal_workspace requires a repository CorpusSnapshot")
     manifest_sha256, entries = _validated_snapshot_entries(snapshot)
     if not workspace_sealing_supported():
+        reason = (
+            _windows_workspace.capability()[1]
+            if os.name == "nt"
+            else "root-relative no-follow filesystem APIs are unavailable"
+        )
         raise RuntimeError(
-            "sealed workspaces require a root-relative no-follow filesystem boundary"
+            "sealed workspaces require a root-relative no-follow filesystem boundary: "
+            + str(reason)
         )
     destination = Path(root).absolute()
-    _seal_posix(snapshot, destination)
+    platform_identities: tuple[tuple[str, int, str, bool], ...] = ()
+    directory_flush = True
+    read_only = True
+    if os.name == "nt":
+        platform_identities, read_only, directory_flush = _seal_windows(
+            snapshot, destination
+        )
+    else:
+        _seal_posix(snapshot, destination)
     workspace = SealedWorkspace(
         destination,
         manifest_sha256,
         entries,
         os.name == "posix",
-        True,
+        read_only,
+        platform_identities,
+        directory_flush,
     )
     verify_workspace_seal(workspace, snapshot)
     return workspace
@@ -1390,9 +1530,11 @@ def _verify_descriptor_file(
         raise WorkspaceChanged("sealed workspace file content changed")
 
 
-def _verify_posix(workspace: SealedWorkspace, snapshot: CorpusSnapshot) -> tuple[str, ...]:
+def _verify_posix(
+    workspace: SealedWorkspace, snapshot: CorpusSnapshot
+) -> tuple[tuple[str, str], ...]:
     chains, root_fd = _open_posix_directory_path(workspace.root)
-    paths = []
+    members = []
     visited = 0
     visited_directories = 0
     expected = {
@@ -1403,27 +1545,28 @@ def _verify_posix(workspace: SealedWorkspace, snapshot: CorpusSnapshot) -> tuple
         for source in snapshot.sources
     }
     try:
-        stack: list[list[object]] = [[(), root_fd, None, 0]]
+        stack: list[list[object]] = [[(), -1, root_fd, None, 0]]
         while stack:
             frame = stack[-1]
             prefix = frame[0]
-            directory_fd = frame[1]
-            entries = frame[2]
+            depth = frame[1]
+            directory_fd = frame[2]
+            entries = frame[3]
             if entries is None:
                 with os.scandir(directory_fd) as iterator:
                     entries = sorted(iterator, key=lambda item: item.name)
-                frame[2] = entries
+                frame[3] = entries
                 visited += len(entries)
                 if visited > snapshot.code_capture.limits.max_entries:
                     raise WorkspaceChanged("sealed workspace entry range exceeded")
-            index = frame[3]
+            index = frame[4]
             if index >= len(entries):
                 stack.pop()
                 if directory_fd != root_fd:
                     os.close(directory_fd)
                 continue
             entry = entries[index]
-            frame[3] = index + 1
+            frame[4] = index + 1
             _verify_component_barrier(entry.name)
             metadata = os.stat(entry.name, dir_fd=directory_fd, follow_symlinks=False)
             if _is_unsafe(metadata):
@@ -1431,13 +1574,17 @@ def _verify_posix(workspace: SealedWorkspace, snapshot: CorpusSnapshot) -> tuple
             relative_parts = (*prefix, entry.name)
             relative = "/".join(relative_parts)
             if stat.S_ISDIR(metadata.st_mode):
+                members.append((relative, "directory"))
                 visited_directories += 1
                 if visited_directories > snapshot.code_capture.limits.max_directories:
                     raise WorkspaceChanged("sealed workspace directory range exceeded")
+                child_depth = depth + 1
+                if child_depth > snapshot.code_capture.limits.max_depth:
+                    raise WorkspaceChanged("sealed workspace depth range exceeded")
                 child = os.open(entry.name, _posix_directory_flags(), dir_fd=directory_fd)
-                stack.append([relative_parts, child, None, 0])
+                stack.append([relative_parts, child_depth, child, None, 0])
             elif stat.S_ISREG(metadata.st_mode):
-                paths.append(relative)
+                members.append((relative, "file"))
                 if relative in expected:
                     descriptor = os.open(
                         entry.name,
@@ -1463,15 +1610,217 @@ def _verify_posix(workspace: SealedWorkspace, snapshot: CorpusSnapshot) -> tuple
         finally:
             for descriptor in reversed(named_chains):
                 os.close(descriptor)
-        return tuple(sorted(paths))
+        return tuple(sorted(members))
     except (OSError, PermissionError) as exc:
         raise WorkspaceChanged("sealed workspace directory cannot be verified") from exc
     finally:
         if "stack" in locals():
             for frame in reversed(stack[1:]):
-                os.close(frame[1])
+                os.close(frame[2])
         for descriptor in reversed(chains):
             os.close(descriptor)
+
+
+def _expected_workspace_members(
+    expected: tuple[tuple[str, int, str], ...]
+) -> tuple[tuple[str, str], ...]:
+    members: set[tuple[str, str]] = set()
+    for relative, _size, _digest in expected:
+        parts = PurePosixPath(relative).parts
+        for end in range(1, len(parts)):
+            members.add(("/".join(parts[:end]), "directory"))
+        members.add((relative, "file"))
+    return tuple(sorted(members))
+
+
+def _verify_windows_file(
+    handle: int,
+    *,
+    size: int,
+    digest: str,
+    chunk_bytes: int,
+    require_read_only: bool,
+) -> None:
+    before = _windows_workspace.identity(handle, directory=False)
+    if _windows_workspace.file_size(handle) != size:
+        raise WorkspaceChanged("sealed workspace file size changed")
+    hasher = hashlib.sha256()
+    total = 0
+    for chunk in _windows_workspace.read_chunks(
+        handle, chunk_bytes=chunk_bytes, max_bytes=size
+    ):
+        total += len(chunk)
+        hasher.update(chunk)
+    after = _windows_workspace.identity(handle, directory=False)
+    if (
+        before != after
+        or _windows_workspace.file_size(handle) != size
+        or total != size
+        or hasher.hexdigest() != digest
+    ):
+        raise WorkspaceChanged("sealed workspace file content changed")
+    if require_read_only and not _windows_workspace.is_read_only(handle):
+        raise WorkspaceChanged("sealed workspace file is no longer read-only")
+
+
+def _validated_windows_identities(
+    workspace: SealedWorkspace,
+    expected_members: tuple[tuple[str, str], ...],
+) -> dict[str, tuple[int, bytes, bool]]:
+    identities: dict[str, tuple[int, bytes, bool]] = {}
+    try:
+        for relative, volume, file_id, directory in workspace.platform_identities:
+            if (
+                not isinstance(relative, str)
+                or isinstance(volume, bool)
+                or not isinstance(volume, int)
+                or volume < 0
+                or not isinstance(file_id, str)
+                or _WINDOWS_FILE_ID_RE.fullmatch(file_id) is None
+                or not isinstance(directory, bool)
+                or relative in identities
+            ):
+                raise ValueError
+            decoded = bytes.fromhex(file_id)
+            identities[relative] = (volume, decoded, directory)
+    except (TypeError, ValueError) as exc:
+        raise WorkspaceChanged("sealed workspace identity manifest is invalid") from exc
+    expected_kinds = {"": True}
+    expected_kinds.update(
+        (relative, kind == "directory") for relative, kind in expected_members
+    )
+    if set(identities) != set(expected_kinds) or any(
+        identities[relative][2] != directory
+        for relative, directory in expected_kinds.items()
+    ):
+        raise WorkspaceChanged("sealed workspace identity manifest changed")
+    return identities
+
+
+def _verify_windows(
+    workspace: SealedWorkspace,
+    snapshot: CorpusSnapshot,
+    expected_members: tuple[tuple[str, str], ...],
+) -> tuple[tuple[str, str], ...]:
+    persisted = _validated_windows_identities(workspace, expected_members)
+    chains: list[int] = []
+    members: list[tuple[str, str]] = []
+    visited = 0
+    visited_directories = 0
+    expected = {
+        source.record.relative_path: (source.record.size, source.record.sha256)
+        for source in snapshot.sources
+    }
+    limits = snapshot.code_capture.limits
+    try:
+        chains = _windows_workspace.open_directory_path(workspace.root)
+        root_handle = chains[-1]
+        if persisted.get("") != _windows_workspace.identity(
+            root_handle, directory=True
+        ):
+            raise WorkspaceChanged("sealed workspace root identity changed")
+        stack: list[list[object]] = [[(), -1, root_handle, None, 0]]
+        while stack:
+            frame = stack[-1]
+            prefix = frame[0]
+            depth = frame[1]
+            directory_handle = frame[2]
+            entries = frame[3]
+            if entries is None:
+                entries = _windows_workspace.list_directory(
+                    directory_handle, max_entries=limits.max_entries
+                )
+                frame[3] = entries
+                visited += len(entries)
+                if visited > limits.max_entries:
+                    raise WorkspaceChanged("sealed workspace entry range exceeded")
+            index = frame[4]
+            if index >= len(entries):
+                if _windows_workspace.list_directory(
+                    directory_handle, max_entries=limits.max_entries
+                ) != entries:
+                    raise WorkspaceChanged(
+                        "sealed workspace directory changed during verification"
+                    )
+                stack.pop()
+                if directory_handle != root_handle:
+                    _windows_workspace.close_handle(directory_handle)
+                continue
+            entry = entries[index]
+            frame[4] = index + 1
+            _verify_component_barrier(entry.name)
+            relative_parts = (*prefix, entry.name)
+            relative = "/".join(relative_parts)
+            if entry.kind == "link":
+                raise WorkspaceChanged("sealed workspace member became a reparse point")
+            if entry.kind == "directory":
+                members.append((relative, "directory"))
+                visited_directories += 1
+                if visited_directories > limits.max_directories:
+                    raise WorkspaceChanged("sealed workspace directory range exceeded")
+                child_depth = depth + 1
+                if child_depth > limits.max_depth:
+                    raise WorkspaceChanged("sealed workspace depth range exceeded")
+                child = _windows_workspace.open_directory(directory_handle, entry.name)
+                try:
+                    child_identity = _windows_workspace.identity(child, directory=True)
+                    if (
+                        child_identity[1] != entry.file_id
+                        or (
+                            relative in persisted
+                            and persisted[relative] != child_identity
+                        )
+                    ):
+                        raise WorkspaceChanged(
+                            "sealed workspace directory identity changed"
+                        )
+                except BaseException:
+                    _windows_workspace.close_handle(child)
+                    raise
+                stack.append([relative_parts, child_depth, child, None, 0])
+            elif entry.kind == "file":
+                members.append((relative, "file"))
+                if relative in expected:
+                    handle = _windows_workspace.open_file(directory_handle, entry.name)
+                    try:
+                        file_identity = _windows_workspace.identity(
+                            handle, directory=False
+                        )
+                        if (
+                            file_identity[1] != entry.file_id
+                            or persisted.get(relative) != file_identity
+                        ):
+                            raise WorkspaceChanged(
+                                "sealed workspace file identity changed"
+                            )
+                        size, digest = expected[relative]
+                        _verify_windows_file(
+                            handle,
+                            size=size,
+                            digest=digest,
+                            chunk_bytes=limits.chunk_bytes,
+                            require_read_only=workspace.read_only_requested,
+                        )
+                    finally:
+                        _windows_workspace.close_handle(handle)
+            else:
+                raise WorkspaceChanged("sealed workspace contains a device")
+
+        named = _windows_workspace.open_directory(chains[-2], workspace.root.name)
+        try:
+            if _windows_workspace.identity(named, directory=True) != persisted.get(""):
+                raise WorkspaceChanged("sealed workspace root changed during verification")
+        finally:
+            _windows_workspace.close_handle(named)
+        return tuple(sorted(members))
+    except (OSError, PermissionError, ValueError) as exc:
+        raise WorkspaceChanged("sealed workspace directory cannot be verified") from exc
+    finally:
+        if "stack" in locals():
+            for frame in reversed(stack[1:]):
+                _windows_workspace.close_handle(frame[2])
+        for handle in reversed(chains):
+            _windows_workspace.close_handle(handle)
 
 
 def verify_workspace_seal(workspace: SealedWorkspace, snapshot: CorpusSnapshot) -> None:
@@ -1487,9 +1836,14 @@ def verify_workspace_seal(workspace: SealedWorkspace, snapshot: CorpusSnapshot) 
         )
     if workspace.source_manifest_sha256 != manifest_sha256 or workspace.entries != expected:
         raise WorkspaceChanged("sealed workspace source manifest changed")
-    actual_paths = _verify_posix(workspace, snapshot)
-    if actual_paths != tuple(item[0] for item in expected):
-        raise WorkspaceChanged("sealed workspace has extra or missing files")
+    expected_members = _expected_workspace_members(expected)
+    actual_members = (
+        _verify_windows(workspace, snapshot, expected_members)
+        if os.name == "nt"
+        else _verify_posix(workspace, snapshot)
+    )
+    if actual_members != expected_members:
+        raise WorkspaceChanged("sealed workspace has extra or missing entries")
 
 
 __all__ = [
