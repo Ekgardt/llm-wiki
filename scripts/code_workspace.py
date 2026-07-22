@@ -259,6 +259,10 @@ def _capture_open_barrier(_path: Path) -> None:
     return
 
 
+def _capture_entry_identity_barrier(_path: Path) -> None:
+    return
+
+
 def _capture_root_barrier(_root: Path) -> None:
     return
 
@@ -282,18 +286,23 @@ def _hold_directory_identity(
 
         handle = _open_windows_directory(path)
         try:
-            identity = _windows_handle_file_identity(handle)
+            try:
+                identity = _windows_handle_file_identity(handle)
+            except OSError as exc:
+                raise RuntimeError("stable directory identity is unavailable") from exc
             if expected_identity is not None and identity != expected_identity:
                 raise PermissionError("repository code directory changed before traversal")
             yield
-            current = _open_windows_directory(path)
             try:
-                if identity != _windows_handle_file_identity(current):
-                    raise RuntimeError("repository code directory changed during capture")
-            finally:
-                _close_windows_handle(current)
-        except OSError as exc:
-            raise RuntimeError("stable directory identity is unavailable") from exc
+                current = _open_windows_directory(path)
+                try:
+                    current_identity = _windows_handle_file_identity(current)
+                finally:
+                    _close_windows_handle(current)
+            except OSError as exc:
+                raise RuntimeError("stable directory identity is unavailable") from exc
+            if identity != current_identity:
+                raise RuntimeError("repository code directory changed during capture")
         finally:
             _close_windows_handle(handle)
         return
@@ -472,9 +481,7 @@ def _entry_identity(path: Path, info: os.stat_result) -> tuple[object, ...] | No
         descriptor = _open_read(path)
         try:
             opened = os.fstat(descriptor)
-            if not stat.S_ISREG(opened.st_mode) or (
-                os.name == "posix" and not _same_file(info, opened)
-            ):
+            if not stat.S_ISREG(opened.st_mode) or not _same_file(info, opened):
                 raise PermissionError("repository code file changed during enumeration")
             return _descriptor_identity(descriptor)
         finally:
@@ -796,6 +803,9 @@ def _collect_repository_code_from_root(
                         raise ValueError("repository code entry limit exceeded")
                     info = entry.stat(follow_symlinks=False)
                     path = Path(entry.path)
+                    if os.name == "nt":
+                        info = path.lstat()
+                    _capture_entry_identity_barrier(path)
                     raw_entries.append((entry.name, path, info, _entry_identity(path, info)))
         membership_entries = []
         normalized_names: dict[str, str] = {}

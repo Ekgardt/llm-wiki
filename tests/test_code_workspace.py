@@ -678,6 +678,58 @@ def test_capture_rejects_replacement_between_stat_and_open_at_barrier(
     assert replaced.is_set()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows enumeration identity race")
+@pytest.mark.parametrize("_attempt", range(20))
+def test_windows_capture_rejects_replacement_between_enumeration_stat_and_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _attempt: int
+) -> None:
+    import code_workspace
+
+    root = tmp_path / "repository"
+    target = root / "src/app.py"
+    attacker = tmp_path / "attacker.py"
+    _write(target, b"safe = True\n")
+    _write(attacker, b"secret = True\n")
+    attacker_descriptor = code_workspace._open_read(attacker)
+    try:
+        attacker_identity = code_workspace._descriptor_identity(attacker_descriptor)
+    finally:
+        os.close(attacker_descriptor)
+
+    real_read = code_workspace.os.read
+    replaced = False
+    attacker_reads = 0
+
+    def replace_after_enumeration_stat(path: Path) -> None:
+        nonlocal replaced
+        if path == target and not replaced:
+            os.replace(attacker, target)
+            replaced = True
+
+    def track_attacker_read(descriptor: int, size: int) -> bytes:
+        nonlocal attacker_reads
+        metadata = os.fstat(descriptor)
+        if (
+            stat.S_ISREG(metadata.st_mode)
+            and code_workspace._descriptor_identity(descriptor) == attacker_identity
+        ):
+            attacker_reads += 1
+        return real_read(descriptor, size)
+
+    monkeypatch.setattr(
+        code_workspace,
+        "_capture_entry_identity_barrier",
+        replace_after_enumeration_stat,
+        raising=False,
+    )
+    monkeypatch.setattr(code_workspace.os, "read", track_attacker_read)
+    with pytest.raises(PermissionError, match="changed during enumeration"):
+        _capture(root)
+
+    assert replaced
+    assert attacker_reads == 0
+
+
 def test_capture_rejects_unavailable_descriptor_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
