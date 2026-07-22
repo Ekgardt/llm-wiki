@@ -6,6 +6,7 @@ import hashlib
 import math
 import os
 import re
+import signal
 import stat
 import subprocess
 import threading
@@ -13,7 +14,7 @@ import time
 import unicodedata
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from reliable_memory import canonical_json_bytes
 from repository_scope import RepositoryScope, sanitized_git_environment
@@ -38,6 +39,8 @@ GIT_STATUS_TIMEOUT_SECONDS = 5.0
 _MAX_GIT_HEAD_BYTES = 65
 _GIT_COMMIT_RE = re.compile(rb"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_WINDOWS_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+_PROCESS_CLEANUP_SECONDS = 0.2
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +67,24 @@ class WorkspaceDelta:
     renamed: tuple[tuple[str, str], ...]
     deleted: tuple[str, ...]
     configuration_changed: bool
+
+
+_Identity = tuple[int, int, int, int, int, int]
+
+
+@dataclass(frozen=True, slots=True)
+class _DirectorySnapshot:
+    path: Path
+    resolved: Path
+    identity: _Identity
+
+
+@dataclass(frozen=True, slots=True)
+class _FileSnapshot:
+    path: Path
+    resolved: Path
+    identity: _Identity
+    parents: tuple[_DirectorySnapshot, ...]
 
 
 def _check_stop(
@@ -104,6 +125,118 @@ def _is_configuration(path: str) -> bool:
     )
 
 
+def _is_relevant_path(path: str) -> bool:
+    return PurePosixPath(path).suffix in {".py", ".pyi"} or _is_configuration(path)
+
+
+def _identity(info: os.stat_result) -> _Identity:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_size,
+        info.st_mtime_ns,
+        getattr(info, "st_file_attributes", 0),
+    )
+
+
+def _is_reparse(info: os.stat_result) -> bool:
+    return stat.S_ISLNK(info.st_mode) or bool(
+        getattr(info, "st_file_attributes", 0) & _REPARSE_POINT
+    )
+
+
+def _directory_snapshot(root: Path, path: Path) -> _DirectorySnapshot:
+    try:
+        info = path.lstat()
+        if _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
+            raise PermissionError("workspace revision directory is a symlink or reparse point")
+        resolved_root = root.resolve(strict=True)
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(resolved_root)
+    except (OSError, ValueError) as exc:
+        raise PermissionError("workspace revision directory changed or escapes checkout") from exc
+    return _DirectorySnapshot(path, resolved, _identity(info))
+
+
+def _validate_directory_snapshot(root: Path, snapshot: _DirectorySnapshot) -> None:
+    current = _directory_snapshot(root, snapshot.path)
+    if current != snapshot:
+        raise PermissionError("workspace revision directory identity changed")
+
+
+def _file_snapshot(root: Path, path: Path) -> _FileSnapshot:
+    parents = []
+    for parent in path.parents:
+        parents.append(_directory_snapshot(root, parent))
+        if parent == root:
+            break
+    else:
+        raise PermissionError("workspace revision source is outside checkout")
+    try:
+        info = path.lstat()
+        if _is_reparse(info) or not stat.S_ISREG(info.st_mode):
+            raise PermissionError("workspace revision source must be a regular non-symlink file")
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(root.resolve(strict=True))
+    except (OSError, ValueError) as exc:
+        raise PermissionError("workspace revision source escapes checkout or changed") from exc
+    return _FileSnapshot(path, resolved, _identity(info), tuple(parents))
+
+
+def _validate_file_snapshot(root: Path, snapshot: _FileSnapshot) -> None:
+    for parent in snapshot.parents:
+        _validate_directory_snapshot(root, parent)
+    current = _file_snapshot(root, snapshot.path)
+    if current != snapshot:
+        raise PermissionError("workspace revision file snapshot changed")
+
+
+def _terminate_process_tree(
+    process: subprocess.Popen[bytes], *, platform_name: str | None = None
+) -> None:
+    platform_name = platform_name or os.name
+    if platform_name == "nt":
+        system_root = os.environ.get("SystemRoot", r"C:\Windows")
+        taskkill = str(PureWindowsPath(system_root) / "System32" / "taskkill.exe")
+        try:
+            terminator = subprocess.Popen(
+                [taskkill, "/PID", str(process.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                shell=False,
+            )
+            try:
+                terminator.communicate(timeout=_PROCESS_CLEANUP_SECONDS)
+            except subprocess.TimeoutExpired:
+                terminator.kill()
+                terminator.wait(timeout=_PROCESS_CLEANUP_SECONDS)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=_PROCESS_CLEANUP_SECONDS)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        try:
+            os.killpg(process.pid, getattr(signal, "SIGKILL", 9))
+        except OSError:
+            pass
+    try:
+        process.wait(timeout=_PROCESS_CLEANUP_SECONDS)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            process.kill()
+            process.wait(timeout=_PROCESS_CLEANUP_SECONDS)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
 def _git_output(
     root: Path,
     arguments: list[str],
@@ -114,49 +247,88 @@ def _git_output(
     cancelled: Callable[[], bool] | None,
 ) -> bytes:
     _check_stop(deadline, cancelled)
-    command = ["git", "-C", root.as_posix(), *arguments]
-    process = subprocess.Popen(
-        command,
+    command = [
+        "git",
+        "--no-optional-locks",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        root.as_posix(),
+        *arguments,
+    ]
+    popen_options: dict[str, object] = dict(
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         shell=False,
         env=sanitized_git_environment(),
     )
-    stopped = threading.Event()
+    if os.name == "nt":
+        popen_options["creationflags"] = _WINDOWS_NEW_PROCESS_GROUP
+    else:
+        popen_options["start_new_session"] = True
+    process = subprocess.Popen(command, **popen_options)
     stop_reason: list[str] = []
+    termination_started = threading.Event()
+    termination_lock = threading.Lock()
     local_deadline = time.monotonic() + GIT_STATUS_TIMEOUT_SECONDS
     effective_deadline = local_deadline if deadline is None else min(local_deadline, deadline)
 
-    def monitor() -> None:
-        while not stopped.is_set() and process.poll() is None:
+    def terminate() -> None:
+        with termination_lock:
+            if termination_started.is_set():
+                return
+            termination_started.set()
+        _terminate_process_tree(process)
+
+    output_parts: list[bytes] = []
+    read_errors: list[BaseException] = []
+    read_done = threading.Event()
+
+    def read_output() -> None:
+        try:
+            assert process.stdout is not None
+            output_parts.append(process.stdout.read(maximum_bytes + 1))
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the owning thread
+            read_errors.append(exc)
+        finally:
+            read_done.set()
+
+    reader = threading.Thread(target=read_output, daemon=True)
+    reader.start()
+    try:
+        while not read_done.is_set():
             if cancelled is not None and cancelled():
                 stop_reason.append("cancelled")
-                process.kill()
-                return
+                terminate()
+                break
             remaining = effective_deadline - time.monotonic()
             if remaining <= 0:
                 stop_reason.append("deadline")
-                process.kill()
-                return
-            stopped.wait(min(0.01, remaining))
-
-    watcher = threading.Thread(target=monitor, daemon=True)
-    watcher.start()
-    output = b""
-    try:
-        assert process.stdout is not None
-        output = process.stdout.read(maximum_bytes + 1)
-        if len(output) > maximum_bytes and process.poll() is None:
-            process.kill()
-        process.wait()
+                terminate()
+                break
+            read_done.wait(min(0.01, remaining))
+        if stop_reason and process.stdout is not None:
+            process.stdout.close()
+        reader.join(timeout=_PROCESS_CLEANUP_SECONDS)
+        if read_errors and not stop_reason:
+            raise read_errors[0]
+        output = output_parts[0] if output_parts else b""
+        if len(output) > maximum_bytes:
+            terminate()
+        try:
+            process.wait(timeout=_PROCESS_CLEANUP_SECONDS)
+        except subprocess.TimeoutExpired:
+            terminate()
     finally:
-        stopped.set()
         if process.poll() is None:
-            process.kill()
-            process.wait()
-        process.stdout.close()
-        watcher.join(timeout=0.1)
+            terminate()
+        if process.stdout is not None:
+            try:
+                process.stdout.close()
+            except OSError:
+                pass
+        reader.join(timeout=_PROCESS_CLEANUP_SECONDS)
     if stop_reason:
         raise TimeoutError(f"workspace revision {stop_reason[0]} during {label}")
     if len(output) > maximum_bytes:
@@ -174,7 +346,13 @@ def _git_status(
 ) -> bytes:
     return _git_output(
         root,
-        ["status", "--porcelain=v2", "-z", "--untracked-files=all"],
+        [
+            "status",
+            "--porcelain=v2",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=all",
+        ],
         maximum_bytes=MAX_GIT_STATUS_BYTES,
         label="Git status",
         deadline=deadline,
@@ -246,6 +424,7 @@ def _status_paths(output: bytes) -> list[tuple[str, str]]:
 def _relevant_files(
     root: Path,
     *,
+    directory_snapshots: list[_DirectorySnapshot],
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
 ) -> Iterator[Path]:
@@ -256,17 +435,9 @@ def _relevant_files(
     while stack:
         _check_stop(deadline, cancelled)
         current = stack.pop()
-        current_info = current.lstat()
-        if (
-            current.is_symlink()
-            or getattr(current_info, "st_file_attributes", 0) & _REPARSE_POINT
-            or not stat.S_ISDIR(current_info.st_mode)
-        ):
-            continue
-        try:
-            current.resolve(strict=True).relative_to(resolved_root)
-        except (OSError, ValueError) as exc:
-            raise PermissionError("workspace revision directory escapes checkout") from exc
+        current_snapshot = _directory_snapshot(root, current)
+        current_snapshot.resolved.relative_to(resolved_root)
+        directory_snapshots.append(current_snapshot)
         entries = []
         with os.scandir(current) as iterator:
             for entry in iterator:
@@ -275,13 +446,22 @@ def _relevant_files(
                 info = entry.stat(follow_symlinks=False)
                 path = Path(entry.path)
                 relative = path.relative_to(root).as_posix()
-                unsafe = entry.is_symlink() or bool(
-                    getattr(info, "st_file_attributes", 0) & _REPARSE_POINT
-                )
+                unsafe = entry.is_symlink() or _is_reparse(info)
+                relevant_name = _is_relevant_path(relative)
+                linked_directory = False
+                if unsafe:
+                    try:
+                        linked_directory = entry.is_dir(follow_symlinks=True)
+                    except OSError:
+                        linked_directory = False
+                    if relevant_name or linked_directory or stat.S_ISDIR(info.st_mode):
+                        raise PermissionError(
+                            "workspace revision relevant path is a symlink or reparse directory"
+                        )
                 relevant = (
                     not unsafe
                     and stat.S_ISREG(info.st_mode)
-                    and (path.suffix in {".py", ".pyi"} or _is_configuration(relative))
+                    and relevant_name
                 )
                 if relevant:
                     relevant_examined += 1
@@ -290,6 +470,7 @@ def _relevant_files(
                 if examined > MAX_REVISION_FILES:
                     raise ValueError("workspace revision exceeds the examined-entry ceiling")
                 entries.append((entry, path, info, unsafe, relevant))
+        _validate_directory_snapshot(root, current_snapshot)
         directories = []
         for entry, path, info, unsafe, relevant in sorted(
             entries, key=lambda item: unicodedata.normalize("NFC", item[0].name)
@@ -313,34 +494,9 @@ def _hash_file(
     remaining_bytes: int,
     deadline: float | None,
     cancelled: Callable[[], bool] | None,
-) -> tuple[str, int]:
-    resolved_root = root.resolve(strict=True)
-    try:
-        for parent in path.parents:
-            if parent == root:
-                break
-            parent_info = parent.lstat()
-            if (
-                parent.is_symlink()
-                or getattr(parent_info, "st_file_attributes", 0) & _REPARSE_POINT
-                or not stat.S_ISDIR(parent_info.st_mode)
-            ):
-                raise PermissionError(
-                    "workspace revision source parent must be a regular directory"
-                )
-        else:
-            raise PermissionError("workspace revision source is outside checkout")
-        before = path.lstat()
-        if (
-            path.is_symlink()
-            or getattr(before, "st_file_attributes", 0) & _REPARSE_POINT
-            or not stat.S_ISREG(before.st_mode)
-        ):
-            raise PermissionError("workspace revision source must be a regular non-symlink file")
-        path.resolve(strict=True).relative_to(resolved_root)
-    except (OSError, ValueError) as exc:
-        raise PermissionError("workspace revision source escapes checkout or changed") from exc
-    if before.st_size > remaining_bytes:
+) -> tuple[str, int, _FileSnapshot]:
+    snapshot = _file_snapshot(root, path)
+    if snapshot.identity[3] > remaining_bytes:
         raise ValueError("workspace revision exceeds the byte ceiling")
     digest = hashlib.sha256()
     size = 0
@@ -351,13 +507,7 @@ def _hash_file(
         raise PermissionError("workspace revision source changed or became a symlink at open") from exc
     try:
         opened = os.fstat(descriptor)
-        identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-        if not stat.S_ISREG(opened.st_mode) or identity != (
-            opened.st_dev,
-            opened.st_ino,
-            opened.st_size,
-            opened.st_mtime_ns,
-        ):
+        if not stat.S_ISREG(opened.st_mode) or _identity(opened) != snapshot.identity:
             raise PermissionError("workspace revision source changed before open")
         with os.fdopen(descriptor, "rb", closefd=False) as source:
             while True:
@@ -370,18 +520,12 @@ def _hash_file(
                     raise ValueError("workspace revision exceeds the byte ceiling")
                 digest.update(chunk)
         after = os.fstat(descriptor)
-        current = path.lstat()
-        if identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+        if _identity(after) != snapshot.identity:
             raise PermissionError("workspace revision source changed during read")
-        if (
-            path.is_symlink()
-            or getattr(current, "st_file_attributes", 0) & _REPARSE_POINT
-            or identity[:2] != (current.st_dev, current.st_ino)
-        ):
-            raise PermissionError("workspace revision source was replaced during read")
+        _validate_file_snapshot(root, snapshot)
     finally:
         os.close(descriptor)
-    return digest.hexdigest(), size
+    return digest.hexdigest(), size, snapshot
 
 
 def compute_workspace_revision(
@@ -395,6 +539,8 @@ def compute_workspace_revision(
     root = Path(repository.checkout_root)
     raw_entries: dict[str, tuple[str, Path | None]] = {}
     normalized_inputs: dict[str, str] = {}
+    directory_snapshots: list[_DirectorySnapshot] = []
+    file_snapshots: list[_FileSnapshot] = []
 
     def add(raw: str, kind: str, path: Path | None) -> None:
         normalized = _normalized_path(raw)
@@ -409,6 +555,12 @@ def compute_workspace_revision(
         raw_entries[normalized] = (kind, path)
 
     if repository.git_common_dir is not None:
+        git_head = _git_head(
+            root,
+            allow_missing=repository.git_commit is None,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
         for raw, status in _status_paths(
             _git_status(root, deadline=deadline, cancelled=cancelled)
         ):
@@ -423,11 +575,15 @@ def compute_workspace_revision(
             except FileNotFoundError:
                 add(raw, "deleted", None)
                 continue
-            if (
-                path.is_symlink()
-                or getattr(info, "st_file_attributes", 0) & _REPARSE_POINT
-                or not stat.S_ISREG(info.st_mode)
-            ):
+            unsafe = path.is_symlink() or _is_reparse(info)
+            if unsafe:
+                linked_directory = path.is_dir()
+                if _is_relevant_path(normalized) or linked_directory or stat.S_ISDIR(info.st_mode):
+                    raise PermissionError(
+                        "workspace revision Git path is a relevant symlink or reparse directory"
+                    )
+                continue
+            if not stat.S_ISREG(info.st_mode):
                 continue
             try:
                 path.resolve(strict=True).relative_to(root.resolve(strict=True))
@@ -435,16 +591,15 @@ def compute_workspace_revision(
                 raise PermissionError("workspace revision source escapes checkout") from exc
             add(raw, status, path)
 
-        git_head = _git_head(
-            root,
-            allow_missing=repository.git_commit is None,
-            deadline=deadline,
-            cancelled=cancelled,
-        )
     else:
         git_head = None
 
-    for path in _relevant_files(root, deadline=deadline, cancelled=cancelled):
+    for path in _relevant_files(
+        root,
+        directory_snapshots=directory_snapshots,
+        deadline=deadline,
+        cancelled=cancelled,
+    ):
         _check_stop(deadline, cancelled)
         raw = path.relative_to(root).as_posix()
         normalized = _normalized_path(raw)
@@ -462,7 +617,7 @@ def compute_workspace_revision(
         if path is None:
             entries.append(RevisionEntry(relative, "deleted", None, 0))
             continue
-        sha256, size = _hash_file(
+        sha256, size, snapshot = _hash_file(
             path,
             root=root,
             remaining_bytes=MAX_REVISION_BYTES - total_bytes,
@@ -470,7 +625,27 @@ def compute_workspace_revision(
             cancelled=cancelled,
         )
         total_bytes += size
+        file_snapshots.append(snapshot)
         entries.append(RevisionEntry(relative, kind, sha256, size))
+
+    for snapshot in directory_snapshots:
+        _check_stop(deadline, cancelled)
+        _validate_directory_snapshot(root, snapshot)
+    for snapshot in file_snapshots:
+        _check_stop(deadline, cancelled)
+        _validate_file_snapshot(root, snapshot)
+    for relative, (_kind, path) in raw_entries.items():
+        if path is None and os.path.lexists(root / PurePosixPath(relative)):
+            raise PermissionError("workspace revision deleted path changed before consistency fence")
+    if repository.git_common_dir is not None:
+        final_head = _git_head(
+            root,
+            allow_missing=git_head is None,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+        if final_head != git_head:
+            raise RuntimeError("Git HEAD changed during workspace revision")
 
     values = {
         "repository_id": repository.repository_id,
