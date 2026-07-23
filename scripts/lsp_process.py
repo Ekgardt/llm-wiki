@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -100,18 +101,19 @@ class LspProcess:
         cwd = cwd.resolve()
         arguments = _validated_command(command, cwd)
         environment = lsp_environment()
-        _create_owner_root(owner_root)
+        owner_nonce = _validated_owner_root(owner_root)
+        generation_nonce = _new_generation_nonce()
+        started_monotonic = time.monotonic()
+        started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
         process: subprocess.Popen[bytes] | None = None
         protocol: LspProtocol | None = None
         stderr_thread: threading.Thread | None = None
+        exit_thread: threading.Thread | None = None
         instance: LspProcess | None = None
         instance_lock = threading.Lock()
         failed_before_instance = False
-        owner_nonce = secrets.token_hex(16)
-        generation_nonce = secrets.token_hex(16)
-        started_monotonic = time.monotonic()
-        started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        created_paths: list[tuple[Path, bool]] = []
 
         def protocol_failed(_reason: str) -> None:
             nonlocal failed_before_instance
@@ -123,6 +125,7 @@ class LspProcess:
             current._mark_failed()
 
         try:
+            _create_owner_root(owner_root, created_paths)
             process = subprocess.Popen(
                 arguments,
                 cwd=cwd,
@@ -156,6 +159,7 @@ class LspProcess:
                 "state": ProcessState.PROCESS_RUNNING.value,
             }
             _write_owner_record(owner_root, owner_record)
+            created_paths.append((owner_root / "owner.json", False))
             protocol = LspProtocol(
                 process.stdout,
                 process.stdin,
@@ -178,15 +182,21 @@ class LspProcess:
             with instance_lock:
                 if failed_before_instance:
                     instance._mark_failed()
-            instance._exit_thread = threading.Thread(
+            exit_thread = threading.Thread(
                 target=instance._monitor_exit,
                 name=f"lsp-exit-{generation_nonce}",
                 daemon=True,
             )
-            instance._exit_thread.start()
+            instance._exit_thread = exit_thread
+            exit_thread.start()
             return instance
         except BaseException:
-            _rollback_startup(process, protocol, stderr_thread, owner_root)
+            _rollback_startup(
+                process,
+                protocol,
+                (stderr_thread, exit_thread),
+                created_paths,
+            )
             raise
 
     def request(
@@ -296,20 +306,37 @@ def _validated_command(command: Sequence[str], cwd: Path) -> list[str]:
     return arguments
 
 
-def _create_owner_root(owner_root: Path) -> None:
+def _validated_owner_root(owner_root: Path) -> str:
+    owner_nonce = owner_root.name
+    if re.fullmatch(r"[0-9a-f]{32}", owner_nonce) is None:
+        raise ValueError(
+            "owner_root basename must be 32 lowercase hexadecimal characters"
+        )
     if os.path.lexists(owner_root):
         raise FileExistsError(owner_root)
     if not owner_root.parent.exists() or not owner_root.parent.is_dir():
         raise FileNotFoundError(owner_root.parent)
+    return owner_nonce
+
+
+def _new_generation_nonce() -> str:
+    nonce = secrets.token_hex(16)
+    if re.fullmatch(r"[0-9a-f]{32}", nonce) is None:
+        raise ValueError("generation nonce must be 32 lowercase hexadecimal characters")
+    return nonce
+
+
+def _create_owner_root(
+    owner_root: Path, created_paths: list[tuple[Path, bool]]
+) -> None:
     owner_root.mkdir(mode=0o700)
-    try:
-        (owner_root / "cancellation").mkdir(mode=0o700)
-        if os.name == "posix":
-            owner_root.chmod(0o700)
-            (owner_root / "cancellation").chmod(0o700)
-    except BaseException:
-        shutil.rmtree(owner_root, ignore_errors=True)
-        raise
+    created_paths.append((owner_root, True))
+    cancellation_root = owner_root / "cancellation"
+    cancellation_root.mkdir(mode=0o700)
+    created_paths.append((cancellation_root, True))
+    if os.name == "posix":
+        owner_root.chmod(0o700)
+        cancellation_root.chmod(0o700)
 
 
 def _write_owner_record(owner_root: Path, record: Mapping[str, object]) -> None:
@@ -380,8 +407,8 @@ def _validated_deadline(deadline: float) -> float:
 def _rollback_startup(
     process: subprocess.Popen[bytes] | None,
     protocol: LspProtocol | None,
-    stderr_thread: threading.Thread | None,
-    owner_root: Path,
+    threads: tuple[threading.Thread | None, ...],
+    created_paths: Sequence[tuple[Path, bool]],
 ) -> None:
     if process is not None and process.poll() is None:
         try:
@@ -397,7 +424,10 @@ def _rollback_startup(
             except (OSError, subprocess.TimeoutExpired):
                 pass
     if protocol is not None:
-        protocol.close()
+        try:
+            protocol.close()
+        except BaseException:
+            pass
     if process is not None:
         for stream in (process.stdin, process.stdout, process.stderr):
             if stream is not None:
@@ -405,6 +435,16 @@ def _rollback_startup(
                     stream.close()
                 except (OSError, ValueError):
                     pass
-    if stderr_thread is not None and stderr_thread.ident is not None:
-        stderr_thread.join(_STARTUP_WAIT_SECONDS)
-    shutil.rmtree(owner_root, ignore_errors=True)
+    for thread in threads:
+        if thread is not None and thread.ident is not None:
+            thread.join(_STARTUP_WAIT_SECONDS)
+    for path, is_directory in reversed(created_paths):
+        try:
+            if is_directory:
+                path.rmdir()
+            else:
+                path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass

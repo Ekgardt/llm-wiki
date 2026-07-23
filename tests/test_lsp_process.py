@@ -26,6 +26,7 @@ from lsp_process import (
 from lsp_protocol import CancellationSource, ProtocolViolation
 
 FAKE_SERVER = Path(__file__).with_name("fake_lsp_server.py").resolve()
+OWNER_NONCE = "a" * 32
 
 
 def _command(*arguments: str) -> list[str]:
@@ -34,7 +35,7 @@ def _command(*arguments: str) -> list[str]:
 
 def _start(tmp_path: Path, *arguments: str) -> LspProcess:
     return LspProcess.start(
-        _command(*arguments), cwd=tmp_path, owner_root=tmp_path / "owner"
+        _command(*arguments), cwd=tmp_path, owner_root=tmp_path / OWNER_NONCE
     )
 
 
@@ -202,10 +203,12 @@ def test_zero_stderr_and_concurrent_snapshots_never_block(tmp_path: Path) -> Non
 
 
 def test_each_start_has_independent_lowercase_hex_nonces(tmp_path: Path) -> None:
-    (tmp_path / "first").mkdir()
-    (tmp_path / "second").mkdir()
-    first = _start(tmp_path / "first")
-    second = _start(tmp_path / "second")
+    first = LspProcess.start(
+        _command(), cwd=tmp_path, owner_root=tmp_path / ("a" * 32)
+    )
+    second = LspProcess.start(
+        _command(), cwd=tmp_path, owner_root=tmp_path / ("b" * 32)
+    )
     _wait(first)
     _wait(second)
     for nonce in (
@@ -217,16 +220,19 @@ def test_each_start_has_independent_lowercase_hex_nonces(tmp_path: Path) -> None
         assert len(nonce) == 32
         assert nonce == nonce.lower()
         int(nonce, 16)
-    assert first.owner_nonce != second.owner_nonce
+    assert first.owner_nonce == "a" * 32
+    assert second.owner_nonce == "b" * 32
     assert first.generation_nonce != second.generation_nonce
     assert first.protocol.generation_nonce == first.generation_nonce
 
 
 def test_owner_json_is_canonical_redacted_restricted_and_has_only_schema(
-    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    secret_argument = "repository-secret-path"
-    process = _start(tmp_path, "--stderr-bytes", "0")
+    secret_argument = str(tmp_path / "repository-secret-path" / "credential-value")
+    environment_secret = "allowlisted-environment-secret-7f31"
+    monkeypatch.setenv("TMP", environment_secret)
+    process = _start(tmp_path, "--ignored-secret", secret_argument)
     owner_file = process.owner_root / "owner.json"
     raw = owner_file.read_bytes()
     record = json.loads(raw)
@@ -245,7 +251,11 @@ def test_owner_json_is_canonical_redacted_restricted_and_has_only_schema(
     assert record["generation_nonce"] == process.generation_nonce
     assert record["command_basename"] == Path(sys.executable).name
     assert record["state"] in {"process_running", "failed"}
-    assert secret_argument not in raw.decode()
+    persisted = raw.decode()
+    assert secret_argument not in persisted
+    assert environment_secret not in persisted
+    assert str(tmp_path.resolve()) not in persisted
+    assert str(Path(sys.executable).resolve()) not in persisted
     assert set(path.name for path in process.owner_root.iterdir()) == {
         "cancellation",
         "owner.json",
@@ -329,7 +339,7 @@ def test_exit_monitor_fails_all_pending_once_and_marks_failed(tmp_path: Path) ->
 def test_start_rejects_invalid_commands_before_creating_owner(
     tmp_path: Path, command: object
 ) -> None:
-    owner = tmp_path / "owner"
+    owner = tmp_path / OWNER_NONCE
     with pytest.raises((TypeError, ValueError, FileNotFoundError)):
         LspProcess.start(command, cwd=tmp_path, owner_root=owner)  # type: ignore[arg-type]
     assert not owner.exists()
@@ -337,18 +347,21 @@ def test_start_rejects_invalid_commands_before_creating_owner(
 
 def test_start_rejects_invalid_cwd_and_preexisting_owner(tmp_path: Path) -> None:
     missing = tmp_path / "missing"
-    owner = tmp_path / "owner"
+    owner = tmp_path / OWNER_NONCE
     with pytest.raises(ValueError, match="cwd"):
         LspProcess.start(_command(), cwd=missing, owner_root=owner)
     owner.mkdir()
+    sentinel = owner / "preexisting.txt"
+    sentinel.write_text("preserve", encoding="utf-8")
     with pytest.raises(FileExistsError):
         LspProcess.start(_command(), cwd=tmp_path, owner_root=owner)
+    assert sentinel.read_text(encoding="utf-8") == "preserve"
 
 
 def test_start_rejects_symlink_owner(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()
-    owner = tmp_path / "owner"
+    owner = tmp_path / OWNER_NONCE
     try:
         owner.symlink_to(target, target_is_directory=True)
     except OSError:
@@ -374,7 +387,7 @@ def test_startup_failure_terminates_child_and_removes_created_owner(
 
     monkeypatch.setattr(lsp_process.subprocess, "Popen", popen_spy)
     monkeypatch.setattr(lsp_process, "LspProtocol", BrokenProtocol)
-    owner = tmp_path / "owner"
+    owner = tmp_path / OWNER_NONCE
     with pytest.raises(RuntimeError, match="protocol startup failed"):
         LspProcess.start(
             _command("--exit-while-pending"), cwd=tmp_path, owner_root=owner
@@ -396,7 +409,166 @@ def test_stderr_thread_start_failure_rolls_back_without_masking_error(
         real_start(thread)
 
     monkeypatch.setattr(threading.Thread, "start", fail_stderr_start)
-    owner = tmp_path / "owner"
+    owner = tmp_path / OWNER_NONCE
     with pytest.raises(RuntimeError, match="stderr thread start failed"):
         LspProcess.start(_command(), cwd=tmp_path, owner_root=owner)
+    assert not owner.exists()
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["owner", "A" * 32, "g" * 32, "a" * 31, "a" * 33],
+)
+def test_start_rejects_invalid_owner_identity_before_mutation(
+    tmp_path: Path, name: str
+) -> None:
+    owner = tmp_path / name
+    with pytest.raises(ValueError, match="owner_root"):
+        LspProcess.start(_command(), cwd=tmp_path, owner_root=owner)
+    assert not owner.exists()
+
+
+def test_owner_identity_matches_caller_derived_root_not_generation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    generation = "b" * 32
+    real_token_hex = lsp_process.secrets.token_hex
+    calls = 0
+
+    def token_hex(size: int) -> str:
+        nonlocal calls
+        calls += 1
+        return generation if calls == 1 else real_token_hex(size)
+
+    monkeypatch.setattr(lsp_process.secrets, "token_hex", token_hex)
+    process = _start(tmp_path)
+    assert process.owner_nonce == OWNER_NONCE
+    assert process.generation_nonce == generation
+    owner_record = json.loads((process.owner_root / "owner.json").read_bytes())
+    assert owner_record["owner_nonce"] == OWNER_NONCE
+    _wait(process)
+
+
+@pytest.mark.parametrize("generated", [RuntimeError("generation nonce failed"), "invalid"])
+def test_generation_nonce_failure_occurs_before_filesystem_mutation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, generated: object
+) -> None:
+    owner = tmp_path / OWNER_NONCE
+
+    def fail_nonce(_size: int) -> str:
+        if isinstance(generated, BaseException):
+            raise generated
+        assert isinstance(generated, str)
+        return generated
+
+    monkeypatch.setattr(lsp_process.secrets, "token_hex", fail_nonce)
+    with pytest.raises((RuntimeError, ValueError), match="generation nonce"):
+        LspProcess.start(_command(), cwd=tmp_path, owner_root=owner)
+    assert not owner.exists()
+
+
+def test_timestamp_failure_occurs_before_filesystem_mutation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    owner = tmp_path / OWNER_NONCE
+
+    class BrokenDateTime:
+        @staticmethod
+        def now(_timezone: object) -> object:
+            raise RuntimeError("timestamp failed")
+
+    monkeypatch.setattr(lsp_process, "datetime", BrokenDateTime)
+    with pytest.raises(RuntimeError, match="timestamp failed"):
+        LspProcess.start(_command(), cwd=tmp_path, owner_root=owner)
+    assert not owner.exists()
+
+
+def test_popen_failure_removes_only_created_owner_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    owner = tmp_path / OWNER_NONCE
+    sibling = tmp_path / "preexisting.txt"
+    sibling.write_text("preserve", encoding="utf-8")
+
+    def fail_popen(*_args: object, **_kwargs: object) -> object:
+        raise OSError("popen failed")
+
+    monkeypatch.setattr(lsp_process.subprocess, "Popen", fail_popen)
+    with pytest.raises(OSError, match="popen failed"):
+        LspProcess.start(_command(), cwd=tmp_path, owner_root=owner)
+    assert not owner.exists()
+    assert sibling.read_text(encoding="utf-8") == "preserve"
+
+
+def test_cancellation_directory_failure_removes_partially_created_owner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    owner = tmp_path / OWNER_NONCE
+    real_mkdir = Path.mkdir
+
+    def fail_cancellation(path: Path, *args: object, **kwargs: object) -> None:
+        if path.name == "cancellation":
+            raise OSError("cancellation directory failed")
+        real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", fail_cancellation)
+    with pytest.raises(OSError, match="cancellation directory failed"):
+        LspProcess.start(_command(), cwd=tmp_path, owner_root=owner)
+    assert not owner.exists()
+
+
+def test_owner_json_failure_terminates_child_and_removes_created_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    children: list[subprocess.Popen[bytes]] = []
+    real_popen = subprocess.Popen
+
+    def popen_spy(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        child = real_popen(*args, **kwargs)
+        children.append(child)
+        return child
+
+    def fail_owner_json(*_args: object, **_kwargs: object) -> None:
+        raise OSError("owner JSON failed")
+
+    monkeypatch.setattr(lsp_process.subprocess, "Popen", popen_spy)
+    monkeypatch.setattr(lsp_process, "_write_owner_record", fail_owner_json)
+    owner = tmp_path / OWNER_NONCE
+    with pytest.raises(OSError, match="owner JSON failed"):
+        LspProcess.start(
+            _command("--exit-while-pending"), cwd=tmp_path, owner_root=owner
+        )
+    assert len(children) == 1
+    children[0].wait(timeout=5)
+    assert children[0].poll() is not None
+    assert not owner.exists()
+
+
+def test_exit_monitor_thread_start_failure_rolls_back_process_and_owner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    children: list[subprocess.Popen[bytes]] = []
+    real_popen = subprocess.Popen
+    real_start = threading.Thread.start
+
+    def popen_spy(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        child = real_popen(*args, **kwargs)
+        children.append(child)
+        return child
+
+    def fail_exit_start(thread: threading.Thread) -> None:
+        if thread.name.startswith("lsp-exit-"):
+            raise RuntimeError("exit thread start failed")
+        real_start(thread)
+
+    monkeypatch.setattr(lsp_process.subprocess, "Popen", popen_spy)
+    monkeypatch.setattr(threading.Thread, "start", fail_exit_start)
+    owner = tmp_path / OWNER_NONCE
+    with pytest.raises(RuntimeError, match="exit thread start failed"):
+        LspProcess.start(
+            _command("--exit-while-pending"), cwd=tmp_path, owner_root=owner
+        )
+    assert len(children) == 1
+    children[0].wait(timeout=5)
+    assert children[0].poll() is not None
     assert not owner.exists()

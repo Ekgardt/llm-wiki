@@ -169,6 +169,7 @@ def _run_process_server() -> None:
     parser.add_argument("--report-environment", action="store_true")
     parser.add_argument("--echo", action="store_true")
     parser.add_argument("--exit-while-pending", action="store_true")
+    parser.add_argument("--ignored-secret")
     args = parser.parse_args()
 
     remaining = args.stderr_bytes

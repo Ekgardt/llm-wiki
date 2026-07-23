@@ -534,7 +534,7 @@ def test_server_environment_excludes_credentials(monkeypatch: pytest.MonkeyPatch
 
 def test_stderr_ring_retains_only_last_four_mib(fake_server_command: list[str], tmp_path: Path) -> None:
     process = LspProcess.start(fake_server_command + ["--stderr-bytes", str(5 * 1024 * 1024)],
-                               cwd=tmp_path, owner_root=tmp_path / "owner")
+                               cwd=tmp_path, owner_root=lsp_owner_root(tmp_path, "a" * 32))
     process.wait_for_exit(deadline=time.monotonic() + 5)
     assert len(process.stderr_bytes()) == 4 * 1024 * 1024
 ```
@@ -582,7 +582,7 @@ class LspProcess:
     last_used_monotonic: float
 ```
 
-Expose exact methods `LspProcess.start(cls, command: Sequence[str], *, cwd: Path, owner_root: Path) -> LspProcess`, `LspProcess.request(self, method: str, params: object, *, deadline: float, cancellation: CancellationToken | None = None) -> object`, and `LspProcess.stderr_bytes(self) -> bytes`. Use an in-memory `collections.deque[bytes]` ring trimmed by bytes, not lines. Write `owner.json` as restricted canonical JSON with owner PID, 32-hex owner nonce, generation nonce, start timestamp, command basename, and state; never persist arguments containing repository paths or environment values. Create only `cancellation/` and cleanup evidence beneath the approved owner root. Do not implement shutdown, restart, or process-tree killing in this task.
+Expose exact methods `LspProcess.start(cls, command: Sequence[str], *, cwd: Path, owner_root: Path) -> LspProcess`, `LspProcess.request(self, method: str, params: object, *, deadline: float, cancellation: CancellationToken | None = None) -> object`, and `LspProcess.stderr_bytes(self) -> bytes`. The caller derives `owner_root` with `lsp_paths.lsp_owner_root`, so it is already the exclusive `run/lsp/<32-lowercase-hex-owner-nonce>/` root; `LspProcess` validates that basename, requires the root not to exist, and uses the basename as `owner_nonce`. Use an in-memory `collections.deque[bytes]` ring trimmed by bytes, not lines. Write `owner.json` as restricted canonical JSON with owner PID, owner nonce, a fresh independent generation nonce, start timestamp, command basename, and state; never persist arguments containing repository paths or environment values. Create only `cancellation/` and cleanup evidence beneath the approved owner root. Do not implement shutdown, restart, or process-tree killing in this task.
 
 - [ ] **Step 4: Run process and protocol tests and verify GREEN**
 
