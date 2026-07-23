@@ -174,7 +174,9 @@ def _run_process_server() -> None:
     parser.add_argument("--ignored-secret")
     parser.add_argument("--sleep-seconds", type=float, default=0.0)
     parser.add_argument("--spawn-descendant", action="store_true")
+    parser.add_argument("--exit-after-descendant-spawn", action="store_true")
     parser.add_argument("--descendant-pid-file")
+    parser.add_argument("--descendant-pid-log")
     parser.add_argument("--lifecycle", action="store_true")
     parser.add_argument("--ignore-shutdown", action="store_true")
     parser.add_argument("--event-log")
@@ -182,6 +184,8 @@ def _run_process_server() -> None:
     parser.add_argument("--always-crash", action="store_true")
     parser.add_argument("--application-error", action="store_true")
     parser.add_argument("--hang-once-marker")
+    parser.add_argument("--idle-exit-marker")
+    parser.add_argument("--hang-then-exit", action="store_true")
     args = parser.parse_args()
 
     if args.spawn_descendant:
@@ -193,14 +197,33 @@ def _run_process_server() -> None:
             close_fds=True,
         )
         if args.descendant_pid_file:
-            with open(args.descendant_pid_file, "w", encoding="ascii") as stream:
+            temporary_pid_file = args.descendant_pid_file + ".tmp"
+            with open(temporary_pid_file, "w", encoding="ascii") as stream:
                 stream.write(str(descendant.pid))
-        else:
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_pid_file, args.descendant_pid_file)
+        elif not args.descendant_pid_log:
             print(json.dumps({"descendant_pid": descendant.pid}), flush=True)
+        if args.descendant_pid_log:
+            with open(args.descendant_pid_log, "a", encoding="ascii") as stream:
+                stream.write(f"{descendant.pid}\n")
+        if args.exit_after_descendant_spawn:
+            return
 
     if args.lifecycle:
+        if args.idle_exit_marker:
+            first = not os.path.exists(args.idle_exit_marker)
+            if first:
+                with open(args.idle_exit_marker, "wb"):
+                    pass
+            time.sleep(0.05 if first else 0.75)
+            return
         while True:
             request = _read_message(sys.stdin.buffer)
+            if args.hang_then_exit:
+                time.sleep(0.1)
+                return
             method = request.get("method")
             if args.event_log:
                 with open(args.event_log, "a", encoding="utf-8") as stream:

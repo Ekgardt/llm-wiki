@@ -92,6 +92,8 @@ if os.name == "nt":
     _KERNEL32.ResumeThread.restype = wintypes.DWORD
     _KERNEL32.CloseHandle.argtypes = (wintypes.HANDLE,)
     _KERNEL32.CloseHandle.restype = wintypes.BOOL
+    _KERNEL32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    _KERNEL32.WaitForSingleObject.restype = wintypes.DWORD
 
 
 @dataclass(slots=True)
@@ -121,35 +123,33 @@ class ProcessTree:
 
         job: int | None = None
         process: subprocess.Popen[bytes] | None = None
+        cleanup_deadline = time.monotonic() + 2.0
         try:
             job = _create_windows_job()
             process = subprocess.Popen(
                 list(command), creationflags=_CREATE_SUSPENDED, **options
             )
-            if not _KERNEL32.AssignProcessToJobObject(job, int(process._handle)):
-                raise ctypes.WinError(ctypes.get_last_error())
+            _assign_windows_process(job, process)
             _resume_windows_process(process.pid)
             return cls(process, job, None)
         except BaseException:
             if job is not None:
                 _KERNEL32.TerminateJobObject(job, 1)
                 _close_windows_handle(job)
-            elif process is not None:
+            if process is not None and process.poll() is None:
                 try:
                     process.kill()
                 except OSError:
                     pass
             if process is not None:
                 try:
-                    process.wait(timeout=2)
+                    process.wait(timeout=max(0.0, cleanup_deadline - time.monotonic()))
                 except (OSError, subprocess.TimeoutExpired):
                     pass
             raise
 
     def terminate(self, *, deadline: float) -> None:
         deadline = _deadline(deadline)
-        if self.process.poll() is not None:
-            return
         if os.name == "nt":
             job = self.windows_job
             if job is None:
@@ -158,7 +158,9 @@ class ProcessTree:
                 error = ctypes.get_last_error()
                 if self.process.poll() is None:
                     raise ctypes.WinError(error)
-            _wait(self.process, deadline)
+            _wait_windows_job(job, deadline)
+            if self.process.poll() is None:
+                _wait(self.process, deadline)
             return
 
         group = self.process_group
@@ -170,16 +172,18 @@ class ProcessTree:
             return
         remaining = deadline - time.monotonic()
         graceful_deadline = time.monotonic() + min(0.5, max(0.0, remaining / 2))
-        try:
-            _wait(self.process, graceful_deadline)
+        if _wait_posix_group(group, graceful_deadline):
+            if self.process.poll() is None:
+                _wait(self.process, deadline)
             return
-        except TimeoutError:
-            pass
         try:
             os.killpg(group, signal.SIGKILL)
         except ProcessLookupError:
-            pass
-        _wait(self.process, deadline)
+            return
+        if not _wait_posix_group(group, deadline):
+            raise TimeoutError("LSP process group did not exit before deadline")
+        if self.process.poll() is None:
+            _wait(self.process, deadline)
 
     def close(self) -> None:
         if os.name == "nt":
@@ -190,7 +194,7 @@ class ProcessTree:
             return
         group = self.process_group
         self.process_group = None
-        if group is not None and self.process.poll() is None:
+        if group is not None:
             try:
                 os.killpg(group, signal.SIGKILL)
             except ProcessLookupError:
@@ -215,7 +219,34 @@ def _wait(process: subprocess.Popen[bytes], deadline: float) -> None:
         raise TimeoutError("LSP process tree did not exit before deadline") from exc
 
 
+def _wait_posix_group(group: int, deadline: float) -> bool:
+    while True:
+        try:
+            os.killpg(group, 0)
+        except ProcessLookupError:
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.01, remaining))
+
+
 if os.name == "nt":
+    def _assign_windows_process(job: int, process: subprocess.Popen[bytes]) -> None:
+        if not _KERNEL32.AssignProcessToJobObject(job, int(process._handle)):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+
+    def _wait_windows_job(job: int, deadline: float) -> None:
+        remaining = deadline - time.monotonic()
+        milliseconds = max(0, min(0xFFFFFFFE, int(remaining * 1000)))
+        result = _KERNEL32.WaitForSingleObject(job, milliseconds)
+        if result == 0x00000102:
+            raise TimeoutError("LSP Windows job did not exit before deadline")
+        if result != 0:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+
     def _create_windows_job() -> int:
         handle = _KERNEL32.CreateJobObjectW(None, None)
         if not handle:
