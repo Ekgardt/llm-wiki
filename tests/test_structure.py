@@ -245,6 +245,41 @@ def test_code_navigation_target_is_approved_but_not_reported_as_current() -> Non
     assert (ROOT / "AGENTS.md").read_bytes() == (ROOT / "CLAUDE.md").read_bytes()
 
 
+def test_lsp_live_lease_layout_is_canonical() -> None:
+    decision_path = ROOT / "knowledge/notes/lsp-live-lease-decision.md"
+    structure = (ROOT / "docs/STRUCTURE.md").read_text(encoding="utf-8")
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+
+    assert decision_path.is_file()
+    decision = decision_path.read_text(encoding="utf-8")
+    _required_frontmatter_scalars(
+        decision,
+        {
+            "type": "decision",
+            "status": "active",
+            "confidence": "high",
+            "source_authority": "user",
+            "date": "2026-07-23",
+        },
+    )
+    for text in (decision, structure, agents):
+        normalized = " ".join(text.split())
+        for value in (
+            "run/lsp/<owner-nonce>/lease.json",
+            "10 seconds",
+            "30 seconds",
+            "bounded mutable live lease",
+            "owner.json",
+            "failure.json",
+        ):
+            assert value in normalized
+    existing = (
+        ROOT / "knowledge/notes/read-only-lsp-navigation-engine-decision.md"
+    ).read_text(encoding="utf-8")
+    assert "[[lsp-live-lease-decision]]" in existing
+    assert (ROOT / "AGENTS.md").read_bytes() == (ROOT / "CLAUDE.md").read_bytes()
+
+
 def test_agent_contract_mentions_three_zone_process_rule():
     """The contract must document the 'architecture changes require sign-off'
     rule so future agents don't improvise structural changes mid-task.

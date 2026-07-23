@@ -88,7 +88,10 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── queue/                        legacy migration input only
 │   ├── queue-migrated-v2             migration completion marker
 │   ├── state.json                    automation + compile receipts
-│   ├── lsp/<owner-nonce>/             reserved bounded LSP process scratch
+│   ├── lsp/<owner-nonce>/             bounded LSP process scratch
+│   │   ├── owner.json                 immutable create-only owner evidence
+│   │   ├── failure.json               optional immutable terminal evidence
+│   │   └── lease.json                 bounded mutable live lease
 │   └── state.json.lock
 │
 ├── AGENTS.md                     ROOT — agent contract (byte-identical to CLAUDE.md)
@@ -189,6 +192,15 @@ The approved managed Pyright artifact path is
 `cache/code-tools/pyright/1.1.411/`. Live LSP process scratch is bounded under
 `run/lsp/<owner-nonce>/`; doctor and deletion eligibility must treat a live owner
 or retained failure evidence as protected operational state.
+
+While lifecycle ownership is live, `run/lsp/<owner-nonce>/lease.json` is a bounded
+mutable live lease distinct from immutable create-only `owner.json` and
+`failure.json`. It contains only canonical process/nonces, timestamps, schema, and
+live-state fields. It is refreshed every 10 seconds and expires after 30 seconds.
+Controlled success or terminal failure stops and joins the heartbeat before lease
+removal; abrupt death leaves the lease to expire. Updates are atomic, owner-only,
+and anchored to the retained owner-directory handle. See
+`knowledge/notes/lsp-live-lease-decision.md`.
 
 ## What lives where
 
@@ -336,7 +348,9 @@ graph-dependent code tools use bounded live extraction and label it incomplete.
 - `run/` — `state.json`, `compile.pid`, `run/markdown-transactions.sqlite3`,
   `run/transactions/`, `run/queue.sqlite3`, `run/queue-results/`, receipts, and
   locks. `run/lsp/<owner-nonce>/` is reserved for bounded process scratch and is
-  derived without directory creation. Existing `run/queue/*.json` is one-time
+  derived without directory creation. Its `lease.json` is a bounded mutable live
+  lease with a 10 seconds heartbeat and 30 seconds expiry, separate from immutable
+  `owner.json` and `failure.json`. Existing `run/queue/*.json` is one-time
   migration input only.
 - `cache/cognee/` — optional semantic graph data (only if Cognee installed).
 

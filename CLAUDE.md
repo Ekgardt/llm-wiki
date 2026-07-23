@@ -152,8 +152,13 @@ capability limits, and fall back to existing structural evidence. Installation i
 a separate explicit operator action. The managed Pyright artifact lives at
 `cache/code-tools/pyright/1.1.411/`; bounded process scratch lives under
 `run/lsp/<owner-nonce>/` and follows the existing `run/` deletion contract, which
-protects live LSP owners and retained LSP failure evidence. See
-`knowledge/notes/read-only-lsp-navigation-engine-decision.md`.
+protects live LSP owners and retained LSP failure evidence. While ownership is live,
+`run/lsp/<owner-nonce>/lease.json` is a bounded mutable live lease, refreshed every
+10 seconds with a 30 seconds expiry, and remains distinct from immutable create-only
+`owner.json` and `failure.json`. Controlled cleanup removes the lease after joining
+its heartbeat; abrupt death leaves it to expire. See
+`knowledge/notes/read-only-lsp-navigation-engine-decision.md` and
+`knowledge/notes/lsp-live-lease-decision.md`.
 
 **Forbidden at vault root:** `wiki/`, `memory/`, `outputs/`, `state/`,
 `LLM-wiki-state/` (legacy sibling layout — removed). Runtime lives **inside**
