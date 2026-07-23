@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -172,7 +173,79 @@ def _run_process_server() -> None:
     parser.add_argument("--exit-while-pending", action="store_true")
     parser.add_argument("--ignored-secret")
     parser.add_argument("--sleep-seconds", type=float, default=0.0)
+    parser.add_argument("--spawn-descendant", action="store_true")
+    parser.add_argument("--descendant-pid-file")
+    parser.add_argument("--lifecycle", action="store_true")
+    parser.add_argument("--ignore-shutdown", action="store_true")
+    parser.add_argument("--event-log")
+    parser.add_argument("--crash-once-marker")
+    parser.add_argument("--always-crash", action="store_true")
+    parser.add_argument("--application-error", action="store_true")
+    parser.add_argument("--hang-once-marker")
     args = parser.parse_args()
+
+    if args.spawn_descendant:
+        descendant = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+        if args.descendant_pid_file:
+            with open(args.descendant_pid_file, "w", encoding="ascii") as stream:
+                stream.write(str(descendant.pid))
+        else:
+            print(json.dumps({"descendant_pid": descendant.pid}), flush=True)
+
+    if args.lifecycle:
+        while True:
+            request = _read_message(sys.stdin.buffer)
+            method = request.get("method")
+            if args.event_log:
+                with open(args.event_log, "a", encoding="utf-8") as stream:
+                    stream.write(str(method) + "\n")
+            if args.always_crash:
+                return
+            if args.crash_once_marker and not os.path.exists(args.crash_once_marker):
+                with open(args.crash_once_marker, "wb"):
+                    pass
+                return
+            if args.hang_once_marker and not os.path.exists(args.hang_once_marker):
+                with open(args.hang_once_marker, "wb"):
+                    pass
+                continue
+            if method == "shutdown":
+                if args.ignore_shutdown:
+                    continue
+                sys.stdout.buffer.write(
+                    _frame({"jsonrpc": "2.0", "id": request["id"], "result": None})
+                )
+                sys.stdout.buffer.flush()
+            elif method == "exit":
+                return
+            elif args.application_error and "id" in request:
+                sys.stdout.buffer.write(
+                    _frame(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": request["id"],
+                            "error": {"code": -32001, "message": "application failed"},
+                        }
+                    )
+                )
+                sys.stdout.buffer.flush()
+            elif "id" in request:
+                sys.stdout.buffer.write(
+                    _frame(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": request["id"],
+                            "result": request.get("params"),
+                        }
+                    )
+                )
+                sys.stdout.buffer.flush()
 
     if args.sleep_seconds:
         time.sleep(args.sleep_seconds)

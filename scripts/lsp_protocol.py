@@ -606,7 +606,47 @@ class LspProtocol:
             raise JsonRpcResponseError(pending.error)
         return pending.result
 
-    def close(self) -> None:
+    def notify(self, method: str, params: object, *, deadline: float) -> None:
+        """Deliver one notification through the single owned writer."""
+        if not isinstance(method, str) or not method:
+            raise ValueError("method must be a non-empty string")
+        if not isinstance(params, (dict, list)):
+            raise TypeError("params must be an object or array")
+        if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
+            raise TypeError("deadline must be a monotonic timestamp")
+        if not math.isfinite(deadline):
+            raise ValueError("deadline must be finite")
+        self._write_message(
+            {"jsonrpc": "2.0", "method": method, "params": params},
+            deadline=float(deadline),
+            wait=True,
+        )
+
+    def cancel_all(self, reason: str) -> None:
+        """Cancel every active request without bypassing writer ownership."""
+        if not isinstance(reason, str) or not reason or len(reason.encode("utf-8")) > 256:
+            raise ValueError("reason must be a non-empty string of at most 256 bytes")
+        completed: list[PendingRequest] = []
+        now = time.monotonic()
+        with self._state_lock:
+            self._raise_if_unavailable_locked()
+            for key, pending in tuple(self._pending.items()):
+                if pending.terminal is None:
+                    self._commit_local_locked(
+                        key, pending, "cancelled", now, "manager"
+                    )
+                    completed.append(pending)
+        for pending in completed:
+            pending.completed.set()
+
+    def close(self, deadline: float | None = None) -> None:
+        if deadline is None:
+            deadline = time.monotonic() + _OWNER_JOIN_SECONDS
+        elif isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
+            raise TypeError("deadline must be a monotonic timestamp")
+        elif not math.isfinite(deadline):
+            raise ValueError("deadline must be finite")
+        deadline = float(deadline)
         with self._state_lock:
             first_close = not self._closed
             self._closed = True
@@ -642,8 +682,8 @@ class LspProtocol:
                 self._write_queue.put_nowait(None)
             except queue.Full:
                 pass
-        self._join_owner(self.reader_thread)
-        self._join_owner(self.writer_thread)
+        self._join_owner(self.reader_thread, deadline)
+        self._join_owner(self.writer_thread, deadline)
 
     def _stop_io_for_process_cleanup(self) -> None:
         """Stop owned I/O without synchronously closing process pipes."""
@@ -1279,10 +1319,12 @@ class LspProtocol:
             pass
 
     @staticmethod
-    def _join_owner(owner: threading.Thread) -> None:
+    def _join_owner(owner: threading.Thread, deadline: float) -> None:
         if owner is threading.current_thread():
             return
-        owner.join(_OWNER_JOIN_SECONDS)
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            owner.join(remaining)
 
     @staticmethod
     def _wait_owner_started(event: threading.Event, owner_name: str) -> None:

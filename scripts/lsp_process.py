@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import json
 import math
 import os
@@ -12,17 +13,21 @@ import stat
 import subprocess as _subprocess
 import threading
 import time
+import weakref
 from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import BinaryIO
 
+import lsp_process_tree as _lsp_process_tree
 import windows_workspace as _windows_workspace
 from compile_cache import _acl_output_text, _acl_principal, _windows_acl_identity
-from lsp_protocol import CancellationToken, LspProtocol
+from lsp_protocol import CancellationToken, LspProtocol, ProtocolViolation
+
+ProcessTree = _lsp_process_tree.ProcessTree
 
 
 class _SubprocessFacade:
@@ -32,6 +37,7 @@ class _SubprocessFacade:
 
 
 subprocess = _SubprocessFacade()
+_lsp_process_tree.subprocess = subprocess
 
 MAX_STDERR_BYTES = 4 * 1024 * 1024
 LSP_ENV_ALLOWLIST = frozenset(
@@ -58,6 +64,10 @@ _STARTUP_FAILED = "startup_failed"
 _PROCESS_EXITED = "process_exited"
 _MAX_EVIDENCE_BYTES = 4096
 _MAX_ACL_OUTPUT_BYTES = 16 * 1024
+_HEARTBEAT_SECONDS = 10.0
+_LEASE_EXPIRY_SECONDS = 30.0
+_IDLE_SECONDS = 300.0
+_GRACEFUL_CLEANUP_SECONDS = 2.0
 
 
 class StartupCleanupError(RuntimeError):
@@ -211,6 +221,137 @@ class _OwnerDirectory:
         finally:
             _windows_workspace.close_handle(handle)
 
+    def write_lease(self, record: Mapping[str, object]) -> None:
+        if self.owner_handle is None:
+            raise RuntimeError("LSP owner directory is closed")
+        payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        if len(payload) > _MAX_EVIDENCE_BYTES:
+            raise ValueError("LSP lease exceeds its byte bound")
+        temporary = f".lease-{secrets.token_hex(8)}.tmp"
+        if os.name == "posix":
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | os.O_NOFOLLOW
+                | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+                dir_fd=self.owner_handle,
+            )
+            try:
+                identity = _identity_from_stat(os.fstat(descriptor))
+                _require_file_identity(identity, "LSP lease")
+                _write_all_descriptor(descriptor, payload)
+                os.fchmod(descriptor, 0o600)
+                os.fsync(descriptor)
+                _verify_descriptor(descriptor, identity, mode=0o600, directory=False)
+            finally:
+                os.close(descriptor)
+            try:
+                os.replace(
+                    temporary,
+                    "lease.json",
+                    src_dir_fd=self.owner_handle,
+                    dst_dir_fd=self.owner_handle,
+                )
+                os.fsync(self.owner_handle)
+            except BaseException:
+                try:
+                    os.unlink(temporary, dir_fd=self.owner_handle)
+                except OSError:
+                    pass
+                raise
+            return
+
+        handle = _windows_workspace.create_file(self.owner_handle, temporary)
+        try:
+            _windows_workspace.write_all(handle, payload, chunk_bytes=_MAX_EVIDENCE_BYTES)
+            _windows_workspace.flush_file(handle)
+            _windows_workspace.replace_file(handle, self.owner_handle, "lease.json")
+        except BaseException:
+            try:
+                _windows_workspace.delete_handle(handle)
+            except OSError:
+                pass
+            raise
+        finally:
+            _windows_workspace.close_handle(handle)
+        _windows_workspace.flush_directory(self.owner_handle)
+
+    def remove_lease(self) -> None:
+        if self.owner_handle is None:
+            return
+        if os.name == "posix":
+            try:
+                os.unlink("lease.json", dir_fd=self.owner_handle)
+                os.fsync(self.owner_handle)
+            except FileNotFoundError:
+                pass
+            return
+        try:
+            handle = _windows_workspace.open_deletable_file(
+                self.owner_handle, "lease.json"
+            )
+        except FileNotFoundError:
+            return
+        try:
+            _windows_workspace.delete_handle(handle)
+        finally:
+            _windows_workspace.close_handle(handle)
+
+    def remove_success_scratch(self) -> None:
+        if self.owner_handle is None:
+            return
+        self.remove_lease()
+        if os.name == "posix":
+            for name in ("owner.json", "failure.json"):
+                try:
+                    os.unlink(name, dir_fd=self.owner_handle)
+                except FileNotFoundError:
+                    pass
+            try:
+                os.rmdir("cancellation", dir_fd=self.owner_handle)
+            except FileNotFoundError:
+                pass
+            os.fsync(self.owner_handle)
+            os.rmdir(self.owner_root.name, dir_fd=self.parent_handle)
+            os.fsync(self.parent_handle)
+            return
+        for name in ("owner.json", "failure.json"):
+            try:
+                handle = _windows_workspace.open_deletable_file(self.owner_handle, name)
+            except FileNotFoundError:
+                continue
+            try:
+                _windows_workspace.delete_handle(handle)
+            finally:
+                _windows_workspace.close_handle(handle)
+        try:
+            cancellation = _windows_workspace.open_deletable_directory(
+                self.owner_handle, "cancellation"
+            )
+        except FileNotFoundError:
+            cancellation = None
+        if cancellation is not None:
+            try:
+                _windows_workspace.delete_handle(cancellation)
+            finally:
+                _windows_workspace.close_handle(cancellation)
+        original = self.owner_handle
+        expected = self.owner_identity
+        self.owner_handle = None
+        _windows_workspace.close_handle(original)
+        owner = _windows_workspace.open_deletable_directory(
+            self.parent_handle, self.owner_root.name
+        )
+        try:
+            if _windows_workspace.identity(owner, directory=True) != expected:
+                raise PermissionError("LSP owner root identity changed before deletion")
+            _windows_workspace.delete_handle(owner)
+        finally:
+            _windows_workspace.close_handle(owner)
+
     def verify_lexical_identity(self) -> None:
         if self.owner_handle is None or self.owner_identity is None:
             raise RuntimeError("LSP owner directory was not created")
@@ -294,7 +435,7 @@ def lsp_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
     return {name: values[name] for name in sorted(LSP_ENV_ALLOWLIST) if name in values}
 
 
-@dataclass(slots=True)
+@dataclass
 class LspProcess:
     process: subprocess.Popen[bytes]
     protocol: LspProtocol
@@ -304,6 +445,7 @@ class LspProcess:
     state: ProcessState
     started_monotonic: float
     last_used_monotonic: float
+    restart_count: int = 0
     _stderr: deque[bytes] = field(default_factory=deque, init=False, repr=False)
     _stderr_lock: threading.Lock = field(
         default_factory=threading.Lock, init=False, repr=False
@@ -318,6 +460,18 @@ class LspProcess:
     _exit_thread: threading.Thread | None = field(default=None, init=False, repr=False)
     _owner_directory: _OwnerDirectory | None = field(default=None, init=False, repr=False)
     _startup_complete: bool = field(default=False, init=False, repr=False)
+    _tree: ProcessTree | None = field(default=None, init=False, repr=False)
+    _command: tuple[str, ...] = field(default=(), init=False, repr=False)
+    _cwd: Path | None = field(default=None, init=False, repr=False)
+    _environment: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _lifecycle_lock: threading.RLock = field(
+        default_factory=threading.RLock, init=False, repr=False
+    )
+    _closing: bool = field(default=False, init=False, repr=False)
+    _heartbeat_stop: threading.Event = field(
+        default_factory=threading.Event, init=False, repr=False
+    )
+    _heartbeat_thread: threading.Thread | None = field(default=None, init=False, repr=False)
 
     @classmethod
     def start(
@@ -336,6 +490,7 @@ class LspProcess:
         started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
         owner_directory: _OwnerDirectory | None = None
+        tree: ProcessTree | None = None
         process: subprocess.Popen[bytes] | None = None
         protocol: LspProtocol | None = None
         stderr_thread: threading.Thread | None = None
@@ -353,22 +508,14 @@ class LspProcess:
                 if current is None or not startup_complete:
                     failed_before_instance = True
                     return
-            current._mark_failed()
+            current._generation_failed(generation_nonce)
 
         try:
             owner_directory = _OwnerDirectory.open(owner_root)
             startup_deadline = time.monotonic() + _STARTUP_WAIT_SECONDS
             owner_directory.create(startup_deadline)
-            process = subprocess.Popen(
-                arguments,
-                cwd=cwd,
-                env=environment,
-                shell=False,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                close_fds=True,
-            )
+            tree = ProcessTree.spawn(arguments, cwd=cwd, env=environment)
+            process = tree.process
             if process.stdin is None or process.stdout is None or process.stderr is None:
                 raise RuntimeError("LSP process pipes were not created")
 
@@ -418,15 +565,21 @@ class LspProcess:
             new_instance._stderr_lock = stderr_lock
             new_instance._stderr_thread = stderr_thread
             new_instance._owner_directory = owner_directory
+            new_instance._tree = tree
+            new_instance._command = tuple(arguments)
+            new_instance._cwd = cwd
+            new_instance._environment = environment
             with instance_lock:
                 instance = new_instance
             exit_thread = threading.Thread(
                 target=instance._monitor_exit,
+                args=(process, protocol, generation_nonce),
                 name=f"lsp-exit-{generation_nonce}",
                 daemon=True,
             )
             instance._exit_thread = exit_thread
             exit_thread.start()
+            instance._start_heartbeat()
             owner_directory.verify_lexical_identity()
             with instance_lock:
                 if process.poll() is not None or failed_before_instance:
@@ -434,8 +587,20 @@ class LspProcess:
                 with instance._owner_handle_lock:
                     instance._startup_complete = True
                 startup_complete = True
+            atexit.register(_atexit_close, weakref.ref(instance))
             return instance
         except BaseException as startup_error:
+            if instance is not None:
+                instance._stop_heartbeat(
+                    startup_deadline
+                    if startup_deadline is not None
+                    else time.monotonic()
+                )
+            if owner_directory is not None:
+                try:
+                    owner_directory.remove_lease()
+                except OSError:
+                    pass
             try:
                 _rollback_startup(
                     process,
@@ -449,6 +614,7 @@ class LspProcess:
                     ),
                     owner_nonce=owner_nonce,
                     generation_nonce=generation_nonce,
+                    tree=tree,
                 )
             except StartupCleanupError as cleanup_error:
                 raise cleanup_error from startup_error
@@ -462,17 +628,216 @@ class LspProcess:
         deadline: float,
         cancellation: CancellationToken | None = None,
     ) -> object:
-        if self.process.poll() is not None:
-            self.protocol._become_fatal("LSP process exited unexpectedly")
-            self._mark_failed()
-            raise RuntimeError("LSP process has exited")
-        with self._state_lock:
+        deadline = _validated_deadline(deadline)
+        attempted_generation = self.generation_nonce
+        for attempt in range(2):
+            with self._lifecycle_lock:
+                if self.state is ProcessState.FAILED:
+                    raise RuntimeError("LSP process has exited")
+                protocol = self.protocol
+                process = self.process
+                expired = protocol.expired_drain_keys(time.monotonic())
+                if expired or process.poll() is not None or protocol.fatal:
+                    self.restart(deadline)
+                    protocol = self.protocol
+                    process = self.process
+                with self._state_lock:
+                    self.last_used_monotonic = time.monotonic()
+            try:
+                return protocol.request(
+                    method, params, deadline=deadline, cancellation=cancellation
+                )
+            except ProtocolViolation as error:
+                if isinstance(error.__cause__, TimeoutError):
+                    raise
+                with self._lifecycle_lock:
+                    changed = self.generation_nonce != attempted_generation
+                    if attempt or self.restart_count >= 1 and not changed:
+                        self._terminal_failure(_PROCESS_EXITED, deadline)
+                        raise
+                    if not changed:
+                        self.restart(deadline)
+                    attempted_generation = self.generation_nonce
+        raise RuntimeError("LSP request retry invariant breached")
+
+    def shutdown(self, deadline: float) -> None:
+        deadline = _validated_deadline(deadline)
+        with self._lifecycle_lock:
+            if self._closing and self.process.poll() is not None:
+                return
+            self._closing = True
+            graceful_deadline = min(deadline, time.monotonic() + _GRACEFUL_CLEANUP_SECONDS)
+            graceful = False
+            if self.process.poll() is None and time.monotonic() < graceful_deadline:
+                try:
+                    self.protocol.request(
+                        "shutdown", {}, deadline=graceful_deadline
+                    )
+                    self.protocol.notify("exit", {}, deadline=graceful_deadline)
+                    self.wait_for_exit(graceful_deadline)
+                    graceful = True
+                except (OSError, RuntimeError, TimeoutError):
+                    pass
+            if not graceful and self.process.poll() is None:
+                tree = self._tree
+                if tree is not None:
+                    tree.terminate(deadline=deadline)
+            self._finish_generation(deadline)
+
+    def cancel_all(self, reason: str) -> None:
+        with self._lifecycle_lock:
             if self.state is ProcessState.FAILED:
-                raise RuntimeError("LSP process has exited")
-            self.last_used_monotonic = time.monotonic()
-        return self.protocol.request(
-            method, params, deadline=deadline, cancellation=cancellation
-        )
+                return
+            self.protocol.cancel_all(reason)
+
+    def restart(self, deadline: float) -> None:
+        deadline = _validated_deadline(deadline)
+        with self._lifecycle_lock:
+            if self.restart_count >= 1:
+                self._terminal_failure(_PROCESS_EXITED, deadline)
+                raise ProtocolViolation("LSP process restart limit exceeded")
+            if self._cwd is None or not self._command:
+                raise RuntimeError("LSP restart inputs are unavailable")
+            old_protocol = self.protocol
+            old_tree = self._tree
+            old_process = self.process
+            old_protocol.close(deadline)
+            if old_tree is not None and old_process.poll() is None:
+                old_tree.terminate(deadline=deadline)
+            if old_tree is not None:
+                old_tree.close()
+            self._join_generation_threads(deadline)
+
+            generation_nonce = _new_generation_nonce()
+            self.restart_count += 1
+            self.generation_nonce = generation_nonce
+            try:
+                tree = ProcessTree.spawn(
+                    self._command, cwd=self._cwd, env=self._environment
+                )
+            except BaseException:
+                with self._state_lock:
+                    self.state = ProcessState.FAILED
+                owner = self._owner_directory
+                if owner is not None:
+                    try:
+                        _write_failure_record(
+                            owner,
+                            code="restart_failed",
+                            owner_nonce=self.owner_nonce,
+                            generation_nonce=generation_nonce,
+                            pid=old_process.pid,
+                        )
+                    except (FileExistsError, OSError, RuntimeError, ValueError):
+                        pass
+                    self._stop_heartbeat(deadline)
+                    owner.remove_lease()
+                    self._owner_directory = None
+                    owner.close()
+                raise
+            process = tree.process
+            self.process = process
+            self._tree = tree
+            protocol: LspProtocol | None = None
+            stderr_thread: threading.Thread | None = None
+            try:
+                if (
+                    process.stdin is None
+                    or process.stdout is None
+                    or process.stderr is None
+                ):
+                    raise RuntimeError("LSP process pipes were not created")
+                stderr_parts: deque[bytes] = deque()
+                stderr_lock = threading.Lock()
+                stderr_size = [0]
+                stderr_thread = threading.Thread(
+                    target=_drain_stderr,
+                    args=(process.stderr, stderr_parts, stderr_size, stderr_lock),
+                    name=f"lsp-stderr-{generation_nonce}",
+                    daemon=True,
+                )
+                stderr_thread.start()
+
+                def failed(_reason: str) -> None:
+                    self._generation_failed(generation_nonce)
+
+                protocol = LspProtocol(
+                    process.stdout,
+                    process.stdin,
+                    generation_nonce,
+                    fatal_callback=failed,
+                )
+                self.protocol = protocol
+                self._stderr = stderr_parts
+                self._stderr_lock = stderr_lock
+                self._stderr_thread = stderr_thread
+                self.state = ProcessState.PROCESS_RUNNING
+                self._write_live_lease()
+                exit_thread = threading.Thread(
+                    target=self._monitor_exit,
+                    args=(process, protocol, generation_nonce),
+                    name=f"lsp-exit-{generation_nonce}",
+                    daemon=True,
+                )
+                self._exit_thread = exit_thread
+                exit_thread.start()
+            except BaseException:
+                if protocol is not None:
+                    protocol.close(deadline)
+                try:
+                    if process.poll() is None:
+                        tree.terminate(deadline=deadline)
+                except (OSError, TimeoutError):
+                    pass
+                finally:
+                    tree.close()
+                    self._tree = None
+                if stderr_thread is not None and stderr_thread.ident is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining > 0:
+                        stderr_thread.join(remaining)
+                with self._state_lock:
+                    self.state = ProcessState.FAILED
+                owner = self._owner_directory
+                if owner is not None:
+                    try:
+                        _write_failure_record(
+                            owner,
+                            code="restart_failed",
+                            owner_nonce=self.owner_nonce,
+                            generation_nonce=generation_nonce,
+                            pid=process.pid,
+                        )
+                    except (FileExistsError, OSError, RuntimeError, ValueError):
+                        pass
+                    self._stop_heartbeat(deadline)
+                    owner.remove_lease()
+                    self._owner_directory = None
+                    owner.close()
+                raise
+
+    def close(self, deadline: float) -> None:
+        deadline = _validated_deadline(deadline)
+        with self._lifecycle_lock:
+            if self._owner_directory is None and self.process.poll() is not None:
+                return
+        self.shutdown(deadline)
+        self._stop_heartbeat(deadline)
+        owner_directory = self._take_owner_directory()
+        if owner_directory is not None:
+            try:
+                owner_directory.remove_success_scratch()
+            finally:
+                owner_directory.close()
+        tree = self._tree
+        self._tree = None
+        if tree is not None:
+            tree.close()
+
+    def idle_expired(self, now: float) -> bool:
+        now = _validated_deadline(now)
+        with self._state_lock:
+            return now - self.last_used_monotonic >= _IDLE_SECONDS
 
     def stderr_bytes(self) -> bytes:
         with self._stderr_lock:
@@ -501,12 +866,35 @@ class LspProcess:
             pass
         return return_code
 
-    def _monitor_exit(self) -> None:
-        self.process.wait()
-        self.protocol._become_fatal("LSP process exited unexpectedly")
-        self._mark_failed()
+    def _monitor_exit(
+        self,
+        process: subprocess.Popen[bytes],
+        protocol: LspProtocol,
+        generation_nonce: str,
+    ) -> None:
+        process.wait()
+        if self._closing or generation_nonce != self.generation_nonce:
+            return
+        protocol._become_fatal("LSP process exited unexpectedly")
+        self._generation_failed(generation_nonce)
 
-    def _mark_failed(self) -> None:
+    def _generation_failed(self, generation_nonce: str) -> None:
+        if not self._lifecycle_lock.acquire(blocking=False):
+            return
+        try:
+            if self._closing or generation_nonce != self.generation_nonce:
+                return
+            if self.restart_count >= 1:
+                self._terminal_failure(
+                    _PROCESS_EXITED, time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
+                )
+            else:
+                with self._state_lock:
+                    self.state = ProcessState.DEGRADED
+        finally:
+            self._lifecycle_lock.release()
+
+    def _terminal_failure(self, code: str, deadline: float) -> None:
         with self._owner_handle_lock:
             if not self._startup_complete:
                 return
@@ -518,7 +906,7 @@ class LspProcess:
             try:
                 _write_failure_record(
                     owner_directory,
-                    code=_PROCESS_EXITED,
+                    code=code,
                     owner_nonce=self.owner_nonce,
                     generation_nonce=self.generation_nonce,
                     pid=self.process.pid,
@@ -526,11 +914,99 @@ class LspProcess:
             except (FileExistsError, OSError, ValueError, RuntimeError):
                 pass
             finally:
+                self._stop_heartbeat(deadline)
+                owner_directory.remove_lease()
+                tree = self._tree
+                if tree is not None and self.process.poll() is None:
+                    try:
+                        tree.terminate(deadline=deadline)
+                    except (OSError, TimeoutError):
+                        pass
+                if tree is not None:
+                    try:
+                        tree.close()
+                    except OSError:
+                        pass
+                    self._tree = None
+                try:
+                    self.protocol.close(deadline)
+                except (OSError, RuntimeError):
+                    pass
                 self._owner_directory = None
                 try:
                     owner_directory.close()
                 except OSError:
                     pass
+
+    def _start_heartbeat(self) -> None:
+        self._write_live_lease()
+        thread = threading.Thread(
+            target=self._heartbeat_loop,
+            name=f"lsp-heartbeat-{self.owner_nonce}",
+            daemon=True,
+        )
+        self._heartbeat_thread = thread
+        thread.start()
+
+    def _heartbeat_loop(self) -> None:
+        while not self._heartbeat_stop.wait(_HEARTBEAT_SECONDS):
+            try:
+                self._write_live_lease()
+            except (OSError, RuntimeError, ValueError):
+                self._generation_failed(self.generation_nonce)
+                return
+
+    def _write_live_lease(self) -> None:
+        owner = self._owner_directory
+        if owner is None:
+            return
+        heartbeat = datetime.now(timezone.utc)
+        expires = heartbeat + timedelta(seconds=_LEASE_EXPIRY_SECONDS)
+        owner.write_lease(
+            {
+                "expires_at": expires.isoformat().replace("+00:00", "Z"),
+                "generation_nonce": self.generation_nonce,
+                "heartbeat_at": heartbeat.isoformat().replace("+00:00", "Z"),
+                "manager_pid": os.getpid(),
+                "owner_nonce": self.owner_nonce,
+                "schema_version": 1,
+                "server_pid": self.process.pid,
+                "state": "live",
+            }
+        )
+
+    def _stop_heartbeat(self, deadline: float) -> None:
+        self._heartbeat_stop.set()
+        thread = self._heartbeat_thread
+        if thread is None or thread is threading.current_thread():
+            return
+        if thread.ident is None and thread not in threading.enumerate():
+            return
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            thread.join(remaining)
+
+    def _finish_generation(self, deadline: float) -> None:
+        try:
+            self.protocol._finish_io_after_process_exit(deadline)
+        except (OSError, RuntimeError):
+            pass
+        self._join_generation_threads(deadline)
+
+    def _join_generation_threads(self, deadline: float) -> None:
+        for thread in (self._stderr_thread, self._exit_thread):
+            if thread is None or thread is threading.current_thread():
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            thread.join(remaining)
+
+    def _take_owner_directory(self) -> _OwnerDirectory | None:
+        with self._owner_handle_lock:
+            owner = self._owner_directory
+            self._owner_directory = None
+            return owner
 
 
 def _validated_command(command: Sequence[str], cwd: Path) -> list[str]:
@@ -756,6 +1232,7 @@ def _rollback_startup(
     deadline: float,
     owner_nonce: str,
     generation_nonce: str,
+    tree: ProcessTree | None = None,
 ) -> None:
     # Task 5 retains bounded immutable evidence; later lifecycle/doctor tasks own removal.
     evidence_error: BaseException | None = None
@@ -784,27 +1261,33 @@ def _rollback_startup(
             pass
     child_alive = process is not None and process.poll() is None
     if child_alive:
-        try:
-            process.terminate()
-        except OSError:
-            pass
-        remaining = deadline - time.monotonic()
-        if remaining > 0:
+        if tree is not None:
             try:
-                process.wait(timeout=remaining / 2)
-            except (subprocess.TimeoutExpired, OSError):
+                tree.terminate(deadline=deadline)
+            except (OSError, TimeoutError):
                 pass
-        if process.poll() is None:
+        else:
             try:
-                process.kill()
+                process.terminate()
             except OSError:
                 pass
             remaining = deadline - time.monotonic()
             if remaining > 0:
                 try:
-                    process.wait(timeout=remaining)
+                    process.wait(timeout=remaining / 2)
                 except (subprocess.TimeoutExpired, OSError):
                     pass
+            if process.poll() is None:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    try:
+                        process.wait(timeout=remaining)
+                    except (subprocess.TimeoutExpired, OSError):
+                        pass
     try:
         child_still_alive = process is not None and process.poll() is None
         if child_still_alive:
@@ -840,6 +1323,11 @@ def _rollback_startup(
                 "LSP startup failed and retained evidence could not be written safely"
             ) from evidence_error
     finally:
+        if tree is not None:
+            try:
+                tree.close()
+            except OSError:
+                pass
         if owner_directory is not None:
             try:
                 owner_directory.close()
@@ -862,7 +1350,7 @@ def _write_failure_record(
         "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
     if pid is not None:
-        failure_record["owner_pid"] = pid
+        failure_record["server_pid"] = pid
     # A verified Windows owner DACL has one inheritable owner-only (OI)(CI) ACE.
     owner_directory.write_record("failure.json", failure_record)
 
@@ -882,3 +1370,13 @@ def _join_partially_started_thread(
             if remaining <= 0:
                 return
             time.sleep(min(0.001, remaining))
+
+
+def _atexit_close(reference: weakref.ReferenceType[LspProcess]) -> None:
+    instance = reference()
+    if instance is None:
+        return
+    try:
+        instance.close(time.monotonic() + _GRACEFUL_CLEANUP_SECONDS)
+    except BaseException:
+        pass

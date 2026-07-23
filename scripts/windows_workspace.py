@@ -41,6 +41,7 @@ if os.name == "nt":
     _FILE_WRITE_DATA = 0x00000002
     _FILE_READ_ATTRIBUTES = 0x00000080
     _FILE_WRITE_ATTRIBUTES = 0x00000100
+    _DELETE = 0x00010000
     _SYNCHRONIZE = 0x00100000
     _FILE_SHARE_READ = 0x00000001
     _FILE_SHARE_WRITE = 0x00000002
@@ -112,6 +113,17 @@ if os.name == "nt":
             ("file_attributes", wintypes.DWORD),
         )
 
+    class _FileDispositionInfo(ctypes.Structure):
+        _fields_ = (("delete_file", wintypes.BOOL),)
+
+    class _FileRenameInfo(ctypes.Structure):
+        _fields_ = (
+            ("replace_if_exists", wintypes.BOOL),
+            ("root_directory", wintypes.HANDLE),
+            ("file_name_length", wintypes.DWORD),
+            ("file_name", wintypes.WCHAR * 1),
+        )
+
     class _FileIdExtdDirInfo(ctypes.Structure):
         _fields_ = (
             ("next_entry_offset", wintypes.DWORD),
@@ -144,6 +156,7 @@ if os.name == "nt":
                 "FlushFileBuffers": kernel32,
                 "NtCreateFile": ntdll,
                 "NtOpenFile": ntdll,
+                "NtSetInformationFile": ntdll,
                 "RtlNtStatusToDosError": ntdll,
             }
             missing = [name for name, library in required.items() if not hasattr(library, name)]
@@ -217,6 +230,15 @@ if os.name == "nt":
                 wintypes.ULONG,
             )
             self.nt_open_file.restype = ctypes.c_long
+            self.nt_set_information_file = ntdll.NtSetInformationFile
+            self.nt_set_information_file.argtypes = (
+                wintypes.HANDLE,
+                ctypes.POINTER(_IoStatusBlock),
+                wintypes.LPVOID,
+                wintypes.ULONG,
+                ctypes.c_int,
+            )
+            self.nt_set_information_file.restype = ctypes.c_long
             self.status_to_error = ntdll.RtlNtStatusToDosError
             self.status_to_error.argtypes = (ctypes.c_long,)
             self.status_to_error.restype = wintypes.ULONG
@@ -316,13 +338,21 @@ def _object_attributes(parent: int, name: str):
 
 
 def _relative_handle(
-    parent: int, name: str, *, directory: bool, create: bool, writable: bool = False
+    parent: int,
+    name: str,
+    *,
+    directory: bool,
+    create: bool,
+    writable: bool = False,
+    deletable: bool = False,
 ) -> int:
     require_capability()
     name_buffer, unicode_name, attributes = _object_attributes(parent, name)
     handle = wintypes.HANDLE()
     io_status = _IoStatusBlock()
     desired = _SYNCHRONIZE | _FILE_READ_ATTRIBUTES
+    if (create and not directory) or deletable:
+        desired |= _DELETE
     if directory:
         desired |= _FILE_LIST_DIRECTORY
     else:
@@ -397,6 +427,18 @@ def create_file(parent: int, name: str) -> int:
 
 def open_file(parent: int, name: str) -> int:
     return _relative_handle(parent, name, directory=False, create=False)
+
+
+def open_deletable_file(parent: int, name: str) -> int:
+    return _relative_handle(
+        parent, name, directory=False, create=False, deletable=True
+    )
+
+
+def open_deletable_directory(parent: int, name: str) -> int:
+    return _relative_handle(
+        parent, name, directory=True, create=False, deletable=True
+    )
 
 
 def open_directory_path(path: Path) -> int:
@@ -579,12 +621,45 @@ def flush_directory(handle: int) -> bool:
     return False
 
 
+def replace_file(handle: int, parent: int, name: str) -> None:
+    """Atomically rename one held file relative to its retained parent handle."""
+    normalized = _component(name)
+    encoded = normalized.encode("utf-16-le")
+    size = _FileRenameInfo.file_name.offset + len(encoded)
+    buffer = ctypes.create_string_buffer(size)
+    information = _FileRenameInfo.from_buffer(buffer)
+    information.replace_if_exists = True
+    information.root_directory = parent
+    information.file_name_length = len(encoded)
+    ctypes.memmove(
+        ctypes.addressof(buffer) + _FileRenameInfo.file_name.offset,
+        encoded,
+        len(encoded),
+    )
+    io_status = _IoStatusBlock()
+    status = _API.nt_set_information_file(
+        handle, ctypes.byref(io_status), ctypes.byref(buffer), size, 10
+    )
+    if status < 0:
+        raise OSError(int(_API.status_to_error(status)), "could not replace Windows file")
+
+
+def delete_handle(handle: int) -> None:
+    """Mark one held file or empty directory for deletion by identity."""
+    information = _FileDispositionInfo(True)
+    if not _API.set_information(
+        handle, 4, ctypes.byref(information), ctypes.sizeof(information)
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
 __all__ = [
     "WindowsEntry",
     "capability",
     "close_handle",
     "create_directory",
     "create_file",
+    "delete_handle",
     "file_size",
     "flush_directory",
     "flush_file",
@@ -592,9 +667,12 @@ __all__ = [
     "is_read_only",
     "list_directory",
     "open_directory",
+    "open_deletable_directory",
+    "open_deletable_file",
     "open_directory_path",
     "open_file",
     "read_chunks",
+    "replace_file",
     "require_capability",
     "set_read_only",
     "write_all",

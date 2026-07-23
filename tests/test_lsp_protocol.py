@@ -512,6 +512,59 @@ def test_close_fails_an_active_request_instead_of_returning_a_result(
             future.result(timeout=1)
 
 
+def test_notification_uses_owned_writer_and_waits_for_delivery() -> None:
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=100)
+    protocol = _protocol_with_streams(reader, writer)
+    deadline = time.monotonic() + 1
+
+    protocol.notify("exit", {}, deadline=deadline)
+
+    assert len(writer.frames) == 1
+    assert b'"method":"exit"' in writer.frames[0]
+    assert protocol.stdin_writer_owner == protocol.writer_thread.ident
+    protocol.close()
+
+
+def test_cancel_all_releases_pending_callers_and_sends_one_cancel_each() -> None:
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=100)
+    protocol = _protocol_with_streams(reader, writer)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(
+                protocol.request,
+                "pending",
+                {},
+                deadline=time.monotonic() + 2,
+            )
+            for _ in range(2)
+        ]
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            with protocol._state_lock:
+                sent = len(protocol._pending) == 2 and all(
+                    pending.write_phase == "sent"
+                    for pending in protocol._pending.values()
+                )
+            if sent:
+                break
+            time.sleep(0.001)
+        assert sent
+        protocol.cancel_all("manager shutdown")
+        for future in futures:
+            with pytest.raises(RequestCancelled):
+                future.result(timeout=1)
+
+    deadline = time.monotonic() + 1
+    while len(writer.frames) < 4 and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert len([frame for frame in writer.frames if b"$/cancelRequest" in frame]) == 2
+    assert protocol.pending_count == 2
+    protocol.close()
+
+
 def test_close_committed_before_cancellation_remains_caller_outcome() -> None:
     reader = _BlockingReader()
     writer = _BlockingWriter(block_after=100)
