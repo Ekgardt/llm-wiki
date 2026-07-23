@@ -78,6 +78,7 @@ class _OwnerDirectory:
     parent_identity: object
     owner_handle: int | None = None
     owner_identity: object | None = None
+    owner_permissions_verified: bool = False
     _close_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _closed: bool = False
 
@@ -128,6 +129,7 @@ class _OwnerDirectory:
             _require_directory_identity(self.owner_identity, "LSP owner root")
             os.fchmod(owner, 0o700)
             _verify_descriptor(owner, self.owner_identity, mode=0o700, directory=True)
+            self.owner_permissions_verified = True
             os.mkdir("cancellation", 0o700, dir_fd=owner)
             cancellation = os.open(
                 "cancellation",
@@ -155,6 +157,7 @@ class _OwnerDirectory:
         _verify_owner_only(self.owner_root, 0o700)
         if _windows_workspace.identity(owner, directory=True) != self.owner_identity:
             raise PermissionError("LSP owner root identity changed during ACL setup")
+        self.owner_permissions_verified = True
         cancellation = _windows_workspace.create_directory(owner, "cancellation")
         try:
             cancellation_identity = _windows_workspace.identity(cancellation, directory=True)
@@ -166,7 +169,13 @@ class _OwnerDirectory:
         finally:
             _windows_workspace.close_handle(cancellation)
 
-    def write_record(self, name: str, record: Mapping[str, object]) -> None:
+    def write_record(
+        self,
+        name: str,
+        record: Mapping[str, object],
+        *,
+        inherited_acl: bool = False,
+    ) -> None:
         if name not in {"owner.json", "failure.json"} or self.owner_handle is None:
             raise ValueError("LSP evidence name or owner handle is invalid")
         payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -195,14 +204,17 @@ class _OwnerDirectory:
             os.fsync(self.owner_handle)
             return
 
+        if inherited_acl and not self.owner_permissions_verified:
+            raise PermissionError("LSP owner ACL was not verified before evidence creation")
         handle = _windows_workspace.create_file(self.owner_handle, name)
         try:
             identity = _windows_workspace.identity(handle, directory=False)
             _windows_workspace.write_all(handle, payload, chunk_bytes=_MAX_EVIDENCE_BYTES)
             _windows_workspace.flush_file(handle)
-            evidence_path = self.owner_root / name
-            _restrict_owner_only(evidence_path, 0o600)
-            _verify_owner_only(evidence_path, 0o600)
+            if not inherited_acl:
+                evidence_path = self.owner_root / name
+                _restrict_owner_only(evidence_path, 0o600)
+                _verify_owner_only(evidence_path, 0o600)
             if _windows_workspace.identity(handle, directory=False) != identity:
                 raise PermissionError("LSP evidence identity changed during write")
         finally:
@@ -693,6 +705,25 @@ def _rollback_startup(
 ) -> None:
     # Task 5 retains bounded immutable evidence; later lifecycle/doctor tasks own removal.
     deadline = time.monotonic() + _STARTUP_WAIT_SECONDS
+    evidence_error: BaseException | None = None
+    if (
+        deadline - time.monotonic() > 0
+        and owner_directory is not None
+        and owner_directory.owner_handle is not None
+    ):
+        try:
+            _write_failure_record(
+                owner_directory,
+                code=_STARTUP_FAILED,
+                owner_nonce=owner_nonce,
+                generation_nonce=generation_nonce,
+                pid=process.pid if process is not None else None,
+                startup_cleanup=True,
+            )
+        except FileExistsError:
+            pass
+        except BaseException as error:
+            evidence_error = error
     if protocol is not None:
         try:
             protocol._stop_io_for_process_cleanup()
@@ -704,69 +735,54 @@ def _rollback_startup(
             process.terminate()
         except OSError:
             pass
-        remaining = max(0.0, deadline - time.monotonic())
-        try:
-            process.wait(timeout=remaining / 2)
-        except (subprocess.TimeoutExpired, OSError):
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            try:
+                process.wait(timeout=remaining / 2)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        if process.poll() is None:
             try:
                 process.kill()
             except OSError:
                 pass
-            remaining = max(0.0, deadline - time.monotonic())
-            try:
-                process.wait(timeout=remaining)
-            except (subprocess.TimeoutExpired, OSError):
-                pass
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                try:
+                    process.wait(timeout=remaining)
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
     try:
         child_still_alive = process is not None and process.poll() is None
         if child_still_alive:
-            try:
-                if owner_directory is not None and owner_directory.owner_handle is not None:
-                    _write_failure_record(
-                        owner_directory,
-                        code=_STARTUP_FAILED,
-                        owner_nonce=owner_nonce,
-                        generation_nonce=generation_nonce,
-                        pid=process.pid,
-                    )
-            except FileExistsError:
-                pass
-            except BaseException as evidence_error:
+            if evidence_error is not None:
                 raise StartupCleanupError(
                     "LSP direct child remains alive and failure evidence could not be written"
                 ) from evidence_error
             raise StartupCleanupError("LSP direct child remains alive after startup cleanup")
 
-        cleanup_deadline = max(deadline, time.monotonic() + 0.25)
-        if protocol is not None:
+        if protocol is not None and deadline - time.monotonic() > 0:
             try:
-                protocol._finish_io_after_process_exit(cleanup_deadline)
+                protocol._finish_io_after_process_exit(deadline)
             except BaseException:
                 pass
         if process is not None:
             for stream in (process.stdin, process.stdout, process.stderr):
+                if deadline - time.monotonic() <= 0:
+                    break
                 if stream is not None:
                     try:
                         stream.close()
                     except (OSError, ValueError):
                         pass
         for thread in threads:
+            if deadline - time.monotonic() <= 0:
+                break
             if thread is not None and (
                 thread.ident is not None or thread in threading.enumerate()
             ):
-                _join_partially_started_thread(thread, cleanup_deadline)
-        try:
-            if owner_directory is not None and owner_directory.owner_handle is not None:
-                _write_failure_record(
-                    owner_directory,
-                    code=_STARTUP_FAILED,
-                    owner_nonce=owner_nonce,
-                    generation_nonce=generation_nonce,
-                    pid=process.pid if process is not None else None,
-                )
-        except FileExistsError:
-            pass
-        except BaseException as evidence_error:
+                _join_partially_started_thread(thread, deadline)
+        if evidence_error is not None:
             raise StartupCleanupError(
                 "LSP startup failed and retained evidence could not be written safely"
             ) from evidence_error
@@ -785,6 +801,7 @@ def _write_failure_record(
     owner_nonce: str,
     generation_nonce: str,
     pid: int | None,
+    startup_cleanup: bool = False,
 ) -> None:
     failure_record: dict[str, object] = {
         "code": code,
@@ -794,17 +811,25 @@ def _write_failure_record(
     }
     if pid is not None:
         failure_record["owner_pid"] = pid
-    owner_directory.write_record("failure.json", failure_record)
+    # A verified Windows owner DACL has one inheritable owner-only (OI)(CI) ACE.
+    # Startup rollback inherits it to avoid an independently timed icacls subprocess.
+    owner_directory.write_record(
+        "failure.json", failure_record, inherited_acl=startup_cleanup
+    )
 
 
 def _join_partially_started_thread(
     thread: threading.Thread, deadline: float
 ) -> None:
     while thread in threading.enumerate():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
         try:
-            thread.join(max(0.0, deadline - time.monotonic()))
+            thread.join(remaining)
             return
         except RuntimeError:
-            if time.monotonic() >= deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 return
-            time.sleep(0.001)
+            time.sleep(min(0.001, remaining))

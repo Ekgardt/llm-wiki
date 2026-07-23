@@ -15,6 +15,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import compile_cache
 import lsp_process
 import pytest
 from lsp_process import (
@@ -42,6 +43,21 @@ def _start(tmp_path: Path, *arguments: str) -> LspProcess:
 
 def _wait(process: LspProcess, seconds: float = 10) -> int:
     return process.wait_for_exit(time.monotonic() + seconds)
+
+
+def _assert_startup_failure_acl_is_owner_only(path: Path) -> None:
+    if os.name != "nt":
+        lsp_process._verify_owner_only(path, 0o600)
+        return
+    acl = compile_cache._acl_output_text(
+        compile_cache._run_acl_command(["icacls", str(path)]).stdout
+    )
+    acl_lines = [line.strip() for line in acl.splitlines() if ":(" in line]
+    assert len(acl_lines) == 1
+    assert compile_cache._acl_principal(path, acl_lines[0]).casefold() == (
+        compile_cache._windows_acl_identity().casefold()
+    )
+    assert "(I)" in acl_lines[0] and "(F)" in acl_lines[0]
 
 
 def test_constants_states_and_public_dataclass_fields_are_exact() -> None:
@@ -727,7 +743,7 @@ def test_stubborn_child_preserves_restricted_failure_evidence(
     lsp_process._verify_owner_only(owner / "cancellation", 0o700)
     if owner_record is not None:
         lsp_process._verify_owner_only(owner / "owner.json", 0o600)
-    lsp_process._verify_owner_only(owner / "failure.json", 0o600)
+    _assert_startup_failure_acl_is_owner_only(owner / "failure.json")
 
 
 def test_owner_permission_failure_rolls_back_before_spawn(
@@ -1434,3 +1450,232 @@ def test_repeated_startup_failures_do_not_leak_posix_descriptors(
     assert {
         thread.name for thread in threading.enumerate() if thread.name.startswith("lsp-")
     } == initial_threads
+
+
+def test_rollback_writes_evidence_before_waits_and_never_extends_deadline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events: list[tuple[str, float]] = []
+    clock = [10.0]
+
+    class Process:
+        pid = 515151
+        stdin = io.BytesIO()
+        stdout = io.BytesIO()
+        stderr = io.BytesIO()
+        dead = False
+        waits = 0
+
+        def poll(self) -> int | None:
+            return 0 if self.dead else None
+
+        def terminate(self) -> None:
+            events.append(("terminate", clock[0]))
+
+        def kill(self) -> None:
+            events.append(("kill", clock[0]))
+
+        def wait(self, timeout: float | None = None) -> int:
+            assert timeout is not None
+            events.append(("wait", clock[0]))
+            clock[0] += timeout
+            self.waits += 1
+            if self.waits == 1:
+                raise subprocess.TimeoutExpired("fake", timeout)
+            self.dead = True
+            return 0
+
+    class Protocol:
+        def _stop_io_for_process_cleanup(self) -> None:
+            events.append(("stop", clock[0]))
+
+        def _finish_io_after_process_exit(self, deadline: float) -> None:
+            events.append(("finish", deadline))
+
+    class Owner:
+        owner_handle = 1
+
+        def close(self) -> None:
+            events.append(("close-owner", clock[0]))
+
+    def evidence(*_args: object, **_kwargs: object) -> None:
+        events.append(("evidence", clock[0]))
+
+    monkeypatch.setattr(lsp_process.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(lsp_process, "_write_failure_record", evidence)
+
+    lsp_process._rollback_startup(
+        Process(),
+        Protocol(),
+        (),
+        Owner(),
+        owner_nonce=OWNER_NONCE,
+        generation_nonce="b" * 32,
+    )
+
+    names = [name for name, _when in events]
+    assert names.index("evidence") < names.index("wait")
+    assert "finish" not in names
+    assert clock[0] == 12.0
+
+
+def test_rollback_skips_evidence_and_optional_cleanup_when_budget_is_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    moments = iter([20.0, 23.0])
+    evidence_called = False
+    protocol_called = False
+
+    class Protocol:
+        def _stop_io_for_process_cleanup(self) -> None:
+            nonlocal protocol_called
+            protocol_called = True
+
+    class Owner:
+        owner_handle = 1
+
+        def close(self) -> None:
+            return None
+
+    def evidence(*_args: object, **_kwargs: object) -> None:
+        nonlocal evidence_called
+        evidence_called = True
+
+    monkeypatch.setattr(
+        lsp_process.time, "monotonic", lambda: next(moments, 23.0)
+    )
+    monkeypatch.setattr(lsp_process, "_write_failure_record", evidence)
+
+    lsp_process._rollback_startup(
+        None,
+        Protocol(),
+        (),
+        Owner(),
+        owner_nonce=OWNER_NONCE,
+        generation_nonce="b" * 32,
+    )
+
+    assert evidence_called is False
+    assert protocol_called is True
+
+
+def test_partial_thread_join_retry_sleep_never_exceeds_absolute_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [30.0]
+
+    class StartingThread:
+        def join(self, timeout: float) -> None:
+            clock[0] += min(0.0004, timeout)
+            raise RuntimeError("thread is still starting")
+
+    thread = StartingThread()
+    monkeypatch.setattr(lsp_process.threading, "enumerate", lambda: [thread])
+    monkeypatch.setattr(lsp_process.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        lsp_process.time, "sleep", lambda duration: clock.__setitem__(0, clock[0] + duration)
+    )
+
+    lsp_process._join_partially_started_thread(thread, 30.0005)
+
+    assert clock[0] <= 30.0005
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows inherited ACL contract")
+def test_windows_startup_failure_uses_inherited_acl_without_slow_acl_command(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    real_restrict = lsp_process._restrict_owner_only
+    delayed_failure_acl = False
+
+    def reject_failure_acl(path: Path, mode: int) -> None:
+        nonlocal delayed_failure_acl
+        if path.name == "failure.json":
+            delayed_failure_acl = True
+            time.sleep(3)
+            raise AssertionError("rollback must not invoke failure evidence icacls")
+        real_restrict(path, mode)
+
+    class BrokenProtocol:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("protocol startup failed")
+
+    monkeypatch.setattr(lsp_process, "_restrict_owner_only", reject_failure_acl)
+    monkeypatch.setattr(lsp_process, "LspProtocol", BrokenProtocol)
+    owner = tmp_path / OWNER_NONCE
+    started = time.monotonic()
+
+    with pytest.raises(RuntimeError, match="protocol startup failed"):
+        LspProcess.start(
+            _command("--sleep-seconds", "30"), cwd=tmp_path, owner_root=owner
+        )
+
+    assert time.monotonic() - started < 2.75
+    assert delayed_failure_acl is False
+    failure_path = owner / "failure.json"
+    failure = json.loads(failure_path.read_bytes())
+    assert failure["code"] == "startup_failed"
+    owner_acl = compile_cache._acl_output_text(
+        compile_cache._run_acl_command(["icacls", str(owner)]).stdout
+    )
+    assert "(OI)" in owner_acl and "(CI)" in owner_acl and "(I)" not in owner_acl
+    _assert_startup_failure_acl_is_owner_only(failure_path)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows cleanup contention contract")
+def test_parallel_real_startup_failures_stay_bounded_secure_and_leak_free(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    children: list[subprocess.Popen[bytes]] = []
+    children_lock = threading.Lock()
+    real_popen = subprocess.Popen
+    initial_threads = {
+        thread.name for thread in threading.enumerate() if thread.name.startswith("lsp-")
+    }
+
+    class BrokenProtocol:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("protocol startup failed")
+
+    def popen_spy(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        child = real_popen(*args, **kwargs)
+        with children_lock:
+            children.append(child)
+        return child
+
+    def fail_start(index: int) -> tuple[float, Path]:
+        owner = tmp_path / f"{index + 100:032x}"
+        started = time.monotonic()
+        with pytest.raises(RuntimeError, match="protocol startup failed"):
+            LspProcess.start(
+                _command("--sleep-seconds", "30"), cwd=tmp_path, owner_root=owner
+            )
+        return time.monotonic() - started, owner
+
+    monkeypatch.setattr(lsp_process.subprocess, "Popen", popen_spy)
+    monkeypatch.setattr(lsp_process, "LspProtocol", BrokenProtocol)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(fail_start, range(20)))
+
+    assert max(elapsed for elapsed, _owner in results) <= 2.75
+    assert len(children) == 20
+    assert all(child.poll() is not None for child in children)
+    for _elapsed, owner in results:
+        evidence = (owner / "failure.json").read_bytes()
+        record = json.loads(evidence)
+        assert record["code"] == "startup_failed"
+        assert str(tmp_path).encode() not in evidence
+        assert b"sleep-seconds" not in evidence
+        _assert_startup_failure_acl_is_owner_only(owner / "failure.json")
+
+    settle_deadline = time.monotonic() + 2
+    while time.monotonic() < settle_deadline:
+        current = {
+            thread.name
+            for thread in threading.enumerate()
+            if thread.name.startswith("lsp-")
+        }
+        if current == initial_threads:
+            break
+        time.sleep(0.01)
+    assert current == initial_threads
