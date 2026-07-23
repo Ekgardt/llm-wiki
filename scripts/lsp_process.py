@@ -1,0 +1,410 @@
+"""Own one minimally privileged, bounded LSP child process."""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import secrets
+import shutil
+import subprocess
+import threading
+import time
+from collections import deque
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+from pathlib import Path
+from typing import BinaryIO
+
+from lsp_protocol import CancellationToken, LspProtocol
+
+MAX_STDERR_BYTES = 4 * 1024 * 1024
+LSP_ENV_ALLOWLIST = frozenset(
+    {
+        "COMSPEC",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "PATH",
+        "PATHEXT",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "USERPROFILE",
+        "WINDIR",
+    }
+)
+
+_STDERR_CHUNK_BYTES = 65_537
+_STARTUP_WAIT_SECONDS = 2.0
+
+
+class ProcessState(str, Enum):
+    PROCESS_RUNNING = "process_running"
+    PROTOCOL_INITIALIZED = "protocol_initialized"
+    WORKSPACE_READY = "workspace_ready"
+    DEGRADED = "degraded"
+    FAILED = "failed"
+
+
+def lsp_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Build a new, canonical environment containing only required process values."""
+    values = os.environ if source is None else source
+    for name, value in values.items():
+        if not isinstance(name, str) or not isinstance(value, str):
+            raise TypeError("environment names and values must be strings")
+        if "\0" in name or "\0" in value:
+            raise ValueError("environment names and values must not contain NUL")
+    if os.name == "nt":
+        system_root = values.get("SYSTEMROOT")
+        if (
+            not system_root
+            or not Path(system_root).is_absolute()
+            or not Path(system_root).is_dir()
+        ):
+            raise ValueError("SYSTEMROOT must be an inherited existing directory on Windows")
+    return {name: values[name] for name in sorted(LSP_ENV_ALLOWLIST) if name in values}
+
+
+@dataclass(slots=True)
+class LspProcess:
+    process: subprocess.Popen[bytes]
+    protocol: LspProtocol
+    owner_root: Path
+    owner_nonce: str
+    generation_nonce: str
+    state: ProcessState
+    started_monotonic: float
+    last_used_monotonic: float
+    _stderr: deque[bytes] = field(default_factory=deque, init=False, repr=False)
+    _stderr_lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False
+    )
+    _state_lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False
+    )
+    _stderr_thread: threading.Thread | None = field(default=None, init=False, repr=False)
+    _exit_thread: threading.Thread | None = field(default=None, init=False, repr=False)
+
+    @classmethod
+    def start(
+        cls, command: Sequence[str], *, cwd: Path, owner_root: Path
+    ) -> LspProcess:
+        cwd = Path(cwd)
+        owner_root = Path(owner_root)
+        if not cwd.exists() or not cwd.is_dir():
+            raise ValueError("cwd must be an existing directory")
+        cwd = cwd.resolve()
+        arguments = _validated_command(command, cwd)
+        environment = lsp_environment()
+        _create_owner_root(owner_root)
+
+        process: subprocess.Popen[bytes] | None = None
+        protocol: LspProtocol | None = None
+        stderr_thread: threading.Thread | None = None
+        instance: LspProcess | None = None
+        instance_lock = threading.Lock()
+        failed_before_instance = False
+        owner_nonce = secrets.token_hex(16)
+        generation_nonce = secrets.token_hex(16)
+        started_monotonic = time.monotonic()
+        started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+        def protocol_failed(_reason: str) -> None:
+            nonlocal failed_before_instance
+            with instance_lock:
+                current = instance
+                if current is None:
+                    failed_before_instance = True
+                    return
+            current._mark_failed()
+
+        try:
+            process = subprocess.Popen(
+                arguments,
+                cwd=cwd,
+                env=environment,
+                shell=False,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                close_fds=True,
+            )
+            if process.stdin is None or process.stdout is None or process.stderr is None:
+                raise RuntimeError("LSP process pipes were not created")
+
+            stderr_parts: deque[bytes] = deque()
+            stderr_lock = threading.Lock()
+            stderr_size = [0]
+            stderr_thread = threading.Thread(
+                target=_drain_stderr,
+                args=(process.stderr, stderr_parts, stderr_size, stderr_lock),
+                name=f"lsp-stderr-{generation_nonce}",
+                daemon=True,
+            )
+            stderr_thread.start()
+
+            owner_record: dict[str, object] = {
+                "command_basename": Path(arguments[0]).name,
+                "generation_nonce": generation_nonce,
+                "owner_nonce": owner_nonce,
+                "owner_pid": process.pid,
+                "started_at": started_at,
+                "state": ProcessState.PROCESS_RUNNING.value,
+            }
+            _write_owner_record(owner_root, owner_record)
+            protocol = LspProtocol(
+                process.stdout,
+                process.stdin,
+                generation_nonce,
+                fatal_callback=protocol_failed,
+            )
+            instance = cls(
+                process=process,
+                protocol=protocol,
+                owner_root=owner_root,
+                owner_nonce=owner_nonce,
+                generation_nonce=generation_nonce,
+                state=ProcessState.PROCESS_RUNNING,
+                started_monotonic=started_monotonic,
+                last_used_monotonic=started_monotonic,
+            )
+            instance._stderr = stderr_parts
+            instance._stderr_lock = stderr_lock
+            instance._stderr_thread = stderr_thread
+            with instance_lock:
+                if failed_before_instance:
+                    instance._mark_failed()
+            instance._exit_thread = threading.Thread(
+                target=instance._monitor_exit,
+                name=f"lsp-exit-{generation_nonce}",
+                daemon=True,
+            )
+            instance._exit_thread.start()
+            return instance
+        except BaseException:
+            _rollback_startup(process, protocol, stderr_thread, owner_root)
+            raise
+
+    def request(
+        self,
+        method: str,
+        params: object,
+        *,
+        deadline: float,
+        cancellation: CancellationToken | None = None,
+    ) -> object:
+        if self.process.poll() is not None:
+            self.protocol._become_fatal("LSP process exited unexpectedly")
+            self._mark_failed()
+            raise RuntimeError("LSP process has exited")
+        with self._state_lock:
+            if self.state is ProcessState.FAILED:
+                raise RuntimeError("LSP process has exited")
+            self.last_used_monotonic = time.monotonic()
+        return self.protocol.request(
+            method, params, deadline=deadline, cancellation=cancellation
+        )
+
+    def stderr_bytes(self) -> bytes:
+        with self._stderr_lock:
+            return b"".join(self._stderr)
+
+    def wait_for_exit(self, deadline: float) -> int:
+        deadline = _validated_deadline(deadline)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 and self.process.poll() is None:
+            raise TimeoutError("LSP process did not exit before deadline")
+        try:
+            return_code = self.process.wait(timeout=max(0.0, remaining))
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError("LSP process did not exit before deadline") from exc
+
+        for owner in (self._stderr_thread, self._exit_thread):
+            if owner is None or owner is threading.current_thread():
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("LSP process streams did not drain before deadline")
+            owner.join(remaining)
+            if owner.is_alive():
+                raise TimeoutError("LSP process streams did not drain before deadline")
+        return return_code
+
+    def _monitor_exit(self) -> None:
+        self.process.wait()
+        self.protocol._become_fatal("LSP process exited unexpectedly")
+        self._mark_failed()
+
+    def _mark_failed(self) -> None:
+        with self._state_lock:
+            if self.state is ProcessState.FAILED:
+                return
+            self.state = ProcessState.FAILED
+            try:
+                existing = json.loads((self.owner_root / "owner.json").read_bytes())
+                started_at = existing["started_at"]
+                if not isinstance(started_at, str):
+                    raise ValueError("invalid owner start timestamp")
+                _write_owner_record(
+                    self.owner_root,
+                    {
+                        "command_basename": Path(self.process.args[0]).name,
+                        "generation_nonce": self.generation_nonce,
+                        "owner_nonce": self.owner_nonce,
+                        "owner_pid": self.process.pid,
+                        "started_at": started_at,
+                        "state": ProcessState.FAILED.value,
+                    },
+                )
+            except (OSError, ValueError, KeyError, json.JSONDecodeError):
+                pass
+
+
+def _validated_command(command: Sequence[str], cwd: Path) -> list[str]:
+    if isinstance(command, (str, bytes)) or not isinstance(command, Sequence):
+        raise TypeError("command must be a sequence of strings")
+    if not command:
+        raise ValueError("command must not be empty")
+    arguments = list(command)
+    for argument in arguments:
+        if not isinstance(argument, str):
+            raise TypeError("command arguments must be strings")
+        if "\0" in argument:
+            raise ValueError("command arguments must not contain NUL")
+    if not arguments[0]:
+        raise ValueError("command executable must not be empty")
+
+    executable = Path(arguments[0])
+    if executable.is_absolute():
+        resolved = executable.resolve()
+        if not resolved.is_file():
+            raise FileNotFoundError(arguments[0])
+    elif executable.parent != Path("."):
+        resolved = (cwd / executable).resolve()
+        if not resolved.is_file():
+            raise FileNotFoundError(arguments[0])
+    else:
+        found = shutil.which(arguments[0], path=lsp_environment().get("PATH"))
+        if found is None:
+            raise FileNotFoundError(arguments[0])
+        resolved = Path(found).resolve()
+    arguments[0] = str(resolved)
+    return arguments
+
+
+def _create_owner_root(owner_root: Path) -> None:
+    if os.path.lexists(owner_root):
+        raise FileExistsError(owner_root)
+    if not owner_root.parent.exists() or not owner_root.parent.is_dir():
+        raise FileNotFoundError(owner_root.parent)
+    owner_root.mkdir(mode=0o700)
+    try:
+        (owner_root / "cancellation").mkdir(mode=0o700)
+        if os.name == "posix":
+            owner_root.chmod(0o700)
+            (owner_root / "cancellation").chmod(0o700)
+    except BaseException:
+        shutil.rmtree(owner_root, ignore_errors=True)
+        raise
+
+
+def _write_owner_record(owner_root: Path, record: Mapping[str, object]) -> None:
+    payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    temporary = owner_root / f".owner-{secrets.token_hex(8)}.tmp"
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = None
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if os.name == "posix":
+            temporary.chmod(0o600)
+        os.replace(temporary, owner_root / "owner.json")
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _drain_stderr(
+    stream: BinaryIO,
+    chunks: deque[bytes],
+    size: list[int],
+    lock: threading.Lock,
+) -> None:
+    try:
+        while True:
+            chunk = stream.read(_STDERR_CHUNK_BYTES)
+            if not chunk:
+                return
+            with lock:
+                chunks.append(chunk)
+                size[0] += len(chunk)
+                excess = size[0] - MAX_STDERR_BYTES
+                while excess > 0:
+                    oldest = chunks[0]
+                    if len(oldest) <= excess:
+                        chunks.popleft()
+                        size[0] -= len(oldest)
+                        excess -= len(oldest)
+                    else:
+                        chunks[0] = oldest[excess:]
+                        size[0] -= excess
+                        excess = 0
+    except (OSError, ValueError):
+        return
+    finally:
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+
+
+def _validated_deadline(deadline: float) -> float:
+    if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
+        raise TypeError("deadline must be a monotonic timestamp")
+    if not math.isfinite(deadline):
+        raise ValueError("deadline must be finite")
+    return float(deadline)
+
+
+def _rollback_startup(
+    process: subprocess.Popen[bytes] | None,
+    protocol: LspProtocol | None,
+    stderr_thread: threading.Thread | None,
+    owner_root: Path,
+) -> None:
+    if process is not None and process.poll() is None:
+        try:
+            process.terminate()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=_STARTUP_WAIT_SECONDS)
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+                process.wait(timeout=_STARTUP_WAIT_SECONDS)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    if protocol is not None:
+        protocol.close()
+    if process is not None:
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except (OSError, ValueError):
+                    pass
+    if stderr_thread is not None and stderr_thread.ident is not None:
+        stderr_thread.join(_STARTUP_WAIT_SECONDS)
+    shutil.rmtree(owner_root, ignore_errors=True)

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import argparse
 import json
+import os
 import socket
+import sys
 import threading
 from collections.abc import Callable
 from typing import Any, BinaryIO
@@ -158,3 +161,36 @@ class FakeLspServer:
             thread.join(timeout=1)
         if self.failures:
             raise self.failures[0]
+
+
+def _run_process_server() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--stderr-bytes", type=int, default=0)
+    parser.add_argument("--report-environment", action="store_true")
+    parser.add_argument("--echo", action="store_true")
+    parser.add_argument("--exit-while-pending", action="store_true")
+    args = parser.parse_args()
+
+    remaining = args.stderr_bytes
+    offset = 0
+    while remaining:
+        size = min(65_537, remaining)
+        chunk = bytes((offset + index) % 251 for index in range(size))
+        os.write(2, chunk)
+        offset += size
+        remaining -= size
+
+    if args.report_environment or args.echo or args.exit_while_pending:
+        request = _read_message(sys.stdin.buffer)
+        if args.exit_while_pending:
+            _read_message(sys.stdin.buffer)
+            return
+        result: object = dict(os.environ) if args.report_environment else request.get("params")
+        sys.stdout.buffer.write(
+            _frame({"jsonrpc": "2.0", "id": request["id"], "result": result})
+        )
+        sys.stdout.buffer.flush()
+
+
+if __name__ == "__main__":
+    _run_process_server()
