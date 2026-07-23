@@ -20,6 +20,7 @@ from enum import Enum
 from pathlib import Path
 from typing import BinaryIO
 
+import windows_workspace as _windows_workspace
 from compile_cache import _restrict_owner_only, _verify_owner_only
 from lsp_protocol import CancellationToken, LspProtocol
 
@@ -55,6 +56,7 @@ _STARTUP_WAIT_SECONDS = 2.0
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 _STARTUP_FAILED = "startup_failed"
 _PROCESS_EXITED = "process_exited"
+_MAX_EVIDENCE_BYTES = 4096
 
 
 class StartupCleanupError(RuntimeError):
@@ -69,11 +71,197 @@ class _ObjectIdentity:
     reparse_attributes: int
 
 
-@dataclass(frozen=True, slots=True)
-class _CreatedArtifact:
-    path: Path
-    identity: _ObjectIdentity
-    is_directory: bool
+@dataclass(slots=True)
+class _OwnerDirectory:
+    owner_root: Path
+    parent_handle: int
+    parent_identity: object
+    owner_handle: int | None = None
+    owner_identity: object | None = None
+    _close_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _closed: bool = False
+
+    @classmethod
+    def open(cls, owner_root: Path) -> _OwnerDirectory:
+        if os.name == "posix":
+            if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+                raise RuntimeError("LSP ownership requires POSIX no-follow directory APIs")
+            try:
+                descriptor = os.open(
+                    owner_root.parent,
+                    os.O_RDONLY
+                    | os.O_DIRECTORY
+                    | os.O_NOFOLLOW
+                    | getattr(os, "O_CLOEXEC", 0),
+                )
+            except NotADirectoryError as exc:
+                raise ValueError(
+                    "owner_root parent must be a no-follow directory"
+                ) from exc
+            try:
+                identity = _identity_from_stat(os.fstat(descriptor))
+                _require_directory_identity(identity, "owner_root parent")
+            except BaseException:
+                os.close(descriptor)
+                raise
+            return cls(owner_root, descriptor, identity)
+        if os.name == "nt":
+            handle = _windows_workspace.open_directory_path(owner_root.parent)
+            try:
+                identity = _windows_workspace.identity(handle, directory=True)
+            except BaseException:
+                _windows_workspace.close_handle(handle)
+                raise
+            return cls(owner_root, handle, identity)
+        raise RuntimeError("LSP owner directories are unsupported on this platform")
+
+    def create(self) -> None:
+        if os.name == "posix":
+            os.mkdir(self.owner_root.name, 0o700, dir_fd=self.parent_handle)
+            owner = os.open(
+                self.owner_root.name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=self.parent_handle,
+            )
+            self.owner_handle = owner
+            self.owner_identity = _identity_from_stat(os.fstat(owner))
+            _require_directory_identity(self.owner_identity, "LSP owner root")
+            os.fchmod(owner, 0o700)
+            _verify_descriptor(owner, self.owner_identity, mode=0o700, directory=True)
+            os.mkdir("cancellation", 0o700, dir_fd=owner)
+            cancellation = os.open(
+                "cancellation",
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=owner,
+            )
+            try:
+                cancellation_identity = _identity_from_stat(os.fstat(cancellation))
+                _require_directory_identity(cancellation_identity, "LSP cancellation root")
+                os.fchmod(cancellation, 0o700)
+                _verify_descriptor(
+                    cancellation, cancellation_identity, mode=0o700, directory=True
+                )
+                os.fsync(cancellation)
+            finally:
+                os.close(cancellation)
+            os.fsync(owner)
+            os.fsync(self.parent_handle)
+            return
+
+        owner = _windows_workspace.create_directory(self.parent_handle, self.owner_root.name)
+        self.owner_handle = owner
+        self.owner_identity = _windows_workspace.identity(owner, directory=True)
+        _restrict_owner_only(self.owner_root, 0o700)
+        _verify_owner_only(self.owner_root, 0o700)
+        if _windows_workspace.identity(owner, directory=True) != self.owner_identity:
+            raise PermissionError("LSP owner root identity changed during ACL setup")
+        cancellation = _windows_workspace.create_directory(owner, "cancellation")
+        try:
+            cancellation_identity = _windows_workspace.identity(cancellation, directory=True)
+            cancellation_path = self.owner_root / "cancellation"
+            _restrict_owner_only(cancellation_path, 0o700)
+            _verify_owner_only(cancellation_path, 0o700)
+            if _windows_workspace.identity(cancellation, directory=True) != cancellation_identity:
+                raise PermissionError("LSP cancellation root identity changed during ACL setup")
+        finally:
+            _windows_workspace.close_handle(cancellation)
+
+    def write_record(self, name: str, record: Mapping[str, object]) -> None:
+        if name not in {"owner.json", "failure.json"} or self.owner_handle is None:
+            raise ValueError("LSP evidence name or owner handle is invalid")
+        payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        if len(payload) > _MAX_EVIDENCE_BYTES:
+            raise ValueError("LSP evidence record exceeds its byte bound")
+        if os.name == "posix":
+            descriptor = os.open(
+                name,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | os.O_NOFOLLOW
+                | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+                dir_fd=self.owner_handle,
+            )
+            try:
+                identity = _identity_from_stat(os.fstat(descriptor))
+                _require_file_identity(identity, "LSP evidence record")
+                _write_all_descriptor(descriptor, payload)
+                os.fchmod(descriptor, 0o600)
+                os.fsync(descriptor)
+                _verify_descriptor(descriptor, identity, mode=0o600, directory=False)
+            finally:
+                os.close(descriptor)
+            os.fsync(self.owner_handle)
+            return
+
+        handle = _windows_workspace.create_file(self.owner_handle, name)
+        try:
+            identity = _windows_workspace.identity(handle, directory=False)
+            _windows_workspace.write_all(handle, payload, chunk_bytes=_MAX_EVIDENCE_BYTES)
+            _windows_workspace.flush_file(handle)
+            evidence_path = self.owner_root / name
+            _restrict_owner_only(evidence_path, 0o600)
+            _verify_owner_only(evidence_path, 0o600)
+            if _windows_workspace.identity(handle, directory=False) != identity:
+                raise PermissionError("LSP evidence identity changed during write")
+        finally:
+            _windows_workspace.close_handle(handle)
+
+    def verify_lexical_identity(self) -> None:
+        if self.owner_handle is None or self.owner_identity is None:
+            raise RuntimeError("LSP owner directory was not created")
+        if os.name == "posix":
+            if _current_identity(self.owner_root.parent) != self.parent_identity:
+                raise RuntimeError("owner_root parent identity changed during startup")
+            if _current_identity(self.owner_root) != self.owner_identity:
+                raise RuntimeError("LSP owner root identity changed during startup")
+            _verify_descriptor(
+                self.owner_handle, self.owner_identity, mode=0o700, directory=True
+            )
+            return
+
+        parent = _windows_workspace.open_directory_path(self.owner_root.parent)
+        named: int | None = None
+        try:
+            if _windows_workspace.identity(parent, directory=True) != self.parent_identity:
+                raise RuntimeError("owner_root parent identity changed during startup")
+            named = _windows_workspace.open_directory(parent, self.owner_root.name)
+            if _windows_workspace.identity(named, directory=True) != self.owner_identity:
+                raise RuntimeError("LSP owner root identity changed during startup")
+            if (
+                _windows_workspace.identity(self.owner_handle, directory=True)
+                != self.owner_identity
+            ):
+                raise RuntimeError("held LSP owner root identity changed during startup")
+        finally:
+            if named is not None:
+                _windows_workspace.close_handle(named)
+            _windows_workspace.close_handle(parent)
+
+    def close(self) -> None:
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            owner = self.owner_handle
+            self.owner_handle = None
+            parent = self.parent_handle
+            self.parent_handle = -1
+        first_error: BaseException | None = None
+        for handle in (owner, parent):
+            if handle is None or handle < 0:
+                continue
+            try:
+                if os.name == "posix":
+                    os.close(handle)
+                elif os.name == "nt":
+                    _windows_workspace.close_handle(handle)
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
 
 class ProcessState(str, Enum):
@@ -120,10 +308,13 @@ class LspProcess:
     _state_lock: threading.Lock = field(
         default_factory=threading.Lock, init=False, repr=False
     )
+    _owner_handle_lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False
+    )
     _stderr_thread: threading.Thread | None = field(default=None, init=False, repr=False)
     _exit_thread: threading.Thread | None = field(default=None, init=False, repr=False)
-    _parent_identity: _ObjectIdentity | None = field(default=None, init=False, repr=False)
-    _artifacts: list[_CreatedArtifact] = field(default_factory=list, init=False, repr=False)
+    _owner_directory: _OwnerDirectory | None = field(default=None, init=False, repr=False)
+    _startup_complete: bool = field(default=False, init=False, repr=False)
 
     @classmethod
     def start(
@@ -137,11 +328,11 @@ class LspProcess:
         arguments = _validated_command(command, cwd)
         environment = lsp_environment()
         owner_nonce = _validated_owner_root(owner_root)
-        parent_identity = _parent_identity(owner_root.parent)
         generation_nonce = _new_generation_nonce()
         started_monotonic = time.monotonic()
         started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
+        owner_directory: _OwnerDirectory | None = None
         process: subprocess.Popen[bytes] | None = None
         protocol: LspProtocol | None = None
         stderr_thread: threading.Thread | None = None
@@ -150,7 +341,6 @@ class LspProcess:
         instance_lock = threading.Lock()
         failed_before_instance = False
         startup_complete = False
-        created_artifacts: list[_CreatedArtifact] = []
 
         def protocol_failed(_reason: str) -> None:
             nonlocal failed_before_instance
@@ -162,7 +352,8 @@ class LspProcess:
             current._mark_failed()
 
         try:
-            _create_owner_root(owner_root, created_artifacts, parent_identity)
+            owner_directory = _OwnerDirectory.open(owner_root)
+            owner_directory.create()
             process = subprocess.Popen(
                 arguments,
                 cwd=cwd,
@@ -186,7 +377,7 @@ class LspProcess:
                 daemon=True,
             )
             stderr_thread.start()
-            _verify_startup_fence(owner_root.parent, parent_identity, created_artifacts)
+            owner_directory.verify_lexical_identity()
 
             owner_record: dict[str, object] = {
                 "command_basename": Path(arguments[0]).name,
@@ -196,20 +387,18 @@ class LspProcess:
                 "started_at": started_at,
                 "state": ProcessState.PROCESS_RUNNING.value,
             }
-            _verify_startup_fence(owner_root.parent, parent_identity, created_artifacts)
             _write_owner_record(
-                owner_root,
+                owner_directory,
                 owner_record,
-                created_artifacts=created_artifacts,
             )
-            _verify_startup_fence(owner_root.parent, parent_identity, created_artifacts)
+            owner_directory.verify_lexical_identity()
             protocol = LspProtocol(
                 process.stdout,
                 process.stdin,
                 generation_nonce,
                 fatal_callback=protocol_failed,
             )
-            _verify_startup_fence(owner_root.parent, parent_identity, created_artifacts)
+            owner_directory.verify_lexical_identity()
             new_instance = cls(
                 process=process,
                 protocol=protocol,
@@ -223,8 +412,7 @@ class LspProcess:
             new_instance._stderr = stderr_parts
             new_instance._stderr_lock = stderr_lock
             new_instance._stderr_thread = stderr_thread
-            new_instance._parent_identity = parent_identity
-            new_instance._artifacts = created_artifacts
+            new_instance._owner_directory = owner_directory
             with instance_lock:
                 instance = new_instance
             exit_thread = threading.Thread(
@@ -234,12 +422,13 @@ class LspProcess:
             )
             instance._exit_thread = exit_thread
             exit_thread.start()
-            _verify_startup_fence(owner_root.parent, parent_identity, created_artifacts)
+            owner_directory.verify_lexical_identity()
             with instance_lock:
+                if process.poll() is not None or failed_before_instance:
+                    raise RuntimeError("LSP process exited during startup")
+                with instance._owner_handle_lock:
+                    instance._startup_complete = True
                 startup_complete = True
-                failed_during_startup = failed_before_instance
-            if failed_during_startup:
-                instance._mark_failed()
             return instance
         except BaseException as startup_error:
             try:
@@ -247,9 +436,7 @@ class LspProcess:
                     process,
                     protocol,
                     (stderr_thread, exit_thread),
-                    created_artifacts,
-                    owner_root=owner_root,
-                    parent_identity=parent_identity,
+                    owner_directory,
                     owner_nonce=owner_nonce,
                     generation_nonce=generation_nonce,
                 )
@@ -300,6 +487,8 @@ class LspProcess:
             owner.join(remaining)
             if owner.is_alive():
                 raise TimeoutError("LSP process streams did not drain before deadline")
+        with self._owner_handle_lock:
+            pass
         return return_code
 
     def _monitor_exit(self) -> None:
@@ -308,17 +497,17 @@ class LspProcess:
         self._mark_failed()
 
     def _mark_failed(self) -> None:
-        with self._state_lock:
-            if self.state is ProcessState.FAILED:
+        with self._owner_handle_lock:
+            if not self._startup_complete:
                 return
-            self.state = ProcessState.FAILED
+            with self._state_lock:
+                self.state = ProcessState.FAILED
+            owner_directory = self._owner_directory
+            if owner_directory is None:
+                return
             try:
-                if self._parent_identity is None:
-                    return
                 _write_failure_record(
-                    self.owner_root,
-                    parent_identity=self._parent_identity,
-                    artifacts=self._artifacts,
+                    owner_directory,
                     code=_PROCESS_EXITED,
                     owner_nonce=self.owner_nonce,
                     generation_nonce=self.generation_nonce,
@@ -326,6 +515,12 @@ class LspProcess:
                 )
             except (FileExistsError, OSError, ValueError, RuntimeError):
                 pass
+            finally:
+                self._owner_directory = None
+                try:
+                    owner_directory.close()
+                except OSError:
+                    pass
 
 
 def _validated_command(command: Sequence[str], cwd: Path) -> list[str]:
@@ -376,7 +571,10 @@ def _validated_owner_root(owner_root: Path) -> str:
 
 
 def _object_identity(path: Path) -> _ObjectIdentity:
-    info = path.lstat()
+    return _identity_from_stat(path.lstat())
+
+
+def _identity_from_stat(info: os.stat_result) -> _ObjectIdentity:
     return _ObjectIdentity(
         int(info.st_dev),
         int(info.st_ino),
@@ -385,29 +583,31 @@ def _object_identity(path: Path) -> _ObjectIdentity:
     )
 
 
-def _parent_identity(parent: Path) -> _ObjectIdentity:
-    identity = _object_identity(parent)
+def _require_directory_identity(identity: _ObjectIdentity, label: str) -> None:
     if identity.file_type == stat.S_IFLNK or identity.reparse_attributes:
-        raise ValueError("owner_root parent must not be a symlink or reparse point")
+        raise ValueError(f"{label} must not be a symlink or reparse point")
     if identity.file_type != stat.S_IFDIR:
-        raise ValueError("owner_root parent must be a directory")
-    return identity
+        raise ValueError(f"{label} must be a directory")
 
 
-def _verify_parent_identity(parent: Path, expected: _ObjectIdentity) -> None:
-    if _parent_identity(parent) != expected:
-        raise RuntimeError("owner_root parent identity changed during startup")
+def _require_file_identity(identity: _ObjectIdentity, label: str) -> None:
+    if identity.file_type != stat.S_IFREG or identity.reparse_attributes:
+        raise PermissionError(f"{label} has an unsafe identity")
 
 
-def _verify_startup_fence(
-    parent: Path,
-    parent_identity: _ObjectIdentity,
-    artifacts: Sequence[_CreatedArtifact],
+def _verify_descriptor(
+    descriptor: int,
+    expected: _ObjectIdentity,
+    *,
+    mode: int,
+    directory: bool,
 ) -> None:
-    _verify_parent_identity(parent, parent_identity)
-    for artifact in artifacts:
-        if _current_identity(artifact.path) != artifact.identity:
-            raise RuntimeError("LSP owner artifact identity changed during startup")
+    current = _identity_from_stat(os.fstat(descriptor))
+    expected_type = stat.S_IFDIR if directory else stat.S_IFREG
+    if current != expected or current.file_type != expected_type:
+        raise PermissionError("held LSP artifact identity changed")
+    if stat.S_IMODE(os.fstat(descriptor).st_mode) != mode:
+        raise PermissionError("held LSP artifact is not owner-only")
 
 
 def _current_identity(path: Path) -> _ObjectIdentity | None:
@@ -417,12 +617,13 @@ def _current_identity(path: Path) -> _ObjectIdentity | None:
         return None
 
 
-def _record_artifact(path: Path, *, is_directory: bool) -> _CreatedArtifact:
-    identity = _object_identity(path)
-    expected_type = stat.S_IFDIR if is_directory else stat.S_IFREG
-    if identity.file_type != expected_type or identity.reparse_attributes:
-        raise PermissionError("created LSP artifact has an unsafe identity")
-    return _CreatedArtifact(path, identity, is_directory)
+def _write_all_descriptor(descriptor: int, payload: bytes) -> None:
+    offset = 0
+    while offset < len(payload):
+        written = os.write(descriptor, payload[offset:])
+        if written <= 0:
+            raise OSError("LSP evidence write made no progress")
+        offset += written
 
 
 def _new_generation_nonce() -> str:
@@ -432,61 +633,11 @@ def _new_generation_nonce() -> str:
     return nonce
 
 
-def _create_owner_root(
-    owner_root: Path,
-    created_artifacts: list[_CreatedArtifact],
-    parent_identity: _ObjectIdentity,
-) -> None:
-    owner_root.mkdir(mode=0o700)
-    created_artifacts.append(_record_artifact(owner_root, is_directory=True))
-    _verify_startup_fence(owner_root.parent, parent_identity, created_artifacts)
-    _restrict_owner_only(owner_root, 0o700)
-    _verify_owner_only(owner_root, 0o700)
-    cancellation_root = owner_root / "cancellation"
-    cancellation_root.mkdir(mode=0o700)
-    created_artifacts.append(_record_artifact(cancellation_root, is_directory=True))
-    _verify_startup_fence(owner_root.parent, parent_identity, created_artifacts)
-    _restrict_owner_only(cancellation_root, 0o700)
-    _verify_owner_only(cancellation_root, 0o700)
-
-
 def _write_owner_record(
-    owner_root: Path,
+    owner_directory: _OwnerDirectory,
     record: Mapping[str, object],
-    *,
-    created_artifacts: list[_CreatedArtifact] | None = None,
-) -> _CreatedArtifact:
-    return _write_create_only_record(
-        owner_root / "owner.json",
-        record,
-        created_artifacts=created_artifacts,
-    )
-
-
-def _write_create_only_record(
-    target: Path,
-    record: Mapping[str, object],
-    *,
-    created_artifacts: list[_CreatedArtifact] | None = None,
-) -> _CreatedArtifact:
-    payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    descriptor: int | None = None
-    try:
-        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(descriptor, "wb") as stream:
-            descriptor = None
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        _restrict_owner_only(target, 0o600)
-        _verify_owner_only(target, 0o600)
-        artifact = _record_artifact(target, is_directory=False)
-        if created_artifacts is not None:
-            created_artifacts.append(artifact)
-        return artifact
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
+) -> None:
+    owner_directory.write_record("owner.json", record)
 
 
 def _drain_stderr(
@@ -535,10 +686,8 @@ def _rollback_startup(
     process: subprocess.Popen[bytes] | None,
     protocol: LspProtocol | None,
     threads: tuple[threading.Thread | None, ...],
-    created_artifacts: list[_CreatedArtifact],
+    owner_directory: _OwnerDirectory | None,
     *,
-    owner_root: Path,
-    parent_identity: _ObjectIdentity,
     owner_nonce: str,
     generation_nonce: str,
 ) -> None:
@@ -568,83 +717,75 @@ def _rollback_startup(
                 process.wait(timeout=remaining)
             except (subprocess.TimeoutExpired, OSError):
                 pass
-    child_still_alive = process is not None and process.poll() is None
-    if child_still_alive:
+    try:
+        child_still_alive = process is not None and process.poll() is None
+        if child_still_alive:
+            try:
+                if owner_directory is not None and owner_directory.owner_handle is not None:
+                    _write_failure_record(
+                        owner_directory,
+                        code=_STARTUP_FAILED,
+                        owner_nonce=owner_nonce,
+                        generation_nonce=generation_nonce,
+                        pid=process.pid,
+                    )
+            except FileExistsError:
+                pass
+            except BaseException as evidence_error:
+                raise StartupCleanupError(
+                    "LSP direct child remains alive and failure evidence could not be written"
+                ) from evidence_error
+            raise StartupCleanupError("LSP direct child remains alive after startup cleanup")
+
+        cleanup_deadline = max(deadline, time.monotonic() + 0.25)
+        if protocol is not None:
+            try:
+                protocol._finish_io_after_process_exit(cleanup_deadline)
+            except BaseException:
+                pass
+        if process is not None:
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except (OSError, ValueError):
+                        pass
+        for thread in threads:
+            if thread is not None and (
+                thread.ident is not None or thread in threading.enumerate()
+            ):
+                _join_partially_started_thread(thread, cleanup_deadline)
         try:
-            _write_failure_record(
-                owner_root,
-                parent_identity=parent_identity,
-                artifacts=created_artifacts,
-                code=_STARTUP_FAILED,
-                owner_nonce=owner_nonce,
-                generation_nonce=generation_nonce,
-                pid=process.pid,
-            )
+            if owner_directory is not None and owner_directory.owner_handle is not None:
+                _write_failure_record(
+                    owner_directory,
+                    code=_STARTUP_FAILED,
+                    owner_nonce=owner_nonce,
+                    generation_nonce=generation_nonce,
+                    pid=process.pid if process is not None else None,
+                )
         except FileExistsError:
             pass
         except BaseException as evidence_error:
             raise StartupCleanupError(
-                "LSP direct child remains alive and failure evidence could not be written"
+                "LSP startup failed and retained evidence could not be written safely"
             ) from evidence_error
-        raise StartupCleanupError("LSP direct child remains alive after startup cleanup")
-
-    cleanup_deadline = max(deadline, time.monotonic() + 0.25)
-    if protocol is not None:
-        try:
-            protocol._finish_io_after_process_exit(cleanup_deadline)
-        except BaseException:
-            pass
-    if process is not None:
-        for stream in (process.stdin, process.stdout, process.stderr):
-            if stream is not None:
-                try:
-                    stream.close()
-                except (OSError, ValueError):
-                    pass
-    for thread in threads:
-        if thread is not None and (
-            thread.ident is not None or thread in threading.enumerate()
-        ):
-            _join_partially_started_thread(thread, cleanup_deadline)
-    try:
-        _write_failure_record(
-            owner_root,
-            parent_identity=parent_identity,
-            artifacts=created_artifacts,
-            code=_STARTUP_FAILED,
-            owner_nonce=owner_nonce,
-            generation_nonce=generation_nonce,
-            pid=process.pid if process is not None else None,
-        )
-    except FileExistsError:
-        pass
-    except BaseException as evidence_error:
-        raise StartupCleanupError(
-            "LSP startup failed and retained evidence could not be written safely"
-        ) from evidence_error
+    finally:
+        if owner_directory is not None:
+            try:
+                owner_directory.close()
+            except OSError:
+                pass
 
 
 def _write_failure_record(
-    owner_root: Path,
+    owner_directory: _OwnerDirectory,
     *,
-    parent_identity: _ObjectIdentity,
-    artifacts: list[_CreatedArtifact],
     code: str,
     owner_nonce: str,
     generation_nonce: str,
     pid: int | None,
 ) -> None:
-    root_artifact = next(
-        (
-            artifact
-            for artifact in artifacts
-            if artifact.path == owner_root and artifact.is_directory
-        ),
-        None,
-    )
-    if root_artifact is None:
-        raise RuntimeError("original LSP owner root identity is unavailable")
-    _verify_startup_fence(owner_root.parent, parent_identity, artifacts)
     failure_record: dict[str, object] = {
         "code": code,
         "generation_nonce": generation_nonce,
@@ -653,10 +794,7 @@ def _write_failure_record(
     }
     if pid is not None:
         failure_record["owner_pid"] = pid
-    _write_create_only_record(
-        owner_root / "failure.json",
-        failure_record,
-    )
+    owner_directory.write_record("failure.json", failure_record)
 
 
 def _join_partially_started_thread(
