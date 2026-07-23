@@ -334,7 +334,6 @@ def test_request_id_values_outside_lsp_contract_are_rejected(request_id: object)
         "wrong-charset",
         "json-depth-65",
         "batch-message",
-        "duplicate-response-id",
     ],
 )
 def test_protocol_violation_is_fatal(scenario: str, fake_server: FakeLspServer) -> None:
@@ -342,6 +341,19 @@ def test_protocol_violation_is_fatal(scenario: str, fake_server: FakeLspServer) 
     with pytest.raises(ProtocolViolation):
         _request(connection)
     assert connection.fatal is True
+
+
+def test_duplicate_response_is_fatal_without_overriding_first_response(
+    fake_server: FakeLspServer,
+) -> None:
+    connection = fake_server.connection("duplicate-response-id")
+    assert _request(connection) is None
+    deadline = time.monotonic() + 1
+    while not connection.fatal and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert connection.fatal is True
+    with pytest.raises(ProtocolViolation, match="duplicate active response ID"):
+        _request(connection)
 
 
 def test_fatal_callback_runs_once_and_fails_all_pending_once(
@@ -496,6 +508,28 @@ def test_close_fails_an_active_request_instead_of_returning_a_result(
         future = pool.submit(_request, protocol, "slow", 2)
         assert request_seen.wait(1)
         protocol.close()
+        with pytest.raises(ProtocolViolation, match="closed"):
+            future.result(timeout=1)
+
+
+def test_close_committed_before_cancellation_remains_caller_outcome() -> None:
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=100)
+    protocol = _protocol_with_streams(reader, writer)
+    source = CancellationSource()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(
+            protocol.request,
+            "close-then-cancel",
+            {},
+            deadline=time.monotonic() + 1,
+            cancellation=source.token,
+        )
+        while not writer.frames:
+            time.sleep(0.001)
+        protocol.close()
+        source.cancel()
         with pytest.raises(ProtocolViolation, match="closed"):
             future.result(timeout=1)
 
@@ -822,6 +856,70 @@ def test_queued_cancellation_writes_neither_request_nor_cancel() -> None:
     protocol.close()
 
 
+def test_writer_observes_queued_cancellation_before_requester() -> None:
+    reader = _BlockingReader()
+    writer = _BlockingWriter()
+    protocol = _protocol_with_streams(reader, writer)
+    protocol._write_message({"jsonrpc": "2.0", "method": "test/block"})
+    assert writer.started.wait(1)
+    source = CancellationSource()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(
+            protocol.request,
+            "writer-sees-cancel",
+            {},
+            deadline=time.monotonic() + 1,
+            cancellation=source.token,
+        )
+        while protocol.pending_count == 0:
+            time.sleep(0.001)
+        pending = protocol._pending[protocol.pending_keys[0]]
+        source.cancel()
+        writer.released.set()
+        with pytest.raises(RequestCancelled):
+            future.result(timeout=1)
+
+    time.sleep(0.02)
+    assert len(writer.frames) == 1
+    assert pending.terminal_source == "writer"
+    assert protocol.fatal is False
+    protocol.close()
+
+
+def test_writer_observes_queued_expiry_without_writing_or_becoming_fatal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reader = _BlockingReader()
+    writer = _BlockingWriter()
+    protocol = _protocol_with_streams(reader, writer)
+    protocol._write_message({"jsonrpc": "2.0", "method": "test/block"})
+    assert writer.started.wait(1)
+    deadline = time.monotonic() + 0.04
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(protocol.request, "writer-sees-expiry", {}, deadline=deadline)
+        while protocol.pending_count == 0:
+            time.sleep(0.001)
+        pending = protocol._pending[protocol.pending_keys[0]]
+        monkeypatch.setattr(
+            lsp_protocol.time,
+            "monotonic",
+            lambda: deadline
+            if threading.current_thread() is protocol.writer_thread
+            else deadline - 0.01,
+        )
+        writer.released.set()
+        with pytest.raises(TimeoutError):
+            future.result(timeout=1)
+
+    time.sleep(0.02)
+    assert len(writer.frames) == 1
+    assert pending.terminal_source == "writer"
+    assert protocol.fatal is False
+    protocol.close()
+
+
 def test_fatal_dispatch_stops_before_later_notification_handler(
     fake_server: FakeLspServer,
 ) -> None:
@@ -903,6 +1001,38 @@ def test_blocked_cancellation_write_never_extends_original_deadline() -> None:
     assert len(writer.frames) == 2
     assert protocol.fatal is False
     timer.join()
+    protocol.close()
+
+
+def test_sending_cancellation_preserves_original_before_exactly_one_cancel() -> None:
+    reader = _BlockingReader()
+    writer = _BlockingWriter()
+    protocol = _protocol_with_streams(reader, writer)
+    source = CancellationSource()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(
+            protocol.request,
+            "sending-cancel",
+            {},
+            deadline=time.monotonic() + 1,
+            cancellation=source.token,
+        )
+        assert writer.started.wait(1)
+        key = protocol.pending_keys[0]
+        assert protocol._pending[key].write_phase == "sending"
+        source.cancel()
+        with pytest.raises(RequestCancelled):
+            future.result(timeout=0.2)
+        assert writer.frames == []
+        writer.released.set()
+
+    deadline = time.monotonic() + 1
+    while len(writer.frames) < 2 and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert len(writer.frames) == 2
+    assert b'"method":"sending-cancel"' in writer.frames[0]
+    assert b'"method":"$/cancelRequest"' in writer.frames[1]
     protocol.close()
 
 
@@ -1191,6 +1321,73 @@ def test_response_dispatched_before_cancellation_wins() -> None:
     protocol.close()
 
 
+def test_response_committed_before_fatal_remains_caller_outcome() -> None:
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=100)
+    protocol = _protocol_with_streams(reader, writer)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(_request, protocol, "response-then-fatal", 1)
+        while not writer.frames:
+            time.sleep(0.001)
+        pending = protocol._pending[protocol.pending_keys[0]]
+        original_wakeup = pending.completed
+        pending.completed = threading.Event()
+        protocol._dispatch_message(
+            {"jsonrpc": "2.0", "id": 1, "result": "response-won"},
+            generation_nonce="stream-probe",
+        )
+        protocol._become_fatal("after response")
+        original_wakeup.set()
+        assert future.result(timeout=1) == "response-won"
+    protocol.close()
+
+
+def test_fatal_committed_before_cancellation_remains_caller_outcome() -> None:
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=100)
+    protocol = _protocol_with_streams(reader, writer)
+    source = CancellationSource()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(
+            protocol.request,
+            "fatal-then-cancel",
+            {},
+            deadline=time.monotonic() + 1,
+            cancellation=source.token,
+        )
+        while not writer.frames:
+            time.sleep(0.001)
+        protocol._become_fatal("fatal won")
+        source.cancel()
+        with pytest.raises(ProtocolViolation, match="fatal won"):
+            future.result(timeout=1)
+    protocol.close()
+
+
+def test_cancellation_timestamp_before_fatal_remains_caller_outcome() -> None:
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=100)
+    protocol = _protocol_with_streams(reader, writer)
+    source = CancellationSource()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(
+            protocol.request,
+            "cancel-then-fatal",
+            {},
+            deadline=time.monotonic() + 1,
+            cancellation=source.token,
+        )
+        while not writer.frames:
+            time.sleep(0.001)
+        source.cancel()
+        protocol._become_fatal("fatal was later")
+        with pytest.raises(RequestCancelled):
+            future.result(timeout=1)
+    protocol.close()
+
+
 def test_cancellation_timestamp_before_response_wins_processing_race() -> None:
     reader = _BlockingReader()
     writer = _BlockingWriter(block_after=100)
@@ -1249,6 +1446,32 @@ def test_equal_cancellation_and_response_timestamps_prefer_cancellation(
             {"jsonrpc": "2.0", "id": 1, "result": "tie"},
             generation_nonce="stream-probe",
         )
+        with pytest.raises(RequestCancelled):
+            future.result(timeout=1)
+    protocol.close()
+
+
+def test_equal_cancellation_and_deadline_timestamps_prefer_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=100)
+    protocol = _protocol_with_streams(reader, writer)
+    source = CancellationSource()
+    deadline = time.monotonic() + 1
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(
+            protocol.request,
+            "cancel-deadline-tie",
+            {},
+            deadline=deadline,
+            cancellation=source.token,
+        )
+        while not writer.frames:
+            time.sleep(0.001)
+        monkeypatch.setattr(lsp_protocol.time, "monotonic", lambda: deadline)
+        source.cancel()
         with pytest.raises(RequestCancelled):
             future.result(timeout=1)
     protocol.close()
@@ -1336,6 +1559,111 @@ def test_sent_cancelled_requests_remain_charged_until_late_responses() -> None:
         )
     assert protocol.pending_count == 0
     assert protocol.pending_keys == ()
+    protocol.close()
+
+
+def test_ordinary_writes_cannot_consume_reserved_control_capacity() -> None:
+    reader = _BlockingReader()
+    writer = _BlockingWriter()
+    protocol = _protocol_with_streams(reader, writer)
+    protocol._write_message({"jsonrpc": "2.0", "method": "test/block"})
+    assert writer.started.wait(1)
+    ordinary_limit = lsp_protocol._MAX_QUEUED_WRITES - MAX_PENDING_REQUESTS
+
+    for index in range(ordinary_limit):
+        protocol._write_message(
+            {"jsonrpc": "2.0", "method": "test/ordinary", "params": {"index": index}}
+        )
+    with pytest.raises(TimeoutError, match="queue"):
+        protocol._write_message({"jsonrpc": "2.0", "method": "test/overflow"})
+    assert protocol.fatal is True
+    protocol.close()
+
+
+def test_full_ordinary_queue_still_accepts_all_active_cancellations() -> None:
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=MAX_PENDING_REQUESTS)
+    protocol = _protocol_with_streams(reader, writer)
+    sources = [CancellationSource() for _ in range(MAX_PENDING_REQUESTS)]
+
+    with ThreadPoolExecutor(max_workers=MAX_PENDING_REQUESTS) as pool:
+        futures = [
+            pool.submit(
+                protocol.request,
+                "reserved-cancel",
+                {},
+                deadline=time.monotonic() + 3,
+                cancellation=source.token,
+            )
+            for source in sources
+        ]
+        deadline = time.monotonic() + 1
+        while len(writer.frames) < MAX_PENDING_REQUESTS and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert len(writer.frames) == MAX_PENDING_REQUESTS
+        protocol._write_message({"jsonrpc": "2.0", "method": "test/block"})
+        assert writer.started.wait(1)
+        ordinary_limit = lsp_protocol._MAX_QUEUED_WRITES - MAX_PENDING_REQUESTS
+        for index in range(ordinary_limit):
+            protocol._write_message(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "test/ordinary",
+                    "params": {"index": index},
+                },
+                deadline=time.monotonic() + 3,
+            )
+        assert protocol._ordinary_queued == ordinary_limit
+        for source in sources:
+            source.cancel()
+        for future in futures:
+            with pytest.raises(RequestCancelled):
+                future.result(timeout=0.5)
+        assert protocol._control_queued == MAX_PENDING_REQUESTS
+        assert protocol._write_queue.qsize() == lsp_protocol._MAX_QUEUED_WRITES
+        writer.released.set()
+
+    deadline = time.monotonic() + 2
+    while len([frame for frame in writer.frames if b"$/cancelRequest" in frame]) < 32:
+        assert time.monotonic() < deadline
+        time.sleep(0.001)
+    assert len([frame for frame in writer.frames if b"$/cancelRequest" in frame]) == 32
+    assert protocol.fatal is False
+    protocol.close()
+
+
+def test_request_ids_are_not_reused_after_drain_release() -> None:
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=100)
+    protocol = _protocol_with_streams(reader, writer)
+    source = CancellationSource()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        cancelled = pool.submit(
+            protocol.request,
+            "first",
+            {},
+            deadline=time.monotonic() + 2,
+            cancellation=source.token,
+        )
+        while not writer.frames:
+            time.sleep(0.001)
+        source.cancel()
+        with pytest.raises(RequestCancelled):
+            cancelled.result(timeout=1)
+        protocol._dispatch_message(
+            {"jsonrpc": "2.0", "id": 1, "result": "late"},
+            generation_nonce="stream-probe",
+        )
+        fresh = pool.submit(_request, protocol, "second", 1)
+        while protocol.pending_keys != (("stream-probe", 2),):
+            time.sleep(0.001)
+        protocol._dispatch_message(
+            {"jsonrpc": "2.0", "id": 2, "result": "fresh"},
+            generation_nonce="stream-probe",
+        )
+        assert fresh.result(timeout=1) == "fresh"
+    assert protocol._next_request_id == 3
     protocol.close()
 
 
