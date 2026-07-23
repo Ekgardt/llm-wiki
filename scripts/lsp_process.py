@@ -53,7 +53,8 @@ LSP_ENV_ALLOWLIST = frozenset(
 _STDERR_CHUNK_BYTES = 65_537
 _STARTUP_WAIT_SECONDS = 2.0
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
-_STARTUP_CHILD_ALIVE = "lsp_startup_child_alive"
+_STARTUP_FAILED = "startup_failed"
+_PROCESS_EXITED = "process_exited"
 
 
 class StartupCleanupError(RuntimeError):
@@ -148,13 +149,14 @@ class LspProcess:
         instance: LspProcess | None = None
         instance_lock = threading.Lock()
         failed_before_instance = False
+        startup_complete = False
         created_artifacts: list[_CreatedArtifact] = []
 
         def protocol_failed(_reason: str) -> None:
             nonlocal failed_before_instance
             with instance_lock:
                 current = instance
-                if current is None:
+                if current is None or not startup_complete:
                     failed_before_instance = True
                     return
             current._mark_failed()
@@ -198,7 +200,6 @@ class LspProcess:
             _write_owner_record(
                 owner_root,
                 owner_record,
-                replace=False,
                 created_artifacts=created_artifacts,
             )
             _verify_startup_fence(owner_root.parent, parent_identity, created_artifacts)
@@ -226,8 +227,6 @@ class LspProcess:
             new_instance._artifacts = created_artifacts
             with instance_lock:
                 instance = new_instance
-                if failed_before_instance:
-                    instance._mark_failed()
             exit_thread = threading.Thread(
                 target=instance._monitor_exit,
                 name=f"lsp-exit-{generation_nonce}",
@@ -236,6 +235,11 @@ class LspProcess:
             instance._exit_thread = exit_thread
             exit_thread.start()
             _verify_startup_fence(owner_root.parent, parent_identity, created_artifacts)
+            with instance_lock:
+                startup_complete = True
+                failed_during_startup = failed_before_instance
+            if failed_during_startup:
+                instance._mark_failed()
             return instance
         except BaseException as startup_error:
             try:
@@ -248,8 +252,6 @@ class LspProcess:
                     parent_identity=parent_identity,
                     owner_nonce=owner_nonce,
                     generation_nonce=generation_nonce,
-                    started_at=started_at,
-                    command_basename=Path(arguments[0]).name,
                 )
             except StartupCleanupError as cleanup_error:
                 raise cleanup_error from startup_error
@@ -313,33 +315,16 @@ class LspProcess:
             try:
                 if self._parent_identity is None:
                     return
-                _verify_startup_fence(
-                    self.owner_root.parent, self._parent_identity, self._artifacts
-                )
-                existing = json.loads((self.owner_root / "owner.json").read_bytes())
-                started_at = existing["started_at"]
-                if not isinstance(started_at, str):
-                    raise ValueError("invalid owner start timestamp")
-                owner_artifact = next(
-                    artifact
-                    for artifact in self._artifacts
-                    if artifact.path == self.owner_root / "owner.json"
-                )
-                updated = _write_owner_record(
+                _write_failure_record(
                     self.owner_root,
-                    {
-                        "command_basename": Path(self.process.args[0]).name,
-                        "generation_nonce": self.generation_nonce,
-                        "owner_nonce": self.owner_nonce,
-                        "owner_pid": self.process.pid,
-                        "started_at": started_at,
-                        "state": ProcessState.FAILED.value,
-                    },
-                    replace=True,
-                    expected_identity=owner_artifact.identity,
+                    parent_identity=self._parent_identity,
+                    artifacts=self._artifacts,
+                    code=_PROCESS_EXITED,
+                    owner_nonce=self.owner_nonce,
+                    generation_nonce=self.generation_nonce,
+                    pid=self.process.pid,
                 )
-                self._artifacts[self._artifacts.index(owner_artifact)] = updated
-            except (OSError, ValueError, KeyError, StopIteration, json.JSONDecodeError):
+            except (FileExistsError, OSError, ValueError, RuntimeError):
                 pass
 
 
@@ -440,21 +425,6 @@ def _record_artifact(path: Path, *, is_directory: bool) -> _CreatedArtifact:
     return _CreatedArtifact(path, identity, is_directory)
 
 
-def _remove_if_identity(
-    path: Path, identity: _ObjectIdentity, *, is_directory: bool
-) -> bool:
-    if _current_identity(path) != identity:
-        return False
-    try:
-        if is_directory:
-            path.rmdir()
-        else:
-            path.unlink()
-    except (FileNotFoundError, OSError):
-        return False
-    return True
-
-
 def _new_generation_nonce() -> str:
     nonce = secrets.token_hex(16)
     if re.fullmatch(r"[0-9a-f]{32}", nonce) is None:
@@ -484,61 +454,39 @@ def _write_owner_record(
     owner_root: Path,
     record: Mapping[str, object],
     *,
-    replace: bool,
-    expected_identity: _ObjectIdentity | None = None,
     created_artifacts: list[_CreatedArtifact] | None = None,
 ) -> _CreatedArtifact:
-    return _write_restricted_record(
+    return _write_create_only_record(
         owner_root / "owner.json",
         record,
-        replace=replace,
-        expected_identity=expected_identity,
         created_artifacts=created_artifacts,
     )
 
 
-def _write_restricted_record(
+def _write_create_only_record(
     target: Path,
     record: Mapping[str, object],
     *,
-    replace: bool,
-    expected_identity: _ObjectIdentity | None = None,
     created_artifacts: list[_CreatedArtifact] | None = None,
 ) -> _CreatedArtifact:
     payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    temporary = target.parent / f".{target.name}-{secrets.token_hex(8)}.tmp"
     descriptor: int | None = None
-    temporary_identity: _ObjectIdentity | None = None
     try:
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(descriptor, "wb") as stream:
             descriptor = None
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
-        temporary_identity = _object_identity(temporary)
-        _restrict_owner_only(temporary, 0o600)
-        _verify_owner_only(temporary, 0o600)
-        if replace:
-            if expected_identity is None or _current_identity(target) != expected_identity:
-                raise RuntimeError("owner record identity changed before update")
-            os.replace(temporary, target)
-            temporary_identity = None
-        else:
-            os.link(temporary, target, follow_symlinks=False)
-            artifact = _record_artifact(target, is_directory=False)
-            if temporary_identity != artifact.identity:
-                raise RuntimeError("published owner record identity changed")
-            if created_artifacts is not None:
-                created_artifacts.append(artifact)
         _restrict_owner_only(target, 0o600)
         _verify_owner_only(target, 0o600)
-        return _record_artifact(target, is_directory=False)
+        artifact = _record_artifact(target, is_directory=False)
+        if created_artifacts is not None:
+            created_artifacts.append(artifact)
+        return artifact
     finally:
         if descriptor is not None:
             os.close(descriptor)
-        if temporary_identity is not None:
-            _remove_if_identity(temporary, temporary_identity, is_directory=False)
 
 
 def _drain_stderr(
@@ -593,9 +541,8 @@ def _rollback_startup(
     parent_identity: _ObjectIdentity,
     owner_nonce: str,
     generation_nonce: str,
-    started_at: str,
-    command_basename: str,
 ) -> None:
+    # Task 5 retains bounded immutable evidence; later lifecycle/doctor tasks own removal.
     deadline = time.monotonic() + _STARTUP_WAIT_SECONDS
     if protocol is not None:
         try:
@@ -621,18 +568,20 @@ def _rollback_startup(
                 process.wait(timeout=remaining)
             except (subprocess.TimeoutExpired, OSError):
                 pass
-    if process is not None and process.poll() is None:
+    child_still_alive = process is not None and process.poll() is None
+    if child_still_alive:
         try:
-            _write_failed_startup_evidence(
+            _write_failure_record(
                 owner_root,
                 parent_identity=parent_identity,
                 artifacts=created_artifacts,
-                pid=process.pid,
+                code=_STARTUP_FAILED,
                 owner_nonce=owner_nonce,
                 generation_nonce=generation_nonce,
-                started_at=started_at,
-                command_basename=command_basename,
+                pid=process.pid,
             )
+        except FileExistsError:
+            pass
         except BaseException as evidence_error:
             raise StartupCleanupError(
                 "LSP direct child remains alive and failure evidence could not be written"
@@ -657,63 +606,56 @@ def _rollback_startup(
             thread.ident is not None or thread in threading.enumerate()
         ):
             _join_partially_started_thread(thread, cleanup_deadline)
-    for artifact in reversed(created_artifacts):
-        _remove_if_identity(
-            artifact.path,
-            artifact.identity,
-            is_directory=artifact.is_directory,
+    try:
+        _write_failure_record(
+            owner_root,
+            parent_identity=parent_identity,
+            artifacts=created_artifacts,
+            code=_STARTUP_FAILED,
+            owner_nonce=owner_nonce,
+            generation_nonce=generation_nonce,
+            pid=process.pid if process is not None else None,
         )
+    except FileExistsError:
+        pass
+    except BaseException as evidence_error:
+        raise StartupCleanupError(
+            "LSP startup failed and retained evidence could not be written safely"
+        ) from evidence_error
 
 
-def _write_failed_startup_evidence(
+def _write_failure_record(
     owner_root: Path,
     *,
     parent_identity: _ObjectIdentity,
     artifacts: list[_CreatedArtifact],
-    pid: int,
+    code: str,
     owner_nonce: str,
     generation_nonce: str,
-    started_at: str,
-    command_basename: str,
+    pid: int | None,
 ) -> None:
+    root_artifact = next(
+        (
+            artifact
+            for artifact in artifacts
+            if artifact.path == owner_root and artifact.is_directory
+        ),
+        None,
+    )
+    if root_artifact is None:
+        raise RuntimeError("original LSP owner root identity is unavailable")
     _verify_startup_fence(owner_root.parent, parent_identity, artifacts)
-    owner_path = owner_root / "owner.json"
-    owner_record = {
-        "command_basename": command_basename,
+    failure_record: dict[str, object] = {
+        "code": code,
         "generation_nonce": generation_nonce,
         "owner_nonce": owner_nonce,
-        "owner_pid": pid,
-        "started_at": started_at,
-        "state": ProcessState.FAILED.value,
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
-    existing_owner = next(
-        (artifact for artifact in artifacts if artifact.path == owner_path), None
-    )
-    if existing_owner is None:
-        _write_owner_record(
-            owner_root,
-            owner_record,
-            replace=False,
-            created_artifacts=artifacts,
-        )
-    else:
-        updated = _write_owner_record(
-            owner_root,
-            owner_record,
-            replace=True,
-            expected_identity=existing_owner.identity,
-        )
-        artifacts[artifacts.index(existing_owner)] = updated
-    _verify_startup_fence(owner_root.parent, parent_identity, artifacts)
-    _write_restricted_record(
+    if pid is not None:
+        failure_record["owner_pid"] = pid
+    _write_create_only_record(
         owner_root / "failure.json",
-        {
-            "code": _STARTUP_CHILD_ALIVE,
-            "generation_nonce": generation_nonce,
-            "owner_pid": pid,
-            "state": ProcessState.FAILED.value,
-        },
-        replace=False,
+        failure_record,
     )
 
 
