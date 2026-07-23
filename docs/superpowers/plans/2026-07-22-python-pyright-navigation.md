@@ -433,7 +433,7 @@ def test_protocol_violation_is_fatal(scenario: str, fake_server: FakeLspServer) 
     assert connection.fatal is True
 ```
 
-Also test exactly 8 MiB acceptance and 8 MiB plus one rejection, 8 KiB header ceiling, malformed UTF-8/JSON, non-2.0 messages, invalid IDs, response with both result and error, 32 active requests, request 33 rejection, 10,000 location/diagnostic ceilings, 256 KiB hover ceiling, cancellation, late generation responses, and `MethodNotFound` for unknown server requests.
+Also test exactly 8 MiB acceptance and 8 MiB plus one rejection, 8 KiB header ceiling, malformed UTF-8/JSON, non-2.0 messages, invalid IDs, response with both result and error, 32 active requests, request 33 rejection, 10,000 location/diagnostic ceilings, 256 KiB hover ceiling, source/token authority and stickiness, pre-cancelled/queued/sending/sent races, timestamp and tie ordering, exactly one ordered wire cancellation, no cancellation threads across generations, drain accounting/limits/late responses/close/grace expiry, late generation responses, and `MethodNotFound` for unknown server requests. Preserve all hostile framing, semantic-result, and cross-platform pipe assertions.
 
 - [ ] **Step 2: Run the focused tests and verify RED**
 
@@ -470,9 +470,15 @@ class PendingRequest:
     generation_nonce: str
     deadline: float
     completed: threading.Event
+    cancellation: CancellationToken | None = None
     result: object | None = None
     error: JsonRpcError | None = None
-    cancelled: bool = False
+    write_phase: str = "queued"
+    responded_at: float | None = None
+    local_outcome: str | None = None
+    local_terminal_at: float | None = None
+    drain_deadline: float | None = None
+    cancel_enqueued: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -482,7 +488,9 @@ class JsonRpcError:
     data: object | None
 ```
 
-Expose `JsonRpcFrameReader.read()`, `encode_frame(message)`, `json_depth(value)`, and `LspProtocol.request(method, params, *, deadline, cancelled=None)`. One reader thread owns stdout. Pending keys are `(generation_nonce, request_id)`. On timeout or caller cancellation, mark pending cancelled, send `$/cancelRequest`, wait only inside the original deadline, and drop all later responses for that key. A response ID matching an active request twice is fatal. Any malformed/oversized message invokes one `fatal_callback(reason)`; process restart belongs to Task 6. Unknown server requests receive `MethodNotFound` without executing anything. Unknown server notifications are dropped with one bounded stable warning. `workspace/applyEdit`, `workspace/executeCommand`, `window/showDocument`, and all other mutation requests are never allowlisted.
+Add zero-dependency `CancellationSource` and read-only `CancellationToken` over one private lock/event state. `CancellationSource.token` is stable; `cancel()` records the first `time.monotonic()` timestamp before setting the event and returns true only once. The token exposes only read-only `cancelled_at`, `is_cancelled()`, and `wait(timeout=None)`. Expose `JsonRpcFrameReader.read()`, `encode_frame(message)`, `json_depth(value)`, and exact `LspProtocol.request(method, params, *, deadline: float, cancellation: CancellationToken | None = None)`. Do not add a callable adapter or cancellation worker. One reader thread owns stdout. Pending keys are `(generation_nonce, request_id)`, IDs are never reused, and `MAX_PENDING_REQUESTS = 32` includes sent drain-only requests. Pre-cancelled and expired requests allocate no ID, slot, or frame. With a token, request waits use at most 10 ms response-event slices and execute no caller code.
+
+Resolve cancellation timestamp, absolute deadline, and validated response-dispatch timestamp under the state lock with tie priority cancellation, deadline, response. The writer alone advances queued/sending/sent phases and no state lock crosses blocking pipe I/O. Queued cancellation skips the unsent request and sends no cancellation. Sending/sent local cancellation or timeout returns promptly, preserves request-before-cancel ordering, and enqueues exactly one best-effort `$/cancelRequest` without extending the caller wait. Sent local terminals remain drain-only until a matching late response or terminal transport state. Define `CANCEL_DRAIN_GRACE_SECONDS = 2.0` and read-only validated `expired_drain_keys(now)` returning sorted keys; Task 6 owns restart when that tuple is nonempty. A response ID matching an active request twice is fatal. Any malformed/oversized message invokes one `fatal_callback(reason)`; process restart belongs to Task 6. Unknown server requests receive `MethodNotFound` without executing anything. Unknown server notifications are dropped with one bounded stable warning. `workspace/applyEdit`, `workspace/executeCommand`, `window/showDocument`, and all other mutation requests are never allowlisted.
 
 - [ ] **Step 4: Run protocol tests and Ruff and verify GREEN**
 
@@ -570,7 +578,7 @@ class LspProcess:
     last_used_monotonic: float
 ```
 
-Expose exact methods `LspProcess.start(cls, command: Sequence[str], *, cwd: Path, owner_root: Path) -> LspProcess`, `LspProcess.request(self, method: str, params: object, *, deadline: float, cancelled: Callable[[], bool] | None = None) -> object`, and `LspProcess.stderr_bytes(self) -> bytes`. Use an in-memory `collections.deque[bytes]` ring trimmed by bytes, not lines. Write `owner.json` as restricted canonical JSON with owner PID, 32-hex owner nonce, generation nonce, start timestamp, command basename, and state; never persist arguments containing repository paths or environment values. Create only `cancellation/` and cleanup evidence beneath the approved owner root. Do not implement shutdown, restart, or process-tree killing in this task.
+Expose exact methods `LspProcess.start(cls, command: Sequence[str], *, cwd: Path, owner_root: Path) -> LspProcess`, `LspProcess.request(self, method: str, params: object, *, deadline: float, cancellation: CancellationToken | None = None) -> object`, and `LspProcess.stderr_bytes(self) -> bytes`. Use an in-memory `collections.deque[bytes]` ring trimmed by bytes, not lines. Write `owner.json` as restricted canonical JSON with owner PID, 32-hex owner nonce, generation nonce, start timestamp, command basename, and state; never persist arguments containing repository paths or environment values. Create only `cancellation/` and cleanup evidence beneath the approved owner root. Do not implement shutdown, restart, or process-tree killing in this task.
 
 - [ ] **Step 4: Run process and protocol tests and verify GREEN**
 
@@ -638,7 +646,7 @@ class ProcessTree:
 
 Expose exact methods `ProcessTree.spawn(cls, command: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> ProcessTree`, `ProcessTree.terminate(self, *, deadline: float) -> None`, and `ProcessTree.close(self) -> None`. On POSIX, use `start_new_session=True`, then `SIGTERM` and bounded `SIGKILL` against the process group. On Windows, create a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, assign the process before accepting requests, and terminate/close the Job Object during cleanup. If assignment fails, terminate the just-created process and return `failed`; never claim tree ownership. Do not use `preexec_fn`.
 
-Extend `LspProcess` with `restart_count: int`, `shutdown(deadline)`, `cancel_all(reason)`, `restart(deadline)`, `close(deadline)`, and `idle_expired(now)`. Heartbeat `owner.json` atomically every 10 seconds with `heartbeat_at` and `expires_at` 30 seconds after the heartbeat; stop and join that thread during every close/failure branch. Fatal protocol/process failure allows exactly one fresh process generation. Pending keys from the prior generation are cancelled and all late responses are dropped. Normal close sends `shutdown`, waits for its response, sends `exit`, and then enforces tree cleanup. Failure writes `failure.json` with stable code, timestamp, PID, and generation nonce but no stderr or repository path; success removes the owner scratch after process exit.
+Extend `LspProcess` with `restart_count: int`, `shutdown(deadline)`, `cancel_all(reason)`, `restart(deadline)`, `close(deadline)`, and `idle_expired(now)`. Heartbeat `owner.json` atomically every 10 seconds with `heartbeat_at` and `expires_at` 30 seconds after the heartbeat; stop and join that thread during every close/failure branch. Fatal protocol/process failure allows exactly one fresh process generation. Restart the owning generation when `protocol.expired_drain_keys(time.monotonic())` is nonempty; do not remove expired drains locally and continue using the same server. Pending keys from the prior generation are released by terminal close and all late responses are dropped by generation nonce. Normal close sends `shutdown`, waits for its response, sends `exit`, and then enforces tree cleanup. Failure writes `failure.json` with stable code, timestamp, PID, and generation nonce but no stderr or repository path; success removes the owner scratch after process exit.
 
 - [ ] **Step 4: Run lifecycle tests and verify GREEN**
 

@@ -21,6 +21,7 @@ MAX_LOCATIONS = 10_000
 MAX_DIAGNOSTICS = 10_000
 MAX_HOVER_BYTES = 256 * 1024
 MAX_JSON_DEPTH = 64
+CANCEL_DRAIN_GRACE_SECONDS = 2.0
 METHOD_NOT_FOUND = -32601
 
 SERVER_REQUESTS = frozenset(
@@ -61,7 +62,6 @@ _CANCELLATION_POLL_SECONDS = 0.01
 _UNKNOWN_NOTIFICATION_WARNING = "dropped unknown server notification"
 _MAX_JSON_VALUES = MAX_FRAME_BYTES // 2
 _MAX_QUEUED_WRITES = MAX_PENDING_REQUESTS * 4
-_CALLBACK_WORKERS = 2
 _INTERNAL_WRITE_SECONDS = 1.0
 _OWNER_JOIN_SECONDS = 1.0
 
@@ -76,6 +76,55 @@ class RequestCancelled(RuntimeError):
 
 class PendingRequestLimitExceeded(RuntimeError):
     """The connection already has the maximum number of active requests."""
+
+
+@dataclass(slots=True)
+class _CancellationState:
+    lock: threading.Lock
+    event: threading.Event
+    cancelled_at: float | None = None
+
+
+class CancellationToken:
+    """Read-only, sticky cancellation state shared across threads."""
+
+    __slots__ = ("_state",)
+
+    def __init__(self, state: _CancellationState) -> None:
+        self._state = state
+
+    @property
+    def cancelled_at(self) -> float | None:
+        with self._state.lock:
+            return self._state.cancelled_at
+
+    def is_cancelled(self) -> bool:
+        return self._state.event.is_set()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        return self._state.event.wait(timeout)
+
+
+class CancellationSource:
+    """Single authority for cancelling one cooperative operation scope."""
+
+    __slots__ = ("_state", "_token")
+
+    def __init__(self) -> None:
+        self._state = _CancellationState(threading.Lock(), threading.Event())
+        self._token = CancellationToken(self._state)
+
+    @property
+    def token(self) -> CancellationToken:
+        return self._token
+
+    def cancel(self) -> bool:
+        with self._state.lock:
+            if self._state.cancelled_at is not None:
+                return False
+            self._state.cancelled_at = time.monotonic()
+            self._state.event.set()
+            return True
 
 
 class JsonRpcResponseError(RuntimeError):
@@ -93,9 +142,15 @@ class PendingRequest:
     generation_nonce: str
     deadline: float
     completed: threading.Event
+    cancellation: CancellationToken | None = None
     result: object | None = None
     error: JsonRpcError | None = None
-    cancelled: bool = False
+    write_phase: str = "queued"
+    responded_at: float | None = None
+    local_outcome: str | None = None
+    local_terminal_at: float | None = None
+    drain_deadline: float | None = None
+    cancel_enqueued: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,79 +165,9 @@ class _WriteTask:
     frame: bytes
     deadline: float
     completed: threading.Event
+    request_key: tuple[str, int] | None = None
+    best_effort: bool = False
     error: BaseException | None = None
-
-
-@dataclass(slots=True, eq=False)
-class _CallbackTask:
-    callback: Callable[[], bool]
-    completed: threading.Event
-    abandoned: threading.Event
-    result: bool = False
-    error: BaseException | None = None
-
-
-class _CallbackWorker:
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._ready = threading.Event()
-        self._task: _CallbackTask | None = None
-
-    def submit(self, task: _CallbackTask) -> bool:
-        if not self._lock.acquire(blocking=False):
-            return False
-        try:
-            if self._task is not None:
-                return False
-            self._task = task
-            self._ready.set()
-            return True
-        finally:
-            self._lock.release()
-
-    def run(self) -> None:
-        while True:
-            self._ready.wait()
-            with self._lock:
-                task = self._task
-                self._ready.clear()
-            if task is None:  # pragma: no cover - guarded by submit
-                continue
-            try:
-                if not task.abandoned.is_set():
-                    try:
-                        task.result = bool(task.callback())
-                    except BaseException as exc:
-                        task.error = exc
-            finally:
-                task.completed.set()
-                with self._lock:
-                    self._task = None
-                del task
-
-
-_CALLBACK_SLOTS = tuple(_CallbackWorker() for _ in range(_CALLBACK_WORKERS))
-
-
-def _submit_callback(callback: Callable[[], bool]) -> _CallbackTask | None:
-    task = _CallbackTask(callback, threading.Event(), threading.Event())
-    for worker in _CALLBACK_SLOTS:
-        if worker.submit(task):
-            return task
-    return None
-
-
-_CALLBACK_THREADS = tuple(
-    threading.Thread(
-        target=worker.run,
-        name=f"lsp-cancel-{index}",
-        daemon=True,
-    )
-    for index, worker in enumerate(_CALLBACK_SLOTS)
-)
-for _callback_thread in _CALLBACK_THREADS:
-    _callback_thread.start()
-del _callback_thread
 
 
 class _OwnedReader:
@@ -501,13 +486,28 @@ class LspProtocol:
         with self._state_lock:
             return tuple(self._pending)
 
+    def expired_drain_keys(self, now: float) -> tuple[tuple[str, int], ...]:
+        if isinstance(now, bool) or not isinstance(now, (int, float)):
+            raise TypeError("now must be a monotonic timestamp")
+        if not math.isfinite(now):
+            raise ValueError("now must be finite")
+        with self._state_lock:
+            return tuple(
+                sorted(
+                    key
+                    for key, pending in self._pending.items()
+                    if pending.drain_deadline is not None
+                    and float(now) >= pending.drain_deadline
+                )
+            )
+
     def request(
         self,
         method: str,
         params: object,
         *,
         deadline: float,
-        cancelled: Callable[[], bool] | None = None,
+        cancellation: CancellationToken | None = None,
     ) -> object:
         if not isinstance(method, str) or not method:
             raise ValueError("method must be a non-empty string")
@@ -517,11 +517,19 @@ class LspProtocol:
             raise TypeError("deadline must be a monotonic timestamp")
         if not math.isfinite(deadline):
             raise ValueError("deadline must be finite")
-        if cancelled is not None and not callable(cancelled):
-            raise TypeError("cancelled must be callable")
+        if cancellation is not None and not isinstance(cancellation, CancellationToken):
+            raise TypeError("cancellation must be a CancellationToken")
+
+        deadline = float(deadline)
 
         with self._state_lock:
             self._raise_if_unavailable_locked()
+            cancelled_at = cancellation.cancelled_at if cancellation is not None else None
+            now = time.monotonic()
+            if cancelled_at is not None and cancelled_at <= deadline:
+                raise RequestCancelled(f"LSP request cancelled: {method}")
+            if now >= deadline:
+                raise TimeoutError(f"LSP request timed out: {method}")
             if len(self._pending) >= MAX_PENDING_REQUESTS:
                 raise PendingRequestLimitExceeded("at most 32 LSP requests may be active")
             request_id = self._allocate_request_id_locked()
@@ -529,94 +537,59 @@ class LspProtocol:
                 request_id,
                 method,
                 self.generation_nonce,
-                float(deadline),
+                deadline,
                 threading.Event(),
+                cancellation,
             )
             key = (self.generation_nonce, request_id)
             self._pending[key] = pending
 
         try:
-            self._write_message(
+            self._queue_request_message(
                 {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params},
-                deadline=float(deadline),
-                wait=True,
+                deadline=deadline,
+                key=key,
             )
-        except TimeoutError:
-            self._cancel_pending(key, pending, force=True)
-            raise
         except BaseException:
             self._abandon_pending(key, pending)
             raise
 
-        callback_task: _CallbackTask | None = None
-        try:
-            while True:
-                remaining = float(deadline) - time.monotonic()
-                if remaining <= 0:
-                    self._cancel_pending(key, pending, force=True)
-                    raise TimeoutError(f"LSP request timed out: {method}")
-                if cancelled is not None:
-                    if callback_task is None:
-                        callback_task = _submit_callback(cancelled)
-                    if callback_task is not None:
-                        try:
-                            is_cancelled, callback_finished, callback_timed_out = (
-                                self._evaluate_cancelled(callback_task, float(deadline))
-                            )
-                        except BaseException:
-                            self._cancel_pending(
-                                key,
-                                pending,
-                                force=True,
-                            )
-                            raise
-                        if callback_finished:
-                            callback_task = None
-                        if callback_timed_out or time.monotonic() >= deadline:
-                            self._cancel_pending(
-                                key,
-                                pending,
-                                force=True,
-                            )
-                            raise TimeoutError(f"LSP request timed out: {method}")
-                        if is_cancelled:
-                            self._cancel_pending(
-                                key,
-                                pending,
-                                force=True,
-                            )
-                            raise RequestCancelled(f"LSP request cancelled: {method}")
-                        remaining = float(deadline) - time.monotonic()
-                if pending.completed.is_set():
+        while True:
+            now = time.monotonic()
+            with self._state_lock:
+                outcome = self._resolve_request_locked(key, pending, now)
+                if outcome is not None:
                     break
-                wait_for = remaining
-                if cancelled is not None:
-                    wait_for = min(wait_for, _CANCELLATION_POLL_SECONDS)
-                if pending.completed.wait(wait_for):
-                    break
-        finally:
-            if callback_task is not None:
-                callback_task.abandoned.set()
+            remaining = max(0.0, deadline - now)
+            wait_for = remaining
+            if cancellation is not None:
+                wait_for = min(wait_for, _CANCELLATION_POLL_SECONDS)
+            if pending.completed.wait(wait_for):
+                time.sleep(0)
 
-        with self._state_lock:
-            self._pending.pop(key, None)
-            fatal_error = self._fatal_error
-            closed = self._closed
-            error = pending.error
-            result = pending.result
-        if fatal_error is not None:
-            raise fatal_error
-        if closed:
+        if outcome == "cancelled":
+            raise RequestCancelled(f"LSP request cancelled: {method}")
+        if outcome == "timed_out":
+            if pending.write_phase == "sending":
+                error = TimeoutError("LSP write exceeded its deadline")
+                self._become_fatal("LSP write exceeded its deadline", cause=error)
+            raise TimeoutError(f"LSP request timed out: {method}")
+        if outcome == "fatal":
+            assert self._fatal_error is not None
+            raise self._fatal_error
+        if outcome == "closed":
             raise ProtocolViolation("LSP protocol is closed")
-        if error is not None:
-            raise JsonRpcResponseError(error)
-        return result
+        if pending.error is not None:
+            raise JsonRpcResponseError(pending.error)
+        return pending.result
 
     def close(self) -> None:
         with self._state_lock:
             first_close = not self._closed
             self._closed = True
             pending = tuple(self._pending.values()) if first_close else ()
+            if first_close:
+                self._pending.clear()
             writes = tuple(self._write_tasks) if first_close else ()
         if first_close:
             for request in pending:
@@ -688,10 +661,34 @@ class LspProtocol:
                     return
                 with self._state_lock:
                     stopped = self._closed or self._fatal_error is not None
+                    pending = (
+                        self._pending.get(task.request_key)
+                        if task.request_key is not None
+                        else None
+                    )
+                    skip_request = (
+                        task.request_key is not None
+                        and (
+                            task.request_key in self._cancelled_keys
+                            or (
+                                pending is not None
+                                and pending.write_phase == "queued"
+                                and pending.local_outcome is not None
+                            )
+                        )
+                    )
+                    if pending is not None and not skip_request:
+                        pending.write_phase = "sending"
                 if stopped:
                     self._complete_write(task, ProtocolViolation("LSP protocol stopped"))
                     return
+                if skip_request:
+                    self._complete_write(task, None)
+                    continue
                 if time.monotonic() >= task.deadline:
+                    if task.best_effort:
+                        self._complete_write(task, None)
+                        continue
                     error = TimeoutError("LSP write deadline expired")
                     self._become_fatal("LSP write deadline expired", cause=error)
                     self._complete_write(task, error)
@@ -706,27 +703,26 @@ class LspProtocol:
                     self._complete_write(task, exc)
                     return
                 if time.monotonic() > task.deadline:
+                    if task.best_effort:
+                        self._complete_write(task, None)
+                        continue
                     error = TimeoutError("LSP write exceeded its deadline")
                     self._become_fatal("LSP write exceeded its deadline", cause=error)
                     self._complete_write(task, error)
                     return
+                with self._state_lock:
+                    pending = (
+                        self._pending.get(task.request_key)
+                        if task.request_key is not None
+                        else None
+                    )
+                    if pending is not None:
+                        pending.write_phase = "sent"
+                        if pending.local_outcome is not None:
+                            self._enqueue_cancel_locked(pending)
                 self._complete_write(task, None)
         finally:
             self._close_stream(self._writer)
-
-    def _evaluate_cancelled(
-        self,
-        task: _CallbackTask,
-        deadline: float,
-    ) -> tuple[bool, bool, bool]:
-        remaining = max(0.0, deadline - time.monotonic())
-        if not task.completed.wait(min(remaining, _CANCELLATION_POLL_SECONDS)):
-            return False, False, time.monotonic() >= deadline
-        if time.monotonic() >= deadline:
-            return False, True, True
-        if task.error is not None:
-            raise task.error
-        return task.result, True, False
 
     def _dispatch_message(self, message: dict[str, Any], *, generation_nonce: str) -> None:
         if generation_nonce != self.generation_nonce:
@@ -747,8 +743,6 @@ class LspProtocol:
         key = (generation_nonce, response_id)
         violation: ProtocolViolation | None = None
         with self._state_lock:
-            if key in self._cancelled_keys:
-                return
             if key in self._responded_keys:
                 violation = ProtocolViolation("duplicate active response ID")
             else:
@@ -767,9 +761,14 @@ class LspProtocol:
                 except ProtocolViolation as exc:
                     violation = exc
                 if violation is None:
+                    pending.responded_at = time.monotonic()
                     self._remember_key(
                         key, self._responded_keys, self._responded_order
                     )
+                    if pending.local_outcome is not None:
+                        self._pending.pop(key, None)
+                        self._responded_keys.discard(key)
+                        self._remember_key(key, self._cancelled_keys, self._cancelled_order)
                     pending.completed.set()
         if violation is not None:
             self._become_fatal(str(violation), cause=violation)
@@ -881,42 +880,92 @@ class LspProtocol:
             except BaseException:
                 pass
 
-    def _cancel_pending(
+    def _resolve_request_locked(
         self,
         key: tuple[str, int],
         pending: PendingRequest,
-        *,
-        force: bool = False,
-    ) -> bool:
-        with self._state_lock:
-            current = self._pending.get(key)
-            if current is not pending:
-                return pending.cancelled
-            if pending.completed.is_set() and not force:
-                self._pending.pop(key, None)
-                return False
-            pending.cancelled = True
+        now: float,
+    ) -> str | None:
+        if pending.local_outcome is not None:
+            return pending.local_outcome
+
+        cancelled_at = (
+            pending.cancellation.cancelled_at
+            if pending.cancellation is not None
+            else None
+        )
+        responded_at = pending.responded_at
+        if (
+            cancelled_at is not None
+            and cancelled_at <= pending.deadline
+            and (responded_at is None or cancelled_at <= responded_at)
+        ):
+            self._finish_local_locked(key, pending, "cancelled", cancelled_at)
+            return "cancelled"
+        if now >= pending.deadline and (
+            responded_at is None or pending.deadline <= responded_at
+        ):
+            self._finish_local_locked(key, pending, "timed_out", pending.deadline)
+            return "timed_out"
+        if self._fatal_error is not None:
+            return "fatal"
+        if self._closed:
+            return "closed"
+        if responded_at is not None:
             self._pending.pop(key, None)
-            self._responded_keys.discard(key)
+            return "response"
+        return None
+
+    def _finish_local_locked(
+        self,
+        key: tuple[str, int],
+        pending: PendingRequest,
+        outcome: str,
+        terminal_at: float,
+    ) -> None:
+        if pending.local_outcome is not None:
+            return
+        pending.local_outcome = outcome
+        pending.local_terminal_at = terminal_at
+        if pending.write_phase == "queued":
+            self._pending.pop(key, None)
             self._remember_key(key, self._cancelled_keys, self._cancelled_order)
+        else:
+            pending.drain_deadline = terminal_at + CANCEL_DRAIN_GRACE_SECONDS
+            if pending.write_phase == "sent":
+                self._enqueue_cancel_locked(pending)
+            if pending.responded_at is not None:
+                self._pending.pop(key, None)
+                self._remember_key(key, self._cancelled_keys, self._cancelled_order)
+        pending.completed.set()
+
+    def _enqueue_cancel_locked(self, pending: PendingRequest) -> None:
+        if pending.cancel_enqueued:
+            return
+        pending.cancel_enqueued = True
+        frame = encode_frame(
+            {
+                "jsonrpc": "2.0",
+                "method": "$/cancelRequest",
+                "params": {"id": pending.request_id},
+            }
+        )
+        task = _WriteTask(
+            frame,
+            max(pending.deadline, time.monotonic() + _INTERNAL_WRITE_SECONDS),
+            threading.Event(),
+            best_effort=True,
+        )
+        self._write_tasks.append(task)
         try:
-            self._write_message(
-                {
-                    "jsonrpc": "2.0",
-                    "method": "$/cancelRequest",
-                    "params": {"id": pending.request_id},
-                },
-                deadline=time.monotonic() + _INTERNAL_WRITE_SECONDS,
-                wait=False,
-            )
-        except BaseException:
-            pass
-        return True
+            self._write_queue.put_nowait(task)
+        except queue.Full:
+            self._write_tasks.remove(task)
+            task.completed.set()
 
     def _abandon_pending(self, key: tuple[str, int], pending: PendingRequest) -> None:
         with self._state_lock:
             if self._pending.get(key) is pending:
-                pending.cancelled = True
                 self._pending.pop(key, None)
                 self._remember_key(key, self._cancelled_keys, self._cancelled_order)
 
@@ -979,6 +1028,30 @@ class LspProtocol:
                 raise ProtocolViolation("LSP protocol is closed")
             raise ProtocolViolation("failed to write LSP message") from task.error
 
+    def _queue_request_message(
+        self,
+        message: object,
+        *,
+        deadline: float,
+        key: tuple[str, int],
+    ) -> None:
+        frame = encode_frame(message)
+        task = _WriteTask(frame, deadline, threading.Event(), request_key=key)
+        queue_full = False
+        with self._state_lock:
+            self._raise_if_unavailable_locked()
+            self._write_tasks.append(task)
+            try:
+                self._write_queue.put_nowait(task)
+            except queue.Full:
+                self._write_tasks.remove(task)
+                queue_full = True
+        if queue_full:
+            exc = queue.Full()
+            self._complete_write(task, exc)
+            self._become_fatal("LSP write queue deadline expired", cause=exc)
+            raise TimeoutError("LSP write queue deadline expired") from exc
+
     def _complete_write(self, task: _WriteTask, error: BaseException | None) -> None:
         with self._state_lock:
             if task in self._write_tasks:
@@ -1036,6 +1109,7 @@ class LspProtocol:
                     error.__cause__ = cause
             self._fatal_error = error
             pending = tuple(self._pending.values())
+            self._pending.clear()
             writes = tuple(self._write_tasks)
             callback = self._fatal_callback
         for request in pending:
