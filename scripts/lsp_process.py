@@ -477,6 +477,7 @@ class LspProcess:
         default_factory=threading.Lock, init=False, repr=False
     )
     _recovery_thread: threading.Thread | None = field(default=None, init=False, repr=False)
+    _terminal_recovery_scheduled: bool = field(default=False, init=False, repr=False)
 
     @classmethod
     def start(
@@ -944,9 +945,16 @@ class LspProcess:
             ):
                 return
             if self.restart_count >= 1:
-                self._terminal_failure(
-                    _PROCESS_EXITED, time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
-                )
+                if not self._terminal_recovery_scheduled:
+                    self._terminal_recovery_scheduled = True
+                    recovery = threading.Thread(
+                        target=self._recover_terminal_generation,
+                        args=(generation_nonce,),
+                        name=f"lsp-recovery-{self.owner_nonce}",
+                        daemon=True,
+                    )
+                    self._recovery_thread = recovery
+                    recovery_to_start = recovery
             else:
                 with self._state_lock:
                     self.state = ProcessState.DEGRADED
@@ -965,6 +973,17 @@ class LspProcess:
             self._lifecycle_lock.release()
         if recovery_to_start is not None:
             recovery_to_start.start()
+
+    def _recover_terminal_generation(self, failed_generation: str) -> None:
+        with self._lifecycle_lock:
+            if self.generation_nonce != failed_generation or self._terminal:
+                return
+            try:
+                self._terminal_failure(
+                    _PROCESS_EXITED, time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
+                )
+            except BaseException:
+                pass
 
     def _recover_generation(self, failed_generation: str) -> None:
         deadline = time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
