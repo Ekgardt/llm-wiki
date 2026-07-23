@@ -8,6 +8,7 @@ import os
 import socket
 import sys
 import threading
+import time
 from collections.abc import Callable
 from typing import Any, BinaryIO
 
@@ -170,7 +171,12 @@ def _run_process_server() -> None:
     parser.add_argument("--echo", action="store_true")
     parser.add_argument("--exit-while-pending", action="store_true")
     parser.add_argument("--ignored-secret")
+    parser.add_argument("--sleep-seconds", type=float, default=0.0)
     args = parser.parse_args()
+
+    if args.sleep_seconds:
+        time.sleep(args.sleep_seconds)
+        return
 
     remaining = args.stderr_bytes
     offset = 0

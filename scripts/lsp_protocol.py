@@ -645,6 +645,32 @@ class LspProtocol:
         self._join_owner(self.reader_thread)
         self._join_owner(self.writer_thread)
 
+    def _stop_io_for_process_cleanup(self) -> None:
+        """Stop owned I/O without synchronously closing process pipes."""
+        self._io_stopped.set()
+        try:
+            self._write_queue.put_nowait(None)
+        except queue.Full:
+            pass
+        for owner in (self.reader_thread, self.writer_thread):
+            if owner.ident is not None:
+                self._cancel_owner_io(owner)
+
+    def _finish_io_after_process_exit(self, deadline: float) -> None:
+        """Close process pipes and owners only after the child is confirmed dead."""
+        with self._state_lock:
+            self._closed = True
+        self._stop_io_for_process_cleanup()
+        self._interrupt_stream(self._reader)
+        self._interrupt_stream(self._writer)
+        for owner in (self.reader_thread, self.writer_thread):
+            if owner is threading.current_thread() or owner.ident is None:
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            owner.join(remaining)
+
     def _allocate_request_id_locked(self) -> int:
         if self._next_request_id > _JSON_RPC_INTEGER_MAX:
             raise ProtocolViolation("JSON-RPC request ID space exhausted")

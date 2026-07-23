@@ -611,10 +611,20 @@ def test_stubborn_child_preserves_restricted_failure_evidence(
     child = StubbornProcess()
     monkeypatch.setattr(lsp_process.subprocess, "Popen", lambda *_args, **_kwargs: child)
     if failure_stage == "owner-json":
+        real_owner_write = lsp_process._write_owner_record
+        writes = 0
+
+        def fail_initial_owner_write(*args: object, **kwargs: object):
+            nonlocal writes
+            writes += 1
+            if writes == 1:
+                raise OSError("owner JSON failed")
+            return real_owner_write(*args, **kwargs)
+
         monkeypatch.setattr(
             lsp_process,
             "_write_owner_record",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("owner JSON failed")),
+            fail_initial_owner_write,
         )
     else:
         monkeypatch.setattr(lsp_process, "LspProtocol", BrokenProtocol)
@@ -708,7 +718,7 @@ def test_parent_identity_change_after_spawn_terminates_child_and_rolls_back(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     stable = (1, 2)
-    identities = iter([stable, stable, (1, 3)])
+    identities = iter([stable, stable, stable, stable, (1, 3)])
     children: list[subprocess.Popen[bytes]] = []
     real_popen = subprocess.Popen
 
@@ -779,3 +789,196 @@ def test_posix_non_executable_file_is_rejected_before_mutation(tmp_path: Path) -
     with pytest.raises(ValueError, match="executable"):
         LspProcess.start([str(executable)], cwd=tmp_path, owner_root=owner)
     assert not owner.exists()
+
+
+def test_real_sleeping_child_startup_failure_is_cleaned_within_one_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    children: list[subprocess.Popen[bytes]] = []
+    real_popen = subprocess.Popen
+
+    class BrokenProtocol:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("protocol startup failed")
+
+    def popen_spy(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        child = real_popen(*args, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(lsp_process.subprocess, "Popen", popen_spy)
+    monkeypatch.setattr(lsp_process, "LspProtocol", BrokenProtocol)
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="protocol startup failed"):
+        LspProcess.start(
+            _command("--sleep-seconds", "30"),
+            cwd=tmp_path,
+            owner_root=tmp_path / OWNER_NONCE,
+        )
+    elapsed = time.monotonic() - started
+    assert elapsed < lsp_process._STARTUP_WAIT_SECONDS + 0.75
+    assert len(children) == 1
+    assert children[0].poll() is not None
+
+
+def test_permanently_alive_child_preserves_evidence_without_pipe_close_or_join(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class BlockingClose(io.BytesIO):
+        def close(self) -> None:
+            raise AssertionError("pipe close must not run while child is alive")
+
+    class PermanentlyAliveProcess:
+        args = _command("--ignored-secret", "secret")
+        pid = 525252
+        stdin = BlockingClose()
+        stdout = BlockingClose()
+        stderr = BlockingClose()
+
+        def poll(self) -> None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            assert timeout is not None
+            time.sleep(timeout)
+            raise subprocess.TimeoutExpired(self.args, timeout)
+
+        def terminate(self) -> None:
+            return None
+
+        def kill(self) -> None:
+            return None
+
+    class BrokenProtocol:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("protocol startup failed")
+
+    child = PermanentlyAliveProcess()
+    real_thread_start = threading.Thread.start
+
+    def skip_stderr_owner(thread: threading.Thread) -> None:
+        if not thread.name.startswith("lsp-stderr-"):
+            real_thread_start(thread)
+
+    monkeypatch.setattr(lsp_process.subprocess, "Popen", lambda *_args, **_kwargs: child)
+    monkeypatch.setattr(lsp_process, "LspProtocol", BrokenProtocol)
+    monkeypatch.setattr(threading.Thread, "start", skip_stderr_owner)
+    monkeypatch.setattr(lsp_process, "_restrict_owner_only", lambda _path, _mode: None)
+    monkeypatch.setattr(lsp_process, "_verify_owner_only", lambda _path, _mode: None)
+    owner = tmp_path / OWNER_NONCE
+    started = time.monotonic()
+    with pytest.raises(lsp_process.StartupCleanupError):
+        LspProcess.start(_command(), cwd=tmp_path, owner_root=owner)
+    elapsed = time.monotonic() - started
+    assert elapsed < lsp_process._STARTUP_WAIT_SECONDS + 0.75
+    assert (owner / "failure.json").is_file()
+    assert (owner / "owner.json").is_file()
+
+
+def test_initial_owner_publish_never_overwrites_racing_owner_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    attacker = b"attacker-owner-record"
+    children: list[subprocess.Popen[bytes]] = []
+    real_popen = subprocess.Popen
+
+    def race_publish(_source: object, target: object, **_kwargs: object) -> None:
+        Path(target).write_bytes(attacker)
+        raise FileExistsError(target)
+
+    monkeypatch.setattr(lsp_process.os, "link", race_publish)
+    monkeypatch.setattr(
+        lsp_process.subprocess,
+        "Popen",
+        lambda *args, **kwargs: children.append(real_popen(*args, **kwargs)) or children[-1],
+    )
+    owner = tmp_path / OWNER_NONCE
+    with pytest.raises(FileExistsError):
+        LspProcess.start(_command(), cwd=tmp_path, owner_root=owner)
+    assert (owner / "owner.json").read_bytes() == attacker
+    assert owner.is_dir()
+    assert len(children) == 1
+    children[0].wait(timeout=5)
+    assert children[0].poll() is not None
+
+
+def _replace_owner_root_with_attacker(owner: Path, moved: Path) -> tuple[Path, Path]:
+    owner.rename(moved)
+    owner.mkdir()
+    sentinel = owner / "sentinel.txt"
+    owner_record = owner / "owner.json"
+    sentinel.write_bytes(b"attacker-sentinel")
+    owner_record.write_bytes(b"attacker-owner")
+    return sentinel, owner_record
+
+
+def test_parent_swap_during_owner_write_rejects_and_preserves_replacement(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    owner = tmp_path / OWNER_NONCE
+    moved = tmp_path / "moved-original"
+    real_write = lsp_process._write_owner_record
+    replacement: tuple[Path, Path] | None = None
+    children: list[subprocess.Popen[bytes]] = []
+    real_popen = subprocess.Popen
+
+    def write_then_swap(*args: object, **kwargs: object):
+        nonlocal replacement
+        result = real_write(*args, **kwargs)
+        replacement = _replace_owner_root_with_attacker(owner, moved)
+        return result
+
+    monkeypatch.setattr(lsp_process, "_write_owner_record", write_then_swap)
+    monkeypatch.setattr(
+        lsp_process.subprocess,
+        "Popen",
+        lambda *args, **kwargs: children.append(real_popen(*args, **kwargs)) or children[-1],
+    )
+    with pytest.raises(RuntimeError, match="identity"):
+        LspProcess.start(_command(), cwd=tmp_path, owner_root=owner)
+    assert replacement is not None
+    sentinel, owner_record = replacement
+    assert sentinel.read_bytes() == b"attacker-sentinel"
+    assert owner_record.read_bytes() == b"attacker-owner"
+    assert owner.is_dir()
+    assert moved.is_dir()
+    assert len(children) == 1
+    children[0].wait(timeout=5)
+    assert children[0].poll() is not None
+
+
+def test_final_fence_rejects_post_protocol_owner_swap_without_deleting_replacement(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    owner = tmp_path / OWNER_NONCE
+    moved = tmp_path / "moved-original"
+    real_start = threading.Thread.start
+    replacement: tuple[Path, Path] | None = None
+    children: list[subprocess.Popen[bytes]] = []
+    real_popen = subprocess.Popen
+
+    def start_then_swap(thread: threading.Thread) -> None:
+        nonlocal replacement
+        real_start(thread)
+        if thread.name.startswith("lsp-exit-"):
+            replacement = _replace_owner_root_with_attacker(owner, moved)
+
+    monkeypatch.setattr(threading.Thread, "start", start_then_swap)
+    monkeypatch.setattr(
+        lsp_process.subprocess,
+        "Popen",
+        lambda *args, **kwargs: children.append(real_popen(*args, **kwargs)) or children[-1],
+    )
+    with pytest.raises(RuntimeError, match="identity"):
+        LspProcess.start(
+            _command("--sleep-seconds", "30"), cwd=tmp_path, owner_root=owner
+        )
+    assert replacement is not None
+    sentinel, owner_record = replacement
+    assert sentinel.read_bytes() == b"attacker-sentinel"
+    assert owner_record.read_bytes() == b"attacker-owner"
+    assert owner.is_dir()
+    assert moved.is_dir()
+    assert len(children) == 1
+    children[0].wait(timeout=5)
+    assert children[0].poll() is not None
