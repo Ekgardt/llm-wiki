@@ -24,6 +24,10 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── generation_catalog.py         immutable generation catalog + activation
 │   ├── corpus_snapshot.py            source-hash corpus snapshots + chunks
 │   ├── lsp_paths.py                  pure managed Pyright/LSP path derivation
+│   ├── lsp_protocol.py               strict bounded single-writer LSP transport
+│   ├── lsp_process_tree.py           POSIX group / Windows Job ownership
+│   ├── lsp_process.py                leased LSP lifecycle + one restart
+│   ├── windows_workspace.py          Windows handle-relative filesystem boundary
 │   ├── schemas/                      transaction/queue/compile/archive/claim schemas
 │   ├── lance_store.py               v4.0: LanceDB embedded vector backend (HNSW)
 │   ├── reranker.py                  v4.0: cross-encoder reranker (ONNX)
@@ -170,6 +174,11 @@ checkpoint remains `corpus-generation/v2` with `evidence-graph/v2`. Foundation
 Tasks 1-5 of the 2026-07-21 Plan A remain implemented, including explicit Graph v3
 selection contracts and bounded sealed-workspace utilities, but its one-shot
 consent/SCIP/publication Tasks 6-16 are superseded.
+
+Tasks 1-6 of the replacement Python/Pyright plan now implement path derivation,
+position and URI conversion, bounded protocol transport, process startup evidence,
+and process-tree lifecycle ownership. Precise navigation, provider integration, and
+MCP routing remain unimplemented, so this is not a navigation-complete checkpoint.
 
 The approved target keeps the existing structural Evidence Graph and adds a small,
 Python 3.10-compatible, read-only LSP runtime owned by LLM Wiki. It starts with a

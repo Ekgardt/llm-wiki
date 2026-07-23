@@ -144,6 +144,9 @@ the 2026-07-21 Plan A remain implemented, but its one-shot
 consent/SCIP/publication Tasks 6-16 are superseded. The approved target keeps the
 existing structural Evidence Graph and adds an owned, Python 3.10-compatible,
 read-only LSP runtime, starting with a production-quality Python/Pyright slice.
+Tasks 1-6 of the replacement plan now implement paths, positions, bounded protocol,
+startup evidence, and leased process-tree lifecycle; navigation/provider/MCP routing
+remain unimplemented.
 It adds no Serena runtime dependency, Rust rewrite, second graph, catalog, active
 pointer, runtime root, persistent daemon, or MCP tool. Query-time LSP observations
 are not written into active generations. Language servers start lazily inside the
