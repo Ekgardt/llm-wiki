@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 import windows_workspace as _windows_workspace
-from compile_cache import _restrict_owner_only, _verify_owner_only
+from compile_cache import _acl_output_text, _acl_principal, _windows_acl_identity
 from lsp_protocol import CancellationToken, LspProtocol
 
 
@@ -57,6 +57,7 @@ _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 _STARTUP_FAILED = "startup_failed"
 _PROCESS_EXITED = "process_exited"
 _MAX_EVIDENCE_BYTES = 4096
+_MAX_ACL_OUTPUT_BYTES = 16 * 1024
 
 
 class StartupCleanupError(RuntimeError):
@@ -116,7 +117,7 @@ class _OwnerDirectory:
             return cls(owner_root, handle, identity)
         raise RuntimeError("LSP owner directories are unsupported on this platform")
 
-    def create(self) -> None:
+    def create(self, deadline: float) -> None:
         if os.name == "posix":
             os.mkdir(self.owner_root.name, 0o700, dir_fd=self.parent_handle)
             owner = os.open(
@@ -153,17 +154,13 @@ class _OwnerDirectory:
         owner = _windows_workspace.create_directory(self.parent_handle, self.owner_root.name)
         self.owner_handle = owner
         self.owner_identity = _windows_workspace.identity(owner, directory=True)
-        _restrict_owner_only(self.owner_root, 0o700)
-        _verify_owner_only(self.owner_root, 0o700)
+        _secure_windows_owner_root(self.owner_root, deadline)
         if _windows_workspace.identity(owner, directory=True) != self.owner_identity:
             raise PermissionError("LSP owner root identity changed during ACL setup")
         self.owner_permissions_verified = True
         cancellation = _windows_workspace.create_directory(owner, "cancellation")
         try:
             cancellation_identity = _windows_workspace.identity(cancellation, directory=True)
-            cancellation_path = self.owner_root / "cancellation"
-            _restrict_owner_only(cancellation_path, 0o700)
-            _verify_owner_only(cancellation_path, 0o700)
             if _windows_workspace.identity(cancellation, directory=True) != cancellation_identity:
                 raise PermissionError("LSP cancellation root identity changed during ACL setup")
         finally:
@@ -173,8 +170,6 @@ class _OwnerDirectory:
         self,
         name: str,
         record: Mapping[str, object],
-        *,
-        inherited_acl: bool = False,
     ) -> None:
         if name not in {"owner.json", "failure.json"} or self.owner_handle is None:
             raise ValueError("LSP evidence name or owner handle is invalid")
@@ -204,17 +199,13 @@ class _OwnerDirectory:
             os.fsync(self.owner_handle)
             return
 
-        if inherited_acl and not self.owner_permissions_verified:
+        if not self.owner_permissions_verified:
             raise PermissionError("LSP owner ACL was not verified before evidence creation")
         handle = _windows_workspace.create_file(self.owner_handle, name)
         try:
             identity = _windows_workspace.identity(handle, directory=False)
             _windows_workspace.write_all(handle, payload, chunk_bytes=_MAX_EVIDENCE_BYTES)
             _windows_workspace.flush_file(handle)
-            if not inherited_acl:
-                evidence_path = self.owner_root / name
-                _restrict_owner_only(evidence_path, 0o600)
-                _verify_owner_only(evidence_path, 0o600)
             if _windows_workspace.identity(handle, directory=False) != identity:
                 raise PermissionError("LSP evidence identity changed during write")
         finally:
@@ -353,6 +344,7 @@ class LspProcess:
         instance_lock = threading.Lock()
         failed_before_instance = False
         startup_complete = False
+        startup_deadline: float | None = None
 
         def protocol_failed(_reason: str) -> None:
             nonlocal failed_before_instance
@@ -365,7 +357,8 @@ class LspProcess:
 
         try:
             owner_directory = _OwnerDirectory.open(owner_root)
-            owner_directory.create()
+            startup_deadline = time.monotonic() + _STARTUP_WAIT_SECONDS
+            owner_directory.create(startup_deadline)
             process = subprocess.Popen(
                 arguments,
                 cwd=cwd,
@@ -449,6 +442,11 @@ class LspProcess:
                     protocol,
                     (stderr_thread, exit_thread),
                     owner_directory,
+                    deadline=(
+                        startup_deadline
+                        if startup_deadline is not None
+                        else time.monotonic()
+                    ),
                     owner_nonce=owner_nonce,
                     generation_nonce=generation_nonce,
                 )
@@ -629,6 +627,61 @@ def _current_identity(path: Path) -> _ObjectIdentity | None:
         return None
 
 
+def _secure_windows_owner_root(path: Path, deadline: float) -> None:
+    identity = _windows_acl_identity()
+    changed = _run_windows_owner_acl(
+        [
+            "icacls",
+            str(path),
+            "/inheritance:r",
+            "/grant:r",
+            f"{identity}:(OI)(CI)(F)",
+        ],
+        deadline,
+    )
+    if changed.returncode != 0:
+        raise PermissionError("could not apply owner-only LSP ACL")
+    verified = _run_windows_owner_acl(["icacls", str(path)], deadline)
+    if verified.returncode != 0:
+        raise PermissionError("could not verify owner-only LSP ACL")
+    acl_lines = [
+        line.strip()
+        for line in _acl_output_text(verified.stdout).splitlines()
+        if ":(" in line
+    ]
+    if len(acl_lines) != 1:
+        raise PermissionError("owner-only LSP ACL verification was ambiguous")
+    owner_ace = acl_lines[0]
+    markers = re.findall(r"\([^)]+\)", owner_ace)
+    if (
+        _acl_principal(path, owner_ace).casefold() != identity.casefold()
+        or len(markers) != 3
+        or set(markers) != {"(OI)", "(CI)", "(F)"}
+    ):
+        raise PermissionError("owner-only LSP ACL verification failed")
+
+
+def _run_windows_owner_acl(
+    command: Sequence[str], deadline: float
+) -> _subprocess.CompletedProcess[bytes]:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise PermissionError("owner-only LSP ACL deadline expired")
+    try:
+        result = _subprocess.run(
+            list(command),
+            shell=False,
+            check=False,
+            capture_output=True,
+            timeout=remaining,
+        )
+    except (OSError, _subprocess.TimeoutExpired) as exc:
+        raise PermissionError("owner-only LSP ACL command failed") from exc
+    if len(result.stdout or b"") + len(result.stderr or b"") > _MAX_ACL_OUTPUT_BYTES:
+        raise PermissionError("owner-only LSP ACL output exceeded its byte bound")
+    return result
+
+
 def _write_all_descriptor(descriptor: int, payload: bytes) -> None:
     offset = 0
     while offset < len(payload):
@@ -700,16 +753,17 @@ def _rollback_startup(
     threads: tuple[threading.Thread | None, ...],
     owner_directory: _OwnerDirectory | None,
     *,
+    deadline: float,
     owner_nonce: str,
     generation_nonce: str,
 ) -> None:
     # Task 5 retains bounded immutable evidence; later lifecycle/doctor tasks own removal.
-    deadline = time.monotonic() + _STARTUP_WAIT_SECONDS
     evidence_error: BaseException | None = None
     if (
         deadline - time.monotonic() > 0
         and owner_directory is not None
         and owner_directory.owner_handle is not None
+        and owner_directory.owner_permissions_verified
     ):
         try:
             _write_failure_record(
@@ -718,7 +772,6 @@ def _rollback_startup(
                 owner_nonce=owner_nonce,
                 generation_nonce=generation_nonce,
                 pid=process.pid if process is not None else None,
-                startup_cleanup=True,
             )
         except FileExistsError:
             pass
@@ -801,7 +854,6 @@ def _write_failure_record(
     owner_nonce: str,
     generation_nonce: str,
     pid: int | None,
-    startup_cleanup: bool = False,
 ) -> None:
     failure_record: dict[str, object] = {
         "code": code,
@@ -812,10 +864,7 @@ def _write_failure_record(
     if pid is not None:
         failure_record["owner_pid"] = pid
     # A verified Windows owner DACL has one inheritable owner-only (OI)(CI) ACE.
-    # Startup rollback inherits it to avoid an independently timed icacls subprocess.
-    owner_directory.write_record(
-        "failure.json", failure_record, inherited_acl=startup_cleanup
-    )
+    owner_directory.write_record("failure.json", failure_record)
 
 
 def _join_partially_started_thread(
