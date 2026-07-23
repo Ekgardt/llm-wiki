@@ -880,6 +880,11 @@ class _BlockingReader:
         self.released.set()
 
 
+class _UninterruptibleReader(_BlockingReader):
+    def close(self) -> None:
+        self.closed = True
+
+
 class _BlockingWriter:
     def __init__(self, *, block_after: int = 0, fail: bool = False) -> None:
         self.block_after = block_after
@@ -927,6 +932,24 @@ def _cancellation_threads() -> tuple[threading.Thread, ...]:
         for thread in threading.enumerate()
         if thread.name.startswith("lsp-cancel-")
     )
+
+
+@pytest.mark.parametrize("cleanup", ["close", "finish"])
+def test_deadline_cleanup_reports_blocked_protocol_owner(cleanup: str) -> None:
+    reader = _UninterruptibleReader()
+    protocol = _protocol_with_streams(reader, _BlockingWriter(block_after=100))
+    assert reader.started.wait(1)
+
+    try:
+        with pytest.raises(TimeoutError, match="protocol owner"):
+            deadline = time.monotonic() + 0.02
+            if cleanup == "close":
+                protocol.close(deadline)
+            else:
+                protocol._finish_io_after_process_exit(deadline)
+    finally:
+        reader.released.set()
+        protocol.close(time.monotonic() + 1)
 
 
 def test_queued_cancellation_writes_neither_request_nor_cancel() -> None:

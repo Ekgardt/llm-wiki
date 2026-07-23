@@ -134,17 +134,25 @@ class ProcessTree:
             return cls(process, job, None)
         except BaseException:
             if job is not None:
-                _KERNEL32.TerminateJobObject(job, 1)
-                _close_windows_handle(job)
+                owned_job = job
+                job = None
+                try:
+                    _KERNEL32.TerminateJobObject(owned_job, 1)
+                except BaseException:
+                    pass
+                try:
+                    _close_windows_handle(owned_job)
+                except BaseException:
+                    pass
             if process is not None and process.poll() is None:
                 try:
                     process.kill()
-                except OSError:
+                except BaseException:
                     pass
             if process is not None:
                 try:
                     process.wait(timeout=max(0.0, cleanup_deadline - time.monotonic()))
-                except (OSError, subprocess.TimeoutExpired):
+                except BaseException:
                     pass
             raise
 

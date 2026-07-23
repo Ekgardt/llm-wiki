@@ -468,6 +468,7 @@ class LspProcess:
         default_factory=threading.RLock, init=False, repr=False
     )
     _closing: bool = field(default=False, init=False, repr=False)
+    _terminal: bool = field(default=False, init=False, repr=False)
     _heartbeat_stop: threading.Event = field(
         default_factory=threading.Event, init=False, repr=False
     )
@@ -594,35 +595,59 @@ class LspProcess:
             atexit.register(_atexit_close, weakref.ref(instance))
             return instance
         except BaseException as startup_error:
+            deadline = (
+                startup_deadline
+                if startup_deadline is not None
+                else time.monotonic()
+            )
+            cleanup_error: BaseException | None = None
+            heartbeat_stopped = instance is None
             if instance is not None:
-                instance._stop_heartbeat(
-                    startup_deadline
-                    if startup_deadline is not None
-                    else time.monotonic()
-                )
-            if owner_directory is not None:
                 try:
-                    owner_directory.remove_lease()
-                except OSError:
-                    pass
+                    instance._stop_heartbeat(deadline)
+                    heartbeat_stopped = True
+                except BaseException as exc:
+                    cleanup_error = exc
+            rollback_error: BaseException | None = None
             try:
                 _rollback_startup(
                     process,
                     protocol,
                     (stderr_thread, exit_thread),
                     owner_directory,
-                    deadline=(
-                        startup_deadline
-                        if startup_deadline is not None
-                        else time.monotonic()
-                    ),
+                    deadline=deadline,
                     owner_nonce=owner_nonce,
                     generation_nonce=generation_nonce,
                     tree=tree,
+                    close_owner=False,
                 )
-            except StartupCleanupError as cleanup_error:
+            except BaseException as exc:
+                rollback_error = exc
+            owners_stopped = heartbeat_stopped
+            if protocol is not None:
+                owners_stopped = owners_stopped and not (
+                    protocol.reader_thread.is_alive()
+                    or protocol.writer_thread.is_alive()
+                )
+            owners_stopped = owners_stopped and all(
+                thread is None or not thread.is_alive()
+                for thread in (stderr_thread, exit_thread)
+            )
+            if owner_directory is not None:
+                if owners_stopped:
+                    try:
+                        owner_directory.remove_lease()
+                    except BaseException as exc:
+                        cleanup_error = cleanup_error or exc
+                try:
+                    owner_directory.close()
+                except BaseException as exc:
+                    cleanup_error = cleanup_error or exc
+            if rollback_error is not None:
+                raise rollback_error from startup_error
+            if cleanup_error is not None:
                 raise cleanup_error from startup_error
-            raise
+            raise startup_error
 
     def request(
         self,
@@ -638,6 +663,8 @@ class LspProcess:
             with self._lifecycle_lock:
                 if self.state is ProcessState.FAILED:
                     raise RuntimeError("LSP process has exited")
+                if self._terminal:
+                    raise RuntimeError("LSP process is closed")
                 protocol = self.protocol
                 process = self.process
                 expired = protocol.expired_drain_keys(time.monotonic())
@@ -667,9 +694,10 @@ class LspProcess:
     def shutdown(self, deadline: float) -> None:
         deadline = _validated_deadline(deadline)
         with self._lifecycle_lock:
+            self._terminal = True
+            self._closing = True
             if self._owner_directory is None and self._tree is None:
                 return
-            self._closing = True
             graceful_deadline = min(deadline, time.monotonic() + _GRACEFUL_CLEANUP_SECONDS)
             if self.process.poll() is None and time.monotonic() < graceful_deadline:
                 try:
@@ -687,8 +715,10 @@ class LspProcess:
                     tree.terminate(deadline=deadline)
                 except (OSError, RuntimeError, TimeoutError) as exc:
                     cleanup_error = exc
+            generation_stopped = False
             try:
                 self._finish_generation(deadline)
+                generation_stopped = True
             except (OSError, RuntimeError, TimeoutError) as exc:
                 cleanup_error = cleanup_error or exc
             heartbeat_stopped = False
@@ -697,7 +727,11 @@ class LspProcess:
                 heartbeat_stopped = True
             except (OSError, RuntimeError, TimeoutError) as exc:
                 cleanup_error = cleanup_error or exc
-            owner_directory = self._take_owner_directory() if heartbeat_stopped else None
+            owner_directory = (
+                self._take_owner_directory()
+                if heartbeat_stopped and generation_stopped
+                else None
+            )
             if owner_directory is not None:
                 try:
                     owner_directory.remove_success_scratch()
@@ -726,6 +760,8 @@ class LspProcess:
     def restart(self, deadline: float) -> None:
         deadline = _validated_deadline(deadline)
         with self._lifecycle_lock:
+            if self._terminal:
+                raise RuntimeError("LSP process is closed")
             if self.restart_count >= 1:
                 self._terminal_failure(_PROCESS_EXITED, deadline)
                 raise ProtocolViolation("LSP process restart limit exceeded")
@@ -952,10 +988,12 @@ class LspProcess:
             self._lifecycle_lock.release()
 
     def _terminal_failure(self, code: str, deadline: float) -> None:
+        with self._lifecycle_lock:
+            self._terminal = True
+            self._closing = True
         with self._owner_handle_lock:
             if not self._startup_complete:
                 return
-            self._closing = True
             with self._state_lock:
                 self.state = ProcessState.FAILED
             owner_directory = self._owner_directory
@@ -979,11 +1017,6 @@ class LspProcess:
                     heartbeat_stopped = True
                 except (OSError, RuntimeError, TimeoutError) as exc:
                     cleanup_error = exc
-                if heartbeat_stopped:
-                    try:
-                        owner_directory.remove_lease()
-                    except (OSError, RuntimeError) as exc:
-                        cleanup_error = cleanup_error or exc
                 tree = self._tree
                 if tree is not None:
                     try:
@@ -995,14 +1028,23 @@ class LspProcess:
                     except OSError as exc:
                         cleanup_error = cleanup_error or exc
                     self._tree = None
+                protocol_stopped = False
                 try:
                     self.protocol.close(deadline)
+                    protocol_stopped = True
                 except (OSError, RuntimeError, TimeoutError) as exc:
                     cleanup_error = cleanup_error or exc
+                generation_stopped = False
                 try:
                     self._join_generation_threads(deadline)
+                    generation_stopped = True
                 except TimeoutError as exc:
                     cleanup_error = cleanup_error or exc
+                if heartbeat_stopped and protocol_stopped and generation_stopped:
+                    try:
+                        owner_directory.remove_lease()
+                    except (OSError, RuntimeError) as exc:
+                        cleanup_error = cleanup_error or exc
                 self._owner_directory = None
                 try:
                     owner_directory.close()
@@ -1074,11 +1116,17 @@ class LspProcess:
             raise TimeoutError("LSP heartbeat thread did not stop before deadline")
 
     def _finish_generation(self, deadline: float) -> None:
+        cleanup_error: BaseException | None = None
         try:
             self.protocol._finish_io_after_process_exit(deadline)
-        except (OSError, RuntimeError):
-            pass
-        self._join_generation_threads(deadline)
+        except (OSError, RuntimeError) as exc:
+            cleanup_error = exc
+        try:
+            self._join_generation_threads(deadline)
+        except TimeoutError as exc:
+            cleanup_error = cleanup_error or exc
+        if cleanup_error is not None:
+            raise cleanup_error
 
     def _join_generation_threads(self, deadline: float) -> None:
         first_error: TimeoutError | None = None
@@ -1335,6 +1383,7 @@ def _rollback_startup(
     owner_nonce: str,
     generation_nonce: str,
     tree: ProcessTree | None = None,
+    close_owner: bool = True,
 ) -> None:
     # Task 5 retains bounded immutable evidence; later lifecycle/doctor tasks own removal.
     evidence_error: BaseException | None = None
@@ -1430,7 +1479,7 @@ def _rollback_startup(
                 tree.close()
             except OSError:
                 pass
-        if owner_directory is not None:
+        if close_owner and owner_directory is not None:
             try:
                 owner_directory.close()
             except OSError:

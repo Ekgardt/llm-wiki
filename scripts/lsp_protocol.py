@@ -682,8 +682,7 @@ class LspProtocol:
                 self._write_queue.put_nowait(None)
             except queue.Full:
                 pass
-        self._join_owner(self.reader_thread, deadline)
-        self._join_owner(self.writer_thread, deadline)
+        self._join_owners(deadline)
 
     def _stop_io_for_process_cleanup(self) -> None:
         """Stop owned I/O without synchronously closing process pipes."""
@@ -703,13 +702,7 @@ class LspProtocol:
         self._stop_io_for_process_cleanup()
         self._interrupt_stream(self._reader)
         self._interrupt_stream(self._writer)
-        for owner in (self.reader_thread, self.writer_thread):
-            if owner is threading.current_thread() or owner.ident is None:
-                continue
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return
-            owner.join(remaining)
+        self._join_owners(deadline)
 
     def _allocate_request_id_locked(self) -> int:
         if self._next_request_id > _JSON_RPC_INTEGER_MAX:
@@ -1325,6 +1318,18 @@ class LspProtocol:
         remaining = deadline - time.monotonic()
         if remaining > 0:
             owner.join(remaining)
+        if owner.is_alive():
+            raise TimeoutError("LSP protocol owner did not stop before deadline")
+
+    def _join_owners(self, deadline: float) -> None:
+        first_error: TimeoutError | None = None
+        for owner in (self.reader_thread, self.writer_thread):
+            try:
+                self._join_owner(owner, deadline)
+            except TimeoutError as exc:
+                first_error = first_error or exc
+        if first_error is not None:
+            raise first_error
 
     @staticmethod
     def _wait_owner_started(event: threading.Event, owner_name: str) -> None:

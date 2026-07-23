@@ -185,6 +185,59 @@ def test_assignment_failure_kills_unassigned_suspended_child_within_budget(
     assert jobs and closed.count(jobs[0]) == 1
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows suspended assignment boundary")
+def test_assignment_failure_still_kills_child_when_job_close_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class Child:
+        pid = 424242
+        stdin = None
+        stdout = None
+        stderr = None
+
+        def __init__(self) -> None:
+            self.alive = True
+            self.kill_calls = 0
+            self.wait_calls = 0
+
+        def poll(self) -> int | None:
+            return None if self.alive else 1
+
+        def kill(self) -> None:
+            self.kill_calls += 1
+            self.alive = False
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.wait_calls += 1
+            return 1
+
+    class Kernel:
+        @staticmethod
+        def TerminateJobObject(_job: int, _code: int) -> int:
+            return 1
+
+    child = Child()
+    monkeypatch.setattr(lsp_process_tree, "_KERNEL32", Kernel())
+    monkeypatch.setattr(lsp_process_tree, "_create_windows_job", lambda: 17)
+    monkeypatch.setattr(lsp_process_tree.subprocess, "Popen", lambda *_a, **_kw: child)
+    monkeypatch.setattr(
+        lsp_process_tree,
+        "_assign_windows_process",
+        lambda _job, _process: (_ for _ in ()).throw(OSError("assignment failed")),
+    )
+    monkeypatch.setattr(
+        lsp_process_tree,
+        "_close_windows_handle",
+        lambda _job: (_ for _ in ()).throw(RuntimeError("job close failed")),
+    )
+
+    with pytest.raises(OSError, match="assignment failed"):
+        ProcessTree.spawn(_command(), cwd=tmp_path, env=dict(os.environ))
+
+    assert child.kill_calls == 1
+    assert child.wait_calls == 1
+
+
 @pytest.mark.parametrize("deadline", [float("nan"), float("inf"), True, "later"])
 def test_terminate_rejects_invalid_deadline_without_releasing_tree(
     tmp_path: Path, deadline: object

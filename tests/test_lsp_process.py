@@ -209,6 +209,20 @@ def test_shutdown_alone_completes_tree_threads_lease_and_scratch_cleanup(
     assert all(thread is None or not thread.is_alive() for thread in owner_threads)
 
 
+def test_request_after_shutdown_cannot_restart_terminal_process(tmp_path: Path) -> None:
+    process = _start(tmp_path, "--lifecycle")
+    pid = process.process.pid
+    generation = process.generation_nonce
+
+    process.shutdown(time.monotonic() + 5)
+
+    with pytest.raises(RuntimeError, match="LSP process is closed"):
+        process.request("echo", {}, deadline=time.monotonic() + 5)
+    assert process.process.pid == pid
+    assert process.generation_nonce == generation
+    assert process.restart_count == 0
+
+
 def test_idle_expiry_is_exactly_300_seconds_and_rejects_non_finite_input(
     tmp_path: Path,
 ) -> None:
@@ -1096,6 +1110,78 @@ def test_heartbeat_thread_start_failure_removes_live_lease_and_owned_threads(
     } == baseline
 
 
+def test_startup_heartbeat_stop_timeout_still_runs_all_other_cleanup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: list[LspProcess] = []
+    real_verify = lsp_process._OwnerDirectory.verify_lexical_identity
+    checks = 0
+
+    def fail_after_heartbeat(owner: object) -> None:
+        nonlocal checks
+        checks += 1
+        if checks == 4:
+            raise RuntimeError("final startup fence failed")
+        real_verify(owner)
+
+    def fail_heartbeat_stop(process: LspProcess, _deadline: float) -> None:
+        captured.append(process)
+        raise TimeoutError("heartbeat stop blocked")
+
+    monkeypatch.setattr(
+        lsp_process._OwnerDirectory,
+        "verify_lexical_identity",
+        fail_after_heartbeat,
+    )
+    monkeypatch.setattr(LspProcess, "_stop_heartbeat", fail_heartbeat_stop)
+    owner = tmp_path / OWNER_NONCE
+    started = time.monotonic()
+
+    try:
+        with pytest.raises(TimeoutError, match="heartbeat stop blocked"):
+            LspProcess.start(
+                _command("--sleep-seconds", "30"), cwd=tmp_path, owner_root=owner
+            )
+
+        assert time.monotonic() - started <= lsp_process._STARTUP_WAIT_SECONDS + 0.75
+        assert len(captured) == 1
+        process = captured[0]
+        assert process.process.poll() is not None
+        assert not process.protocol.reader_thread.is_alive()
+        assert not process.protocol.writer_thread.is_alive()
+        assert process._owner_directory is not None
+        assert process._owner_directory._closed is True
+        assert (owner / "failure.json").is_file()
+        assert (owner / "lease.json").is_file()
+    finally:
+        if captured:
+            process = captured[0]
+            process._heartbeat_stop.set()
+            heartbeat = process._heartbeat_thread
+            if heartbeat is not None:
+                heartbeat.join(1)
+            tree = process._tree
+            if tree is not None:
+                try:
+                    tree.terminate(deadline=time.monotonic() + 1)
+                except (OSError, RuntimeError, TimeoutError):
+                    pass
+                try:
+                    tree.close()
+                except OSError:
+                    pass
+            try:
+                process.protocol.close(time.monotonic() + 1)
+            except (OSError, RuntimeError, TimeoutError):
+                pass
+            owner_directory = process._owner_directory
+            if owner_directory is not None:
+                try:
+                    owner_directory.close()
+                except OSError:
+                    pass
+
+
 def test_restart_thread_start_failure_cleans_new_tree_and_becomes_terminal(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1184,6 +1270,26 @@ def test_terminal_lease_removal_failure_does_not_skip_tree_or_protocol_cleanup(
     assert process.state is ProcessState.FAILED
 
 
+def test_terminal_failure_retains_lease_until_protocol_owners_are_proven_stopped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    process = _start(tmp_path, "--lifecycle")
+    lease = process.owner_root / "lease.json"
+    close = process.protocol.close
+    monkeypatch.setattr(
+        process.protocol,
+        "close",
+        lambda _deadline: (_ for _ in ()).throw(TimeoutError("protocol owner blocked")),
+    )
+
+    with pytest.raises(TimeoutError, match="protocol owner blocked"):
+        process._terminal_failure("injected_failure", time.monotonic() + 5)
+
+    assert lease.is_file()
+    monkeypatch.setattr(process.protocol, "close", close)
+    process.protocol.close(time.monotonic() + 1)
+
+
 def test_heartbeat_stop_reports_deadline_with_live_owner_thread(
     tmp_path: Path,
 ) -> None:
@@ -1193,6 +1299,29 @@ def test_heartbeat_stop_reports_deadline_with_live_owner_thread(
         process._stop_heartbeat(time.monotonic() - 1)
 
     process.close(time.monotonic() + 5)
+
+
+def test_shutdown_retains_lease_and_scratch_until_protocol_owners_are_proven_stopped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    process = _start(tmp_path, "--lifecycle")
+    owner = process.owner_root
+    lease = owner / "lease.json"
+    finish = process.protocol._finish_io_after_process_exit
+    monkeypatch.setattr(
+        process.protocol,
+        "_finish_io_after_process_exit",
+        lambda _deadline: (_ for _ in ()).throw(TimeoutError("protocol owner blocked")),
+    )
+
+    with pytest.raises(TimeoutError, match="protocol owner blocked"):
+        process.shutdown(time.monotonic() + 5)
+
+    assert owner.is_dir()
+    assert lease.is_file()
+    monkeypatch.setattr(process.protocol, "_finish_io_after_process_exit", finish)
+    process.shutdown(time.monotonic() + 5)
+    assert not owner.exists()
 
 
 @pytest.mark.parametrize("failure_stage", ["owner-json", "protocol"])
