@@ -760,6 +760,57 @@ def test_one_reader_thread_owns_stdout(fake_server: FakeLspServer) -> None:
     assert protocol.stdin_writer_owner == protocol.writer_thread.ident
 
 
+@pytest.mark.parametrize("failure_owner", ["lsp-stdin-", "lsp-stdout-"])
+def test_constructor_thread_start_failure_retains_no_owner_threads(
+    monkeypatch: pytest.MonkeyPatch, failure_owner: str
+) -> None:
+    baseline = {thread.ident for thread in threading.enumerate() if thread.name.startswith("lsp-")}
+    real_start = threading.Thread.start
+
+    def fail_selected(thread: threading.Thread) -> None:
+        if thread.name.startswith(failure_owner):
+            raise RuntimeError("owner start failed")
+        real_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", fail_selected)
+    for index in range(25):
+        reader = _BlockingReader()
+        writer = _BlockingWriter(block_after=100)
+        with pytest.raises(RuntimeError, match="owner start failed"):
+            _protocol_with_streams(
+                reader,
+                writer,
+                generation_nonce=f"constructor-start-failure-{index}",
+            )
+        assert reader.closed is True
+        assert writer.closed is True
+        assert {
+            thread.ident
+            for thread in threading.enumerate()
+            if thread.name.startswith("lsp-")
+        } == baseline
+
+
+def test_constructor_startup_wait_failure_retains_no_owner_threads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = {thread.ident for thread in threading.enumerate() if thread.name.startswith("lsp-")}
+
+    def fail_wait(_event: threading.Event, _owner_name: str) -> None:
+        raise RuntimeError("startup wait failed")
+
+    monkeypatch.setattr(LspProtocol, "_wait_owner_started", staticmethod(fail_wait))
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=100)
+    with pytest.raises(RuntimeError, match="startup wait failed"):
+        _protocol_with_streams(reader, writer, generation_nonce="constructor-wait-failure")
+    assert reader.closed is True
+    assert writer.closed is True
+    assert {
+        thread.ident for thread in threading.enumerate() if thread.name.startswith("lsp-")
+    } == baseline
+
+
 class _BlockingReader:
     def __init__(self) -> None:
         self.started = threading.Event()

@@ -8,7 +8,8 @@ import os
 import re
 import secrets
 import shutil
-import subprocess
+import stat
+import subprocess as _subprocess
 import threading
 import time
 from collections import deque
@@ -19,7 +20,17 @@ from enum import Enum
 from pathlib import Path
 from typing import BinaryIO
 
+from compile_cache import _restrict_owner_only, _verify_owner_only
 from lsp_protocol import CancellationToken, LspProtocol
+
+
+class _SubprocessFacade:
+    Popen = _subprocess.Popen
+    PIPE = _subprocess.PIPE
+    TimeoutExpired = _subprocess.TimeoutExpired
+
+
+subprocess = _SubprocessFacade()
 
 MAX_STDERR_BYTES = 4 * 1024 * 1024
 LSP_ENV_ALLOWLIST = frozenset(
@@ -41,6 +52,12 @@ LSP_ENV_ALLOWLIST = frozenset(
 
 _STDERR_CHUNK_BYTES = 65_537
 _STARTUP_WAIT_SECONDS = 2.0
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+_STARTUP_CHILD_ALIVE = "lsp_startup_child_alive"
+
+
+class StartupCleanupError(RuntimeError):
+    """Startup failed and the immediate child could not be proven dead."""
 
 
 class ProcessState(str, Enum):
@@ -102,6 +119,7 @@ class LspProcess:
         arguments = _validated_command(command, cwd)
         environment = lsp_environment()
         owner_nonce = _validated_owner_root(owner_root)
+        parent_identity = _parent_identity(owner_root.parent)
         generation_nonce = _new_generation_nonce()
         started_monotonic = time.monotonic()
         started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -126,6 +144,7 @@ class LspProcess:
 
         try:
             _create_owner_root(owner_root, created_paths)
+            _verify_parent_identity(owner_root.parent, parent_identity)
             process = subprocess.Popen(
                 arguments,
                 cwd=cwd,
@@ -158,6 +177,7 @@ class LspProcess:
                 "started_at": started_at,
                 "state": ProcessState.PROCESS_RUNNING.value,
             }
+            _verify_parent_identity(owner_root.parent, parent_identity)
             _write_owner_record(owner_root, owner_record)
             created_paths.append((owner_root / "owner.json", False))
             protocol = LspProtocol(
@@ -190,13 +210,21 @@ class LspProcess:
             instance._exit_thread = exit_thread
             exit_thread.start()
             return instance
-        except BaseException:
-            _rollback_startup(
-                process,
-                protocol,
-                (stderr_thread, exit_thread),
-                created_paths,
-            )
+        except BaseException as startup_error:
+            try:
+                _rollback_startup(
+                    process,
+                    protocol,
+                    (stderr_thread, exit_thread),
+                    created_paths,
+                    owner_root=owner_root,
+                    owner_nonce=owner_nonce,
+                    generation_nonce=generation_nonce,
+                    started_at=started_at,
+                    command_basename=Path(arguments[0]).name,
+                )
+            except StartupCleanupError as cleanup_error:
+                raise cleanup_error from startup_error
             raise
 
     def request(
@@ -291,17 +319,19 @@ def _validated_command(command: Sequence[str], cwd: Path) -> list[str]:
     executable = Path(arguments[0])
     if executable.is_absolute():
         resolved = executable.resolve()
-        if not resolved.is_file():
-            raise FileNotFoundError(arguments[0])
     elif executable.parent != Path("."):
         resolved = (cwd / executable).resolve()
-        if not resolved.is_file():
-            raise FileNotFoundError(arguments[0])
     else:
         found = shutil.which(arguments[0], path=lsp_environment().get("PATH"))
         if found is None:
             raise FileNotFoundError(arguments[0])
         resolved = Path(found).resolve()
+    if os.name == "nt" and resolved.suffix.casefold() in {".bat", ".cmd"}:
+        raise ValueError("Windows shell scripts are not valid LSP executables")
+    if not resolved.is_file():
+        raise FileNotFoundError(arguments[0])
+    if os.name == "posix" and not os.access(resolved, os.X_OK):
+        raise ValueError("LSP executable is not executable")
     arguments[0] = str(resolved)
     return arguments
 
@@ -319,6 +349,21 @@ def _validated_owner_root(owner_root: Path) -> str:
     return owner_nonce
 
 
+def _parent_identity(parent: Path) -> tuple[int, int, int]:
+    info = parent.lstat()
+    attributes = int(getattr(info, "st_file_attributes", 0))
+    if stat.S_ISLNK(info.st_mode) or attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+        raise ValueError("owner_root parent must not be a symlink or reparse point")
+    if not stat.S_ISDIR(info.st_mode):
+        raise ValueError("owner_root parent must be a directory")
+    return (int(info.st_dev), int(info.st_ino), attributes)
+
+
+def _verify_parent_identity(parent: Path, expected: object) -> None:
+    if _parent_identity(parent) != expected:
+        raise RuntimeError("owner_root parent identity changed during startup")
+
+
 def _new_generation_nonce() -> str:
     nonce = secrets.token_hex(16)
     if re.fullmatch(r"[0-9a-f]{32}", nonce) is None:
@@ -331,17 +376,22 @@ def _create_owner_root(
 ) -> None:
     owner_root.mkdir(mode=0o700)
     created_paths.append((owner_root, True))
+    _restrict_owner_only(owner_root, 0o700)
+    _verify_owner_only(owner_root, 0o700)
     cancellation_root = owner_root / "cancellation"
     cancellation_root.mkdir(mode=0o700)
     created_paths.append((cancellation_root, True))
-    if os.name == "posix":
-        owner_root.chmod(0o700)
-        cancellation_root.chmod(0o700)
+    _restrict_owner_only(cancellation_root, 0o700)
+    _verify_owner_only(cancellation_root, 0o700)
 
 
 def _write_owner_record(owner_root: Path, record: Mapping[str, object]) -> None:
+    _write_restricted_record(owner_root / "owner.json", record)
+
+
+def _write_restricted_record(target: Path, record: Mapping[str, object]) -> None:
     payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    temporary = owner_root / f".owner-{secrets.token_hex(8)}.tmp"
+    temporary = target.parent / f".{target.name}-{secrets.token_hex(8)}.tmp"
     descriptor: int | None = None
     try:
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -350,9 +400,11 @@ def _write_owner_record(owner_root: Path, record: Mapping[str, object]) -> None:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
-        if os.name == "posix":
-            temporary.chmod(0o600)
-        os.replace(temporary, owner_root / "owner.json")
+        _restrict_owner_only(temporary, 0o600)
+        _verify_owner_only(temporary, 0o600)
+        os.replace(temporary, target)
+        _restrict_owner_only(target, 0o600)
+        _verify_owner_only(target, 0o600)
     finally:
         if descriptor is not None:
             os.close(descriptor)
@@ -409,20 +461,13 @@ def _rollback_startup(
     protocol: LspProtocol | None,
     threads: tuple[threading.Thread | None, ...],
     created_paths: Sequence[tuple[Path, bool]],
+    *,
+    owner_root: Path,
+    owner_nonce: str,
+    generation_nonce: str,
+    started_at: str,
+    command_basename: str,
 ) -> None:
-    if process is not None and process.poll() is None:
-        try:
-            process.terminate()
-        except OSError:
-            pass
-        try:
-            process.wait(timeout=_STARTUP_WAIT_SECONDS)
-        except subprocess.TimeoutExpired:
-            try:
-                process.kill()
-                process.wait(timeout=_STARTUP_WAIT_SECONDS)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
     if protocol is not None:
         try:
             protocol.close()
@@ -435,9 +480,43 @@ def _rollback_startup(
                     stream.close()
                 except (OSError, ValueError):
                     pass
+    child_alive = process is not None and process.poll() is None
+    if child_alive:
+        try:
+            process.terminate()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=_STARTUP_WAIT_SECONDS)
+        except (subprocess.TimeoutExpired, OSError):
+            try:
+                process.kill()
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=_STARTUP_WAIT_SECONDS)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
     for thread in threads:
-        if thread is not None and thread.ident is not None:
-            thread.join(_STARTUP_WAIT_SECONDS)
+        if thread is not None and (
+            thread.ident is not None or thread in threading.enumerate()
+        ):
+            _join_partially_started_thread(thread)
+    if process is not None and process.poll() is None:
+        try:
+            _write_failed_startup_evidence(
+                owner_root,
+                pid=process.pid,
+                owner_nonce=owner_nonce,
+                generation_nonce=generation_nonce,
+                started_at=started_at,
+                command_basename=command_basename,
+            )
+        except BaseException as evidence_error:
+            raise StartupCleanupError(
+                "LSP direct child remains alive and failure evidence could not be written"
+            ) from evidence_error
+        raise StartupCleanupError("LSP direct child remains alive after startup cleanup")
     for path, is_directory in reversed(created_paths):
         try:
             if is_directory:
@@ -448,3 +527,47 @@ def _rollback_startup(
             pass
         except OSError:
             pass
+
+
+def _write_failed_startup_evidence(
+    owner_root: Path,
+    *,
+    pid: int,
+    owner_nonce: str,
+    generation_nonce: str,
+    started_at: str,
+    command_basename: str,
+) -> None:
+    owner_path = owner_root / "owner.json"
+    _write_restricted_record(
+        owner_path,
+        {
+            "command_basename": command_basename,
+            "generation_nonce": generation_nonce,
+            "owner_nonce": owner_nonce,
+            "owner_pid": pid,
+            "started_at": started_at,
+            "state": ProcessState.FAILED.value,
+        },
+    )
+    _write_restricted_record(
+        owner_root / "failure.json",
+        {
+            "code": _STARTUP_CHILD_ALIVE,
+            "generation_nonce": generation_nonce,
+            "owner_pid": pid,
+            "state": ProcessState.FAILED.value,
+        },
+    )
+
+
+def _join_partially_started_thread(thread: threading.Thread) -> None:
+    deadline = time.monotonic() + _STARTUP_WAIT_SECONDS
+    while thread in threading.enumerate():
+        try:
+            thread.join(max(0.0, deadline - time.monotonic()))
+            return
+        except RuntimeError:
+            if time.monotonic() >= deadline:
+                return
+            time.sleep(0.001)

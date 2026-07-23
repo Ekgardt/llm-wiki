@@ -472,10 +472,26 @@ class LspProtocol:
             name=f"lsp-stdout-{generation_nonce}",
             daemon=True,
         )
-        self.writer_thread.start()
-        self.reader_thread.start()
-        self._writer_started.wait()
-        self._reader_started.wait()
+        try:
+            self.writer_thread.start()
+            self.reader_thread.start()
+            self._wait_owner_started(self._writer_started, "writer")
+            self._wait_owner_started(self._reader_started, "reader")
+        except BaseException:
+            self._io_stopped.set()
+            try:
+                self._write_queue.put_nowait(None)
+            except queue.Full:
+                pass
+            for owner in (self.reader_thread, self.writer_thread):
+                if owner.ident is not None:
+                    self._cancel_owner_io(owner)
+            self._interrupt_stream(self._reader)
+            self._interrupt_stream(self._writer)
+            for owner in (self.reader_thread, self.writer_thread):
+                if owner.ident is not None or owner in threading.enumerate():
+                    self._join_partially_started_owner(owner)
+            raise
 
     @property
     def fatal(self) -> bool:
@@ -1241,6 +1257,23 @@ class LspProtocol:
         if owner is threading.current_thread():
             return
         owner.join(_OWNER_JOIN_SECONDS)
+
+    @staticmethod
+    def _wait_owner_started(event: threading.Event, owner_name: str) -> None:
+        if not event.wait(_OWNER_JOIN_SECONDS):
+            raise RuntimeError(f"LSP {owner_name} owner did not start")
+
+    @staticmethod
+    def _join_partially_started_owner(owner: threading.Thread) -> None:
+        deadline = time.monotonic() + _OWNER_JOIN_SECONDS
+        while owner in threading.enumerate():
+            try:
+                owner.join(max(0.0, deadline - time.monotonic()))
+                return
+            except RuntimeError:
+                if time.monotonic() >= deadline:
+                    return
+                time.sleep(0.001)
 
     @staticmethod
     def _cancel_owner_io(owner: threading.Thread) -> None:

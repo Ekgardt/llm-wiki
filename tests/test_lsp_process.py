@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import io
 import json
 import math
 import os
@@ -233,6 +234,7 @@ def test_owner_json_is_canonical_redacted_restricted_and_has_only_schema(
     environment_secret = "allowlisted-environment-secret-7f31"
     monkeypatch.setenv("TMP", environment_secret)
     process = _start(tmp_path, "--ignored-secret", secret_argument)
+    _wait(process)
     owner_file = process.owner_root / "owner.json"
     raw = owner_file.read_bytes()
     record = json.loads(raw)
@@ -260,11 +262,13 @@ def test_owner_json_is_canonical_redacted_restricted_and_has_only_schema(
         "cancellation",
         "owner.json",
     }
+    lsp_process._verify_owner_only(process.owner_root, 0o700)
+    lsp_process._verify_owner_only(process.owner_root / "cancellation", 0o700)
+    lsp_process._verify_owner_only(owner_file, 0o600)
     if os.name == "posix":
         assert stat.S_IMODE(process.owner_root.stat().st_mode) == 0o700
         assert stat.S_IMODE((process.owner_root / "cancellation").stat().st_mode) == 0o700
         assert stat.S_IMODE(owner_file.stat().st_mode) == 0o600
-    _wait(process)
 
 
 @pytest.mark.parametrize("deadline", [math.nan, math.inf, "later", True])
@@ -571,4 +575,207 @@ def test_exit_monitor_thread_start_failure_rolls_back_process_and_owner(
     assert len(children) == 1
     children[0].wait(timeout=5)
     assert children[0].poll() is not None
+    assert not owner.exists()
+
+
+@pytest.mark.parametrize("failure_stage", ["owner-json", "protocol"])
+def test_stubborn_child_preserves_restricted_failure_evidence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure_stage: str
+) -> None:
+    class StubbornProcess:
+        def __init__(self) -> None:
+            self.args = _command("--ignored-secret", "repository-secret")
+            self.pid = 424242
+            self.stdin = io.BytesIO()
+            self.stdout = io.BytesIO()
+            self.stderr = io.BytesIO()
+            self.terminate_calls = 0
+            self.kill_calls = 0
+
+        def poll(self) -> None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            raise subprocess.TimeoutExpired(self.args, timeout)
+
+        def terminate(self) -> None:
+            self.terminate_calls += 1
+
+        def kill(self) -> None:
+            self.kill_calls += 1
+
+    class BrokenProtocol:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("protocol startup failed")
+
+    child = StubbornProcess()
+    monkeypatch.setattr(lsp_process.subprocess, "Popen", lambda *_args, **_kwargs: child)
+    if failure_stage == "owner-json":
+        monkeypatch.setattr(
+            lsp_process,
+            "_write_owner_record",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("owner JSON failed")),
+        )
+    else:
+        monkeypatch.setattr(lsp_process, "LspProtocol", BrokenProtocol)
+    owner = tmp_path / OWNER_NONCE
+    with pytest.raises(lsp_process.StartupCleanupError, match="direct child remains alive") as raised:
+        LspProcess.start(_command(), cwd=tmp_path, owner_root=owner)
+
+    expected_cause = OSError if failure_stage == "owner-json" else RuntimeError
+    assert isinstance(raised.value.__cause__, expected_cause)
+    assert child.terminate_calls == 1
+    assert child.kill_calls == 1
+    assert owner.is_dir()
+    owner_record = json.loads((owner / "owner.json").read_bytes())
+    failure_record = json.loads((owner / "failure.json").read_bytes())
+    assert owner_record["state"] == "failed"
+    assert failure_record == {
+        "code": "lsp_startup_child_alive",
+        "generation_nonce": owner_record["generation_nonce"],
+        "owner_pid": child.pid,
+        "state": "failed",
+    }
+    evidence = (owner / "owner.json").read_text() + (owner / "failure.json").read_text()
+    assert "repository-secret" not in evidence
+    assert str(tmp_path) not in evidence
+    if os.name == "posix":
+        assert stat.S_IMODE((owner / "failure.json").stat().st_mode) == 0o600
+    lsp_process._verify_owner_only(owner, 0o700)
+    lsp_process._verify_owner_only(owner / "cancellation", 0o700)
+    lsp_process._verify_owner_only(owner / "owner.json", 0o600)
+    lsp_process._verify_owner_only(owner / "failure.json", 0o600)
+
+
+def test_owner_permission_failure_rolls_back_before_spawn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    spawned = False
+
+    def fail_permissions(_path: Path, _mode: int) -> None:
+        raise PermissionError("ACL unavailable")
+
+    def unexpected_spawn(*_args: object, **_kwargs: object) -> object:
+        nonlocal spawned
+        spawned = True
+        raise AssertionError("spawn must not run")
+
+    monkeypatch.setattr(lsp_process, "_restrict_owner_only", fail_permissions)
+    monkeypatch.setattr(lsp_process.subprocess, "Popen", unexpected_spawn)
+    owner = tmp_path / OWNER_NONCE
+    with pytest.raises(PermissionError, match="ACL unavailable"):
+        LspProcess.start(_command(), cwd=tmp_path, owner_root=owner)
+    assert spawned is False
+    assert not owner.exists()
+
+
+def test_immediate_parent_symlink_is_rejected_before_mutation(tmp_path: Path) -> None:
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    linked_parent = tmp_path / "linked-parent"
+    try:
+        linked_parent.symlink_to(real_parent, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks unavailable")
+    owner = linked_parent / OWNER_NONCE
+    with pytest.raises(ValueError, match="parent"):
+        LspProcess.start(_command(), cwd=tmp_path, owner_root=owner)
+    assert not owner.exists()
+
+
+def test_parent_identity_change_after_owner_creation_rolls_back_before_spawn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    identities = iter([(1, 2), (1, 3)])
+    spawned = False
+
+    monkeypatch.setattr(lsp_process, "_parent_identity", lambda _path: next(identities))
+
+    def unexpected_spawn(*_args: object, **_kwargs: object) -> object:
+        nonlocal spawned
+        spawned = True
+        raise AssertionError("spawn must not run")
+
+    monkeypatch.setattr(lsp_process.subprocess, "Popen", unexpected_spawn)
+    owner = tmp_path / OWNER_NONCE
+    with pytest.raises(RuntimeError, match="parent identity changed"):
+        LspProcess.start(_command(), cwd=tmp_path, owner_root=owner)
+    assert spawned is False
+    assert not owner.exists()
+
+
+def test_parent_identity_change_after_spawn_terminates_child_and_rolls_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    stable = (1, 2)
+    identities = iter([stable, stable, (1, 3)])
+    children: list[subprocess.Popen[bytes]] = []
+    real_popen = subprocess.Popen
+
+    monkeypatch.setattr(lsp_process, "_parent_identity", lambda _path: next(identities))
+
+    def popen_spy(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        child = real_popen(*args, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(lsp_process.subprocess, "Popen", popen_spy)
+    owner = tmp_path / OWNER_NONCE
+    with pytest.raises(RuntimeError, match="parent identity changed"):
+        LspProcess.start(
+            _command("--exit-while-pending"), cwd=tmp_path, owner_root=owner
+        )
+    assert len(children) == 1
+    children[0].wait(timeout=5)
+    assert children[0].poll() is not None
+    assert not owner.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows reparse contract")
+def test_windows_reparse_parent_is_rejected_before_mutation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    parent = tmp_path / "reparse-parent"
+    parent.mkdir()
+    real_info = parent.lstat()
+
+    class ReparseInfo:
+        st_mode = real_info.st_mode
+        st_dev = real_info.st_dev
+        st_ino = real_info.st_ino
+        st_file_attributes = 0x400
+
+    real_lstat = Path.lstat
+
+    def reparse_lstat(path: Path):
+        return ReparseInfo() if path == parent else real_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+    owner = parent / OWNER_NONCE
+    with pytest.raises(ValueError, match="reparse"):
+        LspProcess.start(_command(), cwd=tmp_path, owner_root=owner)
+    assert not owner.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows command contract")
+@pytest.mark.parametrize("suffix", [".cmd", ".BAT"])
+def test_windows_shell_scripts_are_rejected_before_mutation(
+    tmp_path: Path, suffix: str
+) -> None:
+    executable = tmp_path / f"server{suffix}"
+    executable.write_text("@echo off", encoding="utf-8")
+    owner = tmp_path / OWNER_NONCE
+    with pytest.raises(ValueError, match="shell script"):
+        LspProcess.start([str(executable)], cwd=tmp_path, owner_root=owner)
+    assert not owner.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX executable contract")
+def test_posix_non_executable_file_is_rejected_before_mutation(tmp_path: Path) -> None:
+    executable = tmp_path / "server"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o600)
+    owner = tmp_path / OWNER_NONCE
+    with pytest.raises(ValueError, match="executable"):
+        LspProcess.start([str(executable)], cwd=tmp_path, owner_root=owner)
     assert not owner.exists()
