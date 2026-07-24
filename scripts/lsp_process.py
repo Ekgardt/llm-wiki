@@ -789,6 +789,7 @@ class _Generation:
     expected_exit: threading.Event = field(default_factory=threading.Event, repr=False)
     failure_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     failure_queued: bool = field(default=False, repr=False)
+    _exit_observed: bool = field(default=False, init=False, repr=False)
 
     @property
     def released(self) -> bool:
@@ -1119,7 +1120,24 @@ def _queue_generation_failure(
     generation: _Generation,
     reason: str,
 ) -> bool:
+    return _commit_generation_failure(
+        coordinator,
+        generation,
+        reason,
+        exit_observed=False,
+    )
+
+
+def _commit_generation_failure(
+    coordinator: _LifecycleCoordinator,
+    generation: _Generation,
+    reason: str,
+    *,
+    exit_observed: bool,
+) -> bool:
     with generation.failure_lock:
+        if exit_observed:
+            generation._exit_observed = True
         if generation.expected_exit.is_set() or generation.failure_queued:
             return False
         intent = _FailureIntent(generation.nonce, reason, False, time.monotonic())
@@ -1127,6 +1145,14 @@ def _queue_generation_failure(
             return False
         generation.failure_queued = True
     return True
+
+
+def _mark_generation_expected_exit(generation: _Generation) -> bool:
+    with generation.failure_lock:
+        if generation._exit_observed or generation.failure_queued:
+            return False
+        generation.expected_exit.set()
+        return True
 
 
 def _enqueue_failure_intent(
@@ -1268,8 +1294,11 @@ def _monitor_generation_exit(
     except BaseException as error:
         _queue_generation_failure(coordinator, generation, str(error))
         return
-    if not _queue_generation_failure(
-        coordinator, generation, "LSP process exited unexpectedly"
+    if not _commit_generation_failure(
+        coordinator,
+        generation,
+        "LSP process exited unexpectedly",
+        exit_observed=True,
     ):
         return
     protocol = generation.protocol
@@ -1494,7 +1523,7 @@ def _heartbeat_loop(instance: LspProcess) -> None:
                 )
                 coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
                 for generation in _generations_locked(coordinator):
-                    generation.expected_exit.set()
+                    _mark_generation_expected_exit(generation)
                 _notify_lifecycle_locked(coordinator)
             finally:
                 _release_lifecycle(coordinator)
@@ -1558,7 +1587,11 @@ def _active_drain_generation(
     if generation is None or protocol is None:
         return None
     with generation.failure_lock:
-        if generation.failure_queued or generation.expected_exit.is_set():
+        if (
+            generation._exit_observed
+            or generation.failure_queued
+            or generation.expected_exit.is_set()
+        ):
             return None
     return generation, protocol
 
@@ -1679,7 +1712,7 @@ def _process_failure_intent_owned(
             coordinator.phase = _LifecyclePhase.RECOVERY_PENDING
             instance.state = ProcessState.DEGRADED
             if active is not None:
-                active.expected_exit.set()
+                _mark_generation_expected_exit(active)
             restart = True
         _notify_lifecycle_locked(coordinator)
     finally:
@@ -1921,7 +1954,7 @@ def _mark_terminal_failure(
         _select_terminal_failure_locked(instance, coordinator, code)
         coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
         for generation in _generations_locked(coordinator):
-            generation.expected_exit.set()
+            _mark_generation_expected_exit(generation)
         _notify_lifecycle_locked(coordinator)
     finally:
         _release_lifecycle(coordinator)
@@ -1973,7 +2006,7 @@ def _restart_lsp_process_owned(instance: LspProcess, deadline: float) -> None:
             coordinator.phase = _LifecyclePhase.RECOVERY_PENDING
             instance.state = ProcessState.DEGRADED
             if coordinator.active is not None:
-                coordinator.active.expected_exit.set()
+                _mark_generation_expected_exit(coordinator.active)
             _notify_lifecycle_locked(coordinator)
     finally:
         _release_lifecycle(coordinator)
@@ -2003,7 +2036,7 @@ def _restart_generation_owned(instance: LspProcess, deadline: float) -> None:
             raise RuntimeError("LSP process is closed")
         old = coordinator.active
         if old is not None:
-            old.expected_exit.set()
+            _mark_generation_expected_exit(old)
             coordinator.retired.append(old)
             coordinator.active = None
         coordinator.phase = _LifecyclePhase.RESTARTING
@@ -2119,7 +2152,7 @@ def _shutdown_lsp_process_owned(instance: LspProcess, deadline: float) -> None:
         )
         generation = coordinator.active
         if generation is not None:
-            generation.expected_exit.set()
+            _mark_generation_expected_exit(generation)
         _notify_lifecycle_locked(coordinator)
     finally:
         _release_lifecycle(coordinator)
@@ -2431,6 +2464,7 @@ def _linearize_terminal_outcome_locked(
         allow_expired=not commit_success,
     )
     try:
+        mark_failure_exits = False
         with coordinator.terminal_state_lock:
             if (
                 coordinator.pending_failure_intents > 0
@@ -2442,11 +2476,13 @@ def _linearize_terminal_outcome_locked(
                     coordinator.pending_failure_code or _PROCESS_EXITED,
                 )
                 coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
-                for generation in _generations_locked(coordinator):
-                    generation.expected_exit.set()
+                mark_failure_exits = True
             if commit_success and coordinator.terminal_outcome == "success":
                 coordinator.success_committed = True
-            return coordinator.terminal_outcome
+        if mark_failure_exits:
+            for generation in _generations_locked(coordinator):
+                _mark_generation_expected_exit(generation)
+        return coordinator.terminal_outcome
     finally:
         _release_terminal_intent(coordinator)
 
@@ -2526,7 +2562,7 @@ def _drive_cleanup_owned(
         code = coordinator.terminal_code or failure_code or _PROCESS_EXITED
         if terminal:
             for generation in generations:
-                generation.expected_exit.set()
+                _mark_generation_expected_exit(generation)
         _notify_lifecycle_locked(coordinator)
     finally:
         _release_lifecycle(coordinator)

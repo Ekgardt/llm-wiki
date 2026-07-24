@@ -34,7 +34,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   transactions/tasks/results, the 30-day undo window, and live owners.
 - Recorded the local-filesystem requirement, current `synchronous=FULL`/no-WAL
   policy, bounded defaults and CLI overrides, cooperating-writer CAS boundary, and
-  explicit non-goals. The suite now collects **4457 tests**.
+  explicit non-goals. The suite now collects **4459 tests**.
 - Added canonical `repository-scope/v1` binding for repositories, linked worktrees,
   checkout roots, Git common directories, and captured commits. Generation readers
   reject the wrong repository/worktree scope instead of returning cross-checkout
@@ -65,6 +65,10 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Linearize each LSP generation's expected and observed exits under one lock.
+  An unexpected process death recorded before shutdown now remains a terminal
+  failure, while shutdown marked before death remains successful; duplicate
+  process and protocol callbacks still select exactly one failure intent.
 - Publish LSP failure evidence only once after exact durable validation. Public
   `FAILED` state and waiter notification now follow that evidence barrier; failed
   evidence remains retryable with live ownership and a `DEGRADED` public state.
@@ -120,7 +124,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - **SessionStart impact advisory** — stale wiki pages from code changes.
 - **MCP config in install scripts** — Claude Code + OpenCode auto-config.
 - **Optional extras** — `hybrid`, `code-graph`, `mcp-server`, `reranker`, `full`.
-- **4457 tests**.
+- **4459 tests**.
 
 ## [3.4.0] — 2026-07-11
 

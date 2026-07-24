@@ -43,7 +43,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── impact_analysis.py           v4.0: LINK layer (code→wiki impact)
 │   ├── build_tiers.py               v4.0: L0/L1/L2 progressive disclosure
 │   └── queries/                     v4.0: 12 tree-sitter .scm language queries
-├── tests/                         CODE — regression suite (pytest, 4457 tests)
+├── tests/                         CODE — regression suite (pytest, 4459 tests)
 ├── docs/                          CODE — architecture + user guide
 ├── skills/                        CODE — 9 agent skills (SKILL.md)
 ├── rules/                         CODE — file-handling policies
@@ -229,6 +229,13 @@ stronger ownership. Optional delegated cgroup v2 containment is a future Linux-o
 candidate requiring a separate capability-gated design. See
 `knowledge/notes/lsp-process-containment-decision.md`.
 
+Each LSP process generation linearizes expected exits, observed process death, and
+one sticky failure-intent selection under a single generation lock. The exit monitor
+records normal `wait()` completion before invoking protocol callbacks. Therefore an
+unexpected death observed before shutdown remains a failure, an expected shutdown
+marked before death remains successful, and duplicate process/protocol callbacks
+cannot enqueue multiple generation failures.
+
 ## What lives where
 
 ### CODE zone (tracked in git)
@@ -238,7 +245,7 @@ candidate requiring a separate capability-gated design. See
   `maybe_compile.py` (PID-locked spawn), `search_memory.py` (triple-RRF),
   `llm_client.py` (5 backends + fake), `integration_adapter.py` (thin host
   lifecycle boundary), `mcp_server.py` (12 task-shaped tools), and `doctor.py`.
-- `tests/` — 4457 tests collected. Hermetic via `conftest.py` (pins
+- `tests/` — 4459 tests collected. Hermetic via `conftest.py` (pins
   `LLM_WIKI_ROOT` to checkout, redirects `LLM_WIKI_STATE_ROOT` to a temp
   dir, defaults `MEMORY_LLM_PROVIDER=fake`).
 - `docs/` — `ARCHITECTURE.md`, `USER-GUIDE.md`, `AGENTS.md` (knowledge

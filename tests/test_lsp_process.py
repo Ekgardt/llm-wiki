@@ -92,7 +92,7 @@ def _wait(process: LspProcess, seconds: float = 10) -> int:
 def _expect_active_generation_exit(process: LspProcess) -> None:
     generation = process._coordinator.active
     assert generation is not None
-    generation.expected_exit.set()
+    assert lsp_process._mark_generation_expected_exit(generation)
 
 
 class _FakeTree:
@@ -463,6 +463,200 @@ def test_second_fatal_failure_is_terminal_and_retains_bounded_evidence(
     assert process._coordinator.phase is lsp_process._LifecyclePhase.CLEANUP_PENDING
     process.close(time.monotonic() + 5)
     assert not (process.owner_root / "lease.json").exists()
+
+
+def test_observed_second_generation_exit_dominates_overlapping_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle", "--sleep-seconds", "30")
+    process.restart(time.monotonic() + 5)
+    coordinator = process._coordinator
+    generation = coordinator.active
+    assert generation is not None and generation.protocol is not None
+    protocol = generation.protocol
+    server_pid = process.process.pid
+    assert process.restart_count == 1
+    lsp_process._stop_recovery_owner(coordinator, time.monotonic() + 2)
+
+    exit_observed = threading.Event()
+    release_callbacks = threading.Event()
+    accepted_intents: list[str] = []
+    shutdown_errors: list[BaseException] = []
+    real_queue_failure = lsp_process._queue_generation_failure
+    real_enqueue = lsp_process._enqueue_failure_intent
+    real_become_fatal = protocol._become_fatal
+
+    def gated_queue_failure(
+        current: lsp_process._LifecycleCoordinator,
+        target: lsp_process._Generation,
+        reason: str,
+    ) -> bool:
+        if current is coordinator and target is generation:
+            if threading.current_thread() is generation.exit_thread:
+                exit_observed.set()
+            assert release_callbacks.wait(5)
+        return real_queue_failure(current, target, reason)
+
+    def gated_become_fatal(
+        reason: str,
+        *,
+        cause: BaseException | None = None,
+    ) -> None:
+        if threading.current_thread() is generation.exit_thread:
+            exit_observed.set()
+        assert release_callbacks.wait(5)
+        real_become_fatal(reason, cause=cause)
+
+    def record_enqueue(
+        current: lsp_process._LifecycleCoordinator,
+        intent: lsp_process._FailureIntent,
+    ) -> bool:
+        accepted = real_enqueue(current, intent)
+        if (
+            accepted
+            and current is coordinator
+            and intent.generation_nonce == generation.nonce
+        ):
+            accepted_intents.append(intent.generation_nonce)
+        return accepted
+
+    def shutdown() -> None:
+        try:
+            process.shutdown(time.monotonic() + 5)
+        except BaseException as error:
+            shutdown_errors.append(error)
+
+    monkeypatch.setattr(lsp_process, "_queue_generation_failure", gated_queue_failure)
+    monkeypatch.setattr(lsp_process, "_enqueue_failure_intent", record_enqueue)
+    monkeypatch.setattr(protocol, "_become_fatal", gated_become_fatal)
+    closer = threading.Thread(target=shutdown)
+    try:
+        process.process.kill()
+        assert exit_observed.wait(3)
+        closer.start()
+        assert _coordinator_wait(
+            process,
+            lambda: coordinator.phase
+            in {
+                lsp_process._LifecyclePhase.STOPPING_SUCCESS,
+                lsp_process._LifecyclePhase.STOPPING_FAILURE,
+                lsp_process._LifecyclePhase.CLEANUP_PENDING,
+                lsp_process._LifecyclePhase.STOPPED_SUCCESS,
+                lsp_process._LifecyclePhase.STOPPED_FAILURE,
+            },
+        )
+        release_callbacks.set()
+        closer.join(5)
+
+        assert not closer.is_alive()
+        assert shutdown_errors == []
+        assert accepted_intents == [generation.nonce]
+        assert process.restart_count == 1
+        assert process.state is ProcessState.FAILED
+        assert coordinator.phase is lsp_process._LifecyclePhase.STOPPED_FAILURE
+        failure = json.loads((process.owner_root / "failure.json").read_bytes())
+        lsp_process._validate_failure_record(
+            failure,
+            code="process_exited",
+            owner_nonce=process.owner_nonce,
+            generation_nonce=generation.nonce,
+            pid=server_pid,
+        )
+        assert set(path.name for path in process.owner_root.iterdir()) == {
+            "cancellation",
+            "failure.json",
+            "owner.json",
+        }
+    finally:
+        release_callbacks.set()
+        if closer.ident is not None:
+            closer.join(5)
+        if lsp_process._coordinator_has_ownership(coordinator):
+            process.close(time.monotonic() + 5)
+
+
+def test_expected_second_generation_exit_precedes_death_and_shutdown_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle", "--sleep-seconds", "30")
+    process.restart(time.monotonic() + 5)
+    coordinator = process._coordinator
+    generation = coordinator.active
+    assert generation is not None and generation.protocol is not None
+    protocol = generation.protocol
+    assert process.restart_count == 1
+    lsp_process._stop_recovery_owner(coordinator, time.monotonic() + 2)
+
+    expected_exit_marked = threading.Event()
+    release_shutdown_request = threading.Event()
+    accepted_intents: list[str] = []
+    shutdown_errors: list[BaseException] = []
+    real_request = protocol.request
+    real_enqueue = lsp_process._enqueue_failure_intent
+
+    def gated_request(
+        method: str,
+        params: object,
+        *,
+        deadline: float,
+        cancellation: lsp_protocol.CancellationToken | None = None,
+    ) -> object:
+        if method == "shutdown":
+            assert generation.expected_exit.is_set()
+            expected_exit_marked.set()
+            assert release_shutdown_request.wait(5)
+        return real_request(
+            method,
+            params,
+            deadline=deadline,
+            cancellation=cancellation,
+        )
+
+    def record_enqueue(
+        current: lsp_process._LifecycleCoordinator,
+        intent: lsp_process._FailureIntent,
+    ) -> bool:
+        accepted = real_enqueue(current, intent)
+        if (
+            accepted
+            and current is coordinator
+            and intent.generation_nonce == generation.nonce
+        ):
+            accepted_intents.append(intent.generation_nonce)
+        return accepted
+
+    def shutdown() -> None:
+        try:
+            process.shutdown(time.monotonic() + 5)
+        except BaseException as error:
+            shutdown_errors.append(error)
+
+    monkeypatch.setattr(protocol, "request", gated_request)
+    monkeypatch.setattr(lsp_process, "_enqueue_failure_intent", record_enqueue)
+    closer = threading.Thread(target=shutdown)
+    try:
+        closer.start()
+        assert expected_exit_marked.wait(3)
+        process.process.kill()
+        process.process.wait(timeout=3)
+        release_shutdown_request.set()
+        closer.join(5)
+
+        assert not closer.is_alive()
+        assert shutdown_errors == []
+        assert accepted_intents == []
+        assert process.restart_count == 1
+        assert coordinator.terminal_outcome == "success"
+        assert coordinator.phase is lsp_process._LifecyclePhase.STOPPED_SUCCESS
+        assert not process.owner_root.exists()
+    finally:
+        release_shutdown_request.set()
+        if closer.ident is not None:
+            closer.join(5)
+        if lsp_process._coordinator_has_ownership(coordinator):
+            process.close(time.monotonic() + 5)
 
 
 def test_idle_fatal_restarts_once_then_second_idle_fatal_is_terminal(

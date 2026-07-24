@@ -164,6 +164,12 @@ not that cross-file indexing is complete; references and call results therefore
 remain `provider_reported` unless stronger coverage evidence exists. A timeout
 produces `not_ready` or `partial`, never a false complete negative.
 
+Each process generation uses one lock to classify expected exits, observed process
+death, and its single sticky failure intent. The exit monitor records normal
+`wait()` completion before invoking protocol callbacks. An unexpected death observed
+before shutdown therefore remains a failure; shutdown marked before death remains
+successful; duplicate process and protocol callbacks cannot select multiple intents.
+
 Before a semantic request, the facade computes a workspace revision from Git HEAD
 plus content hashes of dirty, untracked, deleted, and relevant Python configuration
 files. Non-Git projects use a bounded content manifest. The revision diff drives
