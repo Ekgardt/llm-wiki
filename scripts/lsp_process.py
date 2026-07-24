@@ -1266,8 +1266,6 @@ def _start_lsp_process(
         return instance
     except BaseException as startup_error:
         deadline = startup_deadline if startup_deadline is not None else time.monotonic()
-        if instance is not None:
-            instance.state = ProcessState.FAILED
         try:
             _mark_terminal_failure(
                 instance,
@@ -1359,7 +1357,6 @@ def _heartbeat_loop(instance: LspProcess) -> None:
                     instance, coordinator, "heartbeat_failed"
                 )
                 coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
-                instance.state = ProcessState.FAILED
                 for generation in _generations_locked(coordinator):
                     generation.expected_exit.set()
                 _notify_lifecycle_locked(coordinator)
@@ -1540,7 +1537,6 @@ def _process_failure_intent_owned(
                 "heartbeat_failed" if intent.owner_fatal else _PROCESS_EXITED,
             )
             coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
-            instance.state = ProcessState.FAILED
             terminal = True
         else:
             coordinator.recovery_attempted = True
@@ -1774,6 +1770,8 @@ def _select_terminal_failure_locked(
         coordinator.failure_evidence_identity = _failure_identity(
             instance, coordinator, coordinator.terminal_code
         )
+    if instance is not None and instance.state is not ProcessState.FAILED:
+        instance.state = ProcessState.DEGRADED
 
 
 def _mark_terminal_failure(
@@ -1788,8 +1786,6 @@ def _mark_terminal_failure(
         coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
         for generation in _generations_locked(coordinator):
             generation.expected_exit.set()
-        if instance is not None:
-            instance.state = ProcessState.FAILED
         _notify_lifecycle_locked(coordinator)
     finally:
         _release_lifecycle(coordinator)
@@ -2036,7 +2032,7 @@ def _cancel_all_lsp_process(instance: LspProcess, reason: str) -> None:
     coordinator = instance._coordinator
     _acquire_lifecycle(coordinator, deadline)
     try:
-        if instance.state is ProcessState.FAILED:
+        if coordinator.terminal_outcome == "failure":
             return
         generation = coordinator.active
         if generation is None or generation.protocol is None:
@@ -2129,21 +2125,32 @@ def _ensure_failure_evidence(
     instance: LspProcess | None,
     coordinator: _LifecycleCoordinator,
     code: str,
+    deadline: float,
 ) -> None:
-    owner = coordinator.owner_directory
-    if owner is None:
-        raise RuntimeError("LSP failure evidence owner is unavailable")
-    terminal_code = coordinator.terminal_code
-    if terminal_code is None or code != terminal_code:
-        raise RuntimeError("LSP failure evidence code does not match terminal identity")
-    identity = coordinator.failure_evidence_identity
-    if identity is None:
-        identity = _failure_identity(instance, coordinator, terminal_code)
+    result = coordinator.cleanup_result
+    _acquire_lifecycle(coordinator, deadline, allow_expired=True)
+    try:
+        if result.evidence == "success":
+            return
+        owner = coordinator.owner_directory
+        if owner is None:
+            raise RuntimeError("LSP failure evidence owner is unavailable")
+        terminal_code = coordinator.terminal_code
+        if terminal_code is None or code != terminal_code:
+            raise RuntimeError("LSP failure evidence code does not match terminal identity")
+        identity = coordinator.failure_evidence_identity
         if identity is None:
-            raise RuntimeError("LSP failure evidence generation identity is unavailable")
-        coordinator.failure_evidence_identity = identity
-    if identity.code != terminal_code:
-        raise RuntimeError("LSP failure evidence identity is not terminal-code exact")
+            identity = _failure_identity(instance, coordinator, terminal_code)
+            if identity is None:
+                raise RuntimeError(
+                    "LSP failure evidence generation identity is unavailable"
+                )
+            coordinator.failure_evidence_identity = identity
+        if identity.code != terminal_code:
+            raise RuntimeError("LSP failure evidence identity is not terminal-code exact")
+    finally:
+        _release_lifecycle(coordinator)
+
     try:
         _write_failure_record(
             owner,
@@ -2161,6 +2168,20 @@ def _ensure_failure_evidence(
             generation_nonce=identity.generation_nonce,
             pid=identity.pid,
         )
+
+    _acquire_lifecycle(coordinator, deadline, allow_expired=True)
+    try:
+        if (
+            coordinator.terminal_code != identity.code
+            or coordinator.failure_evidence_identity != identity
+        ):
+            raise RuntimeError("LSP terminal identity changed during evidence write")
+        result.evidence = "success"
+        if instance is not None:
+            instance.state = ProcessState.FAILED
+        _notify_lifecycle_locked(coordinator)
+    finally:
+        _release_lifecycle(coordinator)
 
 
 def _failure_evidence_required(coordinator: _LifecycleCoordinator) -> bool:
@@ -2250,8 +2271,6 @@ def _drain_terminal_failures(
             ),
         )
         coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
-        if instance is not None:
-            instance.state = ProcessState.FAILED
         _notify_lifecycle_locked(coordinator)
     finally:
         _release_lifecycle(coordinator)
@@ -2283,8 +2302,6 @@ def _linearize_terminal_outcome_locked(
                     coordinator.pending_failure_code or _PROCESS_EXITED,
                 )
                 coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
-                if instance is not None:
-                    instance.state = ProcessState.FAILED
                 for generation in _generations_locked(coordinator):
                     generation.expected_exit.set()
             if commit_success and coordinator.terminal_outcome == "success":
@@ -2387,8 +2404,7 @@ def _drive_cleanup_owned(
         result.evidence = "not_applicable"
     elif terminal and outcome == "failure":
         try:
-            _ensure_failure_evidence(instance, coordinator, code)
-            result.evidence = "success"
+            _ensure_failure_evidence(instance, coordinator, code, deadline)
         except BaseException as error:
             _record_cleanup_error(result, current_errors, "evidence", error)
     elif terminal:
@@ -2540,8 +2556,8 @@ def _drive_cleanup_owned(
                     instance,
                     coordinator,
                     coordinator.terminal_code or failure_code or _PROCESS_EXITED,
+                    deadline,
                 )
-                result.evidence = "success"
             except BaseException as error:
                 _record_cleanup_error(result, current_errors, "evidence", error)
         evidence_ready = (
@@ -2569,8 +2585,8 @@ def _drive_cleanup_owned(
                             coordinator.terminal_code
                             or failure_code
                             or _PROCESS_EXITED,
+                            deadline,
                         )
-                        result.evidence = "success"
                     except BaseException as error:
                         _record_cleanup_error(
                             result, current_errors, "evidence", error
@@ -2619,8 +2635,8 @@ def _drive_cleanup_owned(
                     instance,
                     coordinator,
                     coordinator.terminal_code or failure_code or _PROCESS_EXITED,
+                    deadline,
                 )
-                result.evidence = "success"
             except BaseException as error:
                 _record_cleanup_error(result, current_errors, "evidence", error)
 

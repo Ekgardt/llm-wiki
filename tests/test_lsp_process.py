@@ -589,6 +589,29 @@ def test_application_error_and_caller_cancellation_never_restart(
         cancelled.close(time.monotonic() + 5)
 
 
+def test_cancel_all_ignores_terminal_failure_before_evidence_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle")
+    coordinator = process._coordinator
+    cancellations: list[str] = []
+    monkeypatch.setattr(process.protocol, "cancel_all", cancellations.append)
+
+    lsp_process._mark_terminal_failure(
+        process,
+        coordinator,
+        "injected_failure",
+        time.monotonic() + 1,
+    )
+    try:
+        assert process.state is ProcessState.DEGRADED
+        process.cancel_all("too late")
+        assert cancellations == []
+    finally:
+        process.close(time.monotonic() + 5)
+
+
 def test_expired_drain_restarts_without_request_traffic(
     tmp_path: Path,
 ) -> None:
@@ -3239,7 +3262,7 @@ def test_heartbeat_failure_during_cleanup_pending_is_stale_and_observable(
     assert not heartbeat.is_alive()
     assert lease_path.read_bytes() == stale_lease
     assert isinstance(coordinator.background_cleanup_error, OSError)
-    assert process.state is ProcessState.FAILED
+    assert process.state is ProcessState.DEGRADED
 
     tree_fault = False
     with pytest.raises(OSError, match="cleanup-pending heartbeat failed"):
@@ -3385,7 +3408,7 @@ def test_heartbeat_failure_leaves_running_before_blocked_recovery_can_continue(
         heartbeat.join(1)
         assert not heartbeat.is_alive()
         assert coordinator.phase is not lsp_process._LifecyclePhase.RUNNING
-        assert process.state is ProcessState.FAILED
+        assert process.state is ProcessState.DEGRADED
     finally:
         release_recovery.set()
         process.close(time.monotonic() + 5)
@@ -3608,6 +3631,122 @@ def test_posix_lease_publish_failure_preserves_previous_bytes_and_no_temp(
     owner.close()
 
 
+def test_successful_failure_evidence_is_published_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle")
+    coordinator = process._coordinator
+    write_failure = lsp_process._write_failure_record
+    publications = 0
+
+    def count_publication(*args: object, **kwargs: object) -> None:
+        nonlocal publications
+        publications += 1
+        write_failure(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(lsp_process, "_write_failure_record", count_publication)
+    try:
+        process._terminal_failure("injected_failure", time.monotonic() + 5)
+    finally:
+        monkeypatch.setattr(lsp_process, "_write_failure_record", write_failure)
+        if lsp_process._coordinator_has_ownership(coordinator):
+            process.close(time.monotonic() + 5)
+
+    assert publications == 1
+    assert coordinator.cleanup_result.evidence == "success"
+
+
+def test_failed_state_and_waiter_notification_follow_durable_failure_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle")
+    coordinator = process._coordinator
+    owner = coordinator.owner_directory
+    heartbeat = coordinator.heartbeat_thread
+    assert owner is not None and heartbeat is not None
+    write_failure = lsp_process._write_failure_record
+    write_lease = lsp_process._OwnerDirectory.write_lease
+    evidence_started = threading.Event()
+    release_evidence = threading.Event()
+    heartbeat_wrote = threading.Event()
+    waiter_ready = threading.Event()
+    waiter_finished = threading.Event()
+    waiter_results: list[bool] = []
+    cleanup_errors: list[BaseException] = []
+
+    def block_evidence(*args: object, **kwargs: object) -> None:
+        evidence_started.set()
+        assert release_evidence.wait(3)
+        write_failure(*args, **kwargs)  # type: ignore[arg-type]
+
+    def observe_heartbeat(current: object, record: object) -> None:
+        if (
+            current is owner
+            and threading.current_thread() is heartbeat
+            and evidence_started.is_set()
+            and not release_evidence.is_set()
+        ):
+            heartbeat_wrote.set()
+        write_lease(current, record)  # type: ignore[arg-type]
+
+    def wait_for_failed() -> None:
+        with coordinator.condition:
+            waiter_ready.set()
+            waiter_results.append(
+                coordinator.condition.wait_for(
+                    lambda: process.state is ProcessState.FAILED,
+                    timeout=3,
+                )
+            )
+        waiter_finished.set()
+
+    def fail_terminally() -> None:
+        try:
+            process._terminal_failure("injected_failure", time.monotonic() + 5)
+        except BaseException as error:
+            cleanup_errors.append(error)
+
+    monkeypatch.setattr(lsp_process, "_write_failure_record", block_evidence)
+    monkeypatch.setattr(lsp_process._OwnerDirectory, "write_lease", observe_heartbeat)
+    waiter = threading.Thread(target=wait_for_failed)
+    cleanup = threading.Thread(target=fail_terminally)
+    waiter.start()
+    assert waiter_ready.wait(1)
+    cleanup.start()
+    try:
+        assert evidence_started.wait(2), cleanup_errors
+        assert coordinator.phase is lsp_process._LifecyclePhase.STOPPING_FAILURE
+        assert process.state is ProcessState.DEGRADED
+        assert waiter_finished.wait(0.2) is False
+        assert not (process.owner_root / "failure.json").exists()
+        assert (process.owner_root / "lease.json").is_file()
+        coordinator.heartbeat_wake.set()
+        assert heartbeat_wrote.wait(1)
+    finally:
+        release_evidence.set()
+        cleanup.join(5)
+        waiter.join(5)
+        monkeypatch.setattr(lsp_process, "_write_failure_record", write_failure)
+        if lsp_process._coordinator_has_ownership(coordinator):
+            process.close(time.monotonic() + 5)
+
+    assert not cleanup.is_alive()
+    assert not waiter.is_alive()
+    assert cleanup_errors == []
+    assert waiter_results == [True]
+    assert process.state is ProcessState.FAILED
+    failure = json.loads((process.owner_root / "failure.json").read_bytes())
+    lsp_process._validate_failure_record(
+        failure,
+        code="injected_failure",
+        owner_nonce=process.owner_nonce,
+        generation_nonce=process.generation_nonce,
+        pid=process.process.pid,
+    )
+
+
 def test_failure_evidence_write_fault_is_observable_and_tree_cleanup_continues(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3635,10 +3774,12 @@ def test_failure_evidence_write_fault_is_observable_and_tree_cleanup_continues(
     assert generation is None or generation.tree is None or generation.process.poll() is not None
     assert coordinator.cleanup_result.evidence == "failed"
     assert coordinator.cleanup_result.ownership_pending is True
+    assert process.state is ProcessState.DEGRADED
     assert (process.owner_root / "lease.json").is_file()
 
     fault_enabled = False
     process.close(time.monotonic() + 5)
+    assert process.state is ProcessState.FAILED
     assert json.loads(failure.read_bytes())["code"] == "injected_failure"
     assert not (process.owner_root / "lease.json").exists()
 
