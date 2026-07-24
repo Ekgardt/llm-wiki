@@ -79,7 +79,7 @@ def test_spawn_owns_a_real_descendant_and_terminate_leaves_no_surviving_pid(
     assert not _pid_alive(descendant_pid)
 
 
-def test_close_is_idempotent_and_kills_the_owned_tree(tmp_path: Path) -> None:
+def test_close_is_release_only_and_retains_a_live_owned_tree(tmp_path: Path) -> None:
     tree = ProcessTree.spawn(
         _command("--spawn-descendant", "--sleep-seconds", "30"),
         cwd=tmp_path,
@@ -87,9 +87,16 @@ def test_close_is_idempotent_and_kills_the_owned_tree(tmp_path: Path) -> None:
     )
     descendant_pid = _descendant(tree)
 
+    with pytest.raises(RuntimeError, match="live|reaped|empty"):
+        tree.close()
+
+    assert tree.process_group is not None or tree.windows_job is not None
+    assert tree.process.poll() is None
+    assert _pid_alive(descendant_pid)
+
+    tree.terminate(deadline=time.monotonic() + 5)
     tree.close()
     tree.close()
-    tree.process.wait(timeout=5)
 
     deadline = time.monotonic() + 2
     while _pid_alive(descendant_pid) and time.monotonic() < deadline:
@@ -119,7 +126,7 @@ def test_terminate_cleans_descendant_after_direct_leader_already_exited(
         tree.close()
 
 
-def test_close_cleans_descendant_after_direct_leader_already_exited(
+def test_close_retains_group_until_descendant_after_exited_leader_is_gone(
     tmp_path: Path,
 ) -> None:
     tree = ProcessTree.spawn(
@@ -131,6 +138,11 @@ def test_close_cleans_descendant_after_direct_leader_already_exited(
     tree.process.wait(timeout=5)
     assert _pid_alive(descendant_pid)
 
+    with pytest.raises(RuntimeError, match="live|empty"):
+        tree.close()
+
+    assert tree.process_group is not None or tree.windows_job is not None
+    tree.terminate(deadline=time.monotonic() + 5)
     tree.close()
 
     deadline = time.monotonic() + 2
@@ -230,12 +242,123 @@ def test_assignment_failure_still_kills_child_when_job_close_raises(
         "_close_windows_handle",
         lambda _job: (_ for _ in ()).throw(RuntimeError("job close failed")),
     )
+    monkeypatch.setattr(lsp_process_tree, "_job_active_processes", lambda _job: 0)
 
-    with pytest.raises(OSError, match="assignment failed"):
+    with pytest.raises(lsp_process_tree._ProcessTreeSpawnError) as raised:
         ProcessTree.spawn(_command(), cwd=tmp_path, env=dict(os.environ))
 
+    assert isinstance(raised.value.__cause__, OSError)
+    assert "assignment failed" in str(raised.value.__cause__)
+    assert raised.value.tree.windows_job == 17
+    assert any("job close failed" in str(error) for error in raised.value.errors)
     assert child.kill_calls == 1
     assert child.wait_calls == 1
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows pre-child Job ownership")
+def test_popen_failure_retains_job_when_job_close_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(lsp_process_tree, "_create_windows_job", lambda: 19)
+    monkeypatch.setattr(
+        lsp_process_tree.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("popen failed")),
+    )
+    monkeypatch.setattr(
+        lsp_process_tree,
+        "_close_windows_handle",
+        lambda _job: (_ for _ in ()).throw(OSError("job close failed")),
+    )
+
+    with pytest.raises(lsp_process_tree._ProcessTreeSpawnError) as raised:
+        ProcessTree.spawn(_command(), cwd=tmp_path, env=dict(os.environ))
+
+    assert isinstance(raised.value.__cause__, OSError)
+    assert "popen failed" in str(raised.value.__cause__)
+    assert raised.value.tree is None
+    assert raised.value.windows_job == 19
+    assert any("job close failed" in str(error) for error in raised.value.errors)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job setup ownership")
+def test_job_configuration_failure_retains_job_when_close_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Kernel:
+        @staticmethod
+        def CreateJobObjectW(_security: object, _name: object) -> int:
+            return 41
+
+        @staticmethod
+        def SetInformationJobObject(
+            _job: int,
+            _kind: int,
+            _information: object,
+            _size: int,
+        ) -> int:
+            return 0
+
+        @staticmethod
+        def CloseHandle(_job: int) -> int:
+            return 0
+
+    monkeypatch.setattr(lsp_process_tree, "_KERNEL32", Kernel())
+    monkeypatch.setattr(lsp_process_tree.ctypes, "get_last_error", lambda: 5)
+
+    with pytest.raises(lsp_process_tree._ProcessTreeSpawnError) as raised:
+        lsp_process_tree._create_windows_job()
+
+    assert raised.value.tree is None
+    assert raised.value.windows_job == 41
+    assert len(raised.value.errors) == 2
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows final child ownership proof")
+def test_setup_rollback_retains_tree_when_final_child_poll_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class Child:
+        pid = 9191
+        stdin = None
+        stdout = None
+        stderr = None
+
+        @staticmethod
+        def poll() -> int:
+            raise OSError("final poll failed")
+
+    child = Child()
+    monkeypatch.setattr(lsp_process_tree, "_create_windows_job", lambda: 43)
+    monkeypatch.setattr(
+        lsp_process_tree.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: child,
+    )
+    monkeypatch.setattr(
+        lsp_process_tree,
+        "_assign_windows_process",
+        lambda _job, _process: (_ for _ in ()).throw(OSError("assignment failed")),
+    )
+    monkeypatch.setattr(
+        ProcessTree,
+        "terminate",
+        lambda self, *, deadline: None,
+    )
+
+    def release_job(tree: ProcessTree) -> None:
+        tree.windows_job = None
+
+    monkeypatch.setattr(ProcessTree, "close", release_job)
+
+    with pytest.raises(lsp_process_tree._ProcessTreeSpawnError) as raised:
+        ProcessTree.spawn(_command(), cwd=tmp_path, env=dict(os.environ))
+
+    assert raised.value.tree is not None
+    assert raised.value.tree.process is child
+    assert any("final poll failed" in str(error) for error in raised.value.errors)
 
 
 @pytest.mark.parametrize("deadline", [float("nan"), float("inf"), True, "later"])
@@ -250,5 +373,252 @@ def test_terminate_rejects_invalid_deadline_without_releasing_tree(
             tree.terminate(deadline=deadline)  # type: ignore[arg-type]
         assert tree.process.poll() is None
     finally:
+        tree.terminate(deadline=time.monotonic() + 5)
         tree.close()
-        tree.process.wait(timeout=5)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group algorithm")
+def test_posix_wait_reaps_zombie_leader_before_each_group_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    probes = iter([True, False, False])
+
+    class ZombieLeader:
+        pid = 4242
+
+        def poll(self) -> int:
+            events.append("poll")
+            return 0
+
+    def killpg(_group: int, sig: int) -> None:
+        if sig == 0:
+            events.append("probe")
+            if not next(probes):
+                raise ProcessLookupError
+        else:
+            events.append(f"signal:{sig}")
+
+    monkeypatch.setattr(lsp_process_tree.os, "killpg", killpg)
+    monkeypatch.setattr(lsp_process_tree.time, "sleep", lambda _seconds: None)
+    tree = ProcessTree(ZombieLeader(), None, 4242)  # type: ignore[arg-type]
+
+    tree.terminate(deadline=time.monotonic() + 1)
+
+    probe_indexes = [index for index, event in enumerate(events) if event == "probe"]
+    assert probe_indexes
+    assert all(events[index - 1] == "poll" for index in probe_indexes)
+    assert tree.process_group == 4242
+    tree.close()
+    assert tree.process_group is None
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows suspended process contract")
+@pytest.mark.parametrize("previous_count", [0, 1, 2, 0xFFFFFFFF])
+def test_windows_resume_accepts_only_previous_suspend_count_one(
+    monkeypatch: pytest.MonkeyPatch,
+    previous_count: int,
+) -> None:
+    import ctypes
+
+    pid = 4242
+
+    class Kernel:
+        @staticmethod
+        def CreateToolhelp32Snapshot(_flags: int, _pid: int) -> int:
+            return 11
+
+        @staticmethod
+        def Thread32First(_snapshot: int, pointer: object) -> int:
+            entry = ctypes.cast(
+                pointer, ctypes.POINTER(lsp_process_tree._ThreadEntry32)
+            ).contents
+            entry.owner_process_id = pid
+            entry.thread_id = 22
+            return 1
+
+        @staticmethod
+        def Thread32Next(_snapshot: int, _pointer: object) -> int:
+            return 0
+
+        @staticmethod
+        def OpenThread(_access: int, _inherit: bool, _thread_id: int) -> int:
+            return 33
+
+        @staticmethod
+        def ResumeThread(_thread: int) -> int:
+            return previous_count
+
+    monkeypatch.setattr(lsp_process_tree, "_KERNEL32", Kernel())
+    monkeypatch.setattr(lsp_process_tree, "_close_windows_handle", lambda _handle: None)
+
+    if previous_count == 1:
+        lsp_process_tree._resume_windows_process(pid)
+    else:
+        with pytest.raises((OSError, RuntimeError)):
+            lsp_process_tree._resume_windows_process(pid)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job cleanup contract")
+def test_windows_terminate_attempts_direct_kill_when_job_termination_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class Child:
+        pid = 5151
+
+        def __init__(self) -> None:
+            self.alive = True
+
+        def poll(self) -> int | None:
+            calls.append("poll")
+            return None if self.alive else 1
+
+        def kill(self) -> None:
+            calls.append("kill")
+            self.alive = False
+
+        def wait(self, timeout: float | None = None) -> int:
+            calls.append("wait")
+            self.alive = False
+            return 1
+
+    class Kernel:
+        @staticmethod
+        def TerminateJobObject(_job: int, _code: int) -> int:
+            calls.append("terminate-job")
+            return 0
+
+    child = Child()
+    tree = ProcessTree(child, 17, None)  # type: ignore[arg-type]
+    monkeypatch.setattr(lsp_process_tree, "_KERNEL32", Kernel())
+    monkeypatch.setattr(lsp_process_tree.ctypes, "get_last_error", lambda: 5)
+    monkeypatch.setattr(lsp_process_tree, "_job_active_processes", lambda _job: 0)
+
+    with pytest.raises(OSError):
+        tree.terminate(deadline=time.monotonic() + 1)
+
+    assert "terminate-job" in calls
+    assert "kill" in calls
+    assert "wait" in calls or child.poll() is not None
+    assert tree.windows_job == 17
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows independent cleanup matrix")
+@pytest.mark.parametrize("failure", ["terminate", "poll", "kill", "wait"])
+def test_windows_terminate_attempts_every_independent_step_after_error(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    calls: list[str] = []
+
+    class Child:
+        pid = 7171
+
+        def __init__(self) -> None:
+            self.alive = True
+            self.poll_calls = 0
+
+        def poll(self) -> int | None:
+            calls.append("poll")
+            self.poll_calls += 1
+            if failure == "poll" and self.poll_calls == 1:
+                raise OSError("poll failed")
+            return None if self.alive else 1
+
+        def kill(self) -> None:
+            calls.append("kill")
+            if failure == "kill":
+                raise OSError("kill failed")
+            self.alive = False
+
+        def wait(self, timeout: float | None = None) -> int:
+            calls.append("wait")
+            if failure == "wait":
+                raise OSError("wait failed")
+            self.alive = False
+            return 1
+
+    class Kernel:
+        @staticmethod
+        def TerminateJobObject(_job: int, _code: int) -> int:
+            calls.append("terminate-job")
+            if failure == "terminate":
+                raise OSError("job termination failed")
+            return 1
+
+    child = Child()
+    tree = ProcessTree(child, 29, None)  # type: ignore[arg-type]
+
+    def active_processes(_job: int) -> int:
+        calls.append("query-job")
+        return 0
+
+    monkeypatch.setattr(lsp_process_tree, "_KERNEL32", Kernel())
+    monkeypatch.setattr(lsp_process_tree, "_job_active_processes", active_processes)
+
+    with pytest.raises(OSError, match="failed"):
+        tree.terminate(deadline=time.monotonic() + 1)
+
+    assert calls.count("terminate-job") == 1
+    assert calls.count("kill") == 1
+    assert calls.count("wait") >= 1
+    assert calls.count("query-job") >= 1
+    assert tree.windows_job == 29
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job release contract")
+def test_windows_close_failure_retains_job_handle_for_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ReapedChild:
+        pid = 6161
+
+        @staticmethod
+        def poll() -> int:
+            return 0
+
+    tree = ProcessTree(ReapedChild(), 23, None)  # type: ignore[arg-type]
+    monkeypatch.setattr(lsp_process_tree, "_job_active_processes", lambda _job: 0)
+    monkeypatch.setattr(
+        lsp_process_tree,
+        "_close_windows_handle",
+        lambda _job: (_ for _ in ()).throw(OSError("job close failed")),
+    )
+
+    with pytest.raises(OSError, match="job close failed"):
+        tree.close()
+
+    assert tree.windows_job == 23
+    monkeypatch.setattr(lsp_process_tree, "_close_windows_handle", lambda _job: None)
+    tree.close()
+    assert tree.windows_job is None
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job release observations")
+def test_windows_close_queries_job_when_direct_child_observation_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class Child:
+        pid = 8181
+
+        @staticmethod
+        def poll() -> int:
+            calls.append("poll")
+            raise OSError("poll failed")
+
+    def active_processes(_job: int) -> int:
+        calls.append("query-job")
+        return 0
+
+    tree = ProcessTree(Child(), 31, None)  # type: ignore[arg-type]
+    monkeypatch.setattr(lsp_process_tree, "_job_active_processes", active_processes)
+
+    with pytest.raises(OSError, match="poll failed"):
+        tree.close()
+
+    assert calls == ["poll", "query-job"]
+    assert tree.windows_job == 31

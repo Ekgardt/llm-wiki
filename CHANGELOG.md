@@ -34,7 +34,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   transactions/tasks/results, the 30-day undo window, and live owners.
 - Recorded the local-filesystem requirement, current `synchronous=FULL`/no-WAL
   policy, bounded defaults and CLI overrides, cooperating-writer CAS boundary, and
-  explicit non-goals. The suite now collects **3609 tests**.
+  explicit non-goals. The suite now collects **4396 tests**.
 - Added canonical `repository-scope/v1` binding for repositories, linked worktrees,
   checkout roots, Git common directories, and captured commits. Generation readers
   reject the wrong repository/worktree scope instead of returning cross-checkout
@@ -58,6 +58,10 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   pytest exit status and clean up spawned test processes/process trees on interruption.
   Legacy FTS, NumPy, and Lance caches remain readable fallback state; there is no
   daemon, automatic migration, or automatic legacy-cache removal.
+- Centralized LSP lifecycle transitions in one coordinator with serialized restart,
+  heartbeat, and cleanup ownership. Process-tree release is proof-based on Windows and
+  POSIX; protocol, pipe, lease, evidence, and owner handles remain retryable until their
+  owners are confirmed stopped.
 
 ## [4.0.0] — Unreleased
 
@@ -99,7 +103,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - **SessionStart impact advisory** — stale wiki pages from code changes.
 - **MCP config in install scripts** — Claude Code + OpenCode auto-config.
 - **Optional extras** — `hybrid`, `code-graph`, `mcp-server`, `reranker`, `full`.
-- **3609 tests**.
+- **4396 tests**.
 
 ## [3.4.0] — 2026-07-11
 

@@ -363,7 +363,7 @@ def test_architecture_no_recall_at_2():
     assert "legacy vectors.json" not in search_source
 
     contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
-    assert "3609 tests collected" in contributing
+    assert "4396 tests collected" in contributing
 
     integrations = (ROOT / "integrations" / "README.md").read_text(encoding="utf-8")
     assert "installer baseline" in integrations.casefold()

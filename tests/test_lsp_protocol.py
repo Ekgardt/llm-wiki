@@ -864,6 +864,36 @@ def test_constructor_startup_wait_failure_retains_no_owner_threads(
     } == baseline
 
 
+def test_constructor_failure_retains_blocked_owner_for_cleanup_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reader = _UninterruptibleReader()
+    writer = _BlockingWriter(block_after=100)
+
+    def fail_wait(_event: threading.Event, _owner_name: str) -> None:
+        raise RuntimeError("startup wait failed")
+
+    monkeypatch.setattr(LspProtocol, "_wait_owner_started", staticmethod(fail_wait))
+    monkeypatch.setattr(lsp_protocol, "_OWNER_JOIN_SECONDS", 0.02)
+    try:
+        with pytest.raises(RuntimeError) as raised:
+            _protocol_with_streams(
+                reader,
+                writer,
+                generation_nonce="constructor-blocked-owner",
+            )
+
+        error = raised.value
+        assert isinstance(error, lsp_protocol._ProtocolStartupCleanupError)
+        protocol = error.protocol
+        assert protocol.reader_thread.is_alive()
+    finally:
+        reader.released.set()
+    protocol.close(time.monotonic() + 1)
+    assert not protocol.reader_thread.is_alive()
+    assert not protocol.writer_thread.is_alive()
+
+
 class _BlockingReader:
     def __init__(self) -> None:
         self.started = threading.Event()
@@ -1881,3 +1911,116 @@ def test_expired_drain_keys_are_validated_read_only_and_sorted() -> None:
     with pytest.raises(ValueError):
         protocol.expired_drain_keys(float("inf"))
     protocol.close()
+
+
+def test_finish_after_process_exit_completes_pending_immediately_and_clears_it() -> None:
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=100)
+    protocol = _protocol_with_streams(reader, writer)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(
+            protocol.request,
+            "pending-at-exit",
+            {},
+            deadline=time.monotonic() + 5,
+        )
+        assert writer.started.wait(1) is False
+        deadline = time.monotonic() + 1
+        while not writer.frames and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert writer.frames
+
+        protocol._finish_io_after_process_exit(time.monotonic() + 1)
+
+        with pytest.raises(ProtocolViolation, match="closed"):
+            pending.result(timeout=0.2)
+    assert protocol.pending_count == 0
+    assert not protocol.reader_thread.is_alive()
+    assert not protocol.writer_thread.is_alive()
+
+
+def test_protocol_cleanup_timeout_is_retryable_after_blocked_owner_releases() -> None:
+    reader = _UninterruptibleReader()
+    protocol = _protocol_with_streams(reader, _BlockingWriter(block_after=100))
+    assert reader.started.wait(1)
+
+    with pytest.raises(TimeoutError, match="protocol owner"):
+        protocol.close(time.monotonic() + 0.02)
+
+    assert protocol.reader_thread.is_alive()
+    reader.released.set()
+    protocol.close(time.monotonic() + 1)
+    assert not protocol.reader_thread.is_alive()
+    assert not protocol.writer_thread.is_alive()
+
+
+def test_protocol_close_clears_all_queued_write_ownership_after_join() -> None:
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=0)
+    protocol = _protocol_with_streams(reader, writer)
+    protocol._write_message({"jsonrpc": "2.0", "method": "queued/one"})
+    assert writer.started.wait(1)
+    protocol._write_message({"jsonrpc": "2.0", "method": "queued/two"})
+    protocol._write_message({"jsonrpc": "2.0", "method": "queued/three"})
+
+    protocol.close(time.monotonic() + 1)
+
+    assert protocol._write_tasks == []
+    assert protocol._ordinary_queued == 0
+    assert protocol._control_queued == 0
+    assert protocol._write_queue.empty()
+    assert not protocol.reader_thread.is_alive()
+    assert not protocol.writer_thread.is_alive()
+
+
+def test_process_cleanup_stop_wakes_pending_before_blocked_owners_release() -> None:
+    reader = _UninterruptibleReader()
+    writer = _BlockingWriter(block_after=0)
+    protocol = _protocol_with_streams(reader, writer)
+    assert reader.started.wait(1)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(
+            protocol.request,
+            "blocked-during-cleanup",
+            {},
+            deadline=time.monotonic() + 5,
+        )
+        assert writer.started.wait(1)
+        protocol._stop_io_for_process_cleanup()
+
+        with pytest.raises(ProtocolViolation, match="closed"):
+            pending.result(timeout=0.2)
+        assert protocol.pending_count == 0
+        assert protocol.reader_thread.is_alive()
+        assert protocol.writer_thread.is_alive()
+
+        reader.released.set()
+        writer.released.set()
+    protocol._finish_io_after_process_exit(time.monotonic() + 1)
+    assert not protocol.reader_thread.is_alive()
+    assert not protocol.writer_thread.is_alive()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows synchronous I/O interruption")
+def test_windows_cleanup_never_reopens_an_owner_by_recyclable_native_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ctypes
+
+    reader = _BlockingReader()
+    protocol = _protocol_with_streams(reader, _BlockingWriter(block_after=100))
+    assert reader.started.wait(1)
+
+    monkeypatch.setattr(
+        ctypes,
+        "WinDLL",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("cleanup reopened a thread by native ID")
+        ),
+    )
+
+    protocol.close(time.monotonic() + 1)
+    assert not protocol.reader_thread.is_alive()
+    assert not protocol.writer_thread.is_alive()

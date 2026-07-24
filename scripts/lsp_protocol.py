@@ -14,6 +14,32 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, BinaryIO
 
+if os.name == "nt":
+    import ctypes
+    from ctypes import wintypes
+
+    _ERROR_NOT_FOUND = 1168
+    _DUPLICATE_SAME_ACCESS = 0x00000002
+    _KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _KERNEL32.GetCurrentProcess.argtypes = ()
+    _KERNEL32.GetCurrentProcess.restype = wintypes.HANDLE
+    _KERNEL32.GetCurrentThread.argtypes = ()
+    _KERNEL32.GetCurrentThread.restype = wintypes.HANDLE
+    _KERNEL32.DuplicateHandle.argtypes = (
+        wintypes.HANDLE,
+        wintypes.HANDLE,
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.DWORD,
+        wintypes.BOOL,
+        wintypes.DWORD,
+    )
+    _KERNEL32.DuplicateHandle.restype = wintypes.BOOL
+    _KERNEL32.CancelSynchronousIo.argtypes = (wintypes.HANDLE,)
+    _KERNEL32.CancelSynchronousIo.restype = wintypes.BOOL
+    _KERNEL32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    _KERNEL32.CloseHandle.restype = wintypes.BOOL
+
 MAX_FRAME_BYTES = 8 * 1024 * 1024
 MAX_HEADER_BYTES = 8 * 1024
 MAX_PENDING_REQUESTS = 32
@@ -77,6 +103,19 @@ class RequestCancelled(RuntimeError):
 
 class PendingRequestLimitExceeded(RuntimeError):
     """The connection already has the maximum number of active requests."""
+
+
+class _ProtocolStartupCleanupError(RuntimeError):
+    """Protocol construction failed while an I/O owner remains retryable."""
+
+    def __init__(
+        self,
+        protocol: LspProtocol,
+        errors: tuple[BaseException, ...],
+    ) -> None:
+        super().__init__("LSP protocol startup cleanup retains ownership")
+        self.protocol = protocol
+        self.errors = errors
 
 
 @dataclass(slots=True)
@@ -460,6 +499,12 @@ class LspProtocol:
         self._ordinary_queued = 0
         self._control_queued = 0
         self._write_tasks: list[_WriteTask] = []
+        self._owner_handle_lock = threading.Lock()
+        self._reader_os_handle: int | None = None
+        self._writer_os_handle: int | None = None
+        self._owner_start_errors: dict[str, BaseException] = {}
+        self._owner_interrupt_errors: dict[str, BaseException] = {}
+        self._owner_release_errors: dict[str, BaseException] = {}
         self.stdout_reader_owner: int | None = None
         self.stdin_writer_owner: int | None = None
         self.writer_thread = threading.Thread(
@@ -477,7 +522,8 @@ class LspProtocol:
             self.reader_thread.start()
             self._wait_owner_started(self._writer_started, "writer")
             self._wait_owner_started(self._reader_started, "reader")
-        except BaseException:
+            self._raise_owner_start_error()
+        except BaseException as startup_error:
             self._io_stopped.set()
             try:
                 self._write_queue.put_nowait(None)
@@ -488,9 +534,17 @@ class LspProtocol:
                     self._cancel_owner_io(owner)
             self._interrupt_stream(self._reader)
             self._interrupt_stream(self._writer)
+            cleanup_deadline = time.monotonic() + _OWNER_JOIN_SECONDS
+            cleanup_errors: list[BaseException] = []
             for owner in (self.reader_thread, self.writer_thread):
-                if owner.ident is not None or owner in threading.enumerate():
-                    self._join_partially_started_owner(owner)
+                try:
+                    self._join_partially_started_owner(owner, cleanup_deadline)
+                except BaseException as cleanup_error:
+                    cleanup_errors.append(cleanup_error)
+            if cleanup_errors:
+                raise _ProtocolStartupCleanupError(
+                    self, tuple(cleanup_errors)
+                ) from startup_error
             raise
 
     @property
@@ -647,45 +701,55 @@ class LspProtocol:
         elif not math.isfinite(deadline):
             raise ValueError("deadline must be finite")
         deadline = float(deadline)
-        with self._state_lock:
-            first_close = not self._closed
-            self._closed = True
-            pending_items = tuple(self._pending.items()) if first_close else ()
-            pending = tuple(request for _key, request in pending_items)
-            if first_close:
-                closed_error = ProtocolViolation("LSP protocol is closed")
-                closed_at = time.monotonic()
-                for key, request in pending_items:
-                    self._commit_due_locked(
-                        key, request, closed_at, source="transport"
-                    )
-                    if request.terminal is None:
-                        request.terminal = "closed"
-                        request.terminal_at = closed_at
-                        request.terminal_source = "transport"
-                        request.terminal_error = closed_error
-                self._pending.clear()
-            writes = tuple(self._write_tasks) if first_close else ()
-        if first_close:
-            for request in pending:
-                request.completed.set()
-            for task in writes:
-                if task.error is None:
-                    task.error = closed_error
-                task.completed.set()
-            self._io_stopped.set()
-            self._cancel_owner_io(self.reader_thread)
-            self._cancel_owner_io(self.writer_thread)
-            self._interrupt_stream(self._reader)
-            self._interrupt_stream(self._writer)
-            try:
-                self._write_queue.put_nowait(None)
-            except queue.Full:
-                pass
+        self._close_logically()
+        self._io_stopped.set()
+        self._cancel_owner_io(self.reader_thread)
+        self._cancel_owner_io(self.writer_thread)
+        self._interrupt_stream(self._reader)
+        self._interrupt_stream(self._writer)
+        try:
+            self._write_queue.put_nowait(None)
+        except queue.Full:
+            pass
         self._join_owners(deadline)
+        with self._state_lock:
+            self._write_tasks.clear()
+            self._ordinary_queued = 0
+            self._control_queued = 0
+        while True:
+            try:
+                self._write_queue.get_nowait()
+            except queue.Empty:
+                break
+
+    def _close_logically(self) -> None:
+        with self._state_lock:
+            if self._closed:
+                return
+            self._closed = True
+            pending_items = tuple(self._pending.items())
+            pending = tuple(request for _key, request in pending_items)
+            closed_error = ProtocolViolation("LSP protocol is closed")
+            closed_at = time.monotonic()
+            for key, request in pending_items:
+                self._commit_due_locked(key, request, closed_at, source="transport")
+                if request.terminal is None:
+                    request.terminal = "closed"
+                    request.terminal_at = closed_at
+                    request.terminal_source = "transport"
+                    request.terminal_error = closed_error
+            self._pending.clear()
+            writes = tuple(self._write_tasks)
+        for request in pending:
+            request.completed.set()
+        for task in writes:
+            if task.error is None:
+                task.error = closed_error
+            task.completed.set()
 
     def _stop_io_for_process_cleanup(self) -> None:
         """Stop owned I/O without synchronously closing process pipes."""
+        self._close_logically()
         self._io_stopped.set()
         try:
             self._write_queue.put_nowait(None)
@@ -697,12 +761,7 @@ class LspProtocol:
 
     def _finish_io_after_process_exit(self, deadline: float) -> None:
         """Close process pipes and owners only after the child is confirmed dead."""
-        with self._state_lock:
-            self._closed = True
-        self._stop_io_for_process_cleanup()
-        self._interrupt_stream(self._reader)
-        self._interrupt_stream(self._writer)
-        self._join_owners(deadline)
+        self.close(deadline)
 
     def _allocate_request_id_locked(self) -> int:
         if self._next_request_id > _JSON_RPC_INTEGER_MAX:
@@ -718,8 +777,9 @@ class LspProtocol:
             raise ProtocolViolation("LSP protocol is closed")
 
     def _reader_loop(self) -> None:
+        if not self._register_owner("reader", self._reader_started):
+            return
         self.stdout_reader_owner = threading.get_ident()
-        self._reader_started.set()
         frame_reader = JsonRpcFrameReader(_OwnedReader(self._reader, self._io_stopped))
         try:
             while True:
@@ -743,10 +803,12 @@ class LspProtocol:
                 self._become_fatal("failed to read LSP stdout", cause=exc)
         finally:
             self._close_stream(self._reader)
+            self._release_owner("reader")
 
     def _writer_loop(self) -> None:
+        if not self._register_owner("writer", self._writer_started):
+            return
         self.stdin_writer_owner = threading.get_ident()
-        self._writer_started.set()
         try:
             while True:
                 task = self._write_queue.get()
@@ -821,6 +883,7 @@ class LspProtocol:
                 self._complete_write(task, None)
         finally:
             self._close_stream(self._writer)
+            self._release_owner("writer")
 
     def _dispatch_message(self, message: dict[str, Any], *, generation_nonce: str) -> None:
         if generation_nonce != self.generation_nonce:
@@ -1311,22 +1374,34 @@ class LspProtocol:
         except (OSError, ValueError):
             pass
 
-    @staticmethod
-    def _join_owner(owner: threading.Thread, deadline: float) -> None:
+    def _join_owner(self, owner: threading.Thread, deadline: float) -> None:
         if owner is threading.current_thread():
             return
         remaining = deadline - time.monotonic()
         if remaining > 0:
             owner.join(remaining)
         if owner.is_alive():
-            raise TimeoutError("LSP protocol owner did not stop before deadline")
+            error = TimeoutError("LSP protocol owner did not stop before deadline")
+            name = "reader" if owner is self.reader_thread else "writer"
+            with self._owner_handle_lock:
+                interruption = self._owner_interrupt_errors.get(name)
+            if interruption is not None:
+                error.__cause__ = interruption
+            raise error
+        name = "reader" if owner is self.reader_thread else "writer"
+        self._release_owner(name)
+        with self._owner_handle_lock:
+            self._owner_interrupt_errors.pop(name, None)
+            release_error = self._owner_release_errors.get(name)
+        if release_error is not None:
+            raise release_error
 
     def _join_owners(self, deadline: float) -> None:
-        first_error: TimeoutError | None = None
+        first_error: BaseException | None = None
         for owner in (self.reader_thread, self.writer_thread):
             try:
                 self._join_owner(owner, deadline)
-            except TimeoutError as exc:
+            except BaseException as exc:
                 first_error = first_error or exc
         if first_error is not None:
             raise first_error
@@ -1336,30 +1411,113 @@ class LspProtocol:
         if not event.wait(_OWNER_JOIN_SECONDS):
             raise RuntimeError(f"LSP {owner_name} owner did not start")
 
-    @staticmethod
-    def _join_partially_started_owner(owner: threading.Thread) -> None:
-        deadline = time.monotonic() + _OWNER_JOIN_SECONDS
-        while owner in threading.enumerate():
+    def _join_partially_started_owner(
+        self,
+        owner: threading.Thread,
+        deadline: float,
+    ) -> None:
+        while owner.ident is not None or owner in threading.enumerate():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if owner.is_alive():
+                    raise TimeoutError(
+                        "LSP protocol owner did not stop during startup cleanup"
+                    )
+                break
             try:
-                owner.join(max(0.0, deadline - time.monotonic()))
-                return
+                owner.join(remaining)
             except RuntimeError:
                 if time.monotonic() >= deadline:
-                    return
-                time.sleep(0.001)
+                    if owner.is_alive():
+                        raise TimeoutError(
+                            "LSP protocol owner did not stop during startup cleanup"
+                        )
+                    break
+                time.sleep(min(0.001, max(0.0, deadline - time.monotonic())))
+                continue
+            if owner.is_alive():
+                raise TimeoutError(
+                    "LSP protocol owner did not stop during startup cleanup"
+                )
+            break
+        name = "reader" if owner is self.reader_thread else "writer"
+        self._release_owner(name)
+        with self._owner_handle_lock:
+            release_error = self._owner_release_errors.get(name)
+        if release_error is not None:
+            raise release_error
 
-    @staticmethod
-    def _cancel_owner_io(owner: threading.Thread) -> None:
-        if os.name != "nt" or owner is threading.current_thread() or owner.native_id is None:
-            return
-        import ctypes
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.OpenThread.restype = ctypes.c_void_p
-        handle = kernel32.OpenThread(0x0001, False, owner.native_id)
-        if not handle:
-            return
+    def _register_owner(self, name: str, started: threading.Event) -> bool:
+        if os.name != "nt":
+            started.set()
+            return True
         try:
-            kernel32.CancelSynchronousIo(ctypes.c_void_p(handle))
-        finally:
-            kernel32.CloseHandle(ctypes.c_void_p(handle))
+            handle = _duplicate_current_thread_handle()
+        except BaseException as error:
+            with self._owner_handle_lock:
+                self._owner_start_errors[name] = error
+            started.set()
+            return False
+        with self._owner_handle_lock:
+            if name == "reader":
+                self._reader_os_handle = handle
+            else:
+                self._writer_os_handle = handle
+        started.set()
+        return True
+
+    def _raise_owner_start_error(self) -> None:
+        with self._owner_handle_lock:
+            errors = tuple(self._owner_start_errors.values())
+        if errors:
+            raise errors[0]
+
+    def _release_owner(self, name: str) -> None:
+        if os.name != "nt":
+            return
+        with self._owner_handle_lock:
+            handle = self._reader_os_handle if name == "reader" else self._writer_os_handle
+            if handle is None:
+                return
+            if not _KERNEL32.CloseHandle(handle):
+                self._owner_release_errors[name] = ctypes.WinError(ctypes.get_last_error())
+                return
+            self._owner_release_errors.pop(name, None)
+            if name == "reader":
+                self._reader_os_handle = None
+            else:
+                self._writer_os_handle = None
+
+    def _cancel_owner_io(self, owner: threading.Thread) -> None:
+        if os.name != "nt" or owner is threading.current_thread():
+            return
+        name = "reader" if owner is self.reader_thread else "writer"
+        with self._owner_handle_lock:
+            handle = self._reader_os_handle if name == "reader" else self._writer_os_handle
+            if handle is None:
+                return
+            if _KERNEL32.CancelSynchronousIo(handle):
+                self._owner_interrupt_errors.pop(name, None)
+                return
+            error_number = ctypes.get_last_error()
+            if error_number == _ERROR_NOT_FOUND:
+                self._owner_interrupt_errors.pop(name, None)
+                return
+            self._owner_interrupt_errors[name] = ctypes.WinError(error_number)
+
+
+if os.name == "nt":
+    def _duplicate_current_thread_handle() -> int:
+        process = _KERNEL32.GetCurrentProcess()
+        duplicated = wintypes.HANDLE()
+        if not _KERNEL32.DuplicateHandle(
+            process,
+            _KERNEL32.GetCurrentThread(),
+            process,
+            ctypes.byref(duplicated),
+            0,
+            False,
+            _DUPLICATE_SAME_ACCESS,
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return int(duplicated.value)

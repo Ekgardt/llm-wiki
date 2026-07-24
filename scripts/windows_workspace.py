@@ -621,14 +621,13 @@ def flush_directory(handle: int) -> bool:
     return False
 
 
-def replace_file(handle: int, parent: int, name: str) -> None:
-    """Atomically rename one held file relative to its retained parent handle."""
+def _rename_file(handle: int, parent: int, name: str, *, replace: bool) -> None:
     normalized = _component(name)
     encoded = normalized.encode("utf-16-le")
     size = _FileRenameInfo.file_name.offset + len(encoded)
     buffer = ctypes.create_string_buffer(size)
     information = _FileRenameInfo.from_buffer(buffer)
-    information.replace_if_exists = True
+    information.replace_if_exists = replace
     information.root_directory = parent
     information.file_name_length = len(encoded)
     ctypes.memmove(
@@ -641,7 +640,21 @@ def replace_file(handle: int, parent: int, name: str) -> None:
         handle, ctypes.byref(io_status), ctypes.byref(buffer), size, 10
     )
     if status < 0:
-        raise OSError(int(_API.status_to_error(status)), "could not replace Windows file")
+        error = int(_API.status_to_error(status))
+        if not replace and error in {80, 183}:
+            raise FileExistsError(error, f"Windows component already exists: {name}")
+        action = "replace" if replace else "publish"
+        raise OSError(error, f"could not {action} Windows file")
+
+
+def replace_file(handle: int, parent: int, name: str) -> None:
+    """Atomically replace one file relative to its retained parent handle."""
+    _rename_file(handle, parent, name, replace=True)
+
+
+def publish_file(handle: int, parent: int, name: str) -> None:
+    """Atomically publish one held file without replacing an existing name."""
+    _rename_file(handle, parent, name, replace=False)
 
 
 def delete_handle(handle: int) -> None:
@@ -671,6 +684,7 @@ __all__ = [
     "open_deletable_file",
     "open_directory_path",
     "open_file",
+    "publish_file",
     "read_chunks",
     "replace_file",
     "require_capability",

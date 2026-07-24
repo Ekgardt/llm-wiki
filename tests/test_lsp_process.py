@@ -26,6 +26,7 @@ from lsp_process import (
     lsp_environment,
 )
 from lsp_protocol import (
+    MAX_FRAME_BYTES,
     CancellationSource,
     JsonRpcResponseError,
     ProtocolViolation,
@@ -34,6 +35,43 @@ from lsp_protocol import (
 
 FAKE_SERVER = Path(__file__).with_name("fake_lsp_server.py").resolve()
 OWNER_NONCE = "a" * 32
+
+
+@pytest.fixture(autouse=True)
+def _no_lsp_lifecycle_owner_leaks(monkeypatch: pytest.MonkeyPatch):
+    started: list[LspProcess] = []
+    start = LspProcess.start.__func__
+
+    def tracked_start(
+        cls: type[LspProcess],
+        command: object,
+        *,
+        cwd: Path,
+        owner_root: Path,
+    ) -> LspProcess:
+        process = start(cls, command, cwd=cwd, owner_root=owner_root)
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(LspProcess, "start", classmethod(tracked_start))
+    existing = {
+        id(thread)
+        for thread in threading.enumerate()
+        if thread.name.startswith("lsp-")
+    }
+    yield
+    owned = [
+        process.owner_nonce
+        for process in started
+        if lsp_process._coordinator_has_ownership(process._coordinator)
+    ]
+    leaked = [
+        thread.name
+        for thread in threading.enumerate()
+        if thread.name.startswith("lsp-") and id(thread) not in existing
+    ]
+    assert owned == []
+    assert leaked == []
 
 
 def _command(*arguments: str) -> list[str]:
@@ -48,6 +86,12 @@ def _start(tmp_path: Path, *arguments: str) -> LspProcess:
 
 def _wait(process: LspProcess, seconds: float = 10) -> int:
     return process.wait_for_exit(time.monotonic() + seconds)
+
+
+def _expect_active_generation_exit(process: LspProcess) -> None:
+    generation = process._coordinator.active
+    assert generation is not None
+    generation.expected_exit.set()
 
 
 class _FakeTree:
@@ -143,6 +187,13 @@ def test_constants_states_and_public_dataclass_fields_are_exact() -> None:
         "last_used_monotonic",
         "restart_count",
     }
+
+
+def test_lifecycle_coordinator_uses_one_authority_lock_and_condition() -> None:
+    coordinator = lsp_process._LifecycleCoordinator(None)
+
+    assert coordinator.condition._lock is coordinator.lock
+    assert not hasattr(coordinator, "driver_lock")
 
 
 def test_live_lease_is_bounded_redacted_and_removed_after_graceful_close(
@@ -296,6 +347,9 @@ def test_second_fatal_failure_is_terminal_and_retains_bounded_evidence(
         "timestamp",
     }
     assert failure["code"] == "process_exited"
+    assert (process.owner_root / "lease.json").is_file()
+    assert process._coordinator.phase is lsp_process._LifecyclePhase.CLEANUP_PENDING
+    process.close(time.monotonic() + 5)
     assert not (process.owner_root / "lease.json").exists()
 
 
@@ -336,6 +390,8 @@ def test_idle_fatal_restarts_once_then_second_idle_fatal_is_terminal(
     assert process.state is ProcessState.FAILED
     assert process._tree is None
     assert (process.owner_root / "failure.json").is_file()
+    assert lease_path.is_file()
+    process.close(time.monotonic() + 5)
     assert not lease_path.exists()
 
 
@@ -382,6 +438,7 @@ def test_fatal_endings_leave_no_real_descendants_after_leader_exit(
     pids = [int(value) for value in pid_log.read_text(encoding="ascii").splitlines()]
     assert len(pids) == 2
     assert all(not _pid_alive(pid) for pid in pids)
+    process.close(time.monotonic() + 5)
 
 
 def test_application_error_and_caller_cancellation_never_restart(
@@ -569,7 +626,7 @@ def test_environment_requires_inherited_systemroot_on_windows() -> None:
 
 def test_child_receives_only_the_allowlisted_environment(tmp_path: Path) -> None:
     process = _start(tmp_path, "--report-environment")
-    process._closing = True
+    _expect_active_generation_exit(process)
     environment = process.request("environment", {}, deadline=time.monotonic() + 5)
     assert isinstance(environment, dict)
     assert set(environment) <= LSP_ENV_ALLOWLIST
@@ -617,15 +674,18 @@ def test_popen_uses_exact_safe_binary_pipe_arguments(
 def test_stderr_ring_retains_exact_last_four_mib_across_odd_chunks(tmp_path: Path) -> None:
     total = 5 * 1024 * 1024 + 17
     process = _start(tmp_path, "--stderr-bytes", str(total))
+    _expect_active_generation_exit(process)
     _wait(process, 15)
 
     expected = bytes(index % 251 for index in range(total - MAX_STDERR_BYTES, total))
     assert process.stderr_bytes() == expected
     assert len(process.stderr_bytes()) == MAX_STDERR_BYTES
+    process.close(time.monotonic() + 5)
 
 
 def test_zero_stderr_and_concurrent_snapshots_never_block(tmp_path: Path) -> None:
     process = _start(tmp_path, "--sleep-seconds", "2")
+    _expect_active_generation_exit(process)
     stop = threading.Event()
 
     def snapshot() -> None:
@@ -641,6 +701,7 @@ def test_zero_stderr_and_concurrent_snapshots_never_block(tmp_path: Path) -> Non
         thread.join(1)
         assert not thread.is_alive()
     assert process.stderr_bytes() == b""
+    process.close(time.monotonic() + 5)
 
 
 def test_each_start_has_independent_lowercase_hex_nonces(tmp_path: Path) -> None:
@@ -649,11 +710,13 @@ def test_each_start_has_independent_lowercase_hex_nonces(tmp_path: Path) -> None
         cwd=tmp_path,
         owner_root=tmp_path / ("a" * 32),
     )
+    _expect_active_generation_exit(first)
     second = LspProcess.start(
         _command("--sleep-seconds", "2"),
         cwd=tmp_path,
         owner_root=tmp_path / ("b" * 32),
     )
+    _expect_active_generation_exit(second)
     _wait(first)
     _wait(second)
     for process in (first, second):
@@ -737,7 +800,9 @@ def test_wait_for_exit_rejects_invalid_deadline(tmp_path: Path, deadline: object
     process = _start(tmp_path, "--sleep-seconds", "2")
     with pytest.raises((TypeError, ValueError)):
         process.wait_for_exit(deadline)  # type: ignore[arg-type]
+    _expect_active_generation_exit(process)
     _wait(process)
+    process.close(time.monotonic() + 5)
 
 
 def test_wait_for_exit_timeout_does_not_kill_process(tmp_path: Path) -> None:
@@ -745,14 +810,17 @@ def test_wait_for_exit_timeout_does_not_kill_process(tmp_path: Path) -> None:
     with pytest.raises(TimeoutError):
         process.wait_for_exit(time.monotonic() - 1)
     assert process.process.poll() is None
+    _expect_active_generation_exit(process)
     process.process.stdin.close()
     _wait(process)
+    process.close(time.monotonic() + 5)
 
 
 def test_request_delegates_token_and_updates_last_used(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     process = _start(tmp_path, "--echo")
+    _expect_active_generation_exit(process)
     source = CancellationSource()
     observed: list[tuple[object, object, float, object]] = []
     real_request = process.protocol.request
@@ -770,6 +838,7 @@ def test_request_delegates_token_and_updates_last_used(
     assert observed == [("echo", {"safe": True}, deadline, source.token)]
     assert process.last_used_monotonic >= before
     _wait(process)
+    process.close(time.monotonic() + 5)
 
 
 def test_exit_monitor_fails_all_pending_once_and_marks_failed(tmp_path: Path) -> None:
@@ -804,6 +873,7 @@ def test_exit_monitor_fails_all_pending_once_and_marks_failed(tmp_path: Path) ->
     )
     with pytest.raises(RuntimeError, match="exited"):
         process.request("later", {}, deadline=time.monotonic() + 1)
+    process.close(time.monotonic() + 5)
 
 
 @pytest.mark.parametrize("command", [[], [""], ["bad\0command"], "not-a-sequence"])
@@ -896,6 +966,120 @@ def test_stderr_thread_start_failure_retains_evidence_without_masking_error(
     assert "server_pid" in failure
 
 
+def test_protocol_startup_cleanup_owner_is_adopted_for_coordinator_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class RetainedProtocol:
+        def __init__(self) -> None:
+            self.released = False
+            self.stop_calls = 0
+            self.finish_calls = 0
+
+        def _stop_io_for_process_cleanup(self) -> None:
+            self.stop_calls += 1
+
+        def _finish_io_after_process_exit(self, _deadline: float) -> None:
+            self.finish_calls += 1
+            if not self.released:
+                raise TimeoutError("protocol startup owner blocked")
+
+    retained = RetainedProtocol()
+
+    def fail_protocol(*_args: object, **_kwargs: object) -> None:
+        error = lsp_process._ProtocolStartupCleanupError(
+            retained,  # type: ignore[arg-type]
+            (TimeoutError("protocol startup owner blocked"),),
+        )
+        raise error from RuntimeError("protocol startup failed")
+
+    monkeypatch.setattr(lsp_process, "LspProtocol", fail_protocol)
+    owner = tmp_path / OWNER_NONCE
+
+    with pytest.raises(lsp_process.StartupCleanupError) as raised:
+        LspProcess.start(_command(), cwd=tmp_path, owner_root=owner)
+
+    coordinator = raised.value.coordinator
+    assert coordinator is not None
+    generations = [
+        coordinator.active,
+        coordinator.candidate,
+        *coordinator.retired,
+    ]
+    assert any(
+        generation is not None and generation.protocol is retained
+        for generation in generations
+    )
+    assert retained.stop_calls == 1
+    assert retained.finish_calls == 1
+    assert coordinator.phase is lsp_process._LifecyclePhase.CLEANUP_PENDING
+
+    retained.released = True
+    errors = lsp_process._drive_cleanup(
+        None,
+        time.monotonic() + 5,
+        terminal=True,
+        failure_code="startup_failed",
+        coordinator_override=coordinator,
+    )
+    assert errors == []
+    assert not lsp_process._coordinator_has_ownership(coordinator)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows pre-child Job ownership")
+def test_process_startup_adopts_unattached_job_for_cleanup_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fault_enabled = True
+    close_calls: list[int] = []
+
+    def fail_spawn(*_args: object, **_kwargs: object) -> None:
+        error = lsp_process._lsp_process_tree._ProcessTreeSpawnError(
+            None,
+            (OSError("job close failed"),),
+            windows_job=37,
+        )
+        raise error from OSError("popen failed")
+
+    def close_job(job: int) -> None:
+        close_calls.append(job)
+        if fault_enabled:
+            raise OSError("job close failed")
+
+    monkeypatch.setattr(
+        lsp_process.ProcessTree,
+        "_spawn_with_deadline",
+        classmethod(lambda _cls, *args, **kwargs: fail_spawn(*args, **kwargs)),
+    )
+    monkeypatch.setattr(
+        lsp_process._lsp_process_tree,
+        "_close_windows_handle",
+        close_job,
+    )
+
+    with pytest.raises(lsp_process.StartupCleanupError) as raised:
+        LspProcess.start(_command(), cwd=tmp_path, owner_root=tmp_path / OWNER_NONCE)
+
+    coordinator = raised.value.coordinator
+    assert coordinator is not None and coordinator.candidate is not None
+    assert coordinator.candidate.windows_job == 37
+    assert coordinator.phase is lsp_process._LifecyclePhase.CLEANUP_PENDING
+    assert close_calls == [37]
+
+    fault_enabled = False
+    errors = lsp_process._drive_cleanup(
+        None,
+        time.monotonic() + 5,
+        terminal=True,
+        failure_code="startup_failed",
+        coordinator_override=coordinator,
+    )
+    assert errors == []
+    assert close_calls == [37, 37]
+    assert not lsp_process._coordinator_has_ownership(coordinator)
+
+
 @pytest.mark.parametrize(
     "name",
     ["owner", "A" * 32, "g" * 32, "a" * 31, "a" * 33],
@@ -927,7 +1111,9 @@ def test_owner_identity_matches_caller_derived_root_not_generation(
     assert process.generation_nonce == generation
     owner_record = json.loads((process.owner_root / "owner.json").read_bytes())
     assert owner_record["owner_nonce"] == OWNER_NONCE
+    _expect_active_generation_exit(process)
     _wait(process)
+    process.close(time.monotonic() + 5)
 
 
 @pytest.mark.parametrize("generated", [RuntimeError("generation nonce failed"), "invalid"])
@@ -1110,10 +1296,64 @@ def test_heartbeat_thread_start_failure_removes_live_lease_and_owned_threads(
     } == baseline
 
 
+def test_recovery_cannot_run_before_startup_final_fence_completes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    real_start_workers = lsp_process._start_lifecycle_workers
+    workers_started = threading.Event()
+    release_startup = threading.Event()
+    captured: list[LspProcess] = []
+    start_errors: list[BaseException] = []
+
+    def inject_fatal_before_final_fence(
+        instance: LspProcess,
+        deadline: float | None = None,
+    ) -> None:
+        real_start_workers(instance, deadline)
+        captured.append(instance)
+        instance.protocol._become_fatal("fatal during startup final fence")
+        workers_started.set()
+        assert release_startup.wait(3)
+
+    def start() -> None:
+        try:
+            _start(tmp_path, "--lifecycle")
+        except BaseException as error:
+            start_errors.append(error)
+
+    monkeypatch.setattr(
+        lsp_process,
+        "_start_lifecycle_workers",
+        inject_fatal_before_final_fence,
+    )
+    start_thread = threading.Thread(target=start)
+    start_thread.start()
+    assert workers_started.wait(3)
+    instance = captured[0]
+    coordinator = instance._coordinator
+    recovery_ran_before_final_fence = _coordinator_wait(
+        instance,
+        lambda: instance.restart_count != 0
+        or coordinator.phase is not lsp_process._LifecyclePhase.RUNNING,
+        timeout=0.2,
+    )
+    release_startup.set()
+    start_thread.join(5)
+
+    assert recovery_ran_before_final_fence is False
+    assert not start_thread.is_alive()
+    assert len(start_errors) == 1
+    assert isinstance(start_errors[0], RuntimeError)
+    assert json.loads((instance.owner_root / "failure.json").read_bytes())["code"] == (
+        "startup_failed"
+    )
+
+
 def test_startup_heartbeat_stop_timeout_still_runs_all_other_cleanup(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    captured: list[LspProcess] = []
+    captured: list[lsp_process._LifecycleCoordinator] = []
     real_verify = lsp_process._OwnerDirectory.verify_lexical_identity
     checks = 0
 
@@ -1124,8 +1364,14 @@ def test_startup_heartbeat_stop_timeout_still_runs_all_other_cleanup(
             raise RuntimeError("final startup fence failed")
         real_verify(owner)
 
-    def fail_heartbeat_stop(process: LspProcess, _deadline: float) -> None:
-        captured.append(process)
+    def fail_heartbeat_stop(
+        coordinator: lsp_process._LifecycleCoordinator,
+        _deadline: float,
+        *,
+        allow_expired: bool = False,
+    ) -> None:
+        del allow_expired
+        captured.append(coordinator)
         raise TimeoutError("heartbeat stop blocked")
 
     monkeypatch.setattr(
@@ -1133,50 +1379,49 @@ def test_startup_heartbeat_stop_timeout_still_runs_all_other_cleanup(
         "verify_lexical_identity",
         fail_after_heartbeat,
     )
-    monkeypatch.setattr(LspProcess, "_stop_heartbeat", fail_heartbeat_stop)
+    monkeypatch.setattr(lsp_process, "_stop_heartbeat_owner", fail_heartbeat_stop)
     owner = tmp_path / OWNER_NONCE
     started = time.monotonic()
 
     try:
-        with pytest.raises(TimeoutError, match="heartbeat stop blocked"):
+        with pytest.raises(lsp_process.StartupCleanupError) as raised:
             LspProcess.start(
                 _command("--sleep-seconds", "30"), cwd=tmp_path, owner_root=owner
             )
 
         assert time.monotonic() - started <= lsp_process._STARTUP_WAIT_SECONDS + 0.75
         assert len(captured) == 1
-        process = captured[0]
-        assert process.process.poll() is not None
-        assert not process.protocol.reader_thread.is_alive()
-        assert not process.protocol.writer_thread.is_alive()
-        assert process._owner_directory is not None
-        assert process._owner_directory._closed is True
+        assert isinstance(raised.value.__cause__, RuntimeError)
+        coordinator = captured[0]
+        assert any(
+            isinstance(item.error, TimeoutError)
+            for item in coordinator.cleanup_result.errors
+        )
+        assert all(
+            generation.process is None
+            for generation in [
+                coordinator.active,
+                coordinator.candidate,
+                *coordinator.retired,
+            ]
+            if generation is not None
+        )
+        assert coordinator.owner_directory is not None
+        assert coordinator.owner_directory._closed is False
         assert (owner / "failure.json").is_file()
         assert (owner / "lease.json").is_file()
     finally:
         if captured:
-            process = captured[0]
-            process._heartbeat_stop.set()
-            heartbeat = process._heartbeat_thread
+            coordinator = captured[0]
+            coordinator.heartbeat_stop.set()
+            coordinator.heartbeat_wake.set()
+            heartbeat = coordinator.heartbeat_thread
             if heartbeat is not None:
                 heartbeat.join(1)
-            tree = process._tree
-            if tree is not None:
-                try:
-                    tree.terminate(deadline=time.monotonic() + 1)
-                except (OSError, RuntimeError, TimeoutError):
-                    pass
-                try:
-                    tree.close()
-                except OSError:
-                    pass
-            try:
-                process.protocol.close(time.monotonic() + 1)
-            except (OSError, RuntimeError, TimeoutError):
-                pass
-            owner_directory = process._owner_directory
+            owner_directory = coordinator.owner_directory
             if owner_directory is not None:
                 try:
+                    owner_directory.remove_lease()
                     owner_directory.close()
                 except OSError:
                     pass
@@ -1187,11 +1432,11 @@ def test_restart_thread_start_failure_cleans_new_tree_and_becomes_terminal(
 ) -> None:
     process = _start(tmp_path, "--lifecycle")
     spawned: list[object] = []
-    real_spawn = lsp_process.ProcessTree.spawn
+    real_spawn = lsp_process.ProcessTree._spawn_with_deadline.__func__
     real_start = threading.Thread.start
 
-    def spawn(*args: object, **kwargs: object) -> object:
-        tree = real_spawn(*args, **kwargs)
+    def spawn(cls: object, *args: object, **kwargs: object) -> object:
+        tree = real_spawn(cls, *args, **kwargs)
         spawned.append(tree)
         return tree
 
@@ -1200,7 +1445,9 @@ def test_restart_thread_start_failure_cleans_new_tree_and_becomes_terminal(
             raise RuntimeError("restart stderr thread start failed")
         real_start(thread)
 
-    monkeypatch.setattr(lsp_process.ProcessTree, "spawn", spawn)
+    monkeypatch.setattr(
+        lsp_process.ProcessTree, "_spawn_with_deadline", classmethod(spawn)
+    )
     monkeypatch.setattr(threading.Thread, "start", fail_restart_stderr)
 
     with pytest.raises(RuntimeError, match="restart stderr thread start failed"):
@@ -1208,6 +1455,7 @@ def test_restart_thread_start_failure_cleans_new_tree_and_becomes_terminal(
 
     assert len(spawned) == 1
     assert spawned[0].process.poll() is not None
+    assert process.restart_count == 0
     assert process.state is ProcessState.FAILED
     assert json.loads((process.owner_root / "failure.json").read_bytes())["code"] == (
         "restart_failed"
@@ -1221,14 +1469,18 @@ def test_restart_spawn_failure_becomes_terminal_without_live_lease(
     process = _start(tmp_path, "--lifecycle")
     monkeypatch.setattr(
         lsp_process.ProcessTree,
-        "spawn",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("restart spawn failed")),
+        "_spawn_with_deadline",
+        classmethod(
+            lambda _cls, *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("restart spawn failed")
+            )
+        ),
     )
 
     with pytest.raises(OSError, match="restart spawn failed"):
         process.restart(time.monotonic() + 5)
 
-    assert process.restart_count == 1
+    assert process.restart_count == 0
     assert process.state is ProcessState.FAILED
     failure = json.loads((process.owner_root / "failure.json").read_bytes())
     assert failure["code"] == "restart_failed"
@@ -1268,6 +1520,8 @@ def test_terminal_lease_removal_failure_does_not_skip_tree_or_protocol_cleanup(
     assert not process.protocol.reader_thread.is_alive()
     assert not process.protocol.writer_thread.is_alive()
     assert process.state is ProcessState.FAILED
+    monkeypatch.setattr(lsp_process._OwnerDirectory, "remove_lease", real_remove)
+    process.close(time.monotonic() + 5)
 
 
 def test_terminal_failure_retains_lease_until_protocol_owners_are_proven_stopped(
@@ -1288,6 +1542,7 @@ def test_terminal_failure_retains_lease_until_protocol_owners_are_proven_stopped
     assert lease.is_file()
     monkeypatch.setattr(process.protocol, "close", close)
     process.protocol.close(time.monotonic() + 1)
+    process.close(time.monotonic() + 5)
 
 
 def test_heartbeat_stop_reports_deadline_with_live_owner_thread(
@@ -1307,10 +1562,10 @@ def test_shutdown_retains_lease_and_scratch_until_protocol_owners_are_proven_sto
     process = _start(tmp_path, "--lifecycle")
     owner = process.owner_root
     lease = owner / "lease.json"
-    finish = process.protocol._finish_io_after_process_exit
+    close = process.protocol.close
     monkeypatch.setattr(
         process.protocol,
-        "_finish_io_after_process_exit",
+        "close",
         lambda _deadline: (_ for _ in ()).throw(TimeoutError("protocol owner blocked")),
     )
 
@@ -1319,7 +1574,7 @@ def test_shutdown_retains_lease_and_scratch_until_protocol_owners_are_proven_sto
 
     assert owner.is_dir()
     assert lease.is_file()
-    monkeypatch.setattr(process.protocol, "_finish_io_after_process_exit", finish)
+    monkeypatch.setattr(process.protocol, "close", close)
     process.shutdown(time.monotonic() + 5)
     assert not owner.exists()
 
@@ -1357,8 +1612,8 @@ def test_stubborn_child_preserves_restricted_failure_evidence(
     child = StubbornProcess()
     monkeypatch.setattr(
         lsp_process.ProcessTree,
-        "spawn",
-        lambda *_args, **_kwargs: _FakeTree(child),
+        "_spawn_with_deadline",
+        classmethod(lambda _cls, *_args, **_kwargs: _FakeTree(child)),
     )
     if failure_stage == "owner-json":
         real_owner_write = lsp_process._write_owner_record
@@ -1379,7 +1634,7 @@ def test_stubborn_child_preserves_restricted_failure_evidence(
     else:
         monkeypatch.setattr(lsp_process, "LspProtocol", BrokenProtocol)
     owner = tmp_path / OWNER_NONCE
-    with pytest.raises(lsp_process.StartupCleanupError, match="direct child remains alive") as raised:
+    with pytest.raises(lsp_process.StartupCleanupError, match="retains retryable ownership") as raised:
         LspProcess.start(_command(), cwd=tmp_path, owner_root=owner)
 
     expected_cause = OSError if failure_stage == "owner-json" else RuntimeError
@@ -1637,8 +1892,8 @@ def test_permanently_alive_child_preserves_evidence_without_pipe_close_or_join(
 
     monkeypatch.setattr(
         lsp_process.ProcessTree,
-        "spawn",
-        lambda *_args, **_kwargs: _FakeTree(child),
+        "_spawn_with_deadline",
+        classmethod(lambda _cls, *_args, **_kwargs: _FakeTree(child)),
     )
     monkeypatch.setattr(lsp_process, "LspProtocol", BrokenProtocol)
     monkeypatch.setattr(threading.Thread, "start", skip_stderr_owner)
@@ -1664,20 +1919,21 @@ def test_initial_owner_publish_never_overwrites_racing_owner_record(
 
     if os.name == "nt":
         real_create = lsp_process._windows_workspace.create_file
+        real_publish = lsp_process._windows_workspace.publish_file
 
-        def race_publish(parent: int, name: str) -> int:
+        def race_publish(temporary_handle: int, parent: int, name: str) -> None:
             if name == "owner.json":
-                handle = real_create(parent, name)
+                attacker_handle = real_create(parent, name)
                 try:
                     lsp_process._windows_workspace.write_all(
-                        handle, attacker, chunk_bytes=4096
+                        attacker_handle, attacker, chunk_bytes=4096
                     )
-                    lsp_process._windows_workspace.flush_file(handle)
+                    lsp_process._windows_workspace.flush_file(attacker_handle)
                 finally:
-                    lsp_process._windows_workspace.close_handle(handle)
-            return real_create(parent, name)
+                    lsp_process._windows_workspace.close_handle(attacker_handle)
+            real_publish(temporary_handle, parent, name)
 
-        monkeypatch.setattr(lsp_process._windows_workspace, "create_file", race_publish)
+        monkeypatch.setattr(lsp_process._windows_workspace, "publish_file", race_publish)
     else:
         real_open = os.open
 
@@ -1688,16 +1944,39 @@ def test_initial_owner_publish_never_overwrites_racing_owner_record(
             *,
             dir_fd: int | None = None,
         ) -> int:
-            if path == "owner.json" and flags & os.O_EXCL:
-                descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        real_link = os.link
+
+        def race_link(
+            source: object,
+            destination: object,
+            *,
+            src_dir_fd: int | None = None,
+            dst_dir_fd: int | None = None,
+            follow_symlinks: bool = True,
+        ) -> None:
+            if destination == "owner.json":
+                descriptor = real_open(
+                    destination,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=dst_dir_fd,
+                )
                 try:
                     os.write(descriptor, attacker)
                     os.fsync(descriptor)
                 finally:
                     os.close(descriptor)
-            return real_open(path, flags, mode, dir_fd=dir_fd)
+            real_link(
+                source,
+                destination,
+                src_dir_fd=src_dir_fd,
+                dst_dir_fd=dst_dir_fd,
+                follow_symlinks=follow_symlinks,
+            )
 
-        monkeypatch.setattr(lsp_process.os, "open", race_publish)
+        monkeypatch.setattr(lsp_process.os, "link", race_link)
     monkeypatch.setattr(
         lsp_process.subprocess,
         "Popen",
@@ -1717,12 +1996,21 @@ def test_existing_failure_record_is_never_replaced_by_process_exit(
     tmp_path: Path,
 ) -> None:
     process = _start(tmp_path, "--exit-while-pending")
-    attacker = b"preexisting-failure-evidence"
+    attacker_record = {
+        "code": "preexisting_failure",
+        "generation_nonce": process.generation_nonce,
+        "owner_nonce": process.owner_nonce,
+        "timestamp": "2026-07-23T00:00:00Z",
+    }
+    attacker = json.dumps(
+        attacker_record, sort_keys=True, separators=(",", ":")
+    ).encode()
     failure_path = process.owner_root / "failure.json"
     failure_path.write_bytes(attacker)
     process.process.stdin.close()
     _wait(process)
-    assert process.state is ProcessState.DEGRADED
+    assert _coordinator_wait(process, lambda: process.restart_count == 1)
+    assert process.state is ProcessState.PROCESS_RUNNING
     assert failure_path.read_bytes() == attacker
     assert json.loads((process.owner_root / "owner.json").read_bytes())["state"] == (
         "process_running"
@@ -1770,10 +2058,11 @@ def test_parent_swap_during_owner_write_rejects_and_preserves_replacement(
         process = LspProcess.start(
             _command("--exit-while-pending"), cwd=tmp_path, owner_root=owner
         )
-        process._closing = True
+        _expect_active_generation_exit(process)
         process.process.stdin.close()
         _wait(process)
         assert replacement is None
+        process.close(time.monotonic() + 5)
     else:
         with pytest.raises(RuntimeError, match="identity changed"):
             LspProcess.start(_command(), cwd=tmp_path, owner_root=owner)
@@ -1818,10 +2107,11 @@ def test_final_fence_rejects_post_protocol_owner_swap_without_deleting_replaceme
         process = LspProcess.start(
             _command("--exit-while-pending"), cwd=tmp_path, owner_root=owner
         )
-        process._closing = True
+        _expect_active_generation_exit(process)
         process.process.stdin.close()
         _wait(process)
         assert replacement is None
+        process.close(time.monotonic() + 5)
     else:
         with pytest.raises(RuntimeError, match="identity changed"):
             LspProcess.start(
@@ -1890,10 +2180,12 @@ def test_live_process_failure_evidence_follows_renamed_owner_handle(
     sentinel.write_bytes(b"replacement")
     process.process.stdin.close()
     _wait(process)
+    assert _coordinator_wait(process, lambda: process.state is ProcessState.FAILED)
 
-    assert json.loads((moved / "failure.json").read_bytes())["code"] == "process_exited"
+    assert json.loads((moved / "failure.json").read_bytes())["code"] == "restart_failed"
     assert sentinel.read_bytes() == b"replacement"
     assert not (owner / "failure.json").exists()
+    process.close(time.monotonic() + 5)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows handle boundary required")
@@ -1906,7 +2198,7 @@ def test_live_process_owner_handle_blocks_lexical_rename_on_windows(
         with pytest.raises(OSError):
             owner.rename(tmp_path / "moved-original")
     finally:
-        process._closing = True
+        _expect_active_generation_exit(process)
         process.process.stdin.close()
         _wait(process)
 
@@ -1935,7 +2227,7 @@ def test_child_exit_during_final_startup_window_fails_start_and_retains_evidence
     monkeypatch.setattr(threading.Thread, "start", start_after_child_exit)
     owner = tmp_path / OWNER_NONCE
 
-    with pytest.raises(RuntimeError, match="exited during startup"):
+    with pytest.raises(RuntimeError, match="exited during (generation )?startup"):
         LspProcess.start(_command(), cwd=tmp_path, owner_root=owner)
 
     assert len(children) == 1
@@ -1964,17 +2256,18 @@ def test_owner_file_create_race_is_anchored_and_never_mutates_replacement(
             lsp_process._windows_workspace, "create_file", create_after_blocked_swap
         )
     else:
-        real_open = os.open
+        real_link = os.link
 
-        def create_after_swap(
-            path: object,
-            flags: int,
-            mode: int = 0o777,
+        def publish_after_swap(
+            source: object,
+            destination: object,
             *,
-            dir_fd: int | None = None,
-        ) -> int:
+            src_dir_fd: int | None = None,
+            dst_dir_fd: int | None = None,
+            follow_symlinks: bool = True,
+        ) -> None:
             nonlocal replacement
-            if path == "owner.json" and flags & os.O_EXCL:
+            if destination == "owner.json":
                 owner.rename(moved)
                 owner.mkdir()
                 sentinel = owner / "sentinel.txt"
@@ -1984,16 +2277,24 @@ def test_owner_file_create_race_is_anchored_and_never_mutates_replacement(
                 owner_record.write_bytes(b"replacement-owner")
                 failure_record.write_bytes(b"replacement-failure")
                 replacement = sentinel, owner_record, failure_record
-            return real_open(path, flags, mode, dir_fd=dir_fd)
+            real_link(
+                source,
+                destination,
+                src_dir_fd=src_dir_fd,
+                dst_dir_fd=dst_dir_fd,
+                follow_symlinks=follow_symlinks,
+            )
 
-        monkeypatch.setattr(lsp_process.os, "open", create_after_swap)
+        monkeypatch.setattr(lsp_process.os, "link", publish_after_swap)
 
     if os.name == "nt":
         process = _start(tmp_path, "--exit-while-pending")
+        _expect_active_generation_exit(process)
         process.process.stdin.close()
         _wait(process)
         assert replacement is None
         assert json.loads((owner / "owner.json").read_bytes())["state"] == "process_running"
+        process.close(time.monotonic() + 5)
     else:
         with pytest.raises(RuntimeError, match="identity changed"):
             _start(tmp_path, "--sleep-seconds", "30")
@@ -2093,6 +2394,177 @@ def test_owner_directory_close_is_exactly_once_with_mocked_windows_handles(
     assert closed == [202, 101]
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows scratch retry boundary")
+def test_windows_scratch_delete_open_failure_is_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle")
+    coordinator = process._coordinator
+    owner_directory = coordinator.owner_directory
+    assert owner_directory is not None
+    real_open = lsp_process._windows_workspace.open_deletable_directory
+    fail_owner_open = True
+
+    def open_deletable_directory(parent: int, name: str) -> int:
+        if parent == owner_directory.parent_handle and name == process.owner_root.name:
+            if fail_owner_open:
+                raise OSError("owner delete open failed")
+        return real_open(parent, name)
+
+    monkeypatch.setattr(
+        lsp_process._windows_workspace,
+        "open_deletable_directory",
+        open_deletable_directory,
+    )
+
+    with pytest.raises(OSError, match="owner delete open failed"):
+        process.shutdown(time.monotonic() + 5)
+
+    assert process.owner_root.is_dir()
+    assert owner_directory.owner_handle is None
+    assert owner_directory._closed is False
+    assert coordinator.phase is lsp_process._LifecyclePhase.CLEANUP_PENDING
+
+    fail_owner_open = False
+    process.shutdown(time.monotonic() + 5)
+    assert not process.owner_root.exists()
+
+
+def test_posix_scratch_parent_sync_failure_is_retryable_after_directory_removal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class PosixOperations:
+        name = "posix"
+
+        def __init__(self) -> None:
+            self.owner_exists = True
+            self.parent_syncs = 0
+
+        @staticmethod
+        def unlink(_name: str, *, dir_fd: int) -> None:
+            assert dir_fd == 202
+            raise FileNotFoundError
+
+        def rmdir(self, name: str, *, dir_fd: int) -> None:
+            if dir_fd == 202:
+                assert name == "cancellation"
+                raise FileNotFoundError
+            assert dir_fd == 101 and name == OWNER_NONCE
+            if not self.owner_exists:
+                raise FileNotFoundError
+            self.owner_exists = False
+
+        def fsync(self, descriptor: int) -> None:
+            if descriptor == 101:
+                self.parent_syncs += 1
+                if self.parent_syncs == 1:
+                    raise OSError("parent sync failed")
+
+        def stat(
+            self,
+            name: str,
+            *,
+            dir_fd: int,
+            follow_symlinks: bool,
+        ) -> object:
+            assert name == OWNER_NONCE
+            assert dir_fd == 101
+            assert follow_symlinks is False
+            if not self.owner_exists:
+                raise FileNotFoundError
+            return type(
+                "OwnerInfo",
+                (),
+                {
+                    "st_dev": 1,
+                    "st_ino": 2,
+                    "st_mode": stat.S_IFDIR | 0o700,
+                    "st_file_attributes": 0,
+                },
+            )()
+
+    operations = PosixOperations()
+    owner = lsp_process._OwnerDirectory(
+        tmp_path / OWNER_NONCE,
+        parent_handle=101,
+        parent_identity=object(),
+        owner_handle=202,
+        owner_identity=lsp_process._ObjectIdentity(1, 2, stat.S_IFDIR, 0),
+    )
+    monkeypatch.setattr(lsp_process, "os", operations)
+
+    with pytest.raises(OSError, match="parent sync failed"):
+        owner.remove_success_scratch()
+
+    owner.remove_success_scratch()
+    assert operations.owner_exists is False
+    assert operations.parent_syncs == 2
+
+
+def test_posix_success_scratch_never_deletes_replacement_owner_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    replacement_deleted = False
+
+    class PosixOperations:
+        name = "posix"
+
+        @staticmethod
+        def unlink(_name: str, *, dir_fd: int) -> None:
+            assert dir_fd == 202
+            raise FileNotFoundError
+
+        @staticmethod
+        def fsync(_descriptor: int) -> None:
+            return None
+
+        @staticmethod
+        def stat(
+            name: str,
+            *,
+            dir_fd: int,
+            follow_symlinks: bool,
+        ) -> object:
+            assert name == OWNER_NONCE
+            assert dir_fd == 101
+            assert follow_symlinks is False
+            return type(
+                "ReplacementInfo",
+                (),
+                {
+                    "st_dev": 1,
+                    "st_ino": 3,
+                    "st_mode": stat.S_IFDIR | 0o700,
+                    "st_file_attributes": 0,
+                },
+            )()
+
+        @staticmethod
+        def rmdir(name: str, *, dir_fd: int) -> None:
+            nonlocal replacement_deleted
+            if dir_fd == 202:
+                assert name == "cancellation"
+                raise FileNotFoundError
+            replacement_deleted = True
+
+    owner = lsp_process._OwnerDirectory(
+        tmp_path / OWNER_NONCE,
+        parent_handle=101,
+        parent_identity=object(),
+        owner_handle=202,
+        owner_identity=lsp_process._ObjectIdentity(1, 2, stat.S_IFDIR, 0),
+    )
+    monkeypatch.setattr(lsp_process, "os", PosixOperations())
+
+    with pytest.raises(PermissionError, match="identity changed"):
+        owner.remove_success_scratch()
+
+    assert replacement_deleted is False
+
+
 @pytest.mark.skipif(
     os.name != "posix" or not Path("/proc/self/fd").is_dir(),
     reason="Linux descriptor accounting required",
@@ -2130,139 +2602,6 @@ def test_repeated_startup_failures_do_not_leak_posix_descriptors(
     assert {
         thread.name for thread in threading.enumerate() if thread.name.startswith("lsp-")
     } == initial_threads
-
-
-def test_rollback_writes_evidence_before_waits_and_never_extends_deadline(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    events: list[tuple[str, float]] = []
-    clock = [10.0]
-
-    class Process:
-        pid = 515151
-        stdin = io.BytesIO()
-        stdout = io.BytesIO()
-        stderr = io.BytesIO()
-        dead = False
-        waits = 0
-
-        def poll(self) -> int | None:
-            return 0 if self.dead else None
-
-        def terminate(self) -> None:
-            events.append(("terminate", clock[0]))
-
-        def kill(self) -> None:
-            events.append(("kill", clock[0]))
-
-        def wait(self, timeout: float | None = None) -> int:
-            assert timeout is not None
-            events.append(("wait", clock[0]))
-            clock[0] += timeout
-            self.waits += 1
-            if self.waits == 1:
-                raise subprocess.TimeoutExpired("fake", timeout)
-            self.dead = True
-            return 0
-
-    class Protocol:
-        def _stop_io_for_process_cleanup(self) -> None:
-            events.append(("stop", clock[0]))
-
-        def _finish_io_after_process_exit(self, deadline: float) -> None:
-            events.append(("finish", deadline))
-
-    class Owner:
-        owner_handle = 1
-        owner_permissions_verified = True
-
-        def close(self) -> None:
-            events.append(("close-owner", clock[0]))
-
-    def evidence(*_args: object, **_kwargs: object) -> None:
-        events.append(("evidence", clock[0]))
-
-    monkeypatch.setattr(lsp_process.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(lsp_process, "_write_failure_record", evidence)
-
-    lsp_process._rollback_startup(
-        Process(),
-        Protocol(),
-        (),
-        Owner(),
-        deadline=12.0,
-        owner_nonce=OWNER_NONCE,
-        generation_nonce="b" * 32,
-    )
-
-    names = [name for name, _when in events]
-    assert names.index("evidence") < names.index("wait")
-    assert "finish" not in names
-    assert clock[0] == 12.0
-
-
-def test_rollback_skips_evidence_and_optional_cleanup_when_budget_is_exhausted(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    moments = iter([23.0])
-    evidence_called = False
-    protocol_called = False
-
-    class Protocol:
-        def _stop_io_for_process_cleanup(self) -> None:
-            nonlocal protocol_called
-            protocol_called = True
-
-    class Owner:
-        owner_handle = 1
-        owner_permissions_verified = True
-
-        def close(self) -> None:
-            return None
-
-    def evidence(*_args: object, **_kwargs: object) -> None:
-        nonlocal evidence_called
-        evidence_called = True
-
-    monkeypatch.setattr(
-        lsp_process.time, "monotonic", lambda: next(moments, 23.0)
-    )
-    monkeypatch.setattr(lsp_process, "_write_failure_record", evidence)
-
-    lsp_process._rollback_startup(
-        None,
-        Protocol(),
-        (),
-        Owner(),
-        deadline=22.0,
-        owner_nonce=OWNER_NONCE,
-        generation_nonce="b" * 32,
-    )
-
-    assert evidence_called is False
-    assert protocol_called is True
-
-
-def test_partial_thread_join_retry_sleep_never_exceeds_absolute_deadline(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    clock = [30.0]
-
-    class StartingThread:
-        def join(self, timeout: float) -> None:
-            clock[0] += min(0.0004, timeout)
-            raise RuntimeError("thread is still starting")
-
-    thread = StartingThread()
-    monkeypatch.setattr(lsp_process.threading, "enumerate", lambda: [thread])
-    monkeypatch.setattr(lsp_process.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(
-        lsp_process.time, "sleep", lambda duration: clock.__setitem__(0, clock[0] + duration)
-    )
-
-    lsp_process._join_partially_started_thread(thread, 30.0005)
-
-    assert clock[0] <= 30.0005
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows inherited ACL contract")
@@ -2405,3 +2744,787 @@ def test_four_delayed_owner_acl_starts_share_deadline_and_leave_no_leaks(
     assert {
         thread.name for thread in threading.enumerate() if thread.name.startswith("lsp-")
     } == initial_threads
+
+
+def _coordinator_wait(process: LspProcess, predicate: object, timeout: float = 3.0) -> bool:
+    coordinator = process._coordinator
+    with coordinator.condition:
+        return coordinator.condition.wait_for(predicate, timeout=timeout)  # type: ignore[arg-type]
+
+
+def test_fatal_intent_survives_transition_lock_contention_and_recovers_once(
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle")
+    coordinator = process._coordinator
+    held = threading.Event()
+    release = threading.Event()
+    callback_returned = threading.Event()
+
+    def hold_transition() -> None:
+        with coordinator.condition:
+            held.set()
+            assert release.wait(2)
+
+    holder = threading.Thread(target=hold_transition)
+    holder.start()
+    assert held.wait(1)
+
+    callback = threading.Thread(
+        target=lambda: (
+            process.protocol._become_fatal("injected fatal"),
+            callback_returned.set(),
+        )
+    )
+    callback.start()
+    assert callback_returned.wait(0.5)
+    release.set()
+    holder.join(1)
+    callback.join(1)
+
+    assert _coordinator_wait(process, lambda: process.restart_count == 1)
+    assert process.request("echo", {"ok": True}, deadline=time.monotonic() + 3) == {
+        "ok": True
+    }
+    assert process.restart_count == 1
+    process.close(time.monotonic() + 5)
+
+
+def test_shutdown_waits_for_restart_candidate_ownership_to_be_attached(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle")
+    real_spawn = lsp_process.ProcessTree._spawn_with_deadline.__func__
+    spawned = threading.Event()
+    release_spawn = threading.Event()
+    shutdown_finished = threading.Event()
+    candidate_trees: list[object] = []
+    restart_errors: list[BaseException] = []
+    shutdown_errors: list[BaseException] = []
+
+    def blocked_spawn(cls: object, *args: object, **kwargs: object) -> object:
+        tree = real_spawn(cls, *args, **kwargs)
+        candidate_trees.append(tree)
+        spawned.set()
+        assert release_spawn.wait(3)
+        return tree
+
+    def restart() -> None:
+        try:
+            process.restart(time.monotonic() + 5)
+        except BaseException as error:
+            restart_errors.append(error)
+
+    def shutdown() -> None:
+        try:
+            process.shutdown(time.monotonic() + 5)
+        except BaseException as error:
+            shutdown_errors.append(error)
+        finally:
+            shutdown_finished.set()
+
+    monkeypatch.setattr(
+        lsp_process.ProcessTree,
+        "_spawn_with_deadline",
+        classmethod(blocked_spawn),
+    )
+    restart_thread = threading.Thread(target=restart)
+    shutdown_thread = threading.Thread(target=shutdown)
+    restart_thread.start()
+    assert spawned.wait(3)
+    shutdown_thread.start()
+    shutdown_returned_before_candidate_attachment = shutdown_finished.wait(0.2)
+    release_spawn.set()
+    restart_thread.join(5)
+    shutdown_thread.join(5)
+
+    assert shutdown_returned_before_candidate_attachment is False
+    assert not restart_thread.is_alive()
+    assert not shutdown_thread.is_alive()
+    assert restart_errors == []
+    assert shutdown_errors == []
+    assert candidate_trees
+    assert candidate_trees[0].process.poll() is not None
+    assert not process.owner_root.exists()
+
+
+def test_protocol_close_fault_still_releases_tree_and_cleanup_retry_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle")
+    coordinator = process._coordinator
+    generation = coordinator.active
+    assert generation is not None
+    protocol = generation.protocol
+    assert protocol is not None
+    close = protocol.close
+    monkeypatch.setattr(
+        protocol,
+        "close",
+        lambda _deadline: (_ for _ in ()).throw(OSError("protocol close failed")),
+    )
+
+    with pytest.raises(OSError, match="protocol close failed"):
+        process.shutdown(time.monotonic() + 5)
+
+    assert generation.tree is None
+    assert generation.protocol is protocol
+    assert coordinator.phase is lsp_process._LifecyclePhase.CLEANUP_PENDING
+    assert (process.owner_root / "lease.json").is_file()
+
+    monkeypatch.setattr(protocol, "close", close)
+    process.shutdown(time.monotonic() + 5)
+    assert not process.owner_root.exists()
+
+
+def test_cleanup_driver_aggregates_process_observation_error_and_continues() -> None:
+    events: list[str] = []
+
+    class Process:
+        stdin = io.BytesIO()
+        stdout = io.BytesIO()
+        stderr = io.BytesIO()
+
+        @staticmethod
+        def poll() -> int:
+            events.append("poll")
+            raise OSError("process poll failed")
+
+    class Tree:
+        @staticmethod
+        def terminate(*, deadline: float) -> None:
+            del deadline
+            events.append("terminate")
+
+        @staticmethod
+        def close() -> None:
+            events.append("tree-close")
+
+    class Protocol:
+        @staticmethod
+        def _stop_io_for_process_cleanup() -> None:
+            events.append("protocol-stop")
+
+    generation = lsp_process._Generation(
+        "b" * 32,
+        Tree(),  # type: ignore[arg-type]
+        Process(),  # type: ignore[arg-type]
+        protocol=Protocol(),  # type: ignore[arg-type]
+    )
+    coordinator = lsp_process._LifecycleCoordinator(
+        None,
+        phase=lsp_process._LifecyclePhase.STOPPING_FAILURE,
+        active=generation,
+        terminal_outcome="failure",
+        terminal_code="injected_failure",
+    )
+
+    errors = lsp_process._drive_cleanup(
+        None,
+        time.monotonic() + 1,
+        terminal=True,
+        failure_code="injected_failure",
+        coordinator_override=coordinator,
+    )
+
+    assert any("process poll failed" in str(error) for error in errors)
+    assert events == ["protocol-stop", "terminate", "poll", "tree-close"]
+    assert generation.tree is None
+    assert generation.process is not None
+    assert generation.protocol is not None
+    assert coordinator.phase is lsp_process._LifecyclePhase.CLEANUP_PENDING
+
+
+def test_tree_cleanup_fault_retains_tree_owner_lease_and_scratch_until_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle", "--ignore-shutdown")
+    coordinator = process._coordinator
+    generation = coordinator.active
+    assert generation is not None and generation.tree is not None
+    tree = generation.tree
+    terminate = lsp_process.ProcessTree.terminate
+    fault_enabled = True
+
+    def fail_tree(current: object, *, deadline: float) -> None:
+        if current is tree and fault_enabled:
+            raise OSError("tree terminate failed")
+        terminate(current, deadline=deadline)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(lsp_process.ProcessTree, "terminate", fail_tree)
+    with pytest.raises((OSError, RuntimeError, TimeoutError), match="tree|live"):
+        process.shutdown(time.monotonic() + 3)
+
+    assert generation.tree is tree
+    assert coordinator.owner_directory is not None
+    assert (process.owner_root / "lease.json").is_file()
+    assert (process.owner_root / "owner.json").is_file()
+    assert coordinator.cleanup_result.ownership_pending is True
+
+    fault_enabled = False
+    process.shutdown(time.monotonic() + 5)
+    assert not process.owner_root.exists()
+
+
+def test_live_child_defers_protocol_release_and_generation_joins_until_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--sleep-seconds", "30")
+    coordinator = process._coordinator
+    generation = coordinator.active
+    assert generation is not None
+    tree = generation.tree
+    protocol = generation.protocol
+    assert tree is not None and protocol is not None
+    terminate = lsp_process.ProcessTree.terminate
+    stop_io = protocol._stop_io_for_process_cleanup
+    close = protocol.close
+    stop_calls: list[str] = []
+    close_calls: list[str] = []
+    tree_fault = True
+
+    def stop_protocol_io() -> None:
+        stop_calls.append("stop")
+        stop_io()
+
+    def unexpected_close(_deadline: float) -> None:
+        close_calls.append("close")
+        raise AssertionError("live child protocol ownership was released")
+
+    def terminate_tree(current: object, *, deadline: float) -> None:
+        if current is tree and tree_fault:
+            raise OSError("tree still live")
+        terminate(current, deadline=deadline)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        lsp_process.ProcessTree,
+        "terminate",
+        terminate_tree,
+    )
+    monkeypatch.setattr(protocol, "_stop_io_for_process_cleanup", stop_protocol_io)
+    monkeypatch.setattr(protocol, "close", unexpected_close)
+
+    with pytest.raises(OSError, match="tree still live"):
+        process._terminal_failure("injected_failure", time.monotonic() + 0.2)
+
+    assert process.process.poll() is None
+    assert stop_calls == ["stop"]
+    assert close_calls == []
+    assert generation.protocol is protocol
+    assert generation.exit_thread is not None
+    assert coordinator.cleanup_result.ownership_pending is True
+    assert (process.owner_root / "lease.json").is_file()
+
+    tree_fault = False
+    monkeypatch.setattr(protocol, "_stop_io_for_process_cleanup", stop_io)
+    monkeypatch.setattr(protocol, "close", close)
+    process.close(time.monotonic() + 5)
+    assert process.process.poll() is not None
+    assert not (process.owner_root / "lease.json").exists()
+
+
+def test_periodic_heartbeat_write_failure_cannot_leave_running_without_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle")
+    coordinator = process._coordinator
+    owner = coordinator.owner_directory
+    assert owner is not None
+    attempted = threading.Event()
+    real_write_lease = lsp_process._OwnerDirectory.write_lease
+
+    def fail_heartbeat(current: object, record: object) -> None:
+        if current is owner:
+            attempted.set()
+            raise OSError("heartbeat write failed")
+        real_write_lease(current, record)
+
+    monkeypatch.setattr(lsp_process._OwnerDirectory, "write_lease", fail_heartbeat)
+    coordinator.heartbeat_wake.set()
+    assert attempted.wait(1)
+    assert _coordinator_wait(
+        process,
+        lambda: coordinator.phase is not lsp_process._LifecyclePhase.RUNNING,
+    )
+    heartbeat = coordinator.heartbeat_thread
+    assert not (
+        coordinator.phase is lsp_process._LifecyclePhase.RUNNING
+        and (heartbeat is None or not heartbeat.is_alive())
+    )
+    process.close(time.monotonic() + 5)
+    assert process.state is ProcessState.FAILED
+    assert json.loads((process.owner_root / "failure.json").read_bytes())["code"] == (
+        "heartbeat_failed"
+    )
+    assert not (process.owner_root / "lease.json").exists()
+
+
+def test_heartbeat_failure_leaves_running_before_blocked_recovery_can_continue(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle")
+    coordinator = process._coordinator
+    owner = coordinator.owner_directory
+    heartbeat = coordinator.heartbeat_thread
+    assert owner is not None and heartbeat is not None
+    write_attempted = threading.Event()
+    recovery_entered = threading.Event()
+    release_recovery = threading.Event()
+    real_process_intent = lsp_process._process_failure_intent
+
+    def fail_heartbeat(current: object, _record: object) -> None:
+        if current is owner and threading.current_thread() is heartbeat:
+            write_attempted.set()
+            raise OSError("heartbeat write failed")
+        raise AssertionError("unexpected lease writer")
+
+    def block_recovery(
+        current: LspProcess,
+        intent: object,
+        deadline: float,
+    ) -> None:
+        recovery_entered.set()
+        assert release_recovery.wait(3)
+        real_process_intent(current, intent, deadline)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(lsp_process._OwnerDirectory, "write_lease", fail_heartbeat)
+    monkeypatch.setattr(lsp_process, "_process_failure_intent", block_recovery)
+    coordinator.heartbeat_wake.set()
+    try:
+        assert write_attempted.wait(1)
+        assert recovery_entered.wait(1)
+        heartbeat.join(1)
+        assert not heartbeat.is_alive()
+        assert coordinator.phase is not lsp_process._LifecyclePhase.RUNNING
+        assert process.state is ProcessState.FAILED
+    finally:
+        release_recovery.set()
+        process.close(time.monotonic() + 5)
+
+
+def test_restart_waits_for_inflight_heartbeat_before_publishing_new_lease(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle")
+    coordinator = process._coordinator
+    owner = coordinator.owner_directory
+    assert owner is not None
+    first_generation = process.generation_nonce
+    heartbeat_writing = threading.Event()
+    release_heartbeat = threading.Event()
+    restart_finished = threading.Event()
+    restart_errors: list[BaseException] = []
+    real_write_lease = lsp_process._OwnerDirectory.write_lease
+
+    def delayed_heartbeat(current: object, record: object) -> None:
+        assert isinstance(record, dict)
+        if (
+            current is owner
+            and threading.current_thread() is coordinator.heartbeat_thread
+            and record["generation_nonce"] == first_generation
+        ):
+            heartbeat_writing.set()
+            assert release_heartbeat.wait(3)
+        real_write_lease(current, record)  # type: ignore[arg-type]
+
+    def restart() -> None:
+        try:
+            process.restart(time.monotonic() + 5)
+        except BaseException as error:
+            restart_errors.append(error)
+        finally:
+            restart_finished.set()
+
+    monkeypatch.setattr(
+        lsp_process._OwnerDirectory,
+        "write_lease",
+        delayed_heartbeat,
+    )
+    coordinator.heartbeat_wake.set()
+    assert heartbeat_writing.wait(2)
+    restart_thread = threading.Thread(target=restart)
+    restart_thread.start()
+    restart_returned_before_heartbeat = restart_finished.wait(0.2)
+    release_heartbeat.set()
+    restart_thread.join(5)
+
+    assert restart_returned_before_heartbeat is False
+    assert not restart_thread.is_alive()
+    assert restart_errors == []
+    assert process.generation_nonce != first_generation
+    lease = json.loads((process.owner_root / "lease.json").read_bytes())
+    assert lease["generation_nonce"] == process.generation_nonce
+    assert lease["server_pid"] == process.process.pid
+    process.close(time.monotonic() + 5)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX atomic lease publication")
+def test_posix_lease_publish_failure_preserves_previous_bytes_and_no_temp(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    owner_root = tmp_path / OWNER_NONCE
+    owner = lsp_process._OwnerDirectory.open(owner_root)
+    owner.create(time.monotonic() + 1)
+    owner.write_lease({"version": "old"})
+    before = (owner_root / "lease.json").read_bytes()
+    monkeypatch.setattr(
+        lsp_process.os,
+        "replace",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("replace failed")),
+    )
+
+    with pytest.raises(OSError, match="replace failed"):
+        owner.write_lease({"version": "new"})
+
+    assert (owner_root / "lease.json").read_bytes() == before
+    assert not list(owner_root.glob(".lease-*.tmp"))
+    owner.close()
+
+
+def test_failure_evidence_write_fault_is_observable_and_tree_cleanup_continues(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle", "--ignore-shutdown")
+    coordinator = process._coordinator
+    owner = coordinator.owner_directory
+    assert owner is not None
+    write_record = lsp_process._OwnerDirectory.write_record
+    fault_enabled = True
+
+    def fail_failure(current: object, name: str, record: object) -> None:
+        if current is owner and name == "failure.json" and fault_enabled:
+            raise OSError("failure evidence flush failed")
+        write_record(current, name, record)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(lsp_process._OwnerDirectory, "write_record", fail_failure)
+    with pytest.raises(OSError, match="failure evidence flush failed"):
+        process._terminal_failure("injected_failure", time.monotonic() + 2)
+
+    failure = process.owner_root / "failure.json"
+    if failure.exists():
+        json.loads(failure.read_bytes())
+    generation = coordinator.active
+    assert generation is None or generation.tree is None or generation.process.poll() is not None
+    assert coordinator.cleanup_result.evidence == "failed"
+    assert coordinator.cleanup_result.ownership_pending is True
+    assert (process.owner_root / "lease.json").is_file()
+
+    fault_enabled = False
+    process.close(time.monotonic() + 5)
+    assert json.loads(failure.read_bytes())["code"] == "injected_failure"
+    assert not (process.owner_root / "lease.json").exists()
+
+
+def test_evidence_payload_failure_leaves_no_partial_canonical_json(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    owner_root = tmp_path / OWNER_NONCE
+    owner = lsp_process._OwnerDirectory.open(owner_root)
+    owner.create(time.monotonic() + 1)
+
+    if os.name == "nt":
+        real_windows_write = lsp_process._windows_workspace.write_all
+
+        def partial_windows_write(handle: int, payload: bytes, *, chunk_bytes: int) -> None:
+            real_windows_write(handle, payload[:5], chunk_bytes=chunk_bytes)
+            raise OSError("evidence write failed")
+
+        monkeypatch.setattr(
+            lsp_process._windows_workspace,
+            "write_all",
+            partial_windows_write,
+        )
+    else:
+        real_write = lsp_process._write_all_descriptor
+
+        def partial_write(descriptor: int, payload: bytes) -> None:
+            os.write(descriptor, payload[:5])
+            raise OSError("evidence write failed")
+
+        monkeypatch.setattr(lsp_process, "_write_all_descriptor", partial_write)
+
+    with pytest.raises(OSError, match="evidence (flush|write) failed"):
+        owner.write_record("failure.json", {"code": "injected"})
+
+    canonical = owner_root / "failure.json"
+    assert not canonical.exists() or json.loads(canonical.read_bytes()) == {
+        "code": "injected"
+    }
+    assert not list(owner_root.glob(".evidence-*.tmp"))
+    if os.name != "nt":
+        monkeypatch.setattr(lsp_process, "_write_all_descriptor", real_write)
+    owner.close()
+
+
+def test_existing_canonical_but_invalid_failure_evidence_is_never_accepted(
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle", "--ignore-shutdown")
+    failure = process.owner_root / "failure.json"
+    failure.write_bytes(
+        json.dumps(
+            {
+                "code": None,
+                "generation_nonce": "invalid",
+                "owner_nonce": process.owner_nonce,
+                "timestamp": "not-a-timestamp",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    try:
+        with pytest.raises(ValueError, match="failure evidence"):
+            process._terminal_failure("injected_failure", time.monotonic() + 5)
+
+        assert process.process.poll() is not None
+        assert process._coordinator.cleanup_result.evidence == "failed"
+        assert process._coordinator.phase is lsp_process._LifecyclePhase.CLEANUP_PENDING
+        assert (process.owner_root / "lease.json").is_file()
+    finally:
+        if failure.exists():
+            failure.unlink()
+        if lsp_process._coordinator_has_ownership(process._coordinator):
+            process.close(time.monotonic() + 5)
+
+
+@pytest.mark.parametrize("artifact", ["evidence", "lease"])
+def test_posix_partial_artifact_write_removes_temporary_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    artifact: str,
+) -> None:
+    class FileInfo:
+        st_dev = 1
+        st_ino = 2
+        st_mode = stat.S_IFREG | 0o600
+
+    class PosixOperations:
+        name = "posix"
+        O_WRONLY = os.O_WRONLY
+        O_CREAT = os.O_CREAT
+        O_EXCL = os.O_EXCL
+        O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+        O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+
+        def __init__(self) -> None:
+            self.created: list[str] = []
+            self.closed: list[int] = []
+            self.unlinked: list[str] = []
+
+        def open(
+            self,
+            path: str,
+            _flags: int,
+            _mode: int,
+            *,
+            dir_fd: int,
+        ) -> int:
+            assert dir_fd == 202
+            self.created.append(path)
+            return 303
+
+        @staticmethod
+        def fstat(descriptor: int) -> FileInfo:
+            assert descriptor == 303
+            return FileInfo()
+
+        def close(self, descriptor: int) -> None:
+            self.closed.append(descriptor)
+
+        def unlink(self, path: str, *, dir_fd: int) -> None:
+            assert dir_fd == 202
+            self.unlinked.append(path)
+
+    operations = PosixOperations()
+    owner = lsp_process._OwnerDirectory(
+        tmp_path / OWNER_NONCE,
+        parent_handle=101,
+        parent_identity=object(),
+        owner_handle=202,
+        owner_identity=object(),
+        owner_permissions_verified=True,
+    )
+    monkeypatch.setattr(lsp_process, "os", operations)
+    monkeypatch.setattr(
+        lsp_process,
+        "_write_all_descriptor",
+        lambda _descriptor, _payload: (_ for _ in ()).throw(
+            OSError("partial artifact write")
+        ),
+    )
+
+    with pytest.raises(OSError, match="partial artifact write"):
+        if artifact == "evidence":
+            owner.write_record("failure.json", {"code": "injected"})
+        else:
+            owner.write_lease({"state": "live"})
+
+    assert len(operations.created) == 1
+    assert operations.closed == [303]
+    assert operations.unlinked == operations.created
+
+
+def test_startup_rollback_kills_descendant_after_direct_leader_exits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    pid_file = tmp_path / "startup-descendant.pid"
+    children: list[subprocess.Popen[bytes]] = []
+    real_popen = subprocess.Popen
+
+    def popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        child = real_popen(*args, **kwargs)
+        children.append(child)
+        return child
+
+    def fail_after_leader_exit(*_args: object, **_kwargs: object) -> None:
+        assert children
+        children[0].wait(timeout=2)
+        raise RuntimeError("startup publication failed")
+
+    monkeypatch.setattr(lsp_process.subprocess, "Popen", popen)
+    monkeypatch.setattr(lsp_process, "_write_owner_record", fail_after_leader_exit)
+    owner = tmp_path / OWNER_NONCE
+
+    with pytest.raises((RuntimeError, lsp_process.StartupCleanupError)) as raised:
+        LspProcess.start(
+            _command(
+                "--spawn-descendant",
+                "--descendant-pid-file",
+                str(pid_file),
+                "--exit-after-descendant-spawn",
+            ),
+            cwd=tmp_path,
+            owner_root=owner,
+        )
+
+    descendant = int(pid_file.read_text(encoding="ascii"))
+    settle_deadline = time.monotonic() + 2
+    while _pid_alive(descendant) and time.monotonic() < settle_deadline:
+        time.sleep(0.02)
+    if _pid_alive(descendant):
+        assert isinstance(raised.value, lsp_process.StartupCleanupError)
+        assert raised.value.coordinator.cleanup_result.ownership_pending is True
+    else:
+        assert json.loads((owner / "failure.json").read_bytes())["code"] == "startup_failed"
+
+
+def test_blocked_protocol_owner_retains_retryable_generation_and_lease(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle")
+    coordinator = process._coordinator
+    generation = coordinator.active
+    assert generation is not None and generation.protocol is not None
+    protocol = generation.protocol
+    join_owners = protocol._join_owners
+    released = threading.Event()
+
+    def blocked(deadline: float) -> None:
+        if not released.is_set():
+            raise TimeoutError("protocol owner blocked")
+        join_owners(deadline)
+
+    monkeypatch.setattr(protocol, "_join_owners", blocked)
+    with pytest.raises(TimeoutError, match="protocol owner blocked"):
+        process.shutdown(time.monotonic() + 5)
+
+    assert generation.protocol is protocol
+    assert coordinator.cleanup_result.ownership_pending is True
+    assert (process.owner_root / "lease.json").is_file()
+
+    released.set()
+    process.shutdown(time.monotonic() + 5)
+    assert not process.owner_root.exists()
+
+
+def _invalid_request_params(case: str) -> object:
+    if case == "cycle":
+        value: list[object] = []
+        value.append(value)
+        return value
+    if case == "nan":
+        return {"value": float("nan")}
+    if case == "inf":
+        return {"value": float("inf")}
+    if case == "surrogate":
+        return {"value": "\ud800"}
+    if case == "object":
+        return {"value": object()}
+    if case == "oversize":
+        return {"value": "x" * MAX_FRAME_BYTES}
+    raise AssertionError(case)
+
+
+@pytest.mark.parametrize("case", ["cycle", "nan", "inf", "surrogate", "object", "oversize"])
+def test_caller_json_violation_never_restarts_and_valid_follow_up_works(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    owner = tmp_path / f"{len(case):032x}"
+    process = LspProcess.start(_command("--lifecycle"), cwd=tmp_path, owner_root=owner)
+
+    with pytest.raises(ProtocolViolation):
+        process.request(
+            "invalid",
+            _invalid_request_params(case),
+            deadline=time.monotonic() + 2,
+        )
+
+    assert process.restart_count == 0
+    assert process.request("echo", {"valid": True}, deadline=time.monotonic() + 2) == {
+        "valid": True
+    }
+    process.close(time.monotonic() + 5)
+
+
+def test_expired_deadline_waiting_for_transition_lock_changes_nothing(
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle")
+    coordinator = process._coordinator
+    acquired = threading.Event()
+    release = threading.Event()
+    before = (
+        process.process,
+        process.protocol,
+        process.generation_nonce,
+        process.restart_count,
+    )
+
+    def hold_transition() -> None:
+        with coordinator.condition:
+            acquired.set()
+            assert release.wait(2)
+
+    holder = threading.Thread(target=hold_transition)
+    holder.start()
+    assert acquired.wait(1)
+    deadline = time.monotonic() + 0.03
+    try:
+        with pytest.raises(TimeoutError, match="lifecycle|transition"):
+            process.restart(deadline)
+        assert time.monotonic() <= deadline + 0.2
+        assert (
+            process.process,
+            process.protocol,
+            process.generation_nonce,
+            process.restart_count,
+        ) == before
+        assert coordinator.candidate is None
+    finally:
+        release.set()
+        holder.join(1)
+        process.close(time.monotonic() + 5)
