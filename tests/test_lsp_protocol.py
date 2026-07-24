@@ -849,7 +849,9 @@ def test_constructor_startup_wait_failure_retains_no_owner_threads(
 ) -> None:
     baseline = {thread.ident for thread in threading.enumerate() if thread.name.startswith("lsp-")}
 
-    def fail_wait(_event: threading.Event, _owner_name: str) -> None:
+    def fail_wait(
+        _event: threading.Event, _owner_name: str, _deadline: float
+    ) -> None:
         raise RuntimeError("startup wait failed")
 
     monkeypatch.setattr(LspProtocol, "_wait_owner_started", staticmethod(fail_wait))
@@ -864,13 +866,58 @@ def test_constructor_startup_wait_failure_retains_no_owner_threads(
     } == baseline
 
 
+def test_constructor_owner_waits_and_rollback_share_startup_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wait_deadlines: list[float] = []
+    rollback_deadlines: list[float] = []
+    real_wait = LspProtocol._wait_owner_started
+    real_join = LspProtocol._join_partially_started_owner
+
+    def fail_after_reader_starts(
+        event: threading.Event, owner_name: str, deadline: float
+    ) -> None:
+        wait_deadlines.append(deadline)
+        real_wait(event, owner_name, deadline)
+        if owner_name == "reader":
+            raise RuntimeError("injected startup failure")
+
+    def record_rollback(
+        self: LspProtocol, owner: threading.Thread, deadline: float
+    ) -> None:
+        rollback_deadlines.append(deadline)
+        real_join(self, owner, deadline)
+
+    monkeypatch.setattr(
+        LspProtocol, "_wait_owner_started", staticmethod(fail_after_reader_starts)
+    )
+    monkeypatch.setattr(LspProtocol, "_join_partially_started_owner", record_rollback)
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=100)
+    startup_deadline = time.monotonic() + 1
+
+    with pytest.raises(RuntimeError, match="injected startup failure"):
+        LspProtocol(
+            reader,
+            writer,
+            "inherited-startup-deadline",
+            fatal_callback=lambda _reason: None,
+            _startup_deadline=startup_deadline,
+        )
+
+    assert wait_deadlines == [startup_deadline, startup_deadline]
+    assert rollback_deadlines == [startup_deadline, startup_deadline]
+
+
 def test_constructor_failure_retains_blocked_owner_for_cleanup_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     reader = _UninterruptibleReader()
     writer = _BlockingWriter(block_after=100)
 
-    def fail_wait(_event: threading.Event, _owner_name: str) -> None:
+    def fail_wait(
+        _event: threading.Event, _owner_name: str, _deadline: float
+    ) -> None:
         raise RuntimeError("startup wait failed")
 
     monkeypatch.setattr(LspProtocol, "_wait_owner_started", staticmethod(fail_wait))
@@ -1905,6 +1952,7 @@ def test_expired_drain_keys_are_validated_read_only_and_sorted() -> None:
         ("stream-probe", 1),
         ("stream-probe", 2),
     )
+    assert protocol.next_drain_deadline() == now - 1
     assert protocol.pending_count == 3
     with pytest.raises(TypeError):
         protocol.expired_drain_keys(True)

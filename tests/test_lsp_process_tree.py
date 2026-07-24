@@ -32,6 +32,14 @@ def _pid_alive(pid: int) -> bool:
             return kernel32.WaitForSingleObject(handle, 0) == 0x00000102
         finally:
             kernel32.CloseHandle(handle)
+    if sys.platform.startswith("linux"):
+        try:
+            payload = (Path("/proc") / str(pid) / "stat").read_text(encoding="ascii")
+        except (FileNotFoundError, OSError):
+            return False
+        closing = payload.rfind(")")
+        if closing >= 0 and payload[closing + 2 :].split()[0] in {"Z", "X", "x"}:
+            return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -39,6 +47,22 @@ def _pid_alive(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def _write_proc_stat(
+    root: Path,
+    pid: int,
+    *,
+    state: str,
+    process_group: int,
+    session: int,
+) -> None:
+    process = root / str(pid)
+    process.mkdir()
+    (process / "stat").write_text(
+        f"{pid} (test worker) {state} 1 {process_group} {session} 0 0\n",
+        encoding="ascii",
+    )
 
 
 def _descendant(tree: ProcessTree) -> int:
@@ -411,6 +435,63 @@ def test_posix_wait_reaps_zombie_leader_before_each_group_probe(
     assert tree.process_group == 4242
     tree.close()
     assert tree.process_group is None
+
+
+def test_linux_proc_snapshot_treats_all_group_and_session_members_dead(
+    tmp_path: Path,
+) -> None:
+    _write_proc_stat(tmp_path, 101, state="Z", process_group=77, session=77)
+    _write_proc_stat(tmp_path, 102, state="X", process_group=78, session=77)
+
+    assert lsp_process_tree._linux_group_is_inert(tmp_path, 77) is True
+
+
+def test_linux_proc_snapshot_rejects_mixed_live_and_zombie_members(
+    tmp_path: Path,
+) -> None:
+    _write_proc_stat(tmp_path, 101, state="Z", process_group=77, session=77)
+    _write_proc_stat(tmp_path, 102, state="S", process_group=78, session=77)
+
+    assert lsp_process_tree._linux_group_is_inert(tmp_path, 77) is False
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux /proc contract")
+def test_linux_orphan_zombie_does_not_strand_owned_process_group(
+    tmp_path: Path,
+) -> None:
+    tree = ProcessTree.spawn(
+        _command(
+            "--spawn-descendant",
+            "--descendant-exit-after",
+            "0.05",
+            "--exit-after-descendant-spawn",
+        ),
+        cwd=tmp_path,
+        env=dict(os.environ),
+    )
+    descendant_pid = _descendant(tree)
+    tree.process.wait(timeout=5)
+    state: str | None = None
+    settle_deadline = time.monotonic() + 2
+    while time.monotonic() < settle_deadline:
+        try:
+            payload = (Path("/proc") / str(descendant_pid) / "stat").read_text(
+                encoding="ascii"
+            )
+        except FileNotFoundError:
+            state = None
+            break
+        closing = payload.rfind(")")
+        state = payload[closing + 2 :].split()[0]
+        if state in {"Z", "X", "x"}:
+            break
+        time.sleep(0.01)
+
+    assert state is None or state in {"Z", "X", "x"}
+    tree.terminate(deadline=time.monotonic() + 2)
+    tree.close()
+    assert tree.process_group is None
+    assert not _pid_alive(descendant_pid)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows suspended process contract")

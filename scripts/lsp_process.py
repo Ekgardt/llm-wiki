@@ -14,7 +14,6 @@ import stat
 import subprocess as _subprocess
 import threading
 import time
-import weakref
 from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -555,6 +554,14 @@ class _FailureIntent:
     observed_monotonic: float
 
 
+@dataclass(frozen=True, slots=True)
+class _FailureEvidenceIdentity:
+    code: str
+    owner_nonce: str
+    generation_nonce: str
+    pid: int | None
+
+
 @dataclass(slots=True)
 class _Generation:
     nonce: str
@@ -568,6 +575,8 @@ class _Generation:
     stderr_thread: threading.Thread | None = None
     exit_thread: threading.Thread | None = None
     expected_exit: threading.Event = field(default_factory=threading.Event, repr=False)
+    failure_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    failure_queued: bool = field(default=False, repr=False)
 
     @property
     def released(self) -> bool:
@@ -616,14 +625,14 @@ class _LifecycleCoordinator:
     retired: list[_Generation] = field(default_factory=list)
     terminal_outcome: str | None = None
     terminal_code: str | None = None
+    failure_evidence_identity: _FailureEvidenceIdentity | None = None
     background_cleanup_error: BaseException | None = field(default=None, repr=False)
     cleanup_result: _CleanupResult = field(default_factory=_CleanupResult)
     recovery_attempted: bool = False
     startup_complete: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     condition: threading.Condition = field(init=False, repr=False)
-    driver_owner: threading.Thread | None = field(default=None, repr=False)
-    driver_depth: int = field(default=0, repr=False)
+    driver: threading.RLock = field(default_factory=threading.RLock, repr=False)
     failure_queue: queue.SimpleQueue[_FailureIntent] = field(
         default_factory=queue.SimpleQueue, repr=False
     )
@@ -658,7 +667,7 @@ def lsp_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
     return {name: values[name] for name in sorted(LSP_ENV_ALLOWLIST) if name in values}
 
 
-@dataclass
+@dataclass(slots=True)
 class LspProcess:
     process: subprocess.Popen[bytes]
     protocol: LspProtocol
@@ -724,6 +733,12 @@ class LspProcess:
 
     def _terminal_failure(self, code: str, deadline: float) -> None:
         _terminal_failure_lsp_process(self, code, deadline)
+
+    def _atexit_close(self) -> None:
+        try:
+            self.close(time.monotonic() + _GRACEFUL_CLEANUP_SECONDS)
+        except BaseException:
+            pass
 
     def _stop_heartbeat(self, deadline: float) -> None:
         try:
@@ -795,36 +810,17 @@ def _acquire_driver(
     *,
     allow_expired: bool = False,
 ) -> None:
-    current = threading.current_thread()
-    _acquire_lifecycle(coordinator, deadline, allow_expired=True)
-    try:
-        if coordinator.driver_owner is current:
-            coordinator.driver_depth += 1
-            return
-        while coordinator.driver_owner is not None:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or not coordinator.condition.wait(remaining):
-                raise TimeoutError("LSP lifecycle driver deadline expired")
-        if not allow_expired and time.monotonic() >= deadline:
-            raise TimeoutError("LSP lifecycle driver deadline expired")
-        coordinator.driver_owner = current
-        coordinator.driver_depth = 1
-    finally:
-        _release_lifecycle(coordinator)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        acquired = allow_expired and coordinator.driver.acquire(blocking=False)
+    else:
+        acquired = coordinator.driver.acquire(timeout=remaining)
+    if not acquired:
+        raise TimeoutError("LSP lifecycle driver deadline expired")
 
 
-def _release_driver(coordinator: _LifecycleCoordinator, deadline: float) -> None:
-    current = threading.current_thread()
-    _acquire_lifecycle(coordinator, deadline, allow_expired=True)
-    try:
-        if coordinator.driver_owner is not current or coordinator.driver_depth <= 0:
-            raise RuntimeError("LSP lifecycle driver is not owned by this thread")
-        coordinator.driver_depth -= 1
-        if coordinator.driver_depth == 0:
-            coordinator.driver_owner = None
-            coordinator.condition.notify_all()
-    finally:
-        _release_lifecycle(coordinator)
+def _release_driver(coordinator: _LifecycleCoordinator) -> None:
+    coordinator.driver.release()
 
 
 def _notify_lifecycle_locked(coordinator: _LifecycleCoordinator) -> None:
@@ -851,8 +847,10 @@ def _queue_generation_failure(
     generation: _Generation,
     reason: str,
 ) -> bool:
-    if generation.expected_exit.is_set():
-        return False
+    with generation.failure_lock:
+        if generation.expected_exit.is_set() or generation.failure_queued:
+            return False
+        generation.failure_queued = True
     coordinator.failure_queue.put(
         _FailureIntent(generation.nonce, reason, False, time.monotonic())
     )
@@ -929,6 +927,8 @@ def _prepare_generation(
             fatal_callback=lambda reason: _queue_generation_failure(
                 coordinator, generation, reason
             ),
+            _startup_deadline=deadline,
+            _drain_wake=coordinator.recovery_wake,
         )
     except _ProtocolStartupCleanupError as error:
         generation.protocol = error.protocol
@@ -1079,7 +1079,7 @@ def _start_lsp_process(
         owner.verify_lexical_identity()
         if process.poll() is not None or protocol.fatal:
             raise RuntimeError("LSP process exited during startup")
-        atexit.register(_atexit_close, weakref.ref(instance))
+        atexit.register(instance._atexit_close)
         return instance
     except BaseException as startup_error:
         deadline = startup_deadline if startup_deadline is not None else time.monotonic()
@@ -1114,8 +1114,7 @@ def _start_lsp_process(
         raise startup_error
     finally:
         if driver_acquired:
-            assert startup_deadline is not None
-            _release_driver(coordinator, startup_deadline)
+            _release_driver(coordinator)
 
 
 def _start_lifecycle_workers(instance: LspProcess, deadline: float | None = None) -> None:
@@ -1202,16 +1201,58 @@ def _write_current_lease(instance: LspProcess, deadline: float) -> None:
         if generation is not None and owner is not None:
             _write_generation_lease(owner, generation, instance.owner_nonce)
     finally:
-        _release_driver(coordinator, deadline)
+        _release_driver(coordinator)
+
+
+def _active_drain_generation(
+    instance: LspProcess,
+) -> tuple[_Generation, LspProtocol] | None:
+    coordinator = instance._coordinator
+    with coordinator.condition:
+        generation = (
+            coordinator.active
+            if coordinator.phase is _LifecyclePhase.RUNNING
+            else None
+        )
+        protocol = generation.protocol if generation is not None else None
+    if generation is None or protocol is None:
+        return None
+    with generation.failure_lock:
+        if generation.failure_queued or generation.expected_exit.is_set():
+            return None
+    return generation, protocol
+
+
+def _next_drain_deadline(instance: LspProcess) -> float | None:
+    active = _active_drain_generation(instance)
+    if active is None:
+        return None
+    return active[1].next_drain_deadline()
+
+
+def _queue_expired_drain(instance: LspProcess) -> None:
+    active = _active_drain_generation(instance)
+    if active is None:
+        return
+    generation, protocol = active
+    if protocol.expired_drain_keys(time.monotonic()):
+        _queue_generation_failure(instance._coordinator, generation, "expired drain")
 
 
 def _recovery_loop(instance: LspProcess) -> None:
     coordinator = instance._coordinator
     while not coordinator.recovery_stop.is_set():
-        coordinator.recovery_wake.wait()
+        drain_deadline = _next_drain_deadline(instance)
+        wait_for = (
+            None
+            if drain_deadline is None
+            else max(0.0, drain_deadline - time.monotonic())
+        )
+        coordinator.recovery_wake.wait(wait_for)
         coordinator.recovery_wake.clear()
         if coordinator.recovery_stop.is_set():
             return
+        _queue_expired_drain(instance)
         while not coordinator.recovery_stop.is_set():
             try:
                 intent = coordinator.failure_queue.get_nowait()
@@ -1248,7 +1289,7 @@ def _process_failure_intent(
     try:
         _process_failure_intent_owned(instance, intent, deadline)
     finally:
-        _release_driver(coordinator, deadline)
+        _release_driver(coordinator)
 
 
 def _process_failure_intent_owned(
@@ -1497,7 +1538,7 @@ def _terminal_failure_lsp_process(
         if errors:
             raise errors[0]
     finally:
-        _release_driver(coordinator, deadline)
+        _release_driver(coordinator)
 
 
 def _restart_lsp_process(instance: LspProcess, deadline: float) -> None:
@@ -1507,7 +1548,7 @@ def _restart_lsp_process(instance: LspProcess, deadline: float) -> None:
     try:
         _restart_lsp_process_owned(instance, deadline)
     finally:
-        _release_driver(coordinator, deadline)
+        _release_driver(coordinator)
 
 
 def _restart_lsp_process_owned(instance: LspProcess, deadline: float) -> None:
@@ -1543,7 +1584,7 @@ def _restart_generation(
     try:
         _restart_generation_owned(instance, deadline)
     finally:
-        _release_driver(coordinator, deadline)
+        _release_driver(coordinator)
 
 
 def _restart_generation_owned(instance: LspProcess, deadline: float) -> None:
@@ -1638,7 +1679,7 @@ def _shutdown_lsp_process(instance: LspProcess, deadline: float) -> None:
     try:
         _shutdown_lsp_process_owned(instance, deadline)
     finally:
-        _release_driver(coordinator, deadline)
+        _release_driver(coordinator)
 
 
 def _shutdown_lsp_process_owned(instance: LspProcess, deadline: float) -> None:
@@ -1811,27 +1852,40 @@ def _ensure_failure_evidence(
     owner = coordinator.owner_directory
     if owner is None:
         return
-    generation = coordinator.active or coordinator.candidate
-    if generation is None and coordinator.retired:
-        generation = coordinator.retired[-1]
-    process = generation.process if generation is not None else None
-    owner_nonce = instance.owner_nonce if instance is not None else owner.owner_root.name
-    generation_nonce = (
-        generation.nonce
-        if generation is not None
-        else (instance.generation_nonce if instance is not None else "0" * 32)
-    )
+    identity = coordinator.failure_evidence_identity
+    if identity is None:
+        generation = coordinator.active or coordinator.candidate
+        if generation is None and coordinator.retired:
+            generation = coordinator.retired[-1]
+        process = generation.process if generation is not None else None
+        identity = _FailureEvidenceIdentity(
+            code,
+            instance.owner_nonce if instance is not None else owner.owner_root.name,
+            (
+                generation.nonce
+                if generation is not None
+                else (instance.generation_nonce if instance is not None else "0" * 32)
+            ),
+            process.pid if process is not None else None,
+        )
+        coordinator.failure_evidence_identity = identity
     try:
         _write_failure_record(
             owner,
-            code=code,
-            owner_nonce=owner_nonce,
-            generation_nonce=generation_nonce,
-            pid=process.pid if process is not None else None,
+            code=identity.code,
+            owner_nonce=identity.owner_nonce,
+            generation_nonce=identity.generation_nonce,
+            pid=identity.pid,
         )
     except FileExistsError:
         record = owner.read_record("failure.json")
-        _validate_failure_record(record)
+        _validate_failure_record(
+            record,
+            code=identity.code,
+            owner_nonce=identity.owner_nonce,
+            generation_nonce=identity.generation_nonce,
+            pid=identity.pid,
+        )
 
 
 def _stop_heartbeat_owner(
@@ -1938,7 +1992,7 @@ def _drive_cleanup(
             coordinator=coordinator,
         )
     finally:
-        _release_driver(coordinator, deadline)
+        _release_driver(coordinator)
 
 
 def _drive_cleanup_owned(
@@ -2216,6 +2270,8 @@ def _drive_cleanup_owned(
         _notify_lifecycle_locked(coordinator)
     finally:
         _release_lifecycle(coordinator)
+    if terminal and instance is not None and not result.ownership_pending:
+        atexit.unregister(instance._atexit_close)
     return current_errors
 
 
@@ -2469,30 +2525,50 @@ def _write_failure_record(
     }
     if pid is not None:
         failure_record["server_pid"] = pid
-    _validate_failure_record(failure_record)
+    _validate_failure_record(
+        failure_record,
+        code=code,
+        owner_nonce=owner_nonce,
+        generation_nonce=generation_nonce,
+        pid=pid,
+    )
     # A verified Windows owner DACL has one inheritable owner-only (OI)(CI) ACE.
     owner_directory.write_record("failure.json", failure_record)
 
 
-def _validate_failure_record(record: Mapping[str, object]) -> None:
+def _validate_failure_record(
+    record: Mapping[str, object],
+    *,
+    code: str,
+    owner_nonce: str,
+    generation_nonce: str,
+    pid: int | None,
+) -> None:
     required = {"code", "generation_nonce", "owner_nonce", "timestamp"}
     if set(record) not in (required, required | {"server_pid"}):
         raise ValueError("LSP failure evidence has an invalid shape")
-    code = record["code"]
-    if not isinstance(code, str) or re.fullmatch(r"[a-z0-9_]{1,64}", code) is None:
+    observed_code = record["code"]
+    if not isinstance(observed_code, str) or re.fullmatch(
+        r"[a-z0-9_]{1,64}", observed_code
+    ) is None:
         raise ValueError("LSP failure evidence has an invalid code")
     for name in ("generation_nonce", "owner_nonce"):
         value = record[name]
         if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{32}", value) is None:
             raise ValueError(f"LSP failure evidence has an invalid {name}")
     timestamp = record["timestamp"]
-    if not isinstance(timestamp, str) or not timestamp.endswith("Z"):
+    if not isinstance(timestamp, str) or re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{6})?Z", timestamp
+    ) is None:
         raise ValueError("LSP failure evidence has an invalid timestamp")
     try:
         parsed = datetime.fromisoformat(timestamp[:-1] + "+00:00")
     except ValueError as error:
         raise ValueError("LSP failure evidence has an invalid timestamp") from error
-    if parsed.tzinfo != timezone.utc:
+    if (
+        parsed.tzinfo != timezone.utc
+        or parsed.isoformat().replace("+00:00", "Z") != timestamp
+    ):
         raise ValueError("LSP failure evidence has an invalid timestamp")
     if "server_pid" in record:
         server_pid = record["server_pid"]
@@ -2502,13 +2578,12 @@ def _validate_failure_record(record: Mapping[str, object]) -> None:
             or server_pid <= 0
         ):
             raise ValueError("LSP failure evidence has an invalid server_pid")
-
-
-def _atexit_close(reference: weakref.ReferenceType[LspProcess]) -> None:
-    instance = reference()
-    if instance is None:
-        return
-    try:
-        instance.close(time.monotonic() + _GRACEFUL_CLEANUP_SECONDS)
-    except BaseException:
-        pass
+    expected_fields = required | ({"server_pid"} if pid is not None else set())
+    if (
+        set(record) != expected_fields
+        or observed_code != code
+        or record["owner_nonce"] != owner_nonce
+        or record["generation_nonce"] != generation_nonce
+        or (pid is not None and record.get("server_pid") != pid)
+    ):
+        raise ValueError("LSP failure evidence does not match expected terminal identity")

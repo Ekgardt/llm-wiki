@@ -174,6 +174,7 @@ def _run_process_server() -> None:
     parser.add_argument("--ignored-secret")
     parser.add_argument("--sleep-seconds", type=float, default=0.0)
     parser.add_argument("--spawn-descendant", action="store_true")
+    parser.add_argument("--descendant-exit-after", type=float)
     parser.add_argument("--exit-after-descendant-spawn", action="store_true")
     parser.add_argument("--descendant-pid-file")
     parser.add_argument("--descendant-pid-log")
@@ -189,8 +190,13 @@ def _run_process_server() -> None:
     args = parser.parse_args()
 
     if args.spawn_descendant:
+        descendant_code = (
+            f"import os,time; time.sleep({args.descendant_exit_after!r}); os._exit(17)"
+            if args.descendant_exit_after is not None
+            else "import time; time.sleep(60)"
+        )
         descendant = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(60)"],
+            [sys.executable, "-c", descendant_code],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

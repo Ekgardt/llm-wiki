@@ -176,7 +176,8 @@ def test_constants_states_and_public_dataclass_fields_are_exact() -> None:
         ("DEGRADED", "degraded"),
         ("FAILED", "failed"),
     ]
-    public = {field.name for field in dataclasses.fields(LspProcess) if not field.name.startswith("_")}
+    fields = dataclasses.fields(LspProcess)
+    public = {field.name for field in fields if not field.name.startswith("_")}
     assert public == {
         "process",
         "protocol",
@@ -188,41 +189,73 @@ def test_constants_states_and_public_dataclass_fields_are_exact() -> None:
         "last_used_monotonic",
         "restart_count",
     }
+    assert LspProcess.__slots__ == tuple(field.name for field in fields)
+    assert not hasattr(object.__new__(LspProcess), "__dict__")
 
 
 def test_lifecycle_coordinator_uses_one_authority_lock_and_condition() -> None:
     coordinator = lsp_process._LifecycleCoordinator(None)
 
     assert coordinator.condition._lock is coordinator.lock
-    assert not hasattr(coordinator, "driver_lock")
+    assert coordinator.driver is not coordinator.lock
+    assert not hasattr(coordinator, "driver_owner")
+    assert not hasattr(coordinator, "driver_depth")
 
 
-def test_driver_release_obeys_deadline_under_lifecycle_lock_contention() -> None:
+def test_driver_release_survives_transition_contention_and_cleanup_reacquires() -> None:
     coordinator = lsp_process._LifecycleCoordinator(None)
-    lsp_process._acquire_driver(coordinator, time.monotonic() + 1)
+    owner_acquired = threading.Event()
     held = threading.Event()
-    release = threading.Event()
+    release_owner = threading.Event()
+    release_transition = threading.Event()
+    owner_done = threading.Event()
+    owner_errors: list[BaseException] = []
+
+    def own_driver() -> None:
+        try:
+            lsp_process._acquire_driver(coordinator, time.monotonic() + 1)
+            owner_acquired.set()
+            assert release_owner.wait(2)
+        except BaseException as error:
+            owner_errors.append(error)
+        finally:
+            try:
+                lsp_process._release_driver(coordinator)
+            except BaseException as error:
+                owner_errors.append(error)
+            owner_done.set()
 
     def hold_lifecycle_lock() -> None:
         with coordinator.condition:
             held.set()
-            assert release.wait(2)
+            assert release_transition.wait(2)
 
+    owner = threading.Thread(target=own_driver)
+    owner.start()
+    assert owner_acquired.wait(1)
     holder = threading.Thread(target=hold_lifecycle_lock)
     holder.start()
     assert held.wait(1)
-    deadline = time.monotonic() + 0.05
+    expired = time.monotonic() + 0.05
     try:
-        with pytest.raises(TimeoutError, match="transition"):
-            lsp_process._release_driver(coordinator, deadline)
-        assert time.monotonic() <= deadline + 0.2
+        assert threading.Event().wait(max(0.0, expired - time.monotonic())) is False
+        release_owner.set()
+        assert owner_done.wait(0.2)
     finally:
-        release.set()
+        release_transition.set()
         holder.join(1)
+        owner.join(1)
 
     assert not holder.is_alive()
-    lsp_process._release_driver(coordinator, time.monotonic() + 1)
-    assert coordinator.driver_owner is None
+    assert not owner.is_alive()
+    retry_errors = lsp_process._drive_cleanup(
+        None,
+        time.monotonic() + 0.2,
+        terminal=True,
+        coordinator_override=coordinator,
+    )
+    assert owner_errors == []
+    assert retry_errors == []
 
 
 def test_live_lease_is_bounded_redacted_and_removed_after_graceful_close(
@@ -530,24 +563,27 @@ def test_application_error_and_caller_cancellation_never_restart(
         cancelled.close(time.monotonic() + 5)
 
 
-def test_expired_drain_forces_fresh_generation_without_retrying_deadline(
+def test_expired_drain_restarts_without_request_traffic(
     tmp_path: Path,
 ) -> None:
     marker = tmp_path / "hung"
     process = _start(tmp_path, "--lifecycle", "--hang-once-marker", str(marker))
     first_generation = process.generation_nonce
 
-    with pytest.raises(TimeoutError):
-        process.request("slow", {}, deadline=time.monotonic() + 0.05)
-    assert process.restart_count == 0
-    time.sleep(2.05)
+    try:
+        with pytest.raises(TimeoutError):
+            process.request("slow", {}, deadline=time.monotonic() + 0.05)
+        assert process.restart_count == 0
+        assert _coordinator_wait(process, lambda: process.restart_count == 1, timeout=3)
 
-    assert process.request("echo", {"fresh": True}, deadline=time.monotonic() + 5) == {
-        "fresh": True
-    }
-    assert process.restart_count == 1
-    assert process.generation_nonce != first_generation
-    process.close(time.monotonic() + 5)
+        assert process.restart_count == 1
+        assert process.generation_nonce != first_generation
+        assert process.request(
+            "echo", {"fresh": True}, deadline=time.monotonic() + 5
+        ) == {"fresh": True}
+        assert process.restart_count == 1
+    finally:
+        process.close(time.monotonic() + 5)
 
 
 def test_cancel_all_releases_request_then_close_cleans_descendant_and_threads(
@@ -1401,6 +1437,42 @@ def test_recovery_cannot_run_before_startup_final_fence_completes(
     assert json.loads((instance.owner_root / "failure.json").read_bytes())["code"] == (
         "startup_failed"
     )
+
+
+def test_start_passes_one_absolute_deadline_to_process_tree_and_protocol(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    deadlines: dict[str, float | None] = {}
+    real_spawn = lsp_process.ProcessTree._spawn_with_deadline.__func__
+    real_protocol = lsp_process.LspProtocol
+
+    def record_spawn(
+        cls: type[lsp_process.ProcessTree],
+        command: object,
+        *,
+        cwd: Path,
+        env: object,
+        deadline: float,
+    ) -> lsp_process.ProcessTree:
+        deadlines["spawn"] = deadline
+        return real_spawn(cls, command, cwd=cwd, env=env, deadline=deadline)  # type: ignore[arg-type]
+
+    def record_protocol(*args: object, **kwargs: object) -> lsp_protocol.LspProtocol:
+        deadlines["protocol"] = kwargs.get("_startup_deadline")  # type: ignore[assignment]
+        return real_protocol(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        lsp_process.ProcessTree,
+        "_spawn_with_deadline",
+        classmethod(record_spawn),
+    )
+    monkeypatch.setattr(lsp_process, "LspProtocol", record_protocol)
+    process = _start(tmp_path, "--lifecycle")
+    try:
+        assert deadlines["protocol"] == deadlines["spawn"]
+    finally:
+        process.close(time.monotonic() + 5)
 
 
 def test_startup_heartbeat_stop_timeout_still_runs_all_other_cleanup(
@@ -3385,6 +3457,79 @@ def test_existing_canonical_but_invalid_failure_evidence_is_never_accepted(
             failure.unlink()
         if lsp_process._coordinator_has_ownership(process._coordinator):
             process.close(time.monotonic() + 5)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "wrong-owner",
+        "wrong-generation",
+        "wrong-code",
+        "missing-pid",
+        "wrong-pid",
+        "noncanonical-timestamp",
+    ],
+)
+def test_existing_failure_evidence_must_match_terminal_identity_and_stays_sticky(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    process = _start(tmp_path, "--lifecycle", "--ignore-shutdown")
+    coordinator = process._coordinator
+    record: dict[str, object] = {
+        "code": "heartbeat_failed",
+        "generation_nonce": process.generation_nonce,
+        "owner_nonce": process.owner_nonce,
+        "server_pid": process.process.pid,
+        "timestamp": "2026-07-24T12:34:56.123456Z",
+    }
+    if mutation == "wrong-owner":
+        record["owner_nonce"] = "b" * 32
+    elif mutation == "wrong-generation":
+        record["generation_nonce"] = "b" * 32
+    elif mutation == "wrong-code":
+        record["code"] = "process_exited"
+    elif mutation == "missing-pid":
+        record.pop("server_pid")
+    elif mutation == "wrong-pid":
+        record["server_pid"] = process.process.pid + 1
+    elif mutation == "noncanonical-timestamp":
+        record["timestamp"] = "2026-07-24T12:34:56.1Z"
+    else:  # pragma: no cover - parametrization is closed above
+        raise AssertionError(mutation)
+    failure = process.owner_root / "failure.json"
+    failure.write_bytes(
+        json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
+
+    try:
+        lsp_process._queue_owner_failure(coordinator, "injected owner failure")
+        recovery = coordinator.recovery_thread
+        assert recovery is not None
+        recovery.join(5)
+
+        assert not recovery.is_alive()
+        assert coordinator.failure_evidence_identity is not None
+        assert coordinator.failure_evidence_identity.code == "heartbeat_failed"
+        assert isinstance(coordinator.background_cleanup_error, ValueError)
+        assert coordinator.cleanup_result.evidence == "failed"
+        assert coordinator.cleanup_result.ownership_pending is True
+        assert coordinator.owner_directory is not None
+        assert (process.owner_root / "lease.json").is_file()
+
+        failure.unlink()
+        with pytest.raises(ValueError, match="failure evidence"):
+            process.close(time.monotonic() + 5)
+        assert not lsp_process._coordinator_has_ownership(coordinator)
+        process.close(time.monotonic() + 1)
+    finally:
+        if failure.exists():
+            failure.unlink()
+        if lsp_process._coordinator_has_ownership(coordinator):
+            try:
+                process.close(time.monotonic() + 5)
+            except ValueError:
+                process.close(time.monotonic() + 5)
 
 
 @pytest.mark.parametrize("artifact", ["evidence", "lease"])

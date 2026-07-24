@@ -6,10 +6,15 @@ import math
 import os
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+
+_LINUX_PROC_SCAN_LIMIT = 131_072
+_LINUX_PROC_STAT_LIMIT = 4096
+_LINUX_DEAD_STATES = frozenset({b"Z", b"X", b"x"})
 
 if os.name == "nt":
     import ctypes
@@ -338,6 +343,47 @@ def _deadline(value: float) -> float:
     return float(value)
 
 
+def _linux_group_is_inert(proc_root: Path, group: int) -> bool | None:
+    scanned = 0
+    try:
+        entries = os.scandir(proc_root)
+    except OSError:
+        return None
+    with entries:
+        try:
+            for entry in entries:
+                if not entry.name.isdecimal():
+                    continue
+                scanned += 1
+                if scanned > _LINUX_PROC_SCAN_LIMIT:
+                    return None
+                try:
+                    with open(Path(entry.path) / "stat", "rb") as stat_file:
+                        payload = stat_file.read(_LINUX_PROC_STAT_LIMIT + 1)
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    return None
+                if len(payload) > _LINUX_PROC_STAT_LIMIT:
+                    return None
+                closing = payload.rfind(b") ")
+                fields = payload[closing + 2 :].split() if closing >= 0 else ()
+                if len(fields) < 4:
+                    return None
+                try:
+                    process_group = int(fields[2])
+                    session = int(fields[3])
+                except ValueError:
+                    return None
+                if (process_group == group or session == group) and (
+                    fields[0] not in _LINUX_DEAD_STATES
+                ):
+                    return False
+        except OSError:
+            return None
+    return True
+
+
 def _observe_posix_tree(
     process: subprocess.Popen[bytes], group: int
 ) -> tuple[bool, bool]:
@@ -348,6 +394,8 @@ def _observe_posix_tree(
         group_absent = True
     else:
         group_absent = False
+        if direct_reaped and sys.platform.startswith("linux"):
+            group_absent = _linux_group_is_inert(Path("/proc"), group) is True
     return direct_reaped, group_absent
 
 

@@ -472,16 +472,33 @@ class LspProtocol:
         warning_callback: Callable[[str], None] | None = None,
         server_request_handlers: Mapping[str, Callable[[object], object]] | None = None,
         server_notification_handlers: Mapping[str, Callable[[object], None]] | None = None,
+        _startup_deadline: float | None = None,
+        _drain_wake: threading.Event | None = None,
     ) -> None:
         if not isinstance(generation_nonce, str) or not generation_nonce:
             raise ValueError("generation_nonce must be a non-empty string")
         if not callable(fatal_callback):
             raise TypeError("fatal_callback must be callable")
+        if _drain_wake is not None and not isinstance(_drain_wake, threading.Event):
+            raise TypeError("_drain_wake must be a threading.Event or None")
+        if _startup_deadline is not None:
+            if isinstance(_startup_deadline, bool) or not isinstance(
+                _startup_deadline, (int, float)
+            ):
+                raise TypeError("_startup_deadline must be a monotonic timestamp")
+            if not math.isfinite(_startup_deadline):
+                raise ValueError("_startup_deadline must be finite")
+        startup_deadline = (
+            time.monotonic() + _OWNER_JOIN_SECONDS
+            if _startup_deadline is None
+            else float(_startup_deadline)
+        )
         self._reader = reader
         self._writer = writer
         self.generation_nonce = generation_nonce
         self._fatal_callback = fatal_callback
         self._warning_callback = warning_callback
+        self._drain_wake = _drain_wake
         self._server_request_handlers = dict(server_request_handlers or {})
         self._server_notification_handlers = dict(server_notification_handlers or {})
         self._state_lock = threading.Lock()
@@ -524,8 +541,8 @@ class LspProtocol:
         try:
             self.writer_thread.start()
             self.reader_thread.start()
-            self._wait_owner_started(self._writer_started, "writer")
-            self._wait_owner_started(self._reader_started, "reader")
+            self._wait_owner_started(self._writer_started, "writer", startup_deadline)
+            self._wait_owner_started(self._reader_started, "reader", startup_deadline)
             self._raise_owner_start_error()
         except BaseException as startup_error:
             self._io_stopped.set()
@@ -538,7 +555,7 @@ class LspProtocol:
                     self._cancel_owner_io(owner)
             self._interrupt_stream(self._reader)
             self._interrupt_stream(self._writer)
-            cleanup_deadline = time.monotonic() + _OWNER_JOIN_SECONDS
+            cleanup_deadline = startup_deadline
             cleanup_errors: list[BaseException] = []
             for owner in (self.reader_thread, self.writer_thread):
                 try:
@@ -579,6 +596,17 @@ class LspProtocol:
                     if pending.drain_deadline is not None
                     and float(now) >= pending.drain_deadline
                 )
+            )
+
+    def next_drain_deadline(self) -> float | None:
+        with self._state_lock:
+            return min(
+                (
+                    pending.drain_deadline
+                    for pending in self._pending.values()
+                    if pending.drain_deadline is not None
+                ),
+                default=None,
             )
 
     def request(
@@ -1124,6 +1152,8 @@ class LspProtocol:
             self._remember_key(key, self._cancelled_keys, self._cancelled_order)
         else:
             pending.drain_deadline = terminal_at + CANCEL_DRAIN_GRACE_SECONDS
+            if self._drain_wake is not None:
+                self._drain_wake.set()
             if pending.write_phase == "sent":
                 self._enqueue_cancel_locked(pending)
         pending.completed.set()
@@ -1414,9 +1444,12 @@ class LspProtocol:
             raise first_error
 
     @staticmethod
-    def _wait_owner_started(event: threading.Event, owner_name: str) -> None:
-        if not event.wait(_OWNER_JOIN_SECONDS):
-            raise RuntimeError(f"LSP {owner_name} owner did not start")
+    def _wait_owner_started(
+        event: threading.Event, owner_name: str, deadline: float
+    ) -> None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not event.wait(remaining):
+            raise TimeoutError(f"LSP {owner_name} owner did not start before deadline")
 
     def _join_partially_started_owner(
         self,
