@@ -339,6 +339,74 @@ def test_job_configuration_failure_retains_job_when_close_fails(
     assert len(raised.value.errors) == 2
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job setup ownership")
+def test_job_configuration_exception_closes_new_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed: list[int] = []
+
+    class Kernel:
+        @staticmethod
+        def CreateJobObjectW(_security: object, _name: object) -> int:
+            return 42
+
+        @staticmethod
+        def SetInformationJobObject(
+            _job: int,
+            _kind: int,
+            _information: object,
+            _size: int,
+        ) -> int:
+            raise OSError("job configuration raised")
+
+        @staticmethod
+        def CloseHandle(job: int) -> int:
+            closed.append(job)
+            return 1
+
+    monkeypatch.setattr(lsp_process_tree, "_KERNEL32", Kernel())
+
+    with pytest.raises(OSError, match="job configuration raised"):
+        lsp_process_tree._create_windows_job()
+
+    assert closed == [42]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job setup ownership")
+def test_job_configuration_exception_retains_job_when_close_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Kernel:
+        @staticmethod
+        def CreateJobObjectW(_security: object, _name: object) -> int:
+            return 43
+
+        @staticmethod
+        def SetInformationJobObject(
+            _job: int,
+            _kind: int,
+            _information: object,
+            _size: int,
+        ) -> int:
+            raise OSError("job configuration raised")
+
+        @staticmethod
+        def CloseHandle(_job: int) -> int:
+            return 0
+
+    monkeypatch.setattr(lsp_process_tree, "_KERNEL32", Kernel())
+    monkeypatch.setattr(lsp_process_tree.ctypes, "get_last_error", lambda: 6)
+
+    with pytest.raises(lsp_process_tree._ProcessTreeSpawnError) as raised:
+        lsp_process_tree._create_windows_job()
+
+    assert isinstance(raised.value.__cause__, OSError)
+    assert "job configuration raised" in str(raised.value.__cause__)
+    assert raised.value.windows_job == 43
+    assert len(raised.value.errors) == 2
+    assert "job configuration raised" in str(raised.value.errors[0])
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows final child ownership proof")
 def test_setup_rollback_retains_tree_when_final_child_poll_fails(
     monkeypatch: pytest.MonkeyPatch,

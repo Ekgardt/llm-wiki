@@ -469,14 +469,15 @@ if os.name == "nt":
         job = int(handle)
         limits = _ExtendedLimitInformation()
         limits.basic_limit_information.limit_flags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        if not _KERNEL32.SetInformationJobObject(
-            job,
-            _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
-            ctypes.byref(limits),
-            ctypes.sizeof(limits),
-        ):
-            error = ctypes.get_last_error()
-            configuration_error = ctypes.WinError(error)
+        try:
+            if not _KERNEL32.SetInformationJobObject(
+                job,
+                _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                ctypes.byref(limits),
+                ctypes.sizeof(limits),
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+        except BaseException as configuration_error:
             try:
                 _close_windows_handle(job)
             except BaseException as cleanup_error:
@@ -485,7 +486,7 @@ if os.name == "nt":
                     (configuration_error, cleanup_error),
                     windows_job=job,
                 ) from configuration_error
-            raise configuration_error
+            raise
         return job
 
 

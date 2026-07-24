@@ -567,6 +567,7 @@ class _Generation:
     nonce: str
     tree: ProcessTree | None
     process: subprocess.Popen[bytes] | None
+    server_pid: int | None = None
     windows_job: int | None = None
     protocol: LspProtocol | None = None
     stderr: deque[bytes] = field(default_factory=deque)
@@ -619,6 +620,7 @@ class _CleanupResult:
 @dataclass(slots=True)
 class _LifecycleCoordinator:
     owner_directory: _OwnerDirectory | None
+    startup_generation_nonce: str | None = None
     phase: _LifecyclePhase = _LifecyclePhase.STARTING
     active: _Generation | None = None
     candidate: _Generation | None = None
@@ -627,12 +629,22 @@ class _LifecycleCoordinator:
     terminal_code: str | None = None
     failure_evidence_identity: _FailureEvidenceIdentity | None = None
     background_cleanup_error: BaseException | None = field(default=None, repr=False)
+    background_error_lock: threading.Lock = field(
+        default_factory=threading.Lock, repr=False
+    )
     cleanup_result: _CleanupResult = field(default_factory=_CleanupResult)
     recovery_attempted: bool = False
     startup_complete: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     condition: threading.Condition = field(init=False, repr=False)
     driver: threading.RLock = field(default_factory=threading.RLock, repr=False)
+    terminal_intent_lock: threading.RLock = field(
+        default_factory=threading.RLock, repr=False
+    )
+    pending_failure_intents: int = 0
+    pending_failure_code: str | None = None
+    success_committed: bool = False
+    cleanup_started: threading.Event = field(default_factory=threading.Event, repr=False)
     failure_queue: queue.SimpleQueue[_FailureIntent] = field(
         default_factory=queue.SimpleQueue, repr=False
     )
@@ -850,17 +862,45 @@ def _queue_generation_failure(
     with generation.failure_lock:
         if generation.expected_exit.is_set() or generation.failure_queued:
             return False
+        intent = _FailureIntent(generation.nonce, reason, False, time.monotonic())
+        if not _enqueue_failure_intent(coordinator, intent):
+            return False
         generation.failure_queued = True
-    coordinator.failure_queue.put(
-        _FailureIntent(generation.nonce, reason, False, time.monotonic())
-    )
+    return True
+
+
+def _enqueue_failure_intent(
+    coordinator: _LifecycleCoordinator, intent: _FailureIntent
+) -> bool:
+    with coordinator.terminal_intent_lock:
+        if coordinator.success_committed:
+            return False
+        coordinator.pending_failure_intents += 1
+        if intent.owner_fatal:
+            coordinator.pending_failure_code = "heartbeat_failed"
+        elif coordinator.pending_failure_code is None:
+            coordinator.pending_failure_code = _PROCESS_EXITED
+        coordinator.failure_queue.put(intent)
     coordinator.recovery_wake.set()
     return True
 
 
-def _queue_owner_failure(coordinator: _LifecycleCoordinator, reason: str) -> None:
-    coordinator.failure_queue.put(_FailureIntent(None, reason, True, time.monotonic()))
-    coordinator.recovery_wake.set()
+def _acknowledge_failure_intent(coordinator: _LifecycleCoordinator) -> None:
+    with coordinator.terminal_intent_lock:
+        if coordinator.pending_failure_intents <= 0:
+            raise RuntimeError("LSP failure intent acknowledgement underflow")
+        coordinator.pending_failure_intents -= 1
+        if coordinator.pending_failure_intents == 0:
+            coordinator.pending_failure_code = None
+
+
+def _queue_owner_failure(
+    coordinator: _LifecycleCoordinator, reason: str
+) -> bool:
+    return _enqueue_failure_intent(
+        coordinator,
+        _FailureIntent(None, reason, True, time.monotonic()),
+    )
 
 
 def _prepare_generation(
@@ -892,6 +932,7 @@ def _prepare_generation(
     generation.tree = tree
     generation.process = tree.process
     process = tree.process
+    generation.server_pid = process.pid
     if process.stdin is None or process.stdout is None or process.stderr is None:
         raise RuntimeError("LSP process pipes were not created")
 
@@ -976,7 +1017,8 @@ def _write_generation_lease(
     owner_nonce: str,
 ) -> None:
     process = generation.process
-    if process is None:
+    server_pid = process.pid if process is not None else generation.server_pid
+    if server_pid is None:
         raise RuntimeError("LSP generation process is unavailable")
     heartbeat = datetime.now(timezone.utc)
     expires = heartbeat + timedelta(seconds=_LEASE_EXPIRY_SECONDS)
@@ -988,7 +1030,7 @@ def _write_generation_lease(
             "manager_pid": os.getpid(),
             "owner_nonce": owner_nonce,
             "schema_version": 1,
-            "server_pid": process.pid,
+            "server_pid": server_pid,
             "state": "live",
         }
     )
@@ -1012,7 +1054,9 @@ def _start_lsp_process(
     generation_nonce = _new_generation_nonce()
     started_monotonic = time.monotonic()
     started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    coordinator = _LifecycleCoordinator(None)
+    coordinator = _LifecycleCoordinator(
+        None, startup_generation_nonce=generation_nonce
+    )
     startup_deadline: float | None = None
     instance: LspProcess | None = None
     driver_acquired = False
@@ -1155,12 +1199,19 @@ def _heartbeat_loop(instance: LspProcess) -> None:
         coordinator.heartbeat_wake.clear()
         if coordinator.heartbeat_stop.is_set():
             return
+        maintenance_deadline = time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
         try:
-            _write_current_lease(
-                instance, time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
-            )
+            _write_current_lease(instance, maintenance_deadline)
         except BaseException as error:
-            with coordinator.condition:
+            if not _queue_owner_failure(coordinator, f"heartbeat_failed: {error}"):
+                return
+            if coordinator.cleanup_started.is_set():
+                _remember_background_cleanup_error(coordinator, error)
+            try:
+                _acquire_lifecycle(coordinator, maintenance_deadline)
+            except TimeoutError:
+                return
+            try:
                 coordinator.terminal_outcome = "failure"
                 coordinator.terminal_code = "heartbeat_failed"
                 coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
@@ -1168,7 +1219,8 @@ def _heartbeat_loop(instance: LspProcess) -> None:
                 for generation in _generations_locked(coordinator):
                     generation.expected_exit.set()
                 _notify_lifecycle_locked(coordinator)
-            _queue_owner_failure(coordinator, f"heartbeat_failed: {error}")
+            finally:
+                _release_lifecycle(coordinator)
             return
 
 
@@ -1192,10 +1244,21 @@ def _write_current_lease(instance: LspProcess, deadline: float) -> None:
     try:
         _acquire_lifecycle(coordinator, deadline)
         try:
-            if coordinator.phase is not _LifecyclePhase.RUNNING:
+            if coordinator.phase in {
+                _LifecyclePhase.STARTING,
+                _LifecyclePhase.STOPPED_SUCCESS,
+                _LifecyclePhase.STOPPED_FAILURE,
+            }:
                 return
-            generation = coordinator.active
             owner = coordinator.owner_directory
+            generation = next(
+                (
+                    item
+                    for item in _generations_locked(coordinator)
+                    if item.server_pid is not None
+                ),
+                None,
+            )
         finally:
             _release_lifecycle(coordinator)
         if generation is not None and owner is not None:
@@ -1208,13 +1271,25 @@ def _active_drain_generation(
     instance: LspProcess,
 ) -> tuple[_Generation, LspProtocol] | None:
     coordinator = instance._coordinator
-    with coordinator.condition:
+    deadline = time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
+    try:
+        _acquire_lifecycle(coordinator, deadline)
+    except TimeoutError:
+        bounded_error = TimeoutError(
+            "LSP expired-drain inspection exceeded its maintenance deadline"
+        )
+        if _queue_owner_failure(coordinator, str(bounded_error)):
+            _remember_background_cleanup_error(coordinator, bounded_error)
+        return None
+    try:
         generation = (
             coordinator.active
             if coordinator.phase is _LifecyclePhase.RUNNING
             else None
         )
         protocol = generation.protocol if generation is not None else None
+    finally:
+        _release_lifecycle(coordinator)
     if generation is None or protocol is None:
         return None
     with generation.failure_lock:
@@ -1308,8 +1383,10 @@ def _process_failure_intent_owned(
 
     terminal = False
     restart = False
+    acknowledge = False
     try:
         if key in coordinator.seen_failures:
+            acknowledge = True
             return
         if not coordinator.startup_complete:
             coordinator.failure_queue.put(intent)
@@ -1320,8 +1397,10 @@ def _process_failure_intent_owned(
             active is None or active.nonce != intent.generation_nonce
         ):
             coordinator.seen_failures.add(key)
+            acknowledge = True
             return
         coordinator.seen_failures.add(key)
+        acknowledge = True
         if intent.owner_fatal or coordinator.recovery_attempted or instance.restart_count >= 1:
             coordinator.terminal_outcome = "failure"
             coordinator.terminal_code = (
@@ -1340,6 +1419,8 @@ def _process_failure_intent_owned(
         _notify_lifecycle_locked(coordinator)
     finally:
         _release_lifecycle(coordinator)
+        if acknowledge:
+            _acknowledge_failure_intent(coordinator)
 
     if restart:
         try:
@@ -1368,8 +1449,18 @@ def _process_failure_intent_owned(
 def _remember_background_cleanup_error(
     coordinator: _LifecycleCoordinator, error: BaseException
 ) -> None:
-    if coordinator.background_cleanup_error is None:
-        coordinator.background_cleanup_error = error
+    with coordinator.background_error_lock:
+        if coordinator.background_cleanup_error is None:
+            coordinator.background_cleanup_error = error
+
+
+def _take_background_cleanup_error(
+    coordinator: _LifecycleCoordinator,
+) -> BaseException | None:
+    with coordinator.background_error_lock:
+        error = coordinator.background_cleanup_error
+        coordinator.background_cleanup_error = None
+        return error
 
 
 def _request_generation(instance: LspProcess, deadline: float) -> _Generation:
@@ -1690,13 +1781,15 @@ def _shutdown_lsp_process_owned(instance: LspProcess, deadline: float) -> None:
             _LifecyclePhase.STOPPED_SUCCESS,
             _LifecyclePhase.STOPPED_FAILURE,
         } and not _coordinator_has_ownership_locked(coordinator):
-            background_error = coordinator.background_cleanup_error
-            coordinator.background_cleanup_error = None
+            background_error = _take_background_cleanup_error(coordinator)
             if background_error is not None:
                 raise background_error
             return
         if coordinator.terminal_outcome is None:
             coordinator.terminal_outcome = "success"
+        _linearize_terminal_outcome_locked(
+            instance, coordinator, commit_success=False
+        )
         failure = coordinator.terminal_outcome == "failure"
         coordinator.phase = (
             _LifecyclePhase.STOPPING_FAILURE
@@ -1744,8 +1837,7 @@ def _shutdown_lsp_process_owned(instance: LspProcess, deadline: float) -> None:
         raise errors[0]
     if graceful_error is not None:
         raise graceful_error
-    background_error = coordinator.background_cleanup_error
-    coordinator.background_cleanup_error = None
+    background_error = _take_background_cleanup_error(coordinator)
     if background_error is not None:
         raise background_error
 
@@ -1851,22 +1943,33 @@ def _ensure_failure_evidence(
 ) -> None:
     owner = coordinator.owner_directory
     if owner is None:
-        return
+        raise RuntimeError("LSP failure evidence owner is unavailable")
     identity = coordinator.failure_evidence_identity
     if identity is None:
         generation = coordinator.active or coordinator.candidate
         if generation is None and coordinator.retired:
             generation = coordinator.retired[-1]
         process = generation.process if generation is not None else None
+        generation_nonce = (
+            generation.nonce
+            if generation is not None
+            else (
+                instance.generation_nonce
+                if instance is not None
+                else coordinator.startup_generation_nonce
+            )
+        )
+        if generation_nonce is None:
+            raise RuntimeError("LSP failure evidence generation identity is unavailable")
         identity = _FailureEvidenceIdentity(
             code,
             instance.owner_nonce if instance is not None else owner.owner_root.name,
+            generation_nonce,
             (
-                generation.nonce
-                if generation is not None
-                else (instance.generation_nonce if instance is not None else "0" * 32)
+                process.pid
+                if process is not None
+                else (generation.server_pid if generation is not None else None)
             ),
-            process.pid if process is not None else None,
         )
         coordinator.failure_evidence_identity = identity
     try:
@@ -1886,6 +1989,11 @@ def _ensure_failure_evidence(
             generation_nonce=identity.generation_nonce,
             pid=identity.pid,
         )
+
+
+def _failure_evidence_required(coordinator: _LifecycleCoordinator) -> bool:
+    owner = coordinator.owner_directory
+    return owner is not None and owner.owner_permissions_verified
 
 
 def _stop_heartbeat_owner(
@@ -1952,7 +2060,13 @@ def _drain_terminal_failures(
             break
     if not intents:
         return
-    _acquire_lifecycle(coordinator, deadline, allow_expired=True)
+    try:
+        _acquire_lifecycle(coordinator, deadline, allow_expired=True)
+    except BaseException:
+        for intent in intents:
+            coordinator.failure_queue.put(intent)
+        coordinator.recovery_wake.set()
+        raise
     try:
         coordinator.terminal_outcome = "failure"
         if coordinator.terminal_code is None:
@@ -1965,6 +2079,52 @@ def _drain_terminal_failures(
         if instance is not None:
             instance.state = ProcessState.FAILED
         _notify_lifecycle_locked(coordinator)
+    finally:
+        _release_lifecycle(coordinator)
+    for _intent in intents:
+        _acknowledge_failure_intent(coordinator)
+
+
+def _linearize_terminal_outcome_locked(
+    instance: LspProcess | None,
+    coordinator: _LifecycleCoordinator,
+    *,
+    commit_success: bool,
+) -> str | None:
+    with coordinator.terminal_intent_lock:
+        if (
+            coordinator.pending_failure_intents > 0
+            and not coordinator.success_committed
+        ):
+            coordinator.terminal_outcome = "failure"
+            if coordinator.terminal_code is None:
+                coordinator.terminal_code = (
+                    coordinator.pending_failure_code or _PROCESS_EXITED
+                )
+            coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
+            if instance is not None:
+                instance.state = ProcessState.FAILED
+            for generation in _generations_locked(coordinator):
+                generation.expected_exit.set()
+        if commit_success and coordinator.terminal_outcome == "success":
+            coordinator.success_committed = True
+        return coordinator.terminal_outcome
+
+
+def _linearize_terminal_outcome(
+    instance: LspProcess | None,
+    coordinator: _LifecycleCoordinator,
+    deadline: float,
+    *,
+    commit_success: bool,
+) -> str | None:
+    _acquire_lifecycle(coordinator, deadline, allow_expired=True)
+    try:
+        outcome = _linearize_terminal_outcome_locked(
+            instance, coordinator, commit_success=commit_success
+        )
+        _notify_lifecycle_locked(coordinator)
+        return outcome
     finally:
         _release_lifecycle(coordinator)
 
@@ -1982,6 +2142,8 @@ def _drive_cleanup(
     )
     if coordinator is None:
         raise RuntimeError("LSP cleanup requires a lifecycle coordinator")
+    if terminal:
+        coordinator.cleanup_started.set()
     _acquire_driver(coordinator, deadline, allow_expired=True)
     try:
         return _drive_cleanup_owned(
@@ -2014,11 +2176,18 @@ def _drive_cleanup_owned(
         return current_errors
     try:
         generations = _generations_locked(coordinator)
-        outcome = coordinator.terminal_outcome
+        outcome = (
+            _linearize_terminal_outcome_locked(
+                instance, coordinator, commit_success=False
+            )
+            if terminal
+            else coordinator.terminal_outcome
+        )
         code = failure_code or coordinator.terminal_code or _PROCESS_EXITED
         if terminal:
             for generation in generations:
                 generation.expected_exit.set()
+        _notify_lifecycle_locked(coordinator)
     finally:
         _release_lifecycle(coordinator)
 
@@ -2026,9 +2195,10 @@ def _drive_cleanup_owned(
     evidence_unavailable = (
         terminal
         and outcome == "failure"
-        and not generations
-        and owner is not None
-        and not owner.owner_permissions_verified
+        and (
+            owner is None
+            or (not generations and not owner.owner_permissions_verified)
+        )
     )
     if evidence_unavailable:
         result.evidence = "not_applicable"
@@ -2155,12 +2325,12 @@ def _drive_cleanup_owned(
     if joins_ok and not joins_pending:
         result.generation_joins = "success"
 
+    all_generations_released = all(generation.released for generation in generations)
+    recovery_stopped = (
+        coordinator.recovery_thread is None
+        or not coordinator.recovery_thread.is_alive()
+    )
     if terminal:
-        try:
-            _stop_heartbeat_owner(coordinator, deadline, allow_expired=True)
-            result.heartbeat_join = "success"
-        except BaseException as error:
-            _record_cleanup_error(result, current_errors, "heartbeat_join", error)
         try:
             recovery_stopped = _stop_recovery_owner(
                 coordinator, deadline, allow_expired=True
@@ -2174,8 +2344,70 @@ def _drive_cleanup_owned(
                 _drain_terminal_failures(instance, coordinator, deadline)
             except BaseException as error:
                 _record_cleanup_error(result, current_errors, "recovery_join", error)
+        try:
+            outcome = _linearize_terminal_outcome(
+                instance, coordinator, deadline, commit_success=False
+            )
+        except BaseException as error:
+            _record_cleanup_error(result, current_errors, "recovery_join", error)
+            outcome = coordinator.terminal_outcome
+        if outcome == "failure" and _failure_evidence_required(coordinator):
+            try:
+                _ensure_failure_evidence(
+                    instance,
+                    coordinator,
+                    coordinator.terminal_code or failure_code or _PROCESS_EXITED,
+                )
+                result.evidence = "success"
+            except BaseException as error:
+                _record_cleanup_error(result, current_errors, "evidence", error)
+        evidence_ready = (
+            outcome != "failure"
+            or not _failure_evidence_required(coordinator)
+            or result.evidence == "success"
+        )
+        if all_generations_released and recovery_stopped and evidence_ready:
+            try:
+                outcome = _linearize_terminal_outcome(
+                    instance, coordinator, deadline, commit_success=True
+                )
+            except BaseException as error:
+                _record_cleanup_error(result, current_errors, "heartbeat_join", error)
+            else:
+                if (
+                    outcome == "failure"
+                    and result.evidence != "success"
+                    and _failure_evidence_required(coordinator)
+                ):
+                    try:
+                        _ensure_failure_evidence(
+                            instance,
+                            coordinator,
+                            coordinator.terminal_code
+                            or failure_code
+                            or _PROCESS_EXITED,
+                        )
+                        result.evidence = "success"
+                    except BaseException as error:
+                        _record_cleanup_error(
+                            result, current_errors, "evidence", error
+                        )
+                evidence_ready = (
+                    outcome != "failure"
+                    or not _failure_evidence_required(coordinator)
+                    or result.evidence == "success"
+                )
+                if evidence_ready:
+                    try:
+                        _stop_heartbeat_owner(
+                            coordinator, deadline, allow_expired=True
+                        )
+                        result.heartbeat_join = "success"
+                    except BaseException as error:
+                        _record_cleanup_error(
+                            result, current_errors, "heartbeat_join", error
+                        )
 
-    all_generations_released = all(generation.released for generation in generations)
     heartbeat_stopped = (
         coordinator.heartbeat_thread is None
         or not coordinator.heartbeat_thread.is_alive()
@@ -2189,25 +2421,31 @@ def _drive_cleanup_owned(
         all_generations_released and heartbeat_stopped and recovery_stopped
     )
 
-    if (
-        terminal
-        and coordinator.terminal_outcome == "failure"
-        and result.evidence not in {"success", "not_applicable"}
-    ):
+    if terminal and ownership_stopped:
         try:
-            _ensure_failure_evidence(
-                instance,
-                coordinator,
-                coordinator.terminal_code or failure_code or _PROCESS_EXITED,
+            _drain_terminal_failures(instance, coordinator, deadline)
+            outcome = _linearize_terminal_outcome(
+                instance, coordinator, deadline, commit_success=True
             )
-            result.evidence = "success"
         except BaseException as error:
-            _record_cleanup_error(result, current_errors, "evidence", error)
+            _record_cleanup_error(result, current_errors, "recovery_join", error)
+            outcome = coordinator.terminal_outcome
+        if outcome == "failure" and _failure_evidence_required(coordinator):
+            try:
+                _ensure_failure_evidence(
+                    instance,
+                    coordinator,
+                    coordinator.terminal_code or failure_code or _PROCESS_EXITED,
+                )
+                result.evidence = "success"
+            except BaseException as error:
+                _record_cleanup_error(result, current_errors, "evidence", error)
 
     if terminal and ownership_stopped and owner is not None:
         evidence_ready = (
             coordinator.terminal_outcome != "failure"
-            or result.evidence in {"success", "not_applicable"}
+            or not _failure_evidence_required(coordinator)
+            or result.evidence == "success"
         )
         if evidence_ready:
             try:
@@ -2247,13 +2485,28 @@ def _drive_cleanup_owned(
         ]
         if coordinator.candidate is not None and coordinator.candidate.released:
             coordinator.candidate = None
-        if terminal and coordinator.active is not None and coordinator.active.released:
-            coordinator.active = None
         owner = coordinator.owner_directory
         if owner is not None and owner._closed:
             coordinator.owner_directory = None
+        if (
+            terminal
+            and coordinator.active is not None
+            and coordinator.active.released
+            and coordinator.owner_directory is None
+        ):
+            coordinator.active = None
         if terminal:
-            result.ownership_pending = _coordinator_has_ownership_locked(coordinator)
+            result.ownership_pending = (
+                _coordinator_has_ownership_locked(coordinator)
+                or (
+                    coordinator.terminal_outcome == "failure"
+                    and result.evidence != "success"
+                )
+                or (
+                    coordinator.terminal_outcome == "success"
+                    and not coordinator.success_committed
+                )
+            )
         else:
             result.ownership_pending = any(
                 not generation.released for generation in _generations_locked(coordinator)

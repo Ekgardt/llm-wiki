@@ -317,6 +317,9 @@ def test_shutdown_alone_completes_tree_threads_lease_and_scratch_cleanup(
     process.shutdown(time.monotonic() + 5)
 
     assert process.process.poll() is not None
+    descendant_deadline = time.monotonic() + 2
+    while _pid_alive(descendant) and time.monotonic() < descendant_deadline:
+        time.sleep(0.01)
     assert not _pid_alive(descendant)
     assert not process.owner_root.exists()
     assert all(thread is None or not thread.is_alive() for thread in owner_threads)
@@ -1383,6 +1386,32 @@ def test_heartbeat_thread_start_failure_removes_live_lease_and_owned_threads(
     assert {
         thread.name for thread in threading.enumerate() if thread.name.startswith("lsp-")
     } == baseline
+
+
+def test_owner_create_failure_uses_allocated_startup_generation_nonce(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    generation_nonce = "b" * 32
+    owner_root = tmp_path / OWNER_NONCE
+    real_create = lsp_process._OwnerDirectory.create
+
+    def fail_after_create(
+        owner: lsp_process._OwnerDirectory, deadline: float
+    ) -> None:
+        real_create(owner, deadline)
+        raise RuntimeError("owner create failed after allocation")
+
+    monkeypatch.setattr(lsp_process, "_new_generation_nonce", lambda: generation_nonce)
+    monkeypatch.setattr(lsp_process._OwnerDirectory, "create", fail_after_create)
+
+    with pytest.raises(RuntimeError, match="owner create failed after allocation"):
+        LspProcess.start(_command(), cwd=tmp_path, owner_root=owner_root)
+
+    failure = json.loads((owner_root / "failure.json").read_bytes())
+    assert failure["generation_nonce"] == generation_nonce
+    assert failure["owner_nonce"] == OWNER_NONCE
+    assert failure["code"] == "startup_failed"
 
 
 def test_recovery_cannot_run_before_startup_final_fence_completes(
@@ -3062,6 +3091,51 @@ def test_cleanup_driver_aggregates_process_observation_error_and_continues() -> 
     assert coordinator.phase is lsp_process._LifecyclePhase.CLEANUP_PENDING
 
 
+def test_fatal_intent_after_cleanup_drain_dominates_success_finalization(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle")
+    coordinator = process._coordinator
+    server_pid = process.process.pid
+    real_drain = lsp_process._drain_terminal_failures
+    injected = False
+    accepted: bool | None = None
+
+    def drain_then_inject(
+        instance: LspProcess | None,
+        current: lsp_process._LifecycleCoordinator,
+        deadline: float,
+    ) -> None:
+        nonlocal accepted, injected
+        real_drain(instance, current, deadline)
+        if current is coordinator and not injected:
+            injected = True
+            accepted = lsp_process._queue_owner_failure(
+                current, "fatal at finalization barrier"
+            )
+
+    monkeypatch.setattr(lsp_process, "_drain_terminal_failures", drain_then_inject)
+
+    process.close(time.monotonic() + 5)
+
+    assert injected is True
+    assert accepted is True
+    failure_path = process.owner_root / "failure.json"
+    failure = json.loads(failure_path.read_bytes())
+    lsp_process._validate_failure_record(
+        failure,
+        code="heartbeat_failed",
+        owner_nonce=process.owner_nonce,
+        generation_nonce=process.generation_nonce,
+        pid=server_pid,
+    )
+    assert coordinator.phase is lsp_process._LifecyclePhase.STOPPED_FAILURE
+    assert coordinator.cleanup_result.evidence == "success"
+    assert not (process.owner_root / "lease.json").exists()
+    assert not lsp_process._coordinator_has_ownership(coordinator)
+
+
 def test_tree_cleanup_fault_retains_tree_owner_lease_and_scratch_until_retry(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3071,6 +3145,10 @@ def test_tree_cleanup_fault_retains_tree_owner_lease_and_scratch_until_retry(
     generation = coordinator.active
     assert generation is not None and generation.tree is not None
     tree = generation.tree
+    heartbeat = coordinator.heartbeat_thread
+    assert heartbeat is not None
+    lease_path = process.owner_root / "lease.json"
+    first_timestamp = json.loads(lease_path.read_bytes())["heartbeat_at"]
     terminate = lsp_process.ProcessTree.terminate
     fault_enabled = True
 
@@ -3088,10 +3166,67 @@ def test_tree_cleanup_fault_retains_tree_owner_lease_and_scratch_until_retry(
     assert (process.owner_root / "lease.json").is_file()
     assert (process.owner_root / "owner.json").is_file()
     assert coordinator.cleanup_result.ownership_pending is True
+    assert heartbeat.is_alive()
+    coordinator.heartbeat_wake.set()
+    heartbeat_deadline = time.monotonic() + 2
+    while time.monotonic() < heartbeat_deadline:
+        if json.loads(lease_path.read_bytes())["heartbeat_at"] != first_timestamp:
+            break
+        time.sleep(0.01)
+    assert json.loads(lease_path.read_bytes())["heartbeat_at"] != first_timestamp
 
     fault_enabled = False
     process.shutdown(time.monotonic() + 5)
+    assert not heartbeat.is_alive()
     assert not process.owner_root.exists()
+
+
+def test_heartbeat_failure_during_cleanup_pending_is_stale_and_observable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle", "--ignore-shutdown")
+    coordinator = process._coordinator
+    generation = coordinator.active
+    assert generation is not None and generation.tree is not None
+    tree = generation.tree
+    heartbeat = coordinator.heartbeat_thread
+    assert heartbeat is not None
+    terminate = lsp_process.ProcessTree.terminate
+    tree_fault = True
+
+    def terminate_tree(current: object, *, deadline: float) -> None:
+        if current is tree and tree_fault:
+            raise OSError("tree remains live")
+        terminate(current, deadline=deadline)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(lsp_process.ProcessTree, "terminate", terminate_tree)
+    with pytest.raises(OSError, match="tree remains live"):
+        process.close(time.monotonic() + 3)
+
+    lease_path = process.owner_root / "lease.json"
+    stale_lease = lease_path.read_bytes()
+
+    def fail_pending_heartbeat(_instance: LspProcess, _deadline: float) -> None:
+        raise OSError("cleanup-pending heartbeat failed")
+
+    monkeypatch.setattr(lsp_process, "_write_current_lease", fail_pending_heartbeat)
+    coordinator.heartbeat_wake.set()
+    heartbeat.join(1)
+    assert not heartbeat.is_alive()
+    assert lease_path.read_bytes() == stale_lease
+    assert isinstance(coordinator.background_cleanup_error, OSError)
+    assert process.state is ProcessState.FAILED
+
+    tree_fault = False
+    with pytest.raises(OSError, match="cleanup-pending heartbeat failed"):
+        process.close(time.monotonic() + 5)
+
+    failure = json.loads((process.owner_root / "failure.json").read_bytes())
+    assert failure["code"] == "heartbeat_failed"
+    assert not lease_path.exists()
+    assert coordinator.phase is lsp_process._LifecyclePhase.STOPPED_FAILURE
+    assert not lsp_process._coordinator_has_ownership(coordinator)
 
 
 def test_live_child_defers_protocol_release_and_generation_joins_until_retry(
@@ -3230,6 +3365,106 @@ def test_heartbeat_failure_leaves_running_before_blocked_recovery_can_continue(
         assert process.state is ProcessState.FAILED
     finally:
         release_recovery.set()
+        process.close(time.monotonic() + 5)
+
+
+def test_heartbeat_failure_is_bounded_when_transition_lock_is_held(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle")
+    coordinator = process._coordinator
+    heartbeat = coordinator.heartbeat_thread
+    assert heartbeat is not None
+    held = threading.Event()
+    release = threading.Event()
+    attempted = threading.Event()
+
+    def hold_transition() -> None:
+        with coordinator.condition:
+            held.set()
+            assert release.wait(3)
+
+    def fail_heartbeat(_instance: LspProcess, _deadline: float) -> None:
+        attempted.set()
+        raise OSError("heartbeat write failed under contention")
+
+    monkeypatch.setattr(lsp_process, "_GRACEFUL_CLEANUP_SECONDS", 0.05)
+    monkeypatch.setattr(lsp_process, "_write_current_lease", fail_heartbeat)
+    holder = threading.Thread(target=hold_transition)
+    holder.start()
+    assert held.wait(1)
+    coordinator.heartbeat_wake.set()
+
+    try:
+        assert attempted.wait(1)
+        heartbeat.join(0.25)
+        assert not heartbeat.is_alive()
+        assert coordinator.pending_failure_intents >= 1
+    finally:
+        release.set()
+        holder.join(1)
+
+    assert _coordinator_wait(
+        process,
+        lambda: coordinator.phase is not lsp_process._LifecyclePhase.RUNNING,
+    )
+    with pytest.raises(TimeoutError, match="drain inspection"):
+        process.close(time.monotonic() + 5)
+    if lsp_process._coordinator_has_ownership(coordinator):
+        process.close(time.monotonic() + 5)
+    failure = json.loads((process.owner_root / "failure.json").read_bytes())
+    assert failure["code"] == "heartbeat_failed"
+
+
+def test_expired_drain_inspection_is_bounded_when_transition_lock_is_held(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle")
+    coordinator = process._coordinator
+    held = threading.Event()
+    release = threading.Event()
+    completed = threading.Event()
+    results: list[object] = []
+    errors: list[BaseException] = []
+
+    def hold_transition() -> None:
+        with coordinator.condition:
+            held.set()
+            assert release.wait(3)
+
+    def inspect() -> None:
+        try:
+            results.append(lsp_process._active_drain_generation(process))
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            completed.set()
+
+    monkeypatch.setattr(lsp_process, "_GRACEFUL_CLEANUP_SECONDS", 0.05)
+    holder = threading.Thread(target=hold_transition)
+    holder.start()
+    assert held.wait(1)
+    inspector = threading.Thread(target=inspect)
+    inspector.start()
+    try:
+        assert completed.wait(0.25)
+        assert results == [None]
+        assert errors == []
+        assert isinstance(coordinator.background_cleanup_error, TimeoutError)
+    finally:
+        release.set()
+        holder.join(1)
+        inspector.join(1)
+
+    assert _coordinator_wait(
+        process,
+        lambda: coordinator.phase is not lsp_process._LifecyclePhase.RUNNING,
+    )
+    with pytest.raises(TimeoutError, match="drain inspection"):
+        process.close(time.monotonic() + 5)
+    if lsp_process._coordinator_has_ownership(coordinator):
         process.close(time.monotonic() + 5)
 
 
