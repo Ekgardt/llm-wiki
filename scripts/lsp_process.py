@@ -393,8 +393,15 @@ class _OwnerDirectory:
                 raise PermissionError(
                     "LSP owner ACL was not verified before evidence creation"
                 )
-            handle = _windows_workspace.create_file(self.owner_handle, temporary)
             self._remember_temp_name(temporary)
+            try:
+                handle = _windows_workspace.create_file(self.owner_handle, temporary)
+            except BaseException as operation_error:
+                try:
+                    self._retry_pending_temp_names()
+                except BaseException as cleanup_error:
+                    raise cleanup_error from operation_error
+                raise
             published = False
             operation_error: BaseException | None = None
             try:
@@ -469,8 +476,15 @@ class _OwnerDirectory:
                     raise
                 return
 
-            handle = _windows_workspace.create_file(self.owner_handle, temporary)
             self._remember_temp_name(temporary)
+            try:
+                handle = _windows_workspace.create_file(self.owner_handle, temporary)
+            except BaseException as operation_error:
+                try:
+                    self._retry_pending_temp_names()
+                except BaseException as cleanup_error:
+                    raise cleanup_error from operation_error
+                raise
             replaced = False
             operation_error: BaseException | None = None
             try:

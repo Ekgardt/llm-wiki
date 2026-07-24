@@ -290,10 +290,13 @@ The user-approved runtime paths are
 and cleanup evidence. The latter follows the existing `run/` deletion contract and
 must not outlive an active owner except as bounded failure evidence reported by
 doctor. Evidence and lease publication serialize one hidden temporary name per
-owner. If handle-relative deletion fails, that exact name remains owned and blocks
-new publication, evidence success, lease removal, scratch deletion, and owner close.
-The lifecycle remains `CLEANUP_PENDING` until retry deletes the name or proves it
-absent. Successful terminal layouts contain no hidden temporary files.
+owner. Windows reserves that intent before the create call because its wrapper can
+create the entry and then fail identity validation. POSIX records it immediately
+after atomic creation returns and before validation. If later validation or
+handle-relative deletion fails, that exact name remains owned and blocks new
+publication, evidence success, lease removal, scratch deletion, and owner close. The
+lifecycle remains `CLEANUP_PENDING` until retry deletes the name or proves it absent.
+Successful terminal layouts contain no hidden temporary files.
 
 Other language families are future candidates, not part of this approved target.
 Each requires separate capability, installation, execution-risk, platform, and

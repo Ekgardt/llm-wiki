@@ -280,6 +280,7 @@ def test_lsp_live_lease_layout_is_canonical() -> None:
         normalized = " ".join(text.split()).casefold()
         for value in (
             "hidden temporary name",
+            "before the create call",
             "cleanup_pending",
             "lease removal",
             "owner close",

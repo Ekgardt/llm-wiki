@@ -4779,6 +4779,134 @@ def _mock_windows_artifact_owner(
     return owner
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows native create boundary")
+@pytest.mark.parametrize("artifact", ["failure", "lease"])
+def test_windows_post_create_identity_failure_retains_one_temp_intent_until_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    artifact: str,
+) -> None:
+    owner_root = tmp_path / OWNER_NONCE
+    owner = lsp_process._OwnerDirectory.open(owner_root)
+    owner.create(time.monotonic() + 1)
+    workspace = lsp_process._windows_workspace
+    real_create = workspace.create_file
+    real_identity = workspace.identity
+    real_delete = workspace.delete_handle
+    create_active = False
+    cleanup_allowed = False
+    create_calls: list[str] = []
+    temporary_prefix = ".evidence-" if artifact == "failure" else ".lease-"
+
+    def identity(handle: int, *, directory: bool) -> object:
+        if create_active and not directory:
+            raise OSError("temporary identity validation failed")
+        return real_identity(handle, directory=directory)
+
+    def create_file(parent: int, name: str) -> int:
+        nonlocal create_active
+        create_calls.append(name)
+        create_active = True
+        try:
+            return real_create(parent, name)
+        finally:
+            create_active = False
+
+    def delete_handle(handle: int) -> None:
+        if not cleanup_allowed:
+            raise OSError("temporary cleanup blocked")
+        real_delete(handle)
+
+    monkeypatch.setattr(workspace, "identity", identity)
+    monkeypatch.setattr(workspace, "create_file", create_file)
+    monkeypatch.setattr(workspace, "delete_handle", delete_handle)
+
+    try:
+        errors: list[str] = []
+        for _attempt in range(2):
+            with pytest.raises(OSError) as raised:
+                _exercise_mock_windows_artifact_write(owner, artifact)
+            errors.append(str(raised.value))
+
+        assert errors == ["temporary cleanup blocked"] * 2
+        assert len(create_calls) == 1
+        pending = list(owner._pending_temp_names)
+        assert pending == create_calls
+        assert set(path.name for path in owner_root.iterdir()) == {
+            "cancellation",
+            pending[0],
+        }
+
+        with pytest.raises(OSError, match="temporary cleanup blocked"):
+            owner.close()
+        assert owner._pending_temp_names == pending
+        assert owner.owner_handle is not None
+        assert owner.parent_handle >= 0
+        assert owner._closed is False
+
+        cleanup_allowed = True
+        owner._retry_pending_temp_names()
+        assert owner._pending_temp_names == []
+        assert set(path.name for path in owner_root.iterdir()) == {"cancellation"}
+
+        owner.remove_success_scratch()
+        owner.close()
+        assert owner._closed is True
+        assert not owner_root.exists()
+    finally:
+        cleanup_allowed = True
+        for temporary in owner_root.glob(f"{temporary_prefix}*.tmp"):
+            temporary.unlink()
+        if not owner._closed:
+            owner.remove_success_scratch()
+            owner.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native create boundary")
+@pytest.mark.parametrize("artifact", ["failure", "lease"])
+def test_windows_precreate_failure_proves_absence_and_clears_temp_intent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    artifact: str,
+) -> None:
+    owner_root = tmp_path / OWNER_NONCE
+    owner = lsp_process._OwnerDirectory.open(owner_root)
+    owner.create(time.monotonic() + 1)
+    workspace = lsp_process._windows_workspace
+    real_open = workspace.open_deletable_file
+    attempted_names: list[str] = []
+    cleanup_probes: list[str] = []
+
+    def fail_before_create(_parent: int, name: str) -> int:
+        attempted_names.append(name)
+        raise OSError("temporary pre-create failure")
+
+    def open_deletable_file(parent: int, name: str) -> int:
+        cleanup_probes.append(name)
+        return real_open(parent, name)
+
+    monkeypatch.setattr(workspace, "create_file", fail_before_create)
+    monkeypatch.setattr(workspace, "open_deletable_file", open_deletable_file)
+
+    try:
+        with pytest.raises(OSError, match="temporary pre-create failure"):
+            _exercise_mock_windows_artifact_write(owner, artifact)
+
+        assert len(attempted_names) == 1
+        assert cleanup_probes == attempted_names
+        assert owner._pending_temp_names == []
+        assert set(path.name for path in owner_root.iterdir()) == {"cancellation"}
+
+        owner.remove_success_scratch()
+        owner.close()
+        assert owner._closed is True
+        assert not owner_root.exists()
+    finally:
+        if not owner._closed:
+            owner.remove_success_scratch()
+            owner.close()
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows child-handle retry boundary")
 @pytest.mark.parametrize("artifact", ["owner", "failure", "lease"])
 @pytest.mark.parametrize("published", [False, True])
