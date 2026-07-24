@@ -30,6 +30,7 @@ from lsp_protocol import (
     CancellationToken,
     LspProtocol,
     ProtocolViolation,
+    _LocalRequestViolation,
     _ProtocolStartupCleanupError,
 )
 
@@ -615,6 +616,7 @@ class _LifecycleCoordinator:
     retired: list[_Generation] = field(default_factory=list)
     terminal_outcome: str | None = None
     terminal_code: str | None = None
+    background_cleanup_error: BaseException | None = field(default=None, repr=False)
     cleanup_result: _CleanupResult = field(default_factory=_CleanupResult)
     recovery_attempted: bool = False
     startup_complete: bool = False
@@ -811,15 +813,18 @@ def _acquire_driver(
         _release_lifecycle(coordinator)
 
 
-def _release_driver(coordinator: _LifecycleCoordinator) -> None:
+def _release_driver(coordinator: _LifecycleCoordinator, deadline: float) -> None:
     current = threading.current_thread()
-    with coordinator.condition:
+    _acquire_lifecycle(coordinator, deadline, allow_expired=True)
+    try:
         if coordinator.driver_owner is not current or coordinator.driver_depth <= 0:
             raise RuntimeError("LSP lifecycle driver is not owned by this thread")
         coordinator.driver_depth -= 1
         if coordinator.driver_depth == 0:
             coordinator.driver_owner = None
             coordinator.condition.notify_all()
+    finally:
+        _release_lifecycle(coordinator)
 
 
 def _notify_lifecycle_locked(coordinator: _LifecycleCoordinator) -> None:
@@ -1109,7 +1114,8 @@ def _start_lsp_process(
         raise startup_error
     finally:
         if driver_acquired:
-            _release_driver(coordinator)
+            assert startup_deadline is not None
+            _release_driver(coordinator, startup_deadline)
 
 
 def _start_lifecycle_workers(instance: LspProcess, deadline: float | None = None) -> None:
@@ -1196,7 +1202,7 @@ def _write_current_lease(instance: LspProcess, deadline: float) -> None:
         if generation is not None and owner is not None:
             _write_generation_lease(owner, generation, instance.owner_nonce)
     finally:
-        _release_driver(coordinator)
+        _release_driver(coordinator, deadline)
 
 
 def _recovery_loop(instance: LspProcess) -> None:
@@ -1242,7 +1248,7 @@ def _process_failure_intent(
     try:
         _process_failure_intent_owned(instance, intent, deadline)
     finally:
-        _release_driver(coordinator)
+        _release_driver(coordinator, deadline)
 
 
 def _process_failure_intent_owned(
@@ -1300,16 +1306,29 @@ def _process_failure_intent_owned(
         except BaseException:
             try:
                 _terminal_failure_lsp_process(instance, "restart_failed", deadline)
-            except BaseException:
-                pass
+            except BaseException as cleanup_error:
+                _remember_background_cleanup_error(coordinator, cleanup_error)
     elif terminal:
         coordinator.recovery_stop.set()
-        _drive_cleanup(
-            instance,
-            deadline,
-            terminal=True,
-            failure_code=coordinator.terminal_code,
-        )
+        try:
+            errors = _drive_cleanup(
+                instance,
+                deadline,
+                terminal=True,
+                failure_code=coordinator.terminal_code,
+            )
+        except BaseException as cleanup_error:
+            _remember_background_cleanup_error(coordinator, cleanup_error)
+        else:
+            if errors:
+                _remember_background_cleanup_error(coordinator, errors[0])
+
+
+def _remember_background_cleanup_error(
+    coordinator: _LifecycleCoordinator, error: BaseException
+) -> None:
+    if coordinator.background_cleanup_error is None:
+        coordinator.background_cleanup_error = error
 
 
 def _request_generation(instance: LspProcess, deadline: float) -> _Generation:
@@ -1419,6 +1438,8 @@ def _request_lsp_process(
                 deadline=deadline,
                 cancellation=cancellation,
             )
+        except _LocalRequestViolation:
+            raise
         except ProtocolViolation:
             changed = _generation_changed(instance, generation, deadline)
             objectively_fatal = changed or protocol.fatal or process.poll() is not None
@@ -1476,7 +1497,7 @@ def _terminal_failure_lsp_process(
         if errors:
             raise errors[0]
     finally:
-        _release_driver(coordinator)
+        _release_driver(coordinator, deadline)
 
 
 def _restart_lsp_process(instance: LspProcess, deadline: float) -> None:
@@ -1486,7 +1507,7 @@ def _restart_lsp_process(instance: LspProcess, deadline: float) -> None:
     try:
         _restart_lsp_process_owned(instance, deadline)
     finally:
-        _release_driver(coordinator)
+        _release_driver(coordinator, deadline)
 
 
 def _restart_lsp_process_owned(instance: LspProcess, deadline: float) -> None:
@@ -1522,7 +1543,7 @@ def _restart_generation(
     try:
         _restart_generation_owned(instance, deadline)
     finally:
-        _release_driver(coordinator)
+        _release_driver(coordinator, deadline)
 
 
 def _restart_generation_owned(instance: LspProcess, deadline: float) -> None:
@@ -1617,7 +1638,7 @@ def _shutdown_lsp_process(instance: LspProcess, deadline: float) -> None:
     try:
         _shutdown_lsp_process_owned(instance, deadline)
     finally:
-        _release_driver(coordinator)
+        _release_driver(coordinator, deadline)
 
 
 def _shutdown_lsp_process_owned(instance: LspProcess, deadline: float) -> None:
@@ -1628,6 +1649,10 @@ def _shutdown_lsp_process_owned(instance: LspProcess, deadline: float) -> None:
             _LifecyclePhase.STOPPED_SUCCESS,
             _LifecyclePhase.STOPPED_FAILURE,
         } and not _coordinator_has_ownership_locked(coordinator):
+            background_error = coordinator.background_cleanup_error
+            coordinator.background_cleanup_error = None
+            if background_error is not None:
+                raise background_error
             return
         if coordinator.terminal_outcome is None:
             coordinator.terminal_outcome = "success"
@@ -1644,24 +1669,27 @@ def _shutdown_lsp_process_owned(instance: LspProcess, deadline: float) -> None:
     finally:
         _release_lifecycle(coordinator)
 
+    graceful_error: BaseException | None = None
     if not failure and generation is not None:
         process = generation.process
         protocol = generation.protocol
         graceful_deadline = min(
             deadline, time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
         )
-        if (
-            process is not None
-            and protocol is not None
-            and process.poll() is None
-            and time.monotonic() < graceful_deadline
-        ):
-            try:
+        try:
+            if (
+                process is not None
+                and protocol is not None
+                and process.poll() is None
+                and time.monotonic() < graceful_deadline
+            ):
                 protocol.request("shutdown", {}, deadline=graceful_deadline)
                 protocol.notify("exit", {}, deadline=graceful_deadline)
                 _wait_for_lsp_exit(instance, graceful_deadline)
-            except (OSError, RuntimeError, TimeoutError):
-                pass
+        except (OSError, RuntimeError, TimeoutError):
+            pass
+        except BaseException as error:
+            graceful_error = error
 
     errors = _drive_cleanup(
         instance,
@@ -1670,7 +1698,15 @@ def _shutdown_lsp_process_owned(instance: LspProcess, deadline: float) -> None:
         failure_code=coordinator.terminal_code,
     )
     if errors:
+        if graceful_error is not None:
+            raise errors[0] from graceful_error
         raise errors[0]
+    if graceful_error is not None:
+        raise graceful_error
+    background_error = coordinator.background_cleanup_error
+    coordinator.background_cleanup_error = None
+    if background_error is not None:
+        raise background_error
 
 
 def _cancel_all_lsp_process(instance: LspProcess, reason: str) -> None:
@@ -1902,7 +1938,7 @@ def _drive_cleanup(
             coordinator=coordinator,
         )
     finally:
-        _release_driver(coordinator)
+        _release_driver(coordinator, deadline)
 
 
 def _drive_cleanup_owned(

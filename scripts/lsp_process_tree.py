@@ -22,6 +22,7 @@ if os.name == "nt":
     _TH32CS_SNAPTHREAD = 0x00000004
     _THREAD_SUSPEND_RESUME = 0x0002
     _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+    _ERROR_NO_MORE_FILES = 18
 
     class _IoCounters(ctypes.Structure):
         _fields_ = (
@@ -468,6 +469,10 @@ if os.name == "nt":
                     finally:
                         _close_windows_handle(int(thread))
                 available = bool(_KERNEL32.Thread32Next(snapshot, ctypes.byref(entry)))
+                if not available:
+                    error = ctypes.get_last_error()
+                    if error != _ERROR_NO_MORE_FILES:
+                        raise ctypes.WinError(error)
         finally:
             _close_windows_handle(int(snapshot))
         if resumed != 1:

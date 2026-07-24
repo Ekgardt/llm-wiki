@@ -97,6 +97,10 @@ class ProtocolViolation(RuntimeError):
     """A peer sent data outside the bounded LSP protocol contract."""
 
 
+class _LocalRequestViolation(ProtocolViolation):
+    """A caller request failed validation before transport ownership."""
+
+
 class RequestCancelled(RuntimeError):
     """The caller cancelled an active LSP request."""
 
@@ -765,7 +769,7 @@ class LspProtocol:
 
     def _allocate_request_id_locked(self) -> int:
         if self._next_request_id > _JSON_RPC_INTEGER_MAX:
-            raise ProtocolViolation("JSON-RPC request ID space exhausted")
+            raise _LocalRequestViolation("JSON-RPC request ID space exhausted")
         request_id = self._next_request_id
         self._next_request_id += 1
         return request_id
@@ -1212,7 +1216,10 @@ class LspProtocol:
         deadline: float,
         key: tuple[str, int],
     ) -> None:
-        frame = encode_frame(message)
+        try:
+            frame = encode_frame(message)
+        except ProtocolViolation as error:
+            raise _LocalRequestViolation(str(error)) from error
         task = _WriteTask(frame, deadline, threading.Event(), request_key=key)
         queue_full = False
         with self._state_lock:

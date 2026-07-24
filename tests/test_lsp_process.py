@@ -17,6 +17,7 @@ from pathlib import Path
 
 import compile_cache
 import lsp_process
+import lsp_protocol
 import pytest
 from lsp_process import (
     LSP_ENV_ALLOWLIST,
@@ -196,6 +197,34 @@ def test_lifecycle_coordinator_uses_one_authority_lock_and_condition() -> None:
     assert not hasattr(coordinator, "driver_lock")
 
 
+def test_driver_release_obeys_deadline_under_lifecycle_lock_contention() -> None:
+    coordinator = lsp_process._LifecycleCoordinator(None)
+    lsp_process._acquire_driver(coordinator, time.monotonic() + 1)
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold_lifecycle_lock() -> None:
+        with coordinator.condition:
+            held.set()
+            assert release.wait(2)
+
+    holder = threading.Thread(target=hold_lifecycle_lock)
+    holder.start()
+    assert held.wait(1)
+    deadline = time.monotonic() + 0.05
+    try:
+        with pytest.raises(TimeoutError, match="transition"):
+            lsp_process._release_driver(coordinator, deadline)
+        assert time.monotonic() <= deadline + 0.2
+    finally:
+        release.set()
+        holder.join(1)
+
+    assert not holder.is_alive()
+    lsp_process._release_driver(coordinator, time.monotonic() + 1)
+    assert coordinator.driver_owner is None
+
+
 def test_live_lease_is_bounded_redacted_and_removed_after_graceful_close(
     tmp_path: Path,
 ) -> None:
@@ -313,6 +342,30 @@ def test_close_forces_stubborn_process_tree_within_caller_deadline(
     assert time.monotonic() <= deadline + 0.2
     assert process.process.poll() is not None
     assert not _pid_alive(descendant)
+
+
+def test_shutdown_poll_failure_still_forces_complete_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle", "--sleep-seconds", "30")
+    real_poll = process.process.poll
+    poll_calls = 0
+
+    def fail_first_poll() -> int | None:
+        nonlocal poll_calls
+        poll_calls += 1
+        if poll_calls == 1:
+            raise OSError("graceful poll failed")
+        return real_poll()
+
+    monkeypatch.setattr(process.process, "poll", fail_first_poll)
+
+    process.shutdown(time.monotonic() + 5)
+
+    assert poll_calls >= 2
+    assert real_poll() is not None
+    assert not process.owner_root.exists()
 
 
 def test_fatal_request_restarts_once_with_fresh_generation(tmp_path: Path) -> None:
@@ -3108,6 +3161,42 @@ def test_heartbeat_failure_leaves_running_before_blocked_recovery_can_continue(
         process.close(time.monotonic() + 5)
 
 
+def test_background_terminal_cleanup_error_is_observed_after_cleanup_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle")
+    coordinator = process._coordinator
+    generation = coordinator.active
+    assert generation is not None and generation.protocol is not None
+    protocol = generation.protocol
+    stop_io = protocol._stop_io_for_process_cleanup
+    failed = threading.Event()
+
+    def fail_background_stop() -> None:
+        if threading.current_thread() is coordinator.recovery_thread:
+            failed.set()
+            raise OSError("background protocol cleanup failed")
+        stop_io()
+
+    monkeypatch.setattr(protocol, "_stop_io_for_process_cleanup", fail_background_stop)
+    lsp_process._queue_owner_failure(coordinator, "injected owner failure")
+
+    assert failed.wait(2)
+    recovery = coordinator.recovery_thread
+    assert recovery is not None
+    recovery.join(2)
+    assert not recovery.is_alive()
+    assert coordinator.cleanup_result.ownership_pending is True
+    monkeypatch.setattr(protocol, "_stop_io_for_process_cleanup", stop_io)
+
+    with pytest.raises(OSError, match="background protocol cleanup failed"):
+        process.close(time.monotonic() + 5)
+
+    assert not lsp_process._coordinator_has_ownership(coordinator)
+    process.close(time.monotonic() + 1)
+
+
 def test_restart_waits_for_inflight_heartbeat_before_publishing_new_lease(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3484,6 +3573,57 @@ def test_caller_json_violation_never_restarts_and_valid_follow_up_works(
         )
 
     assert process.restart_count == 0
+    assert process.request("echo", {"valid": True}, deadline=time.monotonic() + 2) == {
+        "valid": True
+    }
+    process.close(time.monotonic() + 5)
+
+
+def test_caller_json_violation_is_not_retried_after_concurrent_restart(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle")
+    first_generation = process.generation_nonce
+    real_encode = lsp_protocol.encode_frame
+    encoding = threading.Event()
+    release_encoding = threading.Event()
+    attempts = 0
+    request_errors: list[BaseException] = []
+
+    def block_invalid_encoding(message: object) -> bytes:
+        nonlocal attempts
+        if isinstance(message, dict) and message.get("method") == "invalid":
+            attempts += 1
+            if attempts == 1:
+                encoding.set()
+                assert release_encoding.wait(3)
+        return real_encode(message)
+
+    def request_invalid() -> None:
+        try:
+            process.request(
+                "invalid",
+                _invalid_request_params("cycle"),
+                deadline=time.monotonic() + 5,
+            )
+        except BaseException as error:
+            request_errors.append(error)
+
+    monkeypatch.setattr(lsp_protocol, "encode_frame", block_invalid_encoding)
+    request_thread = threading.Thread(target=request_invalid)
+    request_thread.start()
+    assert encoding.wait(2)
+    process.restart(time.monotonic() + 5)
+    assert process.generation_nonce != first_generation
+    release_encoding.set()
+    request_thread.join(3)
+
+    assert not request_thread.is_alive()
+    assert len(request_errors) == 1
+    assert isinstance(request_errors[0], ProtocolViolation)
+    assert attempts == 1
+    assert process.restart_count == 1
     assert process.request("echo", {"valid": True}, deadline=time.monotonic() + 2) == {
         "valid": True
     }

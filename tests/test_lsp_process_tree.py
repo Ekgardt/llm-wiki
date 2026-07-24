@@ -439,6 +439,7 @@ def test_windows_resume_accepts_only_previous_suspend_count_one(
 
         @staticmethod
         def Thread32Next(_snapshot: int, _pointer: object) -> int:
+            ctypes.set_last_error(18)
             return 0
 
         @staticmethod
@@ -457,6 +458,54 @@ def test_windows_resume_accepts_only_previous_suspend_count_one(
     else:
         with pytest.raises((OSError, RuntimeError)):
             lsp_process_tree._resume_windows_process(pid)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows thread enumeration contract")
+def test_windows_resume_rejects_thread_enumeration_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ctypes
+
+    pid = 4242
+    closed: list[int] = []
+
+    class Kernel:
+        @staticmethod
+        def CreateToolhelp32Snapshot(_flags: int, _pid: int) -> int:
+            return 11
+
+        @staticmethod
+        def Thread32First(_snapshot: int, pointer: object) -> int:
+            entry = ctypes.cast(
+                pointer, ctypes.POINTER(lsp_process_tree._ThreadEntry32)
+            ).contents
+            entry.owner_process_id = pid
+            entry.thread_id = 22
+            return 1
+
+        @staticmethod
+        def Thread32Next(_snapshot: int, _pointer: object) -> int:
+            ctypes.set_last_error(5)
+            return 0
+
+        @staticmethod
+        def OpenThread(_access: int, _inherit: bool, _thread_id: int) -> int:
+            return 33
+
+        @staticmethod
+        def ResumeThread(_thread: int) -> int:
+            return 1
+
+    monkeypatch.setattr(lsp_process_tree, "_KERNEL32", Kernel())
+    monkeypatch.setattr(
+        lsp_process_tree, "_close_windows_handle", lambda handle: closed.append(handle)
+    )
+
+    with pytest.raises(OSError) as raised:
+        lsp_process_tree._resume_windows_process(pid)
+
+    assert raised.value.winerror == 5
+    assert closed == [33, 11]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job cleanup contract")
