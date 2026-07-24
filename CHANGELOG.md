@@ -34,7 +34,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   transactions/tasks/results, the 30-day undo window, and live owners.
 - Recorded the local-filesystem requirement, current `synchronous=FULL`/no-WAL
   policy, bounded defaults and CLI overrides, cooperating-writer CAS boundary, and
-  explicit non-goals. The suite now collects **4451 tests**.
+  explicit non-goals. The suite now collects **4453 tests**.
 - Added canonical `repository-scope/v1` binding for repositories, linked worktrees,
   checkout roots, Git common directories, and captured commits. Generation readers
   reject the wrong repository/worktree scope instead of returning cross-checkout
@@ -74,6 +74,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - Qualify LSP containment by platform: Windows Job Objects own assigned trees;
   POSIX process groups cover pinned Pyright descendants only while they remain
   in-group, and hostile `setsid()` escape is explicitly unsupported.
+- Retain failed LSP evidence and lease temporary-file cleanup as bounded owned
+  state. Cleanup retries the exact handle-relative name before another publish or
+  terminal finalization, so no hidden temp can release the lease or owner.
 
 ## [4.0.0] — Unreleased
 
@@ -115,7 +118,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - **SessionStart impact advisory** — stale wiki pages from code changes.
 - **MCP config in install scripts** — Claude Code + OpenCode auto-config.
 - **Optional extras** — `hybrid`, `code-graph`, `mcp-server`, `reranker`, `full`.
-- **4451 tests**.
+- **4453 tests**.
 
 ## [3.4.0] — 2026-07-11
 

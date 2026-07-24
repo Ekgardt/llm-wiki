@@ -43,7 +43,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── impact_analysis.py           v4.0: LINK layer (code→wiki impact)
 │   ├── build_tiers.py               v4.0: L0/L1/L2 progressive disclosure
 │   └── queries/                     v4.0: 12 tree-sitter .scm language queries
-├── tests/                         CODE — regression suite (pytest, 4451 tests)
+├── tests/                         CODE — regression suite (pytest, 4453 tests)
 ├── docs/                          CODE — architecture + user guide
 ├── skills/                        CODE — 9 agent skills (SKILL.md)
 ├── rules/                         CODE — file-handling policies
@@ -209,7 +209,12 @@ mutable live lease distinct from immutable create-only `owner.json` and
 live-state fields. It is refreshed every 10 seconds and expires after 30 seconds.
 Controlled success or terminal failure stops and joins the heartbeat before lease
 removal; abrupt death leaves the lease to expire. Updates are atomic, owner-only,
-and anchored to the retained owner-directory handle. See
+and anchored to the retained owner-directory handle. Evidence and lease publication
+own at most one serialized hidden temporary name. Failed temp deletion keeps the
+lifecycle in `CLEANUP_PENDING` with its lease and owner, blocking evidence success,
+lease removal, scratch deletion, and owner close. The exact handle-relative name is
+retried before another publication or terminal finalization. A successful terminal
+layout never contains a hidden temp. See
 `knowledge/notes/lsp-live-lease-decision.md`.
 
 LSP process containment is platform-qualified rather than one portable sandbox. A
@@ -231,7 +236,7 @@ candidate requiring a separate capability-gated design. See
   `maybe_compile.py` (PID-locked spawn), `search_memory.py` (triple-RRF),
   `llm_client.py` (5 backends + fake), `integration_adapter.py` (thin host
   lifecycle boundary), `mcp_server.py` (12 task-shaped tools), and `doctor.py`.
-- `tests/` — 4451 tests collected. Hermetic via `conftest.py` (pins
+- `tests/` — 4453 tests collected. Hermetic via `conftest.py` (pins
   `LLM_WIKI_ROOT` to checkout, redirects `LLM_WIKI_STATE_ROOT` to a temp
   dir, defaults `MEMORY_LLM_PROVIDER=fake`).
 - `docs/` — `ARCHITECTURE.md`, `USER-GUIDE.md`, `AGENTS.md` (knowledge

@@ -289,7 +289,11 @@ The user-approved runtime paths are
 `run/lsp/<owner-nonce>/` for process-owned temporary files, cancellation markers,
 and cleanup evidence. The latter follows the existing `run/` deletion contract and
 must not outlive an active owner except as bounded failure evidence reported by
-doctor.
+doctor. Evidence and lease publication serialize one hidden temporary name per
+owner. If handle-relative deletion fails, that exact name remains owned and blocks
+new publication, evidence success, lease removal, scratch deletion, and owner close.
+The lifecycle remains `CLEANUP_PENDING` until retry deletes the name or proves it
+absent. Successful terminal layouts contain no hidden temporary files.
 
 Other language families are future candidates, not part of this approved target.
 Each requires separate capability, installation, execution-risk, platform, and

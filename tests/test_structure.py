@@ -248,6 +248,9 @@ def test_code_navigation_target_is_approved_but_not_reported_as_current() -> Non
 def test_lsp_live_lease_layout_is_canonical() -> None:
     decision_path = ROOT / "knowledge/notes/lsp-live-lease-decision.md"
     structure = (ROOT / "docs/STRUCTURE.md").read_text(encoding="utf-8")
+    design = (
+        ROOT / "docs/superpowers/specs/2026-07-22-read-only-lsp-navigation-design.md"
+    ).read_text(encoding="utf-8")
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
 
     assert decision_path.is_file()
@@ -271,6 +274,16 @@ def test_lsp_live_lease_layout_is_canonical() -> None:
             "bounded mutable live lease",
             "owner.json",
             "failure.json",
+        ):
+            assert value in normalized
+    for text in (structure, design):
+        normalized = " ".join(text.split()).casefold()
+        for value in (
+            "hidden temporary name",
+            "cleanup_pending",
+            "lease removal",
+            "owner close",
+            "successful terminal layout",
         ):
             assert value in normalized
     existing = (

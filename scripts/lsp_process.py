@@ -75,6 +75,7 @@ _LEASE_EXPIRY_SECONDS = 30.0
 _IDLE_SECONDS = 300.0
 _GRACEFUL_CLEANUP_SECONDS = 2.0
 _MAX_PENDING_CHILD_HANDLES = 8
+_MAX_PENDING_TEMP_NAMES = 1
 
 
 class StartupCleanupError(RuntimeError):
@@ -111,7 +112,19 @@ class _OwnerDirectory:
         default_factory=threading.RLock, repr=False
     )
     _pending_child_handles: list[int] = field(default_factory=list, repr=False)
+    _pending_temp_names: list[str] = field(default_factory=list, repr=False)
     _closed: bool = False
+
+    def _remember_temp_name(self, name: str) -> None:
+        if name in self._pending_temp_names:
+            return
+        if len(self._pending_temp_names) >= _MAX_PENDING_TEMP_NAMES:
+            raise RuntimeError("LSP pending temporary name bound was exhausted")
+        self._pending_temp_names.append(name)
+
+    def _forget_temp_name(self, name: str) -> None:
+        if name in self._pending_temp_names:
+            self._pending_temp_names.remove(name)
 
     def _retry_pending_child_handles(self) -> None:
         first_error: BaseException | None = None
@@ -125,6 +138,83 @@ class _OwnerDirectory:
                 self._pending_child_handles.remove(handle)
         if first_error is not None:
             raise first_error
+
+    def _retry_pending_temp_names(self) -> None:
+        with self._child_handle_lock:
+            if os.name == "nt":
+                self._retry_pending_child_handles()
+            if self._pending_temp_names and self.owner_handle is None:
+                raise RuntimeError("LSP pending temporary owner is closed")
+            for name in tuple(self._pending_temp_names):
+                if os.name == "posix":
+                    try:
+                        os.unlink(name, dir_fd=self.owner_handle)
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        self._forget_temp_name(name)
+                        continue
+                    self._forget_temp_name(name)
+                    continue
+                if os.name != "nt":
+                    raise RuntimeError(
+                        "LSP temporary cleanup is unsupported on this platform"
+                    )
+                try:
+                    handle = _windows_workspace.open_deletable_file(
+                        self.owner_handle, name
+                    )
+                except FileNotFoundError:
+                    self._forget_temp_name(name)
+                    continue
+                delete_error: BaseException | None = None
+                try:
+                    _windows_workspace.delete_handle(handle)
+                except BaseException as error:
+                    delete_error = error
+                try:
+                    self._close_child_handle(handle)
+                except BaseException as close_error:
+                    if delete_error is not None:
+                        raise delete_error from close_error
+                    raise
+                if delete_error is not None:
+                    raise delete_error
+                self._forget_temp_name(name)
+
+    def _finish_windows_temporary(
+        self,
+        name: str,
+        handle: int,
+        *,
+        moved: bool,
+        operation_error: BaseException | None,
+    ) -> None:
+        cleanup_error: BaseException | None = None
+        delete_marked = False
+        if operation_error is not None and not moved:
+            try:
+                _windows_workspace.delete_handle(handle)
+            except BaseException as error:
+                cleanup_error = error
+            else:
+                delete_marked = True
+        if moved:
+            self._forget_temp_name(name)
+        try:
+            self._close_child_handle(handle)
+        except BaseException as close_error:
+            if cleanup_error is not None:
+                raise close_error from cleanup_error
+            if operation_error is not None:
+                raise close_error from operation_error
+            raise
+        if delete_marked:
+            self._forget_temp_name(name)
+        if cleanup_error is not None:
+            raise cleanup_error from operation_error
+        if operation_error is not None:
+            raise operation_error
 
     def _close_child_handle(self, handle: int) -> None:
         try:
@@ -253,53 +343,60 @@ class _OwnerDirectory:
         payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
         if len(payload) > _MAX_EVIDENCE_BYTES:
             raise ValueError("LSP evidence record exceeds its byte bound")
-        temporary = f".evidence-{secrets.token_hex(8)}.tmp"
-        if os.name == "posix":
-            try:
-                descriptor = os.open(
-                    temporary,
-                    os.O_WRONLY
-                    | os.O_CREAT
-                    | os.O_EXCL
-                    | os.O_NOFOLLOW
-                    | getattr(os, "O_CLOEXEC", 0),
-                    0o600,
-                    dir_fd=self.owner_handle,
-                )
-                try:
-                    identity = _identity_from_stat(os.fstat(descriptor))
-                    _require_file_identity(identity, "LSP evidence record")
-                    _write_all_descriptor(descriptor, payload)
-                    os.fchmod(descriptor, 0o600)
-                    os.fsync(descriptor)
-                    _verify_descriptor(
-                        descriptor, identity, mode=0o600, directory=False
-                    )
-                finally:
-                    os.close(descriptor)
-                os.link(
-                    temporary,
-                    name,
-                    src_dir_fd=self.owner_handle,
-                    dst_dir_fd=self.owner_handle,
-                    follow_symlinks=False,
-                )
-                os.unlink(temporary, dir_fd=self.owner_handle)
-                self.sync_directory()
-            except BaseException:
-                try:
-                    os.unlink(temporary, dir_fd=self.owner_handle)
-                except OSError:
-                    pass
-                raise
-            return
-
-        if not self.owner_permissions_verified:
-            raise PermissionError("LSP owner ACL was not verified before evidence creation")
         with self._child_handle_lock:
-            self._retry_pending_child_handles()
+            self._retry_pending_temp_names()
+            temporary = f".evidence-{secrets.token_hex(8)}.tmp"
+            if os.name == "posix":
+                try:
+                    descriptor = os.open(
+                        temporary,
+                        os.O_WRONLY
+                        | os.O_CREAT
+                        | os.O_EXCL
+                        | os.O_NOFOLLOW
+                        | getattr(os, "O_CLOEXEC", 0),
+                        0o600,
+                        dir_fd=self.owner_handle,
+                    )
+                    self._remember_temp_name(temporary)
+                    try:
+                        identity = _identity_from_stat(os.fstat(descriptor))
+                        _require_file_identity(identity, "LSP evidence record")
+                        _write_all_descriptor(descriptor, payload)
+                        os.fchmod(descriptor, 0o600)
+                        os.fsync(descriptor)
+                        _verify_descriptor(
+                            descriptor, identity, mode=0o600, directory=False
+                        )
+                    finally:
+                        os.close(descriptor)
+                    os.link(
+                        temporary,
+                        name,
+                        src_dir_fd=self.owner_handle,
+                        dst_dir_fd=self.owner_handle,
+                        follow_symlinks=False,
+                    )
+                    os.unlink(temporary, dir_fd=self.owner_handle)
+                    self._forget_temp_name(temporary)
+                    self.sync_directory()
+                except BaseException as operation_error:
+                    if temporary in self._pending_temp_names:
+                        try:
+                            self._retry_pending_temp_names()
+                        except BaseException as cleanup_error:
+                            raise cleanup_error from operation_error
+                    raise
+                return
+
+            if not self.owner_permissions_verified:
+                raise PermissionError(
+                    "LSP owner ACL was not verified before evidence creation"
+                )
             handle = _windows_workspace.create_file(self.owner_handle, temporary)
+            self._remember_temp_name(temporary)
             published = False
+            operation_error: BaseException | None = None
             try:
                 identity = _windows_workspace.identity(handle, directory=False)
                 _windows_workspace.write_all(
@@ -311,15 +408,14 @@ class _OwnerDirectory:
                 _windows_workspace.publish_file(handle, self.owner_handle, name)
                 published = True
                 self.sync_directory()
-            except BaseException:
-                if not published:
-                    try:
-                        _windows_workspace.delete_handle(handle)
-                    except OSError:
-                        pass
-                raise
-            finally:
-                self._close_child_handle(handle)
+            except BaseException as error:
+                operation_error = error
+            self._finish_windows_temporary(
+                temporary,
+                handle,
+                moved=published,
+                operation_error=operation_error,
+            )
         if not published:
             raise OSError("LSP evidence publication did not complete")
 
@@ -329,62 +425,69 @@ class _OwnerDirectory:
         payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
         if len(payload) > _MAX_EVIDENCE_BYTES:
             raise ValueError("LSP lease exceeds its byte bound")
-        temporary = f".lease-{secrets.token_hex(8)}.tmp"
-        if os.name == "posix":
-            try:
-                descriptor = os.open(
-                    temporary,
-                    os.O_WRONLY
-                    | os.O_CREAT
-                    | os.O_EXCL
-                    | os.O_NOFOLLOW
-                    | getattr(os, "O_CLOEXEC", 0),
-                    0o600,
-                    dir_fd=self.owner_handle,
-                )
-                try:
-                    identity = _identity_from_stat(os.fstat(descriptor))
-                    _require_file_identity(identity, "LSP lease")
-                    _write_all_descriptor(descriptor, payload)
-                    os.fchmod(descriptor, 0o600)
-                    os.fsync(descriptor)
-                    _verify_descriptor(
-                        descriptor, identity, mode=0o600, directory=False
-                    )
-                finally:
-                    os.close(descriptor)
-                os.replace(
-                    temporary,
-                    "lease.json",
-                    src_dir_fd=self.owner_handle,
-                    dst_dir_fd=self.owner_handle,
-                )
-                self.sync_directory()
-            except BaseException:
-                try:
-                    os.unlink(temporary, dir_fd=self.owner_handle)
-                except OSError:
-                    pass
-                raise
-            return
-
         with self._child_handle_lock:
-            self._retry_pending_child_handles()
+            self._retry_pending_temp_names()
+            temporary = f".lease-{secrets.token_hex(8)}.tmp"
+            if os.name == "posix":
+                try:
+                    descriptor = os.open(
+                        temporary,
+                        os.O_WRONLY
+                        | os.O_CREAT
+                        | os.O_EXCL
+                        | os.O_NOFOLLOW
+                        | getattr(os, "O_CLOEXEC", 0),
+                        0o600,
+                        dir_fd=self.owner_handle,
+                    )
+                    self._remember_temp_name(temporary)
+                    try:
+                        identity = _identity_from_stat(os.fstat(descriptor))
+                        _require_file_identity(identity, "LSP lease")
+                        _write_all_descriptor(descriptor, payload)
+                        os.fchmod(descriptor, 0o600)
+                        os.fsync(descriptor)
+                        _verify_descriptor(
+                            descriptor, identity, mode=0o600, directory=False
+                        )
+                    finally:
+                        os.close(descriptor)
+                    os.replace(
+                        temporary,
+                        "lease.json",
+                        src_dir_fd=self.owner_handle,
+                        dst_dir_fd=self.owner_handle,
+                    )
+                    self._forget_temp_name(temporary)
+                    self.sync_directory()
+                except BaseException as operation_error:
+                    if temporary in self._pending_temp_names:
+                        try:
+                            self._retry_pending_temp_names()
+                        except BaseException as cleanup_error:
+                            raise cleanup_error from operation_error
+                    raise
+                return
+
             handle = _windows_workspace.create_file(self.owner_handle, temporary)
+            self._remember_temp_name(temporary)
+            replaced = False
+            operation_error: BaseException | None = None
             try:
                 _windows_workspace.write_all(
                     handle, payload, chunk_bytes=_MAX_EVIDENCE_BYTES
                 )
                 _windows_workspace.flush_file(handle)
                 _windows_workspace.replace_file(handle, self.owner_handle, "lease.json")
-            except BaseException:
-                try:
-                    _windows_workspace.delete_handle(handle)
-                except OSError:
-                    pass
-                raise
-            finally:
-                self._close_child_handle(handle)
+                replaced = True
+            except BaseException as error:
+                operation_error = error
+            self._finish_windows_temporary(
+                temporary,
+                handle,
+                moved=replaced,
+                operation_error=operation_error,
+            )
             self.sync_directory()
 
     def sync_directory(self) -> None:
@@ -402,7 +505,10 @@ class _OwnerDirectory:
 
     def remove_lease(self) -> None:
         if self.owner_handle is None:
+            if self._pending_temp_names:
+                raise RuntimeError("LSP pending temporary owner is closed")
             return
+        self._retry_pending_temp_names()
         if os.name == "posix":
             try:
                 os.unlink("lease.json", dir_fd=self.owner_handle)
@@ -474,6 +580,7 @@ class _OwnerDirectory:
         return record
 
     def remove_success_scratch(self) -> None:
+        self._retry_pending_temp_names()
         if os.name == "posix":
             if self.owner_handle is None:
                 return
@@ -586,8 +693,7 @@ class _OwnerDirectory:
 
     def close(self) -> None:
         with self._child_handle_lock:
-            if os.name == "nt":
-                self._retry_pending_child_handles()
+            self._retry_pending_temp_names()
             with self._close_lock:
                 if self._closed:
                     return
@@ -2146,8 +2252,6 @@ def _ensure_failure_evidence(
     result = coordinator.cleanup_result
     _acquire_lifecycle(coordinator, deadline, allow_expired=True)
     try:
-        if result.evidence == "success":
-            return
         owner = coordinator.owner_directory
         if owner is None:
             raise RuntimeError("LSP failure evidence owner is unavailable")
@@ -2167,38 +2271,43 @@ def _ensure_failure_evidence(
     finally:
         _release_lifecycle(coordinator)
 
-    try:
-        _write_failure_record(
-            owner,
-            code=identity.code,
-            owner_nonce=identity.owner_nonce,
-            generation_nonce=identity.generation_nonce,
-            pid=identity.pid,
-        )
-    except FileExistsError:
-        record = owner.read_record("failure.json")
-        _validate_failure_record(
-            record,
-            code=identity.code,
-            owner_nonce=identity.owner_nonce,
-            generation_nonce=identity.generation_nonce,
-            pid=identity.pid,
-        )
-        owner.sync_directory()
+    with owner._child_handle_lock:
+        owner._retry_pending_temp_names()
+        if result.evidence == "success":
+            return
+        try:
+            _write_failure_record(
+                owner,
+                code=identity.code,
+                owner_nonce=identity.owner_nonce,
+                generation_nonce=identity.generation_nonce,
+                pid=identity.pid,
+            )
+        except FileExistsError:
+            record = owner.read_record("failure.json")
+            _validate_failure_record(
+                record,
+                code=identity.code,
+                owner_nonce=identity.owner_nonce,
+                generation_nonce=identity.generation_nonce,
+                pid=identity.pid,
+            )
+            owner.sync_directory()
+        owner._retry_pending_temp_names()
 
-    _acquire_lifecycle(coordinator, deadline, allow_expired=True)
-    try:
-        if (
-            coordinator.terminal_code != identity.code
-            or coordinator.failure_evidence_identity != identity
-        ):
-            raise RuntimeError("LSP terminal identity changed during evidence write")
-        result.evidence = "success"
-        if instance is not None:
-            instance.state = ProcessState.FAILED
-        _notify_lifecycle_locked(coordinator)
-    finally:
-        _release_lifecycle(coordinator)
+        _acquire_lifecycle(coordinator, deadline, allow_expired=True)
+        try:
+            if (
+                coordinator.terminal_code != identity.code
+                or coordinator.failure_evidence_identity != identity
+            ):
+                raise RuntimeError("LSP terminal identity changed during evidence write")
+            result.evidence = "success"
+            if instance is not None:
+                instance.state = ProcessState.FAILED
+            _notify_lifecycle_locked(coordinator)
+        finally:
+            _release_lifecycle(coordinator)
 
 
 def _failure_evidence_required(coordinator: _LifecycleCoordinator) -> bool:

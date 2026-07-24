@@ -4027,6 +4027,266 @@ def test_posix_partial_artifact_write_removes_temporary_file(
     assert operations.unlinked == operations.created
 
 
+def _block_native_temporary_deletion(
+    monkeypatch: pytest.MonkeyPatch,
+    owner_root: Path,
+    prefix: str,
+    message: str,
+) -> tuple[threading.Event, list[str]]:
+    allowed = threading.Event()
+    attempts: list[str] = []
+    if os.name == "nt":
+        workspace = lsp_process._windows_workspace
+        real_create = workspace.create_file
+        real_open = workspace.open_deletable_file
+        real_delete = workspace.delete_handle
+        temporary_handles: set[int] = set()
+
+        def create_file(parent: int, name: str) -> int:
+            handle = real_create(parent, name)
+            if name.startswith(prefix) and name.endswith(".tmp"):
+                temporary_handles.add(handle)
+            return handle
+
+        def open_deletable_file(parent: int, name: str) -> int:
+            handle = real_open(parent, name)
+            if name.startswith(prefix) and name.endswith(".tmp"):
+                temporary_handles.add(handle)
+            return handle
+
+        def delete_handle(handle: int) -> None:
+            if handle in temporary_handles:
+                names = sorted(path.name for path in owner_root.glob(f"{prefix}*.tmp"))
+                attempts.extend(names)
+                if not allowed.is_set():
+                    raise OSError(message)
+            real_delete(handle)
+            temporary_handles.discard(handle)
+
+        monkeypatch.setattr(workspace, "create_file", create_file)
+        monkeypatch.setattr(workspace, "open_deletable_file", open_deletable_file)
+        monkeypatch.setattr(workspace, "delete_handle", delete_handle)
+    else:
+        real_unlink = lsp_process.os.unlink
+
+        def unlink(name: str, *, dir_fd: int | None = None) -> None:
+            if name.startswith(prefix) and name.endswith(".tmp"):
+                attempts.append(name)
+                if not allowed.is_set():
+                    raise OSError(message)
+            if dir_fd is None:
+                real_unlink(name)
+            else:
+                real_unlink(name, dir_fd=dir_fd)
+
+        monkeypatch.setattr(lsp_process.os, "unlink", unlink)
+    return allowed, attempts
+
+
+def test_failure_temp_cleanup_blocks_canonical_evidence_finalization_until_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle", "--ignore-shutdown")
+    coordinator = process._coordinator
+    owner = coordinator.owner_directory
+    assert owner is not None
+    deletion_allowed, deletion_attempts = _block_native_temporary_deletion(
+        monkeypatch,
+        process.owner_root,
+        ".evidence-",
+        "evidence temporary deletion failed",
+    )
+
+    try:
+        if os.name == "nt":
+            writer_owner = lsp_process._windows_workspace
+            writer_name = "write_all"
+        else:
+            writer_owner = lsp_process
+            writer_name = "_write_all_descriptor"
+        real_write = getattr(writer_owner, writer_name)
+        monkeypatch.setattr(
+            writer_owner,
+            writer_name,
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("evidence temporary write failed")
+            ),
+        )
+        with pytest.raises(OSError, match="evidence temporary deletion failed"):
+            owner.write_record("failure.json", {"code": "one-shot"})
+        assert len(owner._pending_temp_names) == 1
+        assert len(list(process.owner_root.glob(".evidence-*.tmp"))) == 1
+
+        deletion_allowed.set()
+        owner._retry_pending_temp_names()
+        monkeypatch.setattr(writer_owner, writer_name, real_write)
+        assert owner._pending_temp_names == []
+        assert not list(process.owner_root.glob(".evidence-*.tmp"))
+
+        lsp_process._write_failure_record(
+            owner,
+            code="injected_failure",
+            owner_nonce=process.owner_nonce,
+            generation_nonce=process.generation_nonce,
+            pid=process.process.pid,
+        )
+        deletion_allowed.clear()
+        with pytest.raises(OSError, match="evidence temporary deletion failed"):
+            process._terminal_failure("injected_failure", time.monotonic() + 5)
+
+        assert coordinator.phase is lsp_process._LifecyclePhase.CLEANUP_PENDING
+        assert coordinator.cleanup_result.evidence == "failed"
+        assert coordinator.cleanup_result.ownership_pending is True
+        assert coordinator.owner_directory is owner
+        assert owner._closed is False
+        assert process.state is ProcessState.DEGRADED
+        assert (process.owner_root / "lease.json").is_file()
+        pending = list(owner._pending_temp_names)
+        assert len(pending) == 1
+        assert set(path.name for path in process.owner_root.iterdir()) == {
+            "cancellation",
+            "owner.json",
+            "lease.json",
+            "failure.json",
+            pending[0],
+        }
+        first_attempt_count = len(deletion_attempts)
+
+        with pytest.raises(OSError, match="evidence temporary deletion failed"):
+            process.close(time.monotonic() + 5)
+
+        assert len(deletion_attempts) > first_attempt_count
+        assert owner._pending_temp_names == pending
+        assert list(process.owner_root.glob(".evidence-*.tmp")) == [
+            process.owner_root / pending[0]
+        ]
+        assert any(
+            item.step == "evidence"
+            and "temporary deletion failed" in str(item.error)
+            for item in coordinator.cleanup_result.errors
+        )
+
+        deletion_allowed.set()
+        process.close(time.monotonic() + 5)
+
+        assert owner._pending_temp_names == []
+        assert owner._closed is True
+        assert coordinator.owner_directory is None
+        assert coordinator.phase is lsp_process._LifecyclePhase.STOPPED_FAILURE
+        assert process.state is ProcessState.FAILED
+        assert set(path.name for path in process.owner_root.iterdir()) == {
+            "cancellation",
+            "owner.json",
+            "failure.json",
+        }
+    finally:
+        deletion_allowed.set()
+        for temporary in process.owner_root.glob(".evidence-*.tmp"):
+            temporary.unlink()
+        if lsp_process._coordinator_has_ownership(coordinator):
+            process.close(time.monotonic() + 5)
+
+
+def test_lease_temp_cleanup_blocks_success_finalization_until_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle")
+    coordinator = process._coordinator
+    owner = coordinator.owner_directory
+    assert owner is not None
+    lease = process.owner_root / "lease.json"
+    lease_before = lease.read_bytes()
+    deletion_allowed, deletion_attempts = _block_native_temporary_deletion(
+        monkeypatch,
+        process.owner_root,
+        ".lease-",
+        "lease temporary deletion failed",
+    )
+    if os.name == "nt":
+        writer_owner = lsp_process._windows_workspace
+        writer_name = "write_all"
+    else:
+        writer_owner = lsp_process
+        writer_name = "_write_all_descriptor"
+    real_write = getattr(writer_owner, writer_name)
+    monkeypatch.setattr(
+        writer_owner,
+        writer_name,
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("lease temporary write failed")
+        ),
+    )
+
+    try:
+        for _attempt in range(2):
+            lsp_process._acquire_lease(coordinator, time.monotonic() + 1)
+            try:
+                with pytest.raises(OSError, match="lease temporary deletion failed"):
+                    owner.write_lease({"state": "live"})
+            finally:
+                lsp_process._release_lease(coordinator)
+        monkeypatch.setattr(writer_owner, writer_name, real_write)
+
+        pending = list(owner._pending_temp_names)
+        assert len(pending) == 1
+        assert len(set(deletion_attempts)) == 1
+        assert lease.read_bytes() == lease_before
+        assert set(path.name for path in process.owner_root.iterdir()) == {
+            "cancellation",
+            "owner.json",
+            "lease.json",
+            pending[0],
+        }
+
+        with pytest.raises(OSError, match="lease temporary deletion failed"):
+            process.shutdown(time.monotonic() + 5)
+
+        assert coordinator.terminal_outcome == "success"
+        assert coordinator.phase is lsp_process._LifecyclePhase.CLEANUP_PENDING
+        assert coordinator.cleanup_result.lease_removal == "failed"
+        assert coordinator.cleanup_result.ownership_pending is True
+        assert coordinator.owner_directory is owner
+        assert owner._closed is False
+        assert lease.read_bytes() == lease_before
+        assert owner._pending_temp_names == pending
+        assert set(path.name for path in process.owner_root.iterdir()) == {
+            "cancellation",
+            "owner.json",
+            "lease.json",
+            pending[0],
+        }
+
+        with pytest.raises(OSError, match="lease temporary deletion failed"):
+            process.shutdown(time.monotonic() + 5)
+        assert owner._pending_temp_names == pending
+        assert list(process.owner_root.glob(".lease-*.tmp")) == [
+            process.owner_root / pending[0]
+        ]
+        assert any(
+            item.step == "lease_removal"
+            and "temporary deletion failed" in str(item.error)
+            for item in coordinator.cleanup_result.errors
+        )
+
+        deletion_allowed.set()
+        process.shutdown(time.monotonic() + 5)
+
+        assert owner._pending_temp_names == []
+        assert owner._closed is True
+        assert coordinator.owner_directory is None
+        assert coordinator.phase is lsp_process._LifecyclePhase.STOPPED_SUCCESS
+        assert not process.owner_root.exists()
+    finally:
+        monkeypatch.setattr(writer_owner, writer_name, real_write)
+        deletion_allowed.set()
+        for temporary in process.owner_root.glob(".lease-*.tmp"):
+            temporary.unlink()
+        if lsp_process._coordinator_has_ownership(coordinator):
+            process.close(time.monotonic() + 5)
+
+
 def test_startup_rollback_kills_descendant_after_direct_leader_exits(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -4509,6 +4769,11 @@ def _mock_windows_artifact_owner(
     monkeypatch.setattr(workspace, "flush_directory", lambda _handle: True)
     monkeypatch.setattr(workspace, "publish_file", lambda *_args: None)
     monkeypatch.setattr(workspace, "replace_file", lambda *_args: None)
+    monkeypatch.setattr(
+        workspace,
+        "open_deletable_file",
+        lambda *_args: (_ for _ in ()).throw(FileNotFoundError),
+    )
     monkeypatch.setattr(workspace, "delete_handle", lambda _handle: None)
     monkeypatch.setattr(workspace, "close_handle", close_handle)
     return owner
