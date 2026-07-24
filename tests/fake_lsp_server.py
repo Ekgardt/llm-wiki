@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -174,6 +175,7 @@ def _run_process_server() -> None:
     parser.add_argument("--ignored-secret")
     parser.add_argument("--sleep-seconds", type=float, default=0.0)
     parser.add_argument("--spawn-descendant", action="store_true")
+    parser.add_argument("--spawn-setsid-descendant", action="store_true")
     parser.add_argument("--descendant-exit-after", type=float)
     parser.add_argument("--exit-after-descendant-spawn", action="store_true")
     parser.add_argument("--descendant-pid-file")
@@ -188,6 +190,40 @@ def _run_process_server() -> None:
     parser.add_argument("--idle-exit-marker")
     parser.add_argument("--hang-then-exit", action="store_true")
     args = parser.parse_args()
+
+    if args.spawn_setsid_descendant:
+        if os.name != "posix":
+            raise RuntimeError("setsid descendant fixture requires POSIX")
+
+        def report_group_signal(_signum: int, _frame: object) -> None:
+            print(json.dumps({"group_signal": "SIGTERM"}), flush=True)
+
+        signal.signal(signal.SIGTERM, report_group_signal)
+        descendant = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import os,time; os.setsid(); print('ready', flush=True); time.sleep(60)",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+        assert descendant.stdout is not None
+        assert descendant.stdout.readline() == b"ready\n"
+        print(json.dumps({"descendant_pid": descendant.pid}), flush=True)
+        try:
+            sys.stdin.buffer.readline()
+        finally:
+            descendant.terminate()
+            try:
+                descendant.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                descendant.kill()
+                descendant.wait(timeout=2)
+        print(json.dumps({"descendant_reaped": True}), flush=True)
+        return
 
     if args.spawn_descendant:
         descendant_code = (

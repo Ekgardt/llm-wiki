@@ -2536,6 +2536,7 @@ def test_repeated_startup_failures_close_every_returned_windows_handle_once(
 
     for operation in (
         "open_directory_path",
+        "create_writable_directory",
         "create_directory",
         "create_file",
     ):
@@ -3562,8 +3563,11 @@ def test_restart_waits_for_inflight_heartbeat_before_publishing_new_lease(
     heartbeat_writing = threading.Event()
     release_heartbeat = threading.Event()
     restart_finished = threading.Event()
+    restart_acquiring_lease = threading.Event()
     restart_errors: list[BaseException] = []
     real_write_lease = lsp_process._OwnerDirectory.write_lease
+    real_acquire_lease = lsp_process._acquire_lease
+    restart_thread: threading.Thread | None = None
 
     def delayed_heartbeat(current: object, record: object) -> None:
         assert isinstance(record, dict)
@@ -3584,20 +3588,35 @@ def test_restart_waits_for_inflight_heartbeat_before_publishing_new_lease(
         finally:
             restart_finished.set()
 
+    def observe_lease_acquisition(
+        current: object,
+        deadline: float,
+        *,
+        allow_expired: bool = False,
+    ) -> None:
+        if threading.current_thread() is restart_thread:
+            restart_acquiring_lease.set()
+        real_acquire_lease(
+            current,  # type: ignore[arg-type]
+            deadline,
+            allow_expired=allow_expired,
+        )
+
     monkeypatch.setattr(
         lsp_process._OwnerDirectory,
         "write_lease",
         delayed_heartbeat,
     )
+    monkeypatch.setattr(lsp_process, "_acquire_lease", observe_lease_acquisition)
     coordinator.heartbeat_wake.set()
     assert heartbeat_writing.wait(2)
     restart_thread = threading.Thread(target=restart)
     restart_thread.start()
-    restart_returned_before_heartbeat = restart_finished.wait(0.2)
+    assert restart_acquiring_lease.wait(2)
+    assert not restart_finished.is_set()
     release_heartbeat.set()
     restart_thread.join(5)
 
-    assert restart_returned_before_heartbeat is False
     assert not restart_thread.is_alive()
     assert restart_errors == []
     assert process.generation_nonce != first_generation
@@ -4648,3 +4667,171 @@ def test_first_terminal_identity_survives_later_heartbeat_failure(
     assert failure["code"] == "injected_failure"
     assert failure["generation_nonce"] == generation_nonce
     assert failure["server_pid"] == server_pid
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows directory flush boundary")
+@pytest.mark.parametrize("artifact", ["failure", "lease"])
+def test_windows_artifact_directory_flush_false_is_not_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    artifact: str,
+) -> None:
+    owner = _mock_windows_artifact_owner(monkeypatch, tmp_path, lambda _handle: None)
+    flushes: list[int] = []
+    deleted: list[int] = []
+
+    def reject_directory_flush(handle: int) -> bool:
+        flushes.append(handle)
+        return False
+
+    monkeypatch.setattr(
+        lsp_process._windows_workspace,
+        "flush_directory",
+        reject_directory_flush,
+    )
+    monkeypatch.setattr(
+        lsp_process._windows_workspace,
+        "delete_handle",
+        lambda handle: deleted.append(handle),
+    )
+
+    with pytest.raises(OSError, match="directory.*flush"):
+        _exercise_mock_windows_artifact_write(owner, artifact)
+
+    assert flushes == [202]
+    assert deleted == []
+    owner.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows directory flush boundary")
+def test_windows_failure_flush_false_retains_cleanup_until_barrier_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle", "--ignore-shutdown")
+    coordinator = process._coordinator
+    owner = coordinator.owner_directory
+    assert owner is not None and owner.owner_handle is not None
+    real_flush = lsp_process._windows_workspace.flush_directory
+    allow_flush = False
+    attempts = 0
+
+    def controlled_flush(handle: int) -> bool:
+        nonlocal attempts
+        if handle == owner.owner_handle:
+            attempts += 1
+            if not allow_flush:
+                return False
+        return real_flush(handle)
+
+    monkeypatch.setattr(
+        lsp_process._windows_workspace,
+        "flush_directory",
+        controlled_flush,
+    )
+    try:
+        with pytest.raises(OSError, match="directory.*flush"):
+            process._terminal_failure("injected_failure", time.monotonic() + 5)
+
+        failure = process.owner_root / "failure.json"
+        assert failure.is_file()
+        assert coordinator.cleanup_result.evidence == "failed"
+        assert coordinator.cleanup_result.ownership_pending is True
+        assert coordinator.phase is lsp_process._LifecyclePhase.CLEANUP_PENDING
+        assert coordinator.owner_directory is owner
+        assert process.state is ProcessState.DEGRADED
+        assert (process.owner_root / "lease.json").is_file()
+        assert any(
+            item.step == "evidence" and "directory" in str(item.error)
+            for item in coordinator.cleanup_result.errors
+        )
+        attempts_before_retry = attempts
+
+        allow_flush = True
+        process.close(time.monotonic() + 5)
+
+        assert attempts > attempts_before_retry
+        assert process.state is ProcessState.FAILED
+        assert coordinator.cleanup_result.evidence == "success"
+        assert not (process.owner_root / "lease.json").exists()
+    finally:
+        allow_flush = True
+        if lsp_process._coordinator_has_ownership(coordinator):
+            process.close(time.monotonic() + 5)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory fsync boundary")
+@pytest.mark.parametrize("persistent", [False, True], ids=["one-shot", "persistent"])
+def test_posix_failure_retry_repeats_directory_fsync_before_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    persistent: bool,
+) -> None:
+    owner_root = tmp_path / OWNER_NONCE
+    owner = lsp_process._OwnerDirectory.open(owner_root)
+    owner.create(time.monotonic() + 1)
+    assert owner.owner_handle is not None
+    owner_handle = owner.owner_handle
+    identity = lsp_process._FailureEvidenceIdentity(
+        "injected_failure",
+        OWNER_NONCE,
+        "b" * 32,
+        4242,
+    )
+    coordinator = lsp_process._LifecycleCoordinator(
+        owner,
+        startup_generation_nonce=identity.generation_nonce,
+    )
+    coordinator.terminal_outcome = "failure"
+    coordinator.terminal_code = identity.code
+    coordinator.failure_evidence_identity = identity
+    coordinator.phase = lsp_process._LifecyclePhase.STOPPING_FAILURE
+    real_fsync = lsp_process.os.fsync
+    keep_failing = persistent
+    attempts = 0
+
+    def controlled_fsync(descriptor: int) -> None:
+        nonlocal attempts
+        if descriptor == owner_handle:
+            attempts += 1
+            if keep_failing or attempts == 1:
+                raise OSError("owner directory fsync failed")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(lsp_process.os, "fsync", controlled_fsync)
+    try:
+        with pytest.raises(OSError, match="owner directory fsync failed"):
+            lsp_process._ensure_failure_evidence(
+                None,
+                coordinator,
+                identity.code,
+                time.monotonic() + 1,
+            )
+
+        assert attempts == 1
+        assert coordinator.cleanup_result.evidence != "success"
+        assert (owner_root / "failure.json").is_file()
+        if persistent:
+            with pytest.raises(OSError, match="owner directory fsync failed"):
+                lsp_process._ensure_failure_evidence(
+                    None,
+                    coordinator,
+                    identity.code,
+                    time.monotonic() + 1,
+            )
+            assert attempts == 2
+            assert coordinator.cleanup_result.evidence != "success"
+            keep_failing = False
+
+        lsp_process._ensure_failure_evidence(
+            None,
+            coordinator,
+            identity.code,
+            time.monotonic() + 1,
+        )
+        assert attempts == (3 if persistent else 2)
+        assert coordinator.cleanup_result.evidence == "success"
+        assert not list(owner_root.glob(".evidence-*.tmp"))
+    finally:
+        monkeypatch.setattr(lsp_process.os, "fsync", real_fsync)
+        owner.close()

@@ -280,6 +280,68 @@ def test_lsp_live_lease_layout_is_canonical() -> None:
     assert (ROOT / "AGENTS.md").read_bytes() == (ROOT / "CLAUDE.md").read_bytes()
 
 
+def test_lsp_process_containment_contract_is_platform_qualified() -> None:
+    decision_path = ROOT / "knowledge/notes/lsp-process-containment-decision.md"
+    assert decision_path.is_file()
+    decision = decision_path.read_text(encoding="utf-8")
+    _required_frontmatter_scalars(
+        decision,
+        {
+            "type": "decision",
+            "status": "active",
+            "confidence": "high",
+            "source_authority": "user",
+            "date": "2026-07-24",
+        },
+    )
+
+    structure = (ROOT / "docs/STRUCTURE.md").read_text(encoding="utf-8")
+    design = (
+        ROOT / "docs/superpowers/specs/2026-07-22-read-only-lsp-navigation-design.md"
+    ).read_text(encoding="utf-8")
+    plan = (
+        ROOT / "docs/superpowers/plans/2026-07-22-python-pyright-navigation.md"
+    ).read_text(encoding="utf-8")
+    task6 = plan.split("### Task 6:", 1)[1].split("### Task 7:", 1)[0]
+    task15 = plan.split("### Task 15:", 1)[1]
+    module = (ROOT / "scripts/lsp_process_tree.py").read_text(encoding="utf-8")
+    for text in (decision, structure, design, task6, task15, module):
+        normalized = " ".join(text.split())
+        assert "Windows Job Object" in normalized
+        assert "POSIX process group" in normalized
+        assert "setsid()" in normalized
+        assert "unsupported" in normalized
+        assert "trusted" in normalized
+
+    decision_words = " ".join(decision.split())
+    assert "delegated cgroup v2" in decision_words
+    assert "future" in decision_words
+    assert "ancestry scan" in decision_words
+    assert "what is true today" in decision_words
+    assert "what we want it to become" in decision_words
+
+    navigation = (
+        ROOT / "knowledge/notes/read-only-lsp-navigation-engine-decision.md"
+    ).read_text(encoding="utf-8")
+    lease = (ROOT / "knowledge/notes/lsp-live-lease-decision.md").read_text(
+        encoding="utf-8"
+    )
+    for related in (navigation, lease):
+        assert "[[lsp-process-containment-decision]]" in related
+    assert "[[read-only-lsp-navigation-engine-decision]]" in decision
+    assert "[[lsp-live-lease-decision]]" in decision
+
+    index = (ROOT / "knowledge/index.md").read_text(encoding="utf-8")
+    log = (ROOT / "knowledge/log.md").read_text(encoding="utf-8")
+    assert "[[knowledge/notes/lsp-process-containment-decision]]" in index
+    assert "2026-07-24" in log and "process containment" in log
+
+    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    allowlist = "!knowledge/notes/lsp-process-containment-decision.md"
+    assert gitignore.count(allowlist) == 1
+    _assert_literal_note_allowlist(gitignore)
+
+
 def test_agent_contract_mentions_three_zone_process_rule():
     """The contract must document the 'architecture changes require sign-off'
     rule so future agents don't improvise structural changes mid-task.

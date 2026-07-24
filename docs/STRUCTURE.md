@@ -43,7 +43,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── impact_analysis.py           v4.0: LINK layer (code→wiki impact)
 │   ├── build_tiers.py               v4.0: L0/L1/L2 progressive disclosure
 │   └── queries/                     v4.0: 12 tree-sitter .scm language queries
-├── tests/                         CODE — regression suite (pytest, 4443 tests)
+├── tests/                         CODE — regression suite (pytest, 4451 tests)
 ├── docs/                          CODE — architecture + user guide
 ├── skills/                        CODE — 9 agent skills (SKILL.md)
 ├── rules/                         CODE — file-handling policies
@@ -177,8 +177,9 @@ consent/SCIP/publication Tasks 6-16 are superseded.
 
 Tasks 1-6 of the replacement Python/Pyright plan now implement path derivation,
 position and URI conversion, bounded protocol transport, process startup evidence,
-and process-tree lifecycle ownership. Precise navigation, provider integration, and
-MCP routing remain unimplemented, so this is not a navigation-complete checkpoint.
+and platform-qualified process lifecycle ownership. Precise navigation, provider
+integration, and MCP routing remain unimplemented, so this is not a
+navigation-complete checkpoint.
 
 The approved target keeps the existing structural Evidence Graph and adds a small,
 Python 3.10-compatible, read-only LSP runtime owned by LLM Wiki. It starts with a
@@ -211,6 +212,16 @@ removal; abrupt death leaves the lease to expire. Updates are atomic, owner-only
 and anchored to the retained owner-directory handle. See
 `knowledge/notes/lsp-live-lease-decision.md`.
 
+LSP process containment is platform-qualified rather than one portable sandbox. A
+Windows Job Object owns the assigned server tree. On Linux and macOS, a POSIX
+process group owns the pinned Pyright server and descendants only while they remain
+in that group. A hostile descendant can call `setsid()` and escape; containing that
+case is unsupported. The POSIX runtime is therefore limited to qualified Pyright in
+trusted repositories and does not use a `/proc` or `ps` ancestry scan to claim
+stronger ownership. Optional delegated cgroup v2 containment is a future Linux-only
+candidate requiring a separate capability-gated design. See
+`knowledge/notes/lsp-process-containment-decision.md`.
+
 ## What lives where
 
 ### CODE zone (tracked in git)
@@ -220,7 +231,7 @@ and anchored to the retained owner-directory handle. See
   `maybe_compile.py` (PID-locked spawn), `search_memory.py` (triple-RRF),
   `llm_client.py` (5 backends + fake), `integration_adapter.py` (thin host
   lifecycle boundary), `mcp_server.py` (12 task-shaped tools), and `doctor.py`.
-- `tests/` — 4443 tests collected. Hermetic via `conftest.py` (pins
+- `tests/` — 4451 tests collected. Hermetic via `conftest.py` (pins
   `LLM_WIKI_ROOT` to checkout, redirects `LLM_WIKI_STATE_ROOT` to a temp
   dir, defaults `MEMORY_LLM_PROVIDER=fake`).
 - `docs/` — `ARCHITECTURE.md`, `USER-GUIDE.md`, `AGENTS.md` (knowledge

@@ -65,4 +65,5 @@ delays while bounding stale ownership recognition.
 
 ## Related
 
+- [[lsp-process-containment-decision]]
 - [[read-only-lsp-navigation-engine-decision]]

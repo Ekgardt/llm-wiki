@@ -303,11 +303,20 @@ permissions and is therefore limited to operator-trusted local repositories.
 server commands, and never intentionally writes project files; it is not an OS
 sandbox and does not claim that Pyright cannot read or write other user-accessible
 paths. The client validates every requested and returned source path against the
-repository, bounds time and process count, cleans the whole process tree, passes an
-explicit minimal environment allowlist, redacts logs, and does not place agent,
-cloud, SSH, or package-registry credentials in that environment. Pyright may still
-read explicitly configured external environments, stubs, and library code; these
-inputs are part of the configuration fingerprint and provenance.
+repository, bounds time and process count, passes an explicit minimal environment
+allowlist, redacts logs, and does not place agent, cloud, SSH, or package-registry
+credentials in that environment. Pyright may still read explicitly configured
+external environments, stubs, and library code; these inputs are part of the
+configuration fingerprint and provenance.
+
+Process containment is platform-qualified. A Windows Job Object owns the assigned
+server and its child processes. On Linux and macOS, a POSIX process group owns the
+pinned Pyright server and descendants only while they remain in that group. A
+hostile descendant can call `setsid()` and leave that group; portable containment
+of that escape is unsupported. The POSIX contract therefore applies to the pinned,
+qualified Pyright profile in trusted repositories, not to arbitrary hostile
+executables. The runtime does not use a racy process-ancestry scan to imply stronger
+ownership.
 
 Higher-risk servers that may evaluate builds, plugins, macros, or generators need
 a separately approved trust policy before implementation. The completed sealed
@@ -319,7 +328,8 @@ untrusted analyzers but are not in the live point-query hot path.
 Python is not production-ready until tests prove:
 
 - no stale answer in the deterministic edit/rename/delete suite;
-- no orphan process after normal shutdown, crash, timeout, or cancellation;
+- no orphan process inside the platform-qualified ownership boundary after normal
+  shutdown, crash, timeout, or cancellation;
 - successful bounded recovery after forced server failure;
 - correct Unicode and Windows URI behavior;
 - explicit degraded states for missing dependencies, broken projects, unsupported
@@ -344,9 +354,10 @@ fixtures and an operator-supplied local project corpus. It records:
 - failure recovery, stale-result, and orphan-process rates.
 
 Initial acceptance requires at least 99% exact definitions, at least 95% reference
-F1 on qualified fixtures, zero stale fixture answers, zero orphan processes, and
-100% recovery in the bounded crash suite. The default response is at most 10 items
-and 1,200 estimated tokens. On the fixed 100 KLOC Python qualification repository,
+F1 on qualified fixtures, zero stale fixture answers, zero orphan processes inside
+the platform-qualified ownership boundary, and 100% recovery in the bounded crash
+suite. The default response is at most 10 items and 1,200 estimated tokens. On the
+fixed 100 KLOC Python qualification repository,
 warm engine overhead above a direct warmed Pyright request must be no more than
 20 ms at p95, cold readiness must complete within 60 seconds, and LLM Wiki process
 RSS overhead excluding Pyright must stay below 100 MiB. The benchmark manifest pins

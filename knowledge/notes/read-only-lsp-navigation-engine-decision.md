@@ -82,6 +82,7 @@ valid; the one-shot consent/SCIP/publication direction in Tasks 6-16 does not.
 
 ## Related
 
+- [[lsp-process-containment-decision]]
 - [[lsp-live-lease-decision]]
 - [[persistent-code-intelligence-kernel-decision]]
 - [[solo-operator-superset-product-decision]]

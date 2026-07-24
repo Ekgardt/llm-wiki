@@ -14,6 +14,7 @@ This index catalogs durable memory distilled from AI agent sessions
 - [[knowledge/notes/provenance-rule-6]] — CLAUDE.md rule 6 — "mark uncertainty explicitly" — is the root constraint that justifies preliminary flagging, editorial notes, and every "inferred from…" caveat in this vault.
 
 ## Decisions
+- [[knowledge/notes/lsp-process-containment-decision]] — Windows Job Objects own assigned LSP trees, while POSIX process groups cover only pinned Pyright descendants that remain in the group.
 - [[knowledge/notes/lsp-live-lease-decision]] — Live LSP lifecycle ownership uses a bounded mutable lease anchored inside the immutable owner directory.
 - [[knowledge/notes/read-only-lsp-navigation-engine-decision]] — LLM Wiki will keep its structural Evidence Graph and add an owned read-only LSP engine for precise live navigation, starting with production-quality Python support.
 - [[knowledge/notes/persistent-code-intelligence-kernel-decision]] — Superseded after completed Tasks 1-5 by the read-only LSP navigation decision.

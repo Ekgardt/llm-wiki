@@ -5,6 +5,9 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import select
+import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -70,6 +73,15 @@ def _descendant(tree: ProcessTree) -> int:
     line = tree.process.stdout.readline()
     record = json.loads(line)
     return int(record["descendant_pid"])
+
+
+def _process_record(tree: ProcessTree, timeout: float = 2.0) -> dict[str, object]:
+    assert tree.process.stdout is not None
+    readable, _, _ = select.select([tree.process.stdout], [], [], timeout)
+    assert readable, "timed out waiting for process-tree fixture record"
+    record = json.loads(tree.process.stdout.readline())
+    assert isinstance(record, dict)
+    return record
 
 
 def test_public_process_tree_shape_is_exact() -> None:
@@ -228,6 +240,56 @@ def test_close_retains_group_until_descendant_after_exited_leader_is_gone(
     deadline = time.monotonic() + 2
     while _pid_alive(descendant_pid) and time.monotonic() < deadline:
         time.sleep(0.02)
+    assert not _pid_alive(descendant_pid)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX setsid boundary")
+def test_setsid_escape_is_outside_posix_process_group_containment(
+    tmp_path: Path,
+) -> None:
+    tree = ProcessTree.spawn(
+        _command("--spawn-setsid-descendant"),
+        cwd=tmp_path,
+        env=dict(os.environ),
+    )
+    descendant_pid = _descendant(tree)
+    descendant_survived_group_signal = False
+    cleanup_record: dict[str, object] = {}
+    try:
+        assert tree.process_group is not None
+        assert os.getpgid(descendant_pid) == descendant_pid
+        assert os.getpgid(descendant_pid) != tree.process_group
+
+        os.killpg(tree.process_group, signal.SIGTERM)
+        assert _process_record(tree) == {"group_signal": "SIGTERM"}
+        descendant_survived_group_signal = _pid_alive(descendant_pid)
+
+        assert tree.process.stdin is not None
+        tree.process.stdin.write(b"cleanup\n")
+        tree.process.stdin.flush()
+        cleanup_record = _process_record(tree)
+        tree.process.wait(timeout=5)
+        tree.close()
+    finally:
+        if tree.process.poll() is None:
+            if tree.process.stdin is not None:
+                try:
+                    tree.process.stdin.write(b"cleanup\n")
+                    tree.process.stdin.flush()
+                except (BrokenPipeError, OSError):
+                    pass
+            try:
+                tree.process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                tree.process.kill()
+                tree.process.wait(timeout=3)
+        if _pid_alive(descendant_pid):
+            os.kill(descendant_pid, signal.SIGKILL)
+        if tree.process_group is not None:
+            tree.close()
+
+    assert descendant_survived_group_signal is True
+    assert cleanup_record == {"descendant_reaped": True}
     assert not _pid_alive(descendant_pid)
 
 

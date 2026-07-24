@@ -618,7 +618,7 @@ git commit -m "feat: bound LSP process state"
 
 ```python
 @pytest.mark.parametrize("ending", ["shutdown", "crash", "timeout", "cancel"])
-def test_no_descendant_survives_process_ending(ending: str, process_tree_server: ProcessTreeServer) -> None:
+def test_no_owned_descendant_survives_process_ending(ending: str, process_tree_server: ProcessTreeServer) -> None:
     process = process_tree_server.start()
     child_pid = process_tree_server.child_pid(process)
     process_tree_server.end(process, ending)
@@ -634,7 +634,7 @@ def test_protocol_failure_restarts_once_with_new_generation(process_tree_server:
     assert process.restart_count == 1
 ```
 
-Run real descendant tests on all supported OS families. Test graceful `shutdown` request then `exit`, a 2-second graceful cleanup budget inside the caller deadline, forced cleanup, idle timeout of 300 seconds, owner-process exit via `atexit`, reader-thread joins, second fatal failure without restart, and cleanup evidence after failure.
+Run real descendant tests on all supported OS families. Test graceful `shutdown` request then `exit`, a 2-second graceful cleanup budget inside the caller deadline, forced cleanup, idle timeout of 300 seconds, owner-process exit via `atexit`, reader-thread joins, second fatal failure without restart, and cleanup evidence after failure. Add a POSIX negative fixture that proves a descendant calling `setsid()` leaves the owned process group, then coordinates fixture cleanup so the escaped process is killed and reaped without advertising that unsupported case as successful containment.
 
 - [ ] **Step 2: Run the focused tests and verify RED**
 
@@ -652,7 +652,7 @@ class ProcessTree:
     process_group: int | None
 ```
 
-Expose exact methods `ProcessTree.spawn(cls, command: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> ProcessTree`, `ProcessTree.terminate(self, *, deadline: float) -> None`, and `ProcessTree.close(self) -> None`. On POSIX, use `start_new_session=True`, then `SIGTERM` and bounded `SIGKILL` against the process group. On Windows, create a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, assign the process before accepting requests, and terminate/close the Job Object during cleanup. If assignment fails, terminate the just-created process and return `failed`; never claim tree ownership. Do not use `preexec_fn`.
+Expose exact methods `ProcessTree.spawn(cls, command: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> ProcessTree`, `ProcessTree.terminate(self, *, deadline: float) -> None`, and `ProcessTree.close(self) -> None`. On POSIX, use `start_new_session=True`, then `SIGTERM` and bounded `SIGKILL` against the process group. This POSIX process group owns the pinned Pyright server and descendants only while they remain in that group. A hostile descendant can call `setsid()`; containment of that escape is unsupported, so this path is qualified only for pinned Pyright in trusted repositories and must not add `/proc` or `ps` ancestry killing. On Windows, create a Windows Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, assign the process before accepting requests, and terminate/close the Job Object during cleanup. If assignment fails, terminate the just-created process and return `failed`; never claim tree ownership. Do not use `preexec_fn`.
 
 Extend `LspProcess` with `restart_count: int`, `shutdown(deadline)`, `cancel_all(reason)`, `restart(deadline)`, `close(deadline)`, and `idle_expired(now)`. Preserve immutable create-only `owner.json` and `failure.json`; before implementing the 10-second heartbeat and 30-second expiry contract, obtain explicit approval for its separate lifecycle evidence layout rather than replacing either immutable record. Stop and join the eventual heartbeat thread during every close/failure branch. Fatal protocol/process failure allows exactly one fresh process generation. Restart the owning generation when `protocol.expired_drain_keys(time.monotonic())` is nonempty; do not remove expired drains locally and continue using the same server. Pending keys from the prior generation are released by terminal close and all late responses are dropped by generation nonce. Normal close sends `shutdown`, waits for its response, sends `exit`, and then enforces tree cleanup. Failure creates `failure.json` with stable code, timestamp, PID, and generation nonce but no stderr or repository path; success removes the owner scratch after process exit.
 
@@ -1404,7 +1404,7 @@ Expected: PASS.
 
 Run: `uv run python benchmark/run_code_navigation.py --fixture --correctness-only --require-gates`
 
-Expected: PASS with definition accuracy at least 0.99, reference F1 at least 0.95, zero stale answers, zero orphan processes, and recovery rate 1.0.
+Expected: PASS with definition accuracy at least 0.99, reference F1 at least 0.95, zero stale answers, zero orphan processes inside the platform-qualified ownership boundary, and recovery rate 1.0.
 
 - [ ] **Step 5: Commit Task 14**
 
@@ -1456,6 +1456,12 @@ def test_docs_state_security_install_and_market_truth() -> None:
 
 Add i18n assertions that all three READMEs expose the same explicit install command, modes, Pyright version, and trust limitation. Replace brittle suite-count marketing in all three READMEs with synchronized “full regression suite” wording; keep historical counts in prior changelog entries unchanged.
 
+Cross-platform documentation must qualify process ownership rather than promise one
+portable sandbox: a Windows Job Object owns its assigned tree, while a POSIX process
+group covers the trusted, pinned Pyright server and descendants only while they
+remain in that group. A hostile `setsid()` escape is unsupported. Do not add or
+document an ancestry scan as containment.
+
 - [ ] **Step 2: Run focused docs tests and verify RED**
 
 Run: `uv run pytest tests/test_readme_i18n.py tests/test_structure.py -q -k "pyright or code_navigation or real_pyright"`
@@ -1484,7 +1490,7 @@ The job invokes only the explicit installer. No test or query performs a downloa
 uv run python scripts/install_pyright.py --state-root "$LLM_WIKI_STATE_ROOT"
 ```
 
-It documents all `get_architecture` modes and fields, one-based line plus zero-based UTF-8 byte character, status semantics, 60-second precise deadline, stateless offsets, structural fallback, readiness limits, no complete-negative promise, create/edit/rename/delete synchronization, no semantic cache, no graph publication, exact protocol bounds, Node major 22 qualification, trusted-repository requirement, no sandbox claim, no hidden download/update, doctor codes, seven-day failure-evidence retention, and the explicit installer. It states that Pyright can read configured external environments/stubs/libraries and these become fingerprinted provenance. It states that market superiority remains unclaimed.
+It documents all `get_architecture` modes and fields, one-based line plus zero-based UTF-8 byte character, status semantics, 60-second precise deadline, stateless offsets, structural fallback, readiness limits, no complete-negative promise, create/edit/rename/delete synchronization, no semantic cache, no graph publication, exact protocol bounds, Node major 22 qualification, trusted-repository requirement, no sandbox claim, the Windows Job Object versus POSIX process group containment boundary, unsupported `setsid()` escape, no hidden download/update, doctor codes, seven-day failure-evidence retention, and the explicit installer. It states that Pyright can read configured external environments/stubs/libraries and these become fingerprinted provenance. It states that market superiority remains unclaimed.
 
 Update `docs/STRUCTURE.md` from approved target to implemented Python slice only after all focused tests pass. Keep other languages as unimplemented future candidates. Keep `AGENTS.md` and `CLAUDE.md` byte-identical. Add an `Unreleased` changelog entry without a release version bump. Synchronize `README.md`, `README.ru.md`, and `README.zh-CN.md` in the same change. Do not modify `pyproject.toml` version because this task is not a release.
 
@@ -1512,7 +1518,7 @@ Expected: PASS with zero failed tests.
 
 Run: `uv run python benchmark/run_code_navigation.py --fixture --qualification --require-gates`
 
-Expected: PASS all thresholds: definitions at least 99%, reference F1 at least 95%, zero stale answers, zero orphan processes, 100% bounded recovery, at most 10 default items, at most 1,200 estimated tokens, warm overhead p95 at most 20 ms, cold readiness at most 60 seconds, and client RSS below 100 MiB excluding Pyright.
+Expected: PASS all thresholds: definitions at least 99%, reference F1 at least 95%, zero stale answers, zero orphan processes inside the platform-qualified ownership boundary, 100% bounded recovery, at most 10 default items, at most 1,200 estimated tokens, warm overhead p95 at most 20 ms, cold readiness at most 60 seconds, and client RSS below 100 MiB excluding Pyright.
 
 - [ ] **Step 6: Commit Task 15**
 
@@ -1534,7 +1540,7 @@ git commit -m "docs: ship qualified Python navigation"
 - [ ] Startup readiness requires initialize, initialized, configuration, didOpen, and a successful target-file document-symbol probe; initialize alone is not readiness.
 - [ ] Freshness recomputes the workspace revision after each response, retries one mismatch once, and returns `stale` after a second mismatch.
 - [ ] Create, edit, rename, and delete tests return no stale answer.
-- [ ] Shutdown, crash, timeout, and cancellation leave no orphan process or descendant on Windows, Linux, or macOS.
+- [ ] Shutdown, crash, timeout, and cancellation leave no owned process behind: Windows verifies the assigned Job Object tree; Linux and macOS verify the POSIX process group for pinned Pyright descendants that remain in the group. Hostile `setsid()` escape remains explicitly unsupported.
 - [ ] Pyright discovery order is matching project-local, managed, then system; any version/digest/Node/config mismatch is degraded.
 - [ ] Query, MCP, doctor, and discovery code contain no download or update call; only `scripts/install_pyright.py` can fetch the pinned artifact after explicit invocation.
 - [ ] Managed files live only under `cache/code-tools/pyright/1.1.411/`; owner scratch lives only under `run/lsp/<owner-nonce>/`.

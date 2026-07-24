@@ -415,6 +415,11 @@ def create_directory(parent: int, name: str) -> int:
     return _relative_handle(parent, name, directory=True, create=True)
 
 
+def create_writable_directory(parent: int, name: str) -> int:
+    """Create a directory whose retained handle supports metadata flushing."""
+    return _relative_handle(parent, name, directory=True, create=True, writable=True)
+
+
 def open_directory(parent: int, name: str) -> int:
     return _relative_handle(parent, name, directory=True, create=False)
 

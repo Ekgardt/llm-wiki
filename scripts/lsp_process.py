@@ -217,7 +217,9 @@ class _OwnerDirectory:
             os.fsync(self.parent_handle)
             return
 
-        owner = _windows_workspace.create_directory(self.parent_handle, self.owner_root.name)
+        owner = _windows_workspace.create_writable_directory(
+            self.parent_handle, self.owner_root.name
+        )
         self.owner_handle = owner
         self.owner_identity = _windows_workspace.identity(owner, directory=True)
         _secure_windows_owner_root(self.owner_root, deadline)
@@ -283,7 +285,7 @@ class _OwnerDirectory:
                     follow_symlinks=False,
                 )
                 os.unlink(temporary, dir_fd=self.owner_handle)
-                os.fsync(self.owner_handle)
+                self.sync_directory()
             except BaseException:
                 try:
                     os.unlink(temporary, dir_fd=self.owner_handle)
@@ -308,12 +310,13 @@ class _OwnerDirectory:
                     raise PermissionError("LSP evidence identity changed during write")
                 _windows_workspace.publish_file(handle, self.owner_handle, name)
                 published = True
-                _windows_workspace.flush_directory(self.owner_handle)
+                self.sync_directory()
             except BaseException:
-                try:
-                    _windows_workspace.delete_handle(handle)
-                except OSError:
-                    pass
+                if not published:
+                    try:
+                        _windows_workspace.delete_handle(handle)
+                    except OSError:
+                        pass
                 raise
             finally:
                 self._close_child_handle(handle)
@@ -356,7 +359,7 @@ class _OwnerDirectory:
                     src_dir_fd=self.owner_handle,
                     dst_dir_fd=self.owner_handle,
                 )
-                os.fsync(self.owner_handle)
+                self.sync_directory()
             except BaseException:
                 try:
                     os.unlink(temporary, dir_fd=self.owner_handle)
@@ -382,7 +385,20 @@ class _OwnerDirectory:
                 raise
             finally:
                 self._close_child_handle(handle)
-            _windows_workspace.flush_directory(self.owner_handle)
+            self.sync_directory()
+
+    def sync_directory(self) -> None:
+        handle = self.owner_handle
+        if handle is None:
+            raise RuntimeError("LSP owner directory is closed")
+        if os.name == "posix":
+            os.fsync(handle)
+            return
+        if os.name == "nt":
+            if not _windows_workspace.flush_directory(handle):
+                raise OSError("LSP owner directory durability flush failed")
+            return
+        raise RuntimeError("LSP owner directories are unsupported on this platform")
 
     def remove_lease(self) -> None:
         if self.owner_handle is None:
@@ -2168,6 +2184,7 @@ def _ensure_failure_evidence(
             generation_nonce=identity.generation_nonce,
             pid=identity.pid,
         )
+        owner.sync_directory()
 
     _acquire_lifecycle(coordinator, deadline, allow_expired=True)
     try:

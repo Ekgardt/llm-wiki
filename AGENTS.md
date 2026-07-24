@@ -145,8 +145,11 @@ consent/SCIP/publication Tasks 6-16 are superseded. The approved target keeps th
 existing structural Evidence Graph and adds an owned, Python 3.10-compatible,
 read-only LSP runtime, starting with a production-quality Python/Pyright slice.
 Tasks 1-6 of the replacement plan now implement paths, positions, bounded protocol,
-startup evidence, and leased process-tree lifecycle; navigation/provider/MCP routing
-remain unimplemented.
+startup evidence, and leased, platform-qualified process lifecycle ownership;
+navigation/provider/MCP routing remain unimplemented. A Windows Job Object owns the
+assigned server tree. On POSIX, the process group covers pinned Pyright descendants
+only while they remain in-group; hostile `setsid()` escape is unsupported, so this
+path remains limited to trusted repositories.
 It adds no Serena runtime dependency, Rust rewrite, second graph, catalog, active
 pointer, runtime root, persistent daemon, or MCP tool. Query-time LSP observations
 are not written into active generations. Language servers start lazily inside the
@@ -160,8 +163,9 @@ protects live LSP owners and retained LSP failure evidence. While ownership is l
 10 seconds with a 30 seconds expiry, and remains distinct from immutable create-only
 `owner.json` and `failure.json`. Controlled cleanup removes the lease after joining
 its heartbeat; abrupt death leaves it to expire. See
-`knowledge/notes/read-only-lsp-navigation-engine-decision.md` and
-`knowledge/notes/lsp-live-lease-decision.md`.
+`knowledge/notes/read-only-lsp-navigation-engine-decision.md`,
+`knowledge/notes/lsp-live-lease-decision.md`, and
+`knowledge/notes/lsp-process-containment-decision.md`.
 
 **Forbidden at vault root:** `wiki/`, `memory/`, `outputs/`, `state/`,
 `LLM-wiki-state/` (legacy sibling layout — removed). Runtime lives **inside**
@@ -343,7 +347,7 @@ for tests/e2e.
 ## 7. Quick command reference
 
 ```bash
-uv run pytest -q                              # run the test suite (4443 tests collected)
+uv run pytest -q                              # run the test suite (4451 tests collected)
 uv run ruff check scripts/ tests/             # Python static analysis
 uv run python scripts/lint_memory.py --scope all   # structural lint
 uv run python scripts/search_memory.py "query"     # hybrid search

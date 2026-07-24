@@ -1,4 +1,10 @@
-"""Cross-platform ownership and bounded cleanup of one LSP process tree."""
+"""Platform-qualified ownership and bounded cleanup of one LSP process tree.
+
+A Windows Job Object owns the assigned server tree. A POSIX process group owns
+the pinned server and descendants only while they remain in that group; a hostile
+descendant can call setsid(), and containing that escape is unsupported. The POSIX
+path is therefore limited to the qualified Pyright profile in trusted repositories.
+"""
 
 from __future__ import annotations
 
