@@ -81,6 +81,62 @@ def test_public_process_tree_shape_is_exact() -> None:
     assert ProcessTree.__slots__ == ("process", "windows_job", "process_group")
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job observation boundary")
+def test_windows_tree_wait_requires_stable_empty_job_observation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active = iter([0, 1, 0, 0])
+    observations: list[int] = []
+
+    class ExitedProcess:
+        @staticmethod
+        def poll() -> int:
+            return 1
+
+    def active_processes(_job: int) -> int:
+        value = next(active)
+        observations.append(value)
+        return value
+
+    monkeypatch.setattr(lsp_process_tree, "_job_active_processes", active_processes)
+
+    complete, errors = lsp_process_tree._wait_windows_tree(
+        ExitedProcess(), 17, time.monotonic() + 1  # type: ignore[arg-type]
+    )
+
+    assert complete is True
+    assert errors == []
+    assert observations == [0, 1, 0, 0]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job PID observation boundary")
+def test_windows_tree_wait_retains_job_until_captured_pid_is_not_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pid_states = iter([True, True, False])
+    checked: list[int] = []
+
+    class ExitedProcess:
+        @staticmethod
+        def poll() -> int:
+            return 1
+
+    def pid_alive(pid: int) -> bool:
+        checked.append(pid)
+        return next(pid_states)
+
+    monkeypatch.setattr(lsp_process_tree, "_job_active_processes", lambda _job: 0)
+    monkeypatch.setattr(lsp_process_tree, "_windows_pid_alive", pid_alive)
+
+    complete, errors = lsp_process_tree._wait_windows_tree(
+        ExitedProcess(), 17, time.monotonic() + 1, tracked_pids=(4242,)  # type: ignore[arg-type]
+    )
+
+    assert complete is True
+    assert errors == []
+    assert checked == [4242, 4242, 4242]
+
+
 def test_spawn_owns_a_real_descendant_and_terminate_leaves_no_surviving_pid(
     tmp_path: Path,
 ) -> None:
@@ -692,6 +748,7 @@ def test_windows_terminate_attempts_direct_kill_when_job_termination_fails(
     tree = ProcessTree(child, 17, None)  # type: ignore[arg-type]
     monkeypatch.setattr(lsp_process_tree, "_KERNEL32", Kernel())
     monkeypatch.setattr(lsp_process_tree.ctypes, "get_last_error", lambda: 5)
+    monkeypatch.setattr(lsp_process_tree, "_job_process_ids", lambda _job: ())
     monkeypatch.setattr(lsp_process_tree, "_job_active_processes", lambda _job: 0)
 
     with pytest.raises(OSError):
@@ -754,6 +811,7 @@ def test_windows_terminate_attempts_every_independent_step_after_error(
         return 0
 
     monkeypatch.setattr(lsp_process_tree, "_KERNEL32", Kernel())
+    monkeypatch.setattr(lsp_process_tree, "_job_process_ids", lambda _job: ())
     monkeypatch.setattr(lsp_process_tree, "_job_active_processes", active_processes)
 
     with pytest.raises(OSError, match="failed"):

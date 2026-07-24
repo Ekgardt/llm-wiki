@@ -74,6 +74,7 @@ _HEARTBEAT_SECONDS = 10.0
 _LEASE_EXPIRY_SECONDS = 30.0
 _IDLE_SECONDS = 300.0
 _GRACEFUL_CLEANUP_SECONDS = 2.0
+_MAX_PENDING_CHILD_HANDLES = 8
 
 
 class StartupCleanupError(RuntimeError):
@@ -106,7 +107,47 @@ class _OwnerDirectory:
     owner_identity: object | None = None
     owner_permissions_verified: bool = False
     _close_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _child_handle_lock: threading.RLock = field(
+        default_factory=threading.RLock, repr=False
+    )
+    _pending_child_handles: list[int] = field(default_factory=list, repr=False)
     _closed: bool = False
+
+    def _retry_pending_child_handles(self) -> None:
+        first_error: BaseException | None = None
+        for handle in tuple(self._pending_child_handles):
+            try:
+                _windows_workspace.close_handle(handle)
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
+            else:
+                self._pending_child_handles.remove(handle)
+        if first_error is not None:
+            raise first_error
+
+    def _close_child_handle(self, handle: int) -> None:
+        try:
+            _windows_workspace.close_handle(handle)
+        except BaseException:
+            if handle not in self._pending_child_handles:
+                if len(self._pending_child_handles) >= _MAX_PENDING_CHILD_HANDLES:
+                    raise RuntimeError("LSP pending child handle bound was exhausted")
+                self._pending_child_handles.append(handle)
+            raise
+
+    def _close_child_handles(self, *handles: int | None) -> None:
+        first_error: BaseException | None = None
+        for handle in handles:
+            if handle is None:
+                continue
+            try:
+                self._close_child_handle(handle)
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            raise first_error
 
     @classmethod
     def open(cls, owner_root: Path) -> _OwnerDirectory:
@@ -183,13 +224,22 @@ class _OwnerDirectory:
         if _windows_workspace.identity(owner, directory=True) != self.owner_identity:
             raise PermissionError("LSP owner root identity changed during ACL setup")
         self.owner_permissions_verified = True
-        cancellation = _windows_workspace.create_directory(owner, "cancellation")
-        try:
-            cancellation_identity = _windows_workspace.identity(cancellation, directory=True)
-            if _windows_workspace.identity(cancellation, directory=True) != cancellation_identity:
-                raise PermissionError("LSP cancellation root identity changed during ACL setup")
-        finally:
-            _windows_workspace.close_handle(cancellation)
+        with self._child_handle_lock:
+            self._retry_pending_child_handles()
+            cancellation = _windows_workspace.create_directory(owner, "cancellation")
+            try:
+                cancellation_identity = _windows_workspace.identity(
+                    cancellation, directory=True
+                )
+                if (
+                    _windows_workspace.identity(cancellation, directory=True)
+                    != cancellation_identity
+                ):
+                    raise PermissionError(
+                        "LSP cancellation root identity changed during ACL setup"
+                    )
+            finally:
+                self._close_child_handle(cancellation)
 
     def write_record(
         self,
@@ -244,25 +294,29 @@ class _OwnerDirectory:
 
         if not self.owner_permissions_verified:
             raise PermissionError("LSP owner ACL was not verified before evidence creation")
-        handle = _windows_workspace.create_file(self.owner_handle, temporary)
-        published = False
-        try:
-            identity = _windows_workspace.identity(handle, directory=False)
-            _windows_workspace.write_all(handle, payload, chunk_bytes=_MAX_EVIDENCE_BYTES)
-            _windows_workspace.flush_file(handle)
-            if _windows_workspace.identity(handle, directory=False) != identity:
-                raise PermissionError("LSP evidence identity changed during write")
-            _windows_workspace.publish_file(handle, self.owner_handle, name)
-            published = True
-            _windows_workspace.flush_directory(self.owner_handle)
-        except BaseException:
+        with self._child_handle_lock:
+            self._retry_pending_child_handles()
+            handle = _windows_workspace.create_file(self.owner_handle, temporary)
+            published = False
             try:
-                _windows_workspace.delete_handle(handle)
-            except OSError:
-                pass
-            raise
-        finally:
-            _windows_workspace.close_handle(handle)
+                identity = _windows_workspace.identity(handle, directory=False)
+                _windows_workspace.write_all(
+                    handle, payload, chunk_bytes=_MAX_EVIDENCE_BYTES
+                )
+                _windows_workspace.flush_file(handle)
+                if _windows_workspace.identity(handle, directory=False) != identity:
+                    raise PermissionError("LSP evidence identity changed during write")
+                _windows_workspace.publish_file(handle, self.owner_handle, name)
+                published = True
+                _windows_workspace.flush_directory(self.owner_handle)
+            except BaseException:
+                try:
+                    _windows_workspace.delete_handle(handle)
+                except OSError:
+                    pass
+                raise
+            finally:
+                self._close_child_handle(handle)
         if not published:
             raise OSError("LSP evidence publication did not complete")
 
@@ -311,20 +365,24 @@ class _OwnerDirectory:
                 raise
             return
 
-        handle = _windows_workspace.create_file(self.owner_handle, temporary)
-        try:
-            _windows_workspace.write_all(handle, payload, chunk_bytes=_MAX_EVIDENCE_BYTES)
-            _windows_workspace.flush_file(handle)
-            _windows_workspace.replace_file(handle, self.owner_handle, "lease.json")
-        except BaseException:
+        with self._child_handle_lock:
+            self._retry_pending_child_handles()
+            handle = _windows_workspace.create_file(self.owner_handle, temporary)
             try:
-                _windows_workspace.delete_handle(handle)
-            except OSError:
-                pass
-            raise
-        finally:
-            _windows_workspace.close_handle(handle)
-        _windows_workspace.flush_directory(self.owner_handle)
+                _windows_workspace.write_all(
+                    handle, payload, chunk_bytes=_MAX_EVIDENCE_BYTES
+                )
+                _windows_workspace.flush_file(handle)
+                _windows_workspace.replace_file(handle, self.owner_handle, "lease.json")
+            except BaseException:
+                try:
+                    _windows_workspace.delete_handle(handle)
+                except OSError:
+                    pass
+                raise
+            finally:
+                self._close_child_handle(handle)
+            _windows_workspace.flush_directory(self.owner_handle)
 
     def remove_lease(self) -> None:
         if self.owner_handle is None:
@@ -336,16 +394,18 @@ class _OwnerDirectory:
             except FileNotFoundError:
                 pass
             return
-        try:
-            handle = _windows_workspace.open_deletable_file(
-                self.owner_handle, "lease.json"
-            )
-        except FileNotFoundError:
-            return
-        try:
-            _windows_workspace.delete_handle(handle)
-        finally:
-            _windows_workspace.close_handle(handle)
+        with self._child_handle_lock:
+            self._retry_pending_child_handles()
+            try:
+                handle = _windows_workspace.open_deletable_file(
+                    self.owner_handle, "lease.json"
+                )
+            except FileNotFoundError:
+                return
+            try:
+                _windows_workspace.delete_handle(handle)
+            finally:
+                self._close_child_handle(handle)
 
     def read_record(self, name: str) -> dict[str, object]:
         if name not in {"owner.json", "failure.json"} or self.owner_handle is None:
@@ -373,17 +433,19 @@ class _OwnerDirectory:
             finally:
                 os.close(descriptor)
         else:
-            handle = _windows_workspace.open_file(self.owner_handle, name)
-            try:
-                payload = b"".join(
-                    _windows_workspace.read_chunks(
-                        handle,
-                        chunk_bytes=4096,
-                        max_bytes=_MAX_EVIDENCE_BYTES,
+            with self._child_handle_lock:
+                self._retry_pending_child_handles()
+                handle = _windows_workspace.open_file(self.owner_handle, name)
+                try:
+                    payload = b"".join(
+                        _windows_workspace.read_chunks(
+                            handle,
+                            chunk_bytes=4096,
+                            max_bytes=_MAX_EVIDENCE_BYTES,
+                        )
                     )
-                )
-            finally:
-                _windows_workspace.close_handle(handle)
+                finally:
+                    self._close_child_handle(handle)
         try:
             record = json.loads(payload.decode("utf-8", errors="strict"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -427,43 +489,45 @@ class _OwnerDirectory:
                 os.rmdir(self.owner_root.name, dir_fd=self.parent_handle)
             os.fsync(self.parent_handle)
             return
-        original = self.owner_handle
-        expected = self.owner_identity
-        if original is not None:
-            for name in ("owner.json", "failure.json"):
+        with self._child_handle_lock:
+            self._retry_pending_child_handles()
+            original = self.owner_handle
+            expected = self.owner_identity
+            if original is not None:
+                for name in ("owner.json", "failure.json"):
+                    try:
+                        handle = _windows_workspace.open_deletable_file(original, name)
+                    except FileNotFoundError:
+                        continue
+                    try:
+                        _windows_workspace.delete_handle(handle)
+                    finally:
+                        self._close_child_handle(handle)
                 try:
-                    handle = _windows_workspace.open_deletable_file(original, name)
+                    cancellation = _windows_workspace.open_deletable_directory(
+                        original, "cancellation"
+                    )
                 except FileNotFoundError:
-                    continue
-                try:
-                    _windows_workspace.delete_handle(handle)
-                finally:
-                    _windows_workspace.close_handle(handle)
+                    cancellation = None
+                if cancellation is not None:
+                    try:
+                        _windows_workspace.delete_handle(cancellation)
+                    finally:
+                        self._close_child_handle(cancellation)
+                _windows_workspace.close_handle(original)
+                self.owner_handle = None
             try:
-                cancellation = _windows_workspace.open_deletable_directory(
-                    original, "cancellation"
+                owner = _windows_workspace.open_deletable_directory(
+                    self.parent_handle, self.owner_root.name
                 )
             except FileNotFoundError:
-                cancellation = None
-            if cancellation is not None:
-                try:
-                    _windows_workspace.delete_handle(cancellation)
-                finally:
-                    _windows_workspace.close_handle(cancellation)
-            _windows_workspace.close_handle(original)
-            self.owner_handle = None
-        try:
-            owner = _windows_workspace.open_deletable_directory(
-                self.parent_handle, self.owner_root.name
-            )
-        except FileNotFoundError:
-            return
-        try:
-            if _windows_workspace.identity(owner, directory=True) != expected:
-                raise PermissionError("LSP owner root identity changed before deletion")
-            _windows_workspace.delete_handle(owner)
-        finally:
-            _windows_workspace.close_handle(owner)
+                return
+            try:
+                if _windows_workspace.identity(owner, directory=True) != expected:
+                    raise PermissionError("LSP owner root identity changed before deletion")
+                _windows_workspace.delete_handle(owner)
+            finally:
+                self._close_child_handle(owner)
 
     def verify_lexical_identity(self) -> None:
         if self.owner_handle is None or self.owner_identity is None:
@@ -478,52 +542,63 @@ class _OwnerDirectory:
             )
             return
 
-        parent = _windows_workspace.open_directory_path(self.owner_root.parent)
-        named: int | None = None
-        try:
-            if _windows_workspace.identity(parent, directory=True) != self.parent_identity:
-                raise RuntimeError("owner_root parent identity changed during startup")
-            named = _windows_workspace.open_directory(parent, self.owner_root.name)
-            if _windows_workspace.identity(named, directory=True) != self.owner_identity:
-                raise RuntimeError("LSP owner root identity changed during startup")
-            if (
-                _windows_workspace.identity(self.owner_handle, directory=True)
-                != self.owner_identity
-            ):
-                raise RuntimeError("held LSP owner root identity changed during startup")
-        finally:
-            if named is not None:
-                _windows_workspace.close_handle(named)
-            _windows_workspace.close_handle(parent)
+        with self._child_handle_lock:
+            self._retry_pending_child_handles()
+            parent = _windows_workspace.open_directory_path(self.owner_root.parent)
+            named: int | None = None
+            try:
+                if (
+                    _windows_workspace.identity(parent, directory=True)
+                    != self.parent_identity
+                ):
+                    raise RuntimeError("owner_root parent identity changed during startup")
+                named = _windows_workspace.open_directory(parent, self.owner_root.name)
+                if (
+                    _windows_workspace.identity(named, directory=True)
+                    != self.owner_identity
+                ):
+                    raise RuntimeError("LSP owner root identity changed during startup")
+                if (
+                    _windows_workspace.identity(self.owner_handle, directory=True)
+                    != self.owner_identity
+                ):
+                    raise RuntimeError(
+                        "held LSP owner root identity changed during startup"
+                    )
+            finally:
+                self._close_child_handles(named, parent)
 
     def close(self) -> None:
-        with self._close_lock:
-            if self._closed:
-                return
-            owner = self.owner_handle
-            parent = self.parent_handle
-        first_error: BaseException | None = None
-        for label, handle in (("owner", owner), ("parent", parent)):
-            if handle is None or handle < 0:
-                continue
-            try:
-                if os.name == "posix":
-                    os.close(handle)
-                elif os.name == "nt":
-                    _windows_workspace.close_handle(handle)
-            except BaseException as exc:
-                if first_error is None:
-                    first_error = exc
-            else:
-                with self._close_lock:
-                    if label == "owner" and self.owner_handle == handle:
-                        self.owner_handle = None
-                    elif label == "parent" and self.parent_handle == handle:
-                        self.parent_handle = -1
-        with self._close_lock:
-            self._closed = self.owner_handle is None and self.parent_handle < 0
-        if first_error is not None:
-            raise first_error
+        with self._child_handle_lock:
+            if os.name == "nt":
+                self._retry_pending_child_handles()
+            with self._close_lock:
+                if self._closed:
+                    return
+                owner = self.owner_handle
+                parent = self.parent_handle
+            first_error: BaseException | None = None
+            for label, handle in (("owner", owner), ("parent", parent)):
+                if handle is None or handle < 0:
+                    continue
+                try:
+                    if os.name == "posix":
+                        os.close(handle)
+                    elif os.name == "nt":
+                        _windows_workspace.close_handle(handle)
+                except BaseException as exc:
+                    if first_error is None:
+                        first_error = exc
+                else:
+                    with self._close_lock:
+                        if label == "owner" and self.owner_handle == handle:
+                            self.owner_handle = None
+                        elif label == "parent" and self.parent_handle == handle:
+                            self.parent_handle = -1
+            with self._close_lock:
+                self._closed = self.owner_handle is None and self.parent_handle < 0
+            if first_error is not None:
+                raise first_error
 
 
 class ProcessState(str, Enum):
@@ -638,8 +713,12 @@ class _LifecycleCoordinator:
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     condition: threading.Condition = field(init=False, repr=False)
     driver: threading.RLock = field(default_factory=threading.RLock, repr=False)
+    lease_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     terminal_intent_lock: threading.RLock = field(
         default_factory=threading.RLock, repr=False
+    )
+    terminal_state_lock: threading.Lock = field(
+        default_factory=threading.Lock, repr=False
     )
     pending_failure_intents: int = 0
     pending_failure_code: str | None = None
@@ -835,8 +914,53 @@ def _release_driver(coordinator: _LifecycleCoordinator) -> None:
     coordinator.driver.release()
 
 
+def _acquire_lease(
+    coordinator: _LifecycleCoordinator,
+    deadline: float,
+    *,
+    allow_expired: bool = False,
+) -> None:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        acquired = allow_expired and coordinator.lease_lock.acquire(blocking=False)
+    else:
+        acquired = coordinator.lease_lock.acquire(timeout=remaining)
+    if not acquired:
+        raise TimeoutError("LSP lease lock deadline expired")
+
+
+def _release_lease(coordinator: _LifecycleCoordinator) -> None:
+    coordinator.lease_lock.release()
+
+
+def _acquire_terminal_intent(
+    coordinator: _LifecycleCoordinator,
+    deadline: float,
+    *,
+    allow_expired: bool = False,
+) -> None:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        acquired = allow_expired and coordinator.terminal_intent_lock.acquire(
+            blocking=False
+        )
+    else:
+        acquired = coordinator.terminal_intent_lock.acquire(timeout=remaining)
+    if not acquired:
+        raise TimeoutError("LSP terminal intent lock deadline expired")
+
+
+def _release_terminal_intent(coordinator: _LifecycleCoordinator) -> None:
+    coordinator.terminal_intent_lock.release()
+
+
 def _notify_lifecycle_locked(coordinator: _LifecycleCoordinator) -> None:
     coordinator.condition.notify_all()
+
+
+def _require_startup_deadline(deadline: float, stage: str) -> None:
+    if time.monotonic() >= deadline:
+        raise TimeoutError(f"LSP startup deadline expired after {stage}")
 
 
 def _assign_candidate(
@@ -872,21 +996,21 @@ def _queue_generation_failure(
 def _enqueue_failure_intent(
     coordinator: _LifecycleCoordinator, intent: _FailureIntent
 ) -> bool:
-    with coordinator.terminal_intent_lock:
+    with coordinator.terminal_state_lock:
         if coordinator.success_committed:
             return False
         coordinator.pending_failure_intents += 1
-        if intent.owner_fatal:
-            coordinator.pending_failure_code = "heartbeat_failed"
-        elif coordinator.pending_failure_code is None:
-            coordinator.pending_failure_code = _PROCESS_EXITED
+        if coordinator.pending_failure_code is None:
+            coordinator.pending_failure_code = (
+                "heartbeat_failed" if intent.owner_fatal else _PROCESS_EXITED
+            )
         coordinator.failure_queue.put(intent)
     coordinator.recovery_wake.set()
     return True
 
 
 def _acknowledge_failure_intent(coordinator: _LifecycleCoordinator) -> None:
-    with coordinator.terminal_intent_lock:
+    with coordinator.terminal_state_lock:
         if coordinator.pending_failure_intents <= 0:
             raise RuntimeError("LSP failure intent acknowledgement underflow")
         coordinator.pending_failure_intents -= 1
@@ -933,6 +1057,7 @@ def _prepare_generation(
     generation.process = tree.process
     process = tree.process
     generation.server_pid = process.pid
+    _require_startup_deadline(deadline, "process-tree start")
     if process.stdin is None or process.stdout is None or process.stderr is None:
         raise RuntimeError("LSP process pipes were not created")
 
@@ -948,7 +1073,9 @@ def _prepare_generation(
         daemon=True,
     )
     generation.stderr_thread = stderr_thread
+    _require_startup_deadline(deadline, "stderr thread preparation")
     stderr_thread.start()
+    _require_startup_deadline(deadline, "stderr thread start")
 
     owner = coordinator.owner_directory
     if owner is None:
@@ -975,6 +1102,7 @@ def _prepare_generation(
         generation.protocol = error.protocol
         raise
     generation.protocol = protocol
+    _require_startup_deadline(deadline, "protocol owner start")
     owner.verify_lexical_identity()
 
     exit_thread = threading.Thread(
@@ -984,7 +1112,9 @@ def _prepare_generation(
         daemon=True,
     )
     generation.exit_thread = exit_thread
+    _require_startup_deadline(deadline, "exit thread preparation")
     exit_thread.start()
+    _require_startup_deadline(deadline, "exit thread start")
     if process.poll() is not None or protocol.fatal:
         raise RuntimeError("LSP process exited during generation startup")
     return generation
@@ -1068,6 +1198,7 @@ def _start_lsp_process(
         _acquire_driver(coordinator, startup_deadline)
         driver_acquired = True
         owner.create(startup_deadline)
+        _require_startup_deadline(startup_deadline, "owner creation")
         owner_record: dict[str, object] = {
             "command_basename": Path(arguments[0]).name,
             "generation_nonce": generation_nonce,
@@ -1085,6 +1216,7 @@ def _start_lsp_process(
             generation_nonce=generation_nonce,
             owner_record=owner_record,
         )
+        _require_startup_deadline(startup_deadline, "generation preparation")
         process = generation.process
         protocol = generation.protocol
         if process is None or protocol is None:
@@ -1105,7 +1237,12 @@ def _start_lsp_process(
         instance._environment = dict(environment)
         instance._stderr_projection = generation.stderr
         instance._stderr_projection_lock = generation.stderr_lock
-        _write_generation_lease(owner, generation, owner_nonce)
+        _acquire_lease(coordinator, startup_deadline)
+        try:
+            _write_generation_lease(owner, generation, owner_nonce)
+        finally:
+            _release_lease(coordinator)
+        _require_startup_deadline(startup_deadline, "initial lease publication")
 
         _acquire_lifecycle(coordinator, startup_deadline)
         try:
@@ -1120,10 +1257,12 @@ def _start_lsp_process(
             _release_lifecycle(coordinator)
 
         _start_lifecycle_workers(instance, startup_deadline)
+        _require_startup_deadline(startup_deadline, "lifecycle worker start")
         owner.verify_lexical_identity()
         if process.poll() is not None or protocol.fatal:
             raise RuntimeError("LSP process exited during startup")
         atexit.register(instance._atexit_close)
+        _require_startup_deadline(startup_deadline, "final startup fence")
         return instance
     except BaseException as startup_error:
         deadline = startup_deadline if startup_deadline is not None else time.monotonic()
@@ -1187,9 +1326,13 @@ def _start_lifecycle_workers(instance: LspProcess, deadline: float | None = None
         _release_lifecycle(coordinator)
     assert recovery is not None and heartbeat is not None
     if recovery.ident is None and recovery not in threading.enumerate():
+        _require_startup_deadline(deadline, "recovery thread preparation")
         recovery.start()
+        _require_startup_deadline(deadline, "recovery thread start")
     if heartbeat.ident is None and heartbeat not in threading.enumerate():
+        _require_startup_deadline(deadline, "heartbeat thread preparation")
         heartbeat.start()
+        _require_startup_deadline(deadline, "heartbeat thread start")
 
 
 def _heartbeat_loop(instance: LspProcess) -> None:
@@ -1212,8 +1355,9 @@ def _heartbeat_loop(instance: LspProcess) -> None:
             except TimeoutError:
                 return
             try:
-                coordinator.terminal_outcome = "failure"
-                coordinator.terminal_code = "heartbeat_failed"
+                _select_terminal_failure_locked(
+                    instance, coordinator, "heartbeat_failed"
+                )
                 coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
                 instance.state = ProcessState.FAILED
                 for generation in _generations_locked(coordinator):
@@ -1226,21 +1370,9 @@ def _heartbeat_loop(instance: LspProcess) -> None:
 
 def _write_current_lease(instance: LspProcess, deadline: float) -> None:
     coordinator = instance._coordinator
-    while True:
-        if coordinator.heartbeat_stop.is_set():
-            return
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return
-        try:
-            _acquire_driver(
-                coordinator,
-                min(deadline, time.monotonic() + min(0.05, remaining)),
-            )
-        except TimeoutError:
-            continue
-        else:
-            break
+    if coordinator.heartbeat_stop.is_set():
+        return
+    _acquire_lease(coordinator, deadline)
     try:
         _acquire_lifecycle(coordinator, deadline)
         try:
@@ -1264,7 +1396,7 @@ def _write_current_lease(instance: LspProcess, deadline: float) -> None:
         if generation is not None and owner is not None:
             _write_generation_lease(owner, generation, instance.owner_nonce)
     finally:
-        _release_driver(coordinator)
+        _release_lease(coordinator)
 
 
 def _active_drain_generation(
@@ -1402,9 +1534,10 @@ def _process_failure_intent_owned(
         coordinator.seen_failures.add(key)
         acknowledge = True
         if intent.owner_fatal or coordinator.recovery_attempted or instance.restart_count >= 1:
-            coordinator.terminal_outcome = "failure"
-            coordinator.terminal_code = (
-                "heartbeat_failed" if intent.owner_fatal else _PROCESS_EXITED
+            _select_terminal_failure_locked(
+                instance,
+                coordinator,
+                "heartbeat_failed" if intent.owner_fatal else _PROCESS_EXITED,
             )
             coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
             instance.state = ProcessState.FAILED
@@ -1589,6 +1722,60 @@ def _request_lsp_process(
     raise RuntimeError("LSP request retry invariant breached")
 
 
+def _failure_identity(
+    instance: LspProcess | None,
+    coordinator: _LifecycleCoordinator,
+    code: str,
+) -> _FailureEvidenceIdentity | None:
+    owner = coordinator.owner_directory
+    if owner is None:
+        return None
+    generation = coordinator.active or coordinator.candidate
+    if generation is None and coordinator.retired:
+        generation = coordinator.retired[-1]
+    generation_nonce = (
+        generation.nonce
+        if generation is not None
+        else (
+            instance.generation_nonce
+            if instance is not None
+            else coordinator.startup_generation_nonce
+        )
+    )
+    if generation_nonce is None:
+        return None
+    process = generation.process if generation is not None else None
+    server_pid = (
+        process.pid
+        if process is not None
+        else (
+            generation.server_pid
+            if generation is not None
+            else (instance.process.pid if instance is not None else None)
+        )
+    )
+    return _FailureEvidenceIdentity(
+        code,
+        instance.owner_nonce if instance is not None else owner.owner_root.name,
+        generation_nonce,
+        server_pid,
+    )
+
+
+def _select_terminal_failure_locked(
+    instance: LspProcess | None,
+    coordinator: _LifecycleCoordinator,
+    code: str,
+) -> None:
+    coordinator.terminal_outcome = "failure"
+    if coordinator.terminal_code is None:
+        coordinator.terminal_code = code
+    if coordinator.failure_evidence_identity is None:
+        coordinator.failure_evidence_identity = _failure_identity(
+            instance, coordinator, coordinator.terminal_code
+        )
+
+
 def _mark_terminal_failure(
     instance: LspProcess | None,
     coordinator: _LifecycleCoordinator,
@@ -1597,9 +1784,7 @@ def _mark_terminal_failure(
 ) -> None:
     _acquire_lifecycle(coordinator, deadline, allow_expired=True)
     try:
-        coordinator.terminal_outcome = "failure"
-        if coordinator.terminal_code is None:
-            coordinator.terminal_code = code
+        _select_terminal_failure_locked(instance, coordinator, code)
         coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
         for generation in _generations_locked(coordinator):
             generation.expected_exit.set()
@@ -1707,10 +1892,10 @@ def _restart_generation_owned(instance: LspProcess, deadline: float) -> None:
             raise retirement_errors[0]
         raise TimeoutError("LSP retired generation cleanup is incomplete")
 
-    if instance._cwd is None or not instance._command:
-        raise RuntimeError("LSP restart inputs are unavailable")
-    generation_nonce = _new_generation_nonce()
     try:
+        if instance._cwd is None or not instance._command:
+            raise RuntimeError("LSP restart inputs are unavailable")
+        generation_nonce = _new_generation_nonce()
         candidate = _prepare_generation(
             coordinator,
             instance._command,
@@ -1729,7 +1914,11 @@ def _restart_generation_owned(instance: LspProcess, deadline: float) -> None:
             or candidate.protocol.fatal
         ):
             raise RuntimeError("LSP restart candidate failed before commit")
-        _write_generation_lease(owner, candidate, instance.owner_nonce)
+        _acquire_lease(coordinator, deadline)
+        try:
+            _write_generation_lease(owner, candidate, instance.owner_nonce)
+        finally:
+            _release_lease(coordinator)
         _acquire_lifecycle(coordinator, deadline)
         try:
             if coordinator.terminal_outcome is not None:
@@ -1788,7 +1977,7 @@ def _shutdown_lsp_process_owned(instance: LspProcess, deadline: float) -> None:
         if coordinator.terminal_outcome is None:
             coordinator.terminal_outcome = "success"
         _linearize_terminal_outcome_locked(
-            instance, coordinator, commit_success=False
+            instance, coordinator, deadline, commit_success=False
         )
         failure = coordinator.terminal_outcome == "failure"
         coordinator.phase = (
@@ -1944,34 +2133,17 @@ def _ensure_failure_evidence(
     owner = coordinator.owner_directory
     if owner is None:
         raise RuntimeError("LSP failure evidence owner is unavailable")
+    terminal_code = coordinator.terminal_code
+    if terminal_code is None or code != terminal_code:
+        raise RuntimeError("LSP failure evidence code does not match terminal identity")
     identity = coordinator.failure_evidence_identity
     if identity is None:
-        generation = coordinator.active or coordinator.candidate
-        if generation is None and coordinator.retired:
-            generation = coordinator.retired[-1]
-        process = generation.process if generation is not None else None
-        generation_nonce = (
-            generation.nonce
-            if generation is not None
-            else (
-                instance.generation_nonce
-                if instance is not None
-                else coordinator.startup_generation_nonce
-            )
-        )
-        if generation_nonce is None:
+        identity = _failure_identity(instance, coordinator, terminal_code)
+        if identity is None:
             raise RuntimeError("LSP failure evidence generation identity is unavailable")
-        identity = _FailureEvidenceIdentity(
-            code,
-            instance.owner_nonce if instance is not None else owner.owner_root.name,
-            generation_nonce,
-            (
-                process.pid
-                if process is not None
-                else (generation.server_pid if generation is not None else None)
-            ),
-        )
         coordinator.failure_evidence_identity = identity
+    if identity.code != terminal_code:
+        raise RuntimeError("LSP failure evidence identity is not terminal-code exact")
     try:
         _write_failure_record(
             owner,
@@ -2068,13 +2240,15 @@ def _drain_terminal_failures(
         coordinator.recovery_wake.set()
         raise
     try:
-        coordinator.terminal_outcome = "failure"
-        if coordinator.terminal_code is None:
-            coordinator.terminal_code = (
+        _select_terminal_failure_locked(
+            instance,
+            coordinator,
+            (
                 "heartbeat_failed"
                 if any(intent.owner_fatal for intent in intents)
                 else _PROCESS_EXITED
-            )
+            ),
+        )
         coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
         if instance is not None:
             instance.state = ProcessState.FAILED
@@ -2088,27 +2262,36 @@ def _drain_terminal_failures(
 def _linearize_terminal_outcome_locked(
     instance: LspProcess | None,
     coordinator: _LifecycleCoordinator,
+    deadline: float,
     *,
     commit_success: bool,
 ) -> str | None:
-    with coordinator.terminal_intent_lock:
-        if (
-            coordinator.pending_failure_intents > 0
-            and not coordinator.success_committed
-        ):
-            coordinator.terminal_outcome = "failure"
-            if coordinator.terminal_code is None:
-                coordinator.terminal_code = (
-                    coordinator.pending_failure_code or _PROCESS_EXITED
+    _acquire_terminal_intent(
+        coordinator,
+        deadline,
+        allow_expired=not commit_success,
+    )
+    try:
+        with coordinator.terminal_state_lock:
+            if (
+                coordinator.pending_failure_intents > 0
+                and not coordinator.success_committed
+            ):
+                _select_terminal_failure_locked(
+                    instance,
+                    coordinator,
+                    coordinator.pending_failure_code or _PROCESS_EXITED,
                 )
-            coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
-            if instance is not None:
-                instance.state = ProcessState.FAILED
-            for generation in _generations_locked(coordinator):
-                generation.expected_exit.set()
-        if commit_success and coordinator.terminal_outcome == "success":
-            coordinator.success_committed = True
-        return coordinator.terminal_outcome
+                coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
+                if instance is not None:
+                    instance.state = ProcessState.FAILED
+                for generation in _generations_locked(coordinator):
+                    generation.expected_exit.set()
+            if commit_success and coordinator.terminal_outcome == "success":
+                coordinator.success_committed = True
+            return coordinator.terminal_outcome
+    finally:
+        _release_terminal_intent(coordinator)
 
 
 def _linearize_terminal_outcome(
@@ -2121,7 +2304,7 @@ def _linearize_terminal_outcome(
     _acquire_lifecycle(coordinator, deadline, allow_expired=True)
     try:
         outcome = _linearize_terminal_outcome_locked(
-            instance, coordinator, commit_success=commit_success
+            instance, coordinator, deadline, commit_success=commit_success
         )
         _notify_lifecycle_locked(coordinator)
         return outcome
@@ -2178,12 +2361,12 @@ def _drive_cleanup_owned(
         generations = _generations_locked(coordinator)
         outcome = (
             _linearize_terminal_outcome_locked(
-                instance, coordinator, commit_success=False
+                instance, coordinator, deadline, commit_success=False
             )
             if terminal
             else coordinator.terminal_outcome
         )
-        code = failure_code or coordinator.terminal_code or _PROCESS_EXITED
+        code = coordinator.terminal_code or failure_code or _PROCESS_EXITED
         if terminal:
             for generation in generations:
                 generation.expected_exit.set()
@@ -2449,7 +2632,11 @@ def _drive_cleanup_owned(
         )
         if evidence_ready:
             try:
-                owner.remove_lease()
+                _acquire_lease(coordinator, deadline, allow_expired=True)
+                try:
+                    owner.remove_lease()
+                finally:
+                    _release_lease(coordinator)
                 result.lease_removal = "success"
             except BaseException as error:
                 _record_cleanup_error(result, current_errors, "lease_removal", error)
@@ -2496,6 +2683,8 @@ def _drive_cleanup_owned(
         ):
             coordinator.active = None
         if terminal:
+            with coordinator.terminal_state_lock:
+                success_committed = coordinator.success_committed
             result.ownership_pending = (
                 _coordinator_has_ownership_locked(coordinator)
                 or (
@@ -2504,7 +2693,7 @@ def _drive_cleanup_owned(
                 )
                 or (
                     coordinator.terminal_outcome == "success"
-                    and not coordinator.success_committed
+                    and not success_committed
                 )
             )
         else:

@@ -23,7 +23,13 @@ if os.name == "nt":
     _CREATE_SUSPENDED = 0x00000004
     _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
     _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
+    _JOB_OBJECT_BASIC_PROCESS_ID_LIST = 3
     _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+    _MAX_JOB_PROCESS_IDS = 4096
+    _SYNCHRONIZE = 0x00100000
+    _WAIT_OBJECT_0 = 0x00000000
+    _WAIT_TIMEOUT = 0x00000102
+    _WAIT_FAILED = 0xFFFFFFFF
     _TH32CS_SNAPTHREAD = 0x00000004
     _THREAD_SUSPEND_RESUME = 0x0002
     _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
@@ -74,6 +80,13 @@ if os.name == "nt":
             ("total_terminated_processes", wintypes.DWORD),
         )
 
+    class _BasicProcessIdList(ctypes.Structure):
+        _fields_ = (
+            ("number_of_assigned_processes", wintypes.DWORD),
+            ("number_of_process_ids_in_list", wintypes.DWORD),
+            ("process_id_list", ctypes.c_size_t * 1),
+        )
+
     class _ThreadEntry32(ctypes.Structure):
         _fields_ = (
             ("size", wintypes.DWORD),
@@ -107,6 +120,10 @@ if os.name == "nt":
         ctypes.POINTER(wintypes.DWORD),
     )
     _KERNEL32.QueryInformationJobObject.restype = wintypes.BOOL
+    _KERNEL32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    _KERNEL32.OpenProcess.restype = wintypes.HANDLE
+    _KERNEL32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    _KERNEL32.WaitForSingleObject.restype = wintypes.DWORD
     _KERNEL32.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
     _KERNEL32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
     _KERNEL32.Thread32First.argtypes = (wintypes.HANDLE, ctypes.POINTER(_ThreadEntry32))
@@ -267,6 +284,11 @@ class ProcessTree:
         if job is None:
             raise RuntimeError("Windows LSP process tree ownership was released")
         errors: list[BaseException] = []
+        tracked_pids: tuple[int, ...] = ()
+        try:
+            tracked_pids = _job_process_ids(job)
+        except BaseException as error:
+            errors.append(error)
         try:
             if not _KERNEL32.TerminateJobObject(job, 1):
                 errors.append(ctypes.WinError(ctypes.get_last_error()))
@@ -291,7 +313,12 @@ class ProcessTree:
             errors.append(error)
 
         try:
-            complete, observe_errors = _wait_windows_tree(self.process, job, deadline)
+            complete, observe_errors = _wait_windows_tree(
+                self.process,
+                job,
+                deadline,
+                tracked_pids=tracked_pids,
+            )
         except BaseException as error:
             complete = False
             errors.append(error)
@@ -432,11 +459,59 @@ if os.name == "nt":
         return int(information.active_processes)
 
 
+    def _job_process_ids(job: int) -> tuple[int, ...]:
+        offset = _BasicProcessIdList.process_id_list.offset
+        buffer_size = offset + _MAX_JOB_PROCESS_IDS * ctypes.sizeof(ctypes.c_size_t)
+        buffer = ctypes.create_string_buffer(buffer_size)
+        information = _BasicProcessIdList.from_buffer(buffer)
+        returned = wintypes.DWORD()
+        if not _KERNEL32.QueryInformationJobObject(
+            job,
+            _JOB_OBJECT_BASIC_PROCESS_ID_LIST,
+            ctypes.byref(buffer),
+            buffer_size,
+            ctypes.byref(returned),
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        assigned = int(information.number_of_assigned_processes)
+        captured = int(information.number_of_process_ids_in_list)
+        if assigned != captured or captured > _MAX_JOB_PROCESS_IDS:
+            raise RuntimeError("LSP Windows Job process identifier bound was exceeded")
+        process_ids = (ctypes.c_size_t * captured).from_buffer(buffer, offset)
+        return tuple(int(process_id) for process_id in process_ids)
+
+
+    def _windows_pid_alive(pid: int) -> bool:
+        handle = _KERNEL32.OpenProcess(_SYNCHRONIZE, False, pid)
+        if not handle:
+            error = ctypes.get_last_error()
+            if error == 87:  # ERROR_INVALID_PARAMETER: process no longer exists.
+                return False
+            raise ctypes.WinError(error)
+        try:
+            result = int(_KERNEL32.WaitForSingleObject(handle, 0))
+            if result == _WAIT_OBJECT_0:
+                return False
+            if result == _WAIT_TIMEOUT:
+                return True
+            if result == _WAIT_FAILED:
+                raise ctypes.WinError(ctypes.get_last_error())
+            raise OSError(f"unexpected Windows process wait result: {result}")
+        finally:
+            _close_windows_handle(int(handle))
+
+
     def _wait_windows_tree(
-        process: subprocess.Popen[bytes], job: int, deadline: float
+        process: subprocess.Popen[bytes],
+        job: int,
+        deadline: float,
+        *,
+        tracked_pids: Sequence[int] = (),
     ) -> tuple[bool, list[BaseException]]:
         errors: list[BaseException] = []
         query_failed = False
+        empty_observations = 0
+        remaining_pids = set(tracked_pids)
         while True:
             direct_reaped = process.poll() is not None
             active: int | None = None
@@ -446,8 +521,27 @@ if os.name == "nt":
                 except BaseException as error:
                     errors.append(error)
                     query_failed = True
-            if direct_reaped and active == 0:
-                return True, errors
+            pid_probe_failed = False
+            for pid in tuple(remaining_pids):
+                try:
+                    alive = _windows_pid_alive(pid)
+                except BaseException as error:
+                    errors.append(error)
+                    pid_probe_failed = True
+                    break
+                if not alive:
+                    remaining_pids.remove(pid)
+            if (
+                direct_reaped
+                and active == 0
+                and not remaining_pids
+                and not pid_probe_failed
+            ):
+                empty_observations += 1
+                if empty_observations >= 2:
+                    return True, errors
+            else:
+                empty_observations = 0
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return False, errors
