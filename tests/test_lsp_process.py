@@ -5457,6 +5457,159 @@ def test_startup_worker_start_past_original_deadline_never_returns_success(
     assert children and all(child.poll() is not None for child in children)
 
 
+def test_startup_failure_survives_expired_transition_lock_until_cleanup_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(lsp_process, "_GRACEFUL_CLEANUP_SECONDS", 0.05)
+    held = threading.Event()
+    release = threading.Event()
+    captured: list[LspProcess] = []
+    holders: list[threading.Thread] = []
+
+    def fail_with_transition_lock(
+        instance: LspProcess,
+        _deadline: float | None = None,
+    ) -> None:
+        coordinator = instance._coordinator
+
+        def hold_transition() -> None:
+            with coordinator.condition:
+                held.set()
+                release.wait(5)
+
+        holder = threading.Thread(target=hold_transition)
+        holders.append(holder)
+        captured.append(instance)
+        holder.start()
+        assert held.wait(1)
+        raise RuntimeError("startup failed while transition lock stayed held")
+
+    monkeypatch.setattr(lsp_process, "_start_lifecycle_workers", fail_with_transition_lock)
+    owner_root = tmp_path / OWNER_NONCE
+    coordinator: lsp_process._LifecycleCoordinator | None = None
+
+    try:
+        with pytest.raises(lsp_process.StartupCleanupError) as raised:
+            _start(tmp_path, "--lifecycle", "--sleep-seconds", "30")
+
+        assert len(captured) == 1
+        instance = captured[0]
+        coordinator = instance._coordinator
+        generation_nonce = instance.generation_nonce
+        server_pid = instance.process.pid
+        assert isinstance(raised.value.__cause__, RuntimeError)
+        assert coordinator.phase is not lsp_process._LifecyclePhase.STOPPED_SUCCESS
+        assert coordinator.cleanup_result.ownership_pending is True
+        assert any(
+            item.step == "generation_joins" and item.error_type == "TimeoutError"
+            for item in coordinator.cleanup_result.errors
+        )
+        assert lsp_process._coordinator_has_ownership(coordinator)
+        assert coordinator in lsp_process._pending_startup_cleanup_snapshot()
+        assert owner_root.is_dir()
+        assert (owner_root / "owner.json").is_file()
+        assert (owner_root / "lease.json").is_file()
+
+        release.set()
+        holders[0].join(1)
+        errors = lsp_process._drive_cleanup(
+            None,
+            time.monotonic() + 5,
+            terminal=True,
+            failure_code="startup_failed",
+            coordinator_override=coordinator,
+        )
+
+        assert errors == []
+        failure = json.loads((owner_root / "failure.json").read_bytes())
+        lsp_process._validate_failure_record(
+            failure,
+            code="startup_failed",
+            owner_nonce=OWNER_NONCE,
+            generation_nonce=generation_nonce,
+            pid=server_pid,
+        )
+        assert coordinator.phase is lsp_process._LifecyclePhase.STOPPED_FAILURE
+        assert owner_root.is_dir()
+        assert not (owner_root / "lease.json").exists()
+        assert coordinator not in lsp_process._pending_startup_cleanup_snapshot()
+    finally:
+        release.set()
+        for holder in holders:
+            holder.join(1)
+        if coordinator is not None and lsp_process._coordinator_has_ownership(coordinator):
+            lsp_process._retry_startup_cleanup(coordinator, time.monotonic() + 5)
+
+
+def test_restart_failure_survives_expired_transition_lock_until_close_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(lsp_process, "_GRACEFUL_CLEANUP_SECONDS", 0.05)
+    process = _start(tmp_path, "--lifecycle")
+    coordinator = process._coordinator
+    generation_nonce = process.generation_nonce
+    server_pid = process.process.pid
+    held = threading.Event()
+    release = threading.Event()
+    holders: list[threading.Thread] = []
+
+    def fail_nonce() -> str:
+        def hold_transition() -> None:
+            with coordinator.condition:
+                held.set()
+                release.wait(5)
+
+        holder = threading.Thread(target=hold_transition)
+        holders.append(holder)
+        holder.start()
+        assert held.wait(1)
+        raise RuntimeError("restart failed while transition lock stayed held")
+
+    monkeypatch.setattr(lsp_process, "_new_generation_nonce", fail_nonce)
+
+    try:
+        with pytest.raises(
+            RuntimeError, match="restart failed while transition lock stayed held"
+        ):
+            process.restart(time.monotonic() + 1)
+
+        assert len(holders) == 1
+        assert coordinator.phase is not lsp_process._LifecyclePhase.STOPPED_SUCCESS
+        assert coordinator.cleanup_result.ownership_pending is True
+        assert any(
+            item.step == "generation_joins" and item.error_type == "TimeoutError"
+            for item in coordinator.cleanup_result.errors
+        )
+        assert lsp_process._coordinator_has_ownership(coordinator)
+        assert process.owner_root.is_dir()
+        assert (process.owner_root / "owner.json").is_file()
+        assert (process.owner_root / "lease.json").is_file()
+
+        release.set()
+        holders[0].join(1)
+        process.close(time.monotonic() + 5)
+
+        failure = json.loads((process.owner_root / "failure.json").read_bytes())
+        lsp_process._validate_failure_record(
+            failure,
+            code="restart_failed",
+            owner_nonce=process.owner_nonce,
+            generation_nonce=generation_nonce,
+            pid=server_pid,
+        )
+        assert coordinator.phase is lsp_process._LifecyclePhase.STOPPED_FAILURE
+        assert process.owner_root.is_dir()
+        assert not (process.owner_root / "lease.json").exists()
+    finally:
+        release.set()
+        for holder in holders:
+            holder.join(1)
+        if lsp_process._coordinator_has_ownership(coordinator):
+            process.close(time.monotonic() + 5)
+
+
 def test_restart_nonce_failure_after_retirement_is_terminal_and_sticky(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

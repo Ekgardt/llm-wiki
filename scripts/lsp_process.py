@@ -940,6 +940,7 @@ class _LifecycleCoordinator:
     terminal_outcome: str | None = None
     terminal_code: str | None = None
     failure_evidence_identity: _FailureEvidenceIdentity | None = None
+    mandatory_failure_intent: _FailureEvidenceIdentity | None = None
     background_cleanup_error: _CleanupError | None = field(default=None, repr=False)
     background_error_lock: threading.Lock = field(
         default_factory=threading.Lock, repr=False
@@ -1598,6 +1599,11 @@ def _start_lsp_process(
         return instance
     except BaseException as startup_error:
         deadline = startup_deadline if startup_deadline is not None else time.monotonic()
+        _remember_mandatory_terminal_failure(
+            instance,
+            coordinator,
+            _STARTUP_FAILED,
+        )
         try:
             _mark_terminal_failure(
                 instance,
@@ -2105,6 +2111,19 @@ def _failure_identity(
     )
 
 
+def _remember_mandatory_terminal_failure(
+    instance: LspProcess | None,
+    coordinator: _LifecycleCoordinator,
+    code: str,
+) -> None:
+    identity = _failure_identity(instance, coordinator, code)
+    if identity is None:
+        return
+    with coordinator.terminal_state_lock:
+        if coordinator.mandatory_failure_intent is None:
+            coordinator.mandatory_failure_intent = identity
+
+
 def _select_terminal_failure_locked(
     instance: LspProcess | None,
     coordinator: _LifecycleCoordinator,
@@ -2224,6 +2243,11 @@ def _restart_generation_owned(instance: LspProcess, deadline: float) -> None:
 
     retirement_errors = _drive_cleanup(instance, deadline, terminal=False)
     if retirement_errors or any(not item.released for item in coordinator.retired):
+        _remember_mandatory_terminal_failure(
+            instance,
+            coordinator,
+            "restart_failed",
+        )
         _mark_terminal_failure(instance, coordinator, "restart_failed", deadline)
         _drive_cleanup(
             instance,
@@ -2288,6 +2312,11 @@ def _restart_generation_owned(instance: LspProcess, deadline: float) -> None:
         finally:
             _release_lifecycle(coordinator)
     except BaseException:
+        _remember_mandatory_terminal_failure(
+            instance,
+            coordinator,
+            "restart_failed",
+        )
         try:
             _mark_terminal_failure(instance, coordinator, "restart_failed", deadline)
         except BaseException:
@@ -2657,7 +2686,16 @@ def _linearize_terminal_outcome_locked(
     try:
         mark_failure_exits = False
         with coordinator.terminal_state_lock:
-            if (
+            mandatory_intent = coordinator.mandatory_failure_intent
+            if mandatory_intent is not None:
+                coordinator.terminal_outcome = "failure"
+                coordinator.terminal_code = mandatory_intent.code
+                coordinator.failure_evidence_identity = mandatory_intent
+                if instance is not None and instance.state is not ProcessState.FAILED:
+                    instance.state = ProcessState.DEGRADED
+                coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
+                mark_failure_exits = True
+            elif (
                 coordinator.pending_failure_intents > 0
                 and not coordinator.success_committed
             ):
@@ -2668,7 +2706,11 @@ def _linearize_terminal_outcome_locked(
                 )
                 coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
                 mark_failure_exits = True
-            if commit_success and coordinator.terminal_outcome == "success":
+            if (
+                commit_success
+                and mandatory_intent is None
+                and coordinator.terminal_outcome == "success"
+            ):
                 coordinator.success_committed = True
         if mark_failure_exits:
             for generation in _generations_locked(coordinator):
@@ -3093,8 +3135,13 @@ def _drive_cleanup_owned(
         if terminal:
             with coordinator.terminal_state_lock:
                 success_committed = coordinator.success_committed
+                mandatory_failure_pending = (
+                    coordinator.mandatory_failure_intent is not None
+                    and coordinator.terminal_outcome != "failure"
+                )
             result.ownership_pending = (
                 _coordinator_has_ownership_locked(coordinator)
+                or mandatory_failure_pending
                 or (
                     coordinator.terminal_outcome == "failure"
                     and result.evidence != "success"
