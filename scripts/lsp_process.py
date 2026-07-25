@@ -95,7 +95,7 @@ _MAX_RETAINED_CLEANUP_ERRORS = len(_CLEANUP_STEPS)
 
 
 class StartupCleanupError(RuntimeError):
-    """Startup failed and the immediate child could not be proven dead."""
+    """Startup failed and owned cleanup remains incomplete or failed."""
 
     def __init__(
         self,
@@ -1599,6 +1599,7 @@ def _start_lsp_process(
         return instance
     except BaseException as startup_error:
         deadline = startup_deadline if startup_deadline is not None else time.monotonic()
+        cleanup_owned = coordinator.owner_directory is not None or instance is not None
         _remember_mandatory_terminal_failure(
             instance,
             coordinator,
@@ -1613,16 +1614,20 @@ def _start_lsp_process(
             )
         except BaseException:
             pass
-        _drive_cleanup(
-            instance,
-            deadline,
-            terminal=True,
-            failure_code=_STARTUP_FAILED,
-            coordinator_override=coordinator,
-        )
+        try:
+            cleanup_errors = _drive_cleanup(
+                instance,
+                deadline,
+                terminal=True,
+                failure_code=_STARTUP_FAILED,
+                coordinator_override=coordinator,
+            )
+        except BaseException as cleanup_error:
+            cleanup_errors = [cleanup_error]
         pending = _coordinator_has_ownership(coordinator)
         evidence_failed = coordinator.cleanup_result.evidence == "failed"
-        if pending or evidence_failed:
+        if pending or evidence_failed or (cleanup_owned and cleanup_errors):
+            _register_startup_cleanup(coordinator)
             message = (
                 "LSP startup failed and retained evidence could not be written safely"
                 if evidence_failed and not pending
@@ -2162,8 +2167,9 @@ def _terminal_failure_lsp_process(
     code: str,
     deadline: float,
 ) -> None:
-    deadline = _validated_deadline(deadline)
     coordinator = instance._coordinator
+    _remember_mandatory_terminal_failure(instance, coordinator, code)
+    deadline = _validated_deadline(deadline)
     _acquire_driver(coordinator, deadline)
     try:
         _mark_terminal_failure(instance, coordinator, code, deadline)
@@ -2776,6 +2782,7 @@ def _drive_cleanup_owned(
 ) -> list[BaseException]:
     result = coordinator.cleanup_result
     current_errors: list[BaseException] = []
+    terminal_outcome_ready = not terminal
 
     try:
         _acquire_lifecycle(coordinator, deadline, allow_expired=True)
@@ -2785,13 +2792,19 @@ def _drive_cleanup_owned(
         return current_errors
     try:
         generations = _generations_locked(coordinator)
-        outcome = (
-            _linearize_terminal_outcome_locked(
-                instance, coordinator, deadline, commit_success=False
-            )
-            if terminal
-            else coordinator.terminal_outcome
-        )
+        if terminal:
+            try:
+                outcome = _linearize_terminal_outcome_locked(
+                    instance, coordinator, deadline, commit_success=False
+                )
+            except BaseException as error:
+                terminal_outcome_ready = False
+                _record_cleanup_error(result, current_errors, "recovery_join", error)
+                outcome = coordinator.terminal_outcome
+            else:
+                terminal_outcome_ready = True
+        else:
+            outcome = coordinator.terminal_outcome
         code = coordinator.terminal_code or failure_code or _PROCESS_EXITED
         if terminal:
             for generation in generations:
@@ -2982,8 +2995,11 @@ def _drive_cleanup_owned(
                 instance, coordinator, deadline, commit_success=False
             )
         except BaseException as error:
+            terminal_outcome_ready = False
             _record_cleanup_error(result, current_errors, "recovery_join", error)
             outcome = coordinator.terminal_outcome
+        else:
+            terminal_outcome_ready = True
         if outcome == "failure" and _failure_evidence_required(coordinator):
             try:
                 _ensure_failure_evidence(
@@ -3005,8 +3021,10 @@ def _drive_cleanup_owned(
                     instance, coordinator, deadline, commit_success=True
                 )
             except BaseException as error:
+                terminal_outcome_ready = False
                 _record_cleanup_error(result, current_errors, "heartbeat_join", error)
             else:
+                terminal_outcome_ready = True
                 if (
                     outcome == "failure"
                     and result.evidence != "success"
@@ -3061,8 +3079,11 @@ def _drive_cleanup_owned(
                 instance, coordinator, deadline, commit_success=True
             )
         except BaseException as error:
+            terminal_outcome_ready = False
             _record_cleanup_error(result, current_errors, "recovery_join", error)
             outcome = coordinator.terminal_outcome
+        else:
+            terminal_outcome_ready = True
         if outcome == "failure" and _failure_evidence_required(coordinator):
             try:
                 _ensure_failure_evidence(
@@ -3074,7 +3095,7 @@ def _drive_cleanup_owned(
             except BaseException as error:
                 _record_cleanup_error(result, current_errors, "evidence", error)
 
-    if terminal and ownership_stopped and owner is not None:
+    if terminal and ownership_stopped and terminal_outcome_ready and owner is not None:
         evidence_ready = (
             coordinator.terminal_outcome != "failure"
             or not _failure_evidence_required(coordinator)
@@ -3141,6 +3162,7 @@ def _drive_cleanup_owned(
                 )
             result.ownership_pending = (
                 _coordinator_has_ownership_locked(coordinator)
+                or not terminal_outcome_ready
                 or mandatory_failure_pending
                 or (
                     coordinator.terminal_outcome == "failure"
