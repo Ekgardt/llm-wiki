@@ -43,7 +43,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── impact_analysis.py           v4.0: LINK layer (code→wiki impact)
 │   ├── build_tiers.py               v4.0: L0/L1/L2 progressive disclosure
 │   └── queries/                     v4.0: 12 tree-sitter .scm language queries
-├── tests/                         CODE — regression suite (pytest, 4466 tests)
+├── tests/                         CODE — regression suite (pytest, 4470 tests)
 ├── docs/                          CODE — architecture + user guide
 ├── skills/                        CODE — 9 agent skills (SKILL.md)
 ├── rules/                         CODE — file-handling policies
@@ -241,7 +241,10 @@ is reaped and its protocol, stderr, and exit-monitor owners are joined. Cleanup
 closes that handle before releasing the Job Object. A failed close keeps the
 generation, Job, and lease in `CLEANUP_PENDING` for idempotent retry; the retained
 `Popen` object continues to expose its cached return code. POSIX process-group
-release ordering is unchanged.
+release ordering is unchanged. Windows Job bounds and completion use current
+`ActiveProcesses`; lifetime `TotalProcesses` and racing PID-list snapshots are not
+compared. PID capture is a best-effort identity aid and cannot override a bounded,
+stable zero active count.
 
 ## What lives where
 
@@ -252,7 +255,7 @@ release ordering is unchanged.
   `maybe_compile.py` (PID-locked spawn), `search_memory.py` (triple-RRF),
   `llm_client.py` (5 backends + fake), `integration_adapter.py` (thin host
   lifecycle boundary), `mcp_server.py` (12 task-shaped tools), and `doctor.py`.
-- `tests/` — 4466 tests collected. Hermetic via `conftest.py` (pins
+- `tests/` — 4470 tests collected. Hermetic via `conftest.py` (pins
   `LLM_WIKI_ROOT` to checkout, redirects `LLM_WIKI_STATE_ROOT` to a temp
   dir, defaults `MEMORY_LLM_PROVIDER=fake`).
 - `docs/` — `ARCHITECTURE.md`, `USER-GUIDE.md`, `AGENTS.md` (knowledge

@@ -34,7 +34,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   transactions/tasks/results, the 30-day undo window, and live owners.
 - Recorded the local-filesystem requirement, current `synchronous=FULL`/no-WAL
   policy, bounded defaults and CLI overrides, cooperating-writer CAS boundary, and
-  explicit non-goals. The suite now collects **4466 tests**.
+  explicit non-goals. The suite now collects **4470 tests**.
 - Added canonical `repository-scope/v1` binding for repositories, linked worktrees,
   checkout roots, Git common directories, and captured commits. Generation readers
   reject the wrong repository/worktree scope instead of returning cross-checkout
@@ -65,6 +65,10 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Use current `ActiveProcesses`, not lifetime Job totals or a racing PID-list
+  snapshot, for Windows LSP process bounds and cleanup completion. PID capture is
+  now best effort, while an unavailable, over-bound, or persistently nonzero active
+  count remains a retryable cleanup failure.
 - Close each CPython 3.10 Windows LSP process handle after direct-process reap and
   all protocol, stderr, and exit-monitor joins. Handle-close failures now retain
   the generation, Job, lease, and `CLEANUP_PENDING` state for idempotent retry;
@@ -128,7 +132,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - **SessionStart impact advisory** — stale wiki pages from code changes.
 - **MCP config in install scripts** — Claude Code + OpenCode auto-config.
 - **Optional extras** — `hybrid`, `code-graph`, `mcp-server`, `reranker`, `full`.
-- **4466 tests**.
+- **4470 tests**.
 
 ## [3.4.0] — 2026-07-11
 

@@ -68,6 +68,63 @@ def _windows_handle_status(handle: int) -> tuple[bool, int]:
     return valid, ctypes.get_last_error()
 
 
+def _install_windows_job_queries(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    accounting: list[tuple[int, int] | None],
+    assigned: int,
+    pids: tuple[int, ...] | None,
+) -> list[int]:
+    import ctypes
+    from ctypes import wintypes
+
+    accounting_values = iter(accounting)
+    calls: list[int] = []
+
+    class Kernel:
+        @staticmethod
+        def QueryInformationJobObject(
+            _job: int,
+            information_class: int,
+            pointer: object,
+            _size: int,
+            returned: object,
+        ) -> int:
+            calls.append(information_class)
+            address = ctypes.cast(pointer, ctypes.c_void_p).value
+            assert address is not None
+            if information_class == lsp_process_tree._JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION:
+                value = next(accounting_values)
+                if value is None:
+                    ctypes.set_last_error(5)
+                    return 0
+                total, active = value
+                information = lsp_process_tree._BasicAccountingInformation.from_address(
+                    address
+                )
+                information.total_processes = total
+                information.active_processes = active
+            elif information_class == lsp_process_tree._JOB_OBJECT_BASIC_PROCESS_ID_LIST:
+                if pids is None:
+                    ctypes.set_last_error(5)
+                    return 0
+                information = lsp_process_tree._BasicProcessIdList.from_address(address)
+                information.number_of_assigned_processes = assigned
+                information.number_of_process_ids_in_list = len(pids)
+                identifiers = (ctypes.c_size_t * len(pids)).from_address(
+                    address + lsp_process_tree._BasicProcessIdList.process_id_list.offset
+                )
+                for index, pid in enumerate(pids):
+                    identifiers[index] = pid
+            else:  # pragma: no cover - assertion boundary
+                raise AssertionError(f"unexpected Job information class: {information_class}")
+            ctypes.cast(returned, ctypes.POINTER(wintypes.DWORD)).contents.value = _size
+            return 1
+
+    monkeypatch.setattr(lsp_process_tree, "_KERNEL32", Kernel())
+    return calls
+
+
 def _write_proc_stat(
     root: Path,
     pid: int,
@@ -138,11 +195,11 @@ def test_windows_tree_wait_requires_stable_empty_job_observation(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job PID observation boundary")
-def test_windows_tree_wait_retains_job_until_captured_pid_is_not_live(
+def test_windows_tree_wait_treats_captured_pid_as_best_effort_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    pid_states = iter([True, True, False])
     checked: list[int] = []
+    active = iter([0, 0])
 
     class ExitedProcess:
         @staticmethod
@@ -151,9 +208,11 @@ def test_windows_tree_wait_retains_job_until_captured_pid_is_not_live(
 
     def pid_alive(pid: int) -> bool:
         checked.append(pid)
-        return next(pid_states)
+        return True
 
-    monkeypatch.setattr(lsp_process_tree, "_job_active_processes", lambda _job: 0)
+    monkeypatch.setattr(
+        lsp_process_tree, "_job_active_processes", lambda _job: next(active)
+    )
     monkeypatch.setattr(lsp_process_tree, "_windows_pid_alive", pid_alive)
 
     complete, errors = lsp_process_tree._wait_windows_tree(
@@ -162,7 +221,83 @@ def test_windows_tree_wait_retains_job_until_captured_pid_is_not_live(
 
     assert complete is True
     assert errors == []
-    assert checked == [4242, 4242, 4242]
+    assert checked == [4242, 4242]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job accounting boundary")
+def test_windows_job_pid_snapshot_uses_active_not_lifetime_process_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _install_windows_job_queries(
+        monkeypatch,
+        accounting=[(3, 2), (3, 2)],
+        assigned=3,
+        pids=(4101, 4102),
+    )
+
+    assert lsp_process_tree._job_process_ids(17) == (4101, 4102)
+    assert calls == [
+        lsp_process_tree._JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+        lsp_process_tree._JOB_OBJECT_BASIC_PROCESS_ID_LIST,
+        lsp_process_tree._JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+    ]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job accounting races")
+def test_windows_job_pid_snapshot_accepts_active_requery_races_and_pid_query_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenarios = (
+        ([(5, 2), (5, 1)], 2, (4201,), (4201,)),
+        ([(5, 1), (5, 2)], 2, (4301, 4302), (4301, 4302)),
+        ([(5, 2), (5, 0)], 2, None, ()),
+    )
+
+    for accounting, assigned, pids, expected in scenarios:
+        calls = _install_windows_job_queries(
+            monkeypatch,
+            accounting=accounting,
+            assigned=assigned,
+            pids=pids,
+        )
+        assert lsp_process_tree._job_process_ids(17) == expected
+        assert calls == [
+            lsp_process_tree._JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+            lsp_process_tree._JOB_OBJECT_BASIC_PROCESS_ID_LIST,
+            lsp_process_tree._JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+        ]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job accounting boundary")
+def test_windows_job_pid_snapshot_fails_for_unobservable_or_unbounded_active_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_windows_job_queries(
+        monkeypatch,
+        accounting=[None],
+        assigned=0,
+        pids=(),
+    )
+    with pytest.raises(OSError):
+        lsp_process_tree._job_process_ids(17)
+
+    _install_windows_job_queries(
+        monkeypatch,
+        accounting=[(5000, lsp_process_tree._MAX_JOB_PROCESS_IDS + 1)],
+        assigned=0,
+        pids=(),
+    )
+    with pytest.raises(RuntimeError, match="active process bound"):
+        lsp_process_tree._job_process_ids(17)
+
+    _install_windows_job_queries(
+        monkeypatch,
+        accounting=[(5000, 1), (5000, lsp_process_tree._MAX_JOB_PROCESS_IDS + 1)],
+        assigned=1,
+        pids=(4401,),
+    )
+    with pytest.raises(RuntimeError, match="active process bound"):
+        lsp_process_tree._job_process_ids(17)
 
 
 def test_spawn_owns_a_real_descendant_and_terminate_leaves_no_surviving_pid(

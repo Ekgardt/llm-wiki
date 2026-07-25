@@ -175,7 +175,10 @@ process is reaped and protocol, stderr, and exit-monitor owners have joined. It 
 closed before the generation releases its Job Object. If handle closure fails, the
 generation, Job, and lease remain in `CLEANUP_PENDING` for retry, while the retained
 `Popen` object continues to expose its cached return code. This does not change POSIX
-process-group release ordering.
+process-group release ordering. Windows Job bounds and completion use current
+`ActiveProcesses`; lifetime `TotalProcesses` and racing PID-list snapshots are not
+compared. PID capture remains a best-effort identity aid and cannot override a
+bounded, stable zero active count.
 
 Before a semantic request, the facade computes a workspace revision from Git HEAD
 plus content hashes of dirty, untracked, deleted, and relevant Python configuration

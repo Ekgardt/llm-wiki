@@ -347,7 +347,7 @@ class ProcessTree:
             active: int | None = 0
             if job is not None:
                 try:
-                    active = _job_active_processes(job)
+                    active = _bounded_job_active_processes(job)
                 except BaseException as error:
                     errors.append(error)
                     active = None
@@ -467,26 +467,35 @@ if os.name == "nt":
         return int(information.active_processes)
 
 
+    def _bounded_job_active_processes(job: int) -> int:
+        active = _job_active_processes(job)
+        if active > _MAX_JOB_PROCESS_IDS:
+            raise RuntimeError("LSP Windows Job active process bound was exceeded")
+        return active
+
+
     def _job_process_ids(job: int) -> tuple[int, ...]:
+        _bounded_job_active_processes(job)
         offset = _BasicProcessIdList.process_id_list.offset
         buffer_size = offset + _MAX_JOB_PROCESS_IDS * ctypes.sizeof(ctypes.c_size_t)
         buffer = ctypes.create_string_buffer(buffer_size)
         information = _BasicProcessIdList.from_buffer(buffer)
         returned = wintypes.DWORD()
-        if not _KERNEL32.QueryInformationJobObject(
+        queried = _KERNEL32.QueryInformationJobObject(
             job,
             _JOB_OBJECT_BASIC_PROCESS_ID_LIST,
             ctypes.byref(buffer),
             buffer_size,
             ctypes.byref(returned),
-        ):
-            raise ctypes.WinError(ctypes.get_last_error())
-        assigned = int(information.number_of_assigned_processes)
-        captured = int(information.number_of_process_ids_in_list)
-        if assigned != captured or captured > _MAX_JOB_PROCESS_IDS:
-            raise RuntimeError("LSP Windows Job process identifier bound was exceeded")
-        process_ids = (ctypes.c_size_t * captured).from_buffer(buffer, offset)
-        return tuple(int(process_id) for process_id in process_ids)
+        )
+        captured = int(information.number_of_process_ids_in_list) if queried else 0
+        if captured <= _MAX_JOB_PROCESS_IDS:
+            values = (ctypes.c_size_t * captured).from_buffer(buffer, offset)
+            process_ids = tuple(int(process_id) for process_id in values)
+        else:
+            process_ids = ()
+        _bounded_job_active_processes(job)
+        return process_ids
 
 
     def _windows_pid_alive(pid: int) -> bool:
@@ -525,26 +534,19 @@ if os.name == "nt":
             active: int | None = None
             if not query_failed:
                 try:
-                    active = _job_active_processes(job)
+                    active = _bounded_job_active_processes(job)
                 except BaseException as error:
                     errors.append(error)
                     query_failed = True
-            pid_probe_failed = False
             for pid in tuple(remaining_pids):
                 try:
                     alive = _windows_pid_alive(pid)
-                except BaseException as error:
-                    errors.append(error)
-                    pid_probe_failed = True
-                    break
+                except BaseException:
+                    remaining_pids.remove(pid)
+                    continue
                 if not alive:
                     remaining_pids.remove(pid)
-            if (
-                direct_reaped
-                and active == 0
-                and not remaining_pids
-                and not pid_probe_failed
-            ):
+            if direct_reaped and active == 0:
                 empty_observations += 1
                 if empty_observations >= 2:
                     return True, errors

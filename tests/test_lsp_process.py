@@ -2988,6 +2988,97 @@ def test_windows_500_start_close_cycles_keep_process_handle_count_bounded(
     assert all(getattr(handle, "closed", False) for handle in retained_handles)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job restart stress")
+def test_windows_200_crash_restarts_with_children_have_no_false_failure_or_leaks(
+    tmp_path: Path,
+) -> None:
+    import ctypes
+    import gc
+    from ctypes import wintypes
+
+    pid_log = tmp_path / "restart-descendants.txt"
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    def wait_for_pid_line(index: int) -> int:
+        deadline = time.monotonic() + 2
+        while True:
+            lines = (
+                pid_log.read_text(encoding="ascii").splitlines()
+                if pid_log.exists()
+                else []
+            )
+            if len(lines) > index:
+                return int(lines[index])
+            if time.monotonic() >= deadline:
+                pytest.fail("timed out waiting for descendant identity")
+            time.sleep(0.01)
+
+    def open_identity(pid: int) -> int:
+        handle = kernel32.OpenProcess(0x00100000, False, pid)
+        if not handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        return int(handle)
+
+    def run_cycle(index: int) -> None:
+        marker = tmp_path / f"crash-{index}.marker"
+        before = (
+            pid_log.read_text(encoding="ascii").splitlines() if pid_log.exists() else []
+        )
+        process = lsp_process._start_lsp_process(
+            LspProcess,
+            _command(
+                "--lifecycle",
+                "--spawn-descendant",
+                "--descendant-pid-log",
+                str(pid_log),
+                "--crash-once-marker",
+                str(marker),
+            ),
+            cwd=tmp_path,
+            owner_root=tmp_path / OWNER_NONCE,
+        )
+        handles: list[int] = []
+        exit_results: list[int] = []
+        try:
+            handles.append(open_identity(wait_for_pid_line(len(before))))
+            assert process.request(
+                "echo", {"cycle": index}, deadline=time.monotonic() + 10
+            ) == {"cycle": index}
+            handles.append(open_identity(wait_for_pid_line(len(before) + 1)))
+            assert process.restart_count == 1
+            assert process.state is not ProcessState.FAILED
+            assert not (process.owner_root / "failure.json").exists()
+        finally:
+            try:
+                process.close(time.monotonic() + 10)
+            finally:
+                for handle in handles:
+                    exit_results.append(int(kernel32.WaitForSingleObject(handle, 2000)))
+                    assert kernel32.CloseHandle(handle)
+
+        created = pid_log.read_text(encoding="ascii").splitlines()[len(before) :]
+        assert len(created) == 2
+        assert exit_results == [0, 0]
+        assert not process.owner_root.exists()
+        assert not lsp_process._coordinator_has_ownership(process._coordinator)
+
+    run_cycle(-1)
+    gc.collect()
+    baseline = _windows_process_handle_count()
+
+    for index in range(200):
+        run_cycle(index)
+
+    gc.collect()
+    assert _windows_process_handle_count() <= baseline + 8
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows handle boundary required")
 def test_owner_directory_close_is_exactly_once_with_mocked_windows_handles(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
