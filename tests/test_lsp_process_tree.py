@@ -52,6 +52,22 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _windows_handle_status(handle: int) -> tuple[bool, int]:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetHandleInformation.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    kernel32.GetHandleInformation.restype = wintypes.BOOL
+    flags = wintypes.DWORD()
+    ctypes.set_last_error(0)
+    valid = bool(kernel32.GetHandleInformation(handle, ctypes.byref(flags)))
+    return valid, ctypes.get_last_error()
+
+
 def _write_proc_stat(
     root: Path,
     pid: int,
@@ -912,6 +928,65 @@ def test_windows_close_failure_retains_job_handle_for_retry(
     monkeypatch.setattr(lsp_process_tree, "_close_windows_handle", lambda _job: None)
     tree.close()
     assert tree.windows_job is None
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process handle release")
+def test_windows_close_releases_reaped_process_handle_and_keeps_cached_status(
+    tmp_path: Path,
+) -> None:
+    tree = ProcessTree.spawn(
+        _command("--sleep-seconds", "30"), cwd=tmp_path, env=dict(os.environ)
+    )
+    process = tree.process
+    handle = int(process._handle)
+    assert _windows_handle_status(handle) == (True, 0)
+
+    tree.terminate(deadline=time.monotonic() + 3)
+    returncode = process.returncode
+    tree.close()
+    tree.close()
+
+    assert returncode is not None
+    assert _windows_handle_status(handle) == (False, 6)
+    assert process._handle.closed is True
+    assert process.returncode == returncode
+    assert process.poll() == returncode
+    assert process.wait(timeout=0) == returncode
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process handle retry")
+def test_windows_process_handle_close_failure_retains_tree_for_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    tree = ProcessTree.spawn(
+        _command("--sleep-seconds", "30"), cwd=tmp_path, env=dict(os.environ)
+    )
+    process = tree.process
+    handle = int(process._handle)
+    real_close = process._handle.Close
+    close_calls = 0
+
+    def close() -> None:
+        nonlocal close_calls
+        close_calls += 1
+        if close_calls == 1:
+            raise OSError("process handle close failed")
+        real_close()
+
+    monkeypatch.setattr(process._handle, "Close", close)
+    tree.terminate(deadline=time.monotonic() + 3)
+
+    with pytest.raises(OSError, match="process handle close failed"):
+        tree.close()
+
+    assert tree.windows_job is not None
+    assert _windows_handle_status(handle) == (True, 0)
+    tree.close()
+    assert close_calls == 2
+    assert tree.windows_job is None
+    assert _windows_handle_status(handle) == (False, 6)
+    assert process.poll() == process.returncode
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job release observations")

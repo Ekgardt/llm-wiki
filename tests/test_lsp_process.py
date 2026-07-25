@@ -135,6 +135,41 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _windows_handle_status(handle: int) -> tuple[bool, int]:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetHandleInformation.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    kernel32.GetHandleInformation.restype = wintypes.BOOL
+    flags = wintypes.DWORD()
+    ctypes.set_last_error(0)
+    valid = bool(kernel32.GetHandleInformation(handle, ctypes.byref(flags)))
+    return valid, ctypes.get_last_error()
+
+
+def _windows_process_handle_count() -> int:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.GetProcessHandleCount.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    kernel32.GetProcessHandleCount.restype = wintypes.BOOL
+    count = wintypes.DWORD()
+    if not kernel32.GetProcessHandleCount(
+        kernel32.GetCurrentProcess(), ctypes.byref(count)
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return int(count.value)
+
+
 def _wait_for_owned_pids_to_exit(
     process: LspProcess,
     pids: list[int],
@@ -348,6 +383,101 @@ def test_shutdown_alone_completes_tree_threads_lease_and_scratch_cleanup(
     assert all(thread is None or not thread.is_alive() for thread in owner_threads)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows process handle release")
+def test_windows_normal_close_joins_all_users_before_releasing_retained_process_handle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle")
+    generation = process._coordinator.active
+    assert generation is not None and generation.protocol is not None
+    retained = process.process
+    handle = int(retained._handle)
+    owner_threads = (
+        generation.protocol.reader_thread,
+        generation.protocol.writer_thread,
+        generation.stderr_thread,
+        generation.exit_thread,
+    )
+    release_observations: list[tuple[bool, ...]] = []
+
+    def close_process_handle(child: subprocess.Popen[bytes]) -> None:
+        assert child is retained
+        release_observations.append(tuple(thread.is_alive() for thread in owner_threads))
+        child._handle.Close()
+
+    monkeypatch.setattr(
+        lsp_process._lsp_process_tree,
+        "_close_windows_process_handle",
+        close_process_handle,
+        raising=False,
+    )
+    assert _windows_handle_status(handle) == (True, 0)
+
+    process.close(time.monotonic() + 5)
+
+    assert release_observations == [(False, False, False, False)]
+    assert _windows_handle_status(handle) == (False, 6)
+    assert retained.returncode is not None
+    assert retained.poll() == retained.returncode
+    assert retained.wait(timeout=0) == retained.returncode
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process handle retry")
+def test_windows_process_handle_close_failure_keeps_cleanup_pending_until_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle")
+    coordinator = process._coordinator
+    generation = coordinator.active
+    assert generation is not None and generation.tree is not None
+    retained = process.process
+    handle = int(retained._handle)
+    real_close = retained._handle.Close
+    real_unregister = lsp_process.atexit.unregister
+    close_allowed = False
+    unregister_calls: list[object] = []
+
+    def close() -> None:
+        if not close_allowed:
+            raise OSError("process handle close failed")
+        real_close()
+
+    def unregister(callback: object) -> None:
+        unregister_calls.append(callback)
+        real_unregister(callback)
+
+    monkeypatch.setattr(retained._handle, "Close", close)
+    monkeypatch.setattr(lsp_process.atexit, "unregister", unregister)
+    try:
+        with pytest.raises(OSError, match="process handle close failed"):
+            process.close(time.monotonic() + 5)
+
+        assert coordinator.phase is lsp_process._LifecyclePhase.CLEANUP_PENDING
+        assert coordinator.active is generation
+        assert generation.tree is not None
+        assert generation.process is retained
+        assert coordinator.cleanup_result.tree_release == "failed"
+        assert (process.owner_root / "lease.json").is_file()
+        assert _windows_handle_status(handle) == (True, 0)
+        assert unregister_calls == []
+
+        close_allowed = True
+        process.close(time.monotonic() + 5)
+
+        assert coordinator.phase is lsp_process._LifecyclePhase.STOPPED_SUCCESS
+        assert coordinator.cleanup_result.tree_release == "success"
+        assert _windows_handle_status(handle) == (False, 6)
+        assert retained.poll() == retained.returncode
+        assert len(unregister_calls) == 1
+        assert not process.owner_root.exists()
+    finally:
+        close_allowed = True
+        if lsp_process._coordinator_has_ownership(coordinator):
+            process.close(time.monotonic() + 5)
+
+
 def test_request_after_shutdown_cannot_restart_terminal_process(tmp_path: Path) -> None:
     process = _start(tmp_path, "--lifecycle")
     pid = process.process.pid
@@ -463,6 +593,60 @@ def test_second_fatal_failure_is_terminal_and_retains_bounded_evidence(
     assert process._coordinator.phase is lsp_process._LifecyclePhase.CLEANUP_PENDING
     process.close(time.monotonic() + 5)
     assert not (process.owner_root / "lease.json").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process handle release")
+def test_windows_terminal_failure_releases_retained_process_handle(
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle", "--sleep-seconds", "30")
+    retained = process.process
+    handle = int(retained._handle)
+    assert _windows_handle_status(handle) == (True, 0)
+
+    process._terminal_failure("injected_failure", time.monotonic() + 5)
+
+    assert process.state is ProcessState.FAILED
+    assert process._coordinator.phase is lsp_process._LifecyclePhase.STOPPED_FAILURE
+    assert _windows_handle_status(handle) == (False, 6)
+    assert retained.returncode is not None
+    assert retained.poll() == retained.returncode
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process handle release")
+def test_windows_restart_releases_old_generation_process_handle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle")
+    old = process.process
+    old_handle = int(old._handle)
+    close_observations: list[tuple[bool, int]] = []
+    real_close = lsp_process._lsp_process_tree._close_windows_process_handle
+
+    def close_process_handle(child: subprocess.Popen[bytes]) -> None:
+        real_close(child)
+        if child is old:
+            close_observations.append(_windows_handle_status(old_handle))
+
+    monkeypatch.setattr(
+        lsp_process._lsp_process_tree,
+        "_close_windows_process_handle",
+        close_process_handle,
+    )
+    assert _windows_handle_status(old_handle) == (True, 0)
+
+    try:
+        process.restart(time.monotonic() + 5)
+
+        assert process.restart_count == 1
+        assert process.process is not old
+        assert close_observations == [(False, 6)]
+        assert old._handle.closed is True
+        assert old.returncode is not None
+        assert old.poll() == old.returncode
+    finally:
+        process.close(time.monotonic() + 5)
 
 
 def test_observed_second_generation_exit_dominates_overlapping_shutdown(
@@ -1268,6 +1452,8 @@ def test_startup_failure_terminates_child_and_retains_bounded_evidence(
     assert len(children) == 1
     children[0].wait(timeout=5)
     assert children[0].poll() is not None
+    if os.name == "nt":
+        assert _windows_handle_status(int(children[0]._handle)) == (False, 6)
     assert set(path.name for path in owner.iterdir()) == {
         "cancellation",
         "failure.json",
@@ -1849,6 +2035,8 @@ def test_restart_thread_start_failure_cleans_new_tree_and_becomes_terminal(
 
     assert len(spawned) == 1
     assert spawned[0].process.poll() is not None
+    if os.name == "nt":
+        assert _windows_handle_status(int(spawned[0].process._handle)) == (False, 6)
     assert process.restart_count == 0
     assert process.state is ProcessState.FAILED
     assert json.loads((process.owner_root / "failure.json").read_bytes())["code"] == (
@@ -2767,6 +2955,39 @@ def test_repeated_startup_failures_close_every_returned_windows_handle_once(
     )
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows process handle stress")
+def test_windows_500_start_close_cycles_keep_process_handle_count_bounded(
+    tmp_path: Path,
+) -> None:
+    import gc
+
+    def start_untracked() -> LspProcess:
+        return lsp_process._start_lsp_process(
+            LspProcess,
+            _command("--lifecycle"),
+            cwd=tmp_path,
+            owner_root=tmp_path / OWNER_NONCE,
+        )
+
+    retained_handles: list[object] = []
+    warm = start_untracked()
+    warm.close(time.monotonic() + 5)
+    retained_handles.append(warm.process._handle)
+    del warm
+    gc.collect()
+    baseline = _windows_process_handle_count()
+
+    for _index in range(500):
+        process = start_untracked()
+        process.close(time.monotonic() + 5)
+        retained_handles.append(process.process._handle)
+        del process
+
+    gc.collect()
+    assert _windows_process_handle_count() <= baseline + 8
+    assert all(getattr(handle, "closed", False) for handle in retained_handles)
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows handle boundary required")
 def test_owner_directory_close_is_exactly_once_with_mocked_windows_handles(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -3244,7 +3465,7 @@ def test_shutdown_waits_for_restart_candidate_ownership_to_be_attached(
     assert not process.owner_root.exists()
 
 
-def test_protocol_close_fault_still_releases_tree_and_cleanup_retry_finishes(
+def test_protocol_close_fault_retains_windows_tree_until_cleanup_retry_finishes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3252,6 +3473,8 @@ def test_protocol_close_fault_still_releases_tree_and_cleanup_retry_finishes(
     coordinator = process._coordinator
     generation = coordinator.active
     assert generation is not None
+    tree = generation.tree
+    assert tree is not None
     protocol = generation.protocol
     assert protocol is not None
     close = protocol.close
@@ -3261,16 +3484,22 @@ def test_protocol_close_fault_still_releases_tree_and_cleanup_retry_finishes(
         lambda _deadline: (_ for _ in ()).throw(OSError("protocol close failed")),
     )
 
-    with pytest.raises(OSError, match="protocol close failed"):
+    try:
+        with pytest.raises(OSError, match="protocol close failed"):
+            process.shutdown(time.monotonic() + 5)
+
+        if os.name == "nt":
+            assert generation.tree is tree
+        else:
+            assert generation.tree is None
+        assert generation.protocol is protocol
+        assert coordinator.phase is lsp_process._LifecyclePhase.CLEANUP_PENDING
+        assert (process.owner_root / "lease.json").is_file()
+    finally:
+        monkeypatch.setattr(protocol, "close", close)
         process.shutdown(time.monotonic() + 5)
 
     assert generation.tree is None
-    assert generation.protocol is protocol
-    assert coordinator.phase is lsp_process._LifecyclePhase.CLEANUP_PENDING
-    assert (process.owner_root / "lease.json").is_file()
-
-    monkeypatch.setattr(protocol, "close", close)
-    process.shutdown(time.monotonic() + 5)
     assert not process.owner_root.exists()
 
 
@@ -3325,8 +3554,14 @@ def test_cleanup_driver_aggregates_process_observation_error_and_continues() -> 
     )
 
     assert any("process poll failed" in str(error) for error in errors)
-    assert events == ["protocol-stop", "terminate", "poll", "tree-close"]
-    assert generation.tree is None
+    expected_events = ["protocol-stop", "terminate", "poll"]
+    if os.name != "nt":
+        expected_events.append("tree-close")
+    assert events == expected_events
+    if os.name == "nt":
+        assert generation.tree is not None
+    else:
+        assert generation.tree is None
     assert generation.process is not None
     assert generation.protocol is not None
     assert coordinator.phase is lsp_process._LifecyclePhase.CLEANUP_PENDING

@@ -338,25 +338,27 @@ class ProcessTree:
     def close(self) -> None:
         if os.name == "nt":
             job = self.windows_job
-            if job is None:
-                return
             errors: list[BaseException] = []
             try:
                 direct_reaped = self.process.poll() is not None
             except BaseException as error:
                 errors.append(error)
                 direct_reaped = False
-            try:
-                active = _job_active_processes(job)
-            except BaseException as error:
-                errors.append(error)
-                active = None
+            active: int | None = 0
+            if job is not None:
+                try:
+                    active = _job_active_processes(job)
+                except BaseException as error:
+                    errors.append(error)
+                    active = None
             if errors:
                 raise errors[0]
             if not direct_reaped or active != 0:
                 raise RuntimeError("Windows LSP process tree is still live")
-            _close_windows_handle(job)
-            self.windows_job = None
+            _close_windows_process_handle(self.process)
+            if job is not None:
+                _close_windows_handle(job)
+                self.windows_job = None
             return
 
         group = self.process_group
@@ -631,6 +633,24 @@ if os.name == "nt":
     def _close_windows_handle(handle: int) -> None:
         if not _KERNEL32.CloseHandle(handle):
             raise ctypes.WinError(ctypes.get_last_error())
+
+
+    def _close_windows_process_handle(process: subprocess.Popen[bytes]) -> None:
+        handle = getattr(process, "_handle", None)
+        close = getattr(handle, "Close", None)
+        if not callable(close):
+            return
+        was_closed = getattr(handle, "closed", None)
+        try:
+            close()
+        except BaseException:
+            # CPython marks Handle.closed before calling CloseHandle.
+            if was_closed is False and getattr(handle, "closed", None) is True:
+                try:
+                    handle.closed = False
+                except (AttributeError, TypeError):
+                    pass
+            raise
 
 
 __all__ = ["ProcessTree"]

@@ -2590,6 +2590,7 @@ def _drive_cleanup_owned(
     protocol_stop_ok = True
     protocol_stop_pending = False
     tree_release_ok = True
+    tree_release_pending = False
     joins_ok = True
     joins_pending = False
     for generation in generations:
@@ -2645,7 +2646,7 @@ def _drive_cleanup_owned(
                         result, current_errors, "protocol_stop", error
                     )
 
-        if tree is not None:
+        if tree is not None and os.name != "nt":
             try:
                 tree.close()
             except BaseException as error:
@@ -2653,16 +2654,6 @@ def _drive_cleanup_owned(
                 _record_cleanup_error(result, current_errors, "tree_release", error)
             else:
                 generation.tree = None
-
-        windows_job = generation.windows_job
-        if windows_job is not None:
-            try:
-                _lsp_process_tree._close_windows_handle(windows_job)
-            except BaseException as error:
-                tree_release_ok = False
-                _record_cleanup_error(result, current_errors, "tree_release", error)
-            else:
-                generation.windows_job = None
 
         if process_exited:
             for attribute in ("stderr_thread", "exit_thread"):
@@ -2680,6 +2671,37 @@ def _drive_cleanup_owned(
         else:
             joins_pending = True
 
+        windows_release_ready = (
+            process_exited
+            and generation.protocol is None
+            and generation.stderr_thread is None
+            and generation.exit_thread is None
+        )
+        if tree is not None and os.name == "nt":
+            if windows_release_ready:
+                try:
+                    tree.close()
+                except BaseException as error:
+                    tree_release_ok = False
+                    _record_cleanup_error(result, current_errors, "tree_release", error)
+                else:
+                    generation.tree = None
+            else:
+                tree_release_pending = True
+
+        windows_job = generation.windows_job
+        if windows_job is not None:
+            if windows_release_ready:
+                try:
+                    _lsp_process_tree._close_windows_handle(windows_job)
+                except BaseException as error:
+                    tree_release_ok = False
+                    _record_cleanup_error(result, current_errors, "tree_release", error)
+                else:
+                    generation.windows_job = None
+            else:
+                tree_release_pending = True
+
         if (
             process is not None
             and process_exited
@@ -2695,7 +2717,7 @@ def _drive_cleanup_owned(
         result.tree_termination = "success"
     if protocol_stop_ok and not protocol_stop_pending:
         result.protocol_stop = "success"
-    if tree_release_ok:
+    if tree_release_ok and not tree_release_pending:
         result.tree_release = "success"
     if joins_ok and not joins_pending:
         result.generation_joins = "success"

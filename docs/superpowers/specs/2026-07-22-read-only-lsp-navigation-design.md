@@ -170,6 +170,13 @@ death, and its single sticky failure intent. The exit monitor records normal
 before shutdown therefore remains a failure; shutdown marked before death remains
 successful; duplicate process and protocol callbacks cannot select multiple intents.
 
+On Windows, CPython's direct-process handle remains generation-owned until the
+process is reaped and protocol, stderr, and exit-monitor owners have joined. It is
+closed before the generation releases its Job Object. If handle closure fails, the
+generation, Job, and lease remain in `CLEANUP_PENDING` for retry, while the retained
+`Popen` object continues to expose its cached return code. This does not change POSIX
+process-group release ordering.
+
 Before a semantic request, the facade computes a workspace revision from Git HEAD
 plus content hashes of dirty, untracked, deleted, and relevant Python configuration
 files. Non-Git projects use a bounded content manifest. The revision diff drives
