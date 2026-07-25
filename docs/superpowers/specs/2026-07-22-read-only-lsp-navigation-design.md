@@ -177,8 +177,15 @@ generation, Job, and lease remain in `CLEANUP_PENDING` for retry, while the reta
 `Popen` object continues to expose its cached return code. This does not change POSIX
 process-group release ordering. Windows Job bounds and completion use current
 `ActiveProcesses`; lifetime `TotalProcesses` and racing PID-list snapshots are not
-compared. PID capture remains a best-effort identity aid and cannot override a
-bounded, stable zero active count.
+compared. PID capture remains a best-effort identity aid. A snapshot error is
+discarded only after direct-process reap and bounded stable active zero; unknown,
+over-bound, or nonzero active state remains fail-closed. Second-fatal recovery
+quiesces its own tracked recovery role and completes terminal cleanup without caller
+intervention. Incomplete startup ownership enters an eight-entry module registry
+before its first owned mutation and has normal-exit plus public bounded retry paths.
+Windows lease replacement retries only errors 5, 32, and 33 before the earlier of
+the operation deadline or previous lease expiry. Retained cleanup diagnostics are
+sanitized, current per fixed step, and traceback-free.
 
 Before a semantic request, the facade computes a workspace revision from Git HEAD
 plus content hashes of dirty, untracked, deleted, and relevant Python configuration

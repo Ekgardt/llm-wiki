@@ -43,7 +43,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── impact_analysis.py           v4.0: LINK layer (code→wiki impact)
 │   ├── build_tiers.py               v4.0: L0/L1/L2 progressive disclosure
 │   └── queries/                     v4.0: 12 tree-sitter .scm language queries
-├── tests/                         CODE — regression suite (pytest, 4470 tests)
+├── tests/                         CODE — regression suite (pytest, 4484 tests)
 ├── docs/                          CODE — architecture + user guide
 ├── skills/                        CODE — 9 agent skills (SKILL.md)
 ├── rules/                         CODE — file-handling policies
@@ -203,20 +203,28 @@ The approved managed Pyright artifact path is
 `run/lsp/<owner-nonce>/`; doctor and deletion eligibility must treat a live owner
 or retained failure evidence as protected operational state.
 
+Every startup coordinator enters an eight-entry module registry before its first
+owned mutation. Successful startup hands ownership to the instance's existing
+normal-exit callback and leaves the registry. Incomplete startup stays registered;
+the module normal-exit hook and `StartupCleanupError.retry_cleanup(deadline)` use
+the same absolute-deadline cleanup driver.
+
 While lifecycle ownership is live, `run/lsp/<owner-nonce>/lease.json` is a bounded
 mutable live lease distinct from immutable create-only `owner.json` and
 `failure.json`. It contains only canonical process/nonces, timestamps, schema, and
 live-state fields. It is refreshed every 10 seconds and expires after 30 seconds.
 Controlled success or terminal failure stops and joins the heartbeat before lease
 removal; abrupt death leaves the lease to expire. Updates are atomic, owner-only,
-and anchored to the retained owner-directory handle. Evidence and lease publication
-own at most one serialized hidden temporary name. On Windows, that name is reserved
-before the create call so post-create validation failure remains recoverable; POSIX
-records it immediately after atomic creation returns and before validation. Failed
-temp deletion keeps the lifecycle in `CLEANUP_PENDING` with its lease and owner,
-blocking evidence success, lease removal, scratch deletion, and owner close. The
-exact handle-relative name is retried before another publication or terminal
-finalization. A successful terminal layout never contains a hidden temp. See
+and anchored to the retained owner-directory handle. A Windows replacement retries
+only errors 5, 32, and 33 with stop-aware waits bounded by the caller deadline and
+the previous lease's monotonic expiry. Evidence and lease publication own at most
+one serialized hidden temporary name. On Windows, that name is reserved before the
+create call so post-create validation failure remains recoverable; POSIX records it
+immediately after atomic creation returns and before validation. Failed temp
+deletion keeps the lifecycle in `CLEANUP_PENDING` with its lease and owner, blocking
+evidence success, lease removal, scratch deletion, and owner close. The exact
+handle-relative name is retried before another publication or terminal finalization.
+A successful terminal layout never contains a hidden temp. See
 `knowledge/notes/lsp-live-lease-decision.md`.
 
 LSP process containment is platform-qualified rather than one portable sandbox. A
@@ -234,7 +242,11 @@ one sticky failure-intent selection under a single generation lock. The exit mon
 records normal `wait()` completion before invoking protocol callbacks. Therefore an
 unexpected death observed before shutdown remains a failure, an expected shutdown
 marked before death remains successful, and duplicate process/protocol callbacks
-cannot enqueue multiple generation failures.
+cannot enqueue multiple generation failures. A second fatal intent handled by the
+recovery thread quiesces that thread's tracked role and completes terminal cleanup
+without waiting for a caller action. Retained cleanup diagnostics contain at most
+one sanitized current record for each fixed cleanup step and never retain raw
+exception graphs; successful retries clear the resolved step.
 
 On Windows, a generation retains CPython's direct-process handle until the process
 is reaped and its protocol, stderr, and exit-monitor owners are joined. Cleanup
@@ -243,8 +255,9 @@ generation, Job, and lease in `CLEANUP_PENDING` for idempotent retry; the retain
 `Popen` object continues to expose its cached return code. POSIX process-group
 release ordering is unchanged. Windows Job bounds and completion use current
 `ActiveProcesses`; lifetime `TotalProcesses` and racing PID-list snapshots are not
-compared. PID capture is a best-effort identity aid and cannot override a bounded,
-stable zero active count.
+compared. PID capture is a best-effort identity aid. A snapshot error is discarded
+only after direct-process reap and bounded stable active zero; unknown, over-bound,
+or nonzero active state remains fail-closed.
 
 ## What lives where
 
@@ -255,7 +268,7 @@ stable zero active count.
   `maybe_compile.py` (PID-locked spawn), `search_memory.py` (triple-RRF),
   `llm_client.py` (5 backends + fake), `integration_adapter.py` (thin host
   lifecycle boundary), `mcp_server.py` (12 task-shaped tools), and `doctor.py`.
-- `tests/` — 4470 tests collected. Hermetic via `conftest.py` (pins
+- `tests/` — 4484 tests collected. Hermetic via `conftest.py` (pins
   `LLM_WIKI_ROOT` to checkout, redirects `LLM_WIKI_STATE_ROOT` to a temp
   dir, defaults `MEMORY_LLM_PROVIDER=fake`).
 - `docs/` — `ARCHITECTURE.md`, `USER-GUIDE.md`, `AGENTS.md` (knowledge

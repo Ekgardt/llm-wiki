@@ -973,6 +973,88 @@ def test_windows_terminate_attempts_direct_kill_when_job_termination_fails(
     assert tree.windows_job == 17
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job cleanup contract")
+def test_windows_terminate_discards_snapshot_error_after_stable_active_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active_queries = 0
+
+    class ReapedChild:
+        pid = 6161
+
+        @staticmethod
+        def poll() -> int:
+            return 0
+
+        @staticmethod
+        def wait(timeout: float | None = None) -> int:
+            del timeout
+            return 0
+
+    class Kernel:
+        @staticmethod
+        def TerminateJobObject(_job: int, _code: int) -> int:
+            return 1
+
+    def active_processes(_job: int) -> int:
+        nonlocal active_queries
+        active_queries += 1
+        return 0
+
+    tree = ProcessTree(ReapedChild(), 23, None)  # type: ignore[arg-type]
+    monkeypatch.setattr(lsp_process_tree, "_KERNEL32", Kernel())
+    monkeypatch.setattr(
+        lsp_process_tree,
+        "_job_process_ids",
+        lambda _job: (_ for _ in ()).throw(OSError("PID snapshot unavailable")),
+    )
+    monkeypatch.setattr(lsp_process_tree, "_job_active_processes", active_processes)
+
+    tree.terminate(deadline=time.monotonic() + 1)
+
+    assert active_queries >= 2
+    assert tree.windows_job == 23
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job cleanup contract")
+@pytest.mark.parametrize("active", [None, 1])
+def test_windows_terminate_keeps_unknown_or_nonzero_active_state_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    active: int | None,
+) -> None:
+    class ReapedChild:
+        pid = 6262
+
+        @staticmethod
+        def poll() -> int:
+            return 0
+
+        @staticmethod
+        def wait(timeout: float | None = None) -> int:
+            del timeout
+            return 0
+
+    class Kernel:
+        @staticmethod
+        def TerminateJobObject(_job: int, _code: int) -> int:
+            return 1
+
+    def active_processes(_job: int) -> int:
+        if active is None:
+            raise OSError("active Job state unavailable")
+        return active
+
+    tree = ProcessTree(ReapedChild(), 29, None)  # type: ignore[arg-type]
+    monkeypatch.setattr(lsp_process_tree, "_KERNEL32", Kernel())
+    monkeypatch.setattr(lsp_process_tree, "_job_process_ids", lambda _job: ())
+    monkeypatch.setattr(lsp_process_tree, "_job_active_processes", active_processes)
+
+    with pytest.raises((OSError, TimeoutError)):
+        tree.terminate(deadline=time.monotonic() + 0.05)
+
+    assert tree.windows_job == 29
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows independent cleanup matrix")
 @pytest.mark.parametrize("failure", ["terminate", "poll", "kill", "wait"])
 def test_windows_terminate_attempts_every_independent_step_after_error(

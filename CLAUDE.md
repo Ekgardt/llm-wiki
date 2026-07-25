@@ -162,7 +162,10 @@ protects live LSP owners and retained LSP failure evidence. While ownership is l
 `run/lsp/<owner-nonce>/lease.json` is a bounded mutable live lease, refreshed every
 10 seconds with a 30 seconds expiry, and remains distinct from immutable create-only
 `owner.json` and `failure.json`. Controlled cleanup removes the lease after joining
-its heartbeat; abrupt death leaves it to expire. See
+its heartbeat; abrupt death leaves it to expire. Second-fatal recovery completes
+without caller intervention. Incomplete startups are retained in a bounded module
+registry with normal-exit and public deadline-bounded retry. Windows lease refresh
+retries only errors 5, 32, and 33 within the previous lease expiry. See
 `knowledge/notes/read-only-lsp-navigation-engine-decision.md`,
 `knowledge/notes/lsp-live-lease-decision.md`, and
 `knowledge/notes/lsp-process-containment-decision.md`.
@@ -347,7 +350,7 @@ for tests/e2e.
 ## 7. Quick command reference
 
 ```bash
-uv run pytest -q                              # run the test suite (4470 tests collected)
+uv run pytest -q                              # run the test suite (4484 tests collected)
 uv run ruff check scripts/ tests/             # Python static analysis
 uv run python scripts/lint_memory.py --scope all   # structural lint
 uv run python scripts/search_memory.py "query"     # hybrid search

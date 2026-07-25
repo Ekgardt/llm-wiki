@@ -290,11 +290,12 @@ class ProcessTree:
         if job is None:
             raise RuntimeError("Windows LSP process tree ownership was released")
         errors: list[BaseException] = []
+        snapshot_errors: list[BaseException] = []
         tracked_pids: tuple[int, ...] = ()
         try:
             tracked_pids = _job_process_ids(job)
         except BaseException as error:
-            errors.append(error)
+            snapshot_errors.append(error)
         try:
             if not _KERNEL32.TerminateJobObject(job, 1):
                 errors.append(ctypes.WinError(ctypes.get_last_error()))
@@ -330,6 +331,8 @@ class ProcessTree:
             errors.append(error)
         else:
             errors.extend(observe_errors)
+        if not complete:
+            errors[:0] = snapshot_errors
         if errors:
             raise errors[0]
         if not complete:

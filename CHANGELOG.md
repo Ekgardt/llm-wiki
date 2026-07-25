@@ -34,7 +34,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   transactions/tasks/results, the 30-day undo window, and live owners.
 - Recorded the local-filesystem requirement, current `synchronous=FULL`/no-WAL
   policy, bounded defaults and CLI overrides, cooperating-writer CAS boundary, and
-  explicit non-goals. The suite now collects **4470 tests**.
+  explicit non-goals. The suite now collects **4484 tests**.
 - Added canonical `repository-scope/v1` binding for repositories, linked worktrees,
   checkout roots, Git common directories, and captured commits. Generation readers
   reject the wrong repository/worktree scope instead of returning cross-checkout
@@ -65,10 +65,26 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Complete second-fatal LSP cleanup autonomously from the recovery owner. The
+  recovery thread quiesces its own tracked role, joins the heartbeat, releases all
+  generation owners and handles, removes the live lease, and reaches
+  `STOPPED_FAILURE` without a later caller `close()`.
+- Retry Windows LSP lease replacement only for access-denied, sharing-violation,
+  and lock-violation errors. Stop-aware waits are bounded by both the operation
+  deadline and the previously published lease expiry, so a reader cannot cause a
+  refresh to outlive the lease silently.
+- Retain incomplete LSP startup ownership in a bounded module registry before the
+  first owned mutation. Normal interpreter exit retries the registry under one
+  deadline, and `StartupCleanupError.retry_cleanup()` exposes the same bounded path
+  to callers.
+- Bound retained LSP cleanup diagnostics to one sanitized current record per step.
+  Stored records contain no raw exception, message, path, traceback, or frame graph,
+  and successful retries clear stale records.
 - Use current `ActiveProcesses`, not lifetime Job totals or a racing PID-list
   snapshot, for Windows LSP process bounds and cleanup completion. PID capture is
-  now best effort, while an unavailable, over-bound, or persistently nonzero active
-  count remains a retryable cleanup failure.
+  now best effort, and an earlier snapshot error is discarded after direct-process
+  reap plus stable active zero. An unavailable, over-bound, or persistently nonzero
+  active count remains a retryable cleanup failure.
 - Close each CPython 3.10 Windows LSP process handle after direct-process reap and
   all protocol, stderr, and exit-monitor joins. Handle-close failures now retain
   the generation, Job, lease, and `CLEANUP_PENDING` state for idempotent retry;
@@ -132,7 +148,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - **SessionStart impact advisory** — stale wiki pages from code changes.
 - **MCP config in install scripts** — Claude Code + OpenCode auto-config.
 - **Optional extras** — `hybrid`, `code-graph`, `mcp-server`, `reranker`, `full`.
-- **4470 tests**.
+- **4484 tests**.
 
 ## [3.4.0] — 2026-07-11
 
