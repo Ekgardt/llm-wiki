@@ -74,6 +74,7 @@ _HEARTBEAT_SECONDS = 10.0
 _LEASE_EXPIRY_SECONDS = 30.0
 _IDLE_SECONDS = 300.0
 _GRACEFUL_CLEANUP_SECONDS = 2.0
+_RECOVERY_RETRY_SECONDS = 0.05
 _MAX_PENDING_CHILD_HANDLES = 8
 _MAX_PENDING_TEMP_NAMES = 1
 _MAX_STARTUP_CLEANUP_OWNERS = 8
@@ -947,6 +948,7 @@ class _LifecycleCoordinator:
     )
     cleanup_result: _CleanupResult = field(default_factory=_CleanupResult)
     recovery_attempted: bool = False
+    recovery_request_nonce: str | None = None
     startup_complete: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     condition: threading.Condition = field(init=False, repr=False)
@@ -964,6 +966,9 @@ class _LifecycleCoordinator:
     cleanup_started: threading.Event = field(default_factory=threading.Event, repr=False)
     failure_queue: queue.SimpleQueue[_FailureIntent] = field(
         default_factory=queue.SimpleQueue, repr=False
+    )
+    recovery_request_pending: threading.Event = field(
+        default_factory=threading.Event, repr=False
     )
     recovery_wake: threading.Event = field(default_factory=threading.Event, repr=False)
     recovery_stop: threading.Event = field(default_factory=threading.Event, repr=False)
@@ -1599,7 +1604,6 @@ def _start_lsp_process(
         return instance
     except BaseException as startup_error:
         deadline = startup_deadline if startup_deadline is not None else time.monotonic()
-        cleanup_owned = coordinator.owner_directory is not None or instance is not None
         _remember_mandatory_terminal_failure(
             instance,
             coordinator,
@@ -1615,22 +1619,22 @@ def _start_lsp_process(
         except BaseException:
             pass
         try:
-            cleanup_errors = _drive_cleanup(
+            _drive_cleanup(
                 instance,
                 deadline,
                 terminal=True,
                 failure_code=_STARTUP_FAILED,
                 coordinator_override=coordinator,
             )
-        except BaseException as cleanup_error:
-            cleanup_errors = [cleanup_error]
+        except BaseException:
+            pass
         pending = _coordinator_has_ownership(coordinator)
-        evidence_failed = coordinator.cleanup_result.evidence == "failed"
-        if pending or evidence_failed or (cleanup_owned and cleanup_errors):
+        if pending:
             _register_startup_cleanup(coordinator)
+            evidence_failed = coordinator.cleanup_result.evidence == "failed"
             message = (
                 "LSP startup failed and retained evidence could not be written safely"
-                if evidence_failed and not pending
+                if evidence_failed
                 else "LSP startup cleanup retains retryable ownership"
             )
             error = StartupCleanupError(message, coordinator=coordinator)
@@ -1798,17 +1802,46 @@ def _queue_expired_drain(instance: LspProcess) -> None:
 
 def _recovery_loop(instance: LspProcess) -> None:
     coordinator = instance._coordinator
+    request_retry = False
+    terminal_retry_code: str | None = None
     while not coordinator.recovery_stop.is_set():
-        drain_deadline = _next_drain_deadline(instance)
-        wait_for = (
-            None
-            if drain_deadline is None
-            else max(0.0, drain_deadline - time.monotonic())
-        )
-        coordinator.recovery_wake.wait(wait_for)
+        if request_retry or terminal_retry_code is not None:
+            coordinator.recovery_wake.clear()
+            if coordinator.recovery_stop.is_set():
+                return
+            coordinator.recovery_wake.wait(_RECOVERY_RETRY_SECONDS)
+        else:
+            drain_deadline = _next_drain_deadline(instance)
+            wait_for = (
+                None
+                if drain_deadline is None
+                else max(0.0, drain_deadline - time.monotonic())
+            )
+            coordinator.recovery_wake.wait(wait_for)
         coordinator.recovery_wake.clear()
         if coordinator.recovery_stop.is_set():
             return
+
+        if terminal_retry_code is not None:
+            if _retry_autonomous_terminal_cleanup(instance, terminal_retry_code):
+                continue
+            terminal_retry_code = None
+            if coordinator.recovery_stop.is_set():
+                return
+
+        request_failure: str | None = None
+        if coordinator.recovery_request_pending.is_set():
+            maintenance_deadline = time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
+            request_retry, request_failure = _process_recovery_request(
+                instance, maintenance_deadline
+            )
+        else:
+            request_retry = False
+        if request_failure is not None:
+            terminal_retry_code = request_failure
+        if request_retry or terminal_retry_code is not None:
+            continue
+
         _queue_expired_drain(instance)
         while not coordinator.recovery_stop.is_set():
             try:
@@ -1816,24 +1849,170 @@ def _recovery_loop(instance: LspProcess) -> None:
             except queue.Empty:
                 break
             maintenance_deadline = time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
-            _process_failure_intent(instance, intent, maintenance_deadline)
+            terminal_retry_code = _process_failure_intent(
+                instance, intent, maintenance_deadline
+            )
+            if terminal_retry_code is not None:
+                break
+
+
+def _acquire_recovery_driver(
+    coordinator: _LifecycleCoordinator,
+    deadline: float,
+) -> bool:
+    while not coordinator.recovery_stop.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            _acquire_driver(
+                coordinator,
+                min(deadline, time.monotonic() + min(0.05, remaining)),
+            )
+        except TimeoutError:
+            continue
+        return True
+    return False
+
+
+def _process_recovery_request(
+    instance: LspProcess,
+    deadline: float,
+) -> tuple[bool, str | None]:
+    coordinator = instance._coordinator
+    if not _acquire_recovery_driver(coordinator, deadline):
+        return (
+            coordinator.recovery_request_pending.is_set()
+            and not coordinator.recovery_stop.is_set(),
+            None,
+        )
+    try:
+        try:
+            _acquire_lifecycle(coordinator, deadline)
+        except TimeoutError:
+            return True, None
+        try:
+            requested_nonce = coordinator.recovery_request_nonce
+            if requested_nonce is None:
+                coordinator.recovery_request_pending.clear()
+                return False, None
+            active = coordinator.active
+            if active is None or active.nonce != requested_nonce:
+                coordinator.recovery_request_nonce = None
+                coordinator.recovery_request_pending.clear()
+                _notify_lifecycle_locked(coordinator)
+                return False, None
+            if coordinator.terminal_outcome is not None:
+                coordinator.recovery_request_nonce = None
+                coordinator.recovery_request_pending.clear()
+                _notify_lifecycle_locked(coordinator)
+                return False, None
+            if coordinator.phase is not _LifecyclePhase.RECOVERY_PENDING:
+                return True, None
+        finally:
+            _release_lifecycle(coordinator)
+
+        try:
+            _restart_generation_owned(instance, deadline)
+        except BaseException:
+            _remember_mandatory_terminal_failure(
+                instance,
+                coordinator,
+                "restart_failed",
+            )
+            if coordinator.cleanup_result.ownership_pending:
+                return False, "restart_failed"
+        return False, None
+    finally:
+        _release_driver(coordinator)
+
+
+def _retry_autonomous_terminal_cleanup(
+    instance: LspProcess,
+    code: str,
+) -> bool:
+    coordinator = instance._coordinator
+    deadline = time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
+    if not _acquire_recovery_driver(coordinator, deadline):
+        return (
+            coordinator.cleanup_result.ownership_pending
+            and not coordinator.recovery_stop.is_set()
+        )
+    try:
+        try:
+            _terminal_failure_lsp_process(instance, code, deadline)
+        except BaseException as cleanup_error:
+            _remember_background_cleanup_error(coordinator, cleanup_error)
+        if not coordinator.cleanup_result.ownership_pending:
+            return False
+        return _retain_autonomous_cleanup_owners(instance)
+    finally:
+        _release_driver(coordinator)
+
+
+def _retain_autonomous_cleanup_owners(instance: LspProcess) -> bool:
+    coordinator = instance._coordinator
+    deadline = time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
+    try:
+        _acquire_driver(coordinator, deadline)
+    except TimeoutError:
+        return True
+    heartbeat: threading.Thread | None = None
+    try:
+        try:
+            _acquire_lifecycle(coordinator, deadline)
+        except TimeoutError:
+            return True
+        try:
+            if not coordinator.cleanup_result.ownership_pending:
+                return False
+            current = threading.current_thread()
+            owner = coordinator.recovery_thread
+            if owner is not None and owner is not current and owner.is_alive():
+                return False
+            coordinator.recovery_thread = current
+            coordinator.recovery_stop.clear()
+            coordinator.cleanup_result.recovery_join = "pending"
+            heartbeat_owner = coordinator.heartbeat_thread
+            if heartbeat_owner is None or not heartbeat_owner.is_alive():
+                coordinator.heartbeat_stop.clear()
+                coordinator.heartbeat_wake.clear()
+                heartbeat = threading.Thread(
+                    target=_heartbeat_loop,
+                    args=(instance,),
+                    name=f"lsp-heartbeat-{instance.owner_nonce}",
+                    daemon=True,
+                )
+                coordinator.heartbeat_thread = heartbeat
+                coordinator.cleanup_result.heartbeat_join = "pending"
+            _notify_lifecycle_locked(coordinator)
+        finally:
+            _release_lifecycle(coordinator)
+        if heartbeat is not None:
+            try:
+                heartbeat.start()
+            except BaseException as error:
+                _remember_background_cleanup_error(coordinator, error)
+        return True
+    finally:
+        _release_driver(coordinator)
 
 
 def _process_failure_intent(
     instance: LspProcess,
     intent: _FailureIntent,
     deadline: float,
-) -> None:
+) -> str | None:
     coordinator = instance._coordinator
     while True:
         if coordinator.recovery_stop.is_set():
             coordinator.failure_queue.put(intent)
-            return
+            return None
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             coordinator.failure_queue.put(intent)
             coordinator.recovery_wake.set()
-            return
+            return None
         try:
             _acquire_driver(
                 coordinator,
@@ -1844,7 +2023,7 @@ def _process_failure_intent(
         else:
             break
     try:
-        _process_failure_intent_owned(instance, intent, deadline)
+        return _process_failure_intent_owned(instance, intent, deadline)
     finally:
         _release_driver(coordinator)
 
@@ -1853,7 +2032,7 @@ def _process_failure_intent_owned(
     instance: LspProcess,
     intent: _FailureIntent,
     deadline: float,
-) -> None:
+) -> str | None:
     coordinator = instance._coordinator
     key = (intent.generation_nonce, intent.owner_fatal)
     try:
@@ -1861,7 +2040,7 @@ def _process_failure_intent_owned(
     except TimeoutError:
         coordinator.failure_queue.put(intent)
         coordinator.recovery_wake.set()
-        return
+        return None
 
     terminal = False
     restart = False
@@ -1869,18 +2048,18 @@ def _process_failure_intent_owned(
     try:
         if key in coordinator.seen_failures:
             acknowledge = True
-            return
+            return None
         if not coordinator.startup_complete:
             coordinator.failure_queue.put(intent)
             coordinator.recovery_wake.set()
-            return
+            return None
         active = coordinator.active
         if not intent.owner_fatal and (
             active is None or active.nonce != intent.generation_nonce
         ):
             coordinator.seen_failures.add(key)
             acknowledge = True
-            return
+            return None
         coordinator.seen_failures.add(key)
         acknowledge = True
         if intent.owner_fatal or coordinator.recovery_attempted or instance.restart_count >= 1:
@@ -1908,12 +2087,13 @@ def _process_failure_intent_owned(
         try:
             _restart_generation(instance, deadline)
         except BaseException:
-            try:
-                _terminal_failure_lsp_process(instance, "restart_failed", deadline)
-            except BaseException as cleanup_error:
-                _remember_background_cleanup_error(coordinator, cleanup_error)
+            _remember_mandatory_terminal_failure(
+                instance,
+                coordinator,
+                "restart_failed",
+            )
+            return "restart_failed"
     elif terminal:
-        coordinator.recovery_stop.set()
         try:
             errors = _drive_cleanup(
                 instance,
@@ -1923,9 +2103,14 @@ def _process_failure_intent_owned(
             )
         except BaseException as cleanup_error:
             _remember_background_cleanup_error(coordinator, cleanup_error)
+            if coordinator.cleanup_result.ownership_pending:
+                return coordinator.terminal_code or _PROCESS_EXITED
         else:
             if errors:
                 _remember_background_cleanup_error(coordinator, errors[0])
+            if coordinator.cleanup_result.ownership_pending:
+                return coordinator.terminal_code or _PROCESS_EXITED
+    return None
 
 
 def _remember_background_cleanup_error(
@@ -2205,11 +2390,16 @@ def _restart_lsp_process_owned(instance: LspProcess, deadline: float) -> None:
         if coordinator.recovery_attempted or instance.restart_count >= 1:
             terminal = True
         else:
+            active = coordinator.active
+            if active is None:
+                raise RuntimeError("LSP process generation is unavailable")
             coordinator.recovery_attempted = True
+            coordinator.recovery_request_nonce = active.nonce
+            coordinator.recovery_request_pending.set()
             coordinator.phase = _LifecyclePhase.RECOVERY_PENDING
             instance.state = ProcessState.DEGRADED
-            if coordinator.active is not None:
-                _mark_generation_expected_exit(coordinator.active)
+            _mark_generation_expected_exit(active)
+            coordinator.recovery_wake.set()
             _notify_lifecycle_locked(coordinator)
     finally:
         _release_lifecycle(coordinator)
@@ -2239,6 +2429,9 @@ def _restart_generation_owned(instance: LspProcess, deadline: float) -> None:
             raise RuntimeError("LSP process is closed")
         old = coordinator.active
         if old is not None:
+            if coordinator.recovery_request_nonce == old.nonce:
+                coordinator.recovery_request_nonce = None
+                coordinator.recovery_request_pending.clear()
             _mark_generation_expected_exit(old)
             coordinator.retired.append(old)
             coordinator.active = None
@@ -3154,6 +3347,8 @@ def _drive_cleanup_owned(
         ):
             coordinator.active = None
         if terminal:
+            coordinator.recovery_request_nonce = None
+            coordinator.recovery_request_pending.clear()
             with coordinator.terminal_state_lock:
                 success_committed = coordinator.success_committed
                 mandatory_failure_pending = (

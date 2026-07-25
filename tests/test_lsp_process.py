@@ -1571,12 +1571,66 @@ def test_protocol_startup_cleanup_owner_is_adopted_for_coordinator_retry(
     assert retained.stop_calls == 1
     assert retained.finish_calls == 1
     assert coordinator.phase is lsp_process._LifecyclePhase.CLEANUP_PENDING
+    assert lsp_process._coordinator_has_ownership(coordinator)
     assert coordinator in lsp_process._pending_startup_cleanup_snapshot()
 
     retained.released = True
     raised.value.retry_cleanup(time.monotonic() + 5)
     assert not lsp_process._coordinator_has_ownership(coordinator)
     assert coordinator not in lsp_process._pending_startup_cleanup_snapshot()
+
+
+def test_released_startup_failures_do_not_exhaust_cleanup_registry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: list[lsp_process._LifecycleCoordinator] = []
+    failures: list[BaseException] = []
+
+    def fail_workers(
+        instance: LspProcess,
+        _deadline: float | None = None,
+    ) -> None:
+        coordinator = instance._coordinator
+        protocol = instance.protocol
+        stop_io = protocol._stop_io_for_process_cleanup
+        first = True
+
+        def transient_stop_error() -> None:
+            nonlocal first
+            if first:
+                first = False
+                raise OSError("transient protocol stop failure")
+            stop_io()
+
+        captured.append(coordinator)
+        monkeypatch.setattr(protocol, "_stop_io_for_process_cleanup", transient_stop_error)
+        raise RuntimeError("startup worker failed after ownership was released")
+
+    monkeypatch.setattr(lsp_process, "_start_lifecycle_workers", fail_workers)
+    try:
+        for index in range(lsp_process._MAX_STARTUP_CLEANUP_OWNERS + 1):
+            owner = tmp_path / f"{index + 100:032x}"
+            try:
+                LspProcess.start(_command("--lifecycle"), cwd=tmp_path, owner_root=owner)
+            except BaseException as error:
+                failures.append(error)
+
+        assert len(captured) == lsp_process._MAX_STARTUP_CLEANUP_OWNERS + 1
+        assert len(failures) == len(captured)
+        assert all(type(error) is RuntimeError for error in failures)
+        assert all(
+            str(error) == "startup worker failed after ownership was released"
+            for error in failures
+        )
+        assert all(
+            not lsp_process._coordinator_has_ownership(coordinator)
+            for coordinator in captured
+        )
+        assert lsp_process._pending_startup_cleanup_snapshot() == ()
+    finally:
+        for coordinator in captured:
+            lsp_process._unregister_startup_cleanup(coordinator)
 
 
 def test_startup_registry_atexit_hook_retries_owned_cleanup(tmp_path: Path) -> None:
@@ -5311,6 +5365,8 @@ def test_expired_deadline_waiting_for_transition_lock_changes_nothing(
 ) -> None:
     process = _start(tmp_path, "--lifecycle")
     coordinator = process._coordinator
+    generation = coordinator.active
+    assert generation is not None
     acquired = threading.Event()
     release = threading.Event()
     before = (
@@ -5318,6 +5374,11 @@ def test_expired_deadline_waiting_for_transition_lock_changes_nothing(
         process.protocol,
         process.generation_nonce,
         process.restart_count,
+        process.state,
+        coordinator.phase,
+        coordinator.recovery_attempted,
+        generation.expected_exit.is_set(),
+        coordinator.recovery_wake.is_set(),
     )
 
     def hold_transition() -> None:
@@ -5338,12 +5399,89 @@ def test_expired_deadline_waiting_for_transition_lock_changes_nothing(
             process.protocol,
             process.generation_nonce,
             process.restart_count,
+            process.state,
+            coordinator.phase,
+            coordinator.recovery_attempted,
+            generation.expected_exit.is_set(),
+            coordinator.recovery_wake.is_set(),
         ) == before
         assert coordinator.candidate is None
     finally:
         release.set()
         holder.join(1)
         process.close(time.monotonic() + 5)
+
+
+def test_explicit_restart_timeout_after_pending_hands_off_one_recovery_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle")
+    coordinator = process._coordinator
+    recovery = coordinator.recovery_thread
+    assert recovery is not None
+    first_generation = process.generation_nonce
+    seize = threading.Event()
+    held = threading.Event()
+    release = threading.Event()
+    restart_thread = threading.current_thread()
+    release_lifecycle = lsp_process._release_lifecycle
+    prepare_generation = lsp_process._prepare_generation
+    prepared_by: list[threading.Thread] = []
+    armed = True
+
+    def hold_transition() -> None:
+        assert seize.wait(2)
+        with coordinator.condition:
+            held.set()
+            assert release.wait(5)
+
+    def release_then_contend(current: lsp_process._LifecycleCoordinator) -> None:
+        nonlocal armed
+        pending = (
+            current is coordinator
+            and armed
+            and threading.current_thread() is restart_thread
+            and current.phase is lsp_process._LifecyclePhase.RECOVERY_PENDING
+        )
+        release_lifecycle(current)
+        if pending:
+            armed = False
+            seize.set()
+            assert held.wait(1)
+
+    def observe_prepare(*args: object, **kwargs: object) -> lsp_process._Generation:
+        prepared_by.append(threading.current_thread())
+        return prepare_generation(*args, **kwargs)  # type: ignore[arg-type]
+
+    holder = threading.Thread(target=hold_transition)
+    holder.start()
+    monkeypatch.setattr(lsp_process, "_release_lifecycle", release_then_contend)
+    monkeypatch.setattr(lsp_process, "_prepare_generation", observe_prepare)
+
+    try:
+        with pytest.raises(TimeoutError, match="lifecycle transition lock"):
+            process.restart(time.monotonic() + 0.1)
+
+        assert coordinator.phase is lsp_process._LifecyclePhase.RECOVERY_PENDING
+        assert process.restart_count == 0
+        assert prepared_by == []
+
+        release.set()
+        holder.join(1)
+
+        assert _coordinator_wait(process, lambda: process.restart_count == 1, timeout=5)
+        assert coordinator.phase is lsp_process._LifecyclePhase.RUNNING
+        assert process.generation_nonce != first_generation
+        assert prepared_by == [recovery]
+        assert process.request("echo", {"ok": True}, deadline=time.monotonic() + 2) == {
+            "ok": True
+        }
+    finally:
+        release.set()
+        holder.join(1)
+        if lsp_process._coordinator_has_ownership(coordinator):
+            process.close(time.monotonic() + 5)
 
 
 def test_terminal_intent_lock_respects_deadline_and_cannot_commit_success(
@@ -5575,6 +5713,9 @@ def test_autonomous_restart_failure_with_expired_transition_lock_is_sticky(
 ) -> None:
     process = _start(tmp_path, "--lifecycle")
     coordinator = process._coordinator
+    recovery = coordinator.recovery_thread
+    heartbeat = coordinator.heartbeat_thread
+    assert recovery is not None and heartbeat is not None
     generation = coordinator.active
     assert generation is not None
     generation_nonce = process.generation_nonce
@@ -5632,11 +5773,19 @@ def test_autonomous_restart_failure_with_expired_transition_lock_is_sticky(
         assert process.owner_root.is_dir()
         assert (process.owner_root / "owner.json").is_file()
         assert (process.owner_root / "lease.json").is_file()
+        assert recovery.is_alive()
+        assert heartbeat.is_alive()
 
         release.set()
         holders[0].join(1)
-        with pytest.raises(RuntimeError, match="background cleanup failed"):
-            process.close(time.monotonic() + 5)
+
+        assert _coordinator_wait(
+            process,
+            lambda: coordinator.phase is lsp_process._LifecyclePhase.STOPPED_FAILURE,
+            timeout=5,
+        )
+        recovery.join(1)
+        heartbeat.join(1)
 
         failure = json.loads((process.owner_root / "failure.json").read_bytes())
         lsp_process._validate_failure_record(
@@ -5649,6 +5798,9 @@ def test_autonomous_restart_failure_with_expired_transition_lock_is_sticky(
         assert coordinator.phase is lsp_process._LifecyclePhase.STOPPED_FAILURE
         assert process.owner_root.is_dir()
         assert not (process.owner_root / "lease.json").exists()
+        assert not recovery.is_alive()
+        assert not heartbeat.is_alive()
+        assert not lsp_process._coordinator_has_ownership(coordinator)
     finally:
         release.set()
         for holder in holders:
@@ -5659,6 +5811,84 @@ def test_autonomous_restart_failure_with_expired_transition_lock_is_sticky(
             except RuntimeError:
                 if lsp_process._coordinator_has_ownership(coordinator):
                     process.close(time.monotonic() + 5)
+
+
+def test_persistent_autonomous_cleanup_fault_retries_with_fresh_bounded_budgets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(lsp_process, "_GRACEFUL_CLEANUP_SECONDS", 0.02)
+    monkeypatch.setattr(lsp_process, "_RECOVERY_RETRY_SECONDS", 0.04, raising=False)
+    process = _start(tmp_path, "--lifecycle")
+    coordinator = process._coordinator
+    recovery = coordinator.recovery_thread
+    heartbeat = coordinator.heartbeat_thread
+    generation = coordinator.active
+    assert recovery is not None and heartbeat is not None and generation is not None
+    held = threading.Event()
+    release = threading.Event()
+    first_cleanup = threading.Event()
+    terminal_attempts: list[tuple[float, float]] = []
+    terminal_failure = lsp_process._terminal_failure_lsp_process
+
+    def hold_transition() -> None:
+        with coordinator.condition:
+            held.set()
+            assert release.wait(5)
+
+    holder = threading.Thread(target=hold_transition)
+
+    def fail_restart(_instance: LspProcess, deadline: float) -> None:
+        holder.start()
+        assert held.wait(1)
+        threading.Event().wait(max(0.0, deadline - time.monotonic()) + 0.005)
+        raise RuntimeError("persistent autonomous restart failure")
+
+    def observe_terminal_failure(
+        instance: LspProcess,
+        code: str,
+        deadline: float,
+    ) -> None:
+        terminal_attempts.append((time.monotonic(), deadline))
+        first_cleanup.set()
+        terminal_failure(instance, code, deadline)
+
+    monkeypatch.setattr(lsp_process, "_restart_generation", fail_restart)
+    monkeypatch.setattr(
+        lsp_process,
+        "_terminal_failure_lsp_process",
+        observe_terminal_failure,
+    )
+
+    try:
+        assert lsp_process._queue_generation_failure(
+            coordinator, generation, "injected persistent restart failure"
+        )
+        assert first_cleanup.wait(1)
+        threading.Event().wait(0.24)
+
+        assert 2 <= len(terminal_attempts) <= 6
+        assert all(deadline > started for started, deadline in terminal_attempts)
+        assert recovery.is_alive()
+        assert heartbeat.is_alive()
+        assert coordinator.recovery_thread is recovery
+        assert coordinator.heartbeat_thread is heartbeat
+        assert coordinator.cleanup_result.ownership_pending is True
+        assert (process.owner_root / "lease.json").is_file()
+
+        release.set()
+        holder.join(1)
+        assert _coordinator_wait(
+            process,
+            lambda: coordinator.phase is lsp_process._LifecyclePhase.STOPPED_FAILURE,
+            timeout=5,
+        )
+        assert not (process.owner_root / "lease.json").exists()
+    finally:
+        release.set()
+        holder.join(1)
+        if lsp_process._coordinator_has_ownership(coordinator):
+            process.close(time.monotonic() + 5)
 
 
 def test_second_explicit_restart_failure_with_held_transition_lock_is_sticky(

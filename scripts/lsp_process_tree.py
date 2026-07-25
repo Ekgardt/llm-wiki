@@ -32,6 +32,7 @@ if os.name == "nt":
     _JOB_OBJECT_BASIC_PROCESS_ID_LIST = 3
     _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
     _MAX_JOB_PROCESS_IDS = 4096
+    _WINDOWS_PID_SETTLE_SECONDS = 0.05
     _SYNCHRONIZE = 0x00100000
     _WAIT_OBJECT_0 = 0x00000000
     _WAIT_TIMEOUT = 0x00000102
@@ -531,6 +532,7 @@ if os.name == "nt":
         errors: list[BaseException] = []
         query_failed = False
         empty_observations = 0
+        empty_since: float | None = None
         remaining_pids = set(tracked_pids)
         while True:
             direct_reaped = process.poll() is not None
@@ -550,11 +552,18 @@ if os.name == "nt":
                 if not alive:
                     remaining_pids.remove(pid)
             if direct_reaped and active == 0:
+                now = time.monotonic()
+                if empty_since is None:
+                    empty_since = now
                 empty_observations += 1
-                if empty_observations >= 2:
+                pid_settled = not remaining_pids or (
+                    now - empty_since >= _WINDOWS_PID_SETTLE_SECONDS
+                )
+                if empty_observations >= 2 and pid_settled:
                     return True, errors
             else:
                 empty_observations = 0
+                empty_since = None
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return False, errors

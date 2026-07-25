@@ -34,7 +34,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   transactions/tasks/results, the 30-day undo window, and live owners.
 - Recorded the local-filesystem requirement, current `synchronous=FULL`/no-WAL
   policy, bounded defaults and CLI overrides, cooperating-writer CAS boundary, and
-  explicit non-goals. The suite now collects **4486 tests**.
+  explicit non-goals. The suite now collects **4489 tests**.
 - Added canonical `repository-scope/v1` binding for repositories, linked worktrees,
   checkout roots, Git common directories, and captured commits. Generation readers
   reject the wrong repository/worktree scope instead of returning cross-checkout
@@ -65,6 +65,11 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Publish explicit LSP recovery transitions with one sticky worker handoff. Recovery
+  retries incomplete restart-failure cleanup with fresh bounded deadlines and event
+  backoff, while the startup registry retains only coordinators with live ownership.
+  Windows Job cleanup also gives captured process identities a bounded settle window
+  after stable active-zero accounting without making reusable PIDs authoritative.
 - Preserve exact startup and restart failure intent before deadline-bounded lifecycle
   transitions. Cleanup retries can no longer commit success, delete scratch, or drop
   startup recovery before immutable failure evidence reaches `STOPPED_FAILURE`.
@@ -151,7 +156,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - **SessionStart impact advisory** — stale wiki pages from code changes.
 - **MCP config in install scripts** — Claude Code + OpenCode auto-config.
 - **Optional extras** — `hybrid`, `code-graph`, `mcp-server`, `reranker`, `full`.
-- **4486 tests**.
+- **4489 tests**.
 
 ## [3.4.0] — 2026-07-11
 
