@@ -28,7 +28,6 @@ _MAX_PROVIDER_URI = 16 * 1024
 _MAX_DIRECTORY_ENTRIES = 100_000
 _MALFORMED_PERCENT = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _ENCODED_SEPARATOR = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
-_RESIDUAL_PERCENT_ESCAPE = re.compile(r"%[0-9A-Fa-f]{2}")
 _WINDOWS_DRIVE_PATH = re.compile(r"^[A-Za-z]:/")
 _WINDOWS_RESERVED = frozenset(
     {
@@ -49,11 +48,6 @@ _CREDENTIAL_ASSIGNMENT = re.compile(
     r"(?i)(?<![\w])(?P<quote>[\"']?)(?:api_key|authorization|password|secret|token)"
     r"(?P=quote)\s*[:=]\s*"
 )
-_URL_USERINFO = re.compile(
-    r"(?i)(?P<scheme>\b[a-z][a-z0-9+.-]{0,31}://)[^/\s\r\n]+@"
-)
-
-
 class PathContainmentError(ValueError):
     """A source path cannot be proven to remain in its repository checkout."""
 
@@ -108,7 +102,7 @@ def _is_control(character: str) -> bool:
     return (
         codepoint < 32
         or 127 <= codepoint <= 159
-        or unicodedata.category(character) in {"Zl", "Zp"}
+        or unicodedata.category(character) in {"Cf", "Zl", "Zp"}
     )
 
 
@@ -203,19 +197,40 @@ def _assert_ancestry(root: Path, target: Path) -> None:
         raise PathContainmentError("repository source ancestry is invalid")
 
 
-def _revalidate_posix(
+def _open_posix_checkout(
     root: Path,
-    root_identity: tuple[object, ...],
-    steps: tuple[_TraversalStep, ...],
+    owned: _OwnedHandles,
+) -> tuple[int, tuple[object, ...], tuple[_TraversalStep, ...]]:
+    directory_flags = _posix_directory_flags()
+    current = owned.own(os.open("/", directory_flags))
+    filesystem_root_identity = _posix_identity(os.fstat(current))
+    steps: list[_TraversalStep] = []
+    for component in root.parts[1:]:
+        opened = owned.own(os.open(component, directory_flags, dir_fd=current))
+        info = os.fstat(opened)
+        if not stat.S_ISDIR(info.st_mode):
+            raise PathContainmentError("repository checkout root is not a directory")
+        steps.append(_TraversalStep(component, _posix_identity(info), True))
+        current = opened
+    return current, filesystem_root_identity, tuple(steps)
+
+
+def _revalidate_posix(
+    filesystem_root_identity: tuple[object, ...],
+    root_steps: tuple[_TraversalStep, ...],
+    source_steps: tuple[_TraversalStep, ...],
 ) -> None:
     directory_flags = _posix_directory_flags()
     file_flags = _posix_file_flags()
     with _OwnedHandles(os.close) as owned:
-        current = owned.own(os.open(root, directory_flags))
+        current = owned.own(os.open("/", directory_flags))
         root_info = os.fstat(current)
-        if not stat.S_ISDIR(root_info.st_mode) or _posix_identity(root_info) != root_identity:
-            raise PathContainmentError("repository checkout changed during traversal")
-        for step in steps:
+        if (
+            not stat.S_ISDIR(root_info.st_mode)
+            or _posix_identity(root_info) != filesystem_root_identity
+        ):
+            raise PathContainmentError("filesystem root changed during traversal")
+        for step in (*root_steps, *source_steps):
             flags = directory_flags if step.directory else file_flags
             opened = owned.own(os.open(step.name, flags, dir_fd=current))
             info = os.fstat(opened)
@@ -239,15 +254,12 @@ def _resolve_posix(
     file_flags = _posix_file_flags()
 
     with _OwnedHandles(os.close) as owned:
-        root_descriptor = owned.own(os.open(root, directory_flags))
+        root_descriptor, filesystem_root_identity, root_steps = _open_posix_checkout(
+            root, owned
+        )
         root_info = os.fstat(root_descriptor)
         if not stat.S_ISDIR(root_info.st_mode):
             raise PathContainmentError("repository checkout root is not a directory")
-        root_identity = _posix_identity(root_info)
-        canonical_root = root.resolve(strict=True)
-        canonical_descriptor = owned.own(os.open(canonical_root, directory_flags))
-        if _posix_identity(os.fstat(canonical_descriptor)) != root_identity:
-            raise PathContainmentError("repository checkout root changed")
 
         current = root_descriptor
         steps: list[_TraversalStep] = []
@@ -287,38 +299,16 @@ def _resolve_posix(
 
         _resolution_barrier()
         step_tuple = tuple(steps)
-        _revalidate_posix(canonical_root, root_identity, step_tuple)
-
-        existing_directory_steps = tuple(step for step in steps if step.directory)
-        nearest_path = canonical_root.joinpath(
-            *(step.name for step in existing_directory_steps)
-        )
-        canonical_parent = nearest_path.resolve(strict=True)
-        _assert_ancestry(canonical_root, canonical_parent)
-        parent_probe = owned.own(os.open(canonical_parent, directory_flags))
-        expected_parent = (
-            existing_directory_steps[-1].identity
-            if existing_directory_steps
-            else root_identity
-        )
-        if _posix_identity(os.fstat(parent_probe)) != expected_parent:
-            raise PathContainmentError("repository source parent changed")
+        _revalidate_posix(filesystem_root_identity, root_steps, step_tuple)
 
         if missing:
             try:
-                os.stat(missing[0], dir_fd=parent_probe, follow_symlinks=False)
+                os.stat(missing[0], dir_fd=current, follow_symlinks=False)
             except FileNotFoundError:
                 pass
             else:
                 raise PathContainmentError("repository source appeared during traversal")
-            absolute_path = canonical_parent.joinpath(*missing)
-        else:
-            candidate = canonical_root.joinpath(*parts)
-            absolute_path = candidate.resolve(strict=True)
-            _assert_ancestry(canonical_root, absolute_path)
-            final_probe = owned.own(os.open(absolute_path, file_flags))
-            if _posix_identity(os.fstat(final_probe)) != steps[-1].identity:
-                raise PathContainmentError("repository source changed")
+        absolute_path = root.joinpath(*parts)
 
         return RepositorySource(
             repository.repository_id,
@@ -569,8 +559,6 @@ def _decoded_provider_uri(uri: object) -> tuple[str, str] | None:
         or parsed.fragment
         or authority.casefold() not in {"", "localhost"}
         or "@" in authority
-        or _RESIDUAL_PERCENT_ESCAPE.search(authority)
-        or _RESIDUAL_PERCENT_ESCAPE.search(path)
         or any(_is_control(character) for character in authority + path)
         or "\\" in path
         or path.startswith("//")
@@ -656,6 +644,46 @@ def _redact_assignments(value: str) -> str:
     return "".join(pieces)
 
 
+def _redact_url_userinfo(value: str) -> str:
+    def scheme_character(character: str) -> bool:
+        return character.isascii() and (
+            character.isalpha() or character.isdigit() or character in "+.-"
+        )
+
+    pieces: list[str] = []
+    cursor = 0
+    index = 0
+    while index < len(value):
+        if not (
+            value[index].isascii()
+            and value[index].isalpha()
+            and (index == 0 or not scheme_character(value[index - 1]))
+        ):
+            index += 1
+            continue
+        scheme_end = index + 1
+        while scheme_end < len(value) and scheme_character(value[scheme_end]):
+            scheme_end += 1
+        if value[scheme_end : scheme_end + 3] != "://":
+            index = scheme_end
+            continue
+        authority_start = scheme_end + 3
+        authority_end = authority_start
+        while authority_end < len(value):
+            character = value[authority_end]
+            if character in "/?#" or character.isspace() or _is_control(character):
+                break
+            authority_end += 1
+        userinfo_end = value.rfind("@", authority_start, authority_end)
+        if userinfo_end >= authority_start:
+            pieces.append(value[cursor:authority_start])
+            pieces.append("<redacted>@")
+            cursor = userinfo_end + 1
+        index = authority_end
+    pieces.append(value[cursor:])
+    return "".join(pieces)
+
+
 def _path_variants(path: Path) -> tuple[str, ...]:
     variants = {str(path), path.as_posix()}
     raw = str(path)
@@ -677,6 +705,26 @@ def _path_variants(path: Path) -> tuple[str, ...]:
     return tuple(sorted((item for item in variants if len(item) > 1), key=len, reverse=True))
 
 
+def _uri_character_pattern(character: str) -> str:
+    encoded = "".join(f"%{byte:02X}" for byte in character.encode("utf-8"))
+    return f"(?:{re.escape(character)}|(?i:{encoded}))"
+
+
+def _encoded_file_uri_pattern(path: Path) -> re.Pattern[str]:
+    windows_path = bool(PureWindowsPath(str(path)).drive)
+    if windows_path:
+        logical_path = PureWindowsPath(str(path)).as_posix()
+    else:
+        logical_path = PurePosixPath(str(path)).as_posix()
+    path_pattern = "".join(
+        _uri_character_pattern(character) for character in logical_path
+    )
+    if windows_path:
+        path_pattern = f"/?(?i:{path_pattern})"
+    prefix = r"(?i:file:)(?://(?i:localhost)?)?"
+    return re.compile(prefix + path_pattern)
+
+
 def _redact_path(value: str, path: Path, marker: str) -> str:
     windows_path = bool(PureWindowsPath(str(path)).drive)
     for variant in _path_variants(path):
@@ -686,7 +734,7 @@ def _redact_path(value: str, path: Path, marker: str) -> str:
             value,
             flags=re.IGNORECASE if windows_path or variant.startswith("file:") else 0,
         )
-    return value
+    return _encoded_file_uri_pattern(path).sub(lambda _match: marker, value)
 
 
 def _sanitize_controls(value: str) -> str:
@@ -709,9 +757,7 @@ def redact_lsp_text(
         repository = _require_repository(repository)
 
     redacted = _redact_assignments(value)
-    redacted = _URL_USERINFO.sub(
-        lambda match: match.group("scheme") + "<redacted>@", redacted
-    )
+    redacted = _redact_url_userinfo(redacted)
     if repository is not None:
         redacted = _redact_path(
             redacted, Path(repository.checkout_root), "<repository>"

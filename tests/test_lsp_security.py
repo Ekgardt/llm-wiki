@@ -6,7 +6,9 @@ import inspect
 import os
 import re
 import socket
+import stat
 import subprocess
+import unicodedata
 from collections import Counter
 from dataclasses import FrozenInstanceError, fields
 from pathlib import Path
@@ -238,6 +240,93 @@ def test_parent_symlink_is_rejected(repository: Path, scope: RepositoryScope) ->
         resolve_repository_source(scope, "linked/api.py")
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor traversal")
+@pytest.mark.parametrize(
+    ("relative_path", "must_exist"),
+    [("pkg/api.py", True), ("pkg/generated.py", False)],
+)
+def test_posix_checkout_ancestor_symlink_is_rejected(
+    tmp_path: Path,
+    relative_path: str,
+    must_exist: bool,
+) -> None:
+    ancestor = tmp_path / "trusted"
+    repository = ancestor / "repository"
+    (repository / "pkg").mkdir(parents=True)
+    (repository / "pkg" / "api.py").write_text("pass\n", encoding="utf-8")
+    scope = resolve_repository_scope(repository)
+    moved = tmp_path / "trusted-original"
+    ancestor.rename(moved)
+    _symlink_or_skip(ancestor, moved, directory=True)
+
+    with pytest.raises(PathContainmentError):
+        resolve_repository_source(scope, relative_path, must_exist=must_exist)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor traversal")
+def test_posix_checkout_ancestor_replacement_is_rejected_and_descriptors_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ancestor = tmp_path / "trusted"
+    repository = ancestor / "repository"
+    (repository / "pkg").mkdir(parents=True)
+    (repository / "pkg" / "api.py").write_text("pass\n", encoding="utf-8")
+    scope = resolve_repository_scope(repository)
+    moved = tmp_path / "trusted-original"
+    opened: list[int] = []
+    closed: list[int] = []
+    real_open = os.open
+    real_close = os.close
+
+    def tracking_open(*args, **kwargs) -> int:
+        descriptor = real_open(*args, **kwargs)
+        opened.append(descriptor)
+        return descriptor
+
+    def tracking_close(descriptor: int) -> None:
+        closed.append(descriptor)
+        real_close(descriptor)
+
+    def substitute() -> None:
+        ancestor.rename(moved)
+        ancestor.symlink_to(moved, target_is_directory=True)
+
+    monkeypatch.setattr(lsp_security.os, "open", tracking_open)
+    monkeypatch.setattr(lsp_security.os, "close", tracking_close)
+    monkeypatch.setattr(lsp_security, "_resolution_barrier", substitute)
+
+    with pytest.raises(PathContainmentError):
+        resolve_repository_source(scope, "pkg/api.py")
+
+    assert Counter(opened) == Counter(closed)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor traversal")
+def test_posix_checkout_walk_opens_only_root_or_handle_relative_components(
+    scope: RepositoryScope,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, int | None]] = []
+    real_open = os.open
+
+    def tracking_open(path, flags, *args, **kwargs) -> int:
+        calls.append((os.fspath(path), kwargs.get("dir_fd")))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(lsp_security.os, "open", tracking_open)
+
+    resolve_repository_source(scope, "pkg/api.py")
+
+    assert calls
+    assert all(
+        (path == "/" and directory is None)
+        or (not os.path.isabs(path) and directory is not None)
+        for path, directory in calls
+    )
+    assert scope.checkout_root not in {path for path, _directory in calls}
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction")
 def test_windows_junction_parent_is_rejected(
     repository: Path, scope: RepositoryScope
@@ -249,16 +338,20 @@ def test_windows_junction_parent_is_rejected(
     outside.mkdir()
     (outside / "api.py").write_text("secret = True\n", encoding="utf-8")
     junction = repository / "junction"
-    command = f'mklink /J "{junction}" "{outside}"'
     created = subprocess.run(
-        ["cmd.exe", "/d", "/s", "/c", command],
+        ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(outside)],
         stdin=subprocess.DEVNULL,
         capture_output=True,
         check=False,
         timeout=10,
     )
     if created.returncode != 0:
-        pytest.skip("junction creation unavailable")
+        output = (created.stdout + created.stderr).decode(errors="replace")
+        if "privilege" in output.casefold():
+            pytest.skip("junction creation privilege unavailable")
+        pytest.fail(f"junction creation failed: {output}")
+    assert junction.exists()
+    assert os.lstat(junction).st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
 
     with pytest.raises(PathContainmentError):
         resolve_repository_source(scope, "junction/api.py")
@@ -361,6 +454,18 @@ def test_provider_uri_normalizes_to_canonical_repository_source(
     assert normalize_provider_uri(scope, expected.uri) == expected
     localhost = expected.uri.replace("file://", "file://localhost", 1)
     assert normalize_provider_uri(scope, localhost) == expected
+
+
+def test_provider_uri_round_trips_literal_percent_escape_filename(
+    repository: Path,
+    scope: RepositoryScope,
+) -> None:
+    target = repository / "pkg" / "percent%20name.py"
+    target.write_text("pass\n", encoding="utf-8")
+    expected = resolve_repository_source(scope, "pkg/percent%20name.py")
+    assert "%2520" in expected.uri
+
+    assert normalize_provider_uri(scope, expected.uri) == expected
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows drive URI variants")
@@ -557,6 +662,15 @@ def test_redaction_removes_url_userinfo(value: str) -> None:
     assert "p@ss" not in result
 
 
+def test_redaction_removes_url_userinfo_from_long_rfc3986_scheme() -> None:
+    scheme = "a" * 256
+    value = f"{scheme}://alice:hunter2@example.test/private"
+
+    result = redact_lsp_text(value)
+
+    assert result == f"{scheme}://<redacted>@example.test/private"
+
+
 def test_redaction_removes_repository_and_home_native_and_uri_paths(
     scope: RepositoryScope,
 ) -> None:
@@ -613,6 +727,67 @@ def test_redaction_removes_localhost_file_uri_roots(scope: RepositoryScope) -> N
     assert "<home>" in result
 
 
+def _encode_alternating_uri_letters(uri: str) -> str:
+    pieces = [uri[:5]]
+    encode = True
+    index = 5
+    while index < len(uri):
+        character = uri[index]
+        if character == "%" and re.match(r"[0-9A-Fa-f]{2}", uri[index + 1 : index + 3]):
+            pieces.append(uri[index : index + 3])
+            index += 3
+            continue
+        if character.isascii() and character.isalpha() and encode:
+            pieces.append(f"%{ord(character):02X}")
+            encode = False
+        else:
+            pieces.append(character)
+            if character.isascii() and character.isalpha():
+                encode = True
+        index += 1
+    return "".join(pieces)
+
+
+def test_redaction_removes_arbitrarily_percent_encoded_repository_and_home_uris(
+    scope: RepositoryScope,
+) -> None:
+    repository_uri = _encode_alternating_uri_letters(
+        path_to_file_uri(Path(scope.checkout_root))
+    )
+    home_uri = _encode_alternating_uri_letters(path_to_file_uri(Path.home().absolute()))
+
+    result = redact_lsp_text(
+        f"source={repository_uri}/pkg/api.py home={home_uri}/.ssh/config",
+        repository=scope,
+    )
+
+    assert repository_uri not in result
+    assert home_uri not in result
+    assert "<repository>" in result
+    assert "<home>" in result
+
+
+def test_redaction_handles_mixed_literal_utf8_uri_before_truncation(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "projects" / "répository"
+    repository.mkdir(parents=True)
+    scope = resolve_repository_scope(repository)
+    encoded = path_to_file_uri(repository)
+    mixed = encoded.replace("projects", "%70ro%6Aects").replace("%C3%A9", "é")
+    assert mixed != encoded
+
+    result = redact_lsp_text(
+        "x" * 1000 + " " + mixed + "/%GG\x00",
+        repository=scope,
+    )
+
+    assert len(result) <= 1024
+    assert "<repository>" in result
+    assert mixed not in result
+    assert "\x00" not in result
+
+
 def test_redaction_neutralizes_cr_lf_and_control_injection() -> None:
     value = "first\r\nforged=entry\t\x00\x1b\x7f\x85\u2028\u2029last"
 
@@ -621,6 +796,16 @@ def test_redaction_neutralizes_cr_lf_and_control_injection() -> None:
     assert not any(ord(character) < 32 or 127 <= ord(character) <= 159 for character in result)
     assert "\u2028" not in result and "\u2029" not in result
     assert "forged=entry" in result
+
+
+def test_redaction_neutralizes_unicode_format_and_bidi_controls() -> None:
+    controls = "\u200b\u200d\u202e\u2066\ufeff"
+    assert all(unicodedata.category(character) == "Cf" for character in controls)
+
+    result = redact_lsp_text("before" + controls + "after")
+
+    assert not any(unicodedata.category(character) == "Cf" for character in result)
+    assert result == "before" + "<control>" * len(controls) + "after"
 
 
 def test_redaction_happens_before_sanitized_output_is_truncated() -> None:
@@ -718,25 +903,28 @@ def test_posix_parent_substitution_is_detected_and_descriptors_close(
 
 
 def _track_windows_handles(monkeypatch: pytest.MonkeyPatch) -> tuple[list[int], list[int]]:
-    opened: list[int] = []
+    owned: list[int] = []
     closed: list[int] = []
-    for name in ("open_directory_path", "open_directory", "open_file"):
-        original = getattr(windows_workspace, name)
+    active: set[int] = set()
+    original_own = lsp_security._OwnedHandles.own
 
-        def tracking_open(*args, _original=original, **kwargs) -> int:
-            handle = _original(*args, **kwargs)
-            opened.append(handle)
-            return handle
+    def tracking_own(self, handle: int) -> int:
+        result = original_own(self, handle)
+        owned.append(handle)
+        active.add(handle)
+        return result
 
-        monkeypatch.setattr(windows_workspace, name, tracking_open)
     original_close = windows_workspace.close_handle
 
     def tracking_close(handle: int) -> None:
-        closed.append(handle)
         original_close(handle)
+        if handle in active:
+            active.remove(handle)
+            closed.append(handle)
 
+    monkeypatch.setattr(lsp_security._OwnedHandles, "own", tracking_own)
     monkeypatch.setattr(windows_workspace, "close_handle", tracking_close)
-    return opened, closed
+    return owned, closed
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows handle traversal")
@@ -757,7 +945,8 @@ def test_windows_handles_close_on_failure(
     with pytest.raises(PathContainmentError):
         resolve_repository_source(scope, relative_path)
 
-    assert Counter(opened) == (Counter(opened) & Counter(closed))
+    assert Counter(opened) == Counter(closed)
+    assert all(count == 1 for count in Counter(opened).values())
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows handle traversal")
@@ -796,7 +985,41 @@ def test_windows_parent_identity_substitution_is_detected_and_handles_close(
     with pytest.raises(PathContainmentError):
         resolve_repository_source(scope, "pkg/api.py")
 
-    assert Counter(opened) == (Counter(opened) & Counter(closed))
+    assert Counter(opened) == Counter(closed)
+    assert all(count == 1 for count in Counter(opened).values())
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle traversal")
+def test_windows_thousand_failures_do_not_grow_native_handle_count(
+    scope: RepositoryScope,
+) -> None:
+    supported, reason = windows_workspace.capability()
+    if not supported:
+        pytest.skip(reason or "Windows handle-relative APIs unavailable")
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_current_process = kernel32.GetCurrentProcess
+    get_current_process.restype = wintypes.HANDLE
+    get_handle_count = kernel32.GetProcessHandleCount
+    get_handle_count.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    get_handle_count.restype = wintypes.BOOL
+
+    def handle_count() -> int:
+        count = wintypes.DWORD()
+        if not get_handle_count(get_current_process(), ctypes.byref(count)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return int(count.value)
+
+    with pytest.raises(PathContainmentError):
+        resolve_repository_source(scope, "missing.py")
+    before = handle_count()
+    for _index in range(1000):
+        with pytest.raises(PathContainmentError):
+            resolve_repository_source(scope, "missing.py")
+
+    assert handle_count() == before
 
 
 def test_security_boundary_documents_trusted_repository_not_sandbox() -> None:
