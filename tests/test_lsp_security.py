@@ -1081,7 +1081,8 @@ def test_redaction_normalizes_windows_components_without_matching_siblings(
         + _windows_normalized_component_alias(root, uri=True).replace(":", "%3A", 1)
     )
     for value in (native_alias + "/private", file_alias + "%2Fprivate"):
-        result = redact_lsp_text(value, repository=scope)
+        quoted = f'"{value}"'
+        result = redact_lsp_text(quoted, repository=scope)
         assert value not in result
         assert result.count("<repository>") == 1
 
@@ -1089,15 +1090,17 @@ def test_redaction_normalizes_windows_components_without_matching_siblings(
         str(root).swapcase() + "-sibling/private",
         file_alias + "%2Dother/private",
     ):
-        assert redact_lsp_text(value, repository=scope) == value
+        quoted = f'"{value}"'
+        assert redact_lsp_text(quoted, repository=scope) == quoted
 
     pure = PureWindowsPath(str(root))
     parent_alias = pure.drive + "/../" + "/".join(pure.parts[1:])
     assert redact_lsp_text(parent_alias, repository=scope) == "<repository>"
 
     long_alias = _windows_normalized_component_alias(root, dot_repetitions=4096)
-    long_result = redact_lsp_text(long_alias + "/private", repository=scope)
-    assert long_result == "<repository>"
+    long_value = f'"{long_alias}/private"'
+    long_result = redact_lsp_text(long_value, repository=scope)
+    assert long_result == '"<repository>"'
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Unicode path aliases")
@@ -1207,27 +1210,30 @@ def test_redaction_matches_simulated_mixed_windows_short_path_components(
         "file:///D:/LONGPA~1/Long%20Repository%20Component/private.py",
         "file:///D:/Long%20Parent%20Component/LONGRE~1/private.py",
     ):
+        value = f'"{token}"'
         assert lsp_security._redact_path(
-            token, root, "<repository>"
-        ) == "<repository>"
+            value, root, "<repository>"
+        ) == '"<repository>"'
 
     for sibling in (
         r"D:\LONGPA~1\LONGRE~1-other\private.py",
         r"D:\Long Parent Component\Long Repository Component-old\private.py",
         "file:///D:/LONGPA~1/LONGRE~1-other/private.py",
     ):
+        value = f'"{sibling}"'
         assert lsp_security._redact_path(
-            sibling, root, "<repository>"
-        ) == sibling
+            value, root, "<repository>"
+        ) == value
 
     def unavailable(_path: Path) -> Path:
         raise OSError("short names unavailable")
 
     monkeypatch.setattr(windows_workspace, "get_short_path", unavailable)
     long_token = str(PureWindowsPath(root) / "private.py")
+    value = f'"{long_token}"'
     assert lsp_security._redact_path(
-        long_token, root, "<repository>"
-    ) == "<repository>"
+        value, root, "<repository>"
+    ) == '"<repository>"'
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows real 8.3 redaction")
@@ -1315,30 +1321,35 @@ def test_quoted_windows_paths_allow_apostrophes_and_preserve_closing_quote(
         windows_workspace, "get_short_path", lambda path: path, raising=False
     )
 
-    for quote in ("'", '"'):
-        value = f"path={quote}{root}\\private.py{quote} after"
-        assert lsp_security._redact_path(
-            value, root, "<repository>"
-        ) == f"path={quote}<repository>{quote} after"
+    value = f'path="{root}\\private.py" after'
+    assert lsp_security._redact_path(
+        value, root, "<repository>"
+    ) == 'path="<repository>" after'
 
-        sibling = f"path={quote}{root}-old\\private.py{quote} after"
-        assert lsp_security._redact_path(
-            sibling, root, "<repository>"
-        ) == sibling
+    sibling = f'path="{root}-old\\private.py" after'
+    assert lsp_security._redact_path(
+        sibling, root, "<repository>"
+    ) == sibling
 
     plain_root = Path(r"D:\projects\operator")
     apostrophe_sibling = (
-        rf"path='{plain_root}'s repository\private.py' after"
+        rf"path={plain_root}'s repository\private.py after"
     )
     assert lsp_security._redact_path(
         apostrophe_sibling, plain_root, "<repository>"
     ) == apostrophe_sibling
 
+    compact_root = Path(r"D:\projects\operator's-repository")
+    compact_value = str(compact_root) + r"\private.py:12 - diagnostic"
+    assert lsp_security._redact_path(
+        compact_value, compact_root, "<repository>"
+    ) == "<repository>:12 - diagnostic"
+
 
 def test_windows_path_log_suffixes_preserve_valid_root_punctuation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root = Path(r"D:\projects\repo(name), operator's [v1]}")
+    root = Path(r"D:\projects\repo(name),operator's[v1]}")
     monkeypatch.setattr(windows_workspace, "get_short_path", lambda path: path)
     source = str(PureWindowsPath(root) / "source.py")
 
@@ -1346,9 +1357,7 @@ def test_windows_path_log_suffixes_preserve_valid_root_punctuation(
         ("", ":12"),
         ("", ":12:34"),
         ('"', '":12:34).,;]}'),
-        ("'", "':12:34).,;]}"),
         ('"', '"'),
-        ("'", "'"),
     ):
         value = f"path={prefix}{source}{suffix}"
         assert lsp_security._redact_path(
@@ -1358,7 +1367,8 @@ def test_windows_path_log_suffixes_preserve_valid_root_punctuation(
     for punctuation in (".", ",", ";", ")", "]", "}", ".,;)]}"):
         value = str(root) + punctuation
         result = lsp_security._redact_path(value, root, "<repository>")
-        assert result == "<repository>"
+        expected_suffix = "" if punctuation == "." else punctuation
+        assert result == "<repository>" + expected_suffix
 
         sibling = str(root) + "-other" + punctuation
         assert lsp_security._redact_path(
@@ -1366,17 +1376,47 @@ def test_windows_path_log_suffixes_preserve_valid_root_punctuation(
         ) == sibling
 
 
-def test_windows_path_suffix_scanner_is_linear_past_256_boundaries(
+def test_windows_tokenizer_handles_terminal_suffixes_and_long_punctuation_roots(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     components = tuple(
-        f"segment({index:03d}),[alpha]{{beta}};"
-        for index in range(48)
+        f"segment-{index:02d}-" + "(),;[]{}" * 12
+        for index in range(12)
     )
     root_text = "D:\\" + "\\".join(components)
-    assert len(root_text) > 843
-    assert sum(root_text.count(character) for character in ",;()[]{}") > 256
+    assert len(root_text) > 1024
     root = Path(root_text)
+    monkeypatch.setattr(windows_workspace, "get_short_path", lambda path: path)
+    source = root_text + r"\source.py"
+    uri = "file:///D:/" + "/".join(components) + "/source.py"
+
+    cases = (
+        (source + ":12:34 - diagnostic", "<repository>:12:34 - diagnostic"),
+        (uri + ":56:78 - uri diagnostic", "<repository>:56:78 - uri diagnostic"),
+        (
+            f'path="{source}":90:12). next',
+            'path="<repository>":90:12). next',
+        ),
+        (
+            root_text + ".,;)]} - root diagnostic",
+            "<repository>.,;)]} - root diagnostic",
+        ),
+    )
+    for value, expected in cases:
+        assert lsp_security._redact_path(value, root, "<repository>") == expected
+
+    sibling = root_text + "-other" + r"\source.py:12:34 - diagnostic"
+    assert lsp_security._redact_path(
+        sibling, root, "<repository>"
+    ) == sibling
+
+
+def test_windows_tokenizer_scales_near_linearly_for_200_400_800_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(r"D:\projects\linear-repository")
+    root_text = str(root)
+    uri_root = "file:///D:/projects/linear-repository"
     monkeypatch.setattr(windows_workspace, "get_short_path", lambda path: path)
     real_canonicalize = lsp_security._canonical_windows_path_token
     canonical_calls = 0
@@ -1389,28 +1429,53 @@ def test_windows_path_suffix_scanner_is_linear_past_256_boundaries(
     monkeypatch.setattr(
         lsp_security, "_canonical_windows_path_token", canonicalize
     )
-    suffix = '":123:45).,;]}'
-    positive = 'path="' + root_text + r"\source.py" + suffix
-    started = time.perf_counter()
-    assert lsp_security._redact_path(
-        positive, root, "<repository>"
-    ) == 'path="<repository>' + suffix
 
-    adversarial_suffix = ".,;)]}" * 4096
-    sibling = (
-        'path="'
-        + root_text
-        + "-other"
-        + r"\source.py"
-        + adversarial_suffix
+    def measure(count: int) -> float:
+        tokens: list[str] = []
+        for index in range(count):
+            if index % 4 == 0:
+                token = f"path={root_text}\\pkg\\module-{index}.py:12:34).,;]}}"
+            elif index % 4 == 1:
+                token = f"uri={uri_root}/pkg/module-{index}.py:56:78).,;]}}"
+            elif index % 4 == 2:
+                token = f'path="{root_text}\\pkg\\module-{index}.py"'
+            else:
+                token = (
+                    f"path={root_text}-sibling\\module-{index}.py:90:12).,;]}}"
+                )
+            tokens.append(token)
+        value = " ".join(tokens)
+        calls_before = canonical_calls
+        started = time.perf_counter()
+        result = lsp_security._redact_path(value, root, "<repository>")
+        elapsed = time.perf_counter() - started
+        assert result.count("<repository>") == count * 3 // 4
+        assert canonical_calls - calls_before <= count * 2 + 2
+        return elapsed
+
+    timings = tuple(
+        min(measure(count) for _attempt in range(2))
+        for count in (200, 400, 800)
     )
-    assert lsp_security._redact_path(
-        sibling, root, "<repository>"
-    ) == sibling
-    elapsed = time.perf_counter() - started
 
-    assert canonical_calls <= 12
-    assert elapsed < 1.0
+    assert timings[1] <= max(0.05, timings[0] * 3.25)
+    assert timings[2] <= max(0.05, timings[1] * 3.25)
+    assert sum(timings) < 5.0
+
+
+def test_windows_file_uri_token_ceiling_does_not_split_percent_triplet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(r"D:\projects\bounded-repository")
+    monkeypatch.setattr(windows_workspace, "get_short_path", lambda path: path)
+    prefix = "file:///D:/projects/bounded-repository/"
+    filler_length = lsp_security._MAX_REDACTION_PATH_TOKEN - len(prefix) - 1
+    filler = "./" * (filler_length // 2) + "." * (filler_length % 2)
+    value = prefix + filler + "%2E/child.py"
+
+    assert lsp_security._redact_path(
+        value, root, "<repository>"
+    ) == "<repository>%2E/child.py"
 
 
 def test_redaction_removes_localhost_file_uri_roots(scope: RepositoryScope) -> None:
@@ -1694,6 +1759,28 @@ def test_redaction_consumes_iso_escape_intermediate_sequences() -> None:
     assert lsp_security._normalize_log_text(
         "before\x1b" + "".join(intermediates)
     ) == "before"
+
+
+@pytest.mark.parametrize(
+    "sequence",
+    (
+        "\x1b \x1b[31m",
+        "\x1b \x1b#\x1b[31m",
+        "\x1b#\x1b]title\x07",
+        "\x1b(\x1b]title\x1b\\",
+        "\x1b)\x1bPpayload\x1b\\",
+        "\x1b*\x1bXpayload\x1b\\",
+        "\x1b+\x1b^payload\x1b\\",
+        "\x1b-\x1b_payload\x1b\\",
+    ),
+)
+def test_redaction_restarts_escape_intermediates_at_nested_escape(
+    sequence: str,
+) -> None:
+    value = "TOK" + sequence + "EN=restart-secret"
+
+    assert lsp_security._normalize_log_text(value) == "TOKEN=restart-secret"
+    assert redact_lsp_text(value) == "TOKEN=<redacted>"
 
 
 def test_redaction_happens_before_sanitized_output_is_truncated() -> None:

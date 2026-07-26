@@ -32,12 +32,9 @@ _MALFORMED_PERCENT = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _ENCODED_SEPARATOR = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
 _WINDOWS_DRIVE_PATH = re.compile(r"^[A-Za-z]:/")
 _URL_AUTHORITY_TOKEN_BOUNDARIES = frozenset('"<>\\^`{|}')
-_WINDOWS_REDACTION_TOKEN_BOUNDARIES = frozenset("<>|?*")
-_WINDOWS_OPTIONAL_TOKEN_BOUNDARIES = frozenset(",;()[]{}'\"")
-_WINDOWS_REDACTION_TOKEN_START = re.compile(
-    r"(?i)(?P<file>file:)|"
-    r"(?P<native>[A-Z]:(?=[\\/]))"
-)
+_WINDOWS_TOKEN_STRUCTURAL_TERMINATORS = frozenset('<>|?*"')
+_WINDOWS_QUOTED_TOKEN_STRUCTURAL_TERMINATORS = frozenset("<>|?*")
+_WINDOWS_LOG_TRAILING_PUNCTUATION = frozenset(".,;)]}")
 _WINDOWS_RESERVED = frozenset(
     {
         "aux",
@@ -909,28 +906,6 @@ def _canonical_windows_path_token(
     return normalized_drive.casefold(), normalized_components
 
 
-def _windows_token_start_is_bounded(value: str, start: int) -> bool:
-    if start == 0:
-        return True
-    previous = value[start - 1]
-    return not (previous.isalnum() or previous in "_\\/%")
-
-
-def _windows_token_source_end(value: str, start: int, *, file_uri: bool) -> int:
-    limit = min(len(value), start + _MAX_REDACTION_PATH_TOKEN)
-    index = start
-    while index < limit:
-        character = value[index]
-        if (
-            _is_control(character)
-            or character in _WINDOWS_REDACTION_TOKEN_BOUNDARIES
-            or (file_uri and character == "#")
-        ):
-            break
-        index += 1
-    return index
-
-
 def _windows_root_component_aliases(
     path: Path,
 ) -> tuple[str, tuple[frozenset[str], ...]] | None:
@@ -951,201 +926,100 @@ def _windows_root_component_aliases(
     return drive, tuple(frozenset(component_aliases) for component_aliases in aliases)
 
 
-def _windows_path_token_match_end(
-    value: str,
-    start: int,
-    *,
-    file_uri: bool,
+def _windows_path_is_within_root(
+    normalized: tuple[str, tuple[str, ...]] | None,
     root: tuple[str, tuple[frozenset[str], ...]],
-) -> tuple[int | None, int]:
-    source_end = _windows_token_source_end(value, start, file_uri=file_uri)
-    if file_uri:
-        malformed = _MALFORMED_PERCENT.search(value, start, source_end)
-        if malformed is not None:
-            source_end = malformed.start()
-    if file_uri:
-        decoded = _decode_uri_percent_token_once(value, start, source_end)
-        if decoded is None:
-            return None, source_end
-        text, source_ends, encoded = decoded
-    else:
-        text = value[start:source_end]
-        source_ends = tuple(range(start + 1, source_end + 1))
-        encoded = (False,) * len(text)
+) -> bool:
+    if normalized is None:
+        return False
+    drive, components = normalized
     root_drive, root_component_aliases = root
+    return (
+        drive == root_drive
+        and len(components) >= len(root_component_aliases)
+        and all(
+            component in aliases
+            for component, aliases in zip(components, root_component_aliases)
+        )
+    )
 
-    path_start = 0
-    if file_uri:
-        if text[:5].casefold() != "file:":
-            return None, source_end
-        uri_start = 5
-        has_leading_separator = text[uri_start : uri_start + 1] in {"/", "\\"}
-        stripped_start = uri_start
-        while text[stripped_start : stripped_start + 1] in {"/", "\\"}:
-            stripped_start += 1
-        if re.match(r"(?i)^[A-Z]:[\\/]", text[stripped_start:]):
-            path_start = stripped_start
-        else:
-            authority_end = stripped_start
-            while text[authority_end : authority_end + 1] not in {"", "/", "\\"}:
-                authority_end += 1
-            if (
-                not has_leading_separator
-                or authority_end == len(text)
-                or text[stripped_start:authority_end].casefold() != "localhost"
-            ):
-                return None, source_end
-            path_start = authority_end
-            while text[path_start : path_start + 1] in {"/", "\\"}:
-                path_start += 1
 
+def _windows_root_punctuation_suffix_start(
+    text: str,
+    encoded: tuple[bool, ...],
+    normalized: tuple[str, tuple[str, ...]] | None,
+    root: tuple[str, tuple[frozenset[str], ...]],
+) -> int | None:
+    if normalized is None:
+        return None
+    drive, components = normalized
+    root_drive, root_component_aliases = root
     if (
-        text[path_start : path_start + 2].casefold() != root_drive
-        or text[path_start + 2 : path_start + 3] not in {"/", "\\"}
+        drive != root_drive
+        or not root_component_aliases
+        or len(components) != len(root_component_aliases)
+        or any(
+            component not in aliases
+            for component, aliases in zip(
+                components[:-1], root_component_aliases[:-1]
+            )
+        )
     ):
-        return None, source_end
+        return None
 
-    location_starts: set[int] = set()
-    suffix_cursor = len(text)
-    while (
-        suffix_cursor > path_start
-        and not encoded[suffix_cursor - 1]
-        and text[suffix_cursor - 1] in ".,;)]}"
-    ):
-        suffix_cursor -= 1
-    for _part in range(2):
-        digits_end = suffix_cursor
-        while (
-            suffix_cursor > path_start
-            and not encoded[suffix_cursor - 1]
-            and text[suffix_cursor - 1].isascii()
-            and text[suffix_cursor - 1].isdigit()
-        ):
-            suffix_cursor -= 1
-        colon = suffix_cursor - 1
+    final_component = components[-1]
+    for alias in sorted(root_component_aliases[-1], key=len, reverse=True):
+        if not final_component.startswith(alias):
+            continue
+        suffix = final_component[len(alias) :]
+        suffix_start = len(text) - len(suffix)
         if (
-            suffix_cursor == digits_end
-            or colon < path_start
+            suffix
+            and all(character in _WINDOWS_LOG_TRAILING_PUNCTUATION for character in suffix)
+            and text[suffix_start:].casefold() == suffix
+            and all(not encoded[index] for index in range(suffix_start, len(text)))
+        ):
+            return suffix_start
+    return None
+
+
+def _windows_terminal_path_end(
+    text: str,
+    encoded: tuple[bool, ...],
+) -> int | None:
+    cursor = len(text)
+    while (
+        cursor > 0
+        and not encoded[cursor - 1]
+        and text[cursor - 1] in _WINDOWS_LOG_TRAILING_PUNCTUATION
+    ):
+        cursor -= 1
+    punctuation_start = cursor
+    locations = 0
+    for _part in range(2):
+        digits_end = cursor
+        while (
+            cursor > 0
+            and not encoded[cursor - 1]
+            and text[cursor - 1].isascii()
+            and text[cursor - 1].isdigit()
+        ):
+            cursor -= 1
+        colon = cursor - 1
+        if (
+            cursor == digits_end
+            or colon < 0
             or encoded[colon]
             or text[colon] != ":"
         ):
             break
-        location_starts.add(colon)
-        suffix_cursor = colon
-
-    components: list[str] = []
-    component_start = path_start + 2
-    valid = True
-
-    def append_component(target: list[str], raw: str) -> bool:
-        if not raw or raw == ".":
-            return True
-        if raw == "..":
-            if target:
-                target.pop()
-            return True
-        component = raw.rstrip(" .")
-        if not component:
-            return True
-        if (
-            len(component) > _MAX_COMPONENT_CHARACTERS
-            or any(
-                character in '<>:"|?*' or _is_control(character)
-                for character in component
-            )
-        ):
-            return False
-        target.append(component.casefold())
-        return True
-
-    def candidate_matches(candidate_end: int) -> bool:
-        if (
-            not valid
-            or len(components) > _MAX_COMPONENTS
-            or candidate_end - component_start > _MAX_COMPONENT_CHARACTERS
-        ):
-            return False
-        candidate_components = components.copy()
-        if not append_component(
-            candidate_components, text[component_start:candidate_end]
-        ):
-            return False
-        return (
-            len(candidate_components) <= _MAX_COMPONENTS
-            and len(candidate_components) >= len(root_component_aliases)
-            and all(
-                component in aliases
-                for component, aliases in zip(
-                    candidate_components, root_component_aliases
-                )
-            )
-        )
-
-    quote_end: int | None = None
-    location_end: int | None = None
-    optional_end: int | None = None
-    opening_quote = value[start - 1 : start]
-    if opening_quote not in {'"', "'"}:
-        opening_quote = ""
-    for index in range(path_start + 2, len(text)):
-        character = text[index]
-        if character in {"/", "\\"}:
-            if valid:
-                valid = append_component(
-                    components, text[component_start:index]
-                )
-            component_start = index + 1
-            continue
-        if encoded[index]:
-            continue
-
-        is_quote = character in {'"', "'"}
-        if is_quote:
-            following = text[index + 1 : index + 2]
-            if following and (
-                following.isalnum() or following in "_.-%\\/"
-            ):
-                continue
-        is_optional = (
-            character.isspace()
-            or character in _WINDOWS_OPTIONAL_TOKEN_BOUNDARIES
-        )
-        if not (is_quote or is_optional or index in location_starts):
-            continue
-        if not candidate_matches(index):
-            continue
-        if is_quote and quote_end is None:
-            quote_end = index
-        elif index in location_starts and location_end is None:
-            location_end = index
-        elif is_optional and optional_end is None:
-            optional_end = index
-
-    if (
-        quote_end is not None
-        and opening_quote
-        and text[quote_end] == opening_quote
-    ):
-        return source_ends[quote_end - 1], source_end
-    if candidate_matches(len(text)):
-        return source_end, source_end
-    candidate_end = quote_end
-    if candidate_end is None:
-        candidate_end = location_end
-    if candidate_end is None:
-        candidate_end = optional_end
-    if candidate_end is not None:
-        terminal_punctuation = all(
-            not encoded[index] and text[index] in ".,;)]}"
-            for index in range(candidate_end, len(text))
-        )
-        match_end = (
-            source_end
-            if terminal_punctuation
-            else source_ends[candidate_end - 1]
-        )
-        return match_end, source_end
-    return None, source_end
+        locations += 1
+        cursor = colon
+    if locations:
+        return cursor
+    if punctuation_start < len(text):
+        return punctuation_start
+    return None
 
 
 def _redact_windows_path_tokens(value: str, path: Path, marker: str) -> str:
@@ -1154,27 +1028,109 @@ def _redact_windows_path_tokens(value: str, path: Path, marker: str) -> str:
         return value
     pieces: list[str] = []
     cursor = 0
-    search_start = 0
-    while True:
-        match = _WINDOWS_REDACTION_TOKEN_START.search(value, search_start)
-        if match is None:
-            break
-        start = match.start()
-        search_start = start + 1
-        if start < cursor or not _windows_token_start_is_bounded(value, start):
-            continue
-        match_end, _source_end = _windows_path_token_match_end(
-            value,
-            start,
-            file_uri=match.group("file") is not None,
-            root=root,
+    index = 0
+    while index < len(value):
+        start = index
+        previous = value[start - 1 : start]
+        bounded = not (
+            previous and (previous.isalnum() or previous in "_\\/%")
         )
-        if match_end is None:
+        file_uri = bounded and value[start : start + 5].casefold() == "file:"
+        native = (
+            bounded
+            and value[start : start + 1].isascii()
+            and value[start : start + 1].isalpha()
+            and value[start + 1 : start + 2] == ":"
+            and value[start + 2 : start + 3] in {"/", "\\"}
+        )
+        if not (file_uri or native):
+            index += 1
             continue
-        pieces.append(value[cursor:start])
-        pieces.append(marker)
-        cursor = match_end
-        search_start = match_end
+
+        quoted = previous == '"'
+        limit = min(len(value), start + _MAX_REDACTION_PATH_TOKEN)
+        token_end = start
+        while token_end < limit:
+            character = value[token_end]
+            if (
+                _is_control(character)
+                or (file_uri and character == "#")
+                or (
+                    quoted
+                    and character == '"'
+                )
+                or (
+                    not quoted
+                    and (
+                        character.isspace()
+                        or character in _WINDOWS_TOKEN_STRUCTURAL_TERMINATORS
+                    )
+                )
+                or (
+                    quoted
+                    and character in _WINDOWS_QUOTED_TOKEN_STRUCTURAL_TERMINATORS
+                )
+            ):
+                break
+            if file_uri and character == "%":
+                digits = value[token_end + 1 : token_end + 3]
+                if (
+                    token_end + 3 > limit
+                    or len(digits) != 2
+                    or re.fullmatch(r"[0-9A-Fa-f]{2}", digits) is None
+                ):
+                    break
+                token_end += 3
+                continue
+            token_end += 1
+
+        next_index = token_end
+        if token_end < len(value) and token_end < limit:
+            next_index += 1
+        if token_end == start:
+            index = max(start + 1, next_index)
+            continue
+
+        source_ends: tuple[int, ...] | None = None
+        if file_uri:
+            decoded = _decode_uri_percent_token_once(value, start, token_end)
+            if decoded is None:
+                index = next_index
+                continue
+            text, source_ends, encoded = decoded
+        else:
+            text = value[start:token_end]
+            encoded = (False,) * len(text)
+
+        normalized = _canonical_windows_path_token(text, file_uri=file_uri)
+        logical_match_end: int | None = None
+        if _windows_path_is_within_root(normalized, root):
+            logical_match_end = len(text)
+        else:
+            logical_match_end = _windows_root_punctuation_suffix_start(
+                text, encoded, normalized, root
+            )
+            if logical_match_end is None:
+                terminal_path_end = _windows_terminal_path_end(text, encoded)
+                if terminal_path_end is not None and _windows_path_is_within_root(
+                    _canonical_windows_path_token(
+                        text[:terminal_path_end], file_uri=file_uri
+                    ),
+                    root,
+                ):
+                    logical_match_end = terminal_path_end
+
+        if logical_match_end is not None:
+            if logical_match_end == len(text):
+                match_end = token_end
+            elif source_ends is None:
+                match_end = start + logical_match_end
+            else:
+                match_end = source_ends[logical_match_end - 1]
+            pieces.append(value[cursor:start])
+            pieces.append(marker)
+            cursor = match_end
+        index = next_index
     pieces.append(value[cursor:])
     return "".join(pieces)
 
@@ -1215,6 +1171,9 @@ def _normalize_log_text(value: str) -> str:
     while index < len(value):
         character = value[index]
         if state == "escape":
+            if character == "\x1b":
+                state = "ground"
+                continue
             index += 1
             if "0" <= character <= "~":
                 state = "ground"
