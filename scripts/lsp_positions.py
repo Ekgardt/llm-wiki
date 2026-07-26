@@ -370,11 +370,12 @@ def file_uri_to_path(uri: str, *, platform: str | None = None) -> PurePath:
         return PurePosixPath("//" + authority + decoded_path)
 
     if not decoded_path.startswith("/"):
-        raise ValueError("file uri path must be absolute")
+        if target_platform != "nt" or re.match(r"^[A-Za-z]:/", decoded_path) is None:
+            raise ValueError("file uri path must be absolute")
     if target_platform == "nt":
-        drive_match = re.match(r"^/([A-Za-z]):/", decoded_path)
+        drive_match = re.match(r"^/?([A-Za-z]):/(.*)$", decoded_path)
         if drive_match:
-            normalized = drive_match.group(1).upper() + decoded_path[2:]
+            normalized = drive_match.group(1).upper() + ":/" + drive_match.group(2)
             return PureWindowsPath(normalized)
         raise ValueError("Windows file uri must include a drive or UNC authority")
     return PurePosixPath(decoded_path)

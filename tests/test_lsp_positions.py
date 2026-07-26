@@ -245,6 +245,21 @@ def test_file_uri_round_trips_windows_drive_case_space_and_unicode() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "file:///c:/repo/pkg/api.py",
+        "file:///C%3A/repo/pkg/api.py",
+        "file:/C:/repo/pkg/api.py",
+        "file:C:/repo/pkg/api.py",
+    ],
+)
+def test_file_uri_accepts_equivalent_windows_local_drive_forms(uri: str) -> None:
+    assert file_uri_to_path(uri, platform="nt") == PureWindowsPath(
+        "C:/repo/pkg/api.py"
+    )
+
+
 def test_file_uri_round_trips_posix_absolute_path() -> None:
     path = PurePosixPath("/repo name/pkg/β.py")
     uri = path_to_file_uri(path)
