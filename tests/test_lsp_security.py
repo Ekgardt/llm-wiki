@@ -642,6 +642,41 @@ def test_redaction_removes_mixed_case_secret_assignments(value: str, secret: str
 
 
 @pytest.mark.parametrize(
+    ("value", "secret"),
+    [
+        ("OPENAI_API_KEY=alpha-prefixed", "alpha-prefixed"),
+        ("npm_TOKEN: beta-prefixed", "beta-prefixed"),
+        ("Client_Secret = 'gamma-prefixed'", "gamma-prefixed"),
+        ('{"SERVICE_AUTHORIZATION": "Bearer delta-prefixed"}', "delta-prefixed"),
+        ('{"database_PASSWORD": "epsilon-prefixed"}', "epsilon-prefixed"),
+    ],
+)
+def test_redaction_removes_prefixed_environment_secret_assignments(
+    value: str,
+    secret: str,
+) -> None:
+    result = redact_lsp_text(value)
+
+    assert secret not in result
+    assert "<redacted>" in result
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "OPENAI_API_KEY is unset",
+        "NPM_TOKEN",
+        "CLIENT_SECRET may be configured later",
+        "CLIENT_SECRET_NAME=public-label",
+    ],
+)
+def test_redaction_leaves_unassigned_or_non_suffix_secret_words_unchanged(
+    value: str,
+) -> None:
+    assert redact_lsp_text(value) == value
+
+
+@pytest.mark.parametrize(
     "value",
     [
         "https://alice:hunter2@example.test/private",
@@ -697,6 +732,65 @@ def test_redaction_removes_repository_and_home_native_and_uri_paths(
     assert "<home>" in result
 
 
+def test_redaction_removes_lexical_and_resolved_linked_home_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolved_home = tmp_path / "resolved-home"
+    resolved_home.mkdir()
+    lexical_home = tmp_path / "home-link"
+    if os.name == "nt":
+        created = subprocess.run(
+            [
+                "cmd.exe",
+                "/d",
+                "/c",
+                "mklink",
+                "/J",
+                str(lexical_home),
+                str(resolved_home),
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        if created.returncode != 0:
+            output = (created.stdout + created.stderr).decode(errors="replace")
+            if "privilege" in output.casefold():
+                pytest.skip("junction creation privilege unavailable")
+            pytest.fail(f"junction creation failed: {output}")
+        assert os.lstat(lexical_home).st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+    else:
+        _symlink_or_skip(lexical_home, resolved_home, directory=True)
+    resolved_home = lexical_home.resolve(strict=True)
+    monkeypatch.setattr(
+        lsp_security.Path,
+        "home",
+        classmethod(lambda _cls: lexical_home),
+    )
+
+    roots: list[str] = []
+    for path in (lexical_home.absolute(), resolved_home):
+        native = str(path)
+        roots.extend(
+            (
+                native,
+                native.replace("\\", "/"),
+                native.replace("/", "\\"),
+                path_to_file_uri(path),
+            )
+        )
+    unique_roots = tuple(dict.fromkeys(roots))
+    value = " ".join(f"{root}/private" for root in unique_roots)
+
+    result = redact_lsp_text(value)
+
+    assert all(root not in result for root in unique_roots)
+    assert result.count("<home>") == len(unique_roots)
+    assert "<home><home>" not in result
+
+
 def test_redaction_removes_native_separator_variants(scope: RepositoryScope) -> None:
     slash = scope.checkout_root.replace("\\", "/")
     backslash = slash.replace("/", "\\")
@@ -725,6 +819,52 @@ def test_redaction_removes_localhost_file_uri_roots(scope: RepositoryScope) -> N
     assert home_uri not in result
     assert "<repository>" in result
     assert "<home>" in result
+
+
+@pytest.mark.parametrize(
+    "authority",
+    ["loc%61lhost", "%6Co%63a%6Ch%6Fs%74", "LOCAL%68OST"],
+)
+def test_redaction_removes_percent_encoded_localhost_file_uri_roots(
+    scope: RepositoryScope,
+    authority: str,
+) -> None:
+    repository_uri = _encode_alternating_uri_letters(
+        path_to_file_uri(Path(scope.checkout_root))
+    ).replace(
+        "file:///", f"file://{authority}/", 1
+    )
+    home_uri = _encode_alternating_uri_letters(
+        path_to_file_uri(Path.home().absolute())
+    ).replace(
+        "file:///", f"file://{authority}/", 1
+    )
+
+    result = redact_lsp_text(
+        f"{repository_uri}/pkg/api.py {home_uri}/.ssh/config",
+        repository=scope,
+    )
+
+    assert repository_uri not in result
+    assert home_uri not in result
+    assert "<repository>" in result
+    assert "<home>" in result
+
+
+@pytest.mark.parametrize("authority", ["loc%G1lhost", "localhost%", "%FF"])
+def test_redaction_handles_malformed_file_uri_authority_safely(
+    scope: RepositoryScope,
+    authority: str,
+) -> None:
+    uri = path_to_file_uri(Path(scope.checkout_root)).replace(
+        "file:///", f"file://{authority}/", 1
+    )
+
+    result = redact_lsp_text(uri + "\x00", repository=scope)
+
+    assert isinstance(result, str)
+    assert len(result) <= 1024
+    assert "\x00" not in result
 
 
 def _encode_alternating_uri_letters(uri: str) -> str:

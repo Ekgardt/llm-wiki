@@ -45,7 +45,8 @@ _WINDOWS_RESERVED = frozenset(
     }
 )
 _CREDENTIAL_ASSIGNMENT = re.compile(
-    r"(?i)(?<![\w])(?P<quote>[\"']?)(?:api_key|authorization|password|secret|token)"
+    r"(?ai)(?<![a-z0-9_])(?P<quote>[\"']?)[a-z0-9_]*"
+    r"(?:api_key|authorization|password|secret|token)"
     r"(?P=quote)\s*[:=]\s*"
 )
 class PathContainmentError(ValueError):
@@ -721,7 +722,10 @@ def _encoded_file_uri_pattern(path: Path) -> re.Pattern[str]:
     )
     if windows_path:
         path_pattern = f"/?(?i:{path_pattern})"
-    prefix = r"(?i:file:)(?://(?i:localhost)?)?"
+    localhost_pattern = "".join(
+        _uri_character_pattern(character) for character in "localhost"
+    )
+    prefix = rf"(?i:file:)(?://(?i:{localhost_pattern})?)?"
     return re.compile(prefix + path_pattern)
 
 
@@ -763,7 +767,17 @@ def redact_lsp_text(
             redacted, Path(repository.checkout_root), "<repository>"
         )
     try:
-        redacted = _redact_path(redacted, Path.home().absolute(), "<home>")
+        home = Path.home().absolute()
+        home_paths = [home]
+        try:
+            resolved_home = home.resolve(strict=False)
+        except (OSError, RuntimeError):
+            pass
+        else:
+            if resolved_home not in home_paths:
+                home_paths.append(resolved_home)
+        for home_path in home_paths:
+            redacted = _redact_path(redacted, home_path, "<home>")
     except (OSError, RuntimeError):
         pass
     return _sanitize_controls(redacted)[:1024]
