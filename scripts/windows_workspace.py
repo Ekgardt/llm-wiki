@@ -45,6 +45,7 @@ if os.name == "nt":
     _SYNCHRONIZE = 0x00100000
     _FILE_SHARE_READ = 0x00000001
     _FILE_SHARE_WRITE = 0x00000002
+    _FILE_SHARE_DELETE = 0x00000004
     _FILE_CREATE = 2
     _FILE_OPEN = 1
     _FILE_DIRECTORY_FILE = 0x00000001
@@ -345,6 +346,7 @@ def _relative_handle(
     create: bool,
     writable: bool = False,
     deletable: bool = False,
+    share_access: int | None = None,
 ) -> int:
     require_capability()
     name_buffer, unicode_name, attributes = _object_attributes(parent, name)
@@ -366,7 +368,10 @@ def _relative_handle(
         | _FILE_SYNCHRONOUS_IO_NONALERT
         | (_FILE_DIRECTORY_FILE if directory else _FILE_NON_DIRECTORY_FILE)
     )
-    share = 0 if not directory else _FILE_SHARE_READ | _FILE_SHARE_WRITE
+    if share_access is None:
+        share = 0 if not directory else _FILE_SHARE_READ | _FILE_SHARE_WRITE
+    else:
+        share = share_access
     if create:
         allocation = ctypes.c_longlong(0)
         status = _API.nt_create_file(
@@ -432,6 +437,17 @@ def create_file(parent: int, name: str) -> int:
 
 def open_file(parent: int, name: str) -> int:
     return _relative_handle(parent, name, directory=False, create=False)
+
+
+def open_shared_readonly_source_file(parent: int, name: str) -> int:
+    """Open one no-follow source without blocking editor file activity."""
+    return _relative_handle(
+        parent,
+        name,
+        directory=False,
+        create=False,
+        share_access=_FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
+    )
 
 
 def open_deletable_file(parent: int, name: str) -> int:
@@ -689,6 +705,7 @@ __all__ = [
     "open_deletable_file",
     "open_directory_path",
     "open_file",
+    "open_shared_readonly_source_file",
     "publish_file",
     "read_chunks",
     "replace_file",

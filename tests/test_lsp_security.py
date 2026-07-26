@@ -11,7 +11,8 @@ import subprocess
 import unicodedata
 from collections import Counter
 from dataclasses import FrozenInstanceError, fields
-from pathlib import Path
+from itertools import product
+from pathlib import Path, PureWindowsPath
 from typing import get_type_hints
 
 import lsp_security
@@ -393,6 +394,64 @@ def test_windows_case_collision_is_rejected_before_open(
         resolve_repository_source(scope, "pkg/api.py")
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle sharing")
+def test_windows_source_containment_accepts_compatible_open_handles_and_closes_all(
+    repository: Path,
+    scope: RepositoryScope,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supported, reason = windows_workspace.capability()
+    if not supported:
+        pytest.skip(reason or "Windows handle-relative APIs unavailable")
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    target = repository / "pkg" / "api.py"
+    held: list[int] = []
+    external_closed: list[int] = []
+    opened, closed = _track_windows_handles(monkeypatch)
+    try:
+        for desired_access in (0x80000000, 0x40000000, 0x00010000):
+            handle = create_file(
+                str(target),
+                desired_access,
+                0x00000001 | 0x00000002 | 0x00000004,
+                None,
+                3,
+                0x00000080,
+                None,
+            )
+            if handle == ctypes.c_void_p(-1).value:
+                raise ctypes.WinError(ctypes.get_last_error())
+            held.append(int(handle))
+        source = resolve_repository_source(scope, "pkg/api.py")
+        assert source.absolute_path == target.resolve(strict=True)
+    finally:
+        for handle in reversed(held):
+            if not close_handle(handle):
+                raise ctypes.WinError(ctypes.get_last_error())
+            external_closed.append(handle)
+
+    assert Counter(opened) == Counter(closed)
+    assert all(count == 1 for count in Counter(opened).values())
+    assert Counter(external_closed) == Counter(held)
+
+
 def test_missing_leaf_requires_explicit_opt_in(
     repository: Path, scope: RepositoryScope
 ) -> None:
@@ -732,6 +791,25 @@ def test_redaction_removes_repository_and_home_native_and_uri_paths(
     assert "<home>" in result
 
 
+def _mixed_windows_separator_variants(path: Path) -> tuple[str, ...]:
+    normalized = str(PureWindowsPath(str(path))).replace("\\", "/")
+    components = normalized.split("/")
+    variants: list[str] = []
+    for separators in product("/\\", repeat=len(components) - 1):
+        value = components[0]
+        for separator, component in zip(separators, components[1:]):
+            value += separator + component
+        variants.append(
+            "".join(
+                character.swapcase()
+                if index % 2 and character.isascii() and character.isalpha()
+                else character
+                for index, character in enumerate(value)
+            )
+        )
+    return tuple(variants)
+
+
 def test_redaction_removes_lexical_and_resolved_linked_home_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -773,33 +851,47 @@ def test_redaction_removes_lexical_and_resolved_linked_home_paths(
     roots: list[str] = []
     for path in (lexical_home.absolute(), resolved_home):
         native = str(path)
-        roots.extend(
-            (
-                native,
-                native.replace("\\", "/"),
-                native.replace("/", "\\"),
-                path_to_file_uri(path),
-            )
-        )
+        if os.name == "nt":
+            roots.extend(_mixed_windows_separator_variants(path))
+        else:
+            roots.extend((native, native.replace("\\", "/")))
+        roots.append(path_to_file_uri(path))
     unique_roots = tuple(dict.fromkeys(roots))
-    value = " ".join(f"{root}/private" for root in unique_roots)
-
-    result = redact_lsp_text(value)
-
-    assert all(root not in result for root in unique_roots)
-    assert result.count("<home>") == len(unique_roots)
-    assert "<home><home>" not in result
+    for root in unique_roots:
+        result = redact_lsp_text(f"{root}/private")
+        assert root not in result
+        assert result.count("<home>") == 1
+        assert "<home><home>" not in result
 
 
-def test_redaction_removes_native_separator_variants(scope: RepositoryScope) -> None:
-    slash = scope.checkout_root.replace("\\", "/")
-    backslash = slash.replace("/", "\\")
+@pytest.mark.skipif(os.name != "nt", reason="Windows native path separators")
+def test_redaction_removes_every_mixed_windows_repository_separator_combination(
+    scope: RepositoryScope,
+) -> None:
+    variants = _mixed_windows_separator_variants(Path(scope.checkout_root))
+    assert len(variants) > 4
 
-    result = redact_lsp_text(f"{slash}/pkg/api.py {backslash}\\pkg\\api.py", repository=scope)
+    for root in variants:
+        result = redact_lsp_text(f"{root}\\pkg/api.py", repository=scope)
+        assert root not in result
+        assert result.count("<repository>") == 1
 
-    assert slash not in result
-    assert backslash not in result
-    assert result.count("<repository>") == 2
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native path separators")
+def test_redaction_leaves_windows_repository_and_home_sibling_prefixes(
+    scope: RepositoryScope,
+) -> None:
+    repository_sibling = scope.checkout_root + "-sibling"
+    home_root = str(Path.home().absolute())
+    home_sibling = home_root + "-backup"
+    value = f"{repository_sibling}\\pkg\\api.py {home_sibling}\\private"
+
+    assert redact_lsp_text(value, repository=scope) == value
+
+    quoted = f'repository="{scope.checkout_root}" home="{home_root}"'
+    assert redact_lsp_text(quoted, repository=scope) == (
+        'repository="<repository>" home="<home>"'
+    )
 
 
 def test_redaction_removes_localhost_file_uri_roots(scope: RepositoryScope) -> None:
@@ -1123,6 +1215,32 @@ def test_windows_parent_identity_substitution_is_detected_and_handles_close(
     monkeypatch.setattr(lsp_security, "_resolution_barrier", substitute)
 
     with pytest.raises(PathContainmentError):
+        resolve_repository_source(scope, "pkg/api.py")
+
+    assert Counter(opened) == Counter(closed)
+    assert all(count == 1 for count in Counter(opened).values())
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle traversal")
+def test_windows_source_identity_substitution_is_detected_and_handles_close(
+    scope: RepositoryScope,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supported, reason = windows_workspace.capability()
+    if not supported:
+        pytest.skip(reason or "Windows handle-relative APIs unavailable")
+    opened, closed = _track_windows_handles(monkeypatch)
+    original_identity = windows_workspace.identity
+
+    def identity(handle: int, *, directory: bool | None = None):
+        value = original_identity(handle, directory=directory)
+        if directory is False:
+            return value[0], bytes([value[1][0] ^ 1]) + value[1][1:], value[2]
+        return value
+
+    monkeypatch.setattr(windows_workspace, "identity", identity)
+
+    with pytest.raises(PathContainmentError, match="changed before open"):
         resolve_repository_source(scope, "pkg/api.py")
 
     assert Counter(opened) == Counter(closed)

@@ -369,7 +369,11 @@ def _open_windows_step(
     expected_kind = "directory" if directory else "file"
     if entry.kind != expected_kind:
         raise PathContainmentError("Windows repository source has the wrong kind")
-    opener = windows_workspace.open_directory if directory else windows_workspace.open_file
+    opener = (
+        windows_workspace.open_directory
+        if directory
+        else windows_workspace.open_shared_readonly_source_file
+    )
     opened = owned.own(opener(parent, component))
     identity = _windows_identity(opened, directory=directory)
     if identity[1] != entry.file_id:
@@ -729,15 +733,29 @@ def _encoded_file_uri_pattern(path: Path) -> re.Pattern[str]:
     return re.compile(prefix + path_pattern)
 
 
+def _windows_native_path_pattern(path: Path) -> re.Pattern[str]:
+    pure = PureWindowsPath(str(path))
+    components = pure.parts[1:]
+    pattern = re.escape(pure.drive) + r"[\\/]"
+    pattern += r"[\\/]".join(re.escape(component) for component in components)
+    return re.compile(
+        rf"(?<![A-Za-z0-9_]){pattern}(?![\w.-])",
+        flags=re.IGNORECASE,
+    )
+
+
 def _redact_path(value: str, path: Path, marker: str) -> str:
     windows_path = bool(PureWindowsPath(str(path)).drive)
-    for variant in _path_variants(path):
-        value = re.sub(
-            re.escape(variant),
-            lambda _match: marker,
-            value,
-            flags=re.IGNORECASE if windows_path or variant.startswith("file:") else 0,
-        )
+    if windows_path:
+        value = _windows_native_path_pattern(path).sub(lambda _match: marker, value)
+    else:
+        for variant in _path_variants(path):
+            value = re.sub(
+                re.escape(variant),
+                lambda _match: marker,
+                value,
+                flags=re.IGNORECASE if variant.startswith("file:") else 0,
+            )
     return _encoded_file_uri_pattern(path).sub(lambda _match: marker, value)
 
 
