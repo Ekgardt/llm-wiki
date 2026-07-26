@@ -29,6 +29,12 @@ _MAX_DIRECTORY_ENTRIES = 100_000
 _MALFORMED_PERCENT = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _ENCODED_SEPARATOR = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
 _WINDOWS_DRIVE_PATH = re.compile(r"^[A-Za-z]:/")
+_WINDOWS_SEPARATOR_ALIAS_PATTERN = r"(?:[\\/]|%2F|%5C)"
+_WINDOWS_SEPARATOR_RUN_PATTERN = _WINDOWS_SEPARATOR_ALIAS_PATTERN + "+"
+_WINDOWS_ENCODED_NON_SEPARATOR_PATTERN = r"%(?!(?:2F|5C))[0-9A-F]{2}"
+_WINDOWS_PATH_BOUNDARY_PATTERN = (
+    rf"(?![\w.-]|{_WINDOWS_ENCODED_NON_SEPARATOR_PATTERN})"
+)
 _WINDOWS_RESERVED = frozenset(
     {
         "aux",
@@ -715,31 +721,62 @@ def _uri_character_pattern(character: str) -> str:
     return f"(?:{re.escape(character)}|(?i:{encoded}))"
 
 
+def _case_insensitive_character_pattern(character: str) -> str:
+    encoded_characters = {character}
+    if character.isascii() and character.isalpha():
+        encoded_characters.add(character.swapcase())
+    encoded = "|".join(
+        "".join(f"%{byte:02X}" for byte in item.encode("utf-8"))
+        for item in sorted(encoded_characters)
+    )
+    return f"(?:{re.escape(character)}|(?i:{encoded}))"
+
+
+def _windows_path_alias_pattern(path: Path) -> str:
+    pure = PureWindowsPath(str(path))
+    drive = "".join(
+        _case_insensitive_character_pattern(character) for character in pure.drive
+    )
+    components = tuple(
+        "".join(
+            _case_insensitive_character_pattern(character) for character in component
+        )
+        for component in pure.parts[1:]
+    )
+    return drive + _WINDOWS_SEPARATOR_RUN_PATTERN + (
+        _WINDOWS_SEPARATOR_RUN_PATTERN.join(components)
+    )
+
+
 def _encoded_file_uri_pattern(path: Path) -> re.Pattern[str]:
     windows_path = bool(PureWindowsPath(str(path)).drive)
     if windows_path:
-        logical_path = PureWindowsPath(str(path)).as_posix()
-    else:
-        logical_path = PurePosixPath(str(path)).as_posix()
-    path_pattern = "".join(
-        _uri_character_pattern(character) for character in logical_path
-    )
-    if windows_path:
-        path_pattern = f"/?(?i:{path_pattern})"
+        path_pattern = _windows_path_alias_pattern(path)
+        localhost_pattern = "".join(
+            _case_insensitive_character_pattern(character) for character in "localhost"
+        )
+        prefix = (
+            rf"(?i:file:)(?:{_WINDOWS_SEPARATOR_RUN_PATTERN}"
+            rf"(?:{localhost_pattern}{_WINDOWS_SEPARATOR_RUN_PATTERN})?)?"
+        )
+        return re.compile(
+            prefix + path_pattern + _WINDOWS_PATH_BOUNDARY_PATTERN,
+            flags=re.IGNORECASE,
+        )
+
+    logical_path = PurePosixPath(str(path)).as_posix()
+    path_pattern = "".join(_uri_character_pattern(character) for character in logical_path)
     localhost_pattern = "".join(
-        _uri_character_pattern(character) for character in "localhost"
+        _case_insensitive_character_pattern(character) for character in "localhost"
     )
     prefix = rf"(?i:file:)(?://(?i:{localhost_pattern})?)?"
     return re.compile(prefix + path_pattern)
 
 
 def _windows_native_path_pattern(path: Path) -> re.Pattern[str]:
-    pure = PureWindowsPath(str(path))
-    components = pure.parts[1:]
-    pattern = re.escape(pure.drive) + r"[\\/]"
-    pattern += r"[\\/]".join(re.escape(component) for component in components)
+    pattern = _windows_path_alias_pattern(path)
     return re.compile(
-        rf"(?<![A-Za-z0-9_]){pattern}(?![\w.-])",
+        rf"(?<![A-Za-z0-9_]){pattern}{_WINDOWS_PATH_BOUNDARY_PATTERN}",
         flags=re.IGNORECASE,
     )
 

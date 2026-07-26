@@ -791,23 +791,87 @@ def test_redaction_removes_repository_and_home_native_and_uri_paths(
     assert "<home>" in result
 
 
-def _mixed_windows_separator_variants(path: Path) -> tuple[str, ...]:
-    normalized = str(PureWindowsPath(str(path))).replace("\\", "/")
-    components = normalized.split("/")
-    variants: list[str] = []
-    for separators in product("/\\", repeat=len(components) - 1):
-        value = components[0]
-        for separator, component in zip(separators, components[1:]):
-            value += separator + component
-        variants.append(
-            "".join(
-                character.swapcase()
-                if index % 2 and character.isascii() and character.isalpha()
-                else character
-                for index, character in enumerate(value)
-            )
+_WINDOWS_SEPARATOR_ATOMS = ("/", "\\", "%2F", "%5C")
+
+
+def _windows_separator_aliases() -> tuple[str, ...]:
+    return tuple(
+        "".join(tokens)
+        for width in range(1, 4)
+        for tokens in product(_WINDOWS_SEPARATOR_ATOMS, repeat=width)
+    )
+
+
+def _windows_path_with_separators(path: Path, separators: tuple[str, ...]) -> str:
+    pure = PureWindowsPath(str(path))
+    components = pure.parts[1:]
+    assert len(separators) == len(components)
+    value = pure.drive
+    for separator, component in zip(separators, components):
+        value += separator + component
+    return "".join(
+        character.swapcase()
+        if index % 2 and character.isascii() and character.isalpha()
+        else character
+        for index, character in enumerate(value)
+    )
+
+
+def _encode_alternating_windows_path_letters(value: str) -> str:
+    pieces: list[str] = []
+    encode = True
+    index = 0
+    while index < len(value):
+        character = value[index]
+        if character == "%" and re.fullmatch(
+            r"[0-9A-Fa-f]{2}", value[index + 1 : index + 3]
+        ):
+            pieces.append(value[index : index + 3])
+            index += 3
+            continue
+        if character.isascii() and character.isalpha() and encode:
+            pieces.append(f"%{ord(character):02X}")
+            encode = False
+        else:
+            pieces.append(character)
+            if character.isascii() and character.isalpha():
+                encode = True
+        index += 1
+    return "".join(pieces)
+
+
+def _encoded_windows_alias_root(path: Path) -> str:
+    aliases = _windows_separator_aliases()
+    boundary_count = len(PureWindowsPath(str(path)).parts) - 1
+    separators = tuple(
+        aliases[(index * 17 + 5) % len(aliases)] for index in range(boundary_count)
+    )
+    return _encode_alternating_windows_path_letters(
+        _windows_path_with_separators(path, separators)
+    ).replace(":", "%3A", 1)
+
+
+def _windows_separator_alias_variants(path: Path) -> tuple[str, ...]:
+    aliases = _windows_separator_aliases()
+    boundary_count = len(PureWindowsPath(str(path)).parts) - 1
+    variants: set[str] = set()
+    for boundary in range(boundary_count):
+        for alias in aliases:
+            separators = ["/"] * boundary_count
+            separators[boundary] = alias
+            variants.add(_windows_path_with_separators(path, tuple(separators)))
+    for offset in range(len(aliases)):
+        separators = tuple(
+            aliases[(offset + boundary * 17) % len(aliases)]
+            for boundary in range(boundary_count)
         )
-    return tuple(variants)
+        value = _windows_path_with_separators(path, separators)
+        variants.add(value)
+        encoded = _encode_alternating_windows_path_letters(value)
+        variants.add(encoded)
+        variants.add(encoded.replace(":", "%3A", 1))
+        variants.add(encoded.replace(":", "%3a", 1))
+    return tuple(sorted(variants))
 
 
 def test_redaction_removes_lexical_and_resolved_linked_home_paths(
@@ -852,7 +916,7 @@ def test_redaction_removes_lexical_and_resolved_linked_home_paths(
     for path in (lexical_home.absolute(), resolved_home):
         native = str(path)
         if os.name == "nt":
-            roots.extend(_mixed_windows_separator_variants(path))
+            roots.extend(_windows_separator_alias_variants(path))
         else:
             roots.extend((native, native.replace("\\", "/")))
         roots.append(path_to_file_uri(path))
@@ -868,8 +932,11 @@ def test_redaction_removes_lexical_and_resolved_linked_home_paths(
 def test_redaction_removes_every_mixed_windows_repository_separator_combination(
     scope: RepositoryScope,
 ) -> None:
-    variants = _mixed_windows_separator_variants(Path(scope.checkout_root))
-    assert len(variants) > 4
+    variants = _windows_separator_alias_variants(Path(scope.checkout_root))
+    aliases = set(_windows_separator_aliases())
+    assert len(aliases) == 84
+    assert {"//", "\\\\", "%2F%2F", "%5C%5C", "/%5C", "%2F\\"} <= aliases
+    assert len(variants) >= 84
 
     for root in variants:
         result = redact_lsp_text(f"{root}\\pkg/api.py", repository=scope)
@@ -881,17 +948,51 @@ def test_redaction_removes_every_mixed_windows_repository_separator_combination(
 def test_redaction_leaves_windows_repository_and_home_sibling_prefixes(
     scope: RepositoryScope,
 ) -> None:
-    repository_sibling = scope.checkout_root + "-sibling"
-    home_root = str(Path.home().absolute())
-    home_sibling = home_root + "-backup"
-    value = f"{repository_sibling}\\pkg\\api.py {home_sibling}\\private"
+    repository_root = Path(scope.checkout_root)
+    home = Path.home().absolute()
+    for root_path, suffix, repository in (
+        (repository_root, "-sibling", scope),
+        (home, "-backup", None),
+    ):
+        for root in _windows_separator_alias_variants(root_path):
+            for continuation in (suffix, "%2D" + suffix[1:]):
+                value = f"{root}{continuation}\\private"
+                assert redact_lsp_text(value, repository=repository) == value
+        encoded_root = _encoded_windows_alias_root(root_path)
+        for continuation in (suffix, "%2D" + suffix[1:]):
+            value = (
+                f"file:%2F%5Cloc%61lhost\\{encoded_root}"
+                f"{continuation}/private"
+            )
+            assert redact_lsp_text(value, repository=repository) == value
 
-    assert redact_lsp_text(value, repository=scope) == value
-
-    quoted = f'repository="{scope.checkout_root}" home="{home_root}"'
+    quoted = f'repository="{scope.checkout_root}" home="{home}"'
     assert redact_lsp_text(quoted, repository=scope) == (
         'repository="<repository>" home="<home>"'
     )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native path separators")
+def test_redaction_handles_long_and_malformed_windows_separator_aliases_safely(
+    scope: RepositoryScope,
+) -> None:
+    root = Path(scope.checkout_root)
+    boundary_count = len(PureWindowsPath(str(root)).parts) - 1
+    for malformed in ("%", "%2", "%2G", "%5", "%5Z", "%GG" * 2048):
+        separators = ["/"] * boundary_count
+        separators[0] = malformed
+        value = _windows_path_with_separators(root, tuple(separators)) + "\x00"
+        result = redact_lsp_text(value, repository=scope)
+        assert isinstance(result, str)
+        assert len(result) <= 1024
+        assert "\x00" not in result
+
+    separators = ["/"] * boundary_count
+    separators[0] = "/%2F\\%5c" * 4096
+    value = _windows_path_with_separators(root, tuple(separators)) + "/private"
+    result = redact_lsp_text(value, repository=scope)
+    assert "<repository>" in result
+    assert str(root) not in result
 
 
 def test_redaction_removes_localhost_file_uri_roots(scope: RepositoryScope) -> None:
@@ -915,22 +1016,32 @@ def test_redaction_removes_localhost_file_uri_roots(scope: RepositoryScope) -> N
 
 @pytest.mark.parametrize(
     "authority",
-    ["loc%61lhost", "%6Co%63a%6Ch%6Fs%74", "LOCAL%68OST"],
+    ["loc%61lhost", "%4Co%43a%4Ch%4Fs%54", "LOCAL%68OST"],
 )
 def test_redaction_removes_percent_encoded_localhost_file_uri_roots(
     scope: RepositoryScope,
     authority: str,
 ) -> None:
-    repository_uri = _encode_alternating_uri_letters(
-        path_to_file_uri(Path(scope.checkout_root))
-    ).replace(
-        "file:///", f"file://{authority}/", 1
-    )
-    home_uri = _encode_alternating_uri_letters(
-        path_to_file_uri(Path.home().absolute())
-    ).replace(
-        "file:///", f"file://{authority}/", 1
-    )
+    if os.name == "nt":
+        repository_uri = (
+            f"file:%2F\\{authority}/%5c"
+            f"{_encoded_windows_alias_root(Path(scope.checkout_root))}"
+        )
+        home_uri = (
+            f"file:%5C/{authority}%2f\\"
+            f"{_encoded_windows_alias_root(Path.home().absolute())}"
+        )
+    else:
+        repository_uri = _encode_alternating_uri_letters(
+            path_to_file_uri(Path(scope.checkout_root))
+        ).replace(
+            "file:///", f"file://{authority}/", 1
+        )
+        home_uri = _encode_alternating_uri_letters(
+            path_to_file_uri(Path.home().absolute())
+        ).replace(
+            "file:///", f"file://{authority}/", 1
+        )
 
     result = redact_lsp_text(
         f"{repository_uri}/pkg/api.py {home_uri}/.ssh/config",
