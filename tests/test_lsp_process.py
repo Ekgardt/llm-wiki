@@ -1524,6 +1524,53 @@ def test_startup_owner_is_registered_before_first_owned_mutation(
         process.close(time.monotonic() + 5)
 
 
+def _exercise_owner_open_failures_never_consume_startup_cleanup_registry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    baseline = {id(item) for item in lsp_process._pending_startup_cleanup_snapshot()}
+    opened: list[Path] = []
+    failures: list[BaseException] = []
+
+    def fail_open(
+        _cls: type[lsp_process._OwnerDirectory], owner_root: Path
+    ) -> lsp_process._OwnerDirectory:
+        opened.append(owner_root)
+        raise OSError("owner directory open failed")
+
+    def fail_cleanup(*_args: object, **_kwargs: object) -> list[BaseException]:
+        raise RuntimeError("startup cleanup also failed")
+
+    monkeypatch.setattr(
+        lsp_process._OwnerDirectory,
+        "open",
+        classmethod(fail_open),
+    )
+    monkeypatch.setattr(lsp_process, "_drive_cleanup", fail_cleanup)
+    try:
+        for index in range(lsp_process._MAX_STARTUP_CLEANUP_OWNERS + 1):
+            try:
+                LspProcess.start(
+                    _command(),
+                    cwd=tmp_path,
+                    owner_root=tmp_path / f"{index + 200:032x}",
+                )
+            except BaseException as error:
+                failures.append(error)
+
+        assert len(opened) == lsp_process._MAX_STARTUP_CLEANUP_OWNERS + 1
+        assert len(failures) == len(opened)
+        assert all(type(error) is OSError for error in failures)
+        assert all(str(error) == "owner directory open failed" for error in failures)
+        assert {
+            id(item) for item in lsp_process._pending_startup_cleanup_snapshot()
+        } == baseline
+    finally:
+        for coordinator in lsp_process._pending_startup_cleanup_snapshot():
+            if id(coordinator) not in baseline:
+                lsp_process._unregister_startup_cleanup(coordinator)
+
+
 def test_protocol_startup_cleanup_owner_is_adopted_for_coordinator_retry(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1631,6 +1678,9 @@ def test_released_startup_failures_do_not_exhaust_cleanup_registry(
     finally:
         for coordinator in captured:
             lsp_process._unregister_startup_cleanup(coordinator)
+    _exercise_owner_open_failures_never_consume_startup_cleanup_registry(
+        monkeypatch, tmp_path
+    )
 
 
 def test_startup_registry_atexit_hook_retries_owned_cleanup(tmp_path: Path) -> None:
@@ -2171,6 +2221,7 @@ def test_restart_spawn_failure_becomes_terminal_without_live_lease(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     process = _start(tmp_path, "--lifecycle")
+    spawn_with_deadline = lsp_process.ProcessTree._spawn_with_deadline.__func__
     monkeypatch.setattr(
         lsp_process.ProcessTree,
         "_spawn_with_deadline",
@@ -2189,6 +2240,14 @@ def test_restart_spawn_failure_becomes_terminal_without_live_lease(
     failure = json.loads((process.owner_root / "failure.json").read_bytes())
     assert failure["code"] == "restart_failed"
     assert not (process.owner_root / "lease.json").exists()
+    monkeypatch.setattr(
+        lsp_process.ProcessTree,
+        "_spawn_with_deadline",
+        classmethod(spawn_with_deadline),
+    )
+    _exercise_explicit_restart_candidate_cleanup_replaces_stopped_recovery_owner(
+        monkeypatch, tmp_path
+    )
 
 
 def test_terminal_lease_removal_failure_does_not_skip_tree_or_protocol_cleanup(
@@ -5482,6 +5541,245 @@ def test_explicit_restart_timeout_after_pending_hands_off_one_recovery_worker(
         holder.join(1)
         if lsp_process._coordinator_has_ownership(coordinator):
             process.close(time.monotonic() + 5)
+    monkeypatch.setattr(lsp_process, "_release_lifecycle", release_lifecycle)
+    monkeypatch.setattr(lsp_process, "_prepare_generation", prepare_generation)
+    _exercise_explicit_restart_retirement_deadline_finishes_without_caller_retry(
+        monkeypatch, tmp_path
+    )
+
+
+def _exercise_explicit_restart_retirement_deadline_finishes_without_caller_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle", "--sleep-seconds", "30")
+    coordinator = process._coordinator
+    generation = coordinator.active
+    recovery = coordinator.recovery_thread
+    assert generation is not None and generation.tree is not None
+    assert recovery is not None
+    tree = generation.tree
+    terminate = lsp_process.ProcessTree.terminate
+    fresh_cleanup_started = threading.Event()
+    allow_fresh_cleanup = threading.Event()
+    caller_deadline = time.monotonic() + 0.05
+
+    def deadline_sensitive_terminate(current: object, *, deadline: float) -> None:
+        if current is tree and deadline <= caller_deadline:
+            threading.Event().wait(max(0.0, deadline - time.monotonic()) + 0.005)
+            raise TimeoutError("restart caller retirement deadline expired")
+        if current is tree:
+            fresh_cleanup_started.set()
+            if not allow_fresh_cleanup.wait(max(0.0, deadline - time.monotonic())):
+                raise TimeoutError("fresh autonomous cleanup stayed blocked")
+        terminate(current, deadline=deadline)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        lsp_process.ProcessTree,
+        "terminate",
+        deadline_sensitive_terminate,
+    )
+    try:
+        with pytest.raises(
+            TimeoutError, match="restart caller retirement deadline expired"
+        ):
+            process.restart(caller_deadline)
+
+        assert coordinator.recovery_request_pending.is_set()
+        assert coordinator.recovery_request_nonce == generation.nonce
+        assert _coordinator_wait(
+            process,
+            lambda: fresh_cleanup_started.is_set()
+            or coordinator.phase is lsp_process._LifecyclePhase.STOPPED_FAILURE,
+            timeout=2,
+        )
+
+        allow_fresh_cleanup.set()
+        assert _coordinator_wait(
+            process,
+            lambda: coordinator.phase is lsp_process._LifecyclePhase.STOPPED_FAILURE,
+            timeout=5,
+        )
+        recovery.join(1)
+
+        assert process.restart_count == 0
+        assert process.state is ProcessState.FAILED
+        assert not recovery.is_alive()
+        assert coordinator.recovery_request_nonce is None
+        assert not coordinator.recovery_request_pending.is_set()
+        assert not lsp_process._coordinator_has_ownership(coordinator)
+    finally:
+        allow_fresh_cleanup.set()
+        monkeypatch.setattr(lsp_process.ProcessTree, "terminate", terminate)
+        if lsp_process._coordinator_has_ownership(coordinator):
+            process.close(time.monotonic() + 5)
+
+
+def _exercise_explicit_restart_candidate_cleanup_replaces_stopped_recovery_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = LspProcess.start(
+        _command("--lifecycle", "--sleep-seconds", "30"),
+        cwd=tmp_path,
+        owner_root=tmp_path / ("b" * 32),
+    )
+    coordinator = process._coordinator
+    original_recovery = coordinator.recovery_thread
+    owner = coordinator.owner_directory
+    assert original_recovery is not None and owner is not None
+    remove_lease = lsp_process._OwnerDirectory.remove_lease
+    retry_started = threading.Event()
+    allow_retry = threading.Event()
+    retry_threads: list[threading.Thread] = []
+    remove_calls = 0
+
+    def fail_restart_spawn(
+        _cls: type[lsp_process.ProcessTree],
+        *_args: object,
+        **_kwargs: object,
+    ) -> lsp_process.ProcessTree:
+        raise OSError("restart candidate spawn failed")
+
+    def transient_remove_lease(current: lsp_process._OwnerDirectory) -> None:
+        nonlocal remove_calls
+        if current is owner:
+            remove_calls += 1
+            if remove_calls == 1:
+                raise OSError("restart cleanup lease removal failed")
+            retry_threads.append(threading.current_thread())
+            retry_started.set()
+            assert allow_retry.wait(5)
+        remove_lease(current)
+
+    monkeypatch.setattr(
+        lsp_process.ProcessTree,
+        "_spawn_with_deadline",
+        classmethod(fail_restart_spawn),
+    )
+    monkeypatch.setattr(
+        lsp_process._OwnerDirectory,
+        "remove_lease",
+        transient_remove_lease,
+    )
+    try:
+        with pytest.raises(OSError, match="restart candidate spawn failed"):
+            process.restart(time.monotonic() + 5)
+
+        assert coordinator.recovery_request_pending.is_set()
+        assert retry_started.wait(2)
+        assert len(retry_threads) == 1
+        replacement = retry_threads[0]
+        assert replacement is not original_recovery
+        assert replacement.is_alive()
+
+        allow_retry.set()
+        assert _coordinator_wait(
+            process,
+            lambda: coordinator.phase is lsp_process._LifecyclePhase.STOPPED_FAILURE,
+            timeout=5,
+        )
+        replacement.join(1)
+
+        assert remove_calls == 2
+        assert not replacement.is_alive()
+        assert not coordinator.recovery_request_pending.is_set()
+        assert not lsp_process._coordinator_has_ownership(coordinator)
+    finally:
+        allow_retry.set()
+        monkeypatch.setattr(
+            lsp_process._OwnerDirectory,
+            "remove_lease",
+            remove_lease,
+        )
+        if lsp_process._coordinator_has_ownership(coordinator):
+            process.close(time.monotonic() + 5)
+
+
+def _exercise_recovery_owned_candidate_failure_retains_worker_for_terminal_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = LspProcess.start(
+        _command("--lifecycle", "--sleep-seconds", "30"),
+        cwd=tmp_path,
+        owner_root=tmp_path / ("c" * 32),
+    )
+    coordinator = process._coordinator
+    recovery = coordinator.recovery_thread
+    owner = coordinator.owner_directory
+    assert recovery is not None and owner is not None
+    caller = threading.current_thread()
+    restart_generation = lsp_process._restart_generation
+    remove_lease = lsp_process._OwnerDirectory.remove_lease
+    retry_started = threading.Event()
+    allow_retry = threading.Event()
+    retry_threads: list[threading.Thread] = []
+    remove_calls = 0
+
+    def expire_caller_restart(instance: LspProcess, deadline: float) -> None:
+        if threading.current_thread() is caller:
+            raise TimeoutError("explicit restart caller deadline expired")
+        restart_generation(instance, deadline)
+
+    def fail_restart_spawn(
+        _cls: type[lsp_process.ProcessTree],
+        *_args: object,
+        **_kwargs: object,
+    ) -> lsp_process.ProcessTree:
+        raise OSError("recovery candidate spawn failed")
+
+    def transient_remove_lease(current: lsp_process._OwnerDirectory) -> None:
+        nonlocal remove_calls
+        if current is owner:
+            remove_calls += 1
+            if remove_calls == 1:
+                raise OSError("recovery cleanup lease removal failed")
+            retry_threads.append(threading.current_thread())
+            retry_started.set()
+            assert allow_retry.wait(5)
+        remove_lease(current)
+
+    monkeypatch.setattr(lsp_process, "_restart_generation", expire_caller_restart)
+    monkeypatch.setattr(
+        lsp_process.ProcessTree,
+        "_spawn_with_deadline",
+        classmethod(fail_restart_spawn),
+    )
+    monkeypatch.setattr(
+        lsp_process._OwnerDirectory,
+        "remove_lease",
+        transient_remove_lease,
+    )
+    try:
+        with pytest.raises(TimeoutError, match="explicit restart caller deadline expired"):
+            process.restart(time.monotonic() + 0.05)
+
+        assert retry_started.wait(2)
+        assert retry_threads == [recovery]
+        assert recovery.is_alive()
+
+        allow_retry.set()
+        assert _coordinator_wait(
+            process,
+            lambda: coordinator.phase is lsp_process._LifecyclePhase.STOPPED_FAILURE,
+            timeout=5,
+        )
+        recovery.join(1)
+
+        assert remove_calls == 2
+        assert not recovery.is_alive()
+        assert not coordinator.recovery_request_pending.is_set()
+        assert not lsp_process._coordinator_has_ownership(coordinator)
+    finally:
+        allow_retry.set()
+        monkeypatch.setattr(
+            lsp_process._OwnerDirectory,
+            "remove_lease",
+            remove_lease,
+        )
+        if lsp_process._coordinator_has_ownership(coordinator):
+            process.close(time.monotonic() + 5)
 
 
 def test_terminal_intent_lock_respects_deadline_and_cannot_commit_success(
@@ -5720,6 +6018,8 @@ def test_autonomous_restart_failure_with_expired_transition_lock_is_sticky(
     assert generation is not None
     generation_nonce = process.generation_nonce
     server_pid = process.process.pid
+    graceful_cleanup_seconds = lsp_process._GRACEFUL_CLEANUP_SECONDS
+    restart_generation = lsp_process._restart_generation
     monkeypatch.setattr(lsp_process, "_GRACEFUL_CLEANUP_SECONDS", 0.05)
     held = threading.Event()
     release = threading.Event()
@@ -5811,6 +6111,16 @@ def test_autonomous_restart_failure_with_expired_transition_lock_is_sticky(
             except RuntimeError:
                 if lsp_process._coordinator_has_ownership(coordinator):
                     process.close(time.monotonic() + 5)
+    monkeypatch.setattr(
+        lsp_process, "_GRACEFUL_CLEANUP_SECONDS", graceful_cleanup_seconds
+    )
+    monkeypatch.setattr(lsp_process, "_restart_generation", restart_generation)
+    monkeypatch.setattr(
+        lsp_process, "_remember_background_cleanup_error", remember_background_error
+    )
+    _exercise_recovery_owned_candidate_failure_retains_worker_for_terminal_retry(
+        monkeypatch, tmp_path
+    )
 
 
 def test_persistent_autonomous_cleanup_fault_retries_with_fresh_bounded_budgets(

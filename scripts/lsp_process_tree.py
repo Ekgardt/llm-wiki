@@ -530,12 +530,15 @@ if os.name == "nt":
         tracked_pids: Sequence[int] = (),
     ) -> tuple[bool, list[BaseException]]:
         errors: list[BaseException] = []
+        wait_error: BaseException | None = None
         query_failed = False
         empty_observations = 0
         empty_since: float | None = None
         remaining_pids = set(tracked_pids)
         while True:
             direct_reaped = process.poll() is not None
+            if direct_reaped:
+                wait_error = None
             active: int | None = None
             if not query_failed:
                 try:
@@ -560,20 +563,25 @@ if os.name == "nt":
                     now - empty_since >= _WINDOWS_PID_SETTLE_SECONDS
                 )
                 if empty_observations >= 2 and pid_settled:
-                    return True, errors
+                    return True, errors + ([wait_error] if wait_error is not None else [])
             else:
                 empty_observations = 0
                 empty_since = None
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return False, errors
+                return False, errors + ([wait_error] if wait_error is not None else [])
             if not direct_reaped:
                 try:
                     process.wait(timeout=min(0.01, remaining))
                 except subprocess.TimeoutExpired:
                     pass
                 except BaseException as error:
-                    errors.append(error)
+                    wait_error = error
+                    remaining = deadline - time.monotonic()
+                    if remaining > 0:
+                        time.sleep(min(0.01, remaining))
+                else:
+                    wait_error = None
             else:
                 time.sleep(min(0.01, remaining))
 

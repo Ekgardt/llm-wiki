@@ -192,6 +192,7 @@ def test_windows_tree_wait_requires_stable_empty_job_observation(
     assert complete is True
     assert errors == []
     assert observations == [0, 1, 0, 0]
+    _exercise_windows_tree_successful_wait_retry_clears_prior_error(monkeypatch)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job PID observation boundary")
@@ -221,6 +222,98 @@ def test_windows_tree_wait_treats_captured_pid_as_best_effort_identity(
     assert complete is True
     assert errors == []
     assert len(checked) >= 3
+    _exercise_windows_tree_wait_error_uses_bounded_backoff_and_constant_error_state(
+        monkeypatch
+    )
+
+
+def _exercise_windows_tree_wait_error_uses_bounded_backoff_and_constant_error_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Clock:
+        now = 100.0
+
+        def monotonic(self) -> float:
+            self.now += 0.0005
+            return self.now
+
+        def sleep(self, seconds: float) -> None:
+            self.now += seconds
+
+    class WaitingProcess:
+        wait_calls = 0
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            self.wait_calls += 1
+            raise OSError("immediate process wait failure")
+
+    for probe_seconds in (0.02, 2.0):
+        clock = Clock()
+        process = WaitingProcess()
+        monkeypatch.setattr(lsp_process_tree.time, "monotonic", clock.monotonic)
+        monkeypatch.setattr(lsp_process_tree.time, "sleep", clock.sleep)
+        monkeypatch.setattr(lsp_process_tree, "_job_active_processes", lambda _job: 1)
+
+        complete, errors = lsp_process_tree._wait_windows_tree(
+            process, 17, clock.now + probe_seconds  # type: ignore[arg-type]
+        )
+
+        assert complete is False
+        assert process.wait_calls <= int(probe_seconds / 0.005) + 3
+        assert len(errors) == 1
+        assert str(errors[0]) == "immediate process wait failure"
+
+
+def _exercise_windows_tree_successful_wait_retry_clears_prior_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Clock:
+        now = 100.0
+
+        def monotonic(self) -> float:
+            self.now += 0.0005
+            return self.now
+
+        def sleep(self, seconds: float) -> None:
+            self.now += seconds
+
+    class RetryingProcess:
+        reaped = False
+        wait_calls = 0
+
+        def poll(self) -> int | None:
+            return 0 if self.reaped else None
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                raise OSError("transient process wait failure")
+            self.reaped = True
+            return 0
+
+    clock = Clock()
+    process = RetryingProcess()
+    monkeypatch.setattr(lsp_process_tree.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(lsp_process_tree.time, "sleep", clock.sleep)
+    monkeypatch.setattr(
+        lsp_process_tree,
+        "_job_active_processes",
+        lambda _job: 0 if process.reaped else 1,
+    )
+
+    complete, errors = lsp_process_tree._wait_windows_tree(
+        process, 17, clock.now + 1  # type: ignore[arg-type]
+    )
+
+    assert complete is True
+    assert process.wait_calls == 2
+    assert errors == []
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job accounting boundary")
