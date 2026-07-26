@@ -34,7 +34,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   transactions/tasks/results, the 30-day undo window, and live owners.
 - Recorded the local-filesystem requirement, current `synchronous=FULL`/no-WAL
   policy, bounded defaults and CLI overrides, cooperating-writer CAS boundary, and
-  explicit non-goals. The suite now collects **4649 tests**.
+  explicit non-goals. The suite now collects **4653 tests**.
 - Added canonical `repository-scope/v1` binding for repositories, linked worktrees,
   checkout roots, Git common directories, and captured commits. Generation readers
   reject the wrong repository/worktree scope instead of returning cross-checkout
@@ -65,6 +65,10 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Normalize control and Unicode-format aliases before LSP credential redaction,
+  scan every punctuation-separated URL authority, and match Windows path roots by
+  normalized components including dot segments, trailing dots/spaces, and encoded
+  Unicode case aliases without matching sibling prefixes.
 - Publish explicit LSP recovery transitions with one sticky worker handoff. Recovery
   retries incomplete restart-failure cleanup with fresh bounded deadlines and event
   backoff, while the startup registry retains only coordinators with live ownership.

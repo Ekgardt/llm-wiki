@@ -35,6 +35,11 @@ _WINDOWS_ENCODED_NON_SEPARATOR_PATTERN = r"%(?!(?:2F|5C))[0-9A-F]{2}"
 _WINDOWS_PATH_BOUNDARY_PATTERN = (
     rf"(?![\w.-]|{_WINDOWS_ENCODED_NON_SEPARATOR_PATTERN})"
 )
+_WINDOWS_TRAILING_COMPONENT_ALIAS_PATTERN = r"(?:[ .]|%2E|%20)*"
+_WINDOWS_CURRENT_DIRECTORY_ALIAS_PATTERN = (
+    rf"(?:(?:\.|%2E)(?: |%20)*{_WINDOWS_SEPARATOR_RUN_PATTERN})*"
+)
+_URL_AUTHORITY_TOKEN_BOUNDARIES = frozenset(",;()[]{}'\"<>")
 _WINDOWS_RESERVED = frozenset(
     {
         "aux",
@@ -682,7 +687,12 @@ def _redact_url_userinfo(value: str) -> str:
         authority_end = authority_start
         while authority_end < len(value):
             character = value[authority_end]
-            if character in "/?#" or character.isspace() or _is_control(character):
+            if (
+                character in "/?#"
+                or character in _URL_AUTHORITY_TOKEN_BOUNDARIES
+                or character.isspace()
+                or _is_control(character)
+            ):
                 break
             authority_end += 1
         userinfo_end = value.rfind("@", authority_start, authority_end)
@@ -690,7 +700,9 @@ def _redact_url_userinfo(value: str) -> str:
             pieces.append(value[cursor:authority_start])
             pieces.append("<redacted>@")
             cursor = userinfo_end + 1
-        index = authority_end
+            index = authority_end
+        else:
+            index = authority_start
     pieces.append(value[cursor:])
     return "".join(pieces)
 
@@ -721,15 +733,53 @@ def _uri_character_pattern(character: str) -> str:
     return f"(?:{re.escape(character)}|(?i:{encoded}))"
 
 
-def _case_insensitive_character_pattern(character: str) -> str:
-    encoded_characters = {character}
-    if character.isascii() and character.isalpha():
-        encoded_characters.add(character.swapcase())
-    encoded = "|".join(
-        "".join(f"%{byte:02X}" for byte in item.encode("utf-8"))
-        for item in sorted(encoded_characters)
+def _case_insensitive_character_pattern(
+    character: str,
+    *equivalent_characters: str,
+) -> str:
+    seeds = tuple(dict.fromkeys((character, *equivalent_characters)))
+    aliases = tuple(
+        dict.fromkeys(
+            alias
+            for seed in seeds
+            for alias in (seed, seed.lower(), seed.upper(), seed.casefold())
+        )
     )
-    return f"(?:{re.escape(character)}|(?i:{encoded}))"
+    raw_aliases: dict[tuple[int, str], str] = {}
+    for alias in aliases:
+        raw_aliases.setdefault((len(alias), alias.casefold()), alias)
+    encoded_aliases = sorted(
+        {
+            "".join(f"%{byte:02X}" for byte in alias.encode("utf-8"))
+            for alias in aliases
+        }
+    )
+    patterns = [
+        *(re.escape(alias) for alias in raw_aliases.values()),
+        *(f"(?i:{alias})" for alias in encoded_aliases),
+    ]
+    patterns.sort(key=lambda pattern: (-len(pattern), pattern))
+    return "(?:" + "|".join(patterns) + ")"
+
+
+def _windows_component_alias_pattern(component: str) -> str:
+    canonical = component.rstrip(" .")
+    aliases = tuple(
+        dict.fromkeys(
+            (canonical, canonical.lower(), canonical.upper(), canonical.casefold())
+        )
+    )
+    positional_aliases = tuple(alias for alias in aliases if len(alias) == len(canonical))
+    return (
+        "".join(
+            _case_insensitive_character_pattern(
+                character,
+                *(alias[index] for alias in positional_aliases),
+            )
+            for index, character in enumerate(canonical)
+        )
+        + _WINDOWS_TRAILING_COMPONENT_ALIAS_PATTERN
+    )
 
 
 def _windows_path_alias_pattern(path: Path) -> str:
@@ -738,14 +788,14 @@ def _windows_path_alias_pattern(path: Path) -> str:
         _case_insensitive_character_pattern(character) for character in pure.drive
     )
     components = tuple(
-        "".join(
-            _case_insensitive_character_pattern(character) for character in component
-        )
-        for component in pure.parts[1:]
+        _windows_component_alias_pattern(component) for component in pure.parts[1:]
     )
-    return drive + _WINDOWS_SEPARATOR_RUN_PATTERN + (
-        _WINDOWS_SEPARATOR_RUN_PATTERN.join(components)
+    if not components:
+        return drive + _WINDOWS_SEPARATOR_RUN_PATTERN
+    component_boundary = (
+        _WINDOWS_SEPARATOR_RUN_PATTERN + _WINDOWS_CURRENT_DIRECTORY_ALIAS_PATTERN
     )
+    return drive + component_boundary + component_boundary.join(components)
 
 
 def _encoded_file_uri_pattern(path: Path) -> re.Pattern[str]:
@@ -796,12 +846,31 @@ def _redact_path(value: str, path: Path, marker: str) -> str:
     return _encoded_file_uri_pattern(path).sub(lambda _match: marker, value)
 
 
-def _sanitize_controls(value: str) -> str:
-    replacements = {"\r": "\\r", "\n": "\\n", "\t": "\\t"}
-    return "".join(
-        replacements.get(character, "<control>") if _is_control(character) else character
-        for character in value
-    )
+def _normalize_log_text(value: str) -> str:
+    pieces: list[str] = []
+    index = 0
+    while index < len(value):
+        character = value[index]
+        csi_start = -1
+        if character == "\x1b" and value[index + 1 : index + 2] == "[":
+            csi_start = index + 2
+        elif character == "\x9b":
+            csi_start = index + 1
+        if csi_start >= 0:
+            # Strip a complete ANSI CSI sequence as one unit so its printable
+            # parameters cannot split a credential key after ESC is removed.
+            csi_end = csi_start
+            while csi_end < len(value) and "0" <= value[csi_end] <= "?":
+                csi_end += 1
+            while csi_end < len(value) and " " <= value[csi_end] <= "/":
+                csi_end += 1
+            if csi_end < len(value) and "@" <= value[csi_end] <= "~":
+                index = csi_end + 1
+                continue
+        if not _is_control(character):
+            pieces.append(character)
+        index += 1
+    return "".join(pieces)
 
 
 def redact_lsp_text(
@@ -815,7 +884,8 @@ def redact_lsp_text(
     if repository is not None:
         repository = _require_repository(repository)
 
-    redacted = _redact_assignments(value)
+    redacted = _normalize_log_text(value)
+    redacted = _redact_assignments(redacted)
     redacted = _redact_url_userinfo(redacted)
     if repository is not None:
         redacted = _redact_path(
@@ -835,7 +905,7 @@ def redact_lsp_text(
             redacted = _redact_path(redacted, home_path, "<home>")
     except (OSError, RuntimeError):
         pass
-    return _sanitize_controls(redacted)[:1024]
+    return _normalize_log_text(redacted)[:1024]
 
 
 __all__ = [

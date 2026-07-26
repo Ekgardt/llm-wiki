@@ -765,6 +765,30 @@ def test_redaction_removes_url_userinfo_from_long_rfc3986_scheme() -> None:
     assert result == f"{scheme}://<redacted>@example.test/private"
 
 
+def test_redaction_scans_every_punctuation_separated_url_authority() -> None:
+    boundaries = (",", ";", "(", ")", "[", "]", "{", "}", "'", '"', "<", ">")
+    credential_url = "https://bob:boundary-secret@example.test"
+    for boundary in boundaries:
+        value = f"https://public.example{boundary}{credential_url}"
+
+        assert redact_lsp_text(value) == (
+            f"https://public.example{boundary}https://<redacted>@example.test"
+        )
+
+    long_value = ",".join(
+        ["https://public.example"] * 4096
+        + ["https://bob:long-tail-secret@example.test"]
+    )
+    long_result = lsp_security._redact_url_userinfo(long_value)
+    assert "long-tail-secret" not in long_result
+    assert long_result.endswith("https://<redacted>@example.test")
+
+    control_separated = "https://public.example\n" + credential_url
+    control_result = redact_lsp_text(control_separated)
+    assert "boundary-secret" not in control_result
+    assert control_result.endswith("https://<redacted>@example.test")
+
+
 def test_redaction_removes_repository_and_home_native_and_uri_paths(
     scope: RepositoryScope,
 ) -> None:
@@ -872,6 +896,27 @@ def _windows_separator_alias_variants(path: Path) -> tuple[str, ...]:
         variants.add(encoded.replace(":", "%3A", 1))
         variants.add(encoded.replace(":", "%3a", 1))
     return tuple(sorted(variants))
+
+
+def _windows_normalized_component_alias(
+    path: Path,
+    *,
+    dot_repetitions: int = 1,
+) -> str:
+    pure = PureWindowsPath(str(path))
+    aliases = _WINDOWS_SEPARATOR_ATOMS
+    trailing_aliases = (".", "%2E", " ", "%20", ".%20")
+    value = pure.drive.swapcase()
+    for index, component in enumerate(pure.parts[1:]):
+        value += aliases[index % len(aliases)]
+        for repetition in range(dot_repetitions):
+            value += (
+                ("." if (index + repetition) % 2 == 0 else "%2E")
+                + aliases[(index + repetition + 1) % len(aliases)]
+            )
+        value += _encode_alternating_windows_path_letters(component)
+        value += trailing_aliases[index % len(trailing_aliases)]
+    return value
 
 
 def test_redaction_removes_lexical_and_resolved_linked_home_paths(
@@ -993,6 +1038,73 @@ def test_redaction_handles_long_and_malformed_windows_separator_aliases_safely(
     result = redact_lsp_text(value, repository=scope)
     assert "<repository>" in result
     assert str(root) not in result
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows path normalization")
+def test_redaction_normalizes_windows_components_without_matching_siblings(
+    scope: RepositoryScope,
+) -> None:
+    root = Path(scope.checkout_root)
+    native_alias = _windows_normalized_component_alias(root)
+    file_alias = (
+        "file:%2F%5Cloc%61lhost\\"
+        + native_alias.replace(":", "%3A", 1)
+    )
+    for value in (native_alias + "/private", file_alias + "%2Fprivate"):
+        result = redact_lsp_text(value, repository=scope)
+        assert value not in result
+        assert result.count("<repository>") == 1
+
+    for value in (
+        native_alias + "-sibling/private",
+        file_alias + "%2Dother/private",
+    ):
+        assert redact_lsp_text(value, repository=scope) == value
+
+    pure = PureWindowsPath(str(root))
+    parent_alias = pure.drive + "/../" + "/".join(pure.parts[1:])
+    assert redact_lsp_text(parent_alias, repository=scope) == parent_alias
+
+    long_alias = _windows_normalized_component_alias(root, dot_repetitions=4096)
+    long_result = redact_lsp_text(long_alias + "/private", repository=scope)
+    assert long_result == "<repository>/private"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Unicode path aliases")
+def test_redaction_matches_percent_encoded_unicode_windows_case_aliases(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "RÉPO-ΟΣ"
+    repository.mkdir()
+    scope = resolve_repository_scope(repository)
+    root = Path(scope.checkout_root)
+    boundary_count = len(PureWindowsPath(str(root)).parts) - 1
+    separators = tuple(
+        _WINDOWS_SEPARATOR_ATOMS[index % len(_WINDOWS_SEPARATOR_ATOMS)]
+        for index in range(boundary_count)
+    )
+    native_alias = (
+        _windows_path_with_separators(root, separators)
+        .replace("É", "%C3%A9")
+        .replace("Ο", "%CE%BF")
+        .replace("Σ", "%CF%82")
+    )
+    file_alias = (
+        "file:%5C%2Floc%61lhost/"
+        + native_alias.replace(":", "%3a", 1)
+    )
+    for value in (native_alias + "/private", file_alias + "%5Cprivate"):
+        result = redact_lsp_text(value, repository=scope)
+        assert value not in result
+        assert result.count("<repository>") == 1
+
+    for value in (native_alias + "-other", file_alias + "%2Dother"):
+        assert redact_lsp_text(value, repository=scope) == value
+
+    malformed = native_alias + "%C3" * 4096
+    malformed_result = redact_lsp_text(malformed, repository=scope)
+    assert "<repository>" not in malformed_result
+    assert len(malformed_result) <= 1024
 
 
 def test_redaction_removes_localhost_file_uri_roots(scope: RepositoryScope) -> None:
@@ -1148,7 +1260,34 @@ def test_redaction_neutralizes_unicode_format_and_bidi_controls() -> None:
     result = redact_lsp_text("before" + controls + "after")
 
     assert not any(unicodedata.category(character) == "Cf" for character in result)
-    assert result == "before" + "<control>" * len(controls) + "after"
+    assert result == "beforeafter"
+
+
+def test_redaction_normalizes_controls_before_detecting_credentials() -> None:
+    key = "OPENAI_API_KEY"
+    insertions = (
+        "\x00",
+        "\r\n",
+        "\x85",
+        "\x1b",
+        "\x1b[0m",
+        "\x1b[38;5;196m",
+        "\u200b",
+        "\u200d",
+        "\u202e",
+        "\u2066",
+        "\ufeff",
+    )
+    for insertion in insertions:
+        for boundary in range(len(key) + 1):
+            value = key[:boundary] + insertion + key[boundary:] + "=boundary-secret"
+            result = redact_lsp_text(value)
+            assert result == key + "=<redacted>"
+            assert "boundary-secret" not in result
+            assert not any(lsp_security._is_control(character) for character in result)
+
+    long_value = "TOKEN" + "\u200b" * 32_768 + "=long-control-secret"
+    assert redact_lsp_text(long_value) == "TOKEN=<redacted>"
 
 
 def test_redaction_happens_before_sanitized_output_is_truncated() -> None:
