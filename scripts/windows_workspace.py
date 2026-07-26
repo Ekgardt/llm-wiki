@@ -15,6 +15,7 @@ _WINDOWS_RESERVED = {
     *(f"com{number}" for number in range(1, 10)),
     *(f"lpt{number}" for number in range(1, 10)),
 }
+_MAX_LOCAL_PATH_CHARACTERS = 32_767
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +152,7 @@ if os.name == "nt":
                 "CreateFileW": kernel32,
                 "CloseHandle": kernel32,
                 "GetFileInformationByHandleEx": kernel32,
+                "GetShortPathNameW": kernel32,
                 "SetFileInformationByHandle": kernel32,
                 "ReadFile": kernel32,
                 "WriteFile": kernel32,
@@ -188,6 +190,13 @@ if os.name == "nt":
                 wintypes.DWORD,
             )
             self.get_information.restype = wintypes.BOOL
+            self.get_short_path = kernel32.GetShortPathNameW
+            self.get_short_path.argtypes = (
+                wintypes.LPCWSTR,
+                wintypes.LPWSTR,
+                wintypes.DWORD,
+            )
+            self.get_short_path.restype = wintypes.DWORD
             self.set_information = kernel32.SetFileInformationByHandle
             self.set_information.argtypes = self.get_information.argtypes
             self.set_information.restype = wintypes.BOOL
@@ -260,6 +269,49 @@ def require_capability() -> None:
     supported, reason = capability()
     if not supported:
         raise RuntimeError(reason or "Windows native workspace APIs are unavailable")
+
+
+def _bounded_local_absolute_path(path: Path) -> tuple[str, PureWindowsPath]:
+    if not isinstance(path, Path):
+        raise TypeError("Windows short path must be a Path")
+    value = str(path)
+    pure = PureWindowsPath(value)
+    try:
+        characters = len(value.encode("utf-16-le")) // 2
+    except UnicodeEncodeError as exc:
+        raise ValueError(
+            "Windows short path must be a bounded local absolute path"
+        ) from exc
+    if (
+        not pure.drive
+        or pure.root != "\\"
+        or value.startswith("\\\\")
+        or "\x00" in value
+        or characters > _MAX_LOCAL_PATH_CHARACTERS
+    ):
+        raise ValueError("Windows short path must be a bounded local absolute path")
+    return str(pure), pure
+
+
+def get_short_path(path: Path) -> Path:
+    """Return the bounded 8.3 form of one existing local absolute path."""
+    require_capability()
+    value, pure = _bounded_local_absolute_path(path)
+    required = int(_API.get_short_path(value, None, 0))
+    if required == 0:
+        raise ctypes.WinError(ctypes.get_last_error())
+    if required > _MAX_LOCAL_PATH_CHARACTERS + 1:
+        raise ValueError("Windows short path result exceeded the bounded path range")
+    buffer = ctypes.create_unicode_buffer(required)
+    written = int(_API.get_short_path(value, buffer, required))
+    if written == 0:
+        raise ctypes.WinError(ctypes.get_last_error())
+    if written >= required or written > _MAX_LOCAL_PATH_CHARACTERS:
+        raise ValueError("Windows short path result exceeded the bounded path range")
+    result, result_pure = _bounded_local_absolute_path(Path(buffer.value))
+    if result_pure.drive.casefold() != pure.drive.casefold():
+        raise OSError("Windows short path changed the local drive")
+    return Path(result)
 
 
 def _component(name: str) -> str:
@@ -697,6 +749,7 @@ __all__ = [
     "file_size",
     "flush_directory",
     "flush_file",
+    "get_short_path",
     "identity",
     "is_read_only",
     "list_directory",

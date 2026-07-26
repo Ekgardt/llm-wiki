@@ -32,12 +32,11 @@ _MALFORMED_PERCENT = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _ENCODED_SEPARATOR = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
 _WINDOWS_DRIVE_PATH = re.compile(r"^[A-Za-z]:/")
 _URL_AUTHORITY_TOKEN_BOUNDARIES = frozenset('"<>\\^`{|}')
-_WINDOWS_REDACTION_TOKEN_BOUNDARIES = frozenset('\"<>|?*')
-_WINDOWS_OPTIONAL_TOKEN_BOUNDARIES = frozenset(",;()[]{}'")
+_WINDOWS_REDACTION_TOKEN_BOUNDARIES = frozenset("<>|?*")
+_WINDOWS_OPTIONAL_TOKEN_BOUNDARIES = frozenset(",;()[]{}'\"")
 _WINDOWS_REDACTION_TOKEN_START = re.compile(
     r"(?i)(?P<file>file:)|"
-    r"(?P<native>(?:[A-Z]|%[0-9A-F]{2})(?::|%3A)"
-    r"(?=(?:[\\/]|%(?:2F|5C))))"
+    r"(?P<native>[A-Z]:(?=[\\/]))"
 )
 _WINDOWS_RESERVED = frozenset(
     {
@@ -798,12 +797,10 @@ def _encoded_file_uri_pattern(path: Path) -> re.Pattern[str]:
     return re.compile(prefix + path_pattern)
 
 
-def _decode_percent_token_once(
+def _decode_uri_percent_token_once(
     value: str,
     start: int,
     end: int,
-    *,
-    strict_percent: bool,
 ) -> tuple[str, tuple[int, ...], tuple[bool, ...]] | None:
     characters: list[str] = []
     source_ends: list[int] = []
@@ -837,8 +834,7 @@ def _decode_percent_token_once(
                 byte_ends.append(index + 3)
                 index += 3
                 continue
-            if strict_percent:
-                return None
+            return None
         if not flush_bytes():
             return None
         characters.append(value[index])
@@ -922,13 +918,11 @@ def _windows_token_start_is_bounded(value: str, start: int) -> bool:
 
 def _windows_token_source_end(value: str, start: int, *, file_uri: bool) -> int:
     limit = min(len(value), start + _MAX_REDACTION_PATH_TOKEN)
-    quote = value[start - 1] if start and value[start - 1] in {'"', "'"} else None
     index = start
     while index < limit:
         character = value[index]
         if (
             _is_control(character)
-            or character == quote
             or character in _WINDOWS_REDACTION_TOKEN_BOUNDARIES
             or (file_uri and character == "#")
         ):
@@ -937,39 +931,68 @@ def _windows_token_source_end(value: str, start: int, *, file_uri: bool) -> int:
     return index
 
 
+def _windows_root_component_aliases(
+    path: Path,
+) -> tuple[str, tuple[frozenset[str], ...]] | None:
+    canonical = _canonical_windows_path_token(str(path), file_uri=False)
+    if canonical is None:
+        return None
+    drive, components = canonical
+    aliases = [{component} for component in components]
+    try:
+        short_path = windows_workspace.get_short_path(path)
+    except (OSError, RuntimeError, ValueError):
+        pass
+    else:
+        short = _canonical_windows_path_token(str(short_path), file_uri=False)
+        if short is not None and short[0] == drive and len(short[1]) == len(aliases):
+            for component_aliases, short_component in zip(aliases, short[1]):
+                component_aliases.add(short_component)
+    return drive, tuple(frozenset(component_aliases) for component_aliases in aliases)
+
+
 def _windows_path_token_match_end(
     value: str,
     start: int,
     *,
     file_uri: bool,
-    root: tuple[str, tuple[str, ...]],
+    root: tuple[str, tuple[frozenset[str], ...]],
 ) -> tuple[int | None, int]:
     source_end = _windows_token_source_end(value, start, file_uri=file_uri)
     if file_uri:
         malformed = _MALFORMED_PERCENT.search(value, start, source_end)
         if malformed is not None:
             source_end = malformed.start()
-    decoded = _decode_percent_token_once(
-        value,
-        start,
-        source_end,
-        strict_percent=file_uri,
-    )
-    if decoded is None:
-        return None, source_end
-    text, source_ends, encoded = decoded
-    candidate_ends = [len(text)]
-    candidate_ends.extend(
-        index
-        for index, character in enumerate(text)
-        if not encoded[index]
-        and (
+    if file_uri:
+        decoded = _decode_uri_percent_token_once(value, start, source_end)
+        if decoded is None:
+            return None, source_end
+        text, source_ends, encoded = decoded
+    else:
+        text = value[start:source_end]
+        source_ends = tuple(range(start + 1, source_end + 1))
+        encoded = (False,) * len(text)
+    quote_ends: list[int] = []
+    optional_ends: list[int] = []
+    for index, character in enumerate(text):
+        if not encoded[index] and (
             character.isspace()
             or character in _WINDOWS_OPTIONAL_TOKEN_BOUNDARIES
-        )
-    )
-    del candidate_ends[_MAX_COMPONENTS + 1 :]
-    root_drive, root_components = root
+        ):
+            if character in {'"', "'"}:
+                following = text[index + 1 : index + 2]
+                if following and (
+                    following.isalnum() or following in "_.-%\\/"
+                ):
+                    continue
+                target = quote_ends
+            else:
+                target = optional_ends
+            target.append(index)
+            if len(quote_ends) + len(optional_ends) >= _MAX_COMPONENTS:
+                break
+    candidate_ends = [*quote_ends, len(text), *optional_ends]
+    root_drive, root_component_aliases = root
     for candidate_end in dict.fromkeys(candidate_ends):
         normalized = _canonical_windows_path_token(
             text[:candidate_end], file_uri=file_uri
@@ -979,8 +1002,11 @@ def _windows_path_token_match_end(
         drive, components = normalized
         if (
             drive == root_drive
-            and len(components) >= len(root_components)
-            and components[: len(root_components)] == root_components
+            and len(components) >= len(root_component_aliases)
+            and all(
+                component in aliases
+                for component, aliases in zip(components, root_component_aliases)
+            )
         ):
             match_end = (
                 start if candidate_end == 0 else source_ends[candidate_end - 1]
@@ -990,7 +1016,7 @@ def _windows_path_token_match_end(
 
 
 def _redact_windows_path_tokens(value: str, path: Path, marker: str) -> str:
-    root = _canonical_windows_path_token(str(path), file_uri=False)
+    root = _windows_root_component_aliases(path)
     if root is None:
         return value
     pieces: list[str] = []
@@ -1085,6 +1111,9 @@ def _normalize_log_text(value: str) -> str:
                 index += 2
                 continue
             if following == "\\":
+                index += 2
+                continue
+            if following and "0" <= following <= "~":
                 index += 2
                 continue
         elif character == "\x9b":

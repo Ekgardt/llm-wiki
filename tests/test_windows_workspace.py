@@ -3,10 +3,58 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 import windows_workspace
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows short-path boundary")
+def test_get_short_path_is_exported_and_returns_existing_local_path(
+    tmp_path: Path,
+) -> None:
+    supported, reason = windows_workspace.capability()
+    if not supported:
+        pytest.skip(reason or "Windows native workspace APIs unavailable")
+    target = tmp_path / "long-existing-workspace-component"
+    target.mkdir()
+
+    assert "get_short_path" in windows_workspace.__all__
+    short = windows_workspace.get_short_path(target)
+
+    assert isinstance(short, Path)
+    assert short.is_absolute()
+    assert short.samefile(target)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows short-path boundary")
+def test_get_short_path_rejects_nonlocal_paths_before_bounded_api_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supported, reason = windows_workspace.capability()
+    if not supported:
+        pytest.skip(reason or "Windows native workspace APIs unavailable")
+    calls: list[tuple[str, int]] = []
+
+    def oversized(path: str, _buffer: object, size: int) -> int:
+        calls.append((path, size))
+        return 40_000
+
+    monkeypatch.setattr(windows_workspace._API, "get_short_path", oversized, raising=False)
+    for path in (
+        Path("relative"),
+        Path(r"\\server\share\folder"),
+        Path(r"\\?\C:\folder"),
+        Path(r"\\.\C:\folder"),
+    ):
+        with pytest.raises(ValueError, match="local absolute"):
+            windows_workspace.get_short_path(path)
+    assert calls == []
+
+    with pytest.raises(ValueError, match="bounded"):
+        windows_workspace.get_short_path(tmp_path)
+    assert calls == [(str(PureWindowsPath(tmp_path)), 0)]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows native handle boundary")

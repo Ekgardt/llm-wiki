@@ -832,14 +832,17 @@ def test_redaction_removes_repository_and_home_native_and_uri_paths(
     assert "<home>" in result
 
 
-_WINDOWS_SEPARATOR_ATOMS = ("/", "\\", "%2F", "%5C")
+_WINDOWS_NATIVE_SEPARATOR_ATOMS = ("/", "\\")
+_WINDOWS_URI_SEPARATOR_ATOMS = ("/", "\\", "%2F", "%5C")
 
 
-def _windows_separator_aliases() -> tuple[str, ...]:
+def _windows_separator_aliases(
+    atoms: tuple[str, ...] = _WINDOWS_NATIVE_SEPARATOR_ATOMS,
+) -> tuple[str, ...]:
     return tuple(
         "".join(tokens)
         for width in range(1, 4)
-        for tokens in product(_WINDOWS_SEPARATOR_ATOMS, repeat=width)
+        for tokens in product(atoms, repeat=width)
     )
 
 
@@ -882,7 +885,7 @@ def _encode_alternating_windows_path_letters(value: str) -> str:
 
 
 def _encoded_windows_alias_root(path: Path) -> str:
-    aliases = _windows_separator_aliases()
+    aliases = _windows_separator_aliases(_WINDOWS_URI_SEPARATOR_ATOMS)
     boundary_count = len(PureWindowsPath(str(path)).parts) - 1
     separators = tuple(
         aliases[(index * 17 + 5) % len(aliases)] for index in range(boundary_count)
@@ -908,10 +911,6 @@ def _windows_separator_alias_variants(path: Path) -> tuple[str, ...]:
         )
         value = _windows_path_with_separators(path, separators)
         variants.add(value)
-        encoded = _encode_alternating_windows_path_letters(value)
-        variants.add(encoded)
-        variants.add(encoded.replace(":", "%3A", 1))
-        variants.add(encoded.replace(":", "%3a", 1))
     return tuple(sorted(variants))
 
 
@@ -919,19 +918,32 @@ def _windows_normalized_component_alias(
     path: Path,
     *,
     dot_repetitions: int = 1,
+    uri: bool = False,
 ) -> str:
     pure = PureWindowsPath(str(path))
-    aliases = _WINDOWS_SEPARATOR_ATOMS
-    trailing_aliases = (".", "%2E", " ", "%20", ".%20")
+    aliases = _WINDOWS_URI_SEPARATOR_ATOMS if uri else _WINDOWS_NATIVE_SEPARATOR_ATOMS
+    trailing_aliases = (
+        (".", "%2E", " ", "%20", ".%20")
+        if uri
+        else (".", " ", ". ")
+    )
     value = pure.drive.swapcase()
     for index, component in enumerate(pure.parts[1:]):
         value += aliases[index % len(aliases)]
         for repetition in range(dot_repetitions):
             value += (
-                ("." if (index + repetition) % 2 == 0 else "%2E")
+                (
+                    "."
+                    if not uri or (index + repetition) % 2 == 0
+                    else "%2E"
+                )
                 + aliases[(index + repetition + 1) % len(aliases)]
             )
-        value += _encode_alternating_windows_path_letters(component)
+        value += (
+            _encode_alternating_windows_path_letters(component)
+            if uri
+            else component.swapcase()
+        )
         value += trailing_aliases[index % len(trailing_aliases)]
     return value
 
@@ -996,9 +1008,9 @@ def test_redaction_removes_every_mixed_windows_repository_separator_combination(
 ) -> None:
     variants = _windows_separator_alias_variants(Path(scope.checkout_root))
     aliases = set(_windows_separator_aliases())
-    assert len(aliases) == 84
-    assert {"//", "\\\\", "%2F%2F", "%5C%5C", "/%5C", "%2F\\"} <= aliases
-    assert len(variants) >= 84
+    assert len(aliases) == 14
+    assert {"/", "\\", "//", "\\\\", "/\\", "\\/"} <= aliases
+    assert len(variants) >= 14
 
     for root in variants:
         result = redact_lsp_text(f"{root}\\pkg/api.py", repository=scope)
@@ -1050,7 +1062,7 @@ def test_redaction_handles_long_and_malformed_windows_separator_aliases_safely(
         assert "\x00" not in result
 
     separators = ["/"] * boundary_count
-    separators[0] = "/%2F\\%5c" * 4096
+    separators[0] = "/\\" * 4096
     value = _windows_path_with_separators(root, tuple(separators)) + "/private"
     result = redact_lsp_text(value, repository=scope)
     assert "<repository>" in result
@@ -1065,7 +1077,7 @@ def test_redaction_normalizes_windows_components_without_matching_siblings(
     native_alias = _windows_normalized_component_alias(root)
     file_alias = (
         "file:%2F%5Cloc%61lhost\\"
-        + native_alias.replace(":", "%3A", 1)
+        + _windows_normalized_component_alias(root, uri=True).replace(":", "%3A", 1)
     )
     for value in (native_alias + "/private", file_alias + "%2Fprivate"):
         result = redact_lsp_text(value, repository=scope)
@@ -1073,7 +1085,7 @@ def test_redaction_normalizes_windows_components_without_matching_siblings(
         assert result.count("<repository>") == 1
 
     for value in (
-        native_alias + "-sibling/private",
+        str(root).swapcase() + "-sibling/private",
         file_alias + "%2Dother/private",
     ):
         assert redact_lsp_text(value, repository=scope) == value
@@ -1088,37 +1100,34 @@ def test_redaction_normalizes_windows_components_without_matching_siblings(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Unicode path aliases")
-def test_redaction_matches_percent_encoded_unicode_windows_case_aliases(
+def test_redaction_decodes_percent_encoded_unicode_only_in_windows_file_uris(
     tmp_path: Path,
 ) -> None:
     repository = tmp_path / "RÉPO-ΟΣ"
     repository.mkdir()
     scope = resolve_repository_scope(repository)
     root = Path(scope.checkout_root)
-    boundary_count = len(PureWindowsPath(str(root)).parts) - 1
-    separators = tuple(
-        _WINDOWS_SEPARATOR_ATOMS[index % len(_WINDOWS_SEPARATOR_ATOMS)]
-        for index in range(boundary_count)
-    )
-    native_alias = (
-        _windows_path_with_separators(root, separators)
-        .replace("É", "%C3%A9")
-        .replace("Ο", "%CE%BF")
-        .replace("Σ", "%CF%82")
-    )
-    file_alias = (
-        "file:%5C%2Floc%61lhost/"
-        + native_alias.replace(":", "%3a", 1)
-    )
+    native_alias = str(root).swapcase()
+    file_alias = path_to_file_uri(root)
     for value in (native_alias + "/private", file_alias + "%5Cprivate"):
         result = redact_lsp_text(value, repository=scope)
         assert value not in result
         assert result.count("<repository>") == 1
 
-    for value in (native_alias + "-other", file_alias + "%2Dother"):
+    encoded_native = (
+        str(root)
+        .replace("É", "%C3%A9")
+        .replace("Ο", "%CE%9F")
+        .replace("Σ", "%CE%A3")
+    )
+    for value in (
+        native_alias + "-other",
+        encoded_native + "/private",
+        file_alias + "%2Dother",
+    ):
         assert redact_lsp_text(value, repository=scope) == value
 
-    malformed = native_alias + "%C3" * 4096
+    malformed = file_alias + "%C3" * 4096
     malformed_result = redact_lsp_text(malformed, repository=scope)
     assert "<repository>" not in malformed_result
     assert len(malformed_result) <= 1024
@@ -1127,10 +1136,10 @@ def test_redaction_matches_percent_encoded_unicode_windows_case_aliases(
 def test_redaction_semantically_normalizes_bounded_windows_path_tokens() -> None:
     root = Path(r"D:\projects\My RÉPO")
     native_aliases = (
-        r"D:\decoy\..\projects\My R%C3%A9PO\private.py",
-        r"D:/projects/scratch/../My R%C3%A9PO./private.py",
-        r"D:\projects\My R%C3%A9PO\child\..\.",
-        r"%44%3A/%2Fprojects\\My%20R%C3%A9PO\..\My R%C3%A9PO/private.py",
+        r"D:\decoy\..\projects\My RÉPO\private.py",
+        r"D:/projects/scratch/../My RÉPO./private.py",
+        r"D:\projects\My RÉPO\child\..\.",
+        r"D:\\projects\\My RÉPO\private.py",
     )
     uri_aliases = (
         "file:///D:/decoy/../projects/My%20R%C3%A9PO/private.py",
@@ -1158,7 +1167,7 @@ def test_redaction_semantically_normalizes_bounded_windows_path_tokens() -> None
     long_token = (
         "D:/"
         + "./" * 4096
-        + "projects/My%20R%C3%A9PO/"
+        + "projects/My RÉPO/"
         + "child/../" * 4096
         + "private.py"
     )
@@ -1176,6 +1185,153 @@ def test_redaction_semantically_normalizes_bounded_windows_path_tokens() -> None
     assert lsp_security._redact_path(
         f'path="{punctuation_token}"', punctuation_root, "<repository>"
     ) == 'path="<repository>"'
+
+
+def test_redaction_matches_simulated_mixed_windows_short_path_components(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(r"D:\Long Parent Component\Long Repository Component")
+    short = Path(r"D:\LONGPA~1\LONGRE~1")
+    monkeypatch.setattr(
+        windows_workspace,
+        "get_short_path",
+        lambda path: short if path == root else path,
+        raising=False,
+    )
+
+    for token in (
+        r"D:\LONGPA~1\Long Repository Component\private.py",
+        r"D:\Long Parent Component\LONGRE~1\private.py",
+        r"D:\LONGPA~1\LONGRE~1\private.py",
+        "file:///D:/LONGPA~1/Long%20Repository%20Component/private.py",
+        "file:///D:/Long%20Parent%20Component/LONGRE~1/private.py",
+    ):
+        assert lsp_security._redact_path(
+            token, root, "<repository>"
+        ) == "<repository>"
+
+    for sibling in (
+        r"D:\LONGPA~1\LONGRE~1-other\private.py",
+        r"D:\Long Parent Component\Long Repository Component-old\private.py",
+        "file:///D:/LONGPA~1/LONGRE~1-other/private.py",
+    ):
+        assert lsp_security._redact_path(
+            sibling, root, "<repository>"
+        ) == sibling
+
+    def unavailable(_path: Path) -> Path:
+        raise OSError("short names unavailable")
+
+    monkeypatch.setattr(windows_workspace, "get_short_path", unavailable)
+    long_token = str(PureWindowsPath(root) / "private.py")
+    assert lsp_security._redact_path(
+        long_token, root, "<repository>"
+    ) == "<repository>"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows real 8.3 redaction")
+def test_redaction_matches_real_mixed_windows_short_path_components(
+    tmp_path: Path,
+) -> None:
+    supported, reason = windows_workspace.capability()
+    if not supported:
+        pytest.skip(reason or "Windows native workspace APIs unavailable")
+    root = (
+        tmp_path
+        / "long-redaction-parent-component"
+        / "long-redaction-repository-component"
+    )
+    root.mkdir(parents=True)
+    long = PureWindowsPath(root)
+    short = PureWindowsPath(windows_workspace.get_short_path(root))
+    long_components = long.parts[1:]
+    short_components = short.parts[1:]
+    differing = [
+        index
+        for index, (long_name, short_name) in enumerate(
+            zip(long_components, short_components)
+        )
+        if long_name.casefold() != short_name.casefold()
+    ]
+    if len(differing) < 2:
+        pytest.skip("two real 8.3 component aliases are unavailable")
+
+    for short_index in differing[:2]:
+        components = list(long_components)
+        components[short_index] = short_components[short_index]
+        token = long.drive + "\\" + "\\".join((*components, "private.py"))
+        assert lsp_security._redact_path(
+            token, root, "<repository>"
+        ) == "<repository>"
+
+    sibling_components = list(short_components)
+    sibling_components[-1] += "-other"
+    sibling = long.drive + "\\" + "\\".join((*sibling_components, "private.py"))
+    assert lsp_security._redact_path(
+        sibling, root, "<repository>"
+    ) == sibling
+
+
+def test_native_windows_percent_triplets_are_literal_and_file_uris_decode_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(r"D:\projects\repo%20name")
+
+    def unavailable(_path: Path) -> Path:
+        raise OSError("short names unavailable")
+
+    monkeypatch.setattr(
+        windows_workspace, "get_short_path", unavailable, raising=False
+    )
+    native = r"D:\projects\repo%20name\private.py"
+    assert lsp_security._redact_path(
+        native, root, "<repository>"
+    ) == "<repository>"
+
+    for different_native in (
+        r"D:\projects\repo name\private.py",
+        r"%44%3A\projects\repo%20name\private.py",
+    ):
+        assert lsp_security._redact_path(
+            different_native, root, "<repository>"
+        ) == different_native
+
+    encoded_once = "file:///D:/projects/repo%2520name/private.py"
+    assert lsp_security._redact_path(
+        encoded_once, root, "<repository>"
+    ) == "<repository>"
+    decoded_twice = "file:///D:/projects/repo%20name/private.py"
+    assert lsp_security._redact_path(
+        decoded_twice, root, "<repository>"
+    ) == decoded_twice
+
+
+def test_quoted_windows_paths_allow_apostrophes_and_preserve_closing_quote(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(r"D:\projects\operator's repository")
+    monkeypatch.setattr(
+        windows_workspace, "get_short_path", lambda path: path, raising=False
+    )
+
+    for quote in ("'", '"'):
+        value = f"path={quote}{root}\\private.py{quote} after"
+        assert lsp_security._redact_path(
+            value, root, "<repository>"
+        ) == f"path={quote}<repository>{quote} after"
+
+        sibling = f"path={quote}{root}-old\\private.py{quote} after"
+        assert lsp_security._redact_path(
+            sibling, root, "<repository>"
+        ) == sibling
+
+    plain_root = Path(r"D:\projects\operator")
+    apostrophe_sibling = (
+        rf"path='{plain_root}'s repository\private.py' after"
+    )
+    assert lsp_security._redact_path(
+        apostrophe_sibling, plain_root, "<repository>"
+    ) == apostrophe_sibling
 
 
 def test_redaction_removes_localhost_file_uri_roots(scope: RepositoryScope) -> None:
@@ -1340,7 +1496,6 @@ def test_redaction_normalizes_controls_before_detecting_credentials() -> None:
         "\x00",
         "\r\n",
         "\x85",
-        "\x1b",
         "\x1b[0m",
         "\x1b[38;5;196m",
         "\u200b",
@@ -1355,8 +1510,7 @@ def test_redaction_normalizes_controls_before_detecting_credentials() -> None:
             result = redact_lsp_text(value)
             assert "boundary-secret" not in result
             assert not any(lsp_security._is_control(character) for character in result)
-            if insertion != "\x1b":
-                assert result == key + "=<redacted>"
+            assert result == key + "=<redacted>"
 
     long_value = "TOKEN" + "\u200b" * 32_768 + "=long-control-secret"
     assert redact_lsp_text(long_value) == "TOKEN=<redacted>"
@@ -1410,6 +1564,31 @@ def test_redaction_strips_every_terminal_string_mode_before_credentials() -> Non
 
     assert lsp_security._normalize_log_text("prefix\x1b[31") == "prefix"
     assert lsp_security._normalize_log_text("prefix\x9b31") == "prefix"
+
+
+def test_redaction_consumes_generic_two_character_escape_controls() -> None:
+    specialized = frozenset("PX[\\]^_")
+    finals = tuple(
+        character
+        for character in map(chr, range(ord("@"), ord("_") + 1))
+        if character not in specialized
+    ) + ("c",)
+
+    for final in finals:
+        sequence = "\x1b" + final
+        assert lsp_security._normalize_log_text(
+            "before" + sequence + "after"
+        ) == "beforeafter"
+        for key in ("TOKEN", "OPENAI_API_KEY"):
+            for boundary in range(len(key) + 1):
+                value = key[:boundary] + sequence + key[boundary:] + "=escape-secret"
+                assert redact_lsp_text(value) == key + "=<redacted>"
+        assert redact_lsp_text(
+            "https://oper" + sequence + "ator:url-secret@example.test/private"
+        ) == "https://<redacted>@example.test/private"
+
+    assert lsp_security._normalize_log_text("before\x1b") == "before"
+    assert lsp_security._normalize_log_text("before\x1bc") == "before"
 
 
 def test_redaction_happens_before_sanitized_output_is_truncated() -> None:
@@ -1532,20 +1711,11 @@ def _track_windows_handles(monkeypatch: pytest.MonkeyPatch) -> tuple[list[int], 
 
 
 def _windows_short_component_or_skip(path: Path) -> str:
-    import ctypes
-    from ctypes import wintypes
-
-    get_short_path = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
-    get_short_path.argtypes = (wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD)
-    get_short_path.restype = wintypes.DWORD
-    required = int(get_short_path(str(path), None, 0))
-    if required == 0:
+    try:
+        short_path = windows_workspace.get_short_path(path)
+    except OSError:
         pytest.skip("Windows short-name lookup is unavailable")
-    buffer = ctypes.create_unicode_buffer(required)
-    written = int(get_short_path(str(path), buffer, required))
-    if written == 0 or written >= required:
-        pytest.skip("Windows short-name lookup did not return a bounded name")
-    short_name = Path(buffer.value).name
+    short_name = short_path.name
     if short_name.casefold() == path.name.casefold() or "~" not in short_name:
         pytest.skip("8.3 name generation is disabled on this volume")
     return short_name
