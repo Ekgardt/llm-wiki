@@ -7,6 +7,7 @@ the repository and configured Pyright process remain trusted.
 
 from __future__ import annotations
 
+import ntpath
 import os
 import re
 import stat
@@ -26,20 +27,18 @@ _MAX_COMPONENT_CHARACTERS = 255
 _MAX_COMPONENT_BYTES = 255
 _MAX_PROVIDER_URI = 16 * 1024
 _MAX_DIRECTORY_ENTRIES = 100_000
+_MAX_REDACTION_PATH_TOKEN = 128 * 1024
 _MALFORMED_PERCENT = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _ENCODED_SEPARATOR = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
 _WINDOWS_DRIVE_PATH = re.compile(r"^[A-Za-z]:/")
-_WINDOWS_SEPARATOR_ALIAS_PATTERN = r"(?:[\\/]|%2F|%5C)"
-_WINDOWS_SEPARATOR_RUN_PATTERN = _WINDOWS_SEPARATOR_ALIAS_PATTERN + "+"
-_WINDOWS_ENCODED_NON_SEPARATOR_PATTERN = r"%(?!(?:2F|5C))[0-9A-F]{2}"
-_WINDOWS_PATH_BOUNDARY_PATTERN = (
-    rf"(?![\w.-]|{_WINDOWS_ENCODED_NON_SEPARATOR_PATTERN})"
+_URL_AUTHORITY_TOKEN_BOUNDARIES = frozenset('"<>\\^`{|}')
+_WINDOWS_REDACTION_TOKEN_BOUNDARIES = frozenset('\"<>|?*')
+_WINDOWS_OPTIONAL_TOKEN_BOUNDARIES = frozenset(",;()[]{}'")
+_WINDOWS_REDACTION_TOKEN_START = re.compile(
+    r"(?i)(?P<file>file:)|"
+    r"(?P<native>(?:[A-Z]|%[0-9A-F]{2})(?::|%3A)"
+    r"(?=(?:[\\/]|%(?:2F|5C))))"
 )
-_WINDOWS_TRAILING_COMPONENT_ALIAS_PATTERN = r"(?:[ .]|%2E|%20)*"
-_WINDOWS_CURRENT_DIRECTORY_ALIAS_PATTERN = (
-    rf"(?:(?:\.|%2E)(?: |%20)*{_WINDOWS_SEPARATOR_RUN_PATTERN})*"
-)
-_URL_AUTHORITY_TOKEN_BOUNDARIES = frozenset(",;()[]{}'\"<>")
 _WINDOWS_RESERVED = frozenset(
     {
         "aux",
@@ -360,6 +359,34 @@ def _windows_entry(
     return entry
 
 
+def _prove_windows_component_missing(
+    parent: int,
+    component: str,
+    owned: _OwnedHandles,
+) -> None:
+    opened = False
+    failures: list[OSError] = []
+    missing = 0
+    for opener in (
+        windows_workspace.open_directory,
+        windows_workspace.open_shared_readonly_source_file,
+    ):
+        try:
+            owned.own(opener(parent, component))
+        except FileNotFoundError:
+            missing += 1
+        except OSError as exc:
+            failures.append(exc)
+        else:
+            opened = True
+    if opened:
+        raise PathContainmentError("Windows repository source uses an unenumerated alias")
+    if failures or missing != 2:
+        raise PathContainmentError(
+            "Windows repository source absence cannot be proven"
+        ) from (failures[0] if failures else None)
+
+
 def _windows_identity(handle: int, *, directory: bool) -> tuple[object, ...]:
     volume, file_id, actual_directory = windows_workspace.identity(
         handle, directory=directory
@@ -455,6 +482,7 @@ def _resolve_windows(
             if entry is None:
                 if must_exist:
                     raise PathContainmentError("repository source does not exist")
+                _prove_windows_component_missing(current, component, owned)
                 missing = parts[index:]
                 break
             opened, identity = _open_windows_step(
@@ -494,6 +522,7 @@ def _resolve_windows(
         if missing:
             if _windows_entry(parent_probe, missing[0]) is not None:
                 raise PathContainmentError("repository source appeared during traversal")
+            _prove_windows_component_missing(parent_probe, missing[0], owned)
             absolute_path = canonical_parent.joinpath(*missing)
         else:
             candidate = canonical_root.joinpath(*parts)
@@ -668,22 +697,22 @@ def _redact_url_userinfo(value: str) -> str:
 
     pieces: list[str] = []
     cursor = 0
-    index = 0
-    while index < len(value):
+    search_start = 0
+    while True:
+        scheme_end = value.find("://", search_start)
+        if scheme_end < 0:
+            break
+        scheme_start = scheme_end
+        while scheme_start > 0 and scheme_character(value[scheme_start - 1]):
+            scheme_start -= 1
+        search_start = scheme_end + 3
         if not (
-            value[index].isascii()
-            and value[index].isalpha()
-            and (index == 0 or not scheme_character(value[index - 1]))
+            scheme_start < scheme_end
+            and value[scheme_start].isascii()
+            and value[scheme_start].isalpha()
         ):
-            index += 1
             continue
-        scheme_end = index + 1
-        while scheme_end < len(value) and scheme_character(value[scheme_end]):
-            scheme_end += 1
-        if value[scheme_end : scheme_end + 3] != "://":
-            index = scheme_end
-            continue
-        authority_start = scheme_end + 3
+        authority_start = search_start
         authority_end = authority_start
         while authority_end < len(value):
             character = value[authority_end]
@@ -696,13 +725,10 @@ def _redact_url_userinfo(value: str) -> str:
                 break
             authority_end += 1
         userinfo_end = value.rfind("@", authority_start, authority_end)
-        if userinfo_end >= authority_start:
+        if userinfo_end >= authority_start and authority_start >= cursor:
             pieces.append(value[cursor:authority_start])
             pieces.append("<redacted>@")
             cursor = userinfo_end + 1
-            index = authority_end
-        else:
-            index = authority_start
     pieces.append(value[cursor:])
     return "".join(pieces)
 
@@ -762,58 +788,7 @@ def _case_insensitive_character_pattern(
     return "(?:" + "|".join(patterns) + ")"
 
 
-def _windows_component_alias_pattern(component: str) -> str:
-    canonical = component.rstrip(" .")
-    aliases = tuple(
-        dict.fromkeys(
-            (canonical, canonical.lower(), canonical.upper(), canonical.casefold())
-        )
-    )
-    positional_aliases = tuple(alias for alias in aliases if len(alias) == len(canonical))
-    return (
-        "".join(
-            _case_insensitive_character_pattern(
-                character,
-                *(alias[index] for alias in positional_aliases),
-            )
-            for index, character in enumerate(canonical)
-        )
-        + _WINDOWS_TRAILING_COMPONENT_ALIAS_PATTERN
-    )
-
-
-def _windows_path_alias_pattern(path: Path) -> str:
-    pure = PureWindowsPath(str(path))
-    drive = "".join(
-        _case_insensitive_character_pattern(character) for character in pure.drive
-    )
-    components = tuple(
-        _windows_component_alias_pattern(component) for component in pure.parts[1:]
-    )
-    if not components:
-        return drive + _WINDOWS_SEPARATOR_RUN_PATTERN
-    component_boundary = (
-        _WINDOWS_SEPARATOR_RUN_PATTERN + _WINDOWS_CURRENT_DIRECTORY_ALIAS_PATTERN
-    )
-    return drive + component_boundary + component_boundary.join(components)
-
-
 def _encoded_file_uri_pattern(path: Path) -> re.Pattern[str]:
-    windows_path = bool(PureWindowsPath(str(path)).drive)
-    if windows_path:
-        path_pattern = _windows_path_alias_pattern(path)
-        localhost_pattern = "".join(
-            _case_insensitive_character_pattern(character) for character in "localhost"
-        )
-        prefix = (
-            rf"(?i:file:)(?:{_WINDOWS_SEPARATOR_RUN_PATTERN}"
-            rf"(?:{localhost_pattern}{_WINDOWS_SEPARATOR_RUN_PATTERN})?)?"
-        )
-        return re.compile(
-            prefix + path_pattern + _WINDOWS_PATH_BOUNDARY_PATTERN,
-            flags=re.IGNORECASE,
-        )
-
     logical_path = PurePosixPath(str(path)).as_posix()
     path_pattern = "".join(_uri_character_pattern(character) for character in logical_path)
     localhost_pattern = "".join(
@@ -823,50 +798,304 @@ def _encoded_file_uri_pattern(path: Path) -> re.Pattern[str]:
     return re.compile(prefix + path_pattern)
 
 
-def _windows_native_path_pattern(path: Path) -> re.Pattern[str]:
-    pattern = _windows_path_alias_pattern(path)
-    return re.compile(
-        rf"(?<![A-Za-z0-9_]){pattern}{_WINDOWS_PATH_BOUNDARY_PATTERN}",
-        flags=re.IGNORECASE,
+def _decode_percent_token_once(
+    value: str,
+    start: int,
+    end: int,
+    *,
+    strict_percent: bool,
+) -> tuple[str, tuple[int, ...], tuple[bool, ...]] | None:
+    characters: list[str] = []
+    source_ends: list[int] = []
+    encoded: list[bool] = []
+    byte_values = bytearray()
+    byte_ends: list[int] = []
+
+    def flush_bytes() -> bool:
+        if not byte_values:
+            return True
+        try:
+            decoded = bytes(byte_values).decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            return False
+        byte_index = 0
+        for character in decoded:
+            byte_index += len(character.encode("utf-8"))
+            characters.append(character)
+            source_ends.append(byte_ends[byte_index - 1])
+            encoded.append(True)
+        byte_values.clear()
+        byte_ends.clear()
+        return True
+
+    index = start
+    while index < end:
+        if value[index] == "%":
+            digits = value[index + 1 : index + 3]
+            if len(digits) == 2 and re.fullmatch(r"[0-9A-Fa-f]{2}", digits):
+                byte_values.append(int(digits, 16))
+                byte_ends.append(index + 3)
+                index += 3
+                continue
+            if strict_percent:
+                return None
+        if not flush_bytes():
+            return None
+        characters.append(value[index])
+        source_ends.append(index + 1)
+        encoded.append(False)
+        index += 1
+    if not flush_bytes():
+        return None
+    return "".join(characters), tuple(source_ends), tuple(encoded)
+
+
+def _canonical_windows_path_token(
+    value: str,
+    *,
+    file_uri: bool,
+) -> tuple[str, tuple[str, ...]] | None:
+    candidate = value
+    if file_uri:
+        if candidate[:5].casefold() != "file:":
+            return None
+        uri_path = candidate[5:].replace("/", "\\")
+        has_leading_separator = uri_path.startswith("\\")
+        stripped = uri_path.lstrip("\\")
+        if re.match(r"(?i)^[A-Z]:\\", stripped):
+            candidate = stripped
+        else:
+            authority, separator, remainder = stripped.partition("\\")
+            if (
+                not has_leading_separator
+                or not separator
+                or authority.casefold() != "localhost"
+            ):
+                return None
+            candidate = remainder.lstrip("\\")
+    else:
+        candidate = candidate.replace("/", "\\")
+
+    if candidate.startswith("\\"):
+        return None
+    drive, tail = ntpath.splitdrive(candidate)
+    if not re.fullmatch(r"(?i)[A-Z]:", drive) or not tail.startswith("\\"):
+        return None
+    raw_components = tuple(part for part in re.split(r"\\+", tail) if part)
+    components: list[str] = []
+    for component in raw_components:
+        if component in {".", ".."}:
+            components.append(component)
+            continue
+        component = component.rstrip(" .")
+        if not component:
+            continue
+        if (
+            len(component) > _MAX_COMPONENT_CHARACTERS
+            or any(character in '<>:"|?*' or _is_control(character) for character in component)
+        ):
+            return None
+        components.append(component)
+
+    normalized = ntpath.normpath(drive + "\\" + "\\".join(components))
+    normalized_drive, normalized_tail = ntpath.splitdrive(normalized)
+    if not re.fullmatch(r"(?i)[A-Z]:", normalized_drive):
+        return None
+    normalized_components = tuple(
+        component.casefold()
+        for component in normalized_tail.split("\\")
+        if component
     )
+    if len(normalized_components) > _MAX_COMPONENTS or any(
+        component in {".", ".."} for component in normalized_components
+    ):
+        return None
+    return normalized_drive.casefold(), normalized_components
+
+
+def _windows_token_start_is_bounded(value: str, start: int) -> bool:
+    if start == 0:
+        return True
+    previous = value[start - 1]
+    return not (previous.isalnum() or previous in "_\\/%")
+
+
+def _windows_token_source_end(value: str, start: int, *, file_uri: bool) -> int:
+    limit = min(len(value), start + _MAX_REDACTION_PATH_TOKEN)
+    quote = value[start - 1] if start and value[start - 1] in {'"', "'"} else None
+    index = start
+    while index < limit:
+        character = value[index]
+        if (
+            _is_control(character)
+            or character == quote
+            or character in _WINDOWS_REDACTION_TOKEN_BOUNDARIES
+            or (file_uri and character == "#")
+        ):
+            break
+        index += 1
+    return index
+
+
+def _windows_path_token_match_end(
+    value: str,
+    start: int,
+    *,
+    file_uri: bool,
+    root: tuple[str, tuple[str, ...]],
+) -> tuple[int | None, int]:
+    source_end = _windows_token_source_end(value, start, file_uri=file_uri)
+    if file_uri:
+        malformed = _MALFORMED_PERCENT.search(value, start, source_end)
+        if malformed is not None:
+            source_end = malformed.start()
+    decoded = _decode_percent_token_once(
+        value,
+        start,
+        source_end,
+        strict_percent=file_uri,
+    )
+    if decoded is None:
+        return None, source_end
+    text, source_ends, encoded = decoded
+    candidate_ends = [len(text)]
+    candidate_ends.extend(
+        index
+        for index, character in enumerate(text)
+        if not encoded[index]
+        and (
+            character.isspace()
+            or character in _WINDOWS_OPTIONAL_TOKEN_BOUNDARIES
+        )
+    )
+    del candidate_ends[_MAX_COMPONENTS + 1 :]
+    root_drive, root_components = root
+    for candidate_end in dict.fromkeys(candidate_ends):
+        normalized = _canonical_windows_path_token(
+            text[:candidate_end], file_uri=file_uri
+        )
+        if normalized is None:
+            continue
+        drive, components = normalized
+        if (
+            drive == root_drive
+            and len(components) >= len(root_components)
+            and components[: len(root_components)] == root_components
+        ):
+            match_end = (
+                start if candidate_end == 0 else source_ends[candidate_end - 1]
+            )
+            return match_end, source_end
+    return None, source_end
+
+
+def _redact_windows_path_tokens(value: str, path: Path, marker: str) -> str:
+    root = _canonical_windows_path_token(str(path), file_uri=False)
+    if root is None:
+        return value
+    pieces: list[str] = []
+    cursor = 0
+    search_start = 0
+    while True:
+        match = _WINDOWS_REDACTION_TOKEN_START.search(value, search_start)
+        if match is None:
+            break
+        start = match.start()
+        search_start = start + 1
+        if start < cursor or not _windows_token_start_is_bounded(value, start):
+            continue
+        match_end, _source_end = _windows_path_token_match_end(
+            value,
+            start,
+            file_uri=match.group("file") is not None,
+            root=root,
+        )
+        if match_end is None:
+            continue
+        pieces.append(value[cursor:start])
+        pieces.append(marker)
+        cursor = match_end
+        search_start = match_end
+    pieces.append(value[cursor:])
+    return "".join(pieces)
 
 
 def _redact_path(value: str, path: Path, marker: str) -> str:
     windows_path = bool(PureWindowsPath(str(path)).drive)
     if windows_path:
-        value = _windows_native_path_pattern(path).sub(lambda _match: marker, value)
-    else:
-        for variant in _path_variants(path):
-            value = re.sub(
-                re.escape(variant),
-                lambda _match: marker,
-                value,
-                flags=re.IGNORECASE if variant.startswith("file:") else 0,
-            )
+        return _redact_windows_path_tokens(value, path, marker)
+    for variant in _path_variants(path):
+        value = re.sub(
+            re.escape(variant),
+            lambda _match: marker,
+            value,
+            flags=re.IGNORECASE if variant.startswith("file:") else 0,
+        )
     return _encoded_file_uri_pattern(path).sub(lambda _match: marker, value)
 
 
 def _normalize_log_text(value: str) -> str:
     pieces: list[str] = []
     index = 0
+    state = "ground"
+    osc = False
+    string_introducers = {
+        "P": False,
+        "X": False,
+        "]": True,
+        "^": False,
+        "_": False,
+    }
+    c1_string_introducers = {
+        "\x90": False,
+        "\x98": False,
+        "\x9d": True,
+        "\x9e": False,
+        "\x9f": False,
+    }
     while index < len(value):
         character = value[index]
-        csi_start = -1
-        if character == "\x1b" and value[index + 1 : index + 2] == "[":
-            csi_start = index + 2
-        elif character == "\x9b":
-            csi_start = index + 1
-        if csi_start >= 0:
-            # Strip a complete ANSI CSI sequence as one unit so its printable
-            # parameters cannot split a credential key after ESC is removed.
-            csi_end = csi_start
-            while csi_end < len(value) and "0" <= value[csi_end] <= "?":
-                csi_end += 1
-            while csi_end < len(value) and " " <= value[csi_end] <= "/":
-                csi_end += 1
-            if csi_end < len(value) and "@" <= value[csi_end] <= "~":
-                index = csi_end + 1
+        if state == "csi":
+            index += 1
+            if "@" <= character <= "~":
+                state = "ground"
+            continue
+        if state == "string":
+            if character == "\x9c":
+                state = "ground"
+                index += 1
+            elif character == "\x1b" and value[index + 1 : index + 2] == "\\":
+                state = "ground"
+                index += 2
+            elif osc and character == "\x07":
+                state = "ground"
+                index += 1
+            else:
+                index += 1
+            continue
+        if character == "\x1b":
+            following = value[index + 1 : index + 2]
+            if following == "[":
+                state = "csi"
+                index += 2
                 continue
+            if following in string_introducers:
+                state = "string"
+                osc = string_introducers[following]
+                index += 2
+                continue
+            if following == "\\":
+                index += 2
+                continue
+        elif character == "\x9b":
+            state = "csi"
+            index += 1
+            continue
+        elif character in c1_string_introducers:
+            state = "string"
+            osc = c1_string_introducers[character]
+            index += 1
+            continue
         if not _is_control(character):
             pieces.append(character)
         index += 1

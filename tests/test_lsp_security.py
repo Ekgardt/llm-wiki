@@ -788,6 +788,23 @@ def test_redaction_scans_every_punctuation_separated_url_authority() -> None:
     assert "boundary-secret" not in control_result
     assert control_result.endswith("https://<redacted>@example.test")
 
+    for userinfo in (
+        "bob,operations:comma-secret",
+        "bob;operations:semicolon-secret",
+        "bob(operations):parenthesis-secret",
+    ):
+        result = redact_lsp_text(f"https://{userinfo}@example.test/private")
+        assert result == "https://<redacted>@example.test/private"
+
+    adjacent = (
+        "https://alice:first-secret@public.example"
+        "https://bob:second-secret@example.test"
+    )
+    adjacent_result = redact_lsp_text(adjacent)
+    assert "first-secret" not in adjacent_result
+    assert "second-secret" not in adjacent_result
+    assert adjacent_result.count("<redacted>@") == 2
+
 
 def test_redaction_removes_repository_and_home_native_and_uri_paths(
     scope: RepositoryScope,
@@ -1063,11 +1080,11 @@ def test_redaction_normalizes_windows_components_without_matching_siblings(
 
     pure = PureWindowsPath(str(root))
     parent_alias = pure.drive + "/../" + "/".join(pure.parts[1:])
-    assert redact_lsp_text(parent_alias, repository=scope) == parent_alias
+    assert redact_lsp_text(parent_alias, repository=scope) == "<repository>"
 
     long_alias = _windows_normalized_component_alias(root, dot_repetitions=4096)
     long_result = redact_lsp_text(long_alias + "/private", repository=scope)
-    assert long_result == "<repository>/private"
+    assert long_result == "<repository>"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows Unicode path aliases")
@@ -1105,6 +1122,60 @@ def test_redaction_matches_percent_encoded_unicode_windows_case_aliases(
     malformed_result = redact_lsp_text(malformed, repository=scope)
     assert "<repository>" not in malformed_result
     assert len(malformed_result) <= 1024
+
+
+def test_redaction_semantically_normalizes_bounded_windows_path_tokens() -> None:
+    root = Path(r"D:\projects\My RÉPO")
+    native_aliases = (
+        r"D:\decoy\..\projects\My R%C3%A9PO\private.py",
+        r"D:/projects/scratch/../My R%C3%A9PO./private.py",
+        r"D:\projects\My R%C3%A9PO\child\..\.",
+        r"%44%3A/%2Fprojects\\My%20R%C3%A9PO\..\My R%C3%A9PO/private.py",
+    )
+    uri_aliases = (
+        "file:///D:/decoy/../projects/My%20R%C3%A9PO/private.py",
+        "file:%2F%2Flocalhost%2FD:%2Fprojects%2Fscratch%2F..%2F"
+        "My%20R%C3%A9PO%2Fprivate.py",
+        "file:/D:/projects/My%20R%C3%A9PO/child/../.",
+    )
+    for token in native_aliases + uri_aliases:
+        assert lsp_security._redact_path(
+            f'path="{token}"', root, "<repository>"
+        ) == 'path="<repository>"'
+
+    outside_aliases = (
+        r"D:\projects\My RÉPO-other\private.py",
+        r"D:\projects\My RÉPO\..\sibling\private.py",
+        "file:///D:/projects/My%20R%C3%A9PO/../sibling/private.py",
+        r"\\server\share\projects\My RÉPO\private.py",
+        r"\\?\D:\projects\My RÉPO\private.py",
+        "file://server/D:/projects/My%20R%C3%A9PO/private.py",
+    )
+    for token in outside_aliases:
+        value = f'path="{token}"'
+        assert lsp_security._redact_path(value, root, "<repository>") == value
+
+    long_token = (
+        "D:/"
+        + "./" * 4096
+        + "projects/My%20R%C3%A9PO/"
+        + "child/../" * 4096
+        + "private.py"
+    )
+    assert lsp_security._redact_path(
+        f'path="{long_token}"', root, "<repository>"
+    ) == 'path="<repository>"'
+
+    malformed = r"D:\projects\My%FFRÉPO\private.py"
+    assert lsp_security._redact_path(
+        malformed, root, "<repository>"
+    ) == malformed
+
+    punctuation_root = Path(r"D:\projects\repo(name), operator's [v1]")
+    punctuation_token = r"D:\projects\repo(name), operator's [v1]\private.py"
+    assert lsp_security._redact_path(
+        f'path="{punctuation_token}"', punctuation_root, "<repository>"
+    ) == 'path="<repository>"'
 
 
 def test_redaction_removes_localhost_file_uri_roots(scope: RepositoryScope) -> None:
@@ -1282,12 +1353,63 @@ def test_redaction_normalizes_controls_before_detecting_credentials() -> None:
         for boundary in range(len(key) + 1):
             value = key[:boundary] + insertion + key[boundary:] + "=boundary-secret"
             result = redact_lsp_text(value)
-            assert result == key + "=<redacted>"
             assert "boundary-secret" not in result
             assert not any(lsp_security._is_control(character) for character in result)
+            if insertion != "\x1b":
+                assert result == key + "=<redacted>"
 
     long_value = "TOKEN" + "\u200b" * 32_768 + "=long-control-secret"
     assert redact_lsp_text(long_value) == "TOKEN=<redacted>"
+
+
+def test_redaction_strips_every_terminal_string_mode_before_credentials() -> None:
+    terminated = (
+        "\x1b[38;5;196m",
+        "\x9b38;5;196m",
+        "\x1b]0;printable-payload\x07",
+        "\x1b]0;printable-payload\x1b\\",
+        "\x9d0;printable-payload\x9c",
+        "\x1bPprintable-payload\x1b\\",
+        "\x90printable-payload\x9c",
+        "\x1bXprintable-payload\x1b\\",
+        "\x98printable-payload\x9c",
+        "\x1b^printable-payload\x1b\\",
+        "\x9eprintable-payload\x9c",
+        "\x1b_printable-payload\x1b\\",
+        "\x9fprintable-payload\x9c",
+    )
+    for key in ("TOKEN", "OPENAI_API_KEY"):
+        for sequence in terminated:
+            for boundary in range(len(key) + 1):
+                value = key[:boundary] + sequence + key[boundary:] + "=mode-secret"
+                result = redact_lsp_text(value)
+                assert result == key + "=<redacted>"
+                assert "mode-secret" not in result
+                assert "printable-payload" not in result
+                assert not any(lsp_security._is_control(character) for character in result)
+
+    unterminated = (
+        "\x1b]unterminated-payload",
+        "\x9dunterminated-payload",
+        "\x1bPunterminated-payload",
+        "\x90unterminated-payload",
+        "\x1bXunterminated-payload",
+        "\x98unterminated-payload",
+        "\x1b^unterminated-payload",
+        "\x9eunterminated-payload",
+        "\x1b_unterminated-payload",
+        "\x9funterminated-payload",
+    )
+    for sequence in unterminated:
+        for boundary in range(len("TOKEN") + 1):
+            value = "TOKEN"[:boundary] + sequence + "TOKEN"[boundary:] + "=tail-secret"
+            result = redact_lsp_text(value)
+            assert "tail-secret" not in result
+            assert "unterminated-payload" not in result
+            assert not any(lsp_security._is_control(character) for character in result)
+
+    assert lsp_security._normalize_log_text("prefix\x1b[31") == "prefix"
+    assert lsp_security._normalize_log_text("prefix\x9b31") == "prefix"
 
 
 def test_redaction_happens_before_sanitized_output_is_truncated() -> None:
@@ -1407,6 +1529,118 @@ def _track_windows_handles(monkeypatch: pytest.MonkeyPatch) -> tuple[list[int], 
     monkeypatch.setattr(lsp_security._OwnedHandles, "own", tracking_own)
     monkeypatch.setattr(windows_workspace, "close_handle", tracking_close)
     return owned, closed
+
+
+def _windows_short_component_or_skip(path: Path) -> str:
+    import ctypes
+    from ctypes import wintypes
+
+    get_short_path = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
+    get_short_path.argtypes = (wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD)
+    get_short_path.restype = wintypes.DWORD
+    required = int(get_short_path(str(path), None, 0))
+    if required == 0:
+        pytest.skip("Windows short-name lookup is unavailable")
+    buffer = ctypes.create_unicode_buffer(required)
+    written = int(get_short_path(str(path), buffer, required))
+    if written == 0 or written >= required:
+        pytest.skip("Windows short-name lookup did not return a bounded name")
+    short_name = Path(buffer.value).name
+    if short_name.casefold() == path.name.casefold() or "~" not in short_name:
+        pytest.skip("8.3 name generation is disabled on this volume")
+    return short_name
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle traversal")
+@pytest.mark.parametrize(
+    ("relative_path", "omitted_name"),
+    [("pkg/generated.py", "pkg"), ("pkg/api.py", "api.py")],
+)
+def test_windows_unenumerated_exact_component_is_not_treated_as_missing(
+    scope: RepositoryScope,
+    monkeypatch: pytest.MonkeyPatch,
+    relative_path: str,
+    omitted_name: str,
+) -> None:
+    supported, reason = windows_workspace.capability()
+    if not supported:
+        pytest.skip(reason or "Windows handle-relative APIs unavailable")
+    original_list = windows_workspace.list_directory
+
+    def omit_component(handle: int, *, max_entries: int) -> list[WindowsEntry]:
+        return [
+            entry
+            for entry in original_list(handle, max_entries=max_entries)
+            if entry.name != omitted_name
+        ]
+
+    monkeypatch.setattr(windows_workspace, "list_directory", omit_component)
+    opened, closed = _track_windows_handles(monkeypatch)
+
+    with pytest.raises(PathContainmentError):
+        resolve_repository_source(scope, relative_path, must_exist=False)
+
+    assert Counter(opened) == Counter(closed)
+    assert all(count == 1 for count in Counter(opened).values())
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows 8.3 aliases")
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_windows_short_file_and_directory_aliases_are_rejected_and_handles_close(
+    repository: Path,
+    scope: RepositoryScope,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    supported, reason = windows_workspace.capability()
+    if not supported:
+        pytest.skip(reason or "Windows handle-relative APIs unavailable")
+    if kind == "file":
+        target = repository / "pkg" / "long-generated-source-component.py"
+        target.write_text("generated = True\n", encoding="utf-8")
+        relative_path = f"pkg/{_windows_short_component_or_skip(target)}"
+    else:
+        target = repository / "long-generated-directory-component"
+        target.mkdir()
+        relative_path = f"{_windows_short_component_or_skip(target)}/missing.py"
+    opened, closed = _track_windows_handles(monkeypatch)
+
+    with pytest.raises(PathContainmentError):
+        resolve_repository_source(scope, relative_path, must_exist=False)
+
+    assert Counter(opened) == Counter(closed)
+    assert all(count == 1 for count in Counter(opened).values())
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows 8.3 junction alias")
+def test_windows_short_junction_alias_is_rejected_without_leaking_handles(
+    repository: Path,
+    scope: RepositoryScope,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supported, reason = windows_workspace.capability()
+    if not supported:
+        pytest.skip(reason or "Windows handle-relative APIs unavailable")
+    outside = repository.parent / "outside-short-junction"
+    outside.mkdir()
+    junction = repository / "long-generated-junction-component"
+    created = subprocess.run(
+        ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(outside)],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    if created.returncode != 0:
+        pytest.skip("junction creation is unavailable")
+    short_name = _windows_short_component_or_skip(junction)
+    opened, closed = _track_windows_handles(monkeypatch)
+
+    with pytest.raises(PathContainmentError):
+        resolve_repository_source(scope, f"{short_name}/missing.py", must_exist=False)
+
+    assert Counter(opened) == Counter(closed)
+    assert all(count == 1 for count in Counter(opened).values())
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows handle traversal")
