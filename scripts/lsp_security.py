@@ -972,46 +972,179 @@ def _windows_path_token_match_end(
         text = value[start:source_end]
         source_ends = tuple(range(start + 1, source_end + 1))
         encoded = (False,) * len(text)
-    quote_ends: list[int] = []
-    optional_ends: list[int] = []
-    for index, character in enumerate(text):
-        if not encoded[index] and (
-            character.isspace()
-            or character in _WINDOWS_OPTIONAL_TOKEN_BOUNDARIES
-        ):
-            if character in {'"', "'"}:
-                following = text[index + 1 : index + 2]
-                if following and (
-                    following.isalnum() or following in "_.-%\\/"
-                ):
-                    continue
-                target = quote_ends
-            else:
-                target = optional_ends
-            target.append(index)
-            if len(quote_ends) + len(optional_ends) >= _MAX_COMPONENTS:
-                break
-    candidate_ends = [*quote_ends, len(text), *optional_ends]
     root_drive, root_component_aliases = root
-    for candidate_end in dict.fromkeys(candidate_ends):
-        normalized = _canonical_windows_path_token(
-            text[:candidate_end], file_uri=file_uri
-        )
-        if normalized is None:
-            continue
-        drive, components = normalized
+
+    path_start = 0
+    if file_uri:
+        if text[:5].casefold() != "file:":
+            return None, source_end
+        uri_start = 5
+        has_leading_separator = text[uri_start : uri_start + 1] in {"/", "\\"}
+        stripped_start = uri_start
+        while text[stripped_start : stripped_start + 1] in {"/", "\\"}:
+            stripped_start += 1
+        if re.match(r"(?i)^[A-Z]:[\\/]", text[stripped_start:]):
+            path_start = stripped_start
+        else:
+            authority_end = stripped_start
+            while text[authority_end : authority_end + 1] not in {"", "/", "\\"}:
+                authority_end += 1
+            if (
+                not has_leading_separator
+                or authority_end == len(text)
+                or text[stripped_start:authority_end].casefold() != "localhost"
+            ):
+                return None, source_end
+            path_start = authority_end
+            while text[path_start : path_start + 1] in {"/", "\\"}:
+                path_start += 1
+
+    if (
+        text[path_start : path_start + 2].casefold() != root_drive
+        or text[path_start + 2 : path_start + 3] not in {"/", "\\"}
+    ):
+        return None, source_end
+
+    location_starts: set[int] = set()
+    suffix_cursor = len(text)
+    while (
+        suffix_cursor > path_start
+        and not encoded[suffix_cursor - 1]
+        and text[suffix_cursor - 1] in ".,;)]}"
+    ):
+        suffix_cursor -= 1
+    for _part in range(2):
+        digits_end = suffix_cursor
+        while (
+            suffix_cursor > path_start
+            and not encoded[suffix_cursor - 1]
+            and text[suffix_cursor - 1].isascii()
+            and text[suffix_cursor - 1].isdigit()
+        ):
+            suffix_cursor -= 1
+        colon = suffix_cursor - 1
         if (
-            drive == root_drive
-            and len(components) >= len(root_component_aliases)
+            suffix_cursor == digits_end
+            or colon < path_start
+            or encoded[colon]
+            or text[colon] != ":"
+        ):
+            break
+        location_starts.add(colon)
+        suffix_cursor = colon
+
+    components: list[str] = []
+    component_start = path_start + 2
+    valid = True
+
+    def append_component(target: list[str], raw: str) -> bool:
+        if not raw or raw == ".":
+            return True
+        if raw == "..":
+            if target:
+                target.pop()
+            return True
+        component = raw.rstrip(" .")
+        if not component:
+            return True
+        if (
+            len(component) > _MAX_COMPONENT_CHARACTERS
+            or any(
+                character in '<>:"|?*' or _is_control(character)
+                for character in component
+            )
+        ):
+            return False
+        target.append(component.casefold())
+        return True
+
+    def candidate_matches(candidate_end: int) -> bool:
+        if (
+            not valid
+            or len(components) > _MAX_COMPONENTS
+            or candidate_end - component_start > _MAX_COMPONENT_CHARACTERS
+        ):
+            return False
+        candidate_components = components.copy()
+        if not append_component(
+            candidate_components, text[component_start:candidate_end]
+        ):
+            return False
+        return (
+            len(candidate_components) <= _MAX_COMPONENTS
+            and len(candidate_components) >= len(root_component_aliases)
             and all(
                 component in aliases
-                for component, aliases in zip(components, root_component_aliases)
+                for component, aliases in zip(
+                    candidate_components, root_component_aliases
+                )
             )
-        ):
-            match_end = (
-                start if candidate_end == 0 else source_ends[candidate_end - 1]
-            )
-            return match_end, source_end
+        )
+
+    quote_end: int | None = None
+    location_end: int | None = None
+    optional_end: int | None = None
+    opening_quote = value[start - 1 : start]
+    if opening_quote not in {'"', "'"}:
+        opening_quote = ""
+    for index in range(path_start + 2, len(text)):
+        character = text[index]
+        if character in {"/", "\\"}:
+            if valid:
+                valid = append_component(
+                    components, text[component_start:index]
+                )
+            component_start = index + 1
+            continue
+        if encoded[index]:
+            continue
+
+        is_quote = character in {'"', "'"}
+        if is_quote:
+            following = text[index + 1 : index + 2]
+            if following and (
+                following.isalnum() or following in "_.-%\\/"
+            ):
+                continue
+        is_optional = (
+            character.isspace()
+            or character in _WINDOWS_OPTIONAL_TOKEN_BOUNDARIES
+        )
+        if not (is_quote or is_optional or index in location_starts):
+            continue
+        if not candidate_matches(index):
+            continue
+        if is_quote and quote_end is None:
+            quote_end = index
+        elif index in location_starts and location_end is None:
+            location_end = index
+        elif is_optional and optional_end is None:
+            optional_end = index
+
+    if (
+        quote_end is not None
+        and opening_quote
+        and text[quote_end] == opening_quote
+    ):
+        return source_ends[quote_end - 1], source_end
+    if candidate_matches(len(text)):
+        return source_end, source_end
+    candidate_end = quote_end
+    if candidate_end is None:
+        candidate_end = location_end
+    if candidate_end is None:
+        candidate_end = optional_end
+    if candidate_end is not None:
+        terminal_punctuation = all(
+            not encoded[index] and text[index] in ".,;)]}"
+            for index in range(candidate_end, len(text))
+        )
+        match_end = (
+            source_end
+            if terminal_punctuation
+            else source_ends[candidate_end - 1]
+        )
+        return match_end, source_end
     return None, source_end
 
 
@@ -1081,6 +1214,13 @@ def _normalize_log_text(value: str) -> str:
     }
     while index < len(value):
         character = value[index]
+        if state == "escape":
+            index += 1
+            if "0" <= character <= "~":
+                state = "ground"
+            elif not " " <= character <= "/":
+                state = "ground"
+            continue
         if state == "csi":
             index += 1
             if "@" <= character <= "~":
@@ -1111,6 +1251,10 @@ def _normalize_log_text(value: str) -> str:
                 index += 2
                 continue
             if following == "\\":
+                index += 2
+                continue
+            if following and " " <= following <= "/":
+                state = "escape"
                 index += 2
                 continue
             if following and "0" <= following <= "~":

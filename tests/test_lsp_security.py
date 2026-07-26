@@ -8,6 +8,7 @@ import re
 import socket
 import stat
 import subprocess
+import time
 import unicodedata
 from collections import Counter
 from dataclasses import FrozenInstanceError, fields
@@ -1334,6 +1335,84 @@ def test_quoted_windows_paths_allow_apostrophes_and_preserve_closing_quote(
     ) == apostrophe_sibling
 
 
+def test_windows_path_log_suffixes_preserve_valid_root_punctuation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(r"D:\projects\repo(name), operator's [v1]}")
+    monkeypatch.setattr(windows_workspace, "get_short_path", lambda path: path)
+    source = str(PureWindowsPath(root) / "source.py")
+
+    for prefix, suffix in (
+        ("", ":12"),
+        ("", ":12:34"),
+        ('"', '":12:34).,;]}'),
+        ("'", "':12:34).,;]}"),
+        ('"', '"'),
+        ("'", "'"),
+    ):
+        value = f"path={prefix}{source}{suffix}"
+        assert lsp_security._redact_path(
+            value, root, "<repository>"
+        ) == f"path={prefix}<repository>{suffix}"
+
+    for punctuation in (".", ",", ";", ")", "]", "}", ".,;)]}"):
+        value = str(root) + punctuation
+        result = lsp_security._redact_path(value, root, "<repository>")
+        assert result == "<repository>"
+
+        sibling = str(root) + "-other" + punctuation
+        assert lsp_security._redact_path(
+            sibling, root, "<repository>"
+        ) == sibling
+
+
+def test_windows_path_suffix_scanner_is_linear_past_256_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    components = tuple(
+        f"segment({index:03d}),[alpha]{{beta}};"
+        for index in range(48)
+    )
+    root_text = "D:\\" + "\\".join(components)
+    assert len(root_text) > 843
+    assert sum(root_text.count(character) for character in ",;()[]{}") > 256
+    root = Path(root_text)
+    monkeypatch.setattr(windows_workspace, "get_short_path", lambda path: path)
+    real_canonicalize = lsp_security._canonical_windows_path_token
+    canonical_calls = 0
+
+    def canonicalize(*args, **kwargs):
+        nonlocal canonical_calls
+        canonical_calls += 1
+        return real_canonicalize(*args, **kwargs)
+
+    monkeypatch.setattr(
+        lsp_security, "_canonical_windows_path_token", canonicalize
+    )
+    suffix = '":123:45).,;]}'
+    positive = 'path="' + root_text + r"\source.py" + suffix
+    started = time.perf_counter()
+    assert lsp_security._redact_path(
+        positive, root, "<repository>"
+    ) == 'path="<repository>' + suffix
+
+    adversarial_suffix = ".,;)]}" * 4096
+    sibling = (
+        'path="'
+        + root_text
+        + "-other"
+        + r"\source.py"
+        + adversarial_suffix
+    )
+    assert lsp_security._redact_path(
+        sibling, root, "<repository>"
+    ) == sibling
+    elapsed = time.perf_counter() - started
+
+    assert canonical_calls <= 12
+    assert elapsed < 1.0
+
+
 def test_redaction_removes_localhost_file_uri_roots(scope: RepositoryScope) -> None:
     repository_uri = path_to_file_uri(Path(scope.checkout_root)).replace(
         "file://", "file://localhost", 1
@@ -1589,6 +1668,32 @@ def test_redaction_consumes_generic_two_character_escape_controls() -> None:
 
     assert lsp_security._normalize_log_text("before\x1b") == "before"
     assert lsp_security._normalize_log_text("before\x1bc") == "before"
+
+
+def test_redaction_consumes_iso_escape_intermediate_sequences() -> None:
+    intermediates = tuple(map(chr, range(0x20, 0x30)))
+    sequences = tuple("\x1b" + intermediate + "B" for intermediate in intermediates)
+    sequences += ("\x1b" + "".join(intermediates) + "B",)
+
+    for sequence in sequences:
+        assert lsp_security._normalize_log_text(
+            "before" + sequence + "after"
+        ) == "beforeafter"
+        for key in ("TOKEN", "OPENAI_API_KEY"):
+            for boundary in range(len(key) + 1):
+                value = key[:boundary] + sequence + key[boundary:] + "=escape-secret"
+                assert redact_lsp_text(value) == key + "=<redacted>"
+        assert redact_lsp_text(
+            "https://oper" + sequence + "ator:url-secret@example.test/private"
+        ) == "https://<redacted>@example.test/private"
+
+    for intermediate in intermediates:
+        assert lsp_security._normalize_log_text(
+            "before\x1b" + intermediate
+        ) == "before"
+    assert lsp_security._normalize_log_text(
+        "before\x1b" + "".join(intermediates)
+    ) == "before"
 
 
 def test_redaction_happens_before_sanitized_output_is_truncated() -> None:
