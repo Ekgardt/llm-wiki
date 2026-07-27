@@ -1158,8 +1158,6 @@ def test_redaction_semantically_normalizes_bounded_windows_path_tokens() -> None
 
     outside_aliases = (
         r"D:\projects\My RÉPO-other\private.py",
-        r"D:\projects\My RÉPO\..\sibling\private.py",
-        "file:///D:/projects/My%20R%C3%A9PO/../sibling/private.py",
         r"\\server\share\projects\My RÉPO\private.py",
         r"\\?\D:\projects\My RÉPO\private.py",
         "file://server/D:/projects/My%20R%C3%A9PO/private.py",
@@ -1167,6 +1165,14 @@ def test_redaction_semantically_normalizes_bounded_windows_path_tokens() -> None
     for token in outside_aliases:
         value = f'path="{token}"'
         assert lsp_security._redact_path(value, root, "<repository>") == value
+
+    for token in (
+        r"D:\projects\My RÉPO\..\sibling\private.py",
+        "file:///D:/projects/My%20R%C3%A9PO/../sibling/private.py",
+    ):
+        assert lsp_security._redact_path(
+            f'path="{token}"', root, "<repository>"
+        ) == 'path="<repository>"'
 
     long_token = (
         "D:/"
@@ -1385,6 +1391,7 @@ def test_windows_tokenizer_handles_terminal_suffixes_and_long_punctuation_roots(
     )
     root_text = "D:\\" + "\\".join(components)
     assert len(root_text) > 1024
+    assert sum(character in "(),;[]{}" for character in root_text) > 256
     root = Path(root_text)
     monkeypatch.setattr(windows_workspace, "get_short_path", lambda path: path)
     source = root_text + r"\source.py"
@@ -1411,6 +1418,126 @@ def test_windows_tokenizer_handles_terminal_suffixes_and_long_punctuation_roots(
     ) == sibling
 
 
+def test_windows_scanner_redacts_unquoted_long_and_short_roots_with_spaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(r"C:\Program Files\Repo")
+    short = Path(r"C:\PROGRA~1\REPO")
+    monkeypatch.setattr(
+        windows_workspace,
+        "get_short_path",
+        lambda path: short if path == root else path,
+    )
+    semantic_calls = 0
+    real_semantic_match = lsp_security._windows_semantic_root_match_end
+
+    def semantic_match(*args, **kwargs):
+        nonlocal semantic_calls
+        semantic_calls += 1
+        return real_semantic_match(*args, **kwargs)
+
+    monkeypatch.setattr(
+        lsp_security, "_windows_semantic_root_match_end", semantic_match
+    )
+
+    cases = (
+        (
+            r"C:\Program Files\Repo\x.py: diagnostic",
+            "<repository>: diagnostic",
+        ),
+        (
+            r"c:/PROGRAM FILES/repo/pkg/x.py:12:34 next",
+            "<repository>:12:34 next",
+        ),
+        (
+            r"C:\PROGRA~1/REPO\x.py; next",
+            "<repository>; next",
+        ),
+    )
+    for value, expected in cases:
+        assert lsp_security._redact_path(value, root, "<repository>") == expected
+    assert semantic_calls == 0
+
+    for sibling in (
+        r"C:\Program Files\Repository\x.py: diagnostic",
+        r"C:\PROGRA~1\REPO-old\x.py: diagnostic",
+    ):
+        assert lsp_security._redact_path(
+            sibling, root, "<repository>"
+        ) == sibling
+
+
+def test_windows_direct_root_match_handles_unicode_casefold_expansion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(r"C:\Program Files\Straße")
+    monkeypatch.setattr(windows_workspace, "get_short_path", lambda path: path)
+
+    for token in (
+        r"C:\Program Files\Straße\source.py",
+        r"c:/program files/STRASSE/source.py",
+    ):
+        assert lsp_security._redact_path(
+            token, root, "<repository>"
+        ) == "<repository>"
+
+
+def test_windows_scanner_stops_semantic_validation_when_it_reaches_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(r"D:\Program Files\RÉPO")
+    short = Path(r"D:\PROGRA~1\REPO~1")
+    monkeypatch.setattr(
+        windows_workspace,
+        "get_short_path",
+        lambda path: short if path == root else path,
+    )
+    inspected_components: list[str] = []
+    real_add_component = lsp_security._windows_add_semantic_component
+
+    def add_component(raw_component, *args, **kwargs):
+        inspected_components.append(raw_component)
+        return real_add_component(raw_component, *args, **kwargs)
+
+    monkeypatch.setattr(
+        lsp_security, "_windows_add_semantic_component", add_component
+    )
+    deep_suffix = "\\" + "\\".join(f"segment-{index}" for index in range(300))
+    overlong_suffix = "\\" + "x" * 4096
+
+    for token in (
+        r"D:\scratch\..\Program Files\RÉPO..." + deep_suffix,
+        r"D:\PROGRA~1\REPO~1" + overlong_suffix,
+        "file:///D:/scratch/../Program%20Files/R%C3%89PO..."
+        + deep_suffix.replace("\\", "/"),
+    ):
+        inspected_components.clear()
+        value = f'path="{token}"'
+        assert lsp_security._redact_path(
+            value, root, "<repository>"
+        ) == 'path="<repository>"'
+        assert len(inspected_components) <= 4
+        assert not any(
+            component.startswith("segment-") or len(component) > 255
+            for component in inspected_components
+        )
+
+
+def test_windows_scanner_retries_after_each_failed_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(r"D:\projects\Repo")
+    monkeypatch.setattr(windows_workspace, "get_short_path", lambda path: path)
+    value = (
+        r"bad=D:\outside\one.py,D:\projects\Repo\first.py;"
+        r"D:\projects\Repo\second.py tail"
+    )
+
+    assert lsp_security._redact_path(value, root, "<repository>") == (
+        r"bad=D:\outside\one.py,<repository>;<repository> tail"
+    )
+
+
 def test_windows_tokenizer_scales_near_linearly_for_200_400_800_tokens(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1418,19 +1545,25 @@ def test_windows_tokenizer_scales_near_linearly_for_200_400_800_tokens(
     root_text = str(root)
     uri_root = "file:///D:/projects/linear-repository"
     monkeypatch.setattr(windows_workspace, "get_short_path", lambda path: path)
-    real_canonicalize = lsp_security._canonical_windows_path_token
-    canonical_calls = 0
+    real_semantic_match = lsp_security._windows_semantic_root_match_end
+    real_add_component = lsp_security._windows_add_semantic_component
+    semantic_calls = 0
+    component_calls = 0
 
-    def canonicalize(*args, **kwargs):
-        nonlocal canonical_calls
-        canonical_calls += 1
-        return real_canonicalize(*args, **kwargs)
+    def semantic_match(*args, **kwargs):
+        nonlocal semantic_calls
+        semantic_calls += 1
+        return real_semantic_match(*args, **kwargs)
 
-    monkeypatch.setattr(
-        lsp_security, "_canonical_windows_path_token", canonicalize
-    )
+    def add_component(*args, **kwargs):
+        nonlocal component_calls
+        component_calls += 1
+        return real_add_component(*args, **kwargs)
 
-    def measure(count: int) -> float:
+    monkeypatch.setattr(lsp_security, "_windows_semantic_root_match_end", semantic_match)
+    monkeypatch.setattr(lsp_security, "_windows_add_semantic_component", add_component)
+
+    def measure(count: int) -> tuple[float, int, int]:
         tokens: list[str] = []
         for index in range(count):
             if index % 4 == 0:
@@ -1438,26 +1571,39 @@ def test_windows_tokenizer_scales_near_linearly_for_200_400_800_tokens(
             elif index % 4 == 1:
                 token = f"uri={uri_root}/pkg/module-{index}.py:56:78).,;]}}"
             elif index % 4 == 2:
-                token = f'path="{root_text}\\pkg\\module-{index}.py"'
-            else:
                 token = (
                     f"path={root_text}-sibling\\module-{index}.py:90:12).,;]}}"
                 )
+            else:
+                token = f"path=D:\\outside\\module-{index}.py"
             tokens.append(token)
-        value = " ".join(tokens)
-        calls_before = canonical_calls
+        value = "".join(
+            token + ("," if index % 2 else ";")
+            for index, token in enumerate(tokens)
+        )
+        semantic_before = semantic_calls
+        component_before = component_calls
         started = time.perf_counter()
         result = lsp_security._redact_path(value, root, "<repository>")
         elapsed = time.perf_counter() - started
-        assert result.count("<repository>") == count * 3 // 4
-        assert canonical_calls - calls_before <= count * 2 + 2
-        return elapsed
+        semantic_delta = semantic_calls - semantic_before
+        component_delta = component_calls - component_before
+        assert result.count("<repository>") == count // 2
+        assert semantic_delta == count * 3 // 4
+        assert component_delta <= count * 3
+        return elapsed, semantic_delta, component_delta
 
-    timings = tuple(
-        min(measure(count) for _attempt in range(2))
+    measurements = tuple(
+        min((measure(count) for _attempt in range(2)), key=lambda item: item[0])
         for count in (200, 400, 800)
     )
+    timings = tuple(measurement[0] for measurement in measurements)
+    semantic_counts = tuple(measurement[1] for measurement in measurements)
+    component_counts = tuple(measurement[2] for measurement in measurements)
 
+    assert semantic_counts == (150, 300, 600)
+    assert component_counts[1] <= component_counts[0] * 2 + 4
+    assert component_counts[2] <= component_counts[1] * 2 + 4
     assert timings[1] <= max(0.05, timings[0] * 3.25)
     assert timings[2] <= max(0.05, timings[1] * 3.25)
     assert sum(timings) < 5.0
@@ -1624,6 +1770,25 @@ def test_redaction_neutralizes_cr_lf_and_control_injection() -> None:
     assert "forged=entry" in result
 
 
+def test_redaction_turns_token_separating_controls_into_safe_spaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    separators = ("\r\n", "\t", "\v", "\f", "\x00", "\x01", "\x7f", "\x85", "\u2028", "\u2029")
+    value = "first" + "second".join(separators) + "last"
+    assert lsp_security._normalize_log_text(value) == (
+        "first second second second second second second second second second last"
+    )
+
+    root = Path(r"D:\projects\Repo")
+    monkeypatch.setattr(windows_workspace, "get_short_path", lambda path: path)
+    paths = f"{root}\\one.py\r\n{root}\\two.py\t{root}\\three.py"
+    normalized = lsp_security._normalize_log_text(paths)
+    assert lsp_security._redact_path(
+        normalized, root, "<repository>"
+    ) == "<repository> <repository> <repository>"
+    assert not any(lsp_security._is_control(character) for character in normalized)
+
+
 def test_redaction_neutralizes_unicode_format_and_bidi_controls() -> None:
     controls = "\u200b\u200d\u202e\u2066\ufeff"
     assert all(unicodedata.category(character) == "Cf" for character in controls)
@@ -1637,9 +1802,6 @@ def test_redaction_neutralizes_unicode_format_and_bidi_controls() -> None:
 def test_redaction_normalizes_controls_before_detecting_credentials() -> None:
     key = "OPENAI_API_KEY"
     insertions = (
-        "\x00",
-        "\r\n",
-        "\x85",
         "\x1b[0m",
         "\x1b[38;5;196m",
         "\u200b",
@@ -1781,6 +1943,45 @@ def test_redaction_restarts_escape_intermediates_at_nested_escape(
 
     assert lsp_security._normalize_log_text(value) == "TOKEN=restart-secret"
     assert redact_lsp_text(value) == "TOKEN=<redacted>"
+
+
+def test_redaction_restarts_every_escape_state_at_nested_introducers() -> None:
+    terminated = (
+        "\x1b[12;\x1b[31m",
+        "\x1b[12;\x9b31m",
+        "\x9b12;\x1b[31m",
+        "\x9b12;\x9dnew-title\x9c",
+        "\x1b]old-title\x1b[31m",
+        "\x1b]old-title\x90new-dcs\x1b\\",
+        "\x1bPold-dcs\x1b]new-title\x07",
+        "\x1b#\x1b[31m",
+        "\x1b#\x9b31m",
+        "\x1b#\x9dnew-title\x9c",
+    )
+    for sequence in terminated:
+        assert lsp_security._normalize_log_text(
+            "before" + sequence + "after"
+        ) == "beforeafter"
+        concealed = "TOK" + sequence + "EN=nested-secret"
+        assert lsp_security._normalize_log_text(concealed) == (
+            "TOKEN=nested-secret"
+        )
+        assert redact_lsp_text(concealed) == "TOKEN=<redacted>"
+
+    unterminated = (
+        "\x1b[12;\x1b[31",
+        "\x1b]title\x1b[31\x1bPpayload",
+        "\x1bPpayload\x9dtitle\x90more-payload",
+        "\x1b#\x9b31\x9dtitle",
+    )
+    for sequence in unterminated:
+        result = lsp_security._normalize_log_text("before" + sequence)
+        assert result == "before"
+        assert "[31" not in result
+
+    for sequence in unterminated[1:]:
+        value = "before" + sequence + "unterminated-secret"
+        assert "unterminated-secret" not in redact_lsp_text(value)
 
 
 def test_redaction_happens_before_sanitized_output_is_truncated() -> None:

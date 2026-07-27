@@ -43,7 +43,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── impact_analysis.py           v4.0: LINK layer (code→wiki impact)
 │   ├── build_tiers.py               v4.0: L0/L1/L2 progressive disclosure
 │   └── queries/                     v4.0: 12 tree-sitter .scm language queries
-├── tests/                         CODE — regression suite (pytest, 4489 tests)
+├── tests/                         CODE — regression suite (pytest, 4686 tests)
 ├── docs/                          CODE — architecture + user guide
 ├── skills/                        CODE — 9 agent skills (SKILL.md)
 ├── rules/                         CODE — file-handling policies
@@ -175,11 +175,11 @@ Tasks 1-5 of the 2026-07-21 Plan A remain implemented, including explicit Graph 
 selection contracts and bounded sealed-workspace utilities, but its one-shot
 consent/SCIP/publication Tasks 6-16 are superseded.
 
-Tasks 1-6 of the replacement Python/Pyright plan now implement path derivation,
+Tasks 1-7 of the replacement Python/Pyright plan now implement path derivation,
 position and URI conversion, bounded protocol transport, process startup evidence,
-and platform-qualified process lifecycle ownership. Precise navigation, provider
-integration, and MCP routing remain unimplemented, so this is not a
-navigation-complete checkpoint.
+platform-qualified process lifecycle ownership, repository containment, and safe
+diagnostic log redaction. Precise navigation, provider integration, and MCP routing
+remain unimplemented, so this is not a navigation-complete checkpoint.
 
 The approved target keeps the existing structural Evidence Graph and adds a small,
 Python 3.10-compatible, read-only LSP runtime owned by LLM Wiki. It starts with a
@@ -268,7 +268,7 @@ or nonzero active state remains fail-closed.
   `maybe_compile.py` (PID-locked spawn), `search_memory.py` (triple-RRF),
   `llm_client.py` (5 backends + fake), `integration_adapter.py` (thin host
   lifecycle boundary), `mcp_server.py` (12 task-shaped tools), and `doctor.py`.
-- `tests/` — 4680 tests collected. Hermetic via `conftest.py` (pins
+- `tests/` — 4686 tests collected. Hermetic via `conftest.py` (pins
   `LLM_WIKI_ROOT` to checkout, redirects `LLM_WIKI_STATE_ROOT` to a temp
   dir, defaults `MEMORY_LLM_PROVIDER=fake`).
 - `docs/` — `ARCHITECTURE.md`, `USER-GUIDE.md`, `AGENTS.md` (knowledge

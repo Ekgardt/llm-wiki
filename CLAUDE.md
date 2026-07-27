@@ -144,9 +144,10 @@ the 2026-07-21 Plan A remain implemented, but its one-shot
 consent/SCIP/publication Tasks 6-16 are superseded. The approved target keeps the
 existing structural Evidence Graph and adds an owned, Python 3.10-compatible,
 read-only LSP runtime, starting with a production-quality Python/Pyright slice.
-Tasks 1-6 of the replacement plan now implement paths, positions, bounded protocol,
-startup evidence, and leased, platform-qualified process lifecycle ownership;
-navigation/provider/MCP routing remain unimplemented. A Windows Job Object owns the
+Tasks 1-7 of the replacement plan now implement paths, positions, bounded protocol,
+startup evidence, leased platform-qualified process lifecycle ownership, repository
+containment, and safe log redaction; navigation/provider/MCP routing remain
+unimplemented. A Windows Job Object owns the
 assigned server tree. On POSIX, the process group covers pinned Pyright descendants
 only while they remain in-group; hostile `setsid()` escape is unsupported, so this
 path remains limited to trusted repositories.
@@ -350,7 +351,7 @@ for tests/e2e.
 ## 7. Quick command reference
 
 ```bash
-uv run pytest -q                              # run the test suite (4680 tests collected)
+uv run pytest -q                              # run the test suite (4686 tests collected)
 uv run ruff check scripts/ tests/             # Python static analysis
 uv run python scripts/lint_memory.py --scope all   # structural lint
 uv run python scripts/search_memory.py "query"     # hybrid search
