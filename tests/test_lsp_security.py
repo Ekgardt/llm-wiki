@@ -13,7 +13,7 @@ import unicodedata
 from collections import Counter
 from dataclasses import FrozenInstanceError, fields
 from itertools import product
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import get_type_hints
 
 import lsp_security
@@ -833,6 +833,125 @@ def test_redaction_removes_repository_and_home_native_and_uri_paths(
     assert "<home>" in result
 
 
+def test_posix_scanner_normalizes_native_and_local_file_uri_aliases() -> None:
+    root = PurePosixPath("/srv/projects/repo")
+    cases = (
+        ("/srv/projects/./repo/pkg/a.py: diagnostic", "<repository>: diagnostic"),
+        ("/srv/other/../projects/repo", "<repository>"),
+        ("/srv//projects/repo/deep.py", "<repository>"),
+        (
+            "file:///srv/projects/./repo/pkg/a.py: diagnostic",
+            "<repository>: diagnostic",
+        ),
+        ("file://localhost/srv/other/../projects/repo", "<repository>"),
+        ("FiLe:/srv//projects/repo/deep.py", "<repository>"),
+        (
+            "file://loc%61lhost/srv/%6Fther/%2E%2E/projects/repo",
+            "<repository>",
+        ),
+    )
+    for value, expected in cases:
+        assert lsp_security._redact_path(value, root, "<repository>") == expected
+
+    spaced_root = PurePosixPath("/srv/Program Files/répo")
+    for value in (
+        "/srv/Program Files/répo/private.py",
+        "/srv/scratch/../Program Files/répo/private.py",
+        "file:///srv/Program%20Files/r%C3%A9po/private.py",
+        "file:///srv/scratch/../Program%20Files/r%C3%A9po/private.py",
+    ):
+        assert lsp_security._redact_path(
+            value, spaced_root, "<repository>"
+        ) == "<repository>"
+
+    deep_suffix = "/" + "/".join(f"segment-{index}" for index in range(300))
+    overlong_suffix = "/" + "x" * 4096
+    for suffix in (deep_suffix, overlong_suffix):
+        assert lsp_security._redact_path(
+            "/srv/other/../projects/repo" + suffix,
+            root,
+            "<repository>",
+        ) == "<repository>"
+
+    literal_percent_root = PurePosixPath("/srv/projects/repo%20name")
+    assert lsp_security._redact_path(
+        "file:///srv/projects/repo%2520name/private.py",
+        literal_percent_root,
+        "<repository>",
+    ) == "<repository>"
+    assert lsp_security._redact_path(
+        "file:///srv/projects/repo%20name/private.py",
+        literal_percent_root,
+        "<repository>",
+    ) == "file:///srv/projects/repo%20name/private.py"
+
+    ignored = (
+        "/srv/projects/repo-other/private.py",
+        "file:///srv/projects/repo-other/private.py",
+        "file://server/srv/projects/repo/private.py",
+        "file:////server/srv/projects/repo/private.py",
+        "https://example.test/srv/projects/repo/private.py",
+        "file:relative/srv/projects/repo",
+        "file:///srv/projects/%FFrepo/private.py",
+        "file:///srv/projects/%GG/repo/private.py",
+        "file:///srv/projects/%252E%252E/projects/repo/private.py",
+        r"file:///srv/projects/repo\private.py",
+    )
+    for value in ignored:
+        assert lsp_security._redact_path(value, root, "<repository>") == value
+
+
+def test_posix_scanner_retries_and_scales_near_linearly() -> None:
+    root = PurePosixPath("/srv/Program Files/linear-repository")
+    native_root = root.as_posix()
+    uri_root = "file:///srv/Program%20Files/linear-repository"
+
+    multiple = (
+        "bad=file://server/srv/Program%20Files/linear-repository/one.py,"
+        "/srv/scratch/../Program Files/linear-repository/two.py;"
+        "file:///srv/scratch/../Program%20Files/linear-repository/three.py tail"
+    )
+    assert lsp_security._redact_path(multiple, root, "<repository>") == (
+        "bad=file://server/srv/Program%20Files/linear-repository/one.py,"
+        "<repository>;<repository> tail"
+    )
+
+    def measure(count: int) -> float:
+        tokens: list[str] = []
+        for index in range(count):
+            if index % 5 == 0:
+                token = f"path={native_root}/pkg/module-{index}.py:12:34"
+            elif index % 5 == 1:
+                token = f"uri={uri_root}/pkg/module-{index}.py:56:78"
+            elif index % 5 == 2:
+                token = (
+                    "/srv/scratch/../Program Files/linear-repository/"
+                    f"pkg/module-{index}.py"
+                )
+            elif index % 5 == 3:
+                token = f"path={native_root}-sibling/module-{index}.py"
+            else:
+                token = f"path=/outside/module-{index}.py"
+            tokens.append(token)
+        value = "".join(
+            token + ("," if index % 2 else ";")
+            for index, token in enumerate(tokens)
+        )
+        started = time.perf_counter()
+        result = lsp_security._redact_path(value, root, "<repository>")
+        elapsed = time.perf_counter() - started
+        assert result.count("<repository>") == count * 3 // 5
+        return elapsed
+
+    timings = tuple(
+        min(measure(count) for _attempt in range(2))
+        for count in (200, 400, 800)
+    )
+    assert timings[1] <= max(0.05, timings[0] * 3.25)
+    assert timings[2] <= max(0.05, timings[1] * 3.25)
+    assert sum(timings) < 5.0
+
+
 _WINDOWS_NATIVE_SEPARATOR_ATOMS = ("/", "\\")
 _WINDOWS_URI_SEPARATOR_ATOMS = ("/", "\\", "%2F", "%5C")
 
@@ -1506,6 +1625,16 @@ def test_windows_scanner_stops_semantic_validation_when_it_reaches_root(
     overlong_suffix = "\\" + "x" * 4096
 
     for token in (
+        r"D:\scratch\..\Program Files\RÉPO\secret.py: diagnostic",
+        r"D:\scratch\..\PROGRA~1\REPO~1\secret.py: diagnostic",
+    ):
+        inspected_components.clear()
+        assert lsp_security._redact_path(
+            token, root, "<repository>"
+        ) == "<repository>: diagnostic"
+        assert len(inspected_components) <= 4
+
+    for token in (
         r"D:\scratch\..\Program Files\RÉPO..." + deep_suffix,
         r"D:\PROGRA~1\REPO~1" + overlong_suffix,
         "file:///D:/scratch/../Program%20Files/R%C3%89PO..."
@@ -1541,9 +1670,9 @@ def test_windows_scanner_retries_after_each_failed_candidate(
 def test_windows_tokenizer_scales_near_linearly_for_200_400_800_tokens(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root = Path(r"D:\projects\linear-repository")
+    root = Path(r"D:\Program Files\linear-repository")
     root_text = str(root)
-    uri_root = "file:///D:/projects/linear-repository"
+    uri_root = "file:///D:/Program%20Files/linear-repository"
     monkeypatch.setattr(windows_workspace, "get_short_path", lambda path: path)
     real_semantic_match = lsp_security._windows_semantic_root_match_end
     real_add_component = lsp_security._windows_add_semantic_component
@@ -1566,16 +1695,21 @@ def test_windows_tokenizer_scales_near_linearly_for_200_400_800_tokens(
     def measure(count: int) -> tuple[float, int, int]:
         tokens: list[str] = []
         for index in range(count):
-            if index % 4 == 0:
+            if index % 5 == 0:
                 token = f"path={root_text}\\pkg\\module-{index}.py:12:34).,;]}}"
-            elif index % 4 == 1:
+            elif index % 5 == 1:
                 token = f"uri={uri_root}/pkg/module-{index}.py:56:78).,;]}}"
-            elif index % 4 == 2:
+            elif index % 5 == 2:
                 token = (
                     f"path={root_text}-sibling\\module-{index}.py:90:12).,;]}}"
                 )
-            else:
+            elif index % 5 == 3:
                 token = f"path=D:\\outside\\module-{index}.py"
+            else:
+                token = (
+                    "path=D:\\scratch\\..\\Program Files\\linear-repository\\"
+                    f"pkg\\module-{index}.py"
+                )
             tokens.append(token)
         value = "".join(
             token + ("," if index % 2 else ";")
@@ -1588,9 +1722,9 @@ def test_windows_tokenizer_scales_near_linearly_for_200_400_800_tokens(
         elapsed = time.perf_counter() - started
         semantic_delta = semantic_calls - semantic_before
         component_delta = component_calls - component_before
-        assert result.count("<repository>") == count // 2
-        assert semantic_delta == count * 3 // 4
-        assert component_delta <= count * 3
+        assert result.count("<repository>") == count * 3 // 5
+        assert semantic_delta == count * 4 // 5
+        assert component_delta <= count * 4
         return elapsed, semantic_delta, component_delta
 
     measurements = tuple(
@@ -1601,7 +1735,7 @@ def test_windows_tokenizer_scales_near_linearly_for_200_400_800_tokens(
     semantic_counts = tuple(measurement[1] for measurement in measurements)
     component_counts = tuple(measurement[2] for measurement in measurements)
 
-    assert semantic_counts == (150, 300, 600)
+    assert semantic_counts == (160, 320, 640)
     assert component_counts[1] <= component_counts[0] * 2 + 4
     assert component_counts[2] <= component_counts[1] * 2 + 4
     assert timings[1] <= max(0.05, timings[0] * 3.25)

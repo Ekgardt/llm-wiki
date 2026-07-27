@@ -43,7 +43,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── impact_analysis.py           v4.0: LINK layer (code→wiki impact)
 │   ├── build_tiers.py               v4.0: L0/L1/L2 progressive disclosure
 │   └── queries/                     v4.0: 12 tree-sitter .scm language queries
-├── tests/                         CODE — regression suite (pytest, 4686 tests)
+├── tests/                         CODE — regression suite (pytest, 4688 tests)
 ├── docs/                          CODE — architecture + user guide
 ├── skills/                        CODE — 9 agent skills (SKILL.md)
 ├── rules/                         CODE — file-handling policies
@@ -268,7 +268,7 @@ or nonzero active state remains fail-closed.
   `maybe_compile.py` (PID-locked spawn), `search_memory.py` (triple-RRF),
   `llm_client.py` (5 backends + fake), `integration_adapter.py` (thin host
   lifecycle boundary), `mcp_server.py` (12 task-shaped tools), and `doctor.py`.
-- `tests/` — 4686 tests collected. Hermetic via `conftest.py` (pins
+- `tests/` — 4688 tests collected. Hermetic via `conftest.py` (pins
   `LLM_WIKI_ROOT` to checkout, redirects `LLM_WIKI_STATE_ROOT` to a temp
   dir, defaults `MEMORY_LLM_PROVIDER=fake`).
 - `docs/` — `ARCHITECTURE.md`, `USER-GUIDE.md`, `AGENTS.md` (knowledge
