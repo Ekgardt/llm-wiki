@@ -28,7 +28,7 @@ _MAX_COMPONENT_CHARACTERS = 255
 _MAX_COMPONENT_BYTES = 255
 _MAX_PROVIDER_URI = 16 * 1024
 _MAX_DIRECTORY_ENTRIES = 100_000
-_MAX_REDACTION_RAW_INPUT = 256 * 1024
+_MAX_REDACTION_RAW_BYTES = 256 * 1024
 _MAX_REDACTION_PATH_TOKEN = 128 * 1024
 _OVERSIZED_REDACTION_MARKER = "<redacted: oversized LSP log>"
 _MALFORMED_PERCENT = re.compile(r"%(?![0-9A-Fa-f]{2})")
@@ -113,6 +113,25 @@ def _is_control(character: str) -> bool:
         or 127 <= codepoint <= 159
         or unicodedata.category(character) in {"Cf", "Zl", "Zp"}
     )
+
+
+def _fits_utf8_redaction_ceiling(value: str) -> bool:
+    byte_count = 0
+    for character in value:
+        codepoint = ord(character)
+        if codepoint < 0x80:
+            byte_count += 1
+        elif codepoint < 0x800:
+            byte_count += 2
+        elif 0xD800 <= codepoint <= 0xDFFF:
+            return False
+        elif codepoint < 0x10000:
+            byte_count += 3
+        else:
+            byte_count += 4
+        if byte_count > _MAX_REDACTION_RAW_BYTES:
+            return False
+    return True
 
 
 def _validate_relative_path(value: object) -> tuple[str, tuple[str, ...]]:
@@ -1947,7 +1966,9 @@ def redact_lsp_text(
         raise TypeError("value must be a string")
     if repository is not None:
         repository = _require_repository(repository)
-    if len(value) > _MAX_REDACTION_RAW_INPUT:
+    if len(value) > _MAX_REDACTION_RAW_BYTES:
+        return _OVERSIZED_REDACTION_MARKER
+    if not _fits_utf8_redaction_ceiling(value):
         return _OVERSIZED_REDACTION_MARKER
 
     redacted = _normalize_log_text(value)

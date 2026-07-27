@@ -1101,7 +1101,37 @@ def test_redaction_fails_closed_before_scanning_oversized_raw_input(
     for value in (
         "x" * (ceiling + 1),
         "\x1b[31m" * (ceiling // len("\x1b[31m") + 1),
+        "\u00e9" * 131_067 + "x" * 12,
+        "prefix\ud800suffix",
     ):
+        assert redact_lsp_text(value) == "<redacted: oversized LSP log>"
+
+
+def test_redaction_rejects_reviewer_multibyte_byte_ceiling_reproduction() -> None:
+    value = "\u00e9" * 131_067 + "x" * 12
+
+    assert len(value) == 131_079
+    assert len(value.encode("utf-8")) == 262_146
+    assert redact_lsp_text(value) == "<redacted: oversized LSP log>"
+
+
+def test_redaction_accepts_exact_ascii_and_multibyte_utf8_byte_boundaries() -> None:
+    ceiling = 256 * 1024
+    cases = (
+        ("x" * (ceiling - 1), "x" * 1024),
+        ("x" * ceiling, "x" * 1024),
+        ("\u00e9" * (ceiling // 2), "\u00e9" * 1024),
+    )
+
+    for value, expected in cases:
+        assert len(value.encode("utf-8")) <= ceiling
+        assert redact_lsp_text(value) == expected
+
+
+def test_redaction_fails_closed_on_lone_utf8_surrogates() -> None:
+    for value in ("\ud800", "prefix\udfffsuffix"):
+        with pytest.raises(UnicodeEncodeError):
+            value.encode("utf-8", errors="strict")
         assert redact_lsp_text(value) == "<redacted: oversized LSP log>"
 
 
