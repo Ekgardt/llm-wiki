@@ -28,8 +28,9 @@ _MAX_COMPONENT_CHARACTERS = 255
 _MAX_COMPONENT_BYTES = 255
 _MAX_PROVIDER_URI = 16 * 1024
 _MAX_DIRECTORY_ENTRIES = 100_000
-_MAX_REDACTION_INPUT = 64 * 1024
+_MAX_REDACTION_RAW_INPUT = 256 * 1024
 _MAX_REDACTION_PATH_TOKEN = 128 * 1024
+_OVERSIZED_REDACTION_MARKER = "<redacted: oversized LSP log>"
 _MALFORMED_PERCENT = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _ENCODED_SEPARATOR = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
 _WINDOWS_DRIVE_PATH = re.compile(r"^[A-Za-z]:/")
@@ -1941,18 +1942,20 @@ def redact_lsp_text(
     *,
     repository: RepositoryScope | None = None,
 ) -> str:
-    """Remove credentials, local roots, and log injection before bounding text."""
+    """Remove credentials, local roots, and log injection from bounded raw text."""
     if not isinstance(value, str):
         raise TypeError("value must be a string")
     if repository is not None:
         repository = _require_repository(repository)
+    if len(value) > _MAX_REDACTION_RAW_INPUT:
+        return _OVERSIZED_REDACTION_MARKER
 
-    redacted = _normalize_log_text(value[:_MAX_REDACTION_INPUT])
-    redacted = _redact_assignments(redacted[:_MAX_REDACTION_INPUT])
-    redacted = _redact_url_userinfo(redacted[:_MAX_REDACTION_INPUT])
+    redacted = _normalize_log_text(value)
+    redacted = _redact_assignments(redacted)
+    redacted = _redact_url_userinfo(redacted)
     if repository is not None:
         redacted = _redact_path(
-            redacted[:_MAX_REDACTION_INPUT],
+            redacted,
             Path(repository.checkout_root),
             "<repository>",
         )
@@ -1967,12 +1970,10 @@ def redact_lsp_text(
             if resolved_home not in home_paths:
                 home_paths.append(resolved_home)
         for home_path in home_paths:
-            redacted = _redact_path(
-                redacted[:_MAX_REDACTION_INPUT], home_path, "<home>"
-            )
+            redacted = _redact_path(redacted, home_path, "<home>")
     except (OSError, RuntimeError):
         pass
-    return _normalize_log_text(redacted[:_MAX_REDACTION_INPUT])[:1024]
+    return _normalize_log_text(redacted)[:1024]
 
 
 __all__ = [

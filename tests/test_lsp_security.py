@@ -1024,7 +1024,7 @@ def test_redaction_bounds_every_stage_before_contractions_and_output(
     scope: RepositoryScope,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ceiling = 64 * 1024
+    ceiling = 256 * 1024
     observed: list[tuple[str, int]] = []
 
     def wrap(name: str):
@@ -1053,7 +1053,7 @@ def test_redaction_bounds_every_stage_before_contractions_and_output(
         + "@example.test/private "
         + repository_uri
         + "/secret.py "
-        + "tail" * 100_000
+        + "tail" * 20_000
     )
     started = time.perf_counter()
     result = redact_lsp_text(value, repository=scope)
@@ -1063,9 +1063,70 @@ def test_redaction_bounds_every_stage_before_contractions_and_output(
     assert "<repository>" in result
     assert "sssss" not in result and "ppppp" not in result
     assert observed
+    assert observed[0] == ("_normalize_log_text", len(value))
+    assert ("_redact_assignments", len(value)) in observed
     assert max(length for _name, length in observed) <= ceiling
     assert len(result) <= 1024
     assert elapsed < 1.0
+
+
+def test_redaction_normalizes_complete_bounded_input_before_url_scanning() -> None:
+    old_boundary = 64 * 1024
+    secret = "review-boundary-secret"
+    prefix = f"https://operator:{secret}"
+    ansi_characters = old_boundary - len(prefix)
+    concealment = "\x1b[31m" * (ansi_characters % 2)
+    concealment += "\x1bc" * ((ansi_characters - len(concealment)) // 2)
+    value = prefix + concealment + "@example.test/private"
+
+    assert value.index("@") == old_boundary
+    assert redact_lsp_text(value) == "https://<redacted>@example.test/private"
+
+
+def test_redaction_fails_closed_before_scanning_oversized_raw_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("oversized raw input reached a semantic scanner")
+
+    for name in (
+        "_normalize_log_text",
+        "_redact_assignments",
+        "_redact_url_userinfo",
+        "_redact_path",
+    ):
+        monkeypatch.setattr(lsp_security, name, forbidden)
+
+    ceiling = 256 * 1024
+    for value in (
+        "x" * (ceiling + 1),
+        "\x1b[31m" * (ceiling // len("\x1b[31m") + 1),
+    ):
+        assert redact_lsp_text(value) == "<redacted: oversized LSP log>"
+
+
+def test_redaction_preserves_ordinary_log_after_bounded_ansi_prefix() -> None:
+    message = "Pyright returned 3 definitions for pkg/api.py"
+    value = "\x1bc" * 40_000 + message
+
+    assert 64 * 1024 < len(value) < 256 * 1024
+    assert redact_lsp_text(value) == message
+
+
+def test_oversized_redaction_time_is_independent_of_attacker_suffix_length() -> None:
+    ceiling = 256 * 1024
+    values = ("x" * (ceiling + 1), "x" * (ceiling * 64))
+
+    def measure(value: str) -> float:
+        started = time.perf_counter()
+        for _iteration in range(2_000):
+            assert redact_lsp_text(value) == "<redacted: oversized LSP log>"
+        return time.perf_counter() - started
+
+    timings = tuple(measure(value) for value in values)
+
+    assert timings[1] <= max(0.05, timings[0] * 3.0)
+    assert sum(timings) < 0.2
 
 
 _WINDOWS_NATIVE_SEPARATOR_ATOMS = ("/", "\\")
