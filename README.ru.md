@@ -1,6 +1,6 @@
 # LLM Wiki
 
-[![Tests](https://img.shields.io/badge/tests-4688%20collected-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://img.shields.io/badge/tests-4693%20collected-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-4.0.0-blue.svg)](CHANGELOG.md)
@@ -105,7 +105,7 @@ LLM Wiki даёт каждому AI-агенту, которым вы польз
 - **5 LLM-бэкендов** (авто-детекция): OpenCode → Codex → Claude CLI → OpenAI → Ollama
 - **Кросс-платформенность**: Windows, macOS, Linux, WSL2
 - **Локально и без daemon-процессов** — установленный baseline включает MCP-пакет; vector search и Cognee остаются опциональными
-- **4688 регрессионных тестов**, CI green на Ubuntu + Windows + macOS, Python 3.10 + 3.13
+- **4693 регрессионных тестов**, CI green на Ubuntu + Windows + macOS, Python 3.10 + 3.13
 - **Pre-commit хуки**: ruff (статический анализ) + структурный lint + gitleaks (сканирование секретов)
 
 ---
@@ -138,7 +138,7 @@ irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 1. Проверяет требования (Python 3.10+, git)
 2. Устанавливает `uv` (быстрый Python-менеджер пакетов), если отсутствует
 3. Синхронизирует locked baseline-зависимости (`uv sync --locked --extra mcp-server`)
-4. Запускает тестовый набор (4688 тестов)
+4. Запускает тестовый набор (4693 тестов)
 5. Устанавливает переменную окружения `LLM_WIKI_ROOT` (user scope)
 6. Создаёт runtime-директории (`cache/`, `logs/`, `run/`, `cache/cognee/` — gitignored)
 7. Регистрирует плановое обслуживание (cron на Unix, Task Scheduler на Windows)
@@ -151,7 +151,7 @@ irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync --locked --extra mcp-server
-uv run pytest -q          # собирает 4688 тестов
+uv run pytest -q          # собирает 4693 тестов
 ```
 
 ### Проверка работы

@@ -15,7 +15,8 @@ from urllib.parse import quote, unquote_to_bytes, urlsplit
 from code_intelligence import PositionEncoding, PositionRange
 
 _MALFORMED_PERCENT = re.compile(r"%(?![0-9A-Fa-f]{2})")
-_ENCODED_PATH_SEPARATOR = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
+_ENCODED_FORWARD_SLASH = re.compile(r"%2f", re.IGNORECASE)
+_ENCODED_BACKSLASH = re.compile(r"%5c", re.IGNORECASE)
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:$")
 _BOUNDARY_CHECKPOINT_STRIDE = 256
 _BOUNDARY_INDEX_CACHE_LINES = 128
@@ -334,7 +335,9 @@ def file_uri_to_path(uri: str, *, platform: str | None = None) -> PurePath:
         raise ValueError("uri must use the file scheme")
     if parsed.query or parsed.fragment:
         raise ValueError("file uri must not contain a query or fragment")
-    if _ENCODED_PATH_SEPARATOR.search(parsed.path):
+    if _ENCODED_FORWARD_SLASH.search(parsed.path) or (
+        target_platform == "nt" and _ENCODED_BACKSLASH.search(parsed.path)
+    ):
         raise ValueError("file uri path must not contain encoded separators")
 
     try:
@@ -348,7 +351,7 @@ def file_uri_to_path(uri: str, *, platform: str | None = None) -> PurePath:
         raise ValueError("file uri path must not contain control characters")
     if "/" in authority or "\\" in authority:
         raise ValueError("file uri authority must not contain separators")
-    if "\\" in decoded_path:
+    if target_platform == "nt" and "\\" in decoded_path:
         raise ValueError("file uri path must not contain backslashes")
     if "@" in authority:
         raise ValueError("file uri authority must not contain userinfo")

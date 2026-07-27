@@ -952,6 +952,122 @@ def test_posix_scanner_retries_and_scales_near_linearly() -> None:
     assert sum(timings) < 5.0
 
 
+def test_posix_scanner_accepts_colon_starts_and_canceled_complex_components() -> None:
+    root = PurePosixPath("/srv/Program Files/repo(name), operator's [v1]")
+    encoded_root = path_to_file_uri(root)[len("file:///srv/") :]
+    cases = (
+        (
+            "path:/srv/scratch: old files, [v2]/../"
+            "Program Files/repo(name), operator's [v1]/secret.py: diagnostic",
+            "path:<repository>: diagnostic",
+        ),
+        (
+            "uri:file:///srv/scratch%3A%20old%20files%2C%20%5Bv2%5D/../"
+            f"{encoded_root}/secret.py",
+            "uri:<repository>",
+        ),
+        (
+            'path="/srv/scratch: old files, [v2]/../'
+            'Program Files/repo(name), operator\'s [v1]/secret.py" next',
+            'path="<repository>" next',
+        ),
+    )
+
+    for value, expected in cases:
+        assert lsp_security._redact_path(value, root, "<repository>") == expected
+
+
+def test_posix_scanner_does_not_rescan_overlapping_dot_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = PurePosixPath("/srv/projects/linear-repository")
+    real_add_component = lsp_security._posix_add_semantic_component
+    component_calls = 0
+    call_limit = 0
+
+    def counted_component(*args, **kwargs):
+        nonlocal component_calls
+        component_calls += 1
+        assert component_calls <= call_limit, "candidate suffix was rescanned"
+        return real_add_component(*args, **kwargs)
+
+    monkeypatch.setattr(
+        lsp_security, "_posix_add_semantic_component", counted_component
+    )
+
+    def measure(characters: int) -> tuple[float, int]:
+        nonlocal call_limit
+        before = component_calls
+        call_limit = before + characters * 2
+        value = "/." * (characters // 2)
+        value += " next=/srv/projects/linear-repository/private.py"
+        started = time.perf_counter()
+        result = lsp_security._redact_path(value, root, "<repository>")
+        elapsed = time.perf_counter() - started
+        assert result.endswith(" next=<repository>")
+        return elapsed, component_calls - before
+
+    measurements = tuple(measure(size) for size in (1_200, 2_400, 4_800, 16_000))
+    timings = tuple(measurement[0] for measurement in measurements)
+    calls = tuple(measurement[1] for measurement in measurements)
+
+    assert calls[1] <= calls[0] * 2 + 8
+    assert calls[2] <= calls[1] * 2 + 8
+    assert calls[3] <= calls[2] * 4
+    assert timings[1] <= max(0.05, timings[0] * 3.0)
+    assert timings[2] <= max(0.05, timings[1] * 3.0)
+    assert timings[3] <= max(0.20, timings[2] * 5.0)
+    assert sum(timings) < 1.0
+
+
+def test_redaction_bounds_every_stage_before_contractions_and_output(
+    scope: RepositoryScope,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ceiling = 64 * 1024
+    observed: list[tuple[str, int]] = []
+
+    def wrap(name: str):
+        original = getattr(lsp_security, name)
+
+        def bounded(value, *args, **kwargs):
+            observed.append((name, len(value)))
+            return original(value, *args, **kwargs)
+
+        monkeypatch.setattr(lsp_security, name, bounded)
+
+    for name in (
+        "_normalize_log_text",
+        "_redact_assignments",
+        "_redact_url_userinfo",
+        "_redact_path",
+    ):
+        wrap(name)
+
+    repository_uri = path_to_file_uri(Path(scope.checkout_root))
+    value = (
+        'TOKEN="'
+        + "s" * 20_000
+        + '" https://operator:'
+        + "p" * 20_000
+        + "@example.test/private "
+        + repository_uri
+        + "/secret.py "
+        + "tail" * 100_000
+    )
+    started = time.perf_counter()
+    result = redact_lsp_text(value, repository=scope)
+    elapsed = time.perf_counter() - started
+
+    assert result.startswith("TOKEN=<redacted> https://<redacted>@example.test/private ")
+    assert "<repository>" in result
+    assert "sssss" not in result and "ppppp" not in result
+    assert observed
+    assert max(length for _name, length in observed) <= ceiling
+    assert len(result) <= 1024
+    assert elapsed < 1.0
+
+
 _WINDOWS_NATIVE_SEPARATOR_ATOMS = ("/", "\\")
 _WINDOWS_URI_SEPARATOR_ATOMS = ("/", "\\", "%2F", "%5C")
 
@@ -1278,7 +1394,6 @@ def test_redaction_semantically_normalizes_bounded_windows_path_tokens() -> None
     outside_aliases = (
         r"D:\projects\My RÉPO-other\private.py",
         r"\\server\share\projects\My RÉPO\private.py",
-        r"\\?\D:\projects\My RÉPO\private.py",
         "file://server/D:/projects/My%20R%C3%A9PO/private.py",
     )
     for token in outside_aliases:
@@ -1652,6 +1767,35 @@ def test_windows_scanner_stops_semantic_validation_when_it_reaches_root(
         )
 
 
+def test_windows_scanner_accepts_local_extended_prefix_and_disposable_spaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(r"D:\Program Files\Repo")
+    monkeypatch.setattr(windows_workspace, "get_short_path", lambda path: path)
+    accepted = (
+        (
+            r"\\?\D:\scratch space, old (v2)\..\Program Files\Repo\secret.py"
+            ": diagnostic",
+            "<repository>: diagnostic",
+        ),
+        (
+            "//?/d:/scratch space, old [v2]/../PROGRAM FILES/repo/secret.py",
+            "<repository>",
+        ),
+    )
+    for value, expected in accepted:
+        assert lsp_security._redact_path(value, root, "<repository>") == expected
+
+    rejected = (
+        r"\\?\UNC\server\share\Program Files\Repo\secret.py",
+        r"\\.\PhysicalDrive0\Program Files\Repo\secret.py",
+        r"\\?\GLOBALROOT\Device\HarddiskVolume1\Program Files\Repo\secret.py",
+        r"\\?\D:\Program Files\Repo-other\secret.py",
+    )
+    for value in rejected:
+        assert lsp_security._redact_path(value, root, "<repository>") == value
+
+
 def test_windows_scanner_retries_after_each_failed_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1871,6 +2015,16 @@ def test_redaction_removes_arbitrarily_percent_encoded_repository_and_home_uris(
     assert home_uri not in result
     assert "<repository>" in result
     assert "<home>" in result
+
+
+def test_posix_redaction_hides_root_before_literal_backslash_uri_filename() -> None:
+    root = PurePosixPath("/srv/projects/repository")
+    uri = path_to_file_uri(root / r"pkg/name\part.py")
+
+    assert "%5C" in uri
+    assert lsp_security._redact_path(
+        uri, root, "<repository>"
+    ) == "<repository>"
 
 
 def test_redaction_handles_mixed_literal_utf8_uri_before_truncation(

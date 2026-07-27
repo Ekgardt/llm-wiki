@@ -268,6 +268,24 @@ def test_file_uri_round_trips_posix_absolute_path() -> None:
     assert file_uri_to_path(uri, platform="posix") == path
 
 
+def test_file_uri_round_trips_posix_literal_backslash() -> None:
+    path = PurePosixPath(r"/repo/name\part.py")
+    uri = path_to_file_uri(path)
+
+    assert uri == "file:///repo/name%5Cpart.py"
+    assert file_uri_to_path(uri, platform="posix") == path
+    with pytest.raises(ValueError):
+        file_uri_to_path(uri, platform="nt")
+
+
+@pytest.mark.parametrize("platform", ["nt", "posix"])
+def test_file_uri_rejects_encoded_forward_slash_on_every_platform(
+    platform: str,
+) -> None:
+    with pytest.raises(ValueError):
+        file_uri_to_path("file:///repo/pkg%2Fsecret.py", platform=platform)
+
+
 def test_file_uri_round_trips_unc_path() -> None:
     path = PureWindowsPath(r"\\server\share name\pkg\api.py")
     uri = path_to_file_uri(path)
@@ -325,14 +343,11 @@ def test_windows_file_uri_requires_drive_or_unc_authority(uri: str) -> None:
         "file://user@server/share/api.py",
         "file://server:80/share/api.py",
         r"file:///tmp/a\b.py",
-        "file:///tmp/a%5Cb.py",
         "file://server%5Cevil/share/a.py",
         "file://server%2Fevil/share/a.py",
         "file://server%0Aevil/share/a.py",
         "file:///repo/pkg%2Fsecret.py",
         "file:///repo/pkg%2fsecret.py",
-        "file:///repo/pkg%5Csecret.py",
-        "file:///repo/pkg%5csecret.py",
     ],
 )
 def test_file_uri_rejects_invalid_inputs(uri: str) -> None:
