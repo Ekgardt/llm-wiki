@@ -278,6 +278,97 @@ def _strict_json_object(
     return value
 
 
+def _normalize_jsonc(raw: bytes, malformed_code: str) -> bytes:
+    try:
+        text = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise _MetadataError(malformed_code) from exc
+
+    normalized: list[str] = []
+    index = 0
+    in_string = False
+    escaped = False
+    while index < len(text):
+        character = text[index]
+        if in_string:
+            normalized.append(character)
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            index += 1
+            continue
+
+        if character == '"':
+            normalized.append(character)
+            in_string = True
+            index += 1
+            continue
+        if character != "/" or index + 1 >= len(text):
+            normalized.append(character)
+            index += 1
+            continue
+
+        marker = text[index + 1]
+        if marker == "/":
+            normalized.extend((" ", " "))
+            index += 2
+            while index < len(text) and text[index] not in "\r\n":
+                normalized.append(" ")
+                index += 1
+            continue
+        if marker != "*":
+            normalized.append(character)
+            index += 1
+            continue
+
+        normalized.extend((" ", " "))
+        index += 2
+        while index < len(text):
+            if text[index] == "*" and index + 1 < len(text) and text[index + 1] == "/":
+                normalized.extend((" ", " "))
+                index += 2
+                break
+            normalized.append(text[index] if text[index] in "\r\n" else " ")
+            index += 1
+        else:
+            raise _MetadataError(malformed_code)
+
+    pending_comma: int | None = None
+    previous_significant: str | None = None
+    in_string = False
+    escaped = False
+    for index, character in enumerate(normalized):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+                previous_significant = character
+            continue
+        if character == '"':
+            pending_comma = None
+            previous_significant = character
+            in_string = True
+        elif character == ",":
+            pending_comma = (
+                index
+                if previous_significant not in {None, "{", "[", ",", ":"}
+                else None
+            )
+            previous_significant = character
+        elif character not in " \t\r\n":
+            if character in "}]" and pending_comma is not None:
+                normalized[pending_comma] = " "
+            pending_comma = None
+            previous_significant = character
+    return "".join(normalized).encode("utf-8")
+
+
 def _read_json_object(
     path: Path,
     max_bytes: int,
@@ -408,7 +499,7 @@ def _read_repository_config(
 
     if suffix == ".json":
         configuration = _strict_json_object(
-            raw,
+            _normalize_jsonc(raw, "pyright_repository_config_malformed"),
             "pyright_repository_config_malformed",
             recursion_code="pyright_repository_config_too_deep",
         )
@@ -466,10 +557,10 @@ def _contained_repository_config_path(
     return candidate
 
 
-def _effective_repository_configuration(
+def _repository_configuration_chain(
     repository: RepositoryScope,
     deadline: float | None,
-) -> dict[str, object] | None:
+) -> list[dict[str, object]] | None:
     repository_root = _lexical_absolute_path(Path(repository.checkout_root))
     current = _repository_config_entrypoint(repository_root, deadline)
     if current is None:
@@ -496,9 +587,16 @@ def _effective_repository_configuration(
         if configuration is None:
             return None
 
-        child = dict(configuration)
-        extends = child.pop("extends", None)
-        configurations.append(child)
+        relative_path = current.relative_to(repository_root)
+        source_directory = relative_path.parent.as_posix()
+        configurations.append(
+            {
+                "configuration": configuration,
+                "source_directory": source_directory,
+                "source_path": relative_path.as_posix(),
+            }
+        )
+        extends = configuration.get("extends")
         if extends is None:
             current = None
             continue
@@ -512,10 +610,8 @@ def _effective_repository_configuration(
             repository_root=repository_root,
         )
 
-    effective: dict[str, object] = {}
-    for configuration in reversed(configurations):
-        effective.update(configuration)
-    return effective
+    configurations.reverse()
+    return configurations
 
 
 def _repository_configuration_identity(
@@ -524,14 +620,14 @@ def _repository_configuration_identity(
 ) -> tuple[str, set[str]]:
     _check_deadline(deadline)
     try:
-        configuration = _effective_repository_configuration(repository, deadline)
+        configuration_chain = _repository_configuration_chain(repository, deadline)
     except _MetadataError as exc:
         return PYRIGHT_CONFIGURATION_SHA256, {exc.code}
-    if configuration is None:
+    if configuration_chain is None:
         return PYRIGHT_CONFIGURATION_SHA256, set()
     envelope = {
         "base_lsp_configuration": PYRIGHT_CONFIGURATION,
-        "repository_configuration": configuration,
+        "repository_configuration_chain": configuration_chain,
     }
     try:
         fingerprint = sha256_bytes(canonical_json_bytes(envelope))

@@ -107,14 +107,35 @@ def _empty_candidates() -> PyrightCandidates:
     return PyrightCandidates(project_local=(), managed=(), system=())
 
 
-def _configuration_fingerprint(configuration: dict[str, object]) -> str:
+def _configuration_entry(
+    configuration: dict[str, object], source_path: str
+) -> dict[str, object]:
+    path = Path(source_path)
+    return {
+        "configuration": configuration,
+        "source_directory": path.parent.as_posix(),
+        "source_path": path.as_posix(),
+    }
+
+
+def _configuration_chain_fingerprint(
+    entries: list[dict[str, object]],
+) -> str:
     return sha256_bytes(
         canonical_json_bytes(
             {
                 "base_lsp_configuration": PYRIGHT_CONFIGURATION,
-                "repository_configuration": configuration,
+                "repository_configuration_chain": entries,
             }
         )
+    )
+
+
+def _configuration_fingerprint(
+    configuration: dict[str, object], *, source_path: str = "pyrightconfig.json"
+) -> str:
+    return _configuration_chain_fingerprint(
+        [_configuration_entry(configuration, source_path)]
     )
 
 
@@ -1029,14 +1050,7 @@ def test_repository_pyrightconfig_changes_identity_hash_and_remains_qualified(
         candidates=PyrightCandidates((server,), (), ()),
     )
 
-    expected_strict = sha256_bytes(
-        canonical_json_bytes(
-            {
-                "base_lsp_configuration": PYRIGHT_CONFIGURATION,
-                "repository_configuration": strict_configuration,
-            }
-        )
-    )
+    expected_strict = _configuration_fingerprint(strict_configuration)
     assert strict.status == "qualified"
     assert strict.configuration_sha256 == expected_strict
     assert strict.configuration_sha256 != sha256_bytes(
@@ -1053,6 +1067,89 @@ def test_repository_pyrightconfig_changes_identity_hash_and_remains_qualified(
     )
     assert basic.status == "qualified"
     assert basic.configuration_sha256 != strict.configuration_sha256
+
+
+def test_repository_jsonc_preserves_strings_and_accepts_comments_and_trailing_commas(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    (repository / "pyrightconfig.json").write_text(
+        r'''
+        {
+          // Line comments are JSONC trivia.
+          "include": [
+            "src", /* Array trailing comma follows. */
+          ],
+          "marker": "literal // and /* block */ and ,] and escaped \"quote\"",
+          /* Block comments may span
+             multiple lines. */
+          "typeCheckingMode": "strict",
+        } // A line comment may end at EOF.
+        ''',
+        encoding="utf-8",
+    )
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert result.status == "qualified"
+    assert result.configuration_sha256 == _configuration_fingerprint(
+        {
+            "include": ["src"],
+            "marker": 'literal // and /* block */ and ,] and escaped "quote"',
+            "typeCheckingMode": "strict",
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b'{"value": 1, /* unclosed',
+        b'{"value": // missing value\n}',
+        b'{"value": 1,,}',
+        b'{"value": "unterminated // not a comment}',
+        b"{,}",
+        b"[,]",
+    ],
+    ids=(
+        "unclosed-block-comment",
+        "missing-value",
+        "duplicate-comma",
+        "unclosed-string",
+        "object-leading-comma",
+        "array-leading-comma",
+    ),
+)
+def test_malformed_repository_jsonc_degrades_stably(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+    content: bytes,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    (repository / "pyrightconfig.json").write_bytes(content)
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert result.status == "degraded"
+    assert result.qualified is False
+    assert "pyright_repository_config_malformed" in result.degradation_codes
 
 
 def test_repository_pyproject_pyright_changes_identity_hash(
@@ -1079,7 +1176,7 @@ def test_repository_pyproject_pyright_changes_identity_hash(
 
     assert strict.status == "qualified"
     assert strict.configuration_sha256 == _configuration_fingerprint(
-        {"typeCheckingMode": "strict"}
+        {"typeCheckingMode": "strict"}, source_path="pyproject.toml"
     )
 
     pyproject.write_text(
@@ -1094,7 +1191,7 @@ def test_repository_pyproject_pyright_changes_identity_hash(
     )
     assert basic.status == "qualified"
     assert basic.configuration_sha256 == _configuration_fingerprint(
-        {"typeCheckingMode": "basic"}
+        {"typeCheckingMode": "basic"}, source_path="pyproject.toml"
     )
     assert basic.configuration_sha256 != strict.configuration_sha256
 
@@ -1127,7 +1224,7 @@ def test_repository_pyrightconfig_takes_precedence_over_pyproject_pyright(
     )
 
 
-def test_json_extends_json_merges_base_then_child_at_top_level(
+def test_json_extends_json_records_base_first_chain_without_flattening(
     monkeypatch: pytest.MonkeyPatch,
     repository: Path,
     state_root: Path,
@@ -1164,13 +1261,151 @@ def test_json_extends_json_merges_base_then_child_at_top_level(
     )
 
     assert result.status == "qualified"
-    assert result.configuration_sha256 == _configuration_fingerprint(
-        {
-            "defineConstant": {"CHILD": True},
-            "include": ["base"],
-            "typeCheckingMode": "basic",
-        }
+    assert result.configuration_sha256 == _configuration_chain_fingerprint(
+        [
+            _configuration_entry(
+                {
+                    "defineConstant": {"BASE": True},
+                    "include": ["base"],
+                    "typeCheckingMode": "strict",
+                },
+                "config/base.json",
+            ),
+            _configuration_entry(
+                {
+                    "defineConstant": {"CHILD": True},
+                    "extends": "config/base.json",
+                    "typeCheckingMode": "basic",
+                },
+                "pyrightconfig.json",
+            ),
+        ]
     )
+
+
+def test_config_chain_distinguishes_accumulated_base_and_child_maps_from_child_only(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    config_dir = repository / "config"
+    config_dir.mkdir()
+    base_configuration = {"defineConstant": {"BASE": True}}
+    child_configuration = {
+        "defineConstant": {"CHILD": True},
+        "extends": "config/base.json",
+    }
+    (config_dir / "base.json").write_bytes(canonical_json_bytes(base_configuration))
+    root = repository / "pyrightconfig.json"
+    root.write_bytes(canonical_json_bytes(child_configuration))
+    _install_node_probe(monkeypatch, tmp_path)
+
+    inherited = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert inherited.status == "qualified"
+    assert inherited.configuration_sha256 == _configuration_chain_fingerprint(
+        [
+            {
+                "configuration": base_configuration,
+                "source_directory": "config",
+                "source_path": "config/base.json",
+            },
+            {
+                "configuration": child_configuration,
+                "source_directory": ".",
+                "source_path": "pyrightconfig.json",
+            },
+        ]
+    )
+
+    child_only = {"defineConstant": {"CHILD": True}}
+    root.write_bytes(canonical_json_bytes(child_only))
+    _install_node_probe(monkeypatch, tmp_path)
+    direct = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+    assert direct.status == "qualified"
+    assert inherited.configuration_sha256 != direct.configuration_sha256
+
+
+def test_config_chain_fingerprint_preserves_each_include_directory_context(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    config_dir = repository / "config"
+    config_dir.mkdir()
+    (config_dir / "base.json").write_bytes(
+        canonical_json_bytes({"include": ["src"]})
+    )
+    root = repository / "pyrightconfig.json"
+    root.write_bytes(canonical_json_bytes({"extends": "config/base.json"}))
+    _install_node_probe(monkeypatch, tmp_path)
+
+    inherited = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    root.write_bytes(canonical_json_bytes({"include": ["src"]}))
+    _install_node_probe(monkeypatch, tmp_path)
+    direct = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+    assert inherited.status == direct.status == "qualified"
+    assert inherited.configuration_sha256 != direct.configuration_sha256
+
+
+def test_config_chain_fingerprint_distinguishes_json_and_toml_sources(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    config_dir = repository / "config"
+    config_dir.mkdir()
+    (config_dir / "base.json").write_bytes(
+        canonical_json_bytes({"include": ["src"]})
+    )
+    root = repository / "pyrightconfig.json"
+    root.write_bytes(canonical_json_bytes({"extends": "config/base.json"}))
+    _install_node_probe(monkeypatch, tmp_path)
+    json_source = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    (config_dir / "base.toml").write_text(
+        '[tool.pyright]\ninclude = ["src"]\n', encoding="utf-8"
+    )
+    root.write_bytes(canonical_json_bytes({"extends": "config/base.toml"}))
+    _install_node_probe(monkeypatch, tmp_path)
+    toml_source = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert json_source.status == toml_source.status == "qualified"
+    assert json_source.configuration_sha256 != toml_source.configuration_sha256
 
 
 def test_json_extends_toml_and_tracks_base_changes(
@@ -1202,8 +1437,17 @@ def test_json_extends_toml_and_tracks_base_changes(
     )
 
     assert first.status == "qualified"
-    assert first.configuration_sha256 == _configuration_fingerprint(
-        {"include": ["base-a"], "typeCheckingMode": "basic"}
+    assert first.configuration_sha256 == _configuration_chain_fingerprint(
+        [
+            _configuration_entry(
+                {"include": ["base-a"], "typeCheckingMode": "strict"},
+                "config/base.toml",
+            ),
+            _configuration_entry(
+                {"extends": "config/base.toml", "typeCheckingMode": "basic"},
+                "pyrightconfig.json",
+            ),
+        ]
     )
 
     base.write_text(
@@ -1217,8 +1461,17 @@ def test_json_extends_toml_and_tracks_base_changes(
         candidates=PyrightCandidates((server,), (), ()),
     )
     assert second.status == "qualified"
-    assert second.configuration_sha256 == _configuration_fingerprint(
-        {"include": ["base-b"], "typeCheckingMode": "basic"}
+    assert second.configuration_sha256 == _configuration_chain_fingerprint(
+        [
+            _configuration_entry(
+                {"include": ["base-b"], "typeCheckingMode": "strict"},
+                "config/base.toml",
+            ),
+            _configuration_entry(
+                {"extends": "config/base.toml", "typeCheckingMode": "basic"},
+                "pyrightconfig.json",
+            ),
+        ]
     )
     assert second.configuration_sha256 != first.configuration_sha256
 
@@ -1248,8 +1501,17 @@ def test_pyproject_toml_extends_json_relative_to_pyproject(
     )
 
     assert result.status == "qualified"
-    assert result.configuration_sha256 == _configuration_fingerprint(
-        {"include": ["base"], "typeCheckingMode": "basic"}
+    assert result.configuration_sha256 == _configuration_chain_fingerprint(
+        [
+            _configuration_entry(
+                {"include": ["base"], "typeCheckingMode": "strict"},
+                "base.json",
+            ),
+            _configuration_entry(
+                {"extends": "base.json", "typeCheckingMode": "basic"},
+                "pyproject.toml",
+            ),
+        ]
     )
 
 
@@ -1602,13 +1864,8 @@ def test_managed_receipt_attests_base_profile_while_identity_includes_repository
     result = discover_pyright(scope, state_root=state_root)
 
     assert result.status == "qualified"
-    assert result.configuration_sha256 == sha256_bytes(
-        canonical_json_bytes(
-            {
-                "base_lsp_configuration": PYRIGHT_CONFIGURATION,
-                "repository_configuration": repository_configuration,
-            }
-        )
+    assert result.configuration_sha256 == _configuration_fingerprint(
+        repository_configuration
     )
     manifest = build_pyright_install_manifest(server_sha256=sha256_bytes(server.read_bytes()))
     assert manifest["configuration_sha256"] == sha256_bytes(
