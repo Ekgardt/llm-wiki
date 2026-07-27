@@ -10,6 +10,7 @@ import socket
 import stat
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -31,6 +32,7 @@ from pyright_profile import (
     PyrightIdentity,
     build_pyright_install_manifest,
     discover_pyright,
+    thaw_pyright_profile_value,
     validate_pyright_install_manifest,
 )
 from reliable_memory import canonical_json_bytes, sha256_bytes
@@ -46,23 +48,27 @@ class _FakeNodeProcess:
         *,
         returncode: int = 0,
         times_out: bool = False,
+        persistent_timeout: bool = False,
     ) -> None:
         self.stdout = io.BytesIO(output)
         self.returncode: int | None = None
         self._final_returncode = returncode
         self._times_out = times_out
+        self._persistent_timeout = persistent_timeout
         self.killed = False
+        self.kill_calls = 0
         self.wait_timeouts: list[float] = []
 
     def wait(self, timeout: float | None = None) -> int:
         if timeout is not None:
             self.wait_timeouts.append(timeout)
-        if self._times_out and not self.killed:
+        if self._times_out and (self._persistent_timeout or not self.killed):
             raise subprocess.TimeoutExpired(("node", "--version"), timeout)
         self.returncode = -9 if self.killed else self._final_returncode
         return self.returncode
 
     def kill(self) -> None:
+        self.kill_calls += 1
         self.killed = True
 
 
@@ -78,10 +84,17 @@ def _install_node_probe(
     output: bytes = b"v22.23.1\n",
     returncode: int = 0,
     times_out: bool = False,
+    persistent_timeout: bool = False,
 ) -> tuple[Path, list[tuple[tuple[str, ...], dict[str, object]]], _FakeNodeProcess]:
     node = tmp_path / ("node.exe" if os.name == "nt" else "node")
+    node.write_bytes(b"synthetic node executable\n")
     calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
-    process = _FakeNodeProcess(output, returncode=returncode, times_out=times_out)
+    process = _FakeNodeProcess(
+        output,
+        returncode=returncode,
+        times_out=times_out,
+        persistent_timeout=persistent_timeout,
+    )
 
     def which(name: str, *, path: str | None = None) -> str | None:
         if name == "pyright-langserver":
@@ -124,7 +137,9 @@ def _configuration_chain_fingerprint(
     return sha256_bytes(
         canonical_json_bytes(
             {
-                "base_lsp_configuration": PYRIGHT_CONFIGURATION,
+                "base_lsp_configuration": thaw_pyright_profile_value(
+                    PYRIGHT_CONFIGURATION
+                ),
                 "repository_configuration_chain": entries,
             }
         )
@@ -159,20 +174,40 @@ def _stat_with(
     )
 
 
-def test_constants_configuration_and_public_dataclasses_are_exact() -> None:
-    assert PYRIGHT_VERSION == lsp_paths.PYRIGHT_VERSION == "1.1.411"
-    assert PYRIGHT_PACKAGE_URL == (
-        "https://registry.npmjs.org/pyright/-/pyright-1.1.411.tgz"
-    )
-    assert PYRIGHT_PACKAGE_SHA256 == (
-        "bd5c488fc20fa237a944279bf32cae2f986cf10d5d5d9e8705819859daeb2f4a"
-    )
-    assert PYRIGHT_PACKAGE_INTEGRITY == (
-        "sha512-03S/vmS5lF1S/tVbKc2WNXCMq8JWCwta/qIYjj1jvqbQhoy+N3NgBzHTSmUlbYD6DJwqQ5XHf108QujoqeURvw=="
-    )
-    assert QUALIFIED_NODE_MAJOR == 22
-    assert PYRIGHT_SERVER_RELATIVE == Path("package/langserver.index.js")
-    assert PYRIGHT_CONFIGURATION == {
+def test_exported_pyright_configuration_is_recursively_immutable() -> None:
+    analysis = PYRIGHT_CONFIGURATION["python"]["analysis"]
+    original = analysis["logLevel"]
+    try:
+        with pytest.raises(TypeError):
+            analysis["logLevel"] = "Information"
+    finally:
+        if isinstance(analysis, dict):
+            analysis["logLevel"] = original
+    assert PYRIGHT_CONFIGURATION["python"]["analysis"]["logLevel"] == "Error"
+
+
+def test_exported_pyright_initialization_lists_are_immutable() -> None:
+    exclude = PYRIGHT_INITIALIZATION_OPTIONS["files"]["exclude"]
+    try:
+        with pytest.raises((AttributeError, TypeError)):
+            exclude.append("**/outside")
+    finally:
+        if isinstance(exclude, list):
+            exclude.clear()
+    assert thaw_pyright_profile_value(PYRIGHT_INITIALIZATION_OPTIONS) == {
+        "files": {"exclude": []}
+    }
+
+
+def test_thawed_profile_values_match_live_manifest_fingerprints() -> None:
+    thaw = getattr(pyright_profile, "thaw_pyright_profile_value", None)
+    assert callable(thaw)
+
+    configuration = thaw(PYRIGHT_CONFIGURATION)
+    initialization_options = thaw(PYRIGHT_INITIALIZATION_OPTIONS)
+    manifest = build_pyright_install_manifest(server_sha256=sha256_bytes(b"server"))
+
+    assert configuration == {
         "python": {
             "analysis": {
                 "autoSearchPaths": True,
@@ -187,7 +222,51 @@ def test_constants_configuration_and_public_dataclasses_are_exact() -> None:
             "disableTaggedHints": False,
         },
     }
-    assert PYRIGHT_INITIALIZATION_OPTIONS == {"files": {"exclude": []}}
+    assert initialization_options == {"files": {"exclude": []}}
+    assert manifest["configuration_sha256"] == sha256_bytes(
+        canonical_json_bytes(configuration)
+    )
+    assert manifest["initialization_options_sha256"] == sha256_bytes(
+        canonical_json_bytes(initialization_options)
+    )
+
+    configuration["python"]["analysis"]["logLevel"] = "Information"
+    initialization_options["files"]["exclude"].append("**/outside")
+    assert thaw(PYRIGHT_CONFIGURATION)["python"]["analysis"]["logLevel"] == "Error"
+    assert thaw(PYRIGHT_INITIALIZATION_OPTIONS)["files"]["exclude"] == []
+
+
+def test_constants_configuration_and_public_dataclasses_are_exact() -> None:
+    assert PYRIGHT_VERSION == lsp_paths.PYRIGHT_VERSION == "1.1.411"
+    assert PYRIGHT_PACKAGE_URL == (
+        "https://registry.npmjs.org/pyright/-/pyright-1.1.411.tgz"
+    )
+    assert PYRIGHT_PACKAGE_SHA256 == (
+        "bd5c488fc20fa237a944279bf32cae2f986cf10d5d5d9e8705819859daeb2f4a"
+    )
+    assert PYRIGHT_PACKAGE_INTEGRITY == (
+        "sha512-03S/vmS5lF1S/tVbKc2WNXCMq8JWCwta/qIYjj1jvqbQhoy+N3NgBzHTSmUlbYD6DJwqQ5XHf108QujoqeURvw=="
+    )
+    assert QUALIFIED_NODE_MAJOR == 22
+    assert PYRIGHT_SERVER_RELATIVE == Path("package/langserver.index.js")
+    assert thaw_pyright_profile_value(PYRIGHT_CONFIGURATION) == {
+        "python": {
+            "analysis": {
+                "autoSearchPaths": True,
+                "diagnosticMode": "openFilesOnly",
+                "logLevel": "Error",
+                "useLibraryCodeForTypes": True,
+            }
+        },
+        "pyright": {
+            "disableLanguageServices": False,
+            "disableOrganizeImports": True,
+            "disableTaggedHints": False,
+        },
+    }
+    assert thaw_pyright_profile_value(PYRIGHT_INITIALIZATION_OPTIONS) == {
+        "files": {"exclude": []}
+    }
     assert [field.name for field in dataclasses.fields(PyrightIdentity)] == [
         "status",
         "source",
@@ -220,9 +299,13 @@ def test_install_manifest_builder_and_validator_form_one_canonical_contract() ->
         validate_pyright_install_manifest(manifest)
     )
     assert manifest == {
-        "configuration_sha256": sha256_bytes(canonical_json_bytes(PYRIGHT_CONFIGURATION)),
+        "configuration_sha256": sha256_bytes(
+            canonical_json_bytes(thaw_pyright_profile_value(PYRIGHT_CONFIGURATION))
+        ),
         "initialization_options_sha256": sha256_bytes(
-            canonical_json_bytes(PYRIGHT_INITIALIZATION_OPTIONS)
+            canonical_json_bytes(
+                thaw_pyright_profile_value(PYRIGHT_INITIALIZATION_OPTIONS)
+            )
         ),
         "package_integrity": PYRIGHT_PACKAGE_INTEGRITY,
         "package_sha256": PYRIGHT_PACKAGE_SHA256,
@@ -473,9 +556,13 @@ def test_managed_candidate_requires_canonical_receipt_and_recomputed_digest(
         executable_sha256=sha256_bytes(b"managed server\n"),
         package_sha256=PYRIGHT_PACKAGE_SHA256,
         initialization_options_sha256=sha256_bytes(
-            canonical_json_bytes(PYRIGHT_INITIALIZATION_OPTIONS)
+            canonical_json_bytes(
+                thaw_pyright_profile_value(PYRIGHT_INITIALIZATION_OPTIONS)
+            )
         ),
-        configuration_sha256=sha256_bytes(canonical_json_bytes(PYRIGHT_CONFIGURATION)),
+        configuration_sha256=sha256_bytes(
+            canonical_json_bytes(thaw_pyright_profile_value(PYRIGHT_CONFIGURATION))
+        ),
         qualified=True,
         degradation_codes=(),
     )
@@ -617,6 +704,7 @@ def test_default_system_discovery_uses_same_windows_shim_normalization(
     shim = prefix / "pyright-langserver.cmd"
     shim.write_text("arbitrary shim text must not be parsed", encoding="utf-8")
     node = tmp_path / "node.exe"
+    node.write_bytes(b"synthetic node executable\n")
     process = _FakeNodeProcess(b"v22.23.1\n")
 
     def which(name: str, *, path: str | None = None) -> str | None:
@@ -1055,7 +1143,7 @@ def test_repository_pyrightconfig_changes_identity_hash_and_remains_qualified(
     assert strict.status == "qualified"
     assert strict.configuration_sha256 == expected_strict
     assert strict.configuration_sha256 != sha256_bytes(
-        canonical_json_bytes(PYRIGHT_CONFIGURATION)
+        canonical_json_bytes(thaw_pyright_profile_value(PYRIGHT_CONFIGURATION))
     )
 
     basic_configuration = {"typeCheckingMode": "basic"}
@@ -1218,7 +1306,7 @@ def test_root_pyproject_without_object_pyright_blocks_ancestor_config_reads(
         "pyright_repository_config_ancestor_search",
     )
     assert first.configuration_sha256 == second.configuration_sha256 == sha256_bytes(
-        canonical_json_bytes(PYRIGHT_CONFIGURATION)
+        canonical_json_bytes(thaw_pyright_profile_value(PYRIGHT_CONFIGURATION))
     )
     assert ancestor_inspections == []
     assert ancestor_reads == []
@@ -1965,7 +2053,7 @@ def test_managed_receipt_attests_base_profile_while_identity_includes_repository
     )
     manifest = build_pyright_install_manifest(server_sha256=sha256_bytes(server.read_bytes()))
     assert manifest["configuration_sha256"] == sha256_bytes(
-        canonical_json_bytes(PYRIGHT_CONFIGURATION)
+        canonical_json_bytes(thaw_pyright_profile_value(PYRIGHT_CONFIGURATION))
     )
 
 
@@ -2141,6 +2229,113 @@ def test_node_missing_is_a_stable_degradation(
 
 
 @pytest.mark.parametrize(
+    "found",
+    [
+        r"\\server\share\node.exe",
+        r"\\?\C:\tools\node.exe",
+        "relative/node",
+    ],
+    ids=("windows-unc", "windows-device", "posix-relative"),
+)
+def test_node_executable_rejects_nonlocal_which_results_without_inspection(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    found: str,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    candidate = Path(found)
+    inspections: list[Path] = []
+    spawn_calls: list[object] = []
+    real_lstat = Path.lstat
+
+    def lstat(path: Path) -> os.stat_result:
+        if path == candidate:
+            inspections.append(path)
+        return real_lstat(path)
+
+    def popen(*args: object, **kwargs: object) -> _FakeNodeProcess:
+        spawn_calls.append((args, kwargs))
+        return _FakeNodeProcess(b"v22.23.1\n")
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    monkeypatch.setattr(pyright_profile.shutil, "which", lambda *args, **kwargs: found)
+    monkeypatch.setattr(pyright_profile.subprocess, "Popen", popen)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert result.node_executable == candidate
+    assert result.status == "degraded"
+    assert "pyright_node_executable_unsafe" in result.degradation_codes
+    assert inspections == []
+    assert spawn_calls == []
+
+
+def test_node_executable_rejects_reparse_point_before_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    node, calls, _process = _install_node_probe(monkeypatch, tmp_path)
+    real_lstat = Path.lstat
+
+    def lstat(path: Path) -> os.stat_result:
+        value = real_lstat(path)
+        if path == node:
+            return _stat_with(value, file_attributes=0x400)  # type: ignore[return-value]
+        return value
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert result.node_executable == node
+    assert result.status == "degraded"
+    assert "pyright_node_executable_unsafe" in result.degradation_codes
+    assert calls == []
+
+
+def test_node_executable_rejects_network_path_before_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    node, calls, _process = _install_node_probe(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        pyright_profile,
+        "_known_network_path",
+        lambda path: path == node,
+        raising=False,
+    )
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert result.node_executable == node
+    assert result.status == "degraded"
+    assert "pyright_node_executable_unsafe" in result.degradation_codes
+    assert calls == []
+
+
+@pytest.mark.parametrize(
     "output",
     [b"22.23.1\n", b"v22.23\n", b"v22.23.1 extra\n", b" v22.23.1\n", b"\xff"],
 )
@@ -2166,7 +2361,64 @@ def test_node_version_output_must_be_exact(
     assert "pyright_node_version_malformed" in result.degradation_codes
 
 
-def test_node_timeout_is_a_stable_degradation_and_kills_probe(
+def test_node_blocking_output_timeout_kills_reaps_and_closes_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    _node, _calls, process = _install_node_probe(
+        monkeypatch,
+        tmp_path,
+        output=b"x" * (pyright_profile.MAX_NODE_VERSION_BYTES + 1),
+        times_out=True,
+    )
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert process.killed is True
+    assert len(process.wait_timeouts) == 2
+    assert process.stdout.closed
+    assert result.status == "degraded"
+    assert "pyright_node_probe_timeout" in result.degradation_codes
+
+
+def test_node_persistent_timeout_after_kill_is_a_stable_probe_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    _node, _calls, process = _install_node_probe(
+        monkeypatch,
+        tmp_path,
+        output=b"",
+        times_out=True,
+        persistent_timeout=True,
+    )
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert process.killed is True
+    assert len(process.wait_timeouts) == 2
+    assert process.stdout.closed
+    assert result.status == "degraded"
+    assert "pyright_node_probe_failed" in result.degradation_codes
+
+
+def test_node_stdout_access_error_overrides_timeout_as_probe_failure(
     monkeypatch: pytest.MonkeyPatch,
     repository: Path,
     state_root: Path,
@@ -2178,6 +2430,16 @@ def test_node_timeout_is_a_stable_degradation_and_kills_probe(
         monkeypatch, tmp_path, output=b"", times_out=True
     )
 
+    def stdout_error(_process: _FakeNodeProcess) -> io.BytesIO:
+        raise OSError("stdout unavailable")
+
+    monkeypatch.setattr(
+        _FakeNodeProcess,
+        "stdout",
+        property(stdout_error),
+        raising=False,
+    )
+
     result = discover_pyright(
         scope,
         state_root=state_root,
@@ -2185,8 +2447,9 @@ def test_node_timeout_is_a_stable_degradation_and_kills_probe(
     )
 
     assert process.killed is True
+    assert len(process.wait_timeouts) == 2
     assert result.status == "degraded"
-    assert "pyright_node_probe_timeout" in result.degradation_codes
+    assert "pyright_node_probe_failed" in result.degradation_codes
 
 
 @pytest.mark.parametrize(
@@ -2244,10 +2507,17 @@ def test_node_wait_errors_are_stable_probe_failures(
     server = create_pyright_fixture(repository)
     _node, _calls, process = _install_node_probe(monkeypatch, tmp_path)
 
-    def fail_wait(timeout: float | None = None) -> int:
-        raise error
+    real_wait = process.wait
+    wait_calls = 0
 
-    monkeypatch.setattr(process, "wait", fail_wait)
+    def fail_first_wait(timeout: float | None = None) -> int:
+        nonlocal wait_calls
+        wait_calls += 1
+        if wait_calls == 1:
+            raise error
+        return real_wait(timeout)
+
+    monkeypatch.setattr(process, "wait", fail_first_wait)
 
     result = discover_pyright(
         scope,
@@ -2257,6 +2527,9 @@ def test_node_wait_errors_are_stable_probe_failures(
 
     assert result.status == "degraded"
     assert "pyright_node_probe_failed" in result.degradation_codes
+    assert process.killed is True
+    assert wait_calls == 2
+    assert process.stdout.closed
 
 
 def test_node_timeout_cleanup_error_is_a_stable_probe_failure(
@@ -2305,6 +2578,96 @@ def test_node_stream_close_error_is_a_stable_probe_failure(
 
     assert result.status == "degraded"
     assert "pyright_node_probe_failed" in result.degradation_codes
+
+
+def test_node_oversized_completed_output_is_bounded_and_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    _node, _calls, process = _install_node_probe(
+        monkeypatch,
+        tmp_path,
+        output=b"x" * (pyright_profile.MAX_NODE_VERSION_BYTES + 1),
+    )
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert result.status == "degraded"
+    assert "pyright_node_output_oversized" in result.degradation_codes
+    assert process.stdout.closed
+
+
+def test_node_probe_never_constructs_a_reader_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    _install_node_probe(monkeypatch, tmp_path)
+    created_names: list[object] = []
+    real_thread = threading.Thread
+
+    def thread(*args: object, **kwargs: object) -> threading.Thread:
+        created_names.append(kwargs.get("name"))
+        if kwargs.get("name") == "pyright-node-version-reader":
+            raise AssertionError("Node probe must not construct a reader thread")
+        return real_thread(*args, **kwargs)
+
+    monkeypatch.setattr(threading, "Thread", thread)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert result.status == "qualified"
+    assert "pyright-node-version-reader" not in created_names
+
+
+def test_repeated_node_probes_reap_processes_and_close_output(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    node = tmp_path / ("node.exe" if os.name == "nt" else "node")
+    node.write_bytes(b"synthetic node executable\n")
+    processes: list[_FakeNodeProcess] = []
+
+    def popen(*args: object, **kwargs: object) -> _FakeNodeProcess:
+        process = _FakeNodeProcess(b"v22.23.1\n")
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(pyright_profile.shutil, "which", lambda *args, **kwargs: str(node))
+    monkeypatch.setattr(pyright_profile.subprocess, "Popen", popen)
+
+    results = [
+        discover_pyright(
+            scope,
+            state_root=state_root,
+            candidates=PyrightCandidates((server,), (), ()),
+        )
+        for _index in range(3)
+    ]
+
+    assert all(result.status == "qualified" for result in results)
+    assert len(processes) == 3
+    assert all(process.returncode == 0 for process in processes)
+    assert all(process.stdout.closed for process in processes)
 
 
 @pytest.mark.parametrize("error", [KeyboardInterrupt(), SystemExit(2)])
@@ -2383,7 +2746,8 @@ def test_node_probe_is_shell_free_credentials_reduced_bounded_and_records_full_v
     assert options["shell"] is False
     assert options["stdin"] is subprocess.DEVNULL
     assert options["stdout"] is subprocess.PIPE
-    assert options["stderr"] is subprocess.DEVNULL
+    assert options["stderr"] is subprocess.STDOUT
     assert "PYRIGHT_TEST_SECRET" not in options["env"]
     assert process.wait_timeouts
     assert 0 < process.wait_timeouts[0] <= pyright_profile.NODE_PROBE_TIMEOUT_SECONDS
+    assert process.stdout.closed

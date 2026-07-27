@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
 import math
 import os
@@ -10,10 +9,11 @@ import re
 import shutil
 import stat
 import subprocess as _subprocess
-import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 
 try:
     import tomllib
@@ -22,7 +22,7 @@ except ModuleNotFoundError:  # Python 3.10
 
 from bounded_io import read_stable_bytes
 from lsp_paths import PYRIGHT_VERSION, managed_pyright_root
-from reliable_memory import canonical_json_bytes, sha256_bytes
+from reliable_memory import _known_network_path, canonical_json_bytes, sha256_bytes
 from repository_scope import RepositoryScope
 
 PYRIGHT_PACKAGE_URL = "https://registry.npmjs.org/pyright/-/pyright-1.1.411.tgz"
@@ -35,7 +35,29 @@ PYRIGHT_PACKAGE_INTEGRITY = (
 QUALIFIED_NODE_MAJOR = 22
 PYRIGHT_SERVER_RELATIVE = Path("package/langserver.index.js")
 
-PYRIGHT_CONFIGURATION = {
+
+def _freeze_pyright_profile_value(value: object) -> object:
+    if isinstance(value, dict):
+        return MappingProxyType(
+            {key: _freeze_pyright_profile_value(item) for key, item in value.items()}
+        )
+    if isinstance(value, list):
+        return tuple(_freeze_pyright_profile_value(item) for item in value)
+    return value
+
+
+def thaw_pyright_profile_value(value: object) -> object:
+    """Return a mutable JSON-domain copy of an immutable profile value."""
+    if isinstance(value, Mapping):
+        return {key: thaw_pyright_profile_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [thaw_pyright_profile_value(item) for item in value]
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    raise TypeError(f"unsupported Pyright profile value: {type(value).__name__}")
+
+
+PYRIGHT_CONFIGURATION = _freeze_pyright_profile_value({
     "python": {
         "analysis": {
             "autoSearchPaths": True,
@@ -49,13 +71,17 @@ PYRIGHT_CONFIGURATION = {
         "disableOrganizeImports": True,
         "disableTaggedHints": False,
     },
-}
-PYRIGHT_INITIALIZATION_OPTIONS = {"files": {"exclude": []}}
+})
+PYRIGHT_INITIALIZATION_OPTIONS = _freeze_pyright_profile_value(
+    {"files": {"exclude": []}}
+)
 
 PYRIGHT_INSTALL_MANIFEST_SCHEMA = "pyright-install/v1"
-PYRIGHT_CONFIGURATION_SHA256 = sha256_bytes(canonical_json_bytes(PYRIGHT_CONFIGURATION))
+PYRIGHT_CONFIGURATION_SHA256 = sha256_bytes(
+    canonical_json_bytes(thaw_pyright_profile_value(PYRIGHT_CONFIGURATION))
+)
 PYRIGHT_INITIALIZATION_OPTIONS_SHA256 = sha256_bytes(
-    canonical_json_bytes(PYRIGHT_INITIALIZATION_OPTIONS)
+    canonical_json_bytes(thaw_pyright_profile_value(PYRIGHT_INITIALIZATION_OPTIONS))
 )
 
 MAX_PACKAGE_JSON_BYTES = 64 * 1024
@@ -119,6 +145,7 @@ class _SubprocessFacade:
     Popen = _subprocess.Popen
     DEVNULL = _subprocess.DEVNULL
     PIPE = _subprocess.PIPE
+    STDOUT = _subprocess.STDOUT
     TimeoutExpired = _subprocess.TimeoutExpired
 
 
@@ -623,7 +650,7 @@ def _repository_configuration_identity(
     if configuration_chain is None:
         return PYRIGHT_CONFIGURATION_SHA256, set()
     envelope = {
-        "base_lsp_configuration": PYRIGHT_CONFIGURATION,
+        "base_lsp_configuration": thaw_pyright_profile_value(PYRIGHT_CONFIGURATION),
         "repository_configuration_chain": configuration_chain,
     }
     try:
@@ -786,36 +813,50 @@ def _managed_manifest(
     return package_sha256, codes
 
 
-def _bounded_node_output(
-    process: object,
-) -> tuple[threading.Thread, list[bytes], list[BaseException], threading.Event]:
-    output: list[bytes] = []
-    errors: list[BaseException] = []
-    oversized = threading.Event()
+def _stop_node_probe(process: object, probe_deadline: float) -> bool:
+    cleanup_ok = True
+    try:
+        process.kill()
+    except _NODE_PROBE_ERRORS:
+        cleanup_ok = False
+    try:
+        process.wait(timeout=max(0.0, probe_deadline - time.monotonic()))
+    except _NODE_PROBE_ERRORS:
+        cleanup_ok = False
+    return cleanup_ok
 
-    def read_output() -> None:
-        try:
-            stream = process.stdout
-            if stream is None:
-                raise OSError("Node stdout pipe is unavailable")
-            content = stream.read(MAX_NODE_VERSION_BYTES + 1)
-            if not isinstance(content, bytes):
-                raise TypeError("Node stdout must be bytes")
-            output.append(content)
-            if len(content) > MAX_NODE_VERSION_BYTES:
-                oversized.set()
-                with contextlib.suppress(OSError):
-                    process.kill()
-        except BaseException as exc:
-            errors.append(exc)
 
-    reader = threading.Thread(
-        target=read_output,
-        name="pyright-node-version-reader",
-        daemon=True,
-    )
-    reader.start()
-    return reader, output, errors, oversized
+def _node_executable_is_safe(node: Path, deadline: float | None) -> bool:
+    if not _is_local_absolute_path(node):
+        return False
+    if os.name == "nt" and node.suffix.casefold() in {".bat", ".cmd"}:
+        return False
+    try:
+        for parent in node.parents:
+            if parent == Path(parent.anchor):
+                break
+            _check_deadline(deadline)
+            info = parent.lstat()
+            if (
+                stat.S_ISLNK(info.st_mode)
+                or getattr(info, "st_file_attributes", 0) & 0x400
+                or not stat.S_ISDIR(info.st_mode)
+            ):
+                return False
+        _check_deadline(deadline)
+        info = node.lstat()
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or getattr(info, "st_file_attributes", 0) & 0x400
+            or not stat.S_ISREG(info.st_mode)
+        ):
+            return False
+        if _known_network_path(node):
+            return False
+    except (OSError, TypeError, ValueError, RuntimeError):
+        return False
+    _check_deadline(deadline)
+    return True
 
 
 def _probe_node(
@@ -837,7 +878,7 @@ def _probe_node(
         node = Path(found)
     except (TypeError, ValueError):
         return None, None, None, {"pyright_node_probe_failed"}
-    if os.name == "nt" and node.suffix.casefold() in {".bat", ".cmd"}:
+    if not _node_executable_is_safe(node, deadline):
         return node, None, None, {"pyright_node_executable_unsafe"}
 
     now = time.monotonic()
@@ -852,79 +893,64 @@ def _probe_node(
             [str(node), "--version"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
             shell=False,
             env=environment,
         )
     except _NODE_PROBE_ERRORS:
         return node, None, None, {"pyright_node_probe_failed"}
 
+    output: bytes | None = None
+    degradation_code: str | None = None
+    stream = None
     try:
-        reader, output, read_errors, oversized = _bounded_node_output(process)
-    except _NODE_PROBE_ERRORS:
-        with contextlib.suppress(*_NODE_PROBE_ERRORS):
-            process.kill()
-        return node, None, None, {"pyright_node_probe_failed"}
-    timed_out = False
-    probe_failed = False
-    try:
-        process.wait(timeout=max(0.0, probe_deadline - time.monotonic()))
-    except subprocess.TimeoutExpired:
-        timed_out = True
         try:
-            process.kill()
+            stream = process.stdout
         except _NODE_PROBE_ERRORS:
-            probe_failed = True
+            degradation_code = "pyright_node_probe_failed"
         try:
             process.wait(timeout=max(0.0, probe_deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
-            pass
+            if degradation_code is None:
+                degradation_code = "pyright_node_probe_timeout"
+            if not _stop_node_probe(process, probe_deadline):
+                degradation_code = "pyright_node_probe_failed"
         except _NODE_PROBE_ERRORS:
-            probe_failed = True
-    except _NODE_PROBE_ERRORS:
-        probe_failed = True
-        try:
-            process.kill()
-        except _NODE_PROBE_ERRORS:
-            pass
-    try:
-        reader.join(timeout=max(0.0, probe_deadline - time.monotonic()))
-    except _NODE_PROBE_ERRORS:
-        probe_failed = True
-    if reader.is_alive():
-        timed_out = True
-        try:
-            process.kill()
-        except _NODE_PROBE_ERRORS:
-            probe_failed = True
-    stream = getattr(process, "stdout", None)
-    if stream is not None and not reader.is_alive():
-        try:
-            stream.close()
-        except _NODE_PROBE_ERRORS:
-            probe_failed = True
+            degradation_code = "pyright_node_probe_failed"
+            _stop_node_probe(process, probe_deadline)
+        if degradation_code is None:
+            try:
+                returncode = process.returncode
+            except _NODE_PROBE_ERRORS:
+                degradation_code = "pyright_node_probe_failed"
+            else:
+                if returncode != 0 or stream is None:
+                    degradation_code = "pyright_node_probe_failed"
+                else:
+                    try:
+                        output = stream.read(MAX_NODE_VERSION_BYTES + 1)
+                    except _NODE_PROBE_ERRORS:
+                        degradation_code = "pyright_node_probe_failed"
+                    else:
+                        if not isinstance(output, bytes):
+                            degradation_code = "pyright_node_probe_failed"
+                        elif len(output) > MAX_NODE_VERSION_BYTES:
+                            degradation_code = "pyright_node_output_oversized"
+    finally:
+        if stream is not None:
+            try:
+                stream.close()
+            except _NODE_PROBE_ERRORS:
+                degradation_code = "pyright_node_probe_failed"
 
-    for error in read_errors:
-        if not isinstance(error, Exception):
-            raise error
-    if read_errors:
-        probe_failed = True
-    if probe_failed:
+    if degradation_code is not None:
+        return node, None, None, {degradation_code}
+    if output is None:
         return node, None, None, {"pyright_node_probe_failed"}
-    if timed_out:
-        return node, None, None, {"pyright_node_probe_timeout"}
-    if oversized.is_set():
-        return node, None, None, {"pyright_node_output_oversized"}
-    try:
-        returncode = process.returncode
-    except _NODE_PROBE_ERRORS:
-        return node, None, None, {"pyright_node_probe_failed"}
-    if returncode != 0 or len(output) != 1:
-        return node, None, None, {"pyright_node_probe_failed"}
-    match = _NODE_VERSION.fullmatch(output[0])
+    match = _NODE_VERSION.fullmatch(output)
     if match is None:
         return node, None, None, {"pyright_node_version_malformed"}
-    version = output[0].decode("ascii").rstrip("\r\n")
+    version = output.decode("ascii").rstrip("\r\n")
     major = int(match.group(1))
     codes = set()
     if major != QUALIFIED_NODE_MAJOR:
@@ -1038,12 +1064,14 @@ def _expected_source_server(
 
 def _is_local_absolute_path(path: Path) -> bool:
     raw = os.fspath(path)
+    is_reserved = getattr(os.path, "isreserved", None)
+    reserved = is_reserved(raw) if is_reserved is not None else path.is_reserved()
     return (
         path.is_absolute()
         and not raw.startswith(("\\\\", "//"))
         and "\0" not in raw
         and ".." not in path.parts
-        and not path.is_reserved()
+        and not reserved
     )
 
 
