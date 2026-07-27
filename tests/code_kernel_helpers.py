@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import stat
 import subprocess
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
@@ -127,6 +129,67 @@ def fixture_digest(root: Path) -> str:
         if path.is_file() and ".git" not in path.parts
     }
     return hashlib.sha256(canonical_json_bytes(values)).hexdigest()
+
+
+def create_pyright_fixture(
+    destination: Path,
+    *,
+    managed: bool = False,
+    package_name: str = "pyright",
+    package_version: str = "1.1.411",
+    integrity: str | None = None,
+    lockfile_version: int | None = 3,
+    lockfile_link: bool = False,
+    server_bytes: bytes = b"synthetic pyright language server\n",
+    manifest_overrides: Mapping[str, object] | None = None,
+) -> Path:
+    """Create a synthetic package tree without invoking npm or the network."""
+    from pyright_profile import (
+        PYRIGHT_PACKAGE_INTEGRITY,
+        PYRIGHT_PACKAGE_URL,
+        build_pyright_install_manifest,
+    )
+
+    integrity = PYRIGHT_PACKAGE_INTEGRITY if integrity is None else integrity
+    package_root = destination / "package" if managed else destination / "node_modules/pyright"
+    package_root.mkdir(parents=True, exist_ok=True)
+    server = package_root / "langserver.index.js"
+    server.write_bytes(server_bytes)
+    (package_root / "package.json").write_bytes(
+        canonical_json_bytes({"name": package_name, "version": package_version})
+    )
+
+    if not managed and lockfile_version is not None:
+        entry: dict[str, object] = {
+            "integrity": integrity,
+            "resolved": PYRIGHT_PACKAGE_URL,
+            "version": package_version,
+        }
+        if lockfile_link:
+            entry["link"] = True
+        if lockfile_version == 1:
+            lockfile: dict[str, object] = {
+                "dependencies": {"pyright": entry},
+                "lockfileVersion": 1,
+            }
+        else:
+            lockfile = {
+                "lockfileVersion": lockfile_version,
+                "packages": {"node_modules/pyright": entry},
+            }
+        (destination / "package-lock.json").write_text(
+            json.dumps(lockfile, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+
+    if managed:
+        manifest = build_pyright_install_manifest(
+            server_sha256=hashlib.sha256(server_bytes).hexdigest()
+        )
+        if manifest_overrides is not None:
+            manifest.update(manifest_overrides)
+        (destination / "install-manifest.json").write_bytes(canonical_json_bytes(manifest))
+    return server
 
 
 def source_bytes(snapshot: CorpusSnapshot, source_id: str) -> bytes:
