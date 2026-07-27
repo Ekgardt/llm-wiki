@@ -477,7 +477,7 @@ def _read_repository_config(
     *,
     root_pyproject: bool,
     deadline: float | None,
-) -> tuple[dict[str, object] | None, bytes]:
+) -> tuple[dict[str, object], bytes]:
     suffix = path.suffix.casefold()
     if suffix not in {".json", ".toml"}:
         raise _MetadataError("pyright_repository_config_unsupported_format")
@@ -519,9 +519,9 @@ def _read_repository_config(
         raise _MetadataError("pyright_repository_config_malformed") from exc
     tool = document.get("tool")
     configuration = tool.get("pyright") if isinstance(tool, dict) else None
-    if configuration is None and root_pyproject:
-        return None, raw
     if not isinstance(configuration, dict):
+        if root_pyproject:
+            raise _MetadataError("pyright_repository_config_ancestor_search")
         raise _MetadataError("pyright_repository_config_malformed")
     _validate_canonical_domain(
         configuration,
@@ -584,9 +584,6 @@ def _repository_configuration_chain(
         total_bytes += len(raw)
         if total_bytes > MAX_PYRIGHT_CONFIG_TOTAL_BYTES:
             raise _MetadataError("pyright_repository_config_total_oversized")
-        if configuration is None:
-            return None
-
         relative_path = current.relative_to(repository_root)
         source_directory = relative_path.parent.as_posix()
         configurations.append(

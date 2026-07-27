@@ -34,7 +34,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   transactions/tasks/results, the 30-day undo window, and live owners.
 - Recorded the local-filesystem requirement, current `synchronous=FULL`/no-WAL
   policy, bounded defaults and CLI overrides, cooperating-writer CAS boundary, and
-  explicit non-goals. The suite now collects **4802 tests**.
+  explicit non-goals. The suite now collects **4806 tests**.
 - Added canonical `repository-scope/v1` binding for repositories, linked worktrees,
   checkout roots, Git common directories, and captured commits. Generation readers
   reject the wrong repository/worktree scope instead of returning cross-checkout
@@ -65,10 +65,11 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- Prevent Pyright source-category laundering, fingerprint effective bounded
-  `pyrightconfig.json`/`pyproject.toml` inheritance, retain empty managed version
-  roots as broken-install evidence, and reject recursive or unsupported config and
-  receipt domains before canonicalization.
+- Prevent Pyright source-category laundering, block ancestor config search when a
+  bounded root `pyproject.toml` has no object `[tool.pyright]`, fingerprint ordered
+  per-file `pyrightconfig.json`/`pyproject.toml` inheritance, retain empty managed
+  version roots as broken-install evidence, and reject recursive or unsupported
+  config and receipt domains before canonicalization.
 - Fail closed on LSP diagnostic text over the 256 KiB strict UTF-8 byte ceiling
   or containing lone surrogates before semantic scanning. Use O(1) code-point
   pre-rejection plus bounded allocation-free byte sizing, normalize and redact

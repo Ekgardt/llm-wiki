@@ -452,6 +452,7 @@ def test_managed_candidate_requires_canonical_receipt_and_recomputed_digest(
 ) -> None:
     scope = _scope(repository)
     (repository / "pyrightconfig.json").unlink()
+    (repository / "pyproject.toml").unlink()
     server = create_pyright_fixture(
         lsp_paths.managed_pyright_root(state_root),
         managed=True,
@@ -1150,6 +1151,101 @@ def test_malformed_repository_jsonc_degrades_stably(
     assert result.status == "degraded"
     assert result.qualified is False
     assert "pyright_repository_config_malformed" in result.degradation_codes
+
+
+@pytest.mark.parametrize(
+    "pyproject_content",
+    [
+        '[project]\nname = "fixture"\n',
+        "[tool.ruff]\nline-length = 88\n",
+        '[tool]\npyright = "strict"\n',
+    ],
+    ids=("tool-absent", "pyright-missing", "pyright-non-object"),
+)
+def test_root_pyproject_without_object_pyright_blocks_ancestor_config_reads(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+    pyproject_content: str,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    (repository / "pyrightconfig.json").unlink()
+    (repository / "pyproject.toml").write_text(pyproject_content, encoding="utf-8")
+    ancestor = repository.parent / "pyrightconfig.json"
+    ancestor.write_bytes(
+        canonical_json_bytes({"typeCheckingMode": "strict"})
+    )
+    ancestor_inspections: list[Path] = []
+    ancestor_reads: list[Path] = []
+    real_lstat = Path.lstat
+    real_read_stable_bytes = pyright_profile.read_stable_bytes
+
+    def lstat(path: Path) -> os.stat_result:
+        if path == ancestor:
+            ancestor_inspections.append(path)
+            raise AssertionError("ancestor config must not be inspected")
+        return real_lstat(path)
+
+    def read_stable_bytes(path: Path, max_bytes: int, *, label: str = "file") -> bytes:
+        if path == ancestor:
+            ancestor_reads.append(path)
+            raise AssertionError("ancestor config must not be read")
+        return real_read_stable_bytes(path, max_bytes, label=label)
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    monkeypatch.setattr(pyright_profile, "read_stable_bytes", read_stable_bytes)
+    _install_node_probe(monkeypatch, tmp_path)
+    first = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    ancestor.write_bytes(canonical_json_bytes({"typeCheckingMode": "basic"}))
+    _install_node_probe(monkeypatch, tmp_path)
+    second = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert first.source == second.source == "project-local"
+    assert first.status == second.status == "degraded"
+    assert first.qualified is second.qualified is False
+    assert first.degradation_codes == second.degradation_codes == (
+        "pyright_repository_config_ancestor_search",
+    )
+    assert first.configuration_sha256 == second.configuration_sha256 == sha256_bytes(
+        canonical_json_bytes(PYRIGHT_CONFIGURATION)
+    )
+    assert ancestor_inspections == []
+    assert ancestor_reads == []
+
+
+def test_malformed_root_pyproject_retains_malformed_degradation(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    (repository / "pyrightconfig.json").unlink()
+    (repository / "pyproject.toml").write_bytes(b"[tool.pyright\n")
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert result.status == "degraded"
+    assert result.qualified is False
+    assert "pyright_repository_config_malformed" in result.degradation_codes
+    assert "pyright_repository_config_ancestor_search" not in result.degradation_codes
 
 
 def test_repository_pyproject_pyright_changes_identity_hash(
