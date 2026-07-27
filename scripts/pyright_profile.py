@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import json
 import math
 import os
@@ -9,6 +10,7 @@ import re
 import shutil
 import stat
 import subprocess as _subprocess
+import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -98,6 +100,8 @@ MAX_PYRIGHT_MANIFEST_DOMAIN_NODES = 4096
 MAX_SERVER_BYTES = 64 * 1024 * 1024
 MAX_NODE_VERSION_BYTES = 128
 NODE_PROBE_TIMEOUT_SECONDS = 2.0
+NODE_PROBE_CLEANUP_SECONDS = 0.5
+_MAX_NODE_PROBE_OWNERS = 8
 
 _NODE_ENV_ALLOWLIST = frozenset(
     {
@@ -150,6 +154,11 @@ class _SubprocessFacade:
 
 
 subprocess = _SubprocessFacade()
+
+_NODE_PROBE_OWNERS_LOCK = threading.Lock()
+_NODE_PROBE_DRAIN_LOCK = threading.Lock()
+_NODE_PROBE_OWNERS: set[object] = set()
+_PENDING_NODE_PROBE_CLEANUPS: dict[object, object] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -813,17 +822,86 @@ def _managed_manifest(
     return package_sha256, codes
 
 
-def _stop_node_probe(process: object, probe_deadline: float) -> bool:
+def _reserve_node_probe_owner() -> object | None:
+    owner = object()
+    with _NODE_PROBE_OWNERS_LOCK:
+        if len(_NODE_PROBE_OWNERS) >= _MAX_NODE_PROBE_OWNERS:
+            return None
+        _NODE_PROBE_OWNERS.add(owner)
+    return owner
+
+
+def _release_node_probe_owner(owner: object) -> None:
+    with _NODE_PROBE_OWNERS_LOCK:
+        _PENDING_NODE_PROBE_CLEANUPS.pop(owner, None)
+        _NODE_PROBE_OWNERS.discard(owner)
+
+
+def _retain_node_probe_owner(owner: object, process: object) -> None:
+    with _NODE_PROBE_OWNERS_LOCK:
+        if owner not in _NODE_PROBE_OWNERS:
+            raise RuntimeError("Node probe cleanup owner was not reserved")
+        _PENDING_NODE_PROBE_CLEANUPS[owner] = process
+
+
+def _pending_node_probe_cleanup_snapshot() -> tuple[object, ...]:
+    with _NODE_PROBE_OWNERS_LOCK:
+        return tuple(_PENDING_NODE_PROBE_CLEANUPS.values())
+
+
+def _pending_node_probe_cleanup_items() -> tuple[tuple[object, object], ...]:
+    with _NODE_PROBE_OWNERS_LOCK:
+        return tuple(_PENDING_NODE_PROBE_CLEANUPS.items())
+
+
+def _stop_node_probe(
+    process: object,
+    cleanup_deadline: float | None = None,
+) -> tuple[bool, bool]:
+    """Kill a probe and spend only its independent bounded reap budget."""
+    if cleanup_deadline is None:
+        cleanup_deadline = time.monotonic() + NODE_PROBE_CLEANUP_SECONDS
     cleanup_ok = True
+    reaped = False
     try:
         process.kill()
     except _NODE_PROBE_ERRORS:
         cleanup_ok = False
     try:
-        process.wait(timeout=max(0.0, probe_deadline - time.monotonic()))
+        process.wait(timeout=max(0.0, cleanup_deadline - time.monotonic()))
     except _NODE_PROBE_ERRORS:
         cleanup_ok = False
-    return cleanup_ok
+    else:
+        reaped = True
+    return cleanup_ok, reaped
+
+
+def _retry_node_probe_cleanups() -> None:
+    """Retry all retained probes within one shared cleanup budget."""
+    if not _pending_node_probe_cleanup_snapshot():
+        return
+    if not _NODE_PROBE_DRAIN_LOCK.acquire(blocking=False):
+        return
+    try:
+        cleanup_deadline = time.monotonic() + NODE_PROBE_CLEANUP_SECONDS
+        for owner, process in _pending_node_probe_cleanup_items():
+            if time.monotonic() >= cleanup_deadline:
+                break
+            try:
+                _cleanup_ok, reaped = _stop_node_probe(process, cleanup_deadline)
+            except BaseException:
+                continue
+            if reaped:
+                _release_node_probe_owner(owner)
+    finally:
+        _NODE_PROBE_DRAIN_LOCK.release()
+
+
+def _atexit_cleanup_node_probes() -> None:
+    try:
+        _retry_node_probe_cleanups()
+    except BaseException:
+        pass
 
 
 def _node_executable_is_safe(node: Path, deadline: float | None) -> bool:
@@ -862,6 +940,7 @@ def _node_executable_is_safe(node: Path, deadline: float | None) -> bool:
 def _probe_node(
     deadline: float | None,
 ) -> tuple[Path | None, str | None, int | None, set[str]]:
+    """Probe Node within its deadline plus at most two bounded cleanup phases."""
     _check_deadline(deadline)
     try:
         environment = _node_environment()
@@ -888,6 +967,12 @@ def _probe_node(
     remaining = probe_deadline - now
     if remaining <= 0:
         return node, None, None, {"pyright_node_probe_timeout"}
+    _retry_node_probe_cleanups()
+    if time.monotonic() >= probe_deadline:
+        return node, None, None, {"pyright_node_probe_timeout"}
+    owner = _reserve_node_probe_owner()
+    if owner is None:
+        return node, None, None, {"pyright_node_probe_failed"}
     try:
         process = subprocess.Popen(
             [str(node), "--version"],
@@ -898,50 +983,75 @@ def _probe_node(
             env=environment,
         )
     except _NODE_PROBE_ERRORS:
+        _release_node_probe_owner(owner)
         return node, None, None, {"pyright_node_probe_failed"}
+    except BaseException:
+        _release_node_probe_owner(owner)
+        raise
 
     output: bytes | None = None
     degradation_code: str | None = None
     stream = None
+    reaped = False
+    cleanup_attempted = False
     try:
         try:
-            stream = process.stdout
-        except _NODE_PROBE_ERRORS:
-            degradation_code = "pyright_node_probe_failed"
-        try:
-            process.wait(timeout=max(0.0, probe_deadline - time.monotonic()))
-        except subprocess.TimeoutExpired:
-            if degradation_code is None:
-                degradation_code = "pyright_node_probe_timeout"
-            if not _stop_node_probe(process, probe_deadline):
-                degradation_code = "pyright_node_probe_failed"
-        except _NODE_PROBE_ERRORS:
-            degradation_code = "pyright_node_probe_failed"
-            _stop_node_probe(process, probe_deadline)
-        if degradation_code is None:
             try:
-                returncode = process.returncode
+                stream = process.stdout
             except _NODE_PROBE_ERRORS:
                 degradation_code = "pyright_node_probe_failed"
+            try:
+                process.wait(timeout=max(0.0, probe_deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                if degradation_code is None:
+                    degradation_code = "pyright_node_probe_timeout"
+                cleanup_attempted = True
+                cleanup_ok, reaped = _stop_node_probe(process)
+                if not cleanup_ok:
+                    degradation_code = "pyright_node_probe_failed"
+            except _NODE_PROBE_ERRORS:
+                degradation_code = "pyright_node_probe_failed"
+                cleanup_attempted = True
+                _cleanup_ok, reaped = _stop_node_probe(process)
             else:
-                if returncode != 0 or stream is None:
+                reaped = True
+            if degradation_code is None:
+                try:
+                    returncode = process.returncode
+                except _NODE_PROBE_ERRORS:
                     degradation_code = "pyright_node_probe_failed"
                 else:
-                    try:
-                        output = stream.read(MAX_NODE_VERSION_BYTES + 1)
-                    except _NODE_PROBE_ERRORS:
+                    if returncode != 0 or stream is None:
                         degradation_code = "pyright_node_probe_failed"
                     else:
-                        if not isinstance(output, bytes):
+                        try:
+                            output = stream.read(MAX_NODE_VERSION_BYTES + 1)
+                        except _NODE_PROBE_ERRORS:
                             degradation_code = "pyright_node_probe_failed"
-                        elif len(output) > MAX_NODE_VERSION_BYTES:
-                            degradation_code = "pyright_node_output_oversized"
+                        else:
+                            if not isinstance(output, bytes):
+                                degradation_code = "pyright_node_probe_failed"
+                            elif len(output) > MAX_NODE_VERSION_BYTES:
+                                degradation_code = "pyright_node_output_oversized"
+        except BaseException:
+            if not reaped and not cleanup_attempted:
+                try:
+                    _cleanup_ok, reaped = _stop_node_probe(process)
+                except BaseException:
+                    pass
+            raise
     finally:
-        if stream is not None:
-            try:
-                stream.close()
-            except _NODE_PROBE_ERRORS:
-                degradation_code = "pyright_node_probe_failed"
+        try:
+            if stream is not None:
+                try:
+                    stream.close()
+                except _NODE_PROBE_ERRORS:
+                    degradation_code = "pyright_node_probe_failed"
+        finally:
+            if reaped:
+                _release_node_probe_owner(owner)
+            else:
+                _retain_node_probe_owner(owner, process)
 
     if degradation_code is not None:
         return node, None, None, {degradation_code}
@@ -1364,3 +1474,6 @@ def discover_pyright(
                     deadline,
                 )
     return _missing_identity(configuration_sha256, profile_codes)
+
+
+atexit.register(_atexit_cleanup_node_probes)

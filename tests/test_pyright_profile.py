@@ -2389,7 +2389,54 @@ def test_node_blocking_output_timeout_kills_reaps_and_closes_probe(
     assert "pyright_node_probe_timeout" in result.degradation_codes
 
 
-def test_node_persistent_timeout_after_kill_is_a_stable_probe_failure(
+def test_node_timeout_cleanup_uses_fresh_budget_after_probe_deadline_expires(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    _node, _calls, process = _install_node_probe(
+        monkeypatch,
+        tmp_path,
+        output=b"",
+        times_out=True,
+    )
+    real_monotonic = time.monotonic
+    operation_expired = False
+    real_wait = process.wait
+
+    def wait(timeout: float | None = None) -> int:
+        nonlocal operation_expired
+        try:
+            return real_wait(timeout)
+        finally:
+            if not process.killed:
+                operation_expired = True
+
+    def monotonic() -> float:
+        elapsed = pyright_profile.NODE_PROBE_TIMEOUT_SECONDS + 1.0
+        return real_monotonic() + (elapsed if operation_expired else 0.0)
+
+    monkeypatch.setattr(process, "wait", wait)
+    monkeypatch.setattr(pyright_profile.time, "monotonic", monotonic)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert process.returncode == -9
+    assert len(process.wait_timeouts) == 2
+    cleanup_timeout = process.wait_timeouts[1]
+    assert cleanup_timeout > 0
+    assert cleanup_timeout <= pyright_profile.NODE_PROBE_CLEANUP_SECONDS
+    assert "pyright_node_probe_timeout" in result.degradation_codes
+
+
+def test_node_persistent_timeout_is_retained_for_bounded_retry(
     monkeypatch: pytest.MonkeyPatch,
     repository: Path,
     state_root: Path,
@@ -2416,6 +2463,13 @@ def test_node_persistent_timeout_after_kill_is_a_stable_probe_failure(
     assert process.stdout.closed
     assert result.status == "degraded"
     assert "pyright_node_probe_failed" in result.degradation_codes
+    assert pyright_profile._pending_node_probe_cleanup_snapshot() == (process,)
+
+    process._persistent_timeout = False
+    pyright_profile._retry_node_probe_cleanups()
+
+    assert process.returncode == -9
+    assert pyright_profile._pending_node_probe_cleanup_snapshot() == ()
 
 
 def test_node_stdout_access_error_overrides_timeout_as_probe_failure(
@@ -2543,6 +2597,7 @@ def test_node_timeout_cleanup_error_is_a_stable_probe_failure(
     _node, _calls, process = _install_node_probe(
         monkeypatch, tmp_path, output=b"", times_out=True
     )
+    real_kill = process.kill
     monkeypatch.setattr(
         process,
         "kill",
@@ -2557,6 +2612,13 @@ def test_node_timeout_cleanup_error_is_a_stable_probe_failure(
 
     assert result.status == "degraded"
     assert "pyright_node_probe_failed" in result.degradation_codes
+    assert pyright_profile._pending_node_probe_cleanup_snapshot() == (process,)
+
+    monkeypatch.setattr(process, "kill", real_kill)
+    pyright_profile._retry_node_probe_cleanups()
+
+    assert process.returncode == -9
+    assert pyright_profile._pending_node_probe_cleanup_snapshot() == ()
 
 
 def test_node_stream_close_error_is_a_stable_probe_failure(
@@ -2668,6 +2730,122 @@ def test_repeated_node_probes_reap_processes_and_close_output(
     assert len(processes) == 3
     assert all(process.returncode == 0 for process in processes)
     assert all(process.stdout.closed for process in processes)
+
+
+def test_repeated_timed_out_real_node_probes_are_reaped_before_return(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    node = tmp_path / ("node.exe" if os.name == "nt" else "node")
+    node.write_bytes(b"synthetic node executable\n")
+    processes: list[subprocess.Popen[bytes]] = []
+    real_popen = subprocess.Popen
+
+    def popen(_command: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
+        process = real_popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            **kwargs,
+        )
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(pyright_profile.shutil, "which", lambda *args, **kwargs: str(node))
+    monkeypatch.setattr(pyright_profile.subprocess, "Popen", popen)
+    monkeypatch.setattr(pyright_profile, "NODE_PROBE_TIMEOUT_SECONDS", 0.05)
+
+    try:
+        results = [pyright_profile._probe_node(None) for _index in range(3)]
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+
+    assert len(processes) == 3
+    assert all(process.poll() is not None for process in processes)
+    assert all(result[3] == {"pyright_node_probe_timeout"} for result in results)
+
+
+def test_node_probe_cleanup_ownership_is_bounded_before_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    node = tmp_path / ("node.exe" if os.name == "nt" else "node")
+    node.write_bytes(b"synthetic node executable\n")
+    processes: list[_FakeNodeProcess] = []
+
+    def popen(*args: object, **kwargs: object) -> _FakeNodeProcess:
+        process = _FakeNodeProcess(b"", times_out=True, persistent_timeout=True)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(pyright_profile.shutil, "which", lambda *args, **kwargs: str(node))
+    monkeypatch.setattr(pyright_profile.subprocess, "Popen", popen)
+
+    try:
+        results = [
+            discover_pyright(
+                scope,
+                state_root=state_root,
+                candidates=PyrightCandidates((server,), (), ()),
+            )
+            for _index in range(pyright_profile._MAX_NODE_PROBE_OWNERS + 1)
+        ]
+
+        assert len(processes) == pyright_profile._MAX_NODE_PROBE_OWNERS
+        assert len(pyright_profile._pending_node_probe_cleanup_snapshot()) == len(processes)
+        assert all("pyright_node_probe_failed" in result.degradation_codes for result in results)
+    finally:
+        for process in processes:
+            process._persistent_timeout = False
+        pyright_profile._retry_node_probe_cleanups()
+
+    assert all(process.returncode == -9 for process in processes)
+    assert pyright_profile._pending_node_probe_cleanup_snapshot() == ()
+
+
+def test_node_probe_cleanup_is_registered_for_normal_interpreter_exit(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "node-probe-reaped.txt"
+    scripts = Path(pyright_profile.__file__).resolve().parent
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.pathsep.join(
+        value for value in (str(scripts), environment.get("PYTHONPATH", "")) if value
+    )
+    program = f"""
+from pathlib import Path
+import pyright_profile
+
+class Process:
+    def kill(self):
+        pass
+
+    def wait(self, timeout=None):
+        Path({str(marker)!r}).write_text("reaped", encoding="utf-8")
+        return -9
+
+owner = pyright_profile._reserve_node_probe_owner()
+assert owner is not None
+pyright_profile._retain_node_probe_owner(owner, Process())
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", program],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert marker.read_text(encoding="utf-8") == "reaped"
 
 
 @pytest.mark.parametrize("error", [KeyboardInterrupt(), SystemExit(2)])
