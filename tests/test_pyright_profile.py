@@ -107,6 +107,17 @@ def _empty_candidates() -> PyrightCandidates:
     return PyrightCandidates(project_local=(), managed=(), system=())
 
 
+def _configuration_fingerprint(configuration: dict[str, object]) -> str:
+    return sha256_bytes(
+        canonical_json_bytes(
+            {
+                "base_lsp_configuration": PYRIGHT_CONFIGURATION,
+                "repository_configuration": configuration,
+            }
+        )
+    )
+
+
 def _stat_with(
     value: os.stat_result,
     *,
@@ -385,6 +396,33 @@ def test_managed_manifest_without_package_tree_is_presence_evidence(
     assert "pyright_server_missing" in result.degradation_codes
 
 
+def test_empty_approved_managed_root_blocks_system_fallthrough(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    managed_root = lsp_paths.managed_pyright_root(state_root)
+    managed_root.mkdir(parents=True)
+    managed_server = managed_root / PYRIGHT_SERVER_RELATIVE
+    system = create_pyright_fixture(tmp_path / "system")
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((), (managed_server,), (system,)),
+    )
+
+    assert result.status == "degraded"
+    assert result.source == "managed"
+    assert result.server_executable == managed_server
+    assert "pyright_manifest_missing" in result.degradation_codes
+    assert "pyright_package_json_missing" in result.degradation_codes
+    assert "pyright_server_missing" in result.degradation_codes
+
+
 def test_managed_candidate_requires_canonical_receipt_and_recomputed_digest(
     monkeypatch: pytest.MonkeyPatch,
     repository: Path,
@@ -440,6 +478,61 @@ def test_system_candidate_without_equivalent_lockfile_provenance_is_degraded(
     assert result.source == "system"
     assert result.qualified is False
     assert "pyright_lockfile_missing" in result.degradation_codes
+
+
+@pytest.mark.parametrize("approved_source", ["project-local", "managed"])
+def test_system_candidates_cannot_launder_approved_source_entrypoints(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+    approved_source: str,
+) -> None:
+    scope = _scope(repository)
+    if approved_source == "project-local":
+        server = create_pyright_fixture(repository)
+    else:
+        server = create_pyright_fixture(
+            lsp_paths.managed_pyright_root(state_root), managed=True
+        )
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((), (), (server,)),
+    )
+
+    assert result.status == "degraded"
+    assert result.source == "system"
+    assert result.server_executable is None
+    assert result.qualified is False
+    assert "pyright_source_path_mismatch" in result.degradation_codes
+
+
+def test_system_shim_cannot_launder_project_local_entrypoint(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    create_pyright_fixture(repository)
+    shim = repository / "node_modules/.bin/pyright-langserver.cmd"
+    shim.parent.mkdir(parents=True, exist_ok=True)
+    shim.write_text("shim content is not trusted or parsed", encoding="utf-8")
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((), (), (shim,)),
+    )
+
+    assert result.status == "degraded"
+    assert result.source == "system"
+    assert result.server_executable is None
+    assert "pyright_source_path_mismatch" in result.degradation_codes
 
 
 def test_system_package_metadata_without_server_is_presence_evidence(
@@ -960,6 +1053,534 @@ def test_repository_pyrightconfig_changes_identity_hash_and_remains_qualified(
     )
     assert basic.status == "qualified"
     assert basic.configuration_sha256 != strict.configuration_sha256
+
+
+def test_repository_pyproject_pyright_changes_identity_hash(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    (repository / "pyrightconfig.json").unlink()
+    pyproject = repository / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "fixture"\n\n[tool.pyright]\ntypeCheckingMode = "strict"\n',
+        encoding="utf-8",
+    )
+    _install_node_probe(monkeypatch, tmp_path)
+
+    strict = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert strict.status == "qualified"
+    assert strict.configuration_sha256 == _configuration_fingerprint(
+        {"typeCheckingMode": "strict"}
+    )
+
+    pyproject.write_text(
+        '[project]\nname = "fixture"\n\n[tool.pyright]\ntypeCheckingMode = "basic"\n',
+        encoding="utf-8",
+    )
+    _install_node_probe(monkeypatch, tmp_path)
+    basic = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+    assert basic.status == "qualified"
+    assert basic.configuration_sha256 == _configuration_fingerprint(
+        {"typeCheckingMode": "basic"}
+    )
+    assert basic.configuration_sha256 != strict.configuration_sha256
+
+
+def test_repository_pyrightconfig_takes_precedence_over_pyproject_pyright(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    (repository / "pyrightconfig.json").write_bytes(
+        canonical_json_bytes({"typeCheckingMode": "basic"})
+    )
+    (repository / "pyproject.toml").write_text(
+        '[tool.pyright]\ntypeCheckingMode = "strict"\n', encoding="utf-8"
+    )
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert result.status == "qualified"
+    assert result.configuration_sha256 == _configuration_fingerprint(
+        {"typeCheckingMode": "basic"}
+    )
+
+
+def test_json_extends_json_merges_base_then_child_at_top_level(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    config_dir = repository / "config"
+    config_dir.mkdir()
+    (config_dir / "base.json").write_bytes(
+        canonical_json_bytes(
+            {
+                "defineConstant": {"BASE": True},
+                "include": ["base"],
+                "typeCheckingMode": "strict",
+            }
+        )
+    )
+    (repository / "pyrightconfig.json").write_bytes(
+        canonical_json_bytes(
+            {
+                "defineConstant": {"CHILD": True},
+                "extends": "config/base.json",
+                "typeCheckingMode": "basic",
+            }
+        )
+    )
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert result.status == "qualified"
+    assert result.configuration_sha256 == _configuration_fingerprint(
+        {
+            "defineConstant": {"CHILD": True},
+            "include": ["base"],
+            "typeCheckingMode": "basic",
+        }
+    )
+
+
+def test_json_extends_toml_and_tracks_base_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    config_dir = repository / "config"
+    config_dir.mkdir()
+    base = config_dir / "base.toml"
+    base.write_text(
+        '[tool.pyright]\ninclude = ["base-a"]\ntypeCheckingMode = "strict"\n',
+        encoding="utf-8",
+    )
+    (repository / "pyrightconfig.json").write_bytes(
+        canonical_json_bytes(
+            {"extends": "config/base.toml", "typeCheckingMode": "basic"}
+        )
+    )
+    _install_node_probe(monkeypatch, tmp_path)
+
+    first = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert first.status == "qualified"
+    assert first.configuration_sha256 == _configuration_fingerprint(
+        {"include": ["base-a"], "typeCheckingMode": "basic"}
+    )
+
+    base.write_text(
+        '[tool.pyright]\ninclude = ["base-b"]\ntypeCheckingMode = "strict"\n',
+        encoding="utf-8",
+    )
+    _install_node_probe(monkeypatch, tmp_path)
+    second = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+    assert second.status == "qualified"
+    assert second.configuration_sha256 == _configuration_fingerprint(
+        {"include": ["base-b"], "typeCheckingMode": "basic"}
+    )
+    assert second.configuration_sha256 != first.configuration_sha256
+
+
+def test_pyproject_toml_extends_json_relative_to_pyproject(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    (repository / "pyrightconfig.json").unlink()
+    (repository / "base.json").write_bytes(
+        canonical_json_bytes({"include": ["base"], "typeCheckingMode": "strict"})
+    )
+    (repository / "pyproject.toml").write_text(
+        '[tool.pyright]\nextends = "base.json"\ntypeCheckingMode = "basic"\n',
+        encoding="utf-8",
+    )
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert result.status == "qualified"
+    assert result.configuration_sha256 == _configuration_fingerprint(
+        {"include": ["base"], "typeCheckingMode": "basic"}
+    )
+
+
+@pytest.mark.parametrize(
+    ("setup", "expected_code"),
+    [
+        ("cycle", "pyright_repository_config_extends_cycle"),
+        ("outside", "pyright_repository_config_outside_repository"),
+        ("absolute", "pyright_repository_config_extends_absolute"),
+        ("missing", "pyright_repository_config_missing"),
+        ("malformed", "pyright_repository_config_malformed"),
+        ("oversized", "pyright_repository_config_oversized"),
+        ("unsupported-format", "pyright_repository_config_unsupported_format"),
+    ],
+)
+def test_invalid_repository_config_extends_degrades_stably(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+    setup: str,
+    expected_code: str,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    root = repository / "pyrightconfig.json"
+    base = repository / "base.json"
+    if setup == "cycle":
+        root.write_bytes(canonical_json_bytes({"extends": "base.json"}))
+        base.write_bytes(canonical_json_bytes({"extends": "pyrightconfig.json"}))
+    elif setup == "outside":
+        outside = repository.parent / "outside.json"
+        outside.write_bytes(canonical_json_bytes({"typeCheckingMode": "strict"}))
+        root.write_bytes(canonical_json_bytes({"extends": "../outside.json"}))
+    elif setup == "absolute":
+        base.write_bytes(canonical_json_bytes({"typeCheckingMode": "strict"}))
+        root.write_bytes(canonical_json_bytes({"extends": str(base)}))
+    elif setup == "missing":
+        root.write_bytes(canonical_json_bytes({"extends": "missing.json"}))
+    elif setup == "malformed":
+        root.write_bytes(canonical_json_bytes({"extends": "base.json"}))
+        base.write_bytes(b"{")
+    elif setup == "oversized":
+        root.write_bytes(canonical_json_bytes({"extends": "base.json"}))
+        base.write_bytes(b"x" * (256 * 1024 + 1))
+    else:
+        root.write_bytes(canonical_json_bytes({"extends": "base.yaml"}))
+        (repository / "base.yaml").write_text("typeCheckingMode: strict\n", encoding="utf-8")
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert result.status == "degraded"
+    assert result.qualified is False
+    assert expected_code in result.degradation_codes
+
+
+def test_repository_config_extends_depth_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    paths = [repository / "pyrightconfig.json"] + [
+        repository / f"base-{index}.json" for index in range(10)
+    ]
+    for index, path in enumerate(paths):
+        value = (
+            {"extends": paths[index + 1].name}
+            if index + 1 < len(paths)
+            else {"typeCheckingMode": "strict"}
+        )
+        path.write_bytes(canonical_json_bytes(value))
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert result.status == "degraded"
+    assert "pyright_repository_config_extends_too_deep" in result.degradation_codes
+
+
+def test_repository_config_total_bytes_are_bounded_across_extends(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    paths = [repository / "pyrightconfig.json"] + [
+        repository / f"large-{index}.json" for index in range(2)
+    ]
+    for index, path in enumerate(paths):
+        value: dict[str, object] = {"padding": "x" * (200 * 1024)}
+        if index + 1 < len(paths):
+            value["extends"] = paths[index + 1].name
+        path.write_bytes(canonical_json_bytes(value))
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert result.status == "degraded"
+    assert "pyright_repository_config_total_oversized" in result.degradation_codes
+
+
+def test_reparse_extended_repository_config_degrades_without_following(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    base = repository / "base.json"
+    base.write_bytes(canonical_json_bytes({"typeCheckingMode": "strict"}))
+    (repository / "pyrightconfig.json").write_bytes(
+        canonical_json_bytes({"extends": "base.json"})
+    )
+    real_lstat = Path.lstat
+
+    def lstat(path: Path) -> os.stat_result:
+        value = real_lstat(path)
+        if path == base:
+            return _stat_with(value, file_attributes=0x400)  # type: ignore[return-value]
+        return value
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert result.status == "degraded"
+    assert "pyright_repository_config_unsafe" in result.degradation_codes
+
+
+@pytest.mark.parametrize("config_format", ["json", "toml"])
+def test_deep_repository_config_domain_degrades_without_recursion_error(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+    config_format: str,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    nested = b"[" * 500 + b"0" + b"]" * 500
+    if config_format == "json":
+        (repository / "pyrightconfig.json").write_bytes(
+            b'{"nested":' + nested + b"}"
+        )
+    else:
+        (repository / "pyrightconfig.json").unlink()
+        (repository / "pyproject.toml").write_bytes(
+            b"[tool.pyright]\nnested = " + nested + b"\n"
+        )
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert result.status == "degraded"
+    assert "pyright_repository_config_too_deep" in result.degradation_codes
+
+
+@pytest.mark.parametrize("config_format", ["json", "toml"])
+def test_repository_config_domain_node_count_is_bounded_iteratively(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+    config_format: str,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    values = b",".join([b"0"] * 66_000)
+    if config_format == "json":
+        (repository / "pyrightconfig.json").write_bytes(
+            b'{"nodes":[' + values + b"]}"
+        )
+    else:
+        (repository / "pyrightconfig.json").unlink()
+        (repository / "pyproject.toml").write_bytes(
+            b"[tool.pyright]\nnodes = [" + values + b"]\n"
+        )
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert result.status == "degraded"
+    assert "pyright_repository_config_too_many_nodes" in result.degradation_codes
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["1.25", "1979-05-27T07:32:00Z"],
+    ids=("float", "datetime"),
+)
+def test_repository_toml_rejects_values_outside_canonical_json_domain(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+    value: str,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    (repository / "pyrightconfig.json").unlink()
+    (repository / "pyproject.toml").write_text(
+        f"[tool.pyright]\nunsupported = {value}\n", encoding="utf-8"
+    )
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert result.status == "degraded"
+    assert "pyright_repository_config_unsupported_value" in result.degradation_codes
+
+
+def test_repository_config_canonicalization_recursion_degrades_stably(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    (repository / "pyrightconfig.json").write_bytes(
+        canonical_json_bytes({"typeCheckingMode": "strict"})
+    )
+    real_canonical = pyright_profile.canonical_json_bytes
+
+    def canonical(value: object) -> bytes:
+        if isinstance(value, dict) and "base_lsp_configuration" in value:
+            raise RecursionError("reviewer reproduction")
+        return real_canonical(value)
+
+    monkeypatch.setattr(pyright_profile, "canonical_json_bytes", canonical)
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert result.status == "degraded"
+    assert "pyright_repository_config_too_deep" in result.degradation_codes
+
+
+def test_deep_managed_manifest_degrades_without_recursion_error(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    managed_root = lsp_paths.managed_pyright_root(state_root)
+    server = create_pyright_fixture(managed_root, managed=True)
+    manifest = managed_root / "install-manifest.json"
+    raw = manifest.read_bytes()
+    nested = b"[" * 500 + b"0" + b"]" * 500
+    manifest.write_bytes(raw[:-1] + b',"nested":' + nested + b"}")
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((), (server,), ()),
+    )
+
+    assert result.status == "degraded"
+    assert "pyright_manifest_too_deep" in result.degradation_codes
+
+
+def test_managed_manifest_canonicalization_recursion_degrades_stably(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(
+        lsp_paths.managed_pyright_root(state_root), managed=True
+    )
+    real_canonical = pyright_profile.canonical_json_bytes
+
+    def canonical(value: object) -> bytes:
+        if isinstance(value, dict) and value.get("schema_version") == "pyright-install/v1":
+            raise RecursionError("reviewer reproduction")
+        return real_canonical(value)
+
+    monkeypatch.setattr(pyright_profile, "canonical_json_bytes", canonical)
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((), (server,), ()),
+    )
+
+    assert result.status == "degraded"
+    assert "pyright_manifest_too_deep" in result.degradation_codes
 
 
 def test_managed_receipt_attests_base_profile_while_identity_includes_repository_config(

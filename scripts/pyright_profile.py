@@ -15,6 +15,11 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
+
 from bounded_io import read_stable_bytes
 from lsp_paths import PYRIGHT_VERSION, managed_pyright_root
 from reliable_memory import canonical_json_bytes, sha256_bytes
@@ -57,6 +62,13 @@ MAX_PACKAGE_JSON_BYTES = 64 * 1024
 MAX_PACKAGE_LOCK_BYTES = 8 * 1024 * 1024
 MAX_INSTALL_MANIFEST_BYTES = 16 * 1024
 MAX_PYRIGHT_CONFIG_BYTES = 256 * 1024
+MAX_PYRIGHT_CONFIG_TOTAL_BYTES = 512 * 1024
+MAX_PYRIGHT_CONFIG_FILES = 9
+MAX_PYRIGHT_CONFIG_EXTENDS_DEPTH = 8
+MAX_PYRIGHT_CONFIG_DOMAIN_DEPTH = 64
+MAX_PYRIGHT_CONFIG_DOMAIN_NODES = 65_536
+MAX_PYRIGHT_MANIFEST_DOMAIN_DEPTH = 64
+MAX_PYRIGHT_MANIFEST_DOMAIN_NODES = 4096
 MAX_SERVER_BYTES = 64 * 1024 * 1024
 MAX_NODE_VERSION_BYTES = 128
 NODE_PROBE_TIMEOUT_SECONDS = 2.0
@@ -243,7 +255,12 @@ def _reject_json_number(_value: str) -> object:
     raise ValueError("non-integral JSON number")
 
 
-def _strict_json_object(raw: bytes, malformed_code: str) -> dict[str, object]:
+def _strict_json_object(
+    raw: bytes,
+    malformed_code: str,
+    *,
+    recursion_code: str | None = None,
+) -> dict[str, object]:
     try:
         text = raw.decode("utf-8", errors="strict")
         value = json.loads(
@@ -252,7 +269,9 @@ def _strict_json_object(raw: bytes, malformed_code: str) -> dict[str, object]:
             parse_float=_reject_json_number,
             parse_constant=_reject_json_number,
         )
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as exc:
+    except RecursionError as exc:
+        raise _MetadataError(recursion_code or malformed_code) from exc
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise _MetadataError(malformed_code) from exc
     if not isinstance(value, dict):
         raise _MetadataError(malformed_code)
@@ -265,6 +284,7 @@ def _read_json_object(
     *,
     prefix: str,
     deadline: float | None,
+    recursion_code: str | None = None,
 ) -> tuple[dict[str, object], bytes]:
     _check_deadline(deadline)
     try:
@@ -278,7 +298,50 @@ def _read_json_object(
     except OSError as exc:
         raise _MetadataError(f"{prefix}_unreadable") from exc
     _check_deadline(deadline)
-    return _strict_json_object(raw, f"{prefix}_malformed"), raw
+    return (
+        _strict_json_object(
+            raw,
+            f"{prefix}_malformed",
+            recursion_code=recursion_code,
+        ),
+        raw,
+    )
+
+
+def _validate_canonical_domain(
+    value: object,
+    *,
+    prefix: str,
+    max_depth: int,
+    max_nodes: int,
+    deadline: float | None,
+) -> None:
+    stack: list[tuple[object, int]] = [(value, 0)]
+    nodes = 0
+    while stack:
+        item, depth = stack.pop()
+        nodes += 1
+        if nodes > max_nodes:
+            raise _MetadataError(f"{prefix}_too_many_nodes")
+        if depth > max_depth:
+            raise _MetadataError(f"{prefix}_too_deep")
+        if nodes & 255 == 0:
+            _check_deadline(deadline)
+
+        if item is None or isinstance(item, (bool, int, str)):
+            continue
+        if isinstance(item, dict):
+            if any(not isinstance(key, str) for key in item):
+                raise _MetadataError(f"{prefix}_unsupported_value")
+            children = tuple(item.values())
+        elif isinstance(item, list):
+            children = tuple(item)
+        else:
+            raise _MetadataError(f"{prefix}_unsupported_value")
+        if nodes + len(stack) + len(children) > max_nodes:
+            raise _MetadataError(f"{prefix}_too_many_nodes")
+        stack.extend((child, depth + 1) for child in reversed(children))
+    _check_deadline(deadline)
 
 
 def _server_digest(path: Path, deadline: float | None) -> tuple[str | None, str | None]:
@@ -297,34 +360,187 @@ def _server_digest(path: Path, deadline: float | None) -> tuple[str | None, str 
     return sha256_bytes(content), None
 
 
+def _repository_config_entrypoint(
+    repository_root: Path,
+    deadline: float | None,
+) -> Path | None:
+    for path in (
+        repository_root / "pyrightconfig.json",
+        repository_root / "pyproject.toml",
+    ):
+        _check_deadline(deadline)
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            continue
+        except PermissionError as exc:
+            raise _MetadataError("pyright_repository_config_unsafe") from exc
+        except OSError as exc:
+            raise _MetadataError("pyright_repository_config_unreadable") from exc
+        return path
+    return None
+
+
+def _read_repository_config(
+    path: Path,
+    *,
+    root_pyproject: bool,
+    deadline: float | None,
+) -> tuple[dict[str, object] | None, bytes]:
+    suffix = path.suffix.casefold()
+    if suffix not in {".json", ".toml"}:
+        raise _MetadataError("pyright_repository_config_unsupported_format")
+    try:
+        raw = read_stable_bytes(
+            path,
+            MAX_PYRIGHT_CONFIG_BYTES,
+            label="Pyright repository config",
+        )
+    except FileNotFoundError as exc:
+        raise _MetadataError("pyright_repository_config_missing") from exc
+    except PermissionError as exc:
+        raise _MetadataError("pyright_repository_config_unsafe") from exc
+    except ValueError as exc:
+        raise _MetadataError("pyright_repository_config_oversized") from exc
+    except OSError as exc:
+        raise _MetadataError("pyright_repository_config_unreadable") from exc
+    _check_deadline(deadline)
+
+    if suffix == ".json":
+        configuration = _strict_json_object(
+            raw,
+            "pyright_repository_config_malformed",
+            recursion_code="pyright_repository_config_too_deep",
+        )
+        _validate_canonical_domain(
+            configuration,
+            prefix="pyright_repository_config",
+            max_depth=MAX_PYRIGHT_CONFIG_DOMAIN_DEPTH,
+            max_nodes=MAX_PYRIGHT_CONFIG_DOMAIN_NODES,
+            deadline=deadline,
+        )
+        return configuration, raw
+    try:
+        document = tomllib.loads(raw.decode("utf-8", errors="strict"))
+    except RecursionError as exc:
+        raise _MetadataError("pyright_repository_config_too_deep") from exc
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise _MetadataError("pyright_repository_config_malformed") from exc
+    tool = document.get("tool")
+    configuration = tool.get("pyright") if isinstance(tool, dict) else None
+    if configuration is None and root_pyproject:
+        return None, raw
+    if not isinstance(configuration, dict):
+        raise _MetadataError("pyright_repository_config_malformed")
+    _validate_canonical_domain(
+        configuration,
+        prefix="pyright_repository_config",
+        max_depth=MAX_PYRIGHT_CONFIG_DOMAIN_DEPTH,
+        max_nodes=MAX_PYRIGHT_CONFIG_DOMAIN_NODES,
+        deadline=deadline,
+    )
+    return configuration, raw
+
+
+def _contained_repository_config_path(
+    value: str,
+    *,
+    current: Path,
+    repository_root: Path,
+) -> Path:
+    if not value or "\0" in value:
+        raise _MetadataError("pyright_repository_config_extends_invalid")
+    try:
+        relative = Path(value)
+    except (TypeError, ValueError) as exc:
+        raise _MetadataError("pyright_repository_config_extends_invalid") from exc
+    if relative.is_absolute():
+        raise _MetadataError("pyright_repository_config_extends_absolute")
+    candidate = _lexical_absolute_path(current.parent / relative)
+    try:
+        candidate.relative_to(repository_root)
+    except ValueError as exc:
+        raise _MetadataError("pyright_repository_config_outside_repository") from exc
+    if candidate.suffix.casefold() not in {".json", ".toml"}:
+        raise _MetadataError("pyright_repository_config_unsupported_format")
+    return candidate
+
+
+def _effective_repository_configuration(
+    repository: RepositoryScope,
+    deadline: float | None,
+) -> dict[str, object] | None:
+    repository_root = _lexical_absolute_path(Path(repository.checkout_root))
+    current = _repository_config_entrypoint(repository_root, deadline)
+    if current is None:
+        return None
+
+    configurations: list[dict[str, object]] = []
+    visited: set[Path] = set()
+    total_bytes = 0
+    while current is not None:
+        _check_deadline(deadline)
+        if current in visited:
+            raise _MetadataError("pyright_repository_config_extends_cycle")
+        if len(configurations) >= MAX_PYRIGHT_CONFIG_FILES:
+            raise _MetadataError("pyright_repository_config_extends_too_deep")
+        visited.add(current)
+        configuration, raw = _read_repository_config(
+            current,
+            root_pyproject=not configurations and current.name == "pyproject.toml",
+            deadline=deadline,
+        )
+        total_bytes += len(raw)
+        if total_bytes > MAX_PYRIGHT_CONFIG_TOTAL_BYTES:
+            raise _MetadataError("pyright_repository_config_total_oversized")
+        if configuration is None:
+            return None
+
+        child = dict(configuration)
+        extends = child.pop("extends", None)
+        configurations.append(child)
+        if extends is None:
+            current = None
+            continue
+        if not isinstance(extends, str):
+            raise _MetadataError("pyright_repository_config_extends_invalid")
+        if len(configurations) - 1 >= MAX_PYRIGHT_CONFIG_EXTENDS_DEPTH:
+            raise _MetadataError("pyright_repository_config_extends_too_deep")
+        current = _contained_repository_config_path(
+            extends,
+            current=current,
+            repository_root=repository_root,
+        )
+
+    effective: dict[str, object] = {}
+    for configuration in reversed(configurations):
+        effective.update(configuration)
+    return effective
+
+
 def _repository_configuration_identity(
     repository: RepositoryScope,
     deadline: float | None,
 ) -> tuple[str, set[str]]:
-    path = Path(repository.checkout_root) / "pyrightconfig.json"
     _check_deadline(deadline)
     try:
-        path.lstat()
-    except FileNotFoundError:
-        return PYRIGHT_CONFIGURATION_SHA256, set()
-    except PermissionError:
-        return PYRIGHT_CONFIGURATION_SHA256, {"pyright_repository_config_unsafe"}
-    except OSError:
-        return PYRIGHT_CONFIGURATION_SHA256, {"pyright_repository_config_unreadable"}
-    try:
-        configuration, _raw = _read_json_object(
-            path,
-            MAX_PYRIGHT_CONFIG_BYTES,
-            prefix="pyright_repository_config",
-            deadline=deadline,
-        )
+        configuration = _effective_repository_configuration(repository, deadline)
     except _MetadataError as exc:
         return PYRIGHT_CONFIGURATION_SHA256, {exc.code}
+    if configuration is None:
+        return PYRIGHT_CONFIGURATION_SHA256, set()
     envelope = {
         "base_lsp_configuration": PYRIGHT_CONFIGURATION,
         "repository_configuration": configuration,
     }
-    fingerprint = sha256_bytes(canonical_json_bytes(envelope))
+    try:
+        fingerprint = sha256_bytes(canonical_json_bytes(envelope))
+    except RecursionError:
+        return PYRIGHT_CONFIGURATION_SHA256, {"pyright_repository_config_too_deep"}
+    except (TypeError, ValueError):
+        return PYRIGHT_CONFIGURATION_SHA256, {
+            "pyright_repository_config_unsupported_value"
+        }
     _check_deadline(deadline)
     return fingerprint, set()
 
@@ -434,6 +650,18 @@ def _managed_manifest(
             MAX_INSTALL_MANIFEST_BYTES,
             prefix="pyright_manifest",
             deadline=deadline,
+            recursion_code="pyright_manifest_too_deep",
+        )
+    except _MetadataError as exc:
+        return None, {exc.code, *codes}
+
+    try:
+        _validate_canonical_domain(
+            value,
+            prefix="pyright_manifest",
+            max_depth=MAX_PYRIGHT_MANIFEST_DOMAIN_DEPTH,
+            max_nodes=MAX_PYRIGHT_MANIFEST_DOMAIN_NODES,
+            deadline=deadline,
         )
     except _MetadataError as exc:
         return None, {exc.code, *codes}
@@ -441,8 +669,10 @@ def _managed_manifest(
     try:
         if canonical_json_bytes(value) != raw:
             codes.add("pyright_manifest_noncanonical")
+    except RecursionError:
+        codes.add("pyright_manifest_too_deep")
     except (TypeError, ValueError):
-        codes.add("pyright_manifest_malformed")
+        codes.add("pyright_manifest_unsupported_value")
 
     try:
         validate_pyright_install_manifest(value)
@@ -685,6 +915,7 @@ def _candidate_is_present(
         )
     root = server.parent.parent
     evidence = (
+        root,
         server.parent,
         server.with_name("package.json"),
         root / "install-manifest.json",
@@ -802,6 +1033,17 @@ def _normalize_candidate(
     state_root: Path,
     deadline: float | None,
 ) -> tuple[Path | None, set[str], bool]:
+    if source == "system":
+        approved_servers = {
+            _expected_source_server("project-local", repository, state_root),
+            _expected_source_server("managed", repository, state_root),
+        }
+        if candidate in approved_servers:
+            return None, {"pyright_source_path_mismatch"}, True
+        server, codes, force_present = _system_candidate_server(candidate, deadline)
+        if server in approved_servers:
+            return None, {"pyright_source_path_mismatch"}, True
+        return server, codes, force_present
     expected = _expected_source_server(source, repository, state_root)
     if expected is not None:
         if candidate != expected:
@@ -811,7 +1053,7 @@ def _normalize_candidate(
                 not _is_local_absolute_path(candidate),
             )
         return expected, set(), False
-    return _system_candidate_server(candidate, deadline)
+    raise AssertionError(f"unsupported Pyright source: {source}")
 
 
 def _normalized_candidate_is_present(
