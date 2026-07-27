@@ -8,6 +8,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import subprocess as _subprocess
 import threading
 import time
@@ -55,6 +56,7 @@ PYRIGHT_INITIALIZATION_OPTIONS_SHA256 = sha256_bytes(
 MAX_PACKAGE_JSON_BYTES = 64 * 1024
 MAX_PACKAGE_LOCK_BYTES = 8 * 1024 * 1024
 MAX_INSTALL_MANIFEST_BYTES = 16 * 1024
+MAX_PYRIGHT_CONFIG_BYTES = 256 * 1024
 MAX_SERVER_BYTES = 64 * 1024 * 1024
 MAX_NODE_VERSION_BYTES = 128
 NODE_PROBE_TIMEOUT_SECONDS = 2.0
@@ -79,6 +81,13 @@ _NODE_ENV_ALLOWLIST = frozenset(
 _HEX_SHA256 = re.compile(r"[0-9a-f]{64}")
 _PACKAGE_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 _NODE_VERSION = re.compile(rb"v([0-9]+)\.([0-9]+)\.([0-9]+)(?:\r?\n)?")
+_NODE_PROBE_ERRORS = (
+    OSError,
+    TypeError,
+    ValueError,
+    RuntimeError,
+    _subprocess.SubprocessError,
+)
 _MANIFEST_KEYS = frozenset(
     {
         "configuration_sha256",
@@ -288,6 +297,38 @@ def _server_digest(path: Path, deadline: float | None) -> tuple[str | None, str 
     return sha256_bytes(content), None
 
 
+def _repository_configuration_identity(
+    repository: RepositoryScope,
+    deadline: float | None,
+) -> tuple[str, set[str]]:
+    path = Path(repository.checkout_root) / "pyrightconfig.json"
+    _check_deadline(deadline)
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return PYRIGHT_CONFIGURATION_SHA256, set()
+    except PermissionError:
+        return PYRIGHT_CONFIGURATION_SHA256, {"pyright_repository_config_unsafe"}
+    except OSError:
+        return PYRIGHT_CONFIGURATION_SHA256, {"pyright_repository_config_unreadable"}
+    try:
+        configuration, _raw = _read_json_object(
+            path,
+            MAX_PYRIGHT_CONFIG_BYTES,
+            prefix="pyright_repository_config",
+            deadline=deadline,
+        )
+    except _MetadataError as exc:
+        return PYRIGHT_CONFIGURATION_SHA256, {exc.code}
+    envelope = {
+        "base_lsp_configuration": PYRIGHT_CONFIGURATION,
+        "repository_configuration": configuration,
+    }
+    fingerprint = sha256_bytes(canonical_json_bytes(envelope))
+    _check_deadline(deadline)
+    return fingerprint, set()
+
+
 def _package_identity(
     server: Path,
     deadline: float | None,
@@ -462,11 +503,17 @@ def _probe_node(
         environment = _node_environment()
     except (OSError, TypeError, ValueError):
         return None, None, None, {"pyright_node_probe_failed"}
-    found = shutil.which("node", path=environment.get("PATH", ""))
+    try:
+        found = shutil.which("node", path=environment.get("PATH", ""))
+    except _NODE_PROBE_ERRORS:
+        return None, None, None, {"pyright_node_probe_failed"}
     _check_deadline(deadline)
     if found is None:
         return None, None, None, {"pyright_node_missing"}
-    node = Path(found)
+    try:
+        node = Path(found)
+    except (TypeError, ValueError):
+        return None, None, None, {"pyright_node_probe_failed"}
     if os.name == "nt" and node.suffix.casefold() in {".bat", ".cmd"}:
         return node, None, None, {"pyright_node_executable_unsafe"}
 
@@ -486,34 +533,70 @@ def _probe_node(
             shell=False,
             env=environment,
         )
-    except OSError:
+    except _NODE_PROBE_ERRORS:
         return node, None, None, {"pyright_node_probe_failed"}
 
-    reader, output, read_errors, oversized = _bounded_node_output(process)
+    try:
+        reader, output, read_errors, oversized = _bounded_node_output(process)
+    except _NODE_PROBE_ERRORS:
+        with contextlib.suppress(*_NODE_PROBE_ERRORS):
+            process.kill()
+        return node, None, None, {"pyright_node_probe_failed"}
     timed_out = False
+    probe_failed = False
     try:
         process.wait(timeout=max(0.0, probe_deadline - time.monotonic()))
     except subprocess.TimeoutExpired:
         timed_out = True
-        with contextlib.suppress(OSError):
+        try:
             process.kill()
-        with contextlib.suppress(subprocess.TimeoutExpired):
+        except _NODE_PROBE_ERRORS:
+            probe_failed = True
+        try:
             process.wait(timeout=max(0.0, probe_deadline - time.monotonic()))
-    reader.join(timeout=max(0.0, probe_deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            pass
+        except _NODE_PROBE_ERRORS:
+            probe_failed = True
+    except _NODE_PROBE_ERRORS:
+        probe_failed = True
+        try:
+            process.kill()
+        except _NODE_PROBE_ERRORS:
+            pass
+    try:
+        reader.join(timeout=max(0.0, probe_deadline - time.monotonic()))
+    except _NODE_PROBE_ERRORS:
+        probe_failed = True
     if reader.is_alive():
         timed_out = True
-        with contextlib.suppress(OSError):
+        try:
             process.kill()
+        except _NODE_PROBE_ERRORS:
+            probe_failed = True
     stream = getattr(process, "stdout", None)
     if stream is not None and not reader.is_alive():
-        with contextlib.suppress(OSError):
+        try:
             stream.close()
+        except _NODE_PROBE_ERRORS:
+            probe_failed = True
 
+    for error in read_errors:
+        if not isinstance(error, Exception):
+            raise error
+    if read_errors:
+        probe_failed = True
+    if probe_failed:
+        return node, None, None, {"pyright_node_probe_failed"}
     if timed_out:
         return node, None, None, {"pyright_node_probe_timeout"}
     if oversized.is_set():
         return node, None, None, {"pyright_node_output_oversized"}
-    if read_errors or process.returncode != 0 or len(output) != 1:
+    try:
+        returncode = process.returncode
+    except _NODE_PROBE_ERRORS:
+        return node, None, None, {"pyright_node_probe_failed"}
+    if returncode != 0 or len(output) != 1:
         return node, None, None, {"pyright_node_probe_failed"}
     match = _NODE_VERSION.fullmatch(output[0])
     if match is None:
@@ -538,12 +621,234 @@ def _candidate_exists(path: Path, deadline: float | None) -> tuple[bool, str | N
     return True, None
 
 
+def _path_exists_no_follow(path: Path, deadline: float | None) -> bool:
+    _check_deadline(deadline)
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    _check_deadline(deadline)
+    return True
+
+
+def _lock_mentions_pyright(
+    path: Path,
+    deadline: float | None,
+) -> bool:
+    try:
+        value, _raw = _read_json_object(
+            path,
+            MAX_PACKAGE_LOCK_BYTES,
+            prefix="pyright_lockfile",
+            deadline=deadline,
+        )
+    except _MetadataError:
+        return False
+    lockfile_version = value.get("lockfileVersion")
+    if lockfile_version == 1:
+        entries = value.get("dependencies")
+        key = "pyright"
+    elif lockfile_version in {2, 3}:
+        entries = value.get("packages")
+        key = "node_modules/pyright"
+    else:
+        return False
+    return isinstance(entries, dict) and key in entries
+
+
+def _candidate_is_present(
+    source: str,
+    server: Path,
+    repository: RepositoryScope,
+    state_root: Path,
+    deadline: float | None,
+) -> tuple[bool, str | None]:
+    exists, code = _candidate_exists(server, deadline)
+    if exists:
+        return True, code
+    expected = _expected_source_server(source, repository, state_root)
+    if expected is None or server != expected:
+        return False, None
+    if source == "project-local":
+        evidence = (
+            server.parent,
+            server.with_name("package.json"),
+        )
+        return (
+            any(_path_exists_no_follow(path, deadline) for path in evidence)
+            or _lock_mentions_pyright(
+                Path(repository.checkout_root) / "package-lock.json", deadline
+            ),
+            None,
+        )
+    root = server.parent.parent
+    evidence = (
+        server.parent,
+        server.with_name("package.json"),
+        root / "install-manifest.json",
+    )
+    return any(_path_exists_no_follow(path, deadline) for path in evidence), None
+
+
 def _validate_candidates(candidates: PyrightCandidates) -> None:
     if not isinstance(candidates, PyrightCandidates):
         raise TypeError("candidates must be a PyrightCandidates instance or None")
     for values in (candidates.project_local, candidates.managed, candidates.system):
         if not isinstance(values, tuple) or any(not isinstance(path, Path) for path in values):
             raise TypeError("Pyright candidate categories must be tuples of Paths")
+
+
+def _expected_source_server(
+    source: str,
+    repository: RepositoryScope,
+    state_root: Path,
+) -> Path | None:
+    if source == "project-local":
+        return Path(repository.checkout_root) / "node_modules/pyright/langserver.index.js"
+    if source == "managed":
+        return managed_pyright_root(state_root) / PYRIGHT_SERVER_RELATIVE
+    return None
+
+
+def _is_local_absolute_path(path: Path) -> bool:
+    raw = os.fspath(path)
+    return (
+        path.is_absolute()
+        and not raw.startswith(("\\\\", "//"))
+        and "\0" not in raw
+        and ".." not in path.parts
+        and not path.is_reserved()
+    )
+
+
+def _lexical_absolute_path(path: Path) -> Path:
+    return Path(os.path.abspath(os.path.normpath(os.fspath(path))))
+
+
+def _system_candidate_server(
+    candidate: Path,
+    deadline: float | None,
+) -> tuple[Path | None, set[str], bool]:
+    mismatch = {"pyright_source_path_mismatch"}
+    if not _is_local_absolute_path(candidate):
+        return None, mismatch, True
+    if (
+        candidate.name == "langserver.index.js"
+        and candidate.parent.name == "pyright"
+        and candidate.parent.parent.name == "node_modules"
+    ):
+        return candidate, set(), False
+
+    if candidate.name.casefold() == "pyright-langserver.cmd":
+        if candidate.parent.name == ".bin":
+            node_modules = candidate.parent.parent
+            if node_modules.name != "node_modules":
+                return None, mismatch, False
+            server = node_modules / "pyright/langserver.index.js"
+        else:
+            server = candidate.parent / "node_modules/pyright/langserver.index.js"
+        try:
+            info = candidate.lstat()
+        except FileNotFoundError:
+            return server, set(), False
+        except OSError:
+            return None, mismatch, False
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or getattr(info, "st_file_attributes", 0) & 0x400
+            or not stat.S_ISREG(info.st_mode)
+        ):
+            return None, mismatch, False
+        return server, set(), False
+
+    if candidate.name != "pyright-langserver":
+        return None, mismatch, False
+    try:
+        info = candidate.lstat()
+    except OSError:
+        return None, mismatch, False
+    if not stat.S_ISLNK(info.st_mode):
+        return None, mismatch, False
+    if candidate.parent.name == ".bin":
+        node_modules = candidate.parent.parent
+        if node_modules.name != "node_modules":
+            return None, mismatch, False
+        expected = node_modules / "pyright/langserver.index.js"
+    elif candidate.parent.name == "bin":
+        expected = candidate.parent.parent / "lib/node_modules/pyright/langserver.index.js"
+    else:
+        return None, mismatch, False
+    _check_deadline(deadline)
+    try:
+        raw_target = os.readlink(candidate)
+    except (OSError, ValueError):
+        return None, mismatch, False
+    target = Path(raw_target)
+    if not target.is_absolute():
+        target = candidate.parent / target
+    target = _lexical_absolute_path(target)
+    _check_deadline(deadline)
+    if not _is_local_absolute_path(target) or target != expected:
+        return None, mismatch, False
+    return expected, set(), False
+
+
+def _normalize_candidate(
+    source: str,
+    candidate: Path,
+    repository: RepositoryScope,
+    state_root: Path,
+    deadline: float | None,
+) -> tuple[Path | None, set[str], bool]:
+    expected = _expected_source_server(source, repository, state_root)
+    if expected is not None:
+        if candidate != expected:
+            return (
+                None,
+                {"pyright_source_path_mismatch"},
+                not _is_local_absolute_path(candidate),
+            )
+        return expected, set(), False
+    return _system_candidate_server(candidate, deadline)
+
+
+def _normalized_candidate_is_present(
+    source: str,
+    candidate: Path,
+    server: Path | None,
+    force_present: bool,
+    repository: RepositoryScope,
+    state_root: Path,
+    deadline: float | None,
+) -> tuple[bool, str | None]:
+    if force_present:
+        return True, None
+    if server is None:
+        return _candidate_exists(candidate, deadline)
+    if source != "system":
+        return _candidate_is_present(
+            source,
+            server,
+            repository,
+            state_root,
+            deadline,
+        )
+    exists, code = _candidate_exists(candidate, deadline)
+    if exists:
+        return True, code
+    exists, code = _candidate_exists(server, deadline)
+    if exists:
+        return True, code
+    evidence = (server.parent, server.with_name("package.json"))
+    if any(_path_exists_no_follow(path, deadline) for path in evidence):
+        return True, None
+    lockfile = _lockfile_path("system", server, repository)
+    return (
+        lockfile is not None and _lock_mentions_pyright(lockfile, deadline),
+        None,
+    )
 
 
 def _default_paths(
@@ -553,12 +858,9 @@ def _default_paths(
     deadline: float | None,
 ) -> tuple[Path, ...]:
     _check_deadline(deadline)
-    if source == "project-local":
-        result = (
-            Path(repository.checkout_root) / "node_modules/pyright/langserver.index.js",
-        )
-    elif source == "managed":
-        result = (managed_pyright_root(state_root) / PYRIGHT_SERVER_RELATIVE,)
+    expected = _expected_source_server(source, repository, state_root)
+    if expected is not None:
+        result = (expected,)
     else:
         try:
             environment = _node_environment()
@@ -570,7 +872,10 @@ def _default_paths(
     return result
 
 
-def _missing_identity() -> PyrightIdentity:
+def _missing_identity(
+    configuration_sha256: str,
+    profile_codes: set[str],
+) -> PyrightIdentity:
     return PyrightIdentity(
         status="missing",
         source=None,
@@ -582,34 +887,38 @@ def _missing_identity() -> PyrightIdentity:
         executable_sha256=None,
         package_sha256=None,
         initialization_options_sha256=PYRIGHT_INITIALIZATION_OPTIONS_SHA256,
-        configuration_sha256=PYRIGHT_CONFIGURATION_SHA256,
+        configuration_sha256=configuration_sha256,
         qualified=False,
-        degradation_codes=("pyright_missing",),
+        degradation_codes=tuple(sorted({"pyright_missing", *profile_codes})),
     )
 
 
 def _inspect_candidate(
     repository: RepositoryScope,
     source: str,
-    server: Path,
-    initial_code: str | None,
+    server: Path | None,
+    initial_codes: set[str],
+    configuration_sha256: str,
+    profile_codes: set[str],
     deadline: float | None,
 ) -> PyrightIdentity:
-    codes = set() if initial_code is None else {initial_code}
-    version, package_codes = _package_identity(server, deadline)
-    codes.update(package_codes)
-    executable_sha256, digest_code = _server_digest(server, deadline)
-    if digest_code is not None:
-        codes.add(digest_code)
-
+    codes = {*initial_codes, *profile_codes}
+    version: str | None = None
+    executable_sha256: str | None = None
     package_sha256: str | None = None
-    if source == "managed":
-        package_sha256, manifest_codes = _managed_manifest(
-            server, executable_sha256, deadline
-        )
-        codes.update(manifest_codes)
-    else:
-        codes.update(_lockfile_codes(source, server, repository, deadline))
+    if server is not None:
+        version, package_codes = _package_identity(server, deadline)
+        codes.update(package_codes)
+        executable_sha256, digest_code = _server_digest(server, deadline)
+        if digest_code is not None:
+            codes.add(digest_code)
+        if source == "managed":
+            package_sha256, manifest_codes = _managed_manifest(
+                server, executable_sha256, deadline
+            )
+            codes.update(manifest_codes)
+        else:
+            codes.update(_lockfile_codes(source, server, repository, deadline))
 
     node_executable, node_version, node_major, node_codes = _probe_node(deadline)
     codes.update(node_codes)
@@ -626,7 +935,7 @@ def _inspect_candidate(
         executable_sha256=executable_sha256,
         package_sha256=package_sha256,
         initialization_options_sha256=PYRIGHT_INITIALIZATION_OPTIONS_SHA256,
-        configuration_sha256=PYRIGHT_CONFIGURATION_SHA256,
+        configuration_sha256=configuration_sha256,
         qualified=qualified,
         degradation_codes=degradation_codes,
     )
@@ -646,6 +955,9 @@ def discover_pyright(
         raise TypeError("state_root must be a Path")
     deadline = _validated_deadline(deadline)
     _check_deadline(deadline)
+    configuration_sha256, profile_codes = _repository_configuration_identity(
+        repository, deadline
+    )
     if candidates is not None:
         _validate_candidates(candidates)
 
@@ -659,14 +971,33 @@ def discover_pyright(
             if candidates is not None
             else _default_paths(source, repository, state_root, deadline)
         )
-        for server in paths:
-            exists, initial_code = _candidate_exists(server, deadline)
+        for candidate in paths:
+            server, initial_codes, force_present = _normalize_candidate(
+                source,
+                candidate,
+                repository,
+                state_root,
+                deadline,
+            )
+            exists, initial_code = _normalized_candidate_is_present(
+                source,
+                candidate,
+                server,
+                force_present,
+                repository,
+                state_root,
+                deadline,
+            )
             if exists:
+                if initial_code is not None:
+                    initial_codes.add(initial_code)
                 return _inspect_candidate(
                     repository,
                     source,
                     server,
-                    initial_code,
+                    initial_codes,
+                    configuration_sha256,
+                    profile_codes,
                     deadline,
                 )
-    return _missing_identity()
+    return _missing_identity(configuration_sha256, profile_codes)

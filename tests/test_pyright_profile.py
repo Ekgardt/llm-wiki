@@ -7,11 +7,13 @@ import dataclasses
 import io
 import os
 import socket
+import stat
 import subprocess
 import sys
 import time
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 
 import lsp_paths
 import pyright_profile
@@ -64,6 +66,11 @@ class _FakeNodeProcess:
         self.killed = True
 
 
+class _CloseErrorBytesIO(io.BytesIO):
+    def close(self) -> None:
+        raise ValueError("close failed")
+
+
 def _install_node_probe(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -77,6 +84,8 @@ def _install_node_probe(
     process = _FakeNodeProcess(output, returncode=returncode, times_out=times_out)
 
     def which(name: str, *, path: str | None = None) -> str | None:
+        if name == "pyright-langserver":
+            return None
         assert name == "node"
         assert path is not None
         return str(node)
@@ -96,6 +105,26 @@ def _scope(repository: Path):
 
 def _empty_candidates() -> PyrightCandidates:
     return PyrightCandidates(project_local=(), managed=(), system=())
+
+
+def _stat_with(
+    value: os.stat_result,
+    *,
+    mode: int | None = None,
+    file_attributes: int | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        st_dev=value.st_dev,
+        st_ino=value.st_ino,
+        st_mode=value.st_mode if mode is None else mode,
+        st_mtime_ns=value.st_mtime_ns,
+        st_size=value.st_size,
+        st_file_attributes=(
+            getattr(value, "st_file_attributes", 0)
+            if file_attributes is None
+            else file_attributes
+        ),
+    )
 
 
 def test_constants_configuration_and_public_dataclasses_are_exact() -> None:
@@ -204,6 +233,73 @@ def test_discovery_prefers_qualified_exact_project_candidate(
     assert len(calls) == 1
 
 
+def test_explicit_project_package_json_cannot_impersonate_entrypoint(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server.with_name("package.json"),), (), ()),
+    )
+
+    assert result.status == "degraded"
+    assert result.source == "project-local"
+    assert result.qualified is False
+    assert "pyright_source_path_mismatch" in result.degradation_codes
+
+
+def test_explicit_project_candidate_outside_checkout_cannot_qualify(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    create_pyright_fixture(repository)
+    outside = create_pyright_fixture(tmp_path / "outside-project")
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((outside,), (), ()),
+    )
+
+    assert result.status == "degraded"
+    assert result.source == "project-local"
+    assert result.qualified is False
+    assert "pyright_source_path_mismatch" in result.degradation_codes
+
+
+def test_explicit_managed_candidate_outside_approved_root_cannot_qualify(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    outside = create_pyright_fixture(tmp_path / "outside-managed", managed=True)
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((), (outside,), ()),
+    )
+
+    assert result.status == "degraded"
+    assert result.source == "managed"
+    assert result.qualified is False
+    assert "pyright_source_path_mismatch" in result.degradation_codes
+
+
 def test_degraded_project_candidate_does_not_fall_through_to_qualified_managed(
     monkeypatch: pytest.MonkeyPatch,
     repository: Path,
@@ -224,6 +320,71 @@ def test_degraded_project_candidate_does_not_fall_through_to_qualified_managed(
     assert "pyright_version_mismatch" in result.degradation_codes
 
 
+def test_project_package_without_server_degrades_before_valid_managed_install(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    server.unlink()
+    create_pyright_fixture(lsp_paths.managed_pyright_root(state_root), managed=True)
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(scope, state_root=state_root)
+
+    assert result.status == "degraded"
+    assert result.source == "project-local"
+    assert result.server_executable == server
+    assert "pyright_server_missing" in result.degradation_codes
+
+
+def test_project_lock_entry_without_package_tree_is_presence_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    server.unlink()
+    server.with_name("package.json").unlink()
+    server.parent.rmdir()
+    create_pyright_fixture(lsp_paths.managed_pyright_root(state_root), managed=True)
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(scope, state_root=state_root)
+
+    assert result.status == "degraded"
+    assert result.source == "project-local"
+    assert result.server_executable == server
+    assert "pyright_server_missing" in result.degradation_codes
+
+
+def test_managed_manifest_without_package_tree_is_presence_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(
+        lsp_paths.managed_pyright_root(state_root), managed=True
+    )
+    server.unlink()
+    server.with_name("package.json").unlink()
+    server.parent.rmdir()
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(scope, state_root=state_root)
+
+    assert result.status == "degraded"
+    assert result.source == "managed"
+    assert result.server_executable == server
+    assert "pyright_server_missing" in result.degradation_codes
+
+
 def test_managed_candidate_requires_canonical_receipt_and_recomputed_digest(
     monkeypatch: pytest.MonkeyPatch,
     repository: Path,
@@ -231,6 +392,7 @@ def test_managed_candidate_requires_canonical_receipt_and_recomputed_digest(
     tmp_path: Path,
 ) -> None:
     scope = _scope(repository)
+    (repository / "pyrightconfig.json").unlink()
     server = create_pyright_fixture(
         lsp_paths.managed_pyright_root(state_root),
         managed=True,
@@ -278,6 +440,259 @@ def test_system_candidate_without_equivalent_lockfile_provenance_is_degraded(
     assert result.source == "system"
     assert result.qualified is False
     assert "pyright_lockfile_missing" in result.degradation_codes
+
+
+def test_system_package_metadata_without_server_is_presence_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(tmp_path / "system-package")
+    server.unlink()
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((), (), (server,)),
+    )
+
+    assert result.status == "degraded"
+    assert result.source == "system"
+    assert result.server_executable == server
+    assert "pyright_server_missing" in result.degradation_codes
+
+
+def test_system_windows_global_cmd_shim_maps_to_actual_package_entrypoint(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    prefix = tmp_path / "npm-prefix"
+    server = create_pyright_fixture(prefix)
+    shim = prefix / "pyright-langserver.cmd"
+    shim.write_text("arbitrary shim text must not be parsed", encoding="utf-8")
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((), (), (shim,)),
+    )
+
+    assert result.status == "qualified"
+    assert result.source == "system"
+    assert result.server_executable == server
+    assert result.qualified is True
+
+
+def test_default_system_discovery_uses_same_windows_shim_normalization(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    prefix = tmp_path / "default-npm-prefix"
+    server = create_pyright_fixture(prefix)
+    shim = prefix / "pyright-langserver.cmd"
+    shim.write_text("arbitrary shim text must not be parsed", encoding="utf-8")
+    node = tmp_path / "node.exe"
+    process = _FakeNodeProcess(b"v22.23.1\n")
+
+    def which(name: str, *, path: str | None = None) -> str | None:
+        assert path is not None
+        if name == "pyright-langserver":
+            return str(shim)
+        assert name == "node"
+        return str(node)
+
+    monkeypatch.setattr(pyright_profile.shutil, "which", which)
+    monkeypatch.setattr(
+        pyright_profile.subprocess,
+        "Popen",
+        lambda *args, **kwargs: process,
+    )
+
+    result = discover_pyright(scope, state_root=state_root)
+
+    assert result.status == "qualified"
+    assert result.source == "system"
+    assert result.server_executable == server
+
+
+def test_system_local_bin_cmd_shim_maps_to_sibling_package(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    package_root = tmp_path / "local-package"
+    server = create_pyright_fixture(package_root)
+    shim = package_root / "node_modules/.bin/pyright-langserver.cmd"
+    shim.parent.mkdir(parents=True)
+    shim.write_text("arbitrary shim text must not be parsed", encoding="utf-8")
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((), (), (shim,)),
+    )
+
+    assert result.status == "qualified"
+    assert result.server_executable == server
+    assert result.qualified is True
+
+
+def test_system_posix_symlink_maps_only_to_expected_global_package_entrypoint(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    prefix = tmp_path / "posix-prefix"
+    server = create_pyright_fixture(prefix / "lib")
+    shim = prefix / "bin/pyright-langserver"
+    shim.parent.mkdir(parents=True)
+    shim.write_bytes(b"placeholder")
+    real_lstat = Path.lstat
+
+    def lstat(path: Path) -> os.stat_result:
+        value = real_lstat(path)
+        if path == shim:
+            return _stat_with(value, mode=stat.S_IFLNK | 0o777)  # type: ignore[return-value]
+        return value
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    monkeypatch.setattr(
+        pyright_profile.os,
+        "readlink",
+        lambda path: "../lib/node_modules/pyright/langserver.index.js",
+    )
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((), (), (shim,)),
+    )
+
+    assert result.status == "qualified"
+    assert result.server_executable == server
+    assert result.qualified is True
+
+
+def test_unrecognized_system_shim_is_not_read_or_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    shim = tmp_path / "unrecognized/.bin/pyright-langserver.cmd"
+    shim.parent.mkdir(parents=True)
+    shim.write_text("do not parse or hash me", encoding="utf-8")
+    real_read = pyright_profile.read_stable_bytes
+
+    def guarded_read(path: Path, *args: object, **kwargs: object) -> bytes:
+        if path == shim:
+            pytest.fail("unrecognized shim was read")
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(pyright_profile, "read_stable_bytes", guarded_read)
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((), (), (shim,)),
+    )
+
+    assert result.status == "degraded"
+    assert result.source == "system"
+    assert result.server_executable is None
+    assert "pyright_source_path_mismatch" in result.degradation_codes
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        Path(r"\\server\share\pyright-langserver.cmd"),
+        Path(r"\\?\C:\tools\pyright-langserver.cmd"),
+    ],
+    ids=("unc", "device"),
+)
+def test_system_candidates_reject_unc_and_device_paths_without_reading(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+    candidate: Path,
+) -> None:
+    scope = _scope(repository)
+    real_read = pyright_profile.read_stable_bytes
+
+    def guarded_read(path: Path, *args: object, **kwargs: object) -> bytes:
+        if path == candidate:
+            pytest.fail("unsafe system path was read")
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(pyright_profile, "read_stable_bytes", guarded_read)
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((), (), (candidate,)),
+    )
+
+    assert result.status == "degraded"
+    assert result.server_executable is None
+    assert "pyright_source_path_mismatch" in result.degradation_codes
+
+
+def test_system_posix_symlink_rejects_target_outside_recognized_layout(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    shim = tmp_path / "posix-prefix/bin/pyright-langserver"
+    shim.parent.mkdir(parents=True)
+    shim.write_bytes(b"placeholder")
+    real_lstat = Path.lstat
+
+    def lstat(path: Path) -> os.stat_result:
+        value = real_lstat(path)
+        if path == shim:
+            return _stat_with(value, mode=stat.S_IFLNK | 0o777)  # type: ignore[return-value]
+        return value
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    monkeypatch.setattr(
+        pyright_profile.os,
+        "readlink",
+        lambda path: "../../outside/langserver.index.js",
+    )
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((), (), (shim,)),
+    )
+
+    assert result.status == "degraded"
+    assert result.server_executable is None
+    assert "pyright_source_path_mismatch" in result.degradation_codes
 
 
 def test_missing_discovery_has_no_network_process_installer_import_or_state_write(
@@ -502,7 +917,148 @@ def test_noncanonical_managed_manifest_is_degraded(
     assert "pyright_manifest_noncanonical" in result.degradation_codes
 
 
-def test_symlinked_package_metadata_is_rejected_without_fallthrough(
+def test_repository_pyrightconfig_changes_identity_hash_and_remains_qualified(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    configuration_path = repository / "pyrightconfig.json"
+    strict_configuration = {"typeCheckingMode": "strict"}
+    configuration_path.write_bytes(canonical_json_bytes(strict_configuration))
+    _install_node_probe(monkeypatch, tmp_path)
+
+    strict = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    expected_strict = sha256_bytes(
+        canonical_json_bytes(
+            {
+                "base_lsp_configuration": PYRIGHT_CONFIGURATION,
+                "repository_configuration": strict_configuration,
+            }
+        )
+    )
+    assert strict.status == "qualified"
+    assert strict.configuration_sha256 == expected_strict
+    assert strict.configuration_sha256 != sha256_bytes(
+        canonical_json_bytes(PYRIGHT_CONFIGURATION)
+    )
+
+    basic_configuration = {"typeCheckingMode": "basic"}
+    configuration_path.write_bytes(canonical_json_bytes(basic_configuration))
+    _install_node_probe(monkeypatch, tmp_path)
+    basic = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+    assert basic.status == "qualified"
+    assert basic.configuration_sha256 != strict.configuration_sha256
+
+
+def test_managed_receipt_attests_base_profile_while_identity_includes_repository_config(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(
+        lsp_paths.managed_pyright_root(state_root), managed=True
+    )
+    repository_configuration = {"typeCheckingMode": "strict"}
+    (repository / "pyrightconfig.json").write_bytes(
+        canonical_json_bytes(repository_configuration)
+    )
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(scope, state_root=state_root)
+
+    assert result.status == "qualified"
+    assert result.configuration_sha256 == sha256_bytes(
+        canonical_json_bytes(
+            {
+                "base_lsp_configuration": PYRIGHT_CONFIGURATION,
+                "repository_configuration": repository_configuration,
+            }
+        )
+    )
+    manifest = build_pyright_install_manifest(server_sha256=sha256_bytes(server.read_bytes()))
+    assert manifest["configuration_sha256"] == sha256_bytes(
+        canonical_json_bytes(PYRIGHT_CONFIGURATION)
+    )
+
+
+@pytest.mark.parametrize(
+    ("content", "expected_code"),
+    [
+        (b"{", "pyright_repository_config_malformed"),
+        (b"x" * (256 * 1024 + 1), "pyright_repository_config_oversized"),
+    ],
+    ids=("malformed", "oversized"),
+)
+def test_invalid_repository_pyrightconfig_degrades_without_crashing(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+    content: bytes,
+    expected_code: str,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    (repository / "pyrightconfig.json").write_bytes(content)
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert result.status == "degraded"
+    assert result.qualified is False
+    assert expected_code in result.degradation_codes
+
+
+def test_reparse_repository_pyrightconfig_degrades_through_no_follow_read(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    configuration_path = repository / "pyrightconfig.json"
+    configuration_path.write_bytes(canonical_json_bytes({"typeCheckingMode": "strict"}))
+    real_lstat = Path.lstat
+
+    def lstat(path: Path) -> os.stat_result:
+        value = real_lstat(path)
+        if path == configuration_path:
+            return _stat_with(value, file_attributes=0x400)  # type: ignore[return-value]
+        return value
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    _install_node_probe(monkeypatch, tmp_path)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert result.status == "degraded"
+    assert "pyright_repository_config_unsafe" in result.degradation_codes
+
+
+def test_reparse_package_metadata_is_rejected_without_fallthrough(
     monkeypatch: pytest.MonkeyPatch,
     repository: Path,
     state_root: Path,
@@ -511,13 +1067,15 @@ def test_symlinked_package_metadata_is_rejected_without_fallthrough(
     scope = _scope(repository)
     server = create_pyright_fixture(repository)
     package_json = server.with_name("package.json")
-    target = tmp_path / "outside-package.json"
-    target.write_text('{"name":"pyright","version":"1.1.411"}', encoding="utf-8")
-    package_json.unlink()
-    try:
-        package_json.symlink_to(target)
-    except OSError as exc:
-        pytest.skip(f"symlinks unavailable: {exc}")
+    real_lstat = Path.lstat
+
+    def lstat(path: Path) -> os.stat_result:
+        value = real_lstat(path)
+        if path == package_json:
+            return _stat_with(value, file_attributes=0x400)  # type: ignore[return-value]
+        return value
+
+    monkeypatch.setattr(Path, "lstat", lstat)
     create_pyright_fixture(lsp_paths.managed_pyright_root(state_root), managed=True)
     _install_node_probe(monkeypatch, tmp_path)
 
@@ -655,6 +1213,149 @@ def test_node_timeout_is_a_stable_degradation_and_kills_probe(
     assert process.killed is True
     assert result.status == "degraded"
     assert "pyright_node_probe_timeout" in result.degradation_codes
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError("spawn failed"),
+        ValueError("invalid spawn"),
+        subprocess.SubprocessError("subprocess failed"),
+    ],
+    ids=("oserror", "value-error", "subprocess-error"),
+)
+def test_node_spawn_errors_are_stable_probe_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+    error: Exception,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    _install_node_probe(monkeypatch, tmp_path)
+
+    def fail_spawn(*args: object, **kwargs: object) -> object:
+        raise error
+
+    monkeypatch.setattr(pyright_profile.subprocess, "Popen", fail_spawn)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert result.status == "degraded"
+    assert "pyright_node_probe_failed" in result.degradation_codes
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError("wait failed"),
+        ValueError("invalid wait"),
+        subprocess.SubprocessError("subprocess wait failed"),
+    ],
+    ids=("oserror", "value-error", "subprocess-error"),
+)
+def test_node_wait_errors_are_stable_probe_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+    error: Exception,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    _node, _calls, process = _install_node_probe(monkeypatch, tmp_path)
+
+    def fail_wait(timeout: float | None = None) -> int:
+        raise error
+
+    monkeypatch.setattr(process, "wait", fail_wait)
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert result.status == "degraded"
+    assert "pyright_node_probe_failed" in result.degradation_codes
+
+
+def test_node_timeout_cleanup_error_is_a_stable_probe_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    _node, _calls, process = _install_node_probe(
+        monkeypatch, tmp_path, output=b"", times_out=True
+    )
+    monkeypatch.setattr(
+        process,
+        "kill",
+        lambda: (_ for _ in ()).throw(RuntimeError("kill failed")),
+    )
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert result.status == "degraded"
+    assert "pyright_node_probe_failed" in result.degradation_codes
+
+
+def test_node_stream_close_error_is_a_stable_probe_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    _node, _calls, process = _install_node_probe(monkeypatch, tmp_path)
+    process.stdout = _CloseErrorBytesIO(b"v22.23.1\n")
+
+    result = discover_pyright(
+        scope,
+        state_root=state_root,
+        candidates=PyrightCandidates((server,), (), ()),
+    )
+
+    assert result.status == "degraded"
+    assert "pyright_node_probe_failed" in result.degradation_codes
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt(), SystemExit(2)])
+def test_node_probe_does_not_swallow_process_control_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    tmp_path: Path,
+    error: BaseException,
+) -> None:
+    scope = _scope(repository)
+    server = create_pyright_fixture(repository)
+    _install_node_probe(monkeypatch, tmp_path)
+
+    def interrupt(*args: object, **kwargs: object) -> object:
+        raise error
+
+    monkeypatch.setattr(pyright_profile.subprocess, "Popen", interrupt)
+
+    with pytest.raises(type(error)):
+        discover_pyright(
+            scope,
+            state_root=state_root,
+            candidates=PyrightCandidates((server,), (), ()),
+        )
 
 
 def test_node_major_mismatch_preserves_full_version(
