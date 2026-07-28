@@ -8,6 +8,7 @@ import dataclasses
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tarfile
@@ -64,6 +65,25 @@ def _assert_no_owned_scratch(state_root: Path) -> None:
 
 def _error_code(error: pytest.ExceptionInfo[PyrightInstallError]) -> str:
     return error.value.code
+
+
+def _windows_process_handle_count() -> int:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.GetProcessHandleCount.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    kernel32.GetProcessHandleCount.restype = wintypes.BOOL
+    count = wintypes.DWORD()
+    if not kernel32.GetProcessHandleCount(
+        kernel32.GetCurrentProcess(), ctypes.byref(count)
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return int(count.value)
 
 
 def test_installed_pyright_public_shape_is_exact() -> None:
@@ -881,6 +901,118 @@ def test_windows_runtime_parent_creation_requires_successful_directory_flush(
     assert _error_code(error) == "pyright_install_fsync_failed"
     assert calls == failed_creation
     assert not _root(state_root).exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle ownership contract")
+def test_windows_parent_flush_failures_release_handles_for_repeated_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = _windows_process_handle_count()
+
+    for failed_creation in (1, 2, 3):
+        for attempt in range(24):
+            state_root = tmp_path / f"level-{failed_creation}-{attempt}" / "state"
+            calls = 0
+
+            def fail_selected_creation(handle: int) -> bool:
+                nonlocal calls
+                calls += 1
+                return calls != failed_creation
+
+            with monkeypatch.context() as scoped:
+                scoped.setattr(
+                    installer_module._windows_workspace,
+                    "flush_directory",
+                    fail_selected_creation,
+                )
+                with pytest.raises(PyrightInstallError) as error:
+                    install_pyright(state_root=state_root)
+
+            assert _error_code(error) == "pyright_install_fsync_failed"
+            assert calls == failed_creation
+            shutil.rmtree(state_root / "cache")
+            state_root.rmdir()
+            state_root.parent.rmdir()
+
+    assert _windows_process_handle_count() <= baseline + 2
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle ownership contract")
+def test_windows_parent_flush_primary_error_retains_close_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "state"
+    real_close = installer_module._windows_workspace.close_handle
+    close_calls: dict[int, int] = {}
+    flush_failed = False
+    faulted = False
+
+    def close_then_fail_once(handle: int) -> None:
+        nonlocal faulted
+        if flush_failed:
+            close_calls[handle] = close_calls.get(handle, 0) + 1
+        real_close(handle)
+        if flush_failed and not faulted:
+            faulted = True
+            raise OSError("injected close failure")
+
+    def fail_flush(handle: int) -> bool:
+        nonlocal flush_failed
+        flush_failed = True
+        return False
+
+    monkeypatch.setattr(
+        installer_module._windows_workspace,
+        "flush_directory",
+        fail_flush,
+    )
+    monkeypatch.setattr(
+        installer_module._windows_workspace,
+        "close_handle",
+        close_then_fail_once,
+    )
+
+    with pytest.raises(PyrightInstallError) as error:
+        install_pyright(state_root=state_root)
+
+    assert _error_code(error) == "pyright_install_fsync_failed"
+    assert isinstance(error.value.__cause__, OSError)
+    assert str(error.value.__cause__) == "injected close failure"
+    assert isinstance(error.value.__cause__.__cause__, OSError)
+    assert str(error.value.__cause__.__cause__) == "directory flush failed"
+    assert faulted is True
+    assert len(close_calls) == 2
+    assert set(close_calls.values()) == {1}
+    shutil.rmtree(state_root / "cache")
+
+    state_root = tmp_path / "close-transition-state"
+    close_calls.clear()
+    flush_failed = False
+    faulted = False
+
+    def successful_flush(handle: int) -> bool:
+        nonlocal flush_failed
+        flush_failed = True
+        return True
+
+    monkeypatch.setattr(
+        installer_module._windows_workspace,
+        "flush_directory",
+        successful_flush,
+    )
+
+    with pytest.raises(PyrightInstallError) as transition_error:
+        install_pyright(state_root=state_root)
+
+    assert _error_code(transition_error) == "pyright_state_root_unsafe"
+    assert isinstance(transition_error.value.__cause__, OSError)
+    assert str(transition_error.value.__cause__) == "injected close failure"
+    assert faulted is True
+    assert len(close_calls) == 2
+    assert set(close_calls.values()) == {1}
+    shutil.rmtree(state_root / "cache")
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows flush contract")

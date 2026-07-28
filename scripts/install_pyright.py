@@ -147,6 +147,30 @@ class _Handle:
             os.close(self.value)
 
 
+def _close_handles_preserving_error(
+    primary_error: BaseException,
+    *handles: _Handle | None,
+) -> None:
+    cleanup_errors: list[BaseException] = []
+    seen: set[int] = set()
+    for handle in handles:
+        if handle is None or id(handle) in seen:
+            continue
+        seen.add(id(handle))
+        try:
+            handle.close()
+        except BaseException as cleanup_error:
+            cleanup_errors.append(cleanup_error)
+    if not cleanup_errors:
+        return
+
+    cause = primary_error.__cause__
+    for cleanup_error in reversed(cleanup_errors):
+        cleanup_error.__cause__ = cause
+        cause = cleanup_error
+    raise primary_error from cause
+
+
 @dataclass(slots=True)
 class _OwnedFile:
     parent: _Handle
@@ -881,31 +905,38 @@ def _clear_directory(directory: _Handle) -> None:
 
 def _ensure_runtime_parent(state_root: Path, deadline: float) -> _Handle:
     current = _open_absolute_directory(state_root, writable=True)
+    pending: _Handle | None = None
     try:
         for component in ("cache", "code-tools", "pyright"):
+            pending = None
             _check_deadline(deadline)
             kind = _entry_kind(current, component)
             if kind is None:
                 try:
-                    child = _create_child_directory(current, component)
+                    pending = _create_child_directory(current, component)
                 except FileExistsError:
                     if _entry_kind(current, component) != "directory":
                         raise PermissionError(
                             "runtime hierarchy creation lost to an unsafe entry"
                         )
-                    child = _open_child_directory(current, component, writable=True)
+                    pending = _open_child_directory(
+                        current,
+                        component,
+                        writable=True,
+                    )
                 else:
                     _check_deadline(deadline)
                     _checked_fsync_directory(current)
             elif kind == "directory":
-                child = _open_child_directory(current, component, writable=True)
+                pending = _open_child_directory(current, component, writable=True)
             else:
                 raise PermissionError("runtime hierarchy contains an unsafe entry")
             current.close()
-            current = child
+            current = pending
+            pending = None
         return current
-    except BaseException:
-        current.close()
+    except BaseException as primary_error:
+        _close_handles_preserving_error(primary_error, pending, current)
         raise
 
 
