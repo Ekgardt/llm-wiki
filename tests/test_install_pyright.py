@@ -9,6 +9,7 @@ import io
 import json
 import os
 import stat
+import subprocess
 import tarfile
 import time
 import urllib.request
@@ -187,18 +188,90 @@ def test_local_artifact_replacement_during_copy_is_rejected(
     _assert_no_owned_scratch(state_root)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows sharing contract")
+def test_windows_local_artifact_copy_denies_writers_and_deleters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "state"
+    artifact = _artifact(tmp_path, monkeypatch)
+    moved = tmp_path / "temporarily-moved.tgz"
+    real_copy = installer_module._copy_to_owned_file
+    denied: list[str] = []
+
+    def probe_exclusive_source(*args: object, **kwargs: object):
+        try:
+            with artifact.path.open("r+b"):
+                pass
+        except PermissionError:
+            denied.append("write")
+        try:
+            artifact.path.rename(moved)
+        except PermissionError:
+            denied.append("delete")
+        else:
+            moved.rename(artifact.path)
+        return real_copy(*args, **kwargs)
+
+    monkeypatch.setattr(installer_module, "_copy_to_owned_file", probe_exclusive_source)
+
+    install_pyright(state_root=state_root, artifact=artifact.path)
+
+    assert denied == ["write", "delete"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX ctime contract")
+def test_posix_local_artifact_mutate_and_restore_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "state"
+    artifact = _artifact(tmp_path, monkeypatch)
+    original = artifact.path.read_bytes()
+    before = artifact.path.stat()
+    real_copy = installer_module._copy_to_owned_file
+
+    def mutate_and_restore(*args: object, **kwargs: object):
+        result = real_copy(*args, **kwargs)
+        changed = bytes([original[0] ^ 1]) + original[1:]
+        with artifact.path.open("r+b") as stream:
+            stream.write(changed)
+            stream.flush()
+            os.fsync(stream.fileno())
+            stream.seek(0)
+            stream.write(original)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.utime(
+            artifact.path,
+            ns=(before.st_atime_ns, before.st_mtime_ns),
+        )
+        assert artifact.path.stat().st_ctime_ns != before.st_ctime_ns
+        return result
+
+    monkeypatch.setattr(installer_module, "_copy_to_owned_file", mutate_and_restore)
+
+    with pytest.raises(PyrightInstallError) as error:
+        install_pyright(state_root=state_root, artifact=artifact.path)
+
+    assert _error_code(error) == "pyright_artifact_unsafe"
+    assert not _root(state_root).exists()
+
+
 def test_local_artifact_on_known_network_path_is_rejected(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state_root = tmp_path / "state"
     artifact = _artifact(tmp_path, monkeypatch)
-    real_network_check = installer_module._known_network_path
-    monkeypatch.setattr(
-        installer_module,
-        "_known_network_path",
-        lambda path: path == artifact.path or real_network_check(path),
-    )
+    real_local_check = installer_module._require_local_filesystem
+
+    def reject_artifact(path: Path, deadline: float) -> None:
+        if path == artifact.path:
+            raise PermissionError("simulated network artifact")
+        real_local_check(path, deadline)
+
+    monkeypatch.setattr(installer_module, "_require_local_filesystem", reject_artifact)
 
     with pytest.raises(PyrightInstallError) as error:
         install_pyright(state_root=state_root, artifact=artifact.path)
@@ -313,6 +386,35 @@ def test_decompressed_tar_limit_includes_metadata_before_members(
     state_root = tmp_path / "state"
     artifact = _artifact(tmp_path, monkeypatch)
     monkeypatch.setattr(installer_module, "MAX_DECOMPRESSED_BYTES", 511)
+
+    with pytest.raises(PyrightInstallError) as error:
+        install_pyright(state_root=state_root, artifact=artifact.path)
+
+    assert _error_code(error) == "pyright_archive_decompressed_limit"
+    assert not _root(state_root).exists()
+    _assert_no_owned_scratch(state_root)
+
+
+def test_decompressed_limit_drains_appended_concatenated_gzip_member(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "state"
+    artifact = create_pyright_install_artifact(tmp_path / "pyright.tgz")
+    limit = 128 * 1024
+    with artifact.path.open("ab") as stream:
+        stream.write(installer_module.gzip.compress(b"x" * limit, mtime=0))
+    content = artifact.path.read_bytes()
+    artifact = dataclasses.replace(
+        artifact,
+        package_sha256=installer_module.hashlib.sha256(content).hexdigest(),
+        package_integrity="sha512-"
+        + installer_module.base64.b64encode(
+            installer_module.hashlib.sha512(content).digest()
+        ).decode("ascii"),
+    )
+    use_pyright_install_artifact_identity(monkeypatch, artifact)
+    monkeypatch.setattr(installer_module, "MAX_DECOMPRESSED_BYTES", limit)
 
     with pytest.raises(PyrightInstallError) as error:
         install_pyright(state_root=state_root, artifact=artifact.path)
@@ -751,6 +853,107 @@ def test_stage_directory_fsync_failure_cleans_unpublished_tree(
     _assert_no_owned_scratch(state_root)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows flush contract")
+@pytest.mark.parametrize("failed_creation", [1, 2, 3], ids=("cache", "code-tools", "pyright"))
+def test_windows_runtime_parent_creation_requires_successful_directory_flush(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_creation: int,
+) -> None:
+    state_root = tmp_path / "state"
+    artifact = _artifact(tmp_path, monkeypatch)
+    calls = 0
+
+    def fail_selected_creation(handle: int) -> bool:
+        nonlocal calls
+        calls += 1
+        return calls != failed_creation
+
+    monkeypatch.setattr(
+        installer_module._windows_workspace,
+        "flush_directory",
+        fail_selected_creation,
+    )
+
+    with pytest.raises(PyrightInstallError) as error:
+        install_pyright(state_root=state_root, artifact=artifact.path)
+
+    assert _error_code(error) == "pyright_install_fsync_failed"
+    assert calls == failed_creation
+    assert not _root(state_root).exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows flush contract")
+def test_windows_stage_flush_false_fails_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "state"
+    artifact = _artifact(tmp_path, monkeypatch)
+    real_sync = installer_module._Stage.sync_directories
+    real_flush = installer_module._windows_workspace.flush_directory
+    syncing_stage = False
+
+    def sync_directories(self: object, deadline: float) -> None:
+        nonlocal syncing_stage
+        syncing_stage = True
+        try:
+            real_sync(self, deadline)
+        finally:
+            syncing_stage = False
+
+    def fail_stage_flush(handle: int) -> bool:
+        return False if syncing_stage else real_flush(handle)
+
+    monkeypatch.setattr(installer_module._Stage, "sync_directories", sync_directories)
+    monkeypatch.setattr(
+        installer_module._windows_workspace,
+        "flush_directory",
+        fail_stage_flush,
+    )
+
+    with pytest.raises(PyrightInstallError) as error:
+        install_pyright(state_root=state_root, artifact=artifact.path)
+
+    assert _error_code(error) == "pyright_install_fsync_failed"
+    assert not _root(state_root).exists()
+    _assert_no_owned_scratch(state_root)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows flush contract")
+def test_windows_publication_parent_flush_false_keeps_complete_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "state"
+    artifact = _artifact(tmp_path, monkeypatch)
+    real_publish = installer_module._atomic_publish_noreplace
+    published = False
+
+    def publish(*args: object, **kwargs: object) -> None:
+        nonlocal published
+        real_publish(*args, **kwargs)
+        published = True
+
+    def fail_published_parent(handle: int) -> bool:
+        return not published
+
+    monkeypatch.setattr(installer_module, "_atomic_publish_noreplace", publish)
+    monkeypatch.setattr(
+        installer_module._windows_workspace,
+        "flush_directory",
+        fail_published_parent,
+    )
+
+    with pytest.raises(PyrightInstallError) as error:
+        install_pyright(state_root=state_root, artifact=artifact.path)
+
+    assert _error_code(error) == "pyright_install_fsync_failed"
+    assert published is True
+    assert (_root(state_root) / "install-manifest.json").is_file()
+    _assert_no_owned_scratch(state_root)
+
+
 def test_parent_fsync_failure_after_publish_keeps_complete_final_tree(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -847,6 +1050,75 @@ def test_valid_existing_install_is_idempotent_before_artifact_or_network_access(
 
     assert observed == expected
     _assert_no_owned_scratch(state_root)
+
+
+def test_existing_install_root_swap_before_return_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "state"
+    artifact = _artifact(tmp_path, monkeypatch)
+    install_pyright(state_root=state_root, artifact=artifact.path)
+    root = _root(state_root)
+    displaced = root.with_name("validated-root")
+    real_sha256 = installer_module.hashlib.sha256
+    attempted = False
+    swapped = False
+
+    def swap_after_validation(content: bytes = b""):
+        nonlocal attempted, swapped
+        if not swapped and content == artifact.server_bytes:
+            attempted = True
+            root.rename(displaced)
+            root.mkdir()
+            swapped = True
+        return real_sha256(content)
+
+    monkeypatch.setattr(installer_module.hashlib, "sha256", swap_after_validation)
+
+    with pytest.raises(PyrightInstallError) as error:
+        install_pyright(state_root=state_root, artifact=tmp_path / "missing.tgz")
+
+    assert attempted is True
+    assert _error_code(error) == "pyright_existing_install_invalid"
+    if swapped:
+        assert not any(root.iterdir())
+
+
+def test_existing_install_appearing_after_lock_is_revalidated_before_return(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.code_kernel_helpers import create_pyright_fixture
+
+    state_root = tmp_path / "state"
+    artifact = _artifact(tmp_path, monkeypatch)
+    real_try_create_lock = installer_module._try_create_lock
+
+    def acquire_then_publish(parent: object, deadline: float):
+        lock = real_try_create_lock(parent, deadline)
+        assert lock is not None
+        create_pyright_fixture(
+            _root(state_root),
+            managed=True,
+            server_bytes=artifact.server_bytes,
+        )
+        return lock
+
+    monkeypatch.setattr(installer_module, "_try_create_lock", acquire_then_publish)
+    monkeypatch.setattr(
+        installer_module,
+        "_copy_local_artifact",
+        lambda *args, **kwargs: pytest.fail("artifact read after locked idempotent check"),
+    )
+
+    result = install_pyright(
+        state_root=state_root,
+        artifact=tmp_path / "missing.tgz",
+    )
+
+    assert result.root == _root(state_root)
+    assert result.server_sha256 == sha256_bytes(artifact.server_bytes)
 
 
 def test_existing_install_with_unsafe_extra_entry_is_refused(
@@ -995,12 +1267,64 @@ def test_known_network_state_root_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state_root = tmp_path / "state"
-    monkeypatch.setattr(installer_module, "_known_network_path", lambda path: True)
+
+    def reject_network(path: Path, deadline: float) -> None:
+        raise PermissionError("simulated network state root")
+
+    monkeypatch.setattr(installer_module, "_require_local_filesystem", reject_network)
 
     with pytest.raises(PyrightInstallError) as error:
         install_pyright(state_root=state_root, artifact=tmp_path / "must-not-be-read")
 
     assert _error_code(error) == "pyright_state_root_unsafe"
+
+
+def test_cloud_synchronized_state_root_is_rejected_before_artifact_access(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "OneDrive" / "state"
+
+    with pytest.raises(PyrightInstallError) as error:
+        install_pyright(
+            state_root=state_root,
+            artifact=tmp_path / "must-not-be-read.tgz",
+        )
+
+    assert _error_code(error) == "pyright_state_root_unsafe"
+    assert not _root(state_root).exists()
+
+
+def test_simulated_darwin_state_validation_uses_no_subprocess(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subprocess_calls: list[object] = []
+
+    def forbidden_subprocess(*args: object, **kwargs: object):
+        subprocess_calls.append(args)
+        raise AssertionError("installer state validation invoked a subprocess")
+
+    monkeypatch.setattr(installer_module.sys, "platform", "darwin")
+    monkeypatch.setattr(subprocess, "run", forbidden_subprocess)
+    monkeypatch.setattr(
+        installer_module,
+        "_known_network_path",
+        lambda path: subprocess.run(["/sbin/mount"]),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        installer_module,
+        "_darwin_filesystem_details",
+        lambda path, deadline: ("apfs", "/dev/disk3s1", 0x00001000),
+        raising=False,
+    )
+
+    installer_module._prepare_state_root(
+        tmp_path / "state",
+        time.monotonic() + 2.0,
+    )
+
+    assert subprocess_calls == []
 
 
 @pytest.mark.parametrize("deadline", [True, float("nan"), float("inf"), "later"])
@@ -1019,6 +1343,65 @@ def test_expired_deadline_is_rejected_before_state_creation(tmp_path: Path) -> N
     with pytest.raises(TimeoutError, match="deadline"):
         install_pyright(state_root=state_root, deadline=time.monotonic() - 1)
     assert not state_root.exists()
+
+
+def test_state_validation_honors_end_to_end_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_deadlines: list[float] = []
+
+    def slow_legacy_validation(path: Path) -> None:
+        time.sleep(0.25)
+
+    def bounded_lock_probe(path: Path, *, deadline: float):
+        observed_deadlines.append(deadline)
+        while time.monotonic() < deadline:
+            time.sleep(0.001)
+        return None
+
+    monkeypatch.setattr(
+        installer_module,
+        "validate_state_root",
+        slow_legacy_validation,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        installer_module,
+        "_sqlite_lock_probe",
+        bounded_lock_probe,
+        raising=False,
+    )
+    started = time.monotonic()
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        install_pyright(
+            state_root=tmp_path / "state",
+            deadline=started + 0.02,
+        )
+
+    elapsed = time.monotonic() - started
+    assert observed_deadlines == [pytest.approx(started + 0.02)]
+    assert elapsed < 0.12
+
+
+def test_nested_install_timeout_is_never_relabelled_as_io_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _artifact(tmp_path, monkeypatch)
+
+    def expire_during_copy(*args: object, **kwargs: object):
+        raise TimeoutError("Pyright installation deadline expired")
+
+    monkeypatch.setattr(
+        installer_module,
+        "_copy_to_owned_file",
+        expire_during_copy,
+    )
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        install_pyright(state_root=tmp_path / "state", artifact=artifact.path)
 
 
 def test_cli_requires_absolute_state_and_artifact_paths(

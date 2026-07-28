@@ -13,6 +13,7 @@ import io
 import json
 import math
 import os
+import re
 import secrets
 import stat
 import sys
@@ -28,10 +29,9 @@ import pyright_profile as _profile
 import windows_workspace as _windows_workspace
 from lsp_paths import managed_pyright_root
 from reliable_memory import (
-    UnsafeStateRoot,
-    _known_network_path,
+    _set_owner_only,
+    _sqlite_lock_probe,
     canonical_json_bytes,
-    validate_state_root,
 )
 
 DEFAULT_INSTALL_TIMEOUT_SECONDS = 120.0
@@ -51,6 +51,26 @@ MAX_PAX_BYTES = 1024 * 1024
 MAX_PAX_FIELDS = 256
 MAX_EXTENDED_METADATA_BYTES = 16 * 1024 * 1024
 MAX_RUNTIME_PARENT_ENTRIES = 16_384
+MAX_MOUNT_TABLE_BYTES = 4 * 1024 * 1024
+
+_DARWIN_MNT_LOCAL = 0x00001000
+_CLOUD_PATH_COMPONENTS = frozenset(
+    {"dropbox", "googledrive", "google drive", "iclouddrive", "onedrive"}
+)
+_NETWORK_FILESYSTEMS = frozenset(
+    {
+        "9p",
+        "afpfs",
+        "ceph",
+        "cifs",
+        "davfs",
+        "nfs",
+        "nfs4",
+        "smbfs",
+        "sshfs",
+        "webdav",
+    }
+)
 
 _LOCK_NAME = ".install-pyright-lock"
 _SCRATCH_PREFIX = ".install-pyright-"
@@ -64,6 +84,31 @@ _WINDOWS_RESERVED = frozenset(
         *(f"lpt{number}" for number in range(1, 10)),
     }
 )
+
+
+class _DarwinFsid(ctypes.Structure):
+    _fields_ = (("values", ctypes.c_int32 * 2),)
+
+
+class _DarwinStatfs(ctypes.Structure):
+    _fields_ = (
+        ("block_size", ctypes.c_uint32),
+        ("io_size", ctypes.c_int32),
+        ("blocks", ctypes.c_uint64),
+        ("blocks_free", ctypes.c_uint64),
+        ("blocks_available", ctypes.c_uint64),
+        ("files", ctypes.c_uint64),
+        ("files_free", ctypes.c_uint64),
+        ("filesystem_id", _DarwinFsid),
+        ("owner", ctypes.c_uint32),
+        ("filesystem_type", ctypes.c_uint32),
+        ("flags", ctypes.c_uint32),
+        ("filesystem_subtype", ctypes.c_uint32),
+        ("type_name", ctypes.c_char * 16),
+        ("mounted_on", ctypes.c_char * 1024),
+        ("mounted_from", ctypes.c_char * 1024),
+        ("reserved", ctypes.c_uint32 * 8),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,9 +399,147 @@ def _require_absolute_local(path: Path, label: str) -> None:
         raise ValueError(f"{label} must be an absolute local path")
 
 
-def _validate_existing_directory_chain(path: Path) -> None:
+def _decode_mount_field(value: str) -> str:
+    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), value)
+
+
+def _path_is_under(path: str, mount_point: str) -> bool:
+    normalized = mount_point.rstrip("/") or "/"
+    return normalized == "/" or path == normalized or path.startswith(normalized + "/")
+
+
+def _read_linux_mount_table(deadline: float) -> tuple[str, bool]:
+    for path, mountinfo in (
+        (Path("/proc/self/mountinfo"), True),
+        (Path("/proc/mounts"), False),
+    ):
+        _check_deadline(deadline)
+        try:
+            with path.open("rb") as stream:
+                raw = stream.read(MAX_MOUNT_TABLE_BYTES + 1)
+        except TimeoutError:
+            raise
+        except OSError:
+            continue
+        _check_deadline(deadline)
+        if len(raw) > MAX_MOUNT_TABLE_BYTES:
+            raise OSError("Linux mount table exceeded the bounded range")
+        try:
+            return raw.decode("utf-8", errors="strict"), mountinfo
+        except UnicodeError as exc:
+            raise OSError("Linux mount table was not valid UTF-8") from exc
+    raise OSError("Linux mount table was unavailable")
+
+
+def _linux_filesystem_details(path: Path, deadline: float) -> tuple[str, str]:
+    data, mountinfo = _read_linux_mount_table(deadline)
+    target = str(path.resolve(strict=False)).replace("\\", "/")
+    matches: list[tuple[int, int, str, str]] = []
+    for index, line in enumerate(data.splitlines()):
+        _check_deadline(deadline)
+        fields = line.split()
+        try:
+            if mountinfo:
+                separator = fields.index("-")
+                mount_point = fields[4]
+                filesystem = fields[separator + 1]
+                source = fields[separator + 2]
+            else:
+                source, mount_point, filesystem = fields[:3]
+        except (IndexError, ValueError) as exc:
+            raise OSError("Linux mount table was malformed") from exc
+        decoded_mount = _decode_mount_field(mount_point)
+        if _path_is_under(target, decoded_mount):
+            matches.append(
+                (
+                    len(decoded_mount.rstrip("/") or "/"),
+                    index,
+                    filesystem,
+                    _decode_mount_field(source),
+                )
+            )
+    if not matches:
+        raise OSError("Linux mount table did not identify the target filesystem")
+    _length, _index, filesystem, source = max(matches)
+    return filesystem, source
+
+
+def _nearest_existing_path(path: Path, deadline: float) -> Path:
+    for candidate in (path, *path.parents):
+        _check_deadline(deadline)
+        try:
+            candidate.lstat()
+        except FileNotFoundError:
+            continue
+        return candidate
+    raise OSError("no existing filesystem ancestor was available")
+
+
+def _darwin_filesystem_details(path: Path, deadline: float) -> tuple[str, str, int]:
+    target = _nearest_existing_path(path, deadline)
+    library = ctypes.CDLL(None, use_errno=True)
+    function = getattr(library, "statfs", None)
+    if function is None:
+        raise OSError("Darwin statfs is unavailable")
+    function.argtypes = (ctypes.c_char_p, ctypes.POINTER(_DarwinStatfs))
+    function.restype = ctypes.c_int
+    information = _DarwinStatfs()
+    _check_deadline(deadline)
+    if function(os.fsencode(target), ctypes.byref(information)) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, "Darwin statfs failed")
+    _check_deadline(deadline)
+    try:
+        filesystem = bytes(information.type_name).split(b"\0", 1)[0].decode("ascii")
+        source = bytes(information.mounted_from).split(b"\0", 1)[0].decode("utf-8")
+    except UnicodeError as exc:
+        raise OSError("Darwin statfs returned invalid text") from exc
+    if not filesystem or not source:
+        raise OSError("Darwin statfs returned incomplete filesystem identity")
+    return filesystem, source, int(information.flags)
+
+
+def _filesystem_type_is_network(filesystem: str) -> bool:
+    normalized = filesystem.casefold()
+    return normalized in _NETWORK_FILESYSTEMS or normalized.endswith(".sshfs")
+
+
+def _require_local_filesystem(path: Path, deadline: float) -> None:
+    _check_deadline(deadline)
+    raw = os.fspath(path)
+    if raw.startswith(("\\\\", "//")):
+        raise PermissionError("UNC paths are not local filesystems")
+    if sys.platform == "darwin":
+        filesystem, source, flags = _darwin_filesystem_details(path, deadline)
+        local = bool(flags & _DARWIN_MNT_LOCAL)
+    elif sys.platform.startswith("linux"):
+        filesystem, source = _linux_filesystem_details(path, deadline)
+        local = True
+    elif os.name == "nt":
+        anchor = path.resolve(strict=False).anchor
+        if not anchor:
+            raise OSError("Windows path has no local drive anchor")
+        drive_type = int(ctypes.windll.kernel32.GetDriveTypeW(anchor))
+        if drive_type in {0, 1}:
+            raise OSError("Windows drive type is unavailable")
+        filesystem = "windows-network" if drive_type == 4 else "windows-local"
+        source = anchor
+        local = drive_type in {2, 3, 5, 6}
+    else:
+        raise OSError("platform filesystem locality check is unavailable")
+    _check_deadline(deadline)
+    if (
+        not local
+        or _filesystem_type_is_network(filesystem)
+        or source.startswith(("\\\\", "//"))
+    ):
+        raise PermissionError("path is on a network filesystem")
+
+
+def _validate_existing_directory_chain(path: Path, deadline: float) -> None:
     candidates = [path, *path.parents]
     for candidate in reversed(candidates):
+        _check_deadline(deadline)
         if candidate == Path(candidate.anchor):
             continue
         try:
@@ -367,20 +550,42 @@ def _validate_existing_directory_chain(path: Path) -> None:
             raise PermissionError("runtime path contains a link, reparse point, or non-directory")
 
 
+def _validate_installer_state_root(path: Path, deadline: float) -> None:
+    _check_deadline(deadline)
+    if any(part.casefold() in _CLOUD_PATH_COMPONENTS for part in path.parts):
+        raise PermissionError("state root is cloud-synchronized")
+    _require_local_filesystem(path, deadline)
+    _check_deadline(deadline)
+    path.mkdir(parents=True, exist_ok=True)
+    _check_deadline(deadline)
+    _set_owner_only(path, 0o700)
+    _check_deadline(deadline)
+    lock_supported = _sqlite_lock_probe(path, deadline=deadline)
+    _check_deadline(deadline)
+    if lock_supported is not True:
+        raise PermissionError("state root failed the SQLite locking probe")
+
+
 def _prepare_state_root(state_root: Path, deadline: float) -> None:
     _check_deadline(deadline)
     _require_absolute_local(state_root, "state_root")
     try:
-        _validate_existing_directory_chain(state_root)
-        if _known_network_path(state_root):
-            raise PermissionError("state root is on a network filesystem")
+        _validate_existing_directory_chain(state_root, deadline)
         _check_deadline(deadline)
-        validate_state_root(state_root)
+        _validate_installer_state_root(state_root, deadline)
         _check_deadline(deadline)
-        _validate_existing_directory_chain(state_root / "cache/code-tools/pyright")
-        if _known_network_path(state_root / "cache/code-tools/pyright"):
-            raise PermissionError("runtime hierarchy is on a network filesystem")
-    except (OSError, RuntimeError, UnsafeStateRoot, ValueError) as exc:
+        _validate_existing_directory_chain(
+            state_root / "cache/code-tools/pyright",
+            deadline,
+        )
+        _require_local_filesystem(
+            state_root / "cache/code-tools/pyright",
+            deadline,
+        )
+        _check_deadline(deadline)
+    except TimeoutError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
         raise PyrightInstallError("pyright_state_root_unsafe") from exc
 
 
@@ -398,9 +603,14 @@ def _posix_directory_flags() -> int:
     )
 
 
-def _open_absolute_directory(path: Path) -> _Handle:
+def _open_absolute_directory(path: Path, *, writable: bool = False) -> _Handle:
     if os.name == "nt":
-        return _Handle(_windows_workspace.open_directory_path(path), True)
+        function = (
+            _windows_workspace.open_writable_directory_path
+            if writable
+            else _windows_workspace.open_directory_path
+        )
+        return _Handle(function(path), True)
     flags = _posix_directory_flags()
     absolute = path.absolute()
     current: int | None = os.open(absolute.anchor, flags)
@@ -502,16 +712,11 @@ def _create_child_file(parent: _Handle, name: str) -> _Handle:
     return _Handle(os.open(name, flags, 0o600, dir_fd=parent.value), False)
 
 
-def _open_child_file(parent: _Handle, name: str, *, shared: bool = False) -> _Handle:
+def _open_child_file(parent: _Handle, name: str) -> _Handle:
     if _entry_kind(parent, name) != "file":
         raise PermissionError("expected a regular file")
     if os.name == "nt":
-        function = (
-            _windows_workspace.open_shared_readonly_source_file
-            if shared
-            else _windows_workspace.open_file
-        )
-        return _Handle(function(parent.value, name), False)
+        return _Handle(_windows_workspace.open_file(parent.value, name), False)
     flags = (
         os.O_RDONLY
         | os.O_NOFOLLOW
@@ -585,6 +790,8 @@ def _fsync_directory(handle: _Handle) -> None:
 def _checked_fsync_file(handle: _Handle) -> None:
     try:
         _fsync_file(handle)
+    except TimeoutError:
+        raise
     except OSError as exc:
         raise PyrightInstallError("pyright_install_fsync_failed") from exc
 
@@ -592,6 +799,8 @@ def _checked_fsync_file(handle: _Handle) -> None:
 def _checked_fsync_directory(handle: _Handle) -> None:
     try:
         _fsync_directory(handle)
+    except TimeoutError:
+        raise
     except OSError as exc:
         raise PyrightInstallError("pyright_install_fsync_failed") from exc
 
@@ -671,7 +880,7 @@ def _clear_directory(directory: _Handle) -> None:
 
 
 def _ensure_runtime_parent(state_root: Path, deadline: float) -> _Handle:
-    current = _open_absolute_directory(state_root)
+    current = _open_absolute_directory(state_root, writable=True)
     try:
         for component in ("cache", "code-tools", "pyright"):
             _check_deadline(deadline)
@@ -687,10 +896,7 @@ def _ensure_runtime_parent(state_root: Path, deadline: float) -> _Handle:
                     child = _open_child_directory(current, component, writable=True)
                 else:
                     _check_deadline(deadline)
-                    if os.name == "nt":
-                        _windows_workspace.flush_directory(current.value)
-                    else:
-                        _fsync_directory(current)
+                    _checked_fsync_directory(current)
             elif kind == "directory":
                 child = _open_child_directory(current, component, writable=True)
             else:
@@ -955,6 +1161,8 @@ def _existing_result(
     _check_deadline(deadline)
     try:
         kind = _entry_kind(parent, _profile.PYRIGHT_VERSION)
+    except TimeoutError:
+        raise
     except (OSError, RuntimeError, PermissionError) as exc:
         raise PyrightInstallError("pyright_existing_install_invalid") from exc
     if kind is None:
@@ -963,6 +1171,7 @@ def _existing_result(
         raise PyrightInstallError("pyright_existing_install_invalid")
     try:
         installation = _open_child_directory(parent, _profile.PYRIGHT_VERSION)
+        installation_identity = _identity(installation)
         try:
             _validate_existing_tree(installation, deadline)
             manifest_raw = _read_bounded_file(
@@ -997,21 +1206,31 @@ def _existing_result(
                 )
             finally:
                 package.close()
+            if not server_raw:
+                raise PyrightInstallError("pyright_existing_install_invalid")
+            server_sha256 = hashlib.sha256(server_raw).hexdigest()
+            if not hmac.compare_digest(server_sha256, validated["server_sha256"]):
+                raise PyrightInstallError("pyright_existing_install_invalid")
+            manifest_sha256 = hashlib.sha256(manifest_raw).hexdigest()
+            if (
+                _named_identity(
+                    parent,
+                    _profile.PYRIGHT_VERSION,
+                    directory=True,
+                )
+                != installation_identity
+            ):
+                raise PyrightInstallError("pyright_existing_install_invalid")
+            return InstalledPyright(
+                root=root,
+                version=_profile.PYRIGHT_VERSION,
+                package_sha256=_profile.PYRIGHT_PACKAGE_SHA256,
+                package_integrity=_profile.PYRIGHT_PACKAGE_INTEGRITY,
+                server_sha256=server_sha256,
+                manifest_sha256=manifest_sha256,
+            )
         finally:
             installation.close()
-        if not server_raw:
-            raise PyrightInstallError("pyright_existing_install_invalid")
-        server_sha256 = hashlib.sha256(server_raw).hexdigest()
-        if not hmac.compare_digest(server_sha256, validated["server_sha256"]):
-            raise PyrightInstallError("pyright_existing_install_invalid")
-        return InstalledPyright(
-            root=root,
-            version=_profile.PYRIGHT_VERSION,
-            package_sha256=_profile.PYRIGHT_PACKAGE_SHA256,
-            package_integrity=_profile.PYRIGHT_PACKAGE_INTEGRITY,
-            server_sha256=server_sha256,
-            manifest_sha256=hashlib.sha256(manifest_raw).hexdigest(),
-        )
     except TimeoutError:
         raise
     except PyrightInstallError as exc:
@@ -1049,6 +1268,17 @@ def _copy_to_owned_file(
     return sha256.hexdigest(), sha512.digest()
 
 
+def _posix_source_identity(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        stat.S_IFMT(info.st_mode),
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
 def _copy_local_artifact(
     artifact: Path,
     destination: _OwnedFile,
@@ -1057,20 +1287,34 @@ def _copy_local_artifact(
     _check_deadline(deadline)
     _require_absolute_local(artifact, "artifact")
     try:
-        _validate_existing_directory_chain(artifact.parent)
-        if _known_network_path(artifact):
-            raise PermissionError("artifact is on a network filesystem")
+        _validate_existing_directory_chain(artifact.parent, deadline)
+        _require_local_filesystem(artifact, deadline)
         before = artifact.lstat()
         if _is_reparse_or_link(before) or not stat.S_ISREG(before.st_mode):
             raise PermissionError("artifact is not a regular local file")
         if before.st_size > MAX_COMPRESSED_BYTES:
             raise PyrightInstallError("pyright_archive_compressed_limit")
+        before_posix_identity = (
+            _posix_source_identity(before) if os.name == "posix" else None
+        )
         parent = _open_absolute_directory(artifact.parent)
         try:
-            source = _open_child_file(parent, artifact.name, shared=True)
+            if os.name == "nt":
+                source = _Handle(
+                    _windows_workspace.open_exclusive_readonly_source_file(artifact),
+                    False,
+                )
+            else:
+                source = _open_child_file(parent, artifact.name)
             source_identity = _identity(source)
             try:
                 if _file_size(source) != before.st_size:
+                    raise PermissionError("artifact changed before open")
+                if (
+                    before_posix_identity is not None
+                    and _posix_source_identity(os.fstat(source.value))
+                    != before_posix_identity
+                ):
                     raise PermissionError("artifact changed before open")
                 result = _copy_to_owned_file(source, destination, deadline)
                 if _identity(source) != source_identity:
@@ -1078,22 +1322,27 @@ def _copy_local_artifact(
             finally:
                 source.close()
             after = artifact.lstat()
-            stable = (
-                before.st_dev,
-                before.st_ino,
-                before.st_size,
-                before.st_mtime_ns,
-            ) == (
-                after.st_dev,
-                after.st_ino,
-                after.st_size,
-                after.st_mtime_ns,
-            )
+            if before_posix_identity is not None:
+                stable = _posix_source_identity(after) == before_posix_identity
+            else:
+                stable = (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                ) == (
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_size,
+                    after.st_mtime_ns,
+                )
             if not stable or _named_identity(parent, artifact.name, directory=False) != source_identity:
                 raise PermissionError("artifact changed or was replaced during copy")
             return result
         finally:
             parent.close()
+    except TimeoutError:
+        raise
     except PyrightInstallError:
         raise
     except (OSError, RuntimeError, PermissionError, ValueError) as exc:
@@ -1129,6 +1378,8 @@ def _download_artifact(
         raise TimeoutError("Pyright installation deadline expired")
     try:
         response_context = _open_pinned_url(request, timeout=timeout)
+    except TimeoutError:
+        raise
     except urllib.error.HTTPError as exc:
         code = (
             "pyright_download_redirect"
@@ -1155,6 +1406,8 @@ def _download_artifact(
                 _check_deadline(deadline)
                 try:
                     chunk = response.read(COPY_CHUNK_BYTES)
+                except TimeoutError:
+                    raise
                 except OSError as exc:
                     raise PyrightInstallError("pyright_download_failed") from exc
                 if not isinstance(chunk, bytes):
@@ -1172,6 +1425,8 @@ def _download_artifact(
         _check_deadline(deadline)
         _checked_fsync_file(destination.handle)
         return sha256.hexdigest(), sha512.digest()
+    except TimeoutError:
+        raise
     except PyrightInstallError:
         raise
     except OSError as exc:
@@ -1409,6 +1664,13 @@ def _extract_archive(
                         package_json = captured
                     if server_member:
                         server_sha256 = digest
+            while True:
+                _check_deadline(deadline)
+                trailing = bounded.read(COPY_CHUNK_BYTES)
+                if not isinstance(trailing, bytes):
+                    raise PyrightInstallError("pyright_archive_malformed")
+                if not trailing:
+                    break
         except gzip.BadGzipFile as exc:
             raise PyrightInstallError("pyright_archive_malformed") from exc
         except (tarfile.TarError, EOFError) as exc:
@@ -1426,6 +1688,9 @@ def _extract_archive(
         if server_sha256 == hashlib.sha256(b"").hexdigest():
             raise PyrightInstallError("pyright_server_empty")
         return stage, package_json, server_sha256
+    except TimeoutError:
+        stage.cleanup()
+        raise
     except OSError as exc:
         stage.cleanup()
         raise PyrightInstallError("pyright_archive_extract_failed") from exc
@@ -1517,6 +1782,8 @@ def _install_under_lock(
                 raise PyrightInstallError("pyright_publish_race")
             return existing
         except PyrightInstallError:
+            raise
+        except TimeoutError:
             raise
         except OSError as exc:
             raise PyrightInstallError("pyright_publish_failed") from exc

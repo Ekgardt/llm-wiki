@@ -502,6 +502,30 @@ def open_shared_readonly_source_file(parent: int, name: str) -> int:
     )
 
 
+def open_exclusive_readonly_source_file(path: Path) -> int:
+    """Open one local no-follow file while denying writers and deleters."""
+    require_capability()
+    value, _pure = _bounded_local_absolute_path(path)
+    handle = _API.create_file(
+        f"\\\\?\\{value}",
+        _FILE_READ_DATA | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE,
+        _FILE_SHARE_READ,
+        None,
+        _OPEN_EXISTING,
+        _FILE_ATTRIBUTE_NORMAL | _FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    if handle == _INVALID_HANDLE_VALUE:
+        raise ctypes.WinError(ctypes.get_last_error())
+    result = int(handle)
+    try:
+        identity(result, directory=False)
+    except BaseException:
+        close_handle(result)
+        raise
+    return result
+
+
 def open_deletable_file(parent: int, name: str) -> int:
     return _relative_handle(
         parent, name, directory=False, create=False, deletable=True
@@ -514,17 +538,17 @@ def open_deletable_directory(parent: int, name: str) -> int:
     )
 
 
-def open_directory_path(path: Path) -> int:
-    """Open a local absolute directory one no-follow component at a time."""
+def _open_directory_path(path: Path, *, writable_leaf: bool) -> int:
     require_capability()
-    absolute = Path(path).absolute()
-    pure = PureWindowsPath(str(absolute))
-    if not pure.drive or not pure.root or str(pure).startswith("\\\\"):
-        raise RuntimeError("safe Windows sealed workspaces require a local drive path")
+    _value, pure = _bounded_local_absolute_path(path)
+    parts = pure.parts[1:]
     root_path = f"\\\\?\\{pure.drive}\\"
+    desired = _FILE_LIST_DIRECTORY | _FILE_READ_ATTRIBUTES
+    if writable_leaf and not parts:
+        desired |= _FILE_WRITE_ATTRIBUTES | _FILE_WRITE_DATA | _SYNCHRONIZE
     root = _API.create_file(
         root_path,
-        _FILE_LIST_DIRECTORY | _FILE_READ_ATTRIBUTES,
+        desired,
         _FILE_SHARE_READ | _FILE_SHARE_WRITE,
         None,
         _OPEN_EXISTING,
@@ -536,8 +560,14 @@ def open_directory_path(path: Path) -> int:
     current: int | None = int(root)
     try:
         identity(current, directory=True)
-        for part in pure.parts[1:]:
-            child = open_directory(current, part)
+        for index, part in enumerate(parts):
+            child = _relative_handle(
+                current,
+                part,
+                directory=True,
+                create=False,
+                writable=writable_leaf and index == len(parts) - 1,
+            )
             try:
                 close_handle(current)
             except BaseException:
@@ -555,6 +585,16 @@ def open_directory_path(path: Path) -> int:
         if current is not None:
             close_handle(current)
         raise
+
+
+def open_directory_path(path: Path) -> int:
+    """Open a local absolute directory one no-follow component at a time."""
+    return _open_directory_path(path, writable_leaf=False)
+
+
+def open_writable_directory_path(path: Path) -> int:
+    """Open one local absolute directory for metadata writes and flushing."""
+    return _open_directory_path(path, writable_leaf=True)
 
 
 def list_directory(handle: int, *, max_entries: int) -> list[WindowsEntry]:
@@ -757,8 +797,10 @@ __all__ = [
     "open_deletable_directory",
     "open_deletable_file",
     "open_directory_path",
+    "open_exclusive_readonly_source_file",
     "open_file",
     "open_shared_readonly_source_file",
+    "open_writable_directory_path",
     "publish_file",
     "read_chunks",
     "replace_file",

@@ -60,7 +60,31 @@ def test_get_short_path_rejects_nonlocal_paths_before_bounded_api_call(
 @pytest.mark.skipif(os.name != "nt", reason="Windows native handle boundary")
 def test_created_directory_handle_supports_durable_metadata_flush(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    relative_opens: list[tuple[str, dict[str, object]]] = []
+    real_relative_handle = windows_workspace._relative_handle
+
+    def tracking_relative_handle(
+        parent: int,
+        name: str,
+        **options: object,
+    ) -> int:
+        relative_opens.append((name, options))
+        return real_relative_handle(parent, name, **options)
+
+    monkeypatch.setattr(windows_workspace, "_relative_handle", tracking_relative_handle)
+    writable = windows_workspace.open_writable_directory_path(tmp_path)
+    try:
+        assert windows_workspace.flush_directory(writable) is True
+    finally:
+        windows_workspace.close_handle(writable)
+    assert relative_opens
+    assert relative_opens[-1] == (
+        tmp_path.name,
+        {"directory": True, "create": False, "writable": True},
+    )
+
     parent = windows_workspace.open_directory_path(tmp_path)
     directory = windows_workspace.create_writable_directory(parent, "durable")
     try:
