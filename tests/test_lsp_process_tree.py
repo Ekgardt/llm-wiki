@@ -166,6 +166,31 @@ def test_public_process_tree_shape_is_exact() -> None:
     assert ProcessTree.__slots__ == ("process", "windows_job", "process_group")
 
 
+def test_public_deadline_spawn_rejects_expiry_before_platform_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        lsp_process_tree.subprocess,
+        "Popen",
+        lambda *args, **kwargs: pytest.fail("expired ProcessTree spawn started a child"),
+    )
+    if os.name == "nt":
+        monkeypatch.setattr(
+            lsp_process_tree,
+            "_create_windows_job",
+            lambda: pytest.fail("expired ProcessTree spawn created a Job"),
+        )
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        ProcessTree.spawn_with_deadline(
+            _command(),
+            cwd=tmp_path,
+            env=dict(os.environ),
+            deadline=time.monotonic() - 1,
+        )
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job observation boundary")
 def test_windows_tree_wait_requires_stable_empty_job_observation(
     monkeypatch: pytest.MonkeyPatch,
@@ -449,15 +474,17 @@ def test_terminate_cleans_descendant_after_direct_leader_already_exited(
     )
     descendant_pid = _descendant(tree)
     tree.process.wait(timeout=5)
-    assert _pid_alive(descendant_pid)
-
     try:
+        assert _pid_alive(descendant_pid)
+        assert tree.has_live_descendants() is True
         tree.terminate(deadline=time.monotonic() + 5)
         deadline = time.monotonic() + 2
         while _pid_alive(descendant_pid) and time.monotonic() < deadline:
             time.sleep(0.02)
         assert not _pid_alive(descendant_pid)
     finally:
+        if tree.process_group is not None or tree.windows_job is not None:
+            tree.terminate(deadline=time.monotonic() + 5)
         tree.close()
 
 

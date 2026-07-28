@@ -22,10 +22,13 @@ try:
 except ModuleNotFoundError:  # Python 3.10
     import tomli as tomllib
 
+import lsp_process_tree as _lsp_process_tree
 from bounded_io import read_stable_bytes
 from lsp_paths import PYRIGHT_VERSION, managed_pyright_root
 from reliable_memory import _known_network_path, canonical_json_bytes, sha256_bytes
 from repository_scope import RepositoryScope
+
+ProcessTree = _lsp_process_tree.ProcessTree
 
 PYRIGHT_PACKAGE_URL = "https://registry.npmjs.org/pyright/-/pyright-1.1.411.tgz"
 PYRIGHT_PACKAGE_SHA256 = (
@@ -837,11 +840,11 @@ def _release_node_probe_owner(owner: object) -> None:
         _NODE_PROBE_OWNERS.discard(owner)
 
 
-def _retain_node_probe_owner(owner: object, process: object) -> None:
+def _retain_node_probe_owner(owner: object, owned: object) -> None:
     with _NODE_PROBE_OWNERS_LOCK:
         if owner not in _NODE_PROBE_OWNERS:
             raise RuntimeError("Node probe cleanup owner was not reserved")
-        _PENDING_NODE_PROBE_CLEANUPS[owner] = process
+        _PENDING_NODE_PROBE_CLEANUPS[owner] = owned
 
 
 def _pending_node_probe_cleanup_snapshot() -> tuple[object, ...]:
@@ -854,44 +857,71 @@ def _pending_node_probe_cleanup_items() -> tuple[tuple[object, object], ...]:
         return tuple(_PENDING_NODE_PROBE_CLEANUPS.items())
 
 
-def _stop_node_probe(
-    process: object,
-    cleanup_deadline: float | None = None,
-) -> tuple[bool, bool]:
-    """Kill a probe and spend only its independent bounded reap budget."""
-    if cleanup_deadline is None:
-        cleanup_deadline = time.monotonic() + NODE_PROBE_CLEANUP_SECONDS
-    cleanup_ok = True
-    reaped = False
+def _terminate_node_probe_tree(tree: object, cleanup_deadline: float) -> bool:
     try:
-        process.kill()
+        tree.terminate(deadline=cleanup_deadline)
     except _NODE_PROBE_ERRORS:
-        cleanup_ok = False
-    try:
-        process.wait(timeout=max(0.0, cleanup_deadline - time.monotonic()))
-    except _NODE_PROBE_ERRORS:
-        cleanup_ok = False
-    else:
-        reaped = True
-    return cleanup_ok, reaped
+        return False
+    return True
 
 
-def _retry_node_probe_cleanups() -> None:
+def _release_node_probe_tree(tree: object) -> bool:
+    streams_closed = True
+    process = tree.process
+    for name in ("stdin", "stdout", "stderr"):
+        try:
+            stream = getattr(process, name)
+        except _NODE_PROBE_ERRORS:
+            streams_closed = False
+            continue
+        if stream is None or getattr(stream, "closed", False):
+            continue
+        try:
+            stream.close()
+        except _NODE_PROBE_ERRORS:
+            streams_closed = False
+    if not streams_closed:
+        return False
+    try:
+        tree.close()
+    except _NODE_PROBE_ERRORS:
+        return False
+    return True
+
+
+def _cleanup_node_probe_owner(owned: object, cleanup_deadline: float) -> bool:
+    if isinstance(owned, _lsp_process_tree._ProcessTreeSpawnError):
+        job = owned.windows_job
+        if job is None:
+            return True
+        try:
+            _lsp_process_tree._close_windows_handle(job)
+        except _NODE_PROBE_ERRORS:
+            return False
+        owned.windows_job = None
+        return True
+    if not _terminate_node_probe_tree(owned, cleanup_deadline):
+        return False
+    return _release_node_probe_tree(owned)
+
+
+def _retry_node_probe_cleanups(cleanup_deadline: float | None = None) -> None:
     """Retry all retained probes within one shared cleanup budget."""
     if not _pending_node_probe_cleanup_snapshot():
         return
     if not _NODE_PROBE_DRAIN_LOCK.acquire(blocking=False):
         return
     try:
-        cleanup_deadline = time.monotonic() + NODE_PROBE_CLEANUP_SECONDS
-        for owner, process in _pending_node_probe_cleanup_items():
+        if cleanup_deadline is None:
+            cleanup_deadline = time.monotonic() + NODE_PROBE_CLEANUP_SECONDS
+        for owner, owned in _pending_node_probe_cleanup_items():
             if time.monotonic() >= cleanup_deadline:
                 break
             try:
-                _cleanup_ok, reaped = _stop_node_probe(process, cleanup_deadline)
+                released = _cleanup_node_probe_owner(owned, cleanup_deadline)
             except BaseException:
                 continue
-            if reaped:
+            if released:
                 _release_node_probe_owner(owner)
     finally:
         _NODE_PROBE_DRAIN_LOCK.release()
@@ -940,7 +970,7 @@ def _node_executable_is_safe(node: Path, deadline: float | None) -> bool:
 def _probe_node(
     deadline: float | None,
 ) -> tuple[Path | None, str | None, int | None, set[str]]:
-    """Probe Node within its deadline plus at most two bounded cleanup phases."""
+    """Probe Node within its deadline plus one fixed tree-cleanup allowance."""
     _check_deadline(deadline)
     try:
         environment = _node_environment()
@@ -967,21 +997,25 @@ def _probe_node(
     remaining = probe_deadline - now
     if remaining <= 0:
         return node, None, None, {"pyright_node_probe_timeout"}
-    _retry_node_probe_cleanups()
+    hard_cleanup_deadline = probe_deadline + NODE_PROBE_CLEANUP_SECONDS
+    _retry_node_probe_cleanups(
+        min(time.monotonic() + NODE_PROBE_CLEANUP_SECONDS, hard_cleanup_deadline)
+    )
     if time.monotonic() >= probe_deadline:
         return node, None, None, {"pyright_node_probe_timeout"}
     owner = _reserve_node_probe_owner()
     if owner is None:
         return node, None, None, {"pyright_node_probe_failed"}
     try:
-        process = subprocess.Popen(
+        tree = ProcessTree.spawn_with_deadline(
             [str(node), "--version"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            shell=False,
+            cwd=node.parent,
             env=environment,
+            deadline=probe_deadline,
         )
+    except _lsp_process_tree._ProcessTreeSpawnError as error:
+        _retain_node_probe_owner(owner, error.tree if error.tree is not None else error)
+        return node, None, None, {"pyright_node_probe_failed"}
     except _NODE_PROBE_ERRORS:
         _release_node_probe_owner(owner)
         return node, None, None, {"pyright_node_probe_failed"}
@@ -989,10 +1023,14 @@ def _probe_node(
         _release_node_probe_owner(owner)
         raise
 
+    process = tree.process
     output: bytes | None = None
     degradation_code: str | None = None
     stream = None
-    reaped = False
+    parent_returncode: int | None = None
+    parent_exited = False
+    had_live_descendants = False
+    tree_empty = False
     cleanup_attempted = False
     try:
         try:
@@ -1001,57 +1039,79 @@ def _probe_node(
             except _NODE_PROBE_ERRORS:
                 degradation_code = "pyright_node_probe_failed"
             try:
-                process.wait(timeout=max(0.0, probe_deadline - time.monotonic()))
+                parent_returncode = process.wait(
+                    timeout=max(0.0, probe_deadline - time.monotonic())
+                )
             except subprocess.TimeoutExpired:
                 if degradation_code is None:
                     degradation_code = "pyright_node_probe_timeout"
-                cleanup_attempted = True
-                cleanup_ok, reaped = _stop_node_probe(process)
-                if not cleanup_ok:
-                    degradation_code = "pyright_node_probe_failed"
             except _NODE_PROBE_ERRORS:
                 degradation_code = "pyright_node_probe_failed"
-                cleanup_attempted = True
-                _cleanup_ok, reaped = _stop_node_probe(process)
             else:
-                reaped = True
-            if degradation_code is None:
                 try:
-                    returncode = process.returncode
+                    observed_returncode = process.returncode
                 except _NODE_PROBE_ERRORS:
                     degradation_code = "pyright_node_probe_failed"
                 else:
-                    if returncode != 0 or stream is None:
+                    parent_exited = observed_returncode is not None
+                    parent_returncode = observed_returncode
+            if parent_exited:
+                try:
+                    had_live_descendants = tree.has_live_descendants()
+                except _NODE_PROBE_ERRORS:
+                    degradation_code = "pyright_node_probe_failed"
+
+            cleanup_attempted = True
+            cleanup_deadline = min(
+                time.monotonic() + NODE_PROBE_CLEANUP_SECONDS,
+                hard_cleanup_deadline,
+            )
+            tree_empty = _terminate_node_probe_tree(tree, cleanup_deadline)
+            if not tree_empty:
+                degradation_code = "pyright_node_probe_failed"
+            elif degradation_code is None and (
+                had_live_descendants or time.monotonic() >= probe_deadline
+            ):
+                degradation_code = "pyright_node_probe_timeout"
+
+            if degradation_code is None:
+                if parent_returncode != 0 or stream is None:
+                    degradation_code = "pyright_node_probe_failed"
+                else:
+                    try:
+                        output = stream.read(MAX_NODE_VERSION_BYTES + 1)
+                    except _NODE_PROBE_ERRORS:
                         degradation_code = "pyright_node_probe_failed"
                     else:
-                        try:
-                            output = stream.read(MAX_NODE_VERSION_BYTES + 1)
-                        except _NODE_PROBE_ERRORS:
+                        if not isinstance(output, bytes):
                             degradation_code = "pyright_node_probe_failed"
-                        else:
-                            if not isinstance(output, bytes):
-                                degradation_code = "pyright_node_probe_failed"
-                            elif len(output) > MAX_NODE_VERSION_BYTES:
-                                degradation_code = "pyright_node_output_oversized"
+                        elif len(output) > MAX_NODE_VERSION_BYTES:
+                            degradation_code = "pyright_node_output_oversized"
         except BaseException:
-            if not reaped and not cleanup_attempted:
+            if not tree_empty and not cleanup_attempted:
                 try:
-                    _cleanup_ok, reaped = _stop_node_probe(process)
+                    cleanup_attempted = True
+                    cleanup_deadline = min(
+                        time.monotonic() + NODE_PROBE_CLEANUP_SECONDS,
+                        hard_cleanup_deadline,
+                    )
+                    tree_empty = _terminate_node_probe_tree(tree, cleanup_deadline)
                 except BaseException:
                     pass
             raise
     finally:
-        try:
-            if stream is not None:
-                try:
-                    stream.close()
-                except _NODE_PROBE_ERRORS:
+        if tree_empty:
+            released = False
+            try:
+                released = _release_node_probe_tree(tree)
+            finally:
+                if released:
+                    _release_node_probe_owner(owner)
+                else:
+                    _retain_node_probe_owner(owner, tree)
                     degradation_code = "pyright_node_probe_failed"
-        finally:
-            if reaped:
-                _release_node_probe_owner(owner)
-            else:
-                _retain_node_probe_owner(owner, process)
+        else:
+            _retain_node_probe_owner(owner, tree)
 
     if degradation_code is not None:
         return node, None, None, {degradation_code}

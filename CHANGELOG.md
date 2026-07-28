@@ -34,7 +34,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   transactions/tasks/results, the 30-day undo window, and live owners.
 - Recorded the local-filesystem requirement, current `synchronous=FULL`/no-WAL
   policy, bounded defaults and CLI overrides, cooperating-writer CAS boundary, and
-  explicit non-goals. The suite now collects **4823 tests**.
+  explicit non-goals. The suite now collects **4828 tests**.
 - Added canonical `repository-scope/v1` binding for repositories, linked worktrees,
   checkout roots, Git common directories, and captured commits. Generation readers
   reject the wrong repository/worktree scope instead of returning cross-checkout
@@ -66,9 +66,10 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 - Require PATH-resolved Node executables to be local regular files outside reparse
-  points and network filesystems, probe versions without reader threads through a
-  bounded wait/kill/reap/close lifecycle, and recursively freeze attested Pyright
-  configuration values behind an explicit thaw-copy boundary.
+  points and network filesystems, probe versions without reader threads through
+  platform-qualified whole-tree cleanup before reading inherited pipes, and
+  recursively freeze attested Pyright configuration values behind an explicit
+  thaw-copy boundary.
 - Prevent Pyright source-category laundering, block ancestor config search when a
   bounded root `pyproject.toml` has no object `[tool.pyright]`, fingerprint ordered
   per-file `pyrightconfig.json`/`pyproject.toml` inheritance, retain empty managed

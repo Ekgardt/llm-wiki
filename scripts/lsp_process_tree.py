@@ -171,11 +171,28 @@ class ProcessTree:
     def spawn(
         cls, command: Sequence[str], *, cwd: Path, env: Mapping[str, str]
     ) -> ProcessTree:
-        return cls._spawn_with_deadline(
+        return cls.spawn_with_deadline(
             command,
             cwd=cwd,
             env=env,
             deadline=time.monotonic() + 2.0,
+        )
+
+    @classmethod
+    def spawn_with_deadline(
+        cls,
+        command: Sequence[str],
+        *,
+        cwd: Path,
+        env: Mapping[str, str],
+        deadline: float,
+    ) -> ProcessTree:
+        """Spawn only while the caller's absolute operation deadline is live."""
+        return cls._spawn_with_deadline(
+            command,
+            cwd=cwd,
+            env=env,
+            deadline=deadline,
         )
 
     @classmethod
@@ -188,6 +205,8 @@ class ProcessTree:
         deadline: float,
     ) -> ProcessTree:
         deadline = _deadline(deadline)
+        if time.monotonic() >= deadline:
+            raise TimeoutError("LSP process-tree spawn deadline expired")
         options: dict[str, object] = {
             "cwd": cwd,
             "env": env,
@@ -246,6 +265,23 @@ class ProcessTree:
             if tree.windows_job is not None or not child_reaped:
                 raise _ProcessTreeSpawnError(tree, tuple(cleanup_errors)) from setup_error
             raise
+
+    def has_live_descendants(self) -> bool:
+        """Observe descendants after the direct process has been reaped."""
+        if self.process.poll() is None:
+            raise RuntimeError("direct LSP process is still live")
+        if os.name == "nt":
+            job = self.windows_job
+            if job is None:
+                raise RuntimeError("Windows LSP process tree ownership was released")
+            return _bounded_job_active_processes(job) != 0
+        group = self.process_group
+        if group is None:
+            raise RuntimeError("POSIX LSP process group ownership was released")
+        direct_reaped, group_absent = _observe_posix_tree(self.process, group)
+        if not direct_reaped:
+            raise RuntimeError("direct LSP process was not reaped")
+        return not group_absent
 
     def terminate(self, *, deadline: float) -> None:
         deadline = _deadline(deadline)
