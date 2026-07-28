@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import base64
+import gzip
 import hashlib
+import io
 import json
 import os
 import shutil
 import stat
 import subprocess
+import tarfile
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -59,6 +63,83 @@ from reliable_memory import canonical_json_bytes, validate_state_root
 from repository_scope import sanitized_git_environment
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures/code_kernel/python"
+
+
+@dataclass(frozen=True, slots=True)
+class PyrightTarEntry:
+    name: str
+    data: bytes = b""
+    kind: bytes = tarfile.REGTYPE
+    linkname: str = ""
+    pax_headers: Mapping[str, str] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PyrightInstallArtifactFixture:
+    path: Path
+    package_sha256: str
+    package_integrity: str
+    server_bytes: bytes
+
+
+def create_pyright_install_artifact(
+    destination: Path,
+    *,
+    entries: tuple[PyrightTarEntry, ...] | None = None,
+    package_bytes: bytes | None = None,
+    server_bytes: bytes = b"synthetic pyright language server\n",
+    include_package: bool = True,
+    include_server: bool = True,
+    tar_format: int = tarfile.PAX_FORMAT,
+) -> PyrightInstallArtifactFixture:
+    """Create a deterministic synthetic npm-style Pyright tarball."""
+    if entries is None:
+        package_bytes = package_bytes or canonical_json_bytes(
+            {"name": "pyright", "version": "1.1.411"}
+        )
+        values = [PyrightTarEntry("package", kind=tarfile.DIRTYPE)]
+        if include_package:
+            values.append(PyrightTarEntry("package/package.json", package_bytes))
+        if include_server:
+            values.append(PyrightTarEntry("package/langserver.index.js", server_bytes))
+        entries = tuple(values)
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("xb") as raw:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
+            with tarfile.open(fileobj=compressed, mode="w", format=tar_format) as archive:
+                for entry in entries:
+                    info = tarfile.TarInfo(entry.name)
+                    info.type = entry.kind
+                    info.linkname = entry.linkname
+                    info.mode = 0o777
+                    info.uid = 123
+                    info.gid = 456
+                    info.mtime = 789
+                    info.pax_headers = dict(entry.pax_headers or {})
+                    regular = entry.kind in {tarfile.REGTYPE, tarfile.AREGTYPE}
+                    info.size = len(entry.data) if regular else 0
+                    archive.addfile(info, io.BytesIO(entry.data) if regular else None)
+
+    content = destination.read_bytes()
+    return PyrightInstallArtifactFixture(
+        path=destination,
+        package_sha256=hashlib.sha256(content).hexdigest(),
+        package_integrity="sha512-"
+        + base64.b64encode(hashlib.sha512(content).digest()).decode("ascii"),
+        server_bytes=server_bytes,
+    )
+
+
+def use_pyright_install_artifact_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    artifact: PyrightInstallArtifactFixture,
+) -> None:
+    """Point the approved profile contract at one synthetic test artifact."""
+    import pyright_profile
+
+    monkeypatch.setattr(pyright_profile, "PYRIGHT_PACKAGE_SHA256", artifact.package_sha256)
+    monkeypatch.setattr(pyright_profile, "PYRIGHT_PACKAGE_INTEGRITY", artifact.package_integrity)
 
 
 def copy_python_fixture(destination: Path) -> Path:
