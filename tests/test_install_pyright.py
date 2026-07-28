@@ -67,6 +67,17 @@ def _error_code(error: pytest.ExceptionInfo[PyrightInstallError]) -> str:
     return error.value.code
 
 
+def _lock_metadata(*, pid: int, process_start: str, nonce: str = "a" * 32) -> bytes:
+    return canonical_json_bytes(
+        {
+            "acquired_at_unix_ns": time.time_ns(),
+            "nonce": nonce,
+            "pid": pid,
+            "process_start": process_start,
+        }
+    )
+
+
 def _windows_process_handle_count() -> int:
     import ctypes
     from ctypes import wintypes
@@ -165,6 +176,127 @@ def test_digest_mismatch_precedes_tar_open_and_stage_creation(
         install_pyright(state_root=state_root, artifact=artifact.path)
 
     assert _error_code(error) == expected_code
+    assert not _root(state_root).exists()
+    _assert_no_owned_scratch(state_root)
+
+
+def test_verified_scratch_cannot_be_swapped_before_extraction_or_accepted_later(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "state"
+    trusted_server = b"good pyright language server payload\n"
+    evil_server = b"evil pyright language server payload\n"
+    trusted = create_pyright_install_artifact(
+        tmp_path / "trusted.tgz", server_bytes=trusted_server
+    )
+    evil = create_pyright_install_artifact(
+        tmp_path / "evil.tgz", server_bytes=evil_server
+    )
+    trusted_content = trusted.path.read_bytes()
+    evil_content = evil.path.read_bytes()
+    common_size = max(len(trusted_content), len(evil_content))
+    trusted_content = trusted_content.ljust(common_size, b"\0")
+    evil_content = evil_content.ljust(common_size, b"\0")
+    trusted.path.write_bytes(trusted_content)
+    trusted = dataclasses.replace(
+        trusted,
+        package_sha256=installer_module.hashlib.sha256(trusted_content).hexdigest(),
+        package_integrity="sha512-"
+        + installer_module.base64.b64encode(
+            installer_module.hashlib.sha512(trusted_content).digest()
+        ).decode("ascii"),
+    )
+    use_pyright_install_artifact_identity(monkeypatch, trusted)
+    real_close = installer_module._OwnedFile.close
+    attacks = 0
+
+    def replace_when_released(owned: object) -> None:
+        nonlocal attacks
+        real_close(owned)
+        if attacks or not owned.name.startswith(".install-pyright-download-"):
+            return
+        scratch = state_root / "cache/code-tools/pyright" / owned.name
+        before = scratch.stat()
+        with scratch.open("r+b") as stream:
+            stream.write(evil_content)
+            stream.truncate()
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.utime(scratch, ns=(before.st_atime_ns, before.st_mtime_ns))
+        attacks += 1
+
+    monkeypatch.setattr(installer_module._OwnedFile, "close", replace_when_released)
+
+    first = install_pyright(state_root=state_root, artifact=trusted.path)
+    second = install_pyright(state_root=state_root, artifact=trusted.path)
+
+    server = _root(state_root) / "package/langserver.index.js"
+    assert attacks == 1
+    assert first == second
+    assert server.read_bytes() == trusted_server
+    assert server.read_bytes() != evil_server
+    _assert_no_owned_scratch(state_root)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX ctime contract")
+def test_posix_verified_scratch_mutate_and_restore_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "state"
+    trusted = create_pyright_install_artifact(
+        tmp_path / "trusted.tgz",
+        server_bytes=b"good pyright language server payload\n",
+    )
+    evil = create_pyright_install_artifact(
+        tmp_path / "evil.tgz",
+        server_bytes=b"evil pyright language server payload\n",
+    )
+    trusted_content = trusted.path.read_bytes()
+    evil_content = evil.path.read_bytes()
+    common_size = max(len(trusted_content), len(evil_content))
+    trusted_content = trusted_content.ljust(common_size, b"\0")
+    evil_content = evil_content.ljust(common_size, b"\0")
+    trusted.path.write_bytes(trusted_content)
+    trusted = dataclasses.replace(
+        trusted,
+        package_sha256=installer_module.hashlib.sha256(trusted_content).hexdigest(),
+        package_integrity="sha512-"
+        + installer_module.base64.b64encode(
+            installer_module.hashlib.sha512(trusted_content).digest()
+        ).decode("ascii"),
+    )
+    use_pyright_install_artifact_identity(monkeypatch, trusted)
+    real_verify = installer_module._verify_artifact_digests
+    attacks = 0
+
+    def replace_after_acceptance(*args: object, **kwargs: object) -> None:
+        nonlocal attacks
+        real_verify(*args, **kwargs)
+        scratch = next(
+            path
+            for path in (state_root / "cache/code-tools/pyright").iterdir()
+            if path.name.startswith(".install-pyright-download-")
+        )
+        before = scratch.stat()
+        with scratch.open("r+b") as stream:
+            stream.write(evil_content)
+            stream.truncate()
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.utime(scratch, ns=(before.st_atime_ns, before.st_mtime_ns))
+        attacks += 1
+
+    monkeypatch.setattr(
+        installer_module, "_verify_artifact_digests", replace_after_acceptance
+    )
+
+    with pytest.raises(PyrightInstallError) as error:
+        install_pyright(state_root=state_root, artifact=trusted.path)
+
+    assert attacks == 1
+    assert _error_code(error) == "pyright_artifact_changed"
     assert not _root(state_root).exists()
     _assert_no_owned_scratch(state_root)
 
@@ -301,6 +433,14 @@ def test_local_artifact_on_known_network_path_is_rejected(
     _assert_no_owned_scratch(state_root)
 
 
+class _ResponseSocket:
+    def __init__(self) -> None:
+        self.timeouts: list[float] = []
+
+    def settimeout(self, timeout: float) -> None:
+        self.timeouts.append(timeout)
+
+
 class _Response(io.BytesIO):
     def __init__(
         self,
@@ -313,6 +453,8 @@ class _Response(io.BytesIO):
         self.status = status
         self._url = url
         self.headers: dict[str, str] = {"Content-Length": str(len(content))}
+        self.socket = _ResponseSocket()
+        self.fp = SimpleNamespace(raw=SimpleNamespace(_sock=self.socket))
 
     def geturl(self) -> str:
         return self._url
@@ -347,6 +489,120 @@ def test_download_opens_only_exact_pinned_url_without_credentials(
     assert request.data is None
     assert "Authorization" not in dict(request.header_items())
     assert 0 < timeout <= installer_module.NETWORK_TIMEOUT_SECONDS
+
+
+def test_download_refreshes_remaining_deadline_on_socket_before_every_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent_path = tmp_path / "pyright"
+    parent_path.mkdir()
+    parent = installer_module._open_absolute_directory(parent_path, writable=True)
+    destination = installer_module._new_owned_file(parent, "download")
+    content = b"abcdefghijklmnopqrstuvwxyz"
+    clock = 100.0
+
+    class TrackingResponse(_Response):
+        def __init__(self) -> None:
+            super().__init__(content)
+            self.read_calls = 0
+
+        def read(self, size: int = -1) -> bytes:
+            assert len(self.socket.timeouts) == self.read_calls + 1
+            self.read_calls += 1
+            return super().read(size)
+
+    response = TrackingResponse()
+
+    def monotonic() -> float:
+        nonlocal clock
+        clock += 0.01
+        return clock
+
+    monkeypatch.setattr(installer_module.time, "monotonic", monotonic)
+    monkeypatch.setattr(installer_module, "COPY_CHUNK_BYTES", 8)
+    monkeypatch.setattr(
+        installer_module, "_open_pinned_url", lambda *args, **kwargs: response
+    )
+    try:
+        sha256, sha512 = installer_module._download_artifact(destination, 101.0)
+
+        assert sha256 == installer_module.hashlib.sha256(content).hexdigest()
+        assert sha512 == installer_module.hashlib.sha512(content).digest()
+        assert response.read_calls == 4
+        assert len(response.socket.timeouts) == response.read_calls
+        assert all(0 < timeout < 1 for timeout in response.socket.timeouts)
+        assert response.socket.timeouts == sorted(
+            response.socket.timeouts, reverse=True
+        )
+    finally:
+        destination.cleanup()
+        parent.close()
+
+
+def test_download_rejects_unadjustable_transport_before_blocking_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "state"
+
+    class UnadjustableResponse(_Response):
+        def __init__(self) -> None:
+            super().__init__(b"blocked")
+            self.fp = SimpleNamespace(raw=SimpleNamespace())
+
+        def read(self, size: int = -1) -> bytes:
+            pytest.fail("unadjustable transport reached blocking read")
+
+    monkeypatch.setattr(
+        installer_module,
+        "_open_pinned_url",
+        lambda *args, **kwargs: UnadjustableResponse(),
+    )
+
+    with pytest.raises(PyrightInstallError) as error:
+        install_pyright(state_root=state_root)
+
+    assert _error_code(error) == "pyright_download_response_invalid"
+    assert not _root(state_root).exists()
+    _assert_no_owned_scratch(state_root)
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_code"),
+    [(302, "pyright_download_redirect"), (503, "pyright_download_failed")],
+    ids=("redirect", "failure"),
+)
+def test_download_closes_http_error_before_chaining(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    expected_code: str,
+) -> None:
+    state_root = tmp_path / "state"
+    body = io.BytesIO(b"error body")
+    http_error = installer_module.urllib.error.HTTPError(
+        PYRIGHT_PACKAGE_URL,
+        status,
+        "request failed",
+        {},
+        body,
+    )
+
+    def fail_open(*args: object, **kwargs: object) -> object:
+        raise http_error
+
+    monkeypatch.setattr(installer_module, "_open_pinned_url", fail_open)
+
+    with pytest.raises(PyrightInstallError) as error:
+        install_pyright(state_root=state_root)
+
+    assert _error_code(error) == expected_code
+    assert error.value.__cause__ is http_error
+    assert http_error.closed is True
+    assert body.closed is True
+    assert not _root(state_root).exists()
+    _assert_no_owned_scratch(state_root)
 
 
 @pytest.mark.parametrize(
@@ -781,6 +1037,179 @@ def test_lock_write_failure_is_typed_and_cleans_owned_lock(
     _assert_no_owned_scratch(state_root)
 
 
+def test_lock_metadata_is_canonical_and_durable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent_path = tmp_path / "pyright"
+    parent_path.mkdir()
+    parent = installer_module._open_absolute_directory(parent_path, writable=True)
+    real_fsync_file = installer_module._fsync_file
+    real_fsync_directory = installer_module._fsync_directory
+    synced: list[str] = []
+
+    def fsync_file(handle: object) -> None:
+        real_fsync_file(handle)
+        synced.append("file")
+
+    def fsync_directory(handle: object) -> None:
+        real_fsync_directory(handle)
+        synced.append("directory")
+
+    monkeypatch.setattr(installer_module, "_fsync_file", fsync_file)
+    monkeypatch.setattr(installer_module, "_fsync_directory", fsync_directory)
+    lock = None
+    try:
+        lock = installer_module._try_create_lock(parent, time.monotonic() + 5)
+        assert lock is not None
+        installer_module._seek_start(lock.handle)
+        raw = installer_module._read_handle(
+            lock.handle, installer_module._file_size(lock.handle)
+        )
+        metadata = json.loads(raw)
+
+        assert raw == canonical_json_bytes(metadata)
+        assert set(metadata) == {
+            "acquired_at_unix_ns",
+            "nonce",
+            "pid",
+            "process_start",
+        }
+        assert isinstance(metadata["acquired_at_unix_ns"], int)
+        assert metadata["pid"] == os.getpid()
+        assert isinstance(metadata["process_start"], str)
+        assert metadata["process_start"]
+        assert len(metadata["nonce"]) == 32
+        assert all(character in "0123456789abcdef" for character in metadata["nonce"])
+        assert synced == ["file", "directory"]
+    finally:
+        if lock is not None:
+            lock.cleanup()
+        parent.close()
+
+
+@pytest.mark.parametrize(
+    "observed_process_start",
+    [None, "reused-process"],
+    ids=("dead", "pid-reused"),
+)
+def test_dead_or_pid_reused_install_lock_is_reclaimed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    observed_process_start: str | None,
+) -> None:
+    parent_path = tmp_path / "pyright"
+    parent_path.mkdir()
+    lock_path = parent_path / ".install-pyright-lock"
+    lock_path.write_bytes(
+        _lock_metadata(pid=424242, process_start="original-process")
+    )
+    monkeypatch.setattr(
+        installer_module,
+        "_process_start_identity",
+        lambda pid: observed_process_start if pid == 424242 else "current-process",
+        raising=False,
+    )
+    parent = installer_module._open_absolute_directory(parent_path, writable=True)
+    lock = None
+    try:
+        lock = installer_module._try_create_lock(parent, time.monotonic() + 5)
+
+        assert lock is not None
+        assert lock.identity == installer_module._identity(lock.handle)
+    finally:
+        if lock is not None:
+            lock.cleanup()
+        parent.close()
+
+
+def test_incomplete_lock_gets_initialization_grace_then_is_reclaimed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent_path = tmp_path / "pyright"
+    parent_path.mkdir()
+    lock_path = parent_path / ".install-pyright-lock"
+    lock_path.write_bytes(b"")
+    parent = installer_module._open_absolute_directory(parent_path, writable=True)
+    lock = None
+    try:
+        assert installer_module._try_create_lock(parent, time.monotonic() + 5) is None
+        old = time.time() - 60
+        os.utime(lock_path, (old, old))
+        monkeypatch.setattr(
+            installer_module,
+            "LOCK_INITIALIZATION_GRACE_SECONDS",
+            10.0,
+            raising=False,
+        )
+
+        lock = installer_module._try_create_lock(parent, time.monotonic() + 5)
+
+        assert lock is not None
+    finally:
+        if lock is not None:
+            lock.cleanup()
+        parent.close()
+
+
+def test_concurrent_stale_lock_reclaimers_have_one_winner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent_path = tmp_path / "pyright"
+    parent_path.mkdir()
+    (parent_path / ".install-pyright-lock").write_bytes(
+        _lock_metadata(pid=424242, process_start="dead-process")
+    )
+    monkeypatch.setattr(
+        installer_module,
+        "_process_start_identity",
+        lambda pid: None if pid == 424242 else "current-process",
+        raising=False,
+    )
+
+    def try_acquire() -> tuple[object, object | None]:
+        parent = installer_module._open_absolute_directory(parent_path, writable=True)
+        return parent, installer_module._try_create_lock(parent, time.monotonic() + 5)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        attempts = list(executor.map(lambda _index: try_acquire(), range(2)))
+
+    winners = [lock for _parent, lock in attempts if lock is not None]
+    try:
+        assert len(winners) == 1
+    finally:
+        for lock in winners:
+            lock.cleanup()
+        for parent, _lock in attempts:
+            parent.close()
+
+
+def test_lock_release_refuses_same_file_with_changed_nonce(
+    tmp_path: Path,
+) -> None:
+    parent_path = tmp_path / "pyright"
+    parent_path.mkdir()
+    lock_path = parent_path / ".install-pyright-lock"
+    parent = installer_module._open_absolute_directory(parent_path, writable=True)
+    lock = installer_module._try_create_lock(parent, time.monotonic() + 5)
+    assert lock is not None
+    try:
+        lock.close()
+        replacement = _lock_metadata(
+            pid=os.getpid(), process_start="replacement", nonce="b" * 32
+        )
+        lock_path.write_bytes(replacement)
+
+        lock.cleanup()
+
+        assert lock_path.read_bytes() == replacement
+    finally:
+        lock_path.unlink(missing_ok=True)
+        parent.close()
+
+
 @pytest.mark.parametrize(
     ("target", "expected_message", "expected_code"),
     [
@@ -1182,6 +1611,50 @@ def test_valid_existing_install_is_idempotent_before_artifact_or_network_access(
 
     assert observed == expected
     _assert_no_owned_scratch(state_root)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows enumeration complexity")
+def test_windows_5424_file_idempotence_enumerates_each_directory_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "state"
+    artifact = _artifact(tmp_path, monkeypatch)
+    expected = install_pyright(state_root=state_root, artifact=artifact.path)
+    package = _root(state_root) / "package"
+    for index in range(5421):
+        (package / f"synthetic-{index:04d}.js").write_bytes(b"")
+    assert sum(path.is_file() for path in _root(state_root).rglob("*")) == 5424
+    real_list_directory = installer_module._windows_workspace.list_directory
+    enumerations = {"root": 0, "package": 0}
+
+    def bounded_list_directory(handle: int, *, max_entries: int):
+        entries = real_list_directory(handle, max_entries=max_entries)
+        names = {entry.name for entry in entries}
+        label = None
+        if names == {"install-manifest.json", "package"}:
+            label = "root"
+        elif "synthetic-0000.js" in names:
+            label = "package"
+        if label is not None:
+            enumerations[label] += 1
+            if enumerations[label] > 1:
+                pytest.fail(f"existing {label} directory was enumerated more than once")
+        return entries
+
+    monkeypatch.setattr(
+        installer_module._windows_workspace,
+        "list_directory",
+        bounded_list_directory,
+    )
+
+    observed = install_pyright(
+        state_root=state_root,
+        artifact=tmp_path / "must-not-be-read.tgz",
+    )
+
+    assert observed == expected
+    assert enumerations == {"root": 1, "package": 1}
 
 
 def test_existing_install_root_swap_before_return_fails_closed(

@@ -156,6 +156,7 @@ if os.name == "nt":
                 "SetFileInformationByHandle": kernel32,
                 "ReadFile": kernel32,
                 "WriteFile": kernel32,
+                "SetFilePointerEx": kernel32,
                 "FlushFileBuffers": kernel32,
                 "NtCreateFile": ntdll,
                 "NtOpenFile": ntdll,
@@ -212,6 +213,14 @@ if os.name == "nt":
             self.write_file = kernel32.WriteFile
             self.write_file.argtypes = self.read_file.argtypes
             self.write_file.restype = wintypes.BOOL
+            self.set_file_pointer = kernel32.SetFilePointerEx
+            self.set_file_pointer.argtypes = (
+                wintypes.HANDLE,
+                ctypes.c_longlong,
+                ctypes.POINTER(ctypes.c_longlong),
+                wintypes.DWORD,
+            )
+            self.set_file_pointer.restype = wintypes.BOOL
             self.flush_file_buffers = kernel32.FlushFileBuffers
             self.flush_file_buffers.argtypes = (wintypes.HANDLE,)
             self.flush_file_buffers.restype = wintypes.BOOL
@@ -698,6 +707,12 @@ def read_chunks(handle: int, *, chunk_bytes: int, max_bytes: int):
         yield buffer.raw[: read.value]
 
 
+def seek_start(handle: int) -> None:
+    require_capability()
+    if not _API.set_file_pointer(handle, 0, None, 0):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
 def file_size(handle: int) -> int:
     information = _FileStandardInfo()
     if not _API.get_information(
@@ -707,6 +722,16 @@ def file_size(handle: int) -> int:
     if information.directory:
         raise PermissionError("Windows workspace file became a directory")
     return int(information.end_of_file)
+
+
+def file_modified_time_ns(handle: int) -> int:
+    information = _FileBasicInfo()
+    if not _API.get_information(
+        handle, 0, ctypes.byref(information), ctypes.sizeof(information)
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    windows_epoch_ticks = 116_444_736_000_000_000
+    return max(0, (int(information.last_write_time) - windows_epoch_ticks) * 100)
 
 
 def is_read_only(handle: int) -> bool:
@@ -786,6 +811,7 @@ __all__ = [
     "create_directory",
     "create_file",
     "delete_handle",
+    "file_modified_time_ns",
     "file_size",
     "flush_directory",
     "flush_file",
@@ -806,5 +832,6 @@ __all__ = [
     "replace_file",
     "require_capability",
     "set_read_only",
+    "seek_start",
     "write_all",
 ]
