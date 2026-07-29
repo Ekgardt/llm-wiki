@@ -48,7 +48,7 @@ The installer detects your agents and wires them up automatically.
    git clone https://github.com/Ekgardt/llm-wiki.git
    cd llm-wiki
    uv sync --locked --extra mcp-server
-   uv run pytest -q          # verify: 4941 tests collected should pass
+   uv run pytest -q          # verify: 4967 tests collected should pass
    ```
 
 2. **Set environment variables** (add to your shell profile):
@@ -412,8 +412,8 @@ setup steps.
 
 ### "Tests fail on fresh clone"
 - Run `uv sync --locked --extra mcp-server` first (the installed baseline includes MCP)
-- `uv run pytest -q` — should report 4941 tests collected
-- If `< 4941`, your checkout is stale; `git pull`
+- `uv run pytest -q` — should report 4967 tests collected
+- If `< 4967`, your checkout is stale; `git pull`
 
 ---
 
@@ -422,7 +422,7 @@ setup steps.
 | Path | Zone | Purpose |
 |------|------|---------|
 | `scripts/` | CODE | Pipeline + hooks + helpers |
-| `tests/` | CODE | 4941 tests collected |
+| `tests/` | CODE | 4967 tests collected |
 | `docs/` | CODE | This file + ARCHITECTURE + STRUCTURE + SETUP-COGNEE + EXPORTING |
 | `skills/` | CODE | 9 agent skills |
 | `rules/` | CODE | 3 file-handling policies |

@@ -189,6 +189,9 @@ def _run_process_server() -> None:
     parser.add_argument("--hang-once-marker")
     parser.add_argument("--idle-exit-marker")
     parser.add_argument("--hang-then-exit", action="store_true")
+    parser.add_argument("--bootstrap-handshake", action="store_true")
+    parser.add_argument("--query-crash-once-marker")
+    parser.add_argument("--require-initialized-query", action="store_true")
     args = parser.parse_args()
 
     if args.spawn_setsid_descendant:
@@ -254,6 +257,7 @@ def _run_process_server() -> None:
             return
 
     if args.lifecycle:
+        initialized = False
         if args.idle_exit_marker:
             first = not os.path.exists(args.idle_exit_marker)
             if first:
@@ -280,6 +284,64 @@ def _run_process_server() -> None:
                 with open(args.hang_once_marker, "wb"):
                     pass
                 continue
+            if (
+                method == "initialized/query"
+                and args.query_crash_once_marker
+                and not os.path.exists(args.query_crash_once_marker)
+            ):
+                with open(args.query_crash_once_marker, "wb"):
+                    pass
+                return
+            if method == "initialize" and args.bootstrap_handshake:
+                sys.stdout.buffer.write(
+                    _frame(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": "bootstrap-configuration",
+                            "method": "workspace/configuration",
+                            "params": {"items": [{"section": "python"}]},
+                        }
+                    )
+                )
+                sys.stdout.buffer.write(
+                    _frame(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "$/progress",
+                            "params": {"token": "bootstrap", "value": {"kind": "begin"}},
+                        }
+                    )
+                )
+                sys.stdout.buffer.flush()
+                configuration = _read_message(sys.stdin.buffer)
+                if configuration.get("result") is not True:
+                    sys.stdout.buffer.write(
+                        _frame(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": request["id"],
+                                "error": {
+                                    "code": -32002,
+                                    "message": "configuration required",
+                                },
+                            }
+                        )
+                    )
+                else:
+                    sys.stdout.buffer.write(
+                        _frame(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": request["id"],
+                                "result": {"capabilities": {}},
+                            }
+                        )
+                    )
+                sys.stdout.buffer.flush()
+                continue
+            if method == "initialized":
+                initialized = True
+                continue
             if method == "shutdown":
                 if args.ignore_shutdown:
                     continue
@@ -289,6 +351,21 @@ def _run_process_server() -> None:
                 sys.stdout.buffer.flush()
             elif method == "exit":
                 return
+            elif method == "initialized/query" and args.require_initialized_query:
+                if initialized:
+                    response = {
+                        "jsonrpc": "2.0",
+                        "id": request["id"],
+                        "result": {"initialized": True, "pid": os.getpid()},
+                    }
+                else:
+                    response = {
+                        "jsonrpc": "2.0",
+                        "id": request["id"],
+                        "error": {"code": -32002, "message": "server not initialized"},
+                    }
+                sys.stdout.buffer.write(_frame(response))
+                sys.stdout.buffer.flush()
             elif args.application_error and "id" in request:
                 sys.stdout.buffer.write(
                     _frame(

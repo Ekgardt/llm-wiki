@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import io
 import json
 import math
@@ -42,6 +43,7 @@ OWNER_NONCE = "a" * 32
 def _no_lsp_lifecycle_owner_leaks(monkeypatch: pytest.MonkeyPatch):
     started: list[LspProcess] = []
     start = LspProcess.start.__func__
+    configured_start = LspProcess.start_configured.__func__
 
     def tracked_start(
         cls: type[LspProcess],
@@ -55,6 +57,34 @@ def _no_lsp_lifecycle_owner_leaks(monkeypatch: pytest.MonkeyPatch):
         return process
 
     monkeypatch.setattr(LspProcess, "start", classmethod(tracked_start))
+
+    def tracked_configured_start(
+        cls: type[LspProcess],
+        command: object,
+        *,
+        cwd: Path,
+        owner_root: Path,
+        deadline: float,
+        server_request_handlers: object,
+        server_notification_handlers: object,
+        generation_bootstrap: object,
+    ) -> LspProcess:
+        process = configured_start(
+            cls,
+            command,
+            cwd=cwd,
+            owner_root=owner_root,
+            deadline=deadline,
+            server_request_handlers=server_request_handlers,
+            server_notification_handlers=server_notification_handlers,
+            generation_bootstrap=generation_bootstrap,
+        )
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(
+        LspProcess, "start_configured", classmethod(tracked_configured_start)
+    )
     existing = {
         id(thread)
         for thread in threading.enumerate()
@@ -83,6 +113,17 @@ def _start(tmp_path: Path, *arguments: str) -> LspProcess:
     return LspProcess.start(
         _command(*arguments), cwd=tmp_path, owner_root=tmp_path / OWNER_NONCE
     )
+
+
+def _initialize_generation(
+    protocol: lsp_protocol.LspProtocol,
+    _pid: int,
+    _generation_nonce: str,
+    deadline: float,
+) -> ProcessState:
+    assert protocol.request("initialize", {}, deadline=deadline) == {"capabilities": {}}
+    protocol.notify("initialized", {}, deadline=deadline)
+    return ProcessState.PROTOCOL_INITIALIZED
 
 
 def _wait(process: LspProcess, seconds: float = 10) -> int:
@@ -250,6 +291,636 @@ def test_constants_states_and_public_dataclass_fields_are_exact() -> None:
     }
     assert LspProcess.__slots__ == tuple(field.name for field in fields)
     assert not hasattr(object.__new__(LspProcess), "__dict__")
+
+
+def test_configured_start_installs_handlers_before_bootstrap_and_uses_caller_deadline(
+    tmp_path: Path,
+) -> None:
+    configurations: list[object] = []
+    progress: list[object] = []
+    bootstraps: list[tuple[int, str, float]] = []
+    deadline = time.monotonic() + 5
+
+    def bootstrap(
+        protocol: lsp_protocol.LspProtocol,
+        pid: int,
+        generation_nonce: str,
+        received_deadline: float,
+    ) -> ProcessState:
+        bootstraps.append((pid, generation_nonce, received_deadline))
+        return _initialize_generation(protocol, pid, generation_nonce, received_deadline)
+
+    process = LspProcess.start_configured(
+        _command("--lifecycle", "--bootstrap-handshake"),
+        cwd=tmp_path,
+        owner_root=tmp_path / OWNER_NONCE,
+        deadline=deadline,
+        server_request_handlers={
+            "workspace/configuration": lambda params: configurations.append(params) or True
+        },
+        server_notification_handlers={"$/progress": progress.append},
+        generation_bootstrap=bootstrap,
+    )
+    try:
+        assert configurations == [{"items": [{"section": "python"}]}]
+        assert progress == [{"token": "bootstrap", "value": {"kind": "begin"}}]
+        assert bootstraps == [(process.process.pid, process.generation_nonce, deadline)]
+        assert process.state is ProcessState.PROTOCOL_INITIALIZED
+    finally:
+        process.close(time.monotonic() + 5)
+
+
+def test_transparent_restart_bootstraps_fresh_generation_before_request_replay(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "query-crashed"
+    configurations: list[object] = []
+    progress: list[object] = []
+    bootstraps: list[tuple[int, str]] = []
+
+    def bootstrap(
+        protocol: lsp_protocol.LspProtocol,
+        pid: int,
+        generation_nonce: str,
+        deadline: float,
+    ) -> ProcessState:
+        bootstraps.append((pid, generation_nonce))
+        _initialize_generation(protocol, pid, generation_nonce, deadline)
+        return (
+            ProcessState.PROTOCOL_INITIALIZED
+            if len(bootstraps) == 1
+            else ProcessState.WORKSPACE_READY
+        )
+
+    process = LspProcess.start_configured(
+        _command(
+            "--lifecycle",
+            "--bootstrap-handshake",
+            "--query-crash-once-marker",
+            str(marker),
+            "--require-initialized-query",
+        ),
+        cwd=tmp_path,
+        owner_root=tmp_path / OWNER_NONCE,
+        deadline=time.monotonic() + 5,
+        server_request_handlers={
+            "workspace/configuration": lambda params: configurations.append(params) or True
+        },
+        server_notification_handlers={"$/progress": progress.append},
+        generation_bootstrap=bootstrap,
+    )
+    first_pid = process.process.pid
+    first_nonce = process.generation_nonce
+    try:
+        assert process.state is ProcessState.PROTOCOL_INITIALIZED
+
+        result = process.request(
+            "initialized/query", {"retry": True}, deadline=time.monotonic() + 5
+        )
+
+        assert result["initialized"] is True
+        assert process.restart_count == 1
+        assert process.state is ProcessState.WORKSPACE_READY
+        assert process.process.pid != first_pid
+        assert process.generation_nonce != first_nonce
+        assert bootstraps == [
+            (first_pid, first_nonce),
+            (process.process.pid, process.generation_nonce),
+        ]
+        assert len(configurations) == 2
+        assert len(progress) == 2
+    finally:
+        process.close(time.monotonic() + 5)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "error"),
+    [
+        ({"deadline": math.nan}, ValueError),
+        ({"deadline": math.inf}, ValueError),
+        ({"deadline": time.monotonic() - 1}, ValueError),
+        ({"deadline": True}, TypeError),
+        ({"server_request_handlers": []}, TypeError),
+        ({"server_request_handlers": {1: lambda _params: None}}, ValueError),
+        ({"server_request_handlers": {"": lambda _params: None}}, ValueError),
+        ({"server_request_handlers": {"workspace/configuration": False}}, TypeError),
+        ({"server_notification_handlers": {"$/progress": False}}, TypeError),
+        ({"generation_bootstrap": False}, TypeError),
+    ],
+)
+def test_configured_start_validates_deadline_handlers_and_bootstrap_before_owner_creation(
+    tmp_path: Path,
+    overrides: dict[str, object],
+    error: type[Exception],
+) -> None:
+    owner = tmp_path / OWNER_NONCE
+    options: dict[str, object] = {
+        "deadline": time.monotonic() + 5,
+        "server_request_handlers": {},
+        "server_notification_handlers": {},
+        "generation_bootstrap": lambda *_args: ProcessState.PROCESS_RUNNING,
+    }
+    options.update(overrides)
+
+    with pytest.raises(error):
+        LspProcess.start_configured(
+            _command("--lifecycle"),
+            cwd=tmp_path,
+            owner_root=owner,
+            **options,
+        )  # type: ignore[arg-type]
+
+    assert not owner.exists()
+
+
+@pytest.mark.parametrize(
+    ("handlers", "owner_nonce"),
+    [
+        ({}, "b" * 32),
+        ({"workspace/configuration": lambda _params: False}, "c" * 32),
+    ],
+)
+def test_bootstrap_configuration_request_rejects_missing_or_false_handler(
+    tmp_path: Path,
+    handlers: dict[str, object],
+    owner_nonce: str,
+) -> None:
+    owner = tmp_path / owner_nonce
+
+    with pytest.raises(JsonRpcResponseError, match="configuration required"):
+        LspProcess.start_configured(
+            _command("--lifecycle", "--bootstrap-handshake"),
+            cwd=tmp_path,
+            owner_root=owner,
+            deadline=time.monotonic() + 5,
+            server_request_handlers=handlers,
+            server_notification_handlers={},
+            generation_bootstrap=_initialize_generation,
+        )  # type: ignore[arg-type]
+
+    assert json.loads((owner / "failure.json").read_bytes())["code"] == "startup_failed"
+    assert not (owner / "lease.json").exists()
+
+
+def test_configured_handler_maps_are_immutable_snapshots_that_survive_restart(
+    tmp_path: Path,
+) -> None:
+    configurations: list[object] = []
+    progress: list[object] = []
+    bootstraps: list[str] = []
+
+    def configuration(params: object) -> bool:
+        configurations.append(params)
+        return True
+
+    request_handlers = {"workspace/configuration": configuration}
+    notification_handlers = {"$/progress": progress.append}
+
+    def bootstrap(
+        protocol: lsp_protocol.LspProtocol,
+        pid: int,
+        generation_nonce: str,
+        deadline: float,
+    ) -> ProcessState:
+        bootstraps.append(generation_nonce)
+        return _initialize_generation(protocol, pid, generation_nonce, deadline)
+
+    process = LspProcess.start_configured(
+        _command("--lifecycle", "--bootstrap-handshake"),
+        cwd=tmp_path,
+        owner_root=tmp_path / OWNER_NONCE,
+        deadline=time.monotonic() + 5,
+        server_request_handlers=request_handlers,
+        server_notification_handlers=notification_handlers,
+        generation_bootstrap=bootstrap,
+    )
+    configuration_snapshot = process._coordinator.generation_configuration
+    try:
+        with pytest.raises(TypeError):
+            configuration_snapshot.server_request_handlers["workspace/configuration"] = False  # type: ignore[index]
+        with pytest.raises(TypeError):
+            configuration_snapshot.server_notification_handlers["$/progress"] = False  # type: ignore[index]
+
+        request_handlers["workspace/configuration"] = lambda _params: False
+        notification_handlers.clear()
+        process.restart(time.monotonic() + 5)
+
+        assert len(configurations) == 2
+        assert len(progress) == 2
+        assert len(bootstraps) == 2
+        assert process.state is ProcessState.PROTOCOL_INITIALIZED
+    finally:
+        process.close(time.monotonic() + 5)
+
+
+def test_configured_process_running_state_is_an_explicit_noop_bootstrap(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[int, str, float]] = []
+
+    def noop(
+        _protocol: lsp_protocol.LspProtocol,
+        pid: int,
+        generation_nonce: str,
+        deadline: float,
+    ) -> ProcessState:
+        calls.append((pid, generation_nonce, deadline))
+        return ProcessState.PROCESS_RUNNING
+
+    process = LspProcess.start_configured(
+        _command("--lifecycle"),
+        cwd=tmp_path,
+        owner_root=tmp_path / OWNER_NONCE,
+        deadline=time.monotonic() + 5,
+        server_request_handlers={},
+        server_notification_handlers={},
+        generation_bootstrap=noop,
+    )
+    try:
+        assert calls == [(process.process.pid, process.generation_nonce, calls[0][2])]
+        assert process.state is ProcessState.PROCESS_RUNNING
+    finally:
+        process.close(time.monotonic() + 5)
+
+
+@pytest.mark.parametrize(
+    ("returned", "error", "owner_nonce"),
+    [
+        (ProcessState.DEGRADED, ValueError, "d" * 32),
+        (ProcessState.FAILED, ValueError, "e" * 32),
+        ("workspace_ready", TypeError, "f" * 32),
+    ],
+)
+def test_configured_start_rejects_non_active_bootstrap_state_and_cleans_candidate(
+    tmp_path: Path,
+    returned: object,
+    error: type[Exception],
+    owner_nonce: str,
+) -> None:
+    owner = tmp_path / owner_nonce
+
+    with pytest.raises(error):
+        LspProcess.start_configured(
+            _command("--lifecycle"),
+            cwd=tmp_path,
+            owner_root=owner,
+            deadline=time.monotonic() + 5,
+            server_request_handlers={},
+            server_notification_handlers={},
+            generation_bootstrap=lambda *_args: returned,
+        )  # type: ignore[arg-type]
+
+    assert json.loads((owner / "failure.json").read_bytes())["code"] == "startup_failed"
+    assert not (owner / "lease.json").exists()
+
+
+def test_configured_start_passes_caller_deadline_to_tree_protocol_and_bootstrap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    deadlines: dict[str, float] = {}
+    real_spawn = lsp_process.ProcessTree._spawn_with_deadline.__func__
+    real_protocol = lsp_process.LspProtocol
+
+    def record_spawn(
+        cls: type[lsp_process.ProcessTree],
+        command: object,
+        *,
+        cwd: Path,
+        env: object,
+        deadline: float,
+    ) -> lsp_process.ProcessTree:
+        deadlines["spawn"] = deadline
+        return real_spawn(cls, command, cwd=cwd, env=env, deadline=deadline)  # type: ignore[arg-type]
+
+    def record_protocol(*args: object, **kwargs: object) -> lsp_protocol.LspProtocol:
+        deadlines["protocol"] = kwargs["_startup_deadline"]  # type: ignore[assignment]
+        return real_protocol(*args, **kwargs)  # type: ignore[arg-type]
+
+    def bootstrap(*args: object) -> ProcessState:
+        deadlines["bootstrap"] = args[-1]  # type: ignore[assignment]
+        return ProcessState.PROCESS_RUNNING
+
+    monkeypatch.setattr(
+        lsp_process.ProcessTree,
+        "_spawn_with_deadline",
+        classmethod(record_spawn),
+    )
+    monkeypatch.setattr(lsp_process, "LspProtocol", record_protocol)
+    deadline = time.monotonic() + 5
+    process = LspProcess.start_configured(
+        _command("--lifecycle"),
+        cwd=tmp_path,
+        owner_root=tmp_path / OWNER_NONCE,
+        deadline=deadline,
+        server_request_handlers={},
+        server_notification_handlers={},
+        generation_bootstrap=bootstrap,
+    )
+    try:
+        assert deadlines == {
+            "spawn": deadline,
+            "protocol": deadline,
+            "bootstrap": deadline,
+        }
+    finally:
+        process.close(time.monotonic() + 5)
+
+
+def test_bootstrap_timeout_cleans_initial_candidate_and_retains_failure_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    children: list[subprocess.Popen[bytes]] = []
+    real_popen = subprocess.Popen
+
+    def record_child(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        child = real_popen(*args, **kwargs)
+        children.append(child)
+        return child
+
+    def timeout(*_args: object) -> ProcessState:
+        raise TimeoutError("generation bootstrap timed out")
+
+    monkeypatch.setattr(lsp_process.subprocess, "Popen", record_child)
+    owner = tmp_path / OWNER_NONCE
+
+    with pytest.raises(TimeoutError, match="generation bootstrap timed out"):
+        LspProcess.start_configured(
+            _command("--lifecycle"),
+            cwd=tmp_path,
+            owner_root=owner,
+            deadline=time.monotonic() + 5,
+            server_request_handlers={},
+            server_notification_handlers={},
+            generation_bootstrap=timeout,
+        )
+
+    assert len(children) == 1
+    assert children[0].poll() is not None
+    assert json.loads((owner / "failure.json").read_bytes())["code"] == "startup_failed"
+    assert not (owner / "lease.json").exists()
+
+
+def test_restart_bootstrap_failure_is_terminal_and_never_replays_request(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "query-crashed"
+    event_log = tmp_path / "events.txt"
+    bootstraps: list[tuple[int, str]] = []
+
+    def bootstrap(
+        protocol: lsp_protocol.LspProtocol,
+        pid: int,
+        generation_nonce: str,
+        deadline: float,
+    ) -> ProcessState:
+        bootstraps.append((pid, generation_nonce))
+        if len(bootstraps) == 2:
+            raise RuntimeError("second generation bootstrap failed")
+        return _initialize_generation(protocol, pid, generation_nonce, deadline)
+
+    process = LspProcess.start_configured(
+        _command(
+            "--lifecycle",
+            "--bootstrap-handshake",
+            "--query-crash-once-marker",
+            str(marker),
+            "--require-initialized-query",
+            "--event-log",
+            str(event_log),
+        ),
+        cwd=tmp_path,
+        owner_root=tmp_path / OWNER_NONCE,
+        deadline=time.monotonic() + 5,
+        server_request_handlers={"workspace/configuration": lambda _params: True},
+        server_notification_handlers={"$/progress": lambda _params: None},
+        generation_bootstrap=bootstrap,
+    )
+    coordinator = process._coordinator
+
+    with pytest.raises(ProtocolViolation):
+        process.request("initialized/query", {}, deadline=time.monotonic() + 5)
+
+    assert _coordinator_wait(
+        process,
+        lambda: coordinator.phase is lsp_process._LifecyclePhase.STOPPED_FAILURE,
+        timeout=5,
+    )
+    assert event_log.read_text(encoding="utf-8").splitlines().count(
+        "initialized/query"
+    ) == 1
+    assert len(bootstraps) == 2
+    assert process.restart_count == 0
+    assert process.state is ProcessState.FAILED
+    assert coordinator.active is None
+    assert coordinator.candidate is None
+    assert json.loads((process.owner_root / "failure.json").read_bytes())["code"] == (
+        "restart_failed"
+    )
+    assert not (process.owner_root / "lease.json").exists()
+
+
+def test_concurrent_autonomous_fatals_bootstrap_only_one_replacement(
+    tmp_path: Path,
+) -> None:
+    bootstraps: list[tuple[int, str]] = []
+
+    def bootstrap(
+        protocol: lsp_protocol.LspProtocol,
+        pid: int,
+        generation_nonce: str,
+        deadline: float,
+    ) -> ProcessState:
+        bootstraps.append((pid, generation_nonce))
+        return _initialize_generation(protocol, pid, generation_nonce, deadline)
+
+    process = LspProcess.start_configured(
+        _command("--lifecycle", "--bootstrap-handshake"),
+        cwd=tmp_path,
+        owner_root=tmp_path / OWNER_NONCE,
+        deadline=time.monotonic() + 5,
+        server_request_handlers={"workspace/configuration": lambda _params: True},
+        server_notification_handlers={"$/progress": lambda _params: None},
+        generation_bootstrap=bootstrap,
+    )
+    protocol = process.protocol
+    barrier = threading.Barrier(8)
+
+    def become_fatal(index: int) -> None:
+        barrier.wait()
+        protocol._become_fatal(f"concurrent fatal {index}")
+
+    try:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(become_fatal, range(8)))
+
+        assert _coordinator_wait(process, lambda: process.restart_count == 1, timeout=5)
+        assert len(bootstraps) == 2
+        assert bootstraps[0][0] != bootstraps[1][0]
+        assert bootstraps[0][1] != bootstraps[1][1]
+        assert process.state is ProcessState.PROTOCOL_INITIALIZED
+    finally:
+        process.close(time.monotonic() + 5)
+
+
+def test_bootstrap_runs_with_lifecycle_and_driver_locks_available(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    coordinators: list[lsp_process._LifecycleCoordinator] = []
+    real_prepare = lsp_process._prepare_generation
+
+    def observe_prepare(
+        coordinator: lsp_process._LifecycleCoordinator,
+        *args: object,
+        **kwargs: object,
+    ) -> lsp_process._Generation:
+        coordinators.append(coordinator)
+        return real_prepare(coordinator, *args, **kwargs)  # type: ignore[arg-type]
+
+    def lock_is_available(lock: object) -> bool:
+        acquired = lock.acquire(blocking=False)  # type: ignore[attr-defined]
+        if acquired:
+            lock.release()  # type: ignore[attr-defined]
+        return acquired
+
+    def bootstrap(
+        protocol: lsp_protocol.LspProtocol,
+        pid: int,
+        generation_nonce: str,
+        deadline: float,
+    ) -> ProcessState:
+        coordinator = coordinators[-1]
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            assert pool.submit(lock_is_available, coordinator.lock).result(timeout=1)
+            assert pool.submit(lock_is_available, coordinator.driver).result(timeout=1)
+        return _initialize_generation(protocol, pid, generation_nonce, deadline)
+
+    monkeypatch.setattr(lsp_process, "_prepare_generation", observe_prepare)
+    process = LspProcess.start_configured(
+        _command("--lifecycle", "--bootstrap-handshake"),
+        cwd=tmp_path,
+        owner_root=tmp_path / OWNER_NONCE,
+        deadline=time.monotonic() + 5,
+        server_request_handlers={"workspace/configuration": lambda _params: True},
+        server_notification_handlers={"$/progress": lambda _params: None},
+        generation_bootstrap=bootstrap,
+    )
+    try:
+        process.restart(time.monotonic() + 5)
+        assert len(coordinators) == 2
+        assert process.restart_count == 1
+    finally:
+        process.close(time.monotonic() + 5)
+
+
+def test_restart_heartbeat_never_publishes_candidate_before_bootstrap_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    bootstraps: list[str] = []
+    bootstrap_entered = threading.Event()
+    release_bootstrap = threading.Event()
+    heartbeat_wrote = threading.Event()
+
+    def bootstrap(
+        protocol: lsp_protocol.LspProtocol,
+        pid: int,
+        generation_nonce: str,
+        deadline: float,
+    ) -> ProcessState:
+        bootstraps.append(generation_nonce)
+        if len(bootstraps) == 2:
+            bootstrap_entered.set()
+            assert release_bootstrap.wait(3)
+        return _initialize_generation(protocol, pid, generation_nonce, deadline)
+
+    process = LspProcess.start_configured(
+        _command("--lifecycle", "--bootstrap-handshake"),
+        cwd=tmp_path,
+        owner_root=tmp_path / OWNER_NONCE,
+        deadline=time.monotonic() + 5,
+        server_request_handlers={"workspace/configuration": lambda _params: True},
+        server_notification_handlers={"$/progress": lambda _params: None},
+        generation_bootstrap=bootstrap,
+    )
+    first_nonce = process.generation_nonce
+    real_write_lease = lsp_process._write_generation_lease
+    heartbeat_generations: list[str] = []
+    restart_errors: list[BaseException] = []
+
+    def observe_write_lease(
+        owner: lsp_process._OwnerDirectory,
+        generation: lsp_process._Generation,
+        owner_nonce: str,
+        deadline: float,
+        retry_stop: threading.Event,
+    ) -> None:
+        if threading.current_thread() is process._coordinator.heartbeat_thread:
+            heartbeat_generations.append(generation.nonce)
+            heartbeat_wrote.set()
+        real_write_lease(
+            owner,
+            generation,
+            owner_nonce,
+            deadline,
+            retry_stop,
+        )
+
+    def restart() -> None:
+        try:
+            process.restart(time.monotonic() + 5)
+        except BaseException as error:
+            restart_errors.append(error)
+
+    monkeypatch.setattr(lsp_process, "_write_generation_lease", observe_write_lease)
+    thread = threading.Thread(target=restart)
+    thread.start()
+    try:
+        assert bootstrap_entered.wait(3)
+        candidate_nonce = bootstraps[1]
+        process._coordinator.heartbeat_wake.set()
+        assert heartbeat_wrote.wait(1)
+
+        assert heartbeat_generations == [first_nonce]
+        assert candidate_nonce != first_nonce
+
+        release_bootstrap.set()
+        thread.join(5)
+        assert not thread.is_alive()
+        assert restart_errors == []
+        assert process.generation_nonce == candidate_nonce
+    finally:
+        release_bootstrap.set()
+        thread.join(5)
+        process.close(time.monotonic() + 5)
+
+
+def test_legacy_start_signature_budget_and_state_are_unchanged(tmp_path: Path) -> None:
+    signature = inspect.signature(LspProcess.start)
+    assert tuple(signature.parameters) == ("command", "cwd", "owner_root")
+    assert signature.parameters["cwd"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert signature.parameters["owner_root"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert "deadline" not in signature.parameters
+    assert tuple(inspect.signature(LspProcess.start_configured).parameters) == (
+        "command",
+        "cwd",
+        "owner_root",
+        "deadline",
+        "server_request_handlers",
+        "server_notification_handlers",
+        "generation_bootstrap",
+    )
+
+    started = time.monotonic()
+    process = _start(tmp_path, "--lifecycle")
+    try:
+        assert process.state is ProcessState.PROCESS_RUNNING
+        assert time.monotonic() - started < lsp_process._STARTUP_WAIT_SECONDS
+        assert process._coordinator.generation_configuration.generation_bootstrap is None
+    finally:
+        process.close(time.monotonic() + 5)
 
 
 def test_lifecycle_coordinator_uses_one_authority_lock_and_condition() -> None:

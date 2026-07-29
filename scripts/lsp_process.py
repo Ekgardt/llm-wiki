@@ -15,11 +15,12 @@ import subprocess as _subprocess
 import threading
 import time
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
+from types import MappingProxyType
 from typing import BinaryIO
 
 import lsp_process_tree as _lsp_process_tree
@@ -807,6 +808,22 @@ class ProcessState(str, Enum):
     FAILED = "failed"
 
 
+GenerationBootstrap = Callable[[LspProtocol, int, str, float], ProcessState]
+
+
+@dataclass(frozen=True, slots=True)
+class _GenerationConfiguration:
+    server_request_handlers: Mapping[str, Callable[[object], object]]
+    server_notification_handlers: Mapping[str, Callable[[object], None]]
+    generation_bootstrap: GenerationBootstrap | None
+
+
+def _unconfigured_generation() -> _GenerationConfiguration:
+    return _GenerationConfiguration(
+        MappingProxyType({}), MappingProxyType({}), None
+    )
+
+
 class _LifecyclePhase(str, Enum):
     STARTING = "starting"
     RUNNING = "running"
@@ -934,9 +951,13 @@ class _CleanupResult:
 class _LifecycleCoordinator:
     owner_directory: _OwnerDirectory | None
     startup_generation_nonce: str | None = None
+    generation_configuration: _GenerationConfiguration = field(
+        default_factory=_unconfigured_generation
+    )
     phase: _LifecyclePhase = _LifecyclePhase.STARTING
     active: _Generation | None = None
     candidate: _Generation | None = None
+    lease_generation: _Generation | None = None
     retired: list[_Generation] = field(default_factory=list)
     terminal_outcome: str | None = None
     terminal_code: str | None = None
@@ -1079,6 +1100,29 @@ class LspProcess:
         cls, command: Sequence[str], *, cwd: Path, owner_root: Path
     ) -> LspProcess:
         return _start_lsp_process(cls, command, cwd=cwd, owner_root=owner_root)
+
+    @classmethod
+    def start_configured(
+        cls,
+        command: Sequence[str],
+        *,
+        cwd: Path,
+        owner_root: Path,
+        deadline: float,
+        server_request_handlers: Mapping[str, Callable[[object], object]],
+        server_notification_handlers: Mapping[str, Callable[[object], None]],
+        generation_bootstrap: GenerationBootstrap,
+    ) -> LspProcess:
+        return _start_configured_lsp_process(
+            cls,
+            command,
+            cwd=cwd,
+            owner_root=owner_root,
+            deadline=deadline,
+            server_request_handlers=server_request_handlers,
+            server_notification_handlers=server_notification_handlers,
+            generation_bootstrap=generation_bootstrap,
+        )
 
     def request(
         self,
@@ -1408,6 +1452,16 @@ def _prepare_generation(
         _write_owner_record(owner, published_owner_record)
         owner.verify_lexical_identity()
 
+    handler_options = {}
+    if coordinator.generation_configuration.generation_bootstrap is not None:
+        handler_options = {
+            "server_request_handlers": (
+                coordinator.generation_configuration.server_request_handlers
+            ),
+            "server_notification_handlers": (
+                coordinator.generation_configuration.server_notification_handlers
+            ),
+        }
     try:
         protocol = LspProtocol(
             process.stdout,
@@ -1418,7 +1472,8 @@ def _prepare_generation(
             ),
             _startup_deadline=deadline,
             _drain_wake=coordinator.recovery_wake,
-        )
+            **handler_options,
+        )  # type: ignore[arg-type]
     except _ProtocolStartupCleanupError as error:
         generation.protocol = error.protocol
         raise
@@ -1496,12 +1551,85 @@ def _write_generation_lease(
     )
 
 
+def _run_generation_bootstrap(
+    configuration: _GenerationConfiguration,
+    generation: _Generation,
+    deadline: float,
+) -> ProcessState:
+    bootstrap = configuration.generation_bootstrap
+    if bootstrap is None:
+        return ProcessState.PROCESS_RUNNING
+    process = generation.process
+    protocol = generation.protocol
+    if process is None or protocol is None:
+        raise RuntimeError("LSP generation bootstrap owners are unavailable")
+    _require_startup_deadline(deadline, "generation bootstrap start")
+    state = bootstrap(protocol, process.pid, generation.nonce, deadline)
+    _require_startup_deadline(deadline, "generation bootstrap completion")
+    if not isinstance(state, ProcessState):
+        raise TypeError("generation_bootstrap must return a ProcessState")
+    if state not in {
+        ProcessState.PROCESS_RUNNING,
+        ProcessState.PROTOCOL_INITIALIZED,
+        ProcessState.WORKSPACE_READY,
+    }:
+        raise ValueError("generation_bootstrap returned an invalid active state")
+    # PROCESS_RUNNING explicitly represents a configured no-op bootstrap.
+    return state
+
+
 def _start_lsp_process(
     cls: type[LspProcess],
     command: Sequence[str],
     *,
     cwd: Path,
     owner_root: Path,
+) -> LspProcess:
+    return _start_lsp_process_impl(
+        cls,
+        command,
+        cwd=cwd,
+        owner_root=owner_root,
+        configured_deadline=None,
+        generation_configuration=_unconfigured_generation(),
+    )
+
+
+def _start_configured_lsp_process(
+    cls: type[LspProcess],
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    owner_root: Path,
+    deadline: float,
+    server_request_handlers: Mapping[str, Callable[[object], object]],
+    server_notification_handlers: Mapping[str, Callable[[object], None]],
+    generation_bootstrap: GenerationBootstrap,
+) -> LspProcess:
+    configured_deadline = _validated_future_deadline(deadline)
+    configuration = _validated_generation_configuration(
+        server_request_handlers,
+        server_notification_handlers,
+        generation_bootstrap,
+    )
+    return _start_lsp_process_impl(
+        cls,
+        command,
+        cwd=cwd,
+        owner_root=owner_root,
+        configured_deadline=configured_deadline,
+        generation_configuration=configuration,
+    )
+
+
+def _start_lsp_process_impl(
+    cls: type[LspProcess],
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    owner_root: Path,
+    configured_deadline: float | None,
+    generation_configuration: _GenerationConfiguration,
 ) -> LspProcess:
     cwd = Path(cwd)
     owner_root = Path(owner_root)
@@ -1515,17 +1643,20 @@ def _start_lsp_process(
     started_monotonic = time.monotonic()
     started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     coordinator = _LifecycleCoordinator(
-        None, startup_generation_nonce=generation_nonce
+        None,
+        generation_configuration=generation_configuration,
+        startup_generation_nonce=generation_nonce,
     )
     _register_startup_cleanup(coordinator)
-    startup_deadline: float | None = None
+    startup_deadline: float | None = configured_deadline
     instance: LspProcess | None = None
     driver_acquired = False
 
     try:
         owner = _OwnerDirectory.open(owner_root)
         coordinator.owner_directory = owner
-        startup_deadline = time.monotonic() + _STARTUP_WAIT_SECONDS
+        if startup_deadline is None:
+            startup_deadline = time.monotonic() + _STARTUP_WAIT_SECONDS
         _acquire_driver(coordinator, startup_deadline)
         driver_acquired = True
         owner.create(startup_deadline)
@@ -1568,6 +1699,17 @@ def _start_lsp_process(
         instance._environment = dict(environment)
         instance._stderr_projection = generation.stderr
         instance._stderr_projection_lock = generation.stderr_lock
+        generation_state = ProcessState.PROCESS_RUNNING
+        if generation_configuration.generation_bootstrap is not None:
+            _release_driver(coordinator)
+            driver_acquired = False
+            generation_state = _run_generation_bootstrap(
+                generation_configuration,
+                generation,
+                startup_deadline,
+            )
+            _acquire_driver(coordinator, startup_deadline, allow_expired=True)
+            driver_acquired = True
         _acquire_lease(coordinator, startup_deadline)
         try:
             _write_generation_lease(
@@ -1587,8 +1729,10 @@ def _start_lsp_process(
                 raise RuntimeError("LSP process exited during startup")
             coordinator.active = generation
             coordinator.candidate = None
+            coordinator.lease_generation = generation
             coordinator.phase = _LifecyclePhase.RUNNING
             coordinator.startup_complete = True
+            instance.state = generation_state
             _notify_lifecycle_locked(coordinator)
         finally:
             _release_lifecycle(coordinator)
@@ -1793,14 +1937,7 @@ def _write_current_lease(instance: LspProcess, deadline: float) -> None:
             }:
                 return
             owner = coordinator.owner_directory
-            generation = next(
-                (
-                    item
-                    for item in _generations_locked(coordinator)
-                    if item.server_pid is not None
-                ),
-                None,
-            )
+            generation = coordinator.lease_generation
         finally:
             _release_lifecycle(coordinator)
         if generation is not None and owner is not None:
@@ -1952,6 +2089,7 @@ def _process_recovery_request(
             and not coordinator.recovery_stop.is_set(),
             None,
         )
+    restart = False
     try:
         try:
             _acquire_lifecycle(coordinator, deadline)
@@ -1989,8 +2127,12 @@ def _process_recovery_request(
         finally:
             _release_lifecycle(coordinator)
 
+        restart = True
+    finally:
+        _release_driver(coordinator)
+    if restart:
         try:
-            _restart_generation_owned(instance, deadline)
+            _restart_generation(instance, deadline)
         except BaseException:
             _remember_mandatory_terminal_failure(
                 instance,
@@ -2000,9 +2142,7 @@ def _process_recovery_request(
             if coordinator.cleanup_result.ownership_pending:
                 _retain_autonomous_cleanup_owners(instance)
                 return False, "restart_failed"
-        return False, None
-    finally:
-        _release_driver(coordinator)
+    return False, None
 
 
 def _retry_autonomous_terminal_cleanup(
@@ -2101,16 +2241,27 @@ def _process_failure_intent(
         else:
             break
     try:
-        return _process_failure_intent_owned(instance, intent, deadline)
+        result, restart = _process_failure_intent_owned(instance, intent, deadline)
     finally:
         _release_driver(coordinator)
+    if restart:
+        try:
+            _restart_generation(instance, deadline)
+        except BaseException:
+            _remember_mandatory_terminal_failure(
+                instance,
+                coordinator,
+                "restart_failed",
+            )
+            return "restart_failed"
+    return result
 
 
 def _process_failure_intent_owned(
     instance: LspProcess,
     intent: _FailureIntent,
     deadline: float,
-) -> str | None:
+) -> tuple[str | None, bool]:
     coordinator = instance._coordinator
     key = (intent.generation_nonce, intent.owner_fatal)
     try:
@@ -2118,7 +2269,7 @@ def _process_failure_intent_owned(
     except TimeoutError:
         coordinator.failure_queue.put(intent)
         coordinator.recovery_wake.set()
-        return None
+        return None, False
 
     terminal = False
     restart = False
@@ -2126,18 +2277,18 @@ def _process_failure_intent_owned(
     try:
         if key in coordinator.seen_failures:
             acknowledge = True
-            return None
+            return None, False
         if not coordinator.startup_complete:
             coordinator.failure_queue.put(intent)
             coordinator.recovery_wake.set()
-            return None
+            return None, False
         active = coordinator.active
         if not intent.owner_fatal and (
             active is None or active.nonce != intent.generation_nonce
         ):
             coordinator.seen_failures.add(key)
             acknowledge = True
-            return None
+            return None, False
         coordinator.seen_failures.add(key)
         acknowledge = True
         if intent.owner_fatal or coordinator.recovery_attempted or instance.restart_count >= 1:
@@ -2161,17 +2312,7 @@ def _process_failure_intent_owned(
         if acknowledge:
             _acknowledge_failure_intent(coordinator)
 
-    if restart:
-        try:
-            _restart_generation(instance, deadline)
-        except BaseException:
-            _remember_mandatory_terminal_failure(
-                instance,
-                coordinator,
-                "restart_failed",
-            )
-            return "restart_failed"
-    elif terminal:
+    if terminal:
         try:
             errors = _drive_cleanup(
                 instance,
@@ -2182,13 +2323,13 @@ def _process_failure_intent_owned(
         except BaseException as cleanup_error:
             _remember_background_cleanup_error(coordinator, cleanup_error)
             if coordinator.cleanup_result.ownership_pending:
-                return coordinator.terminal_code or _PROCESS_EXITED
+                return coordinator.terminal_code or _PROCESS_EXITED, False
         else:
             if errors:
                 _remember_background_cleanup_error(coordinator, errors[0])
             if coordinator.cleanup_result.ownership_pending:
-                return coordinator.terminal_code or _PROCESS_EXITED
-    return None
+                return coordinator.terminal_code or _PROCESS_EXITED, False
+    return None, restart
 
 
 def _remember_background_cleanup_error(
@@ -2451,16 +2592,22 @@ def _terminal_failure_lsp_process(
 def _restart_lsp_process(instance: LspProcess, deadline: float) -> None:
     deadline = _validated_deadline(deadline)
     coordinator = instance._coordinator
-    _acquire_driver(coordinator, deadline)
+    driver_acquired = False
     handoff_required = False
     try:
+        _acquire_driver(coordinator, deadline)
+        driver_acquired = True
         _restart_lsp_process_owned(instance, deadline)
+        _release_driver(coordinator)
+        driver_acquired = False
+        _restart_generation(instance, deadline)
     except BaseException:
         handoff_required = True
         raise
     finally:
         try:
-            _release_driver(coordinator)
+            if driver_acquired:
+                _release_driver(coordinator)
         finally:
             if handoff_required:
                 try:
@@ -2493,14 +2640,12 @@ def _restart_lsp_process_owned(instance: LspProcess, deadline: float) -> None:
             coordinator.phase = _LifecyclePhase.RECOVERY_PENDING
             instance.state = ProcessState.DEGRADED
             _mark_generation_expected_exit(active)
-            coordinator.recovery_wake.set()
             _notify_lifecycle_locked(coordinator)
     finally:
         _release_lifecycle(coordinator)
     if terminal:
         _terminal_failure_lsp_process(instance, _PROCESS_EXITED, deadline)
         raise ProtocolViolation("LSP process restart limit exceeded")
-    _restart_generation(instance, deadline)
 
 
 def _restart_generation(
@@ -2508,14 +2653,43 @@ def _restart_generation(
     deadline: float,
 ) -> None:
     coordinator = instance._coordinator
-    _acquire_driver(coordinator, deadline)
+    driver_acquired = False
+    candidate_prepared = False
     try:
-        _restart_generation_owned(instance, deadline)
+        _acquire_driver(coordinator, deadline)
+        driver_acquired = True
+        candidate = _prepare_restart_generation_owned(instance, deadline)
+        candidate_prepared = True
+        generation_state = ProcessState.PROCESS_RUNNING
+        if coordinator.generation_configuration.generation_bootstrap is not None:
+            _release_driver(coordinator)
+            driver_acquired = False
+            generation_state = _run_generation_bootstrap(
+                coordinator.generation_configuration,
+                candidate,
+                deadline,
+            )
+            _acquire_driver(coordinator, deadline, allow_expired=True)
+            driver_acquired = True
+        _commit_restart_generation_owned(
+            instance,
+            candidate,
+            generation_state,
+            deadline,
+        )
+    except BaseException:
+        if candidate_prepared:
+            _fail_restart_generation(instance, deadline)
+        raise
     finally:
-        _release_driver(coordinator)
+        if driver_acquired:
+            _release_driver(coordinator)
 
 
-def _restart_generation_owned(instance: LspProcess, deadline: float) -> None:
+def _prepare_restart_generation_owned(
+    instance: LspProcess,
+    deadline: float,
+) -> _Generation:
     coordinator = instance._coordinator
     _acquire_lifecycle(coordinator, deadline)
     try:
@@ -2533,18 +2707,7 @@ def _restart_generation_owned(instance: LspProcess, deadline: float) -> None:
 
     retirement_errors = _drive_cleanup(instance, deadline, terminal=False)
     if retirement_errors or any(not item.released for item in coordinator.retired):
-        _remember_mandatory_terminal_failure(
-            instance,
-            coordinator,
-            "restart_failed",
-        )
-        _mark_terminal_failure(instance, coordinator, "restart_failed", deadline)
-        _drive_cleanup(
-            instance,
-            deadline,
-            terminal=True,
-            failure_code="restart_failed",
-        )
+        _fail_restart_generation(instance, deadline)
         if retirement_errors:
             raise retirement_errors[0]
         raise TimeoutError("LSP retired generation cleanup is incomplete")
@@ -2561,9 +2724,6 @@ def _restart_generation_owned(instance: LspProcess, deadline: float) -> None:
             deadline=deadline,
             generation_nonce=generation_nonce,
         )
-        owner = coordinator.owner_directory
-        if owner is None:
-            raise RuntimeError("LSP owner directory is unavailable")
         if (
             candidate.process is None
             or candidate.protocol is None
@@ -2571,31 +2731,55 @@ def _restart_generation_owned(instance: LspProcess, deadline: float) -> None:
             or candidate.protocol.fatal
         ):
             raise RuntimeError("LSP restart candidate failed before commit")
-        _acquire_lease(coordinator, deadline)
-        try:
-            _write_generation_lease(
-                owner,
-                candidate,
-                instance.owner_nonce,
-                deadline,
-                coordinator.heartbeat_stop,
-            )
-        finally:
-            _release_lease(coordinator)
+        return candidate
+    except BaseException:
+        _fail_restart_generation(instance, deadline)
+        raise
+
+
+def _commit_restart_generation_owned(
+    instance: LspProcess,
+    candidate: _Generation,
+    generation_state: ProcessState,
+    deadline: float,
+) -> None:
+    coordinator = instance._coordinator
+    owner = coordinator.owner_directory
+    if owner is None:
+        raise RuntimeError("LSP owner directory is unavailable")
+    if (
+        candidate.process is None
+        or candidate.protocol is None
+        or candidate.process.poll() is not None
+        or candidate.protocol.fatal
+    ):
+        raise RuntimeError("LSP restart candidate failed before commit")
+    _acquire_lease(coordinator, deadline)
+    try:
+        _write_generation_lease(
+            owner,
+            candidate,
+            instance.owner_nonce,
+            deadline,
+            coordinator.heartbeat_stop,
+        )
         _acquire_lifecycle(coordinator, deadline)
         try:
             if coordinator.terminal_outcome is not None:
                 raise RuntimeError("LSP process became terminal during restart")
+            if coordinator.candidate is not candidate:
+                raise RuntimeError("LSP restart candidate lost lifecycle ownership")
             if candidate.process.poll() is not None or candidate.protocol.fatal:
                 raise RuntimeError("LSP restart candidate failed before commit")
             coordinator.active = candidate
             coordinator.candidate = None
+            coordinator.lease_generation = candidate
             coordinator.phase = _LifecyclePhase.RUNNING
             instance.process = candidate.process
             instance.protocol = candidate.protocol
             instance.generation_nonce = candidate.nonce
             instance.restart_count += 1
-            instance.state = ProcessState.PROCESS_RUNNING
+            instance.state = generation_state
             instance._stderr_projection = candidate.stderr
             instance._stderr_projection_lock = candidate.stderr_lock
             coordinator.recovery_request_nonce = None
@@ -2603,23 +2787,27 @@ def _restart_generation_owned(instance: LspProcess, deadline: float) -> None:
             _notify_lifecycle_locked(coordinator)
         finally:
             _release_lifecycle(coordinator)
+    finally:
+        _release_lease(coordinator)
+
+
+def _fail_restart_generation(instance: LspProcess, deadline: float) -> None:
+    coordinator = instance._coordinator
+    _remember_mandatory_terminal_failure(
+        instance,
+        coordinator,
+        "restart_failed",
+    )
+    try:
+        _mark_terminal_failure(instance, coordinator, "restart_failed", deadline)
     except BaseException:
-        _remember_mandatory_terminal_failure(
-            instance,
-            coordinator,
-            "restart_failed",
-        )
-        try:
-            _mark_terminal_failure(instance, coordinator, "restart_failed", deadline)
-        except BaseException:
-            pass
-        _drive_cleanup(
-            instance,
-            deadline,
-            terminal=True,
-            failure_code="restart_failed",
-        )
-        raise
+        pass
+    _drive_cleanup(
+        instance,
+        deadline,
+        terminal=True,
+        failure_code="restart_failed",
+    )
 
 
 def _shutdown_lsp_process(instance: LspProcess, deadline: float) -> None:
@@ -3445,6 +3633,8 @@ def _drive_cleanup_owned(
         owner = coordinator.owner_directory
         if owner is not None and owner._closed:
             coordinator.owner_directory = None
+        if coordinator.owner_directory is None:
+            coordinator.lease_generation = None
         if (
             terminal
             and coordinator.active is not None
@@ -3550,6 +3740,49 @@ def _validated_command(command: Sequence[str], cwd: Path) -> list[str]:
         raise ValueError("LSP executable is not executable")
     arguments[0] = str(resolved)
     return arguments
+
+
+def _validated_future_deadline(deadline: float) -> float:
+    value = _validated_deadline(deadline)
+    if value <= time.monotonic():
+        raise ValueError("deadline must be a future monotonic timestamp")
+    return value
+
+
+def _copied_handler_mapping(
+    handlers: Mapping[str, Callable[[object], object]],
+    label: str,
+) -> Mapping[str, Callable[[object], object]]:
+    if not isinstance(handlers, Mapping):
+        raise TypeError(f"{label} must be a mapping")
+    copied: dict[str, Callable[[object], object]] = {}
+    for method, handler in handlers.items():
+        if not isinstance(method, str) or not method:
+            raise ValueError(f"{label} method names must be non-empty strings")
+        if not callable(handler):
+            raise TypeError(f"{label} handlers must be callable")
+        copied[method] = handler
+    return MappingProxyType(copied)
+
+
+def _validated_generation_configuration(
+    server_request_handlers: Mapping[str, Callable[[object], object]],
+    server_notification_handlers: Mapping[str, Callable[[object], None]],
+    generation_bootstrap: GenerationBootstrap,
+) -> _GenerationConfiguration:
+    if not callable(generation_bootstrap):
+        raise TypeError("generation_bootstrap must be callable")
+    request_handlers = _copied_handler_mapping(
+        server_request_handlers, "server_request_handlers"
+    )
+    notification_handlers = _copied_handler_mapping(
+        server_notification_handlers, "server_notification_handlers"
+    )
+    return _GenerationConfiguration(
+        request_handlers,
+        notification_handlers,
+        generation_bootstrap,
+    )
 
 
 def _validated_owner_root(owner_root: Path) -> str:
