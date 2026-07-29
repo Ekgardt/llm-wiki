@@ -1412,6 +1412,110 @@ def test_extract_fsync_and_rename_interruptions_cleanup_owned_state(
     _assert_no_owned_scratch(state_root)
 
 
+def test_keyboard_interrupt_after_real_publish_preserves_complete_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "state"
+    artifact = _artifact(tmp_path, monkeypatch)
+    real_publish = installer_module._atomic_publish_noreplace
+    moved_states: list[bool] = []
+
+    def publish_then_interrupt(
+        stage: installer_module._Stage,
+        parent: installer_module._Handle,
+        name: str,
+    ) -> None:
+        real_publish(stage, parent, name)
+        moved_states.append(stage.published)
+        stage.published = False
+        raise KeyboardInterrupt("interrupted after atomic publish")
+
+    monkeypatch.setattr(
+        installer_module,
+        "_atomic_publish_noreplace",
+        publish_then_interrupt,
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="after atomic publish"):
+        install_pyright(state_root=state_root, artifact=artifact.path)
+
+    root = _root(state_root)
+    assert (root / "install-manifest.json").is_file()
+    assert (root / "package/package.json").is_file()
+    assert (root / "package/langserver.index.js").read_bytes() == artifact.server_bytes
+    assert moved_states == [True]
+    _assert_no_owned_scratch(state_root)
+
+    monkeypatch.setattr(installer_module, "_atomic_publish_noreplace", real_publish)
+    artifact.path.unlink()
+    result = install_pyright(
+        state_root=state_root,
+        artifact=tmp_path / "must-not-be-read.tgz",
+    )
+
+    assert result.root == root
+    assert result.server_sha256 == sha256_bytes(artifact.server_bytes)
+    _assert_no_owned_scratch(state_root)
+
+
+def test_keyboard_interrupt_before_publish_cleans_owned_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "state"
+    artifact = _artifact(tmp_path, monkeypatch)
+
+    def interrupt_before_publish(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt("interrupted before atomic publish")
+
+    monkeypatch.setattr(
+        installer_module,
+        "_atomic_publish_noreplace",
+        interrupt_before_publish,
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="before atomic publish"):
+        install_pyright(state_root=state_root, artifact=artifact.path)
+
+    assert not _root(state_root).exists()
+    _assert_no_owned_scratch(state_root)
+
+
+def test_stage_cleanup_leaves_moved_root_and_replacement_staging_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent_path = tmp_path / "pyright"
+    parent_path.mkdir()
+    parent = installer_module._open_absolute_directory(parent_path, writable=True)
+    stage = installer_module._new_stage(parent)
+    deadline = time.monotonic() + 5
+    final_name = "published-stage"
+    final_path = parent_path / final_name
+    replacement_path = parent_path / stage.name
+    try:
+        stage.write_bytes(("owned.txt",), b"owned", deadline)
+        installer_module._atomic_publish_noreplace(stage, parent, final_name)
+        stage.published = False
+        replacement_path.mkdir()
+        (replacement_path / "replacement.txt").write_bytes(b"replacement")
+        monkeypatch.setattr(
+            installer_module,
+            "_clear_directory",
+            lambda _root: pytest.fail("cleanup cleared a root without staging ownership"),
+        )
+
+        stage.cleanup()
+
+        assert (final_path / "owned.txt").read_bytes() == b"owned"
+        assert (replacement_path / "replacement.txt").read_bytes() == b"replacement"
+    finally:
+        if not stage.root.closed:
+            stage.root.close()
+        parent.close()
+
+
 def test_stage_directory_fsync_failure_cleans_unpublished_tree(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

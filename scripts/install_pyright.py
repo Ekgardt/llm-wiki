@@ -364,11 +364,45 @@ class _Stage:
         if self.published:
             self.root.close()
             return
+
+        def owns_staging_name() -> bool:
+            try:
+                if os.name == "nt":
+                    volume = _identity(self.parent)[0]
+                    for entry in _windows_workspace.list_directory(
+                        self.parent.value,
+                        max_entries=MAX_RUNTIME_PARENT_ENTRIES,
+                    ):
+                        if entry.name == self.name:
+                            return (
+                                entry.kind == "directory"
+                                and (volume, entry.file_id, True) == self.root_identity
+                            )
+                        if entry.name.casefold() == self.name.casefold():
+                            return False
+                    return False
+                return (
+                    _named_known_identity(
+                        self.parent,
+                        self.name,
+                        directory=True,
+                    )
+                    == self.root_identity
+                )
+            except (FileNotFoundError, OSError, RuntimeError):
+                return False
+
         try:
+            if not owns_staging_name():
+                self.published = True
+                return
             _clear_directory(self.root)
             if os.name == "nt":
-                _windows_workspace.delete_handle(self.root.value)
-            elif _named_identity(self.parent, self.name, directory=True) == self.root_identity:
+                if owns_staging_name():
+                    _windows_workspace.delete_handle(self.root.value)
+                else:
+                    self.published = True
+            elif owns_staging_name():
                 os.rmdir(self.name, dir_fd=self.parent.value)
         except (FileNotFoundError, OSError, RuntimeError):
             pass
@@ -2330,6 +2364,7 @@ def _extract_archive(
 def _atomic_publish_noreplace(stage: _Stage, parent: _Handle, name: str) -> None:
     if os.name == "nt":
         _windows_workspace.publish_file(stage.root.value, parent.value, name)
+        stage.published = True
         return
     old_name = os.fsencode(stage.name)
     new_name = os.fsencode(name)
@@ -2363,6 +2398,7 @@ def _atomic_publish_noreplace(stage: _Stage, parent: _Handle, name: str) -> None
     else:
         raise PyrightInstallError("pyright_publish_unsupported")
     if result == 0:
+        stage.published = True
         return
     error = ctypes.get_errno()
     if error in {errno.EEXIST, errno.ENOTEMPTY}:
