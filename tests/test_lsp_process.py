@@ -330,6 +330,120 @@ def test_configured_start_installs_handlers_before_bootstrap_and_uses_caller_dea
         process.close(time.monotonic() + 5)
 
 
+def test_initial_bootstrap_publishes_candidate_lease_and_refreshes_heartbeat(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(lsp_process, "_HEARTBEAT_SECONDS", 0.05)
+    coordinators: list[lsp_process._LifecycleCoordinator] = []
+    real_prepare = lsp_process._prepare_generation
+    bootstrap_entered = threading.Event()
+    release_bootstrap = threading.Event()
+    bootstrap_nonces: list[str] = []
+    started: list[LspProcess] = []
+    start_errors: list[BaseException] = []
+
+    def observe_prepare(
+        coordinator: lsp_process._LifecycleCoordinator,
+        *args: object,
+        **kwargs: object,
+    ) -> lsp_process._Generation:
+        coordinators.append(coordinator)
+        return real_prepare(coordinator, *args, **kwargs)  # type: ignore[arg-type]
+
+    def bootstrap(
+        protocol: lsp_protocol.LspProtocol,
+        pid: int,
+        generation_nonce: str,
+        deadline: float,
+    ) -> ProcessState:
+        bootstrap_nonces.append(generation_nonce)
+        bootstrap_entered.set()
+        assert release_bootstrap.wait(max(0.0, deadline - time.monotonic()))
+        return _initialize_generation(protocol, pid, generation_nonce, deadline)
+
+    def start() -> None:
+        try:
+            started.append(
+                LspProcess.start_configured(
+                    _command("--lifecycle", "--bootstrap-handshake"),
+                    cwd=tmp_path,
+                    owner_root=tmp_path / OWNER_NONCE,
+                    deadline=time.monotonic() + 3,
+                    server_request_handlers={
+                        "workspace/configuration": lambda _params: True
+                    },
+                    server_notification_handlers={"$/progress": lambda _params: None},
+                    generation_bootstrap=bootstrap,
+                )
+            )
+        except BaseException as error:
+            start_errors.append(error)
+
+    monkeypatch.setattr(lsp_process, "_prepare_generation", observe_prepare)
+    owner_root = tmp_path / OWNER_NONCE
+    lease_path = owner_root / "lease.json"
+    thread = threading.Thread(target=start)
+    thread.start()
+    assert bootstrap_entered.wait(2)
+    coordinator = coordinators[0]
+    owner_exists_during_bootstrap = (owner_root / "owner.json").is_file()
+    lease_exists_during_bootstrap = lease_path.is_file()
+    heartbeat_refreshed = False
+    lease_record: dict[str, object] = {}
+    if lease_exists_during_bootstrap:
+        lease_record = json.loads(lease_path.read_bytes())
+        first_heartbeat = lease_record["heartbeat_at"]
+        refresh_deadline = time.monotonic() + 1
+        while time.monotonic() < refresh_deadline:
+            current = json.loads(lease_path.read_bytes())
+            if current["heartbeat_at"] != first_heartbeat:
+                lease_record = current
+                heartbeat_refreshed = True
+                break
+            time.sleep(0.01)
+    with coordinator.condition:
+        candidate = coordinator.candidate
+        transition_snapshot = (
+            coordinator.phase,
+            coordinator.active,
+            candidate.nonce if candidate is not None else None,
+            (
+                coordinator.lease_generation.nonce
+                if coordinator.lease_generation is not None
+                else None
+            ),
+            coordinator.startup_complete,
+        )
+    release_bootstrap.set()
+    thread.join(5)
+    try:
+        assert not thread.is_alive()
+        assert start_errors == []
+        assert len(started) == 1
+        assert owner_exists_during_bootstrap is True
+        assert lease_exists_during_bootstrap is True
+        assert heartbeat_refreshed is True
+        assert lease_record["generation_nonce"] == bootstrap_nonces[0]
+        assert transition_snapshot == (
+            lsp_process._LifecyclePhase.STARTING,
+            None,
+            bootstrap_nonces[0],
+            bootstrap_nonces[0],
+            False,
+        )
+        assert started[0].state is ProcessState.PROTOCOL_INITIALIZED
+    finally:
+        release_bootstrap.set()
+        thread.join(5)
+        for process in started:
+            if lsp_process._coordinator_has_ownership(process._coordinator):
+                process.close(time.monotonic() + 5)
+        for error in start_errors:
+            if isinstance(error, lsp_process.StartupCleanupError):
+                error.retry_cleanup(time.monotonic() + 5)
+
+
 def test_transparent_restart_bootstraps_fresh_generation_before_request_replay(
     tmp_path: Path,
 ) -> None:
@@ -721,6 +835,113 @@ def test_restart_bootstrap_failure_is_terminal_and_never_replays_request(
     assert not (process.owner_root / "lease.json").exists()
 
 
+def test_autonomous_bootstrap_uses_configured_budget_and_retains_cleanup_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(lsp_process, "_GRACEFUL_CLEANUP_SECONDS", 0.15)
+    monkeypatch.setattr(lsp_process, "_RECOVERY_RETRY_SECONDS", 0.02)
+    bootstraps: list[tuple[float, float, int]] = []
+    replacement_bootstrap_started = threading.Event()
+    first_cleanup_failed = threading.Event()
+    cleanup_retry_started = threading.Event()
+    allow_cleanup_retry = threading.Event()
+
+    def bootstrap(
+        protocol: lsp_protocol.LspProtocol,
+        pid: int,
+        _generation_nonce: str,
+        deadline: float,
+    ) -> ProcessState:
+        started = time.monotonic()
+        bootstraps.append((started, deadline, pid))
+        if len(bootstraps) == 1:
+            return _initialize_generation(protocol, pid, _generation_nonce, deadline)
+        replacement_bootstrap_started.set()
+        threading.Event().wait(max(0.0, deadline - time.monotonic()) + 0.01)
+        raise TimeoutError("autonomous replacement bootstrap expired")
+
+    configured_deadline = time.monotonic() + 0.8
+    process = LspProcess.start_configured(
+        _command("--lifecycle", "--bootstrap-handshake"),
+        cwd=tmp_path,
+        owner_root=tmp_path / OWNER_NONCE,
+        deadline=configured_deadline,
+        server_request_handlers={"workspace/configuration": lambda _params: True},
+        server_notification_handlers={"$/progress": lambda _params: None},
+        generation_bootstrap=bootstrap,
+    )
+    coordinator = process._coordinator
+    recovery = coordinator.recovery_thread
+    heartbeat = coordinator.heartbeat_thread
+    assert recovery is not None and heartbeat is not None
+    terminate = lsp_process.ProcessTree.terminate
+    cleanup_deadline_margins: list[float] = []
+    replacement_terminate_calls = 0
+
+    def fail_first_replacement_cleanup(current: object, *, deadline: float) -> None:
+        nonlocal replacement_terminate_calls
+        replacement_pid = bootstraps[1][2] if len(bootstraps) > 1 else None
+        current_pid = current.process.pid  # type: ignore[attr-defined]
+        if current_pid == replacement_pid:
+            replacement_terminate_calls += 1
+            cleanup_deadline_margins.append(deadline - time.monotonic())
+            if replacement_terminate_calls == 1:
+                first_cleanup_failed.set()
+                raise OSError("transient replacement cleanup failure")
+            cleanup_retry_started.set()
+            if not allow_cleanup_retry.wait(max(0.0, deadline - time.monotonic())):
+                raise TimeoutError("replacement cleanup retry stayed blocked")
+        terminate(current, deadline=deadline)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        lsp_process.ProcessTree,
+        "terminate",
+        fail_first_replacement_cleanup,
+    )
+    try:
+        process.protocol._become_fatal("trigger autonomous configured restart")
+        assert replacement_bootstrap_started.wait(2)
+        assert first_cleanup_failed.wait(2)
+
+        replacement_started, replacement_deadline, _pid = bootstraps[1]
+        assert replacement_deadline - replacement_started >= 0.5
+        assert cleanup_deadline_margins[0] >= 0.05
+        assert cleanup_retry_started.wait(2)
+        assert coordinator.phase in {
+            lsp_process._LifecyclePhase.CLEANUP_PENDING,
+            lsp_process._LifecyclePhase.STOPPING_FAILURE,
+        }
+        assert coordinator.recovery_thread is recovery
+        assert recovery.is_alive()
+        assert heartbeat.is_alive()
+        assert lsp_process._coordinator_has_ownership(coordinator)
+
+        allow_cleanup_retry.set()
+        assert _coordinator_wait(
+            process,
+            lambda: coordinator.phase is lsp_process._LifecyclePhase.STOPPED_FAILURE,
+            timeout=5,
+        )
+        recovery.join(1)
+        heartbeat.join(1)
+        assert not recovery.is_alive()
+        assert not heartbeat.is_alive()
+        assert coordinator.recovery_thread is None
+        assert coordinator.heartbeat_thread is None
+        assert coordinator.cleanup_result.ownership_pending is False
+        assert not (process.owner_root / "lease.json").exists()
+        assert not lsp_process._coordinator_has_ownership(coordinator)
+    finally:
+        allow_cleanup_retry.set()
+        if lsp_process._coordinator_has_ownership(coordinator):
+            try:
+                process.close(time.monotonic() + 5)
+            except RuntimeError:
+                if lsp_process._coordinator_has_ownership(coordinator):
+                    process.close(time.monotonic() + 5)
+
+
 def test_concurrent_autonomous_fatals_bootstrap_only_one_replacement(
     tmp_path: Path,
 ) -> None:
@@ -939,6 +1160,132 @@ def test_bootstrap_raw_protocol_and_handler_complete_while_driver_is_held(
         process.close(time.monotonic() + 5)
 
 
+@pytest.mark.parametrize(
+    ("operation", "owner_nonce"),
+    [
+        ("close", "b" * 32),
+        ("restart", "c" * 32),
+        ("terminal", "d" * 32),
+    ],
+)
+def test_protocol_callback_lifecycle_operations_fail_fast_without_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: str,
+    owner_nonce: str,
+) -> None:
+    instances: list[LspProcess] = []
+    real_start_heartbeat = lsp_process._start_heartbeat_worker
+    handler_errors: list[BaseException] = []
+    handler_elapsed: list[float] = []
+    handler_threads: list[threading.Thread] = []
+    lifecycle_snapshots: list[tuple[object, ...]] = []
+
+    def capture_instance(instance: LspProcess, deadline: float) -> None:
+        instances.append(instance)
+        real_start_heartbeat(instance, deadline)
+
+    def snapshot(instance: LspProcess) -> tuple[object, ...]:
+        coordinator = instance._coordinator
+        with coordinator.condition:
+            candidate = coordinator.candidate
+            return (
+                instance.state,
+                instance.restart_count,
+                coordinator.phase,
+                coordinator.terminal_outcome,
+                coordinator.mandatory_failure_intent,
+                coordinator.recovery_attempted,
+                coordinator.active,
+                candidate.nonce if candidate is not None else None,
+            )
+
+    def progress(_params: object) -> None:
+        instance = instances[0]
+        handler_threads.append(threading.current_thread())
+        lifecycle_snapshots.append(snapshot(instance))
+        started = time.monotonic()
+        try:
+            deadline = time.monotonic() + 1
+            if operation == "close":
+                instance.close(deadline)
+            elif operation == "restart":
+                instance.restart(deadline)
+            else:
+                instance._terminal_failure("handler_failure", deadline)
+        except BaseException as error:
+            handler_errors.append(error)
+        finally:
+            handler_elapsed.append(time.monotonic() - started)
+            lifecycle_snapshots.append(snapshot(instance))
+
+    monkeypatch.setattr(lsp_process, "_start_heartbeat_worker", capture_instance)
+    process = LspProcess.start_configured(
+        _command("--lifecycle", "--bootstrap-handshake"),
+        cwd=tmp_path,
+        owner_root=tmp_path / owner_nonce,
+        deadline=time.monotonic() + 5,
+        server_request_handlers={"workspace/configuration": lambda _params: True},
+        server_notification_handlers={"$/progress": progress},
+        generation_bootstrap=_initialize_generation,
+    )
+    try:
+        assert len(handler_errors) == 1
+        assert type(handler_errors[0]) is RuntimeError
+        assert str(handler_errors[0]) == (
+            "LSP lifecycle operations are not reentrant from protocol callbacks"
+        )
+        assert handler_elapsed[0] < 0.2
+        assert handler_threads == [process.protocol.reader_thread]
+        assert lifecycle_snapshots[0] == lifecycle_snapshots[1]
+        assert process.state is ProcessState.PROTOCOL_INITIALIZED
+        assert process.restart_count == 0
+        assert process._coordinator.phase is lsp_process._LifecyclePhase.RUNNING
+        assert process._coordinator.terminal_outcome is None
+        assert process._coordinator.mandatory_failure_intent is None
+    finally:
+        process.close(time.monotonic() + 5)
+
+
+def test_uncaught_progress_handler_lifecycle_error_is_nonfatal_and_bootstrap_continues(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    instances: list[LspProcess] = []
+    real_start_heartbeat = lsp_process._start_heartbeat_worker
+    handler_entered = threading.Event()
+    handler_returned_normally = threading.Event()
+
+    def capture_instance(instance: LspProcess, deadline: float) -> None:
+        instances.append(instance)
+        real_start_heartbeat(instance, deadline)
+
+    def progress(_params: object) -> None:
+        handler_entered.set()
+        instances[0].close(time.monotonic() + 5)
+        handler_returned_normally.set()
+
+    monkeypatch.setattr(lsp_process, "_start_heartbeat_worker", capture_instance)
+    process = LspProcess.start_configured(
+        _command("--lifecycle", "--bootstrap-handshake"),
+        cwd=tmp_path,
+        owner_root=tmp_path / ("e" * 32),
+        deadline=time.monotonic() + 2,
+        server_request_handlers={"workspace/configuration": lambda _params: True},
+        server_notification_handlers={"$/progress": progress},
+        generation_bootstrap=_initialize_generation,
+    )
+    try:
+        assert handler_entered.is_set()
+        assert not handler_returned_normally.is_set()
+        assert process.protocol.fatal is False
+        assert process.state is ProcessState.PROTOCOL_INITIALIZED
+        assert process._coordinator.phase is lsp_process._LifecyclePhase.RUNNING
+        assert process._coordinator.terminal_outcome is None
+    finally:
+        process.close(time.monotonic() + 5)
+
+
 def test_close_serializes_behind_restart_bootstrap_and_commits_success(
     tmp_path: Path,
 ) -> None:
@@ -1077,7 +1424,7 @@ def test_delayed_failure_selection_cannot_mutate_committed_close_success(
     assert not lsp_process._coordinator_has_ownership(coordinator)
 
 
-def test_restart_heartbeat_never_publishes_candidate_before_bootstrap_commit(
+def test_restart_lease_names_candidate_before_bootstrap_commit_without_activation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1144,8 +1491,32 @@ def test_restart_heartbeat_never_publishes_candidate_before_bootstrap_commit(
         candidate_nonce = bootstraps[1]
         process._coordinator.heartbeat_wake.set()
         assert heartbeat_wrote.wait(1)
+        lease_record = json.loads(
+            (process.owner_root / "lease.json").read_bytes()
+        )
+        with process._coordinator.condition:
+            candidate = process._coordinator.candidate
+            transition_snapshot = (
+                process._coordinator.phase,
+                process._coordinator.active,
+                candidate.nonce if candidate is not None else None,
+                (
+                    process._coordinator.lease_generation.nonce
+                    if process._coordinator.lease_generation is not None
+                    else None
+                ),
+            )
 
-        assert heartbeat_generations == [first_nonce]
+        assert heartbeat_generations == [candidate_nonce]
+        assert lease_record["generation_nonce"] == candidate_nonce
+        assert transition_snapshot == (
+            lsp_process._LifecyclePhase.RESTARTING,
+            None,
+            candidate_nonce,
+            candidate_nonce,
+        )
+        assert process.generation_nonce == first_nonce
+        assert process.state is ProcessState.DEGRADED
         assert candidate_nonce != first_nonce
 
         release_bootstrap.set()
