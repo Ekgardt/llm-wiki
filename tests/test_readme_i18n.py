@@ -100,19 +100,19 @@ def test_all_readmes_mention_current_version():
     critical_markers = {
         "README.md": (
             "12 task-shaped",
-                "4967 tests collected",
+                "4970 tests collected",
             "Historical current 112",
             "optional Obsidian viewer",
         ),
         "README.ru.md": (
             "12 task-shaped",
-                "4967 регрессионный тест",
+                "4970 регрессионных тестов",
             "Исторические текущие 112",
             "Obsidian как опциональный viewer",
         ),
         "README.zh-CN.md": (
             "12 个 task-shaped",
-                "4967 个测试",
+                "4970 个测试",
             "历史当前 112",
             "Obsidian 为可选 viewer",
         ),

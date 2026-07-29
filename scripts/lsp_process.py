@@ -1701,15 +1701,11 @@ def _start_lsp_process_impl(
         instance._stderr_projection_lock = generation.stderr_lock
         generation_state = ProcessState.PROCESS_RUNNING
         if generation_configuration.generation_bootstrap is not None:
-            _release_driver(coordinator)
-            driver_acquired = False
             generation_state = _run_generation_bootstrap(
                 generation_configuration,
                 generation,
                 startup_deadline,
             )
-            _acquire_driver(coordinator, startup_deadline, allow_expired=True)
-            driver_acquired = True
         _acquire_lease(coordinator, startup_deadline)
         try:
             _write_generation_lease(
@@ -1910,13 +1906,13 @@ def _heartbeat_loop(instance: LspProcess) -> None:
             except TimeoutError:
                 return
             try:
-                _select_terminal_failure_locked(
+                if _select_terminal_failure_locked(
                     instance, coordinator, "heartbeat_failed"
-                )
-                coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
-                for generation in _generations_locked(coordinator):
-                    _mark_generation_expected_exit(generation)
-                _notify_lifecycle_locked(coordinator)
+                ):
+                    coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
+                    for generation in _generations_locked(coordinator):
+                        _mark_generation_expected_exit(generation)
+                    _notify_lifecycle_locked(coordinator)
             finally:
                 _release_lifecycle(coordinator)
             return
@@ -2089,7 +2085,6 @@ def _process_recovery_request(
             and not coordinator.recovery_stop.is_set(),
             None,
         )
-    restart = False
     try:
         try:
             _acquire_lifecycle(coordinator, deadline)
@@ -2127,10 +2122,6 @@ def _process_recovery_request(
         finally:
             _release_lifecycle(coordinator)
 
-        restart = True
-    finally:
-        _release_driver(coordinator)
-    if restart:
         try:
             _restart_generation(instance, deadline)
         except BaseException:
@@ -2142,7 +2133,9 @@ def _process_recovery_request(
             if coordinator.cleanup_result.ownership_pending:
                 _retain_autonomous_cleanup_owners(instance)
                 return False, "restart_failed"
-    return False, None
+        return False, None
+    finally:
+        _release_driver(coordinator)
 
 
 def _retry_autonomous_terminal_cleanup(
@@ -2242,19 +2235,19 @@ def _process_failure_intent(
             break
     try:
         result, restart = _process_failure_intent_owned(instance, intent, deadline)
+        if restart:
+            try:
+                _restart_generation(instance, deadline)
+            except BaseException:
+                _remember_mandatory_terminal_failure(
+                    instance,
+                    coordinator,
+                    "restart_failed",
+                )
+                return "restart_failed"
+        return result
     finally:
         _release_driver(coordinator)
-    if restart:
-        try:
-            _restart_generation(instance, deadline)
-        except BaseException:
-            _remember_mandatory_terminal_failure(
-                instance,
-                coordinator,
-                "restart_failed",
-            )
-            return "restart_failed"
-    return result
 
 
 def _process_failure_intent_owned(
@@ -2292,13 +2285,13 @@ def _process_failure_intent_owned(
         coordinator.seen_failures.add(key)
         acknowledge = True
         if intent.owner_fatal or coordinator.recovery_attempted or instance.restart_count >= 1:
-            _select_terminal_failure_locked(
+            terminal = _select_terminal_failure_locked(
                 instance,
                 coordinator,
                 "heartbeat_failed" if intent.owner_fatal else _PROCESS_EXITED,
             )
-            coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
-            terminal = True
+            if terminal:
+                coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
         else:
             coordinator.recovery_attempted = True
             coordinator.phase = _LifecyclePhase.RECOVERY_PENDING
@@ -2529,7 +2522,10 @@ def _remember_mandatory_terminal_failure(
     if identity is None:
         return
     with coordinator.terminal_state_lock:
-        if coordinator.mandatory_failure_intent is None:
+        if (
+            not coordinator.success_committed
+            and coordinator.mandatory_failure_intent is None
+        ):
             coordinator.mandatory_failure_intent = identity
 
 
@@ -2537,7 +2533,9 @@ def _select_terminal_failure_locked(
     instance: LspProcess | None,
     coordinator: _LifecycleCoordinator,
     code: str,
-) -> None:
+) -> bool:
+    if coordinator.success_committed:
+        return False
     coordinator.terminal_outcome = "failure"
     if coordinator.terminal_code is None:
         coordinator.terminal_code = code
@@ -2547,6 +2545,7 @@ def _select_terminal_failure_locked(
         )
     if instance is not None and instance.state is not ProcessState.FAILED:
         instance.state = ProcessState.DEGRADED
+    return True
 
 
 def _mark_terminal_failure(
@@ -2557,11 +2556,11 @@ def _mark_terminal_failure(
 ) -> None:
     _acquire_lifecycle(coordinator, deadline, allow_expired=True)
     try:
-        _select_terminal_failure_locked(instance, coordinator, code)
-        coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
-        for generation in _generations_locked(coordinator):
-            _mark_generation_expected_exit(generation)
-        _notify_lifecycle_locked(coordinator)
+        if _select_terminal_failure_locked(instance, coordinator, code):
+            coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
+            for generation in _generations_locked(coordinator):
+                _mark_generation_expected_exit(generation)
+            _notify_lifecycle_locked(coordinator)
     finally:
         _release_lifecycle(coordinator)
 
@@ -2598,8 +2597,6 @@ def _restart_lsp_process(instance: LspProcess, deadline: float) -> None:
         _acquire_driver(coordinator, deadline)
         driver_acquired = True
         _restart_lsp_process_owned(instance, deadline)
-        _release_driver(coordinator)
-        driver_acquired = False
         _restart_generation(instance, deadline)
     except BaseException:
         handoff_required = True
@@ -2662,15 +2659,11 @@ def _restart_generation(
         candidate_prepared = True
         generation_state = ProcessState.PROCESS_RUNNING
         if coordinator.generation_configuration.generation_bootstrap is not None:
-            _release_driver(coordinator)
-            driver_acquired = False
             generation_state = _run_generation_bootstrap(
                 coordinator.generation_configuration,
                 candidate,
                 deadline,
             )
-            _acquire_driver(coordinator, deadline, allow_expired=True)
-            driver_acquired = True
         _commit_restart_generation_owned(
             instance,
             candidate,
@@ -2793,6 +2786,14 @@ def _commit_restart_generation_owned(
 
 def _fail_restart_generation(instance: LspProcess, deadline: float) -> None:
     coordinator = instance._coordinator
+    _acquire_lifecycle(coordinator, deadline, allow_expired=True)
+    try:
+        success_committed = coordinator.success_committed
+    finally:
+        _release_lifecycle(coordinator)
+    if success_committed:
+        _drive_cleanup(instance, deadline, terminal=False)
+        return
     _remember_mandatory_terminal_failure(
         instance,
         coordinator,
@@ -3134,7 +3135,7 @@ def _drain_terminal_failures(
         coordinator.recovery_wake.set()
         raise
     try:
-        _select_terminal_failure_locked(
+        selected = _select_terminal_failure_locked(
             instance,
             coordinator,
             (
@@ -3143,8 +3144,9 @@ def _drain_terminal_failures(
                 else _PROCESS_EXITED
             ),
         )
-        coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
-        _notify_lifecycle_locked(coordinator)
+        if selected:
+            coordinator.phase = _LifecyclePhase.STOPPING_FAILURE
+            _notify_lifecycle_locked(coordinator)
     finally:
         _release_lifecycle(coordinator)
     for _intent in intents:
@@ -3166,6 +3168,8 @@ def _linearize_terminal_outcome_locked(
     try:
         mark_failure_exits = False
         with coordinator.terminal_state_lock:
+            if coordinator.success_committed:
+                return "success"
             mandatory_intent = coordinator.mandatory_failure_intent
             if mandatory_intent is not None:
                 coordinator.terminal_outcome = "failure"

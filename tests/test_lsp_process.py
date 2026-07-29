@@ -764,11 +764,114 @@ def test_concurrent_autonomous_fatals_bootstrap_only_one_replacement(
         process.close(time.monotonic() + 5)
 
 
-def test_bootstrap_runs_with_lifecycle_and_driver_locks_available(
+def test_explicit_restart_and_autonomous_wake_bootstrap_one_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    bootstraps: list[tuple[int, str]] = []
+
+    def bootstrap(
+        protocol: lsp_protocol.LspProtocol,
+        pid: int,
+        generation_nonce: str,
+        deadline: float,
+    ) -> ProcessState:
+        bootstraps.append((pid, generation_nonce))
+        _initialize_generation(protocol, pid, generation_nonce, deadline)
+        return ProcessState.WORKSPACE_READY
+
+    process = LspProcess.start_configured(
+        _command("--lifecycle", "--bootstrap-handshake"),
+        cwd=tmp_path,
+        owner_root=tmp_path / OWNER_NONCE,
+        deadline=time.monotonic() + 5,
+        server_request_handlers={"workspace/configuration": lambda _params: True},
+        server_notification_handlers={"$/progress": lambda _params: None},
+        generation_bootstrap=bootstrap,
+    )
+    coordinator = process._coordinator
+    first_protocol = process.protocol
+    real_restart_generation = lsp_process._restart_generation
+    real_process_recovery_request = lsp_process._process_recovery_request
+    explicit_paused = threading.Event()
+    release_explicit = threading.Event()
+    autonomous_entered = threading.Event()
+    autonomous_replacement_entered = threading.Event()
+    autonomous_replacement_finished = threading.Event()
+    explicit_threads: list[threading.Thread] = []
+    explicit_errors: list[BaseException] = []
+
+    def pause_explicit_restart(instance: LspProcess, deadline: float) -> None:
+        current = threading.current_thread()
+        if current is explicit_threads[0]:
+            explicit_paused.set()
+            assert release_explicit.wait(max(0.0, deadline - time.monotonic()))
+        elif current is coordinator.recovery_thread:
+            autonomous_replacement_entered.set()
+        try:
+            real_restart_generation(instance, deadline)
+        finally:
+            if current is coordinator.recovery_thread:
+                autonomous_replacement_finished.set()
+
+    def observe_autonomous_recovery(
+        instance: LspProcess,
+        deadline: float,
+    ) -> tuple[bool, str | None]:
+        autonomous_entered.set()
+        return real_process_recovery_request(instance, deadline)
+
+    def explicit_restart() -> None:
+        try:
+            process.restart(time.monotonic() + 10)
+        except BaseException as error:
+            explicit_errors.append(error)
+
+    monkeypatch.setattr(lsp_process, "_restart_generation", pause_explicit_restart)
+    monkeypatch.setattr(
+        lsp_process, "_process_recovery_request", observe_autonomous_recovery
+    )
+    restart_thread = threading.Thread(target=explicit_restart)
+    explicit_threads.append(restart_thread)
+    restart_thread.start()
+    try:
+        assert explicit_paused.wait(3)
+        first_protocol._become_fatal("fatal while explicit restart is pending")
+        coordinator.recovery_wake.set()
+        assert autonomous_entered.wait(3)
+        if autonomous_replacement_entered.wait(0.25):
+            assert autonomous_replacement_finished.wait(5)
+
+        release_explicit.set()
+        restart_thread.join(10)
+
+        assert not restart_thread.is_alive()
+        assert explicit_errors == []
+        assert bootstraps == [
+            bootstraps[0],
+            (process.process.pid, process.generation_nonce),
+        ]
+        assert len(bootstraps) == 2
+        assert process.restart_count == 1
+        assert process.state is ProcessState.WORKSPACE_READY
+        assert coordinator.phase is lsp_process._LifecyclePhase.RUNNING
+        assert coordinator.active is not None
+        assert coordinator.candidate is None
+        assert coordinator.terminal_outcome is None
+    finally:
+        release_explicit.set()
+        restart_thread.join(10)
+        if lsp_process._coordinator_has_ownership(coordinator):
+            process.close(time.monotonic() + 5)
+
+
+def test_bootstrap_raw_protocol_and_handler_complete_while_driver_is_held(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     coordinators: list[lsp_process._LifecycleCoordinator] = []
+    configurations: list[object] = []
+    lock_observations: list[tuple[bool, bool, bool]] = []
     real_prepare = lsp_process._prepare_generation
 
     def observe_prepare(
@@ -792,12 +895,72 @@ def test_bootstrap_runs_with_lifecycle_and_driver_locks_available(
         deadline: float,
     ) -> ProcessState:
         coordinator = coordinators[-1]
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            assert pool.submit(lock_is_available, coordinator.lock).result(timeout=1)
-            assert pool.submit(lock_is_available, coordinator.driver).result(timeout=1)
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            driver_available = pool.submit(
+                lock_is_available, coordinator.driver
+            ).result(timeout=1)
+            lifecycle_available = pool.submit(
+                lock_is_available, coordinator.lock
+            ).result(timeout=1)
+            lease_available = pool.submit(
+                lock_is_available, coordinator.lease_lock
+            ).result(timeout=1)
+        lock_observations.append(
+            (driver_available, lifecycle_available, lease_available)
+        )
+        assert driver_available is False
+        assert lifecycle_available is True
+        assert lease_available is True
         return _initialize_generation(protocol, pid, generation_nonce, deadline)
 
     monkeypatch.setattr(lsp_process, "_prepare_generation", observe_prepare)
+    process = LspProcess.start_configured(
+        _command("--lifecycle", "--bootstrap-handshake"),
+        cwd=tmp_path,
+        owner_root=tmp_path / OWNER_NONCE,
+        deadline=time.monotonic() + 5,
+        server_request_handlers={
+            "workspace/configuration": lambda params: configurations.append(params)
+            or True
+        },
+        server_notification_handlers={"$/progress": lambda _params: None},
+        generation_bootstrap=bootstrap,
+    )
+    try:
+        process.restart(time.monotonic() + 5)
+        assert len(coordinators) == 2
+        assert lock_observations == [(False, True, True), (False, True, True)]
+        assert configurations == [
+            {"items": [{"section": "python"}]},
+            {"items": [{"section": "python"}]},
+        ]
+        assert process.restart_count == 1
+    finally:
+        process.close(time.monotonic() + 5)
+
+
+def test_close_serializes_behind_restart_bootstrap_and_commits_success(
+    tmp_path: Path,
+) -> None:
+    bootstraps: list[str] = []
+    bootstrap_entered = threading.Event()
+    release_bootstrap = threading.Event()
+    close_finished = threading.Event()
+    restart_errors: list[BaseException] = []
+    close_errors: list[BaseException] = []
+
+    def bootstrap(
+        protocol: lsp_protocol.LspProtocol,
+        pid: int,
+        generation_nonce: str,
+        deadline: float,
+    ) -> ProcessState:
+        bootstraps.append(generation_nonce)
+        if len(bootstraps) == 2:
+            bootstrap_entered.set()
+            assert release_bootstrap.wait(max(0.0, deadline - time.monotonic()))
+        return _initialize_generation(protocol, pid, generation_nonce, deadline)
+
     process = LspProcess.start_configured(
         _command("--lifecycle", "--bootstrap-handshake"),
         cwd=tmp_path,
@@ -807,12 +970,111 @@ def test_bootstrap_runs_with_lifecycle_and_driver_locks_available(
         server_notification_handlers={"$/progress": lambda _params: None},
         generation_bootstrap=bootstrap,
     )
+    coordinator = process._coordinator
+
+    def restart() -> None:
+        try:
+            process.restart(time.monotonic() + 8)
+        except BaseException as error:
+            restart_errors.append(error)
+
+    def close() -> None:
+        try:
+            process.close(time.monotonic() + 8)
+        except BaseException as error:
+            close_errors.append(error)
+        finally:
+            close_finished.set()
+
+    restart_thread = threading.Thread(target=restart)
+    close_thread = threading.Thread(target=close)
+    restart_thread.start()
+    assert bootstrap_entered.wait(3)
+    close_thread.start()
+    close_returned_before_bootstrap = close_finished.wait(0.2)
+    release_bootstrap.set()
+    restart_thread.join(8)
+    close_thread.join(8)
     try:
-        process.restart(time.monotonic() + 5)
-        assert len(coordinators) == 2
-        assert process.restart_count == 1
+        assert close_returned_before_bootstrap is False
+        assert not restart_thread.is_alive()
+        assert not close_thread.is_alive()
+        assert restart_errors == []
+        assert close_errors == []
+        assert len(bootstraps) == 2
+        assert coordinator.success_committed is True
+        assert coordinator.terminal_outcome == "success"
+        assert coordinator.terminal_code is None
+        assert coordinator.failure_evidence_identity is None
+        assert coordinator.mandatory_failure_intent is None
+        assert coordinator.phase is lsp_process._LifecyclePhase.STOPPED_SUCCESS
+        assert coordinator.cleanup_result.evidence == "not_applicable"
+        assert coordinator.cleanup_result.ownership_pending is False
+        assert process.state is ProcessState.PROTOCOL_INITIALIZED
+        assert not process.owner_root.exists()
+        assert not lsp_process._coordinator_has_ownership(coordinator)
     finally:
-        process.close(time.monotonic() + 5)
+        release_bootstrap.set()
+        restart_thread.join(8)
+        close_thread.join(8)
+        if lsp_process._coordinator_has_ownership(coordinator):
+            process.close(time.monotonic() + 5)
+
+
+def test_delayed_failure_selection_cannot_mutate_committed_close_success(
+    tmp_path: Path,
+) -> None:
+    process = _start(tmp_path, "--lifecycle")
+    coordinator = process._coordinator
+    state_before_close = process.state
+    process.close(time.monotonic() + 5)
+    candidate_process = subprocess.Popen(
+        _command("--lifecycle", "--sleep-seconds", "30"),
+        cwd=tmp_path,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    candidate = lsp_process._Generation(
+        "b" * 32,
+        _FakeTree(candidate_process),  # type: ignore[arg-type]
+        candidate_process,
+    )
+    with coordinator.condition:
+        coordinator.candidate = candidate
+    callback_errors: list[BaseException] = []
+
+    def delayed_failure_callback() -> None:
+        try:
+            lsp_process._mark_terminal_failure(
+                process,
+                coordinator,
+                "process_exited",
+                time.monotonic() + 2,
+            )
+            lsp_process._fail_restart_generation(process, time.monotonic() + 2)
+        except BaseException as error:
+            callback_errors.append(error)
+
+    callback = threading.Thread(target=delayed_failure_callback)
+    callback.start()
+    callback.join(2)
+
+    assert not callback.is_alive()
+    assert callback_errors == []
+    assert coordinator.success_committed is True
+    assert coordinator.terminal_outcome == "success"
+    assert coordinator.terminal_code is None
+    assert coordinator.failure_evidence_identity is None
+    assert coordinator.phase is lsp_process._LifecyclePhase.STOPPED_SUCCESS
+    assert coordinator.cleanup_result.evidence == "not_applicable"
+    assert coordinator.cleanup_result.ownership_pending is False
+    assert coordinator.candidate is None
+    assert candidate.released
+    assert candidate_process.poll() is not None
+    assert process.state is state_before_close
+    assert not process.owner_root.exists()
+    assert not lsp_process._coordinator_has_ownership(coordinator)
 
 
 def test_restart_heartbeat_never_publishes_candidate_before_bootstrap_commit(
