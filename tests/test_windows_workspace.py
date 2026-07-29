@@ -9,6 +9,16 @@ import pytest
 import windows_workspace
 
 
+def test_windows_entry_size_is_bounded_nonnegative_and_backward_compatible() -> None:
+    entry = windows_workspace.WindowsEntry("page.md", "file", b"a" * 16)
+
+    assert entry.size == 0
+    assert windows_workspace.WindowsEntry("page.md", "file", b"a" * 16, 7).size == 7
+    for invalid in (-1, True, 2**63):
+        with pytest.raises(ValueError, match="size"):
+            windows_workspace.WindowsEntry("page.md", "file", b"a" * 16, invalid)
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows short-path boundary")
 def test_get_short_path_is_exported_and_returns_existing_local_path(
     tmp_path: Path,

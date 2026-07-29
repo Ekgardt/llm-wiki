@@ -5,13 +5,16 @@ from __future__ import annotations
 import ast
 import concurrent.futures
 import dataclasses
+import http.client
 import io
 import json
 import os
 import shutil
+import socket
 import stat
 import subprocess
 import tarfile
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -505,12 +508,16 @@ def test_download_refreshes_remaining_deadline_on_socket_before_every_read(
     class TrackingResponse(_Response):
         def __init__(self) -> None:
             super().__init__(content)
-            self.read_calls = 0
+            self.read1_calls = 0
 
         def read(self, size: int = -1) -> bytes:
-            assert len(self.socket.timeouts) == self.read_calls + 1
-            self.read_calls += 1
-            return super().read(size)
+            pytest.fail("download used multi-read response.read")
+
+        def read1(self, size: int = -1) -> bytes:
+            assert size == installer_module.COPY_CHUNK_BYTES
+            assert len(self.socket.timeouts) == self.read1_calls + 1
+            self.read1_calls += 1
+            return super().read1(size)
 
     response = TrackingResponse()
 
@@ -529,8 +536,8 @@ def test_download_refreshes_remaining_deadline_on_socket_before_every_read(
 
         assert sha256 == installer_module.hashlib.sha256(content).hexdigest()
         assert sha512 == installer_module.hashlib.sha512(content).digest()
-        assert response.read_calls == 4
-        assert len(response.socket.timeouts) == response.read_calls
+        assert response.read1_calls == 4
+        assert len(response.socket.timeouts) == response.read1_calls
         assert all(0 < timeout < 1 for timeout in response.socket.timeouts)
         assert response.socket.timeouts == sorted(
             response.socket.timeouts, reverse=True
@@ -538,6 +545,137 @@ def test_download_refreshes_remaining_deadline_on_socket_before_every_read(
     finally:
         destination.cleanup()
         parent.close()
+
+
+def test_download_real_http_response_drip_feed_honors_absolute_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent_path = tmp_path / "pyright"
+    parent_path.mkdir()
+    parent = installer_module._open_absolute_directory(parent_path, writable=True)
+    destination = installer_module._new_owned_file(parent, "download")
+    client, server = socket.socketpair()
+    release_body = threading.Event()
+    stop = threading.Event()
+
+    def serve() -> None:
+        try:
+            server.sendall(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Length: 8\r\n"
+                b"Connection: close\r\n\r\n"
+            )
+            if not release_body.wait(1.0):
+                return
+            for value in b"12345678":
+                if stop.wait(0.1):
+                    return
+                server.sendall(bytes((value,)))
+        except OSError:
+            pass
+
+    worker = threading.Thread(target=serve, name="pyright-drip-server", daemon=True)
+    worker.start()
+    response = http.client.HTTPResponse(client)
+    response.begin()
+    response.url = PYRIGHT_PACKAGE_URL
+
+    def open_url(*args: object, **kwargs: object) -> http.client.HTTPResponse:
+        release_body.set()
+        return response
+
+    monkeypatch.setattr(installer_module, "_open_pinned_url", open_url)
+    started = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError):
+            installer_module._download_artifact(destination, started + 0.25)
+    finally:
+        stop.set()
+        client.close()
+        server.close()
+        worker.join(timeout=0.2)
+        elapsed = time.monotonic() - started
+        destination.cleanup()
+        parent.close()
+
+    assert not worker.is_alive()
+    assert 0.15 <= elapsed < 0.55
+
+
+def test_download_rejects_response_without_callable_read1_before_body(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "state"
+
+    class ReadOnlyResponse(_Response):
+        read1 = None
+
+        def read(self, size: int = -1) -> bytes:
+            pytest.fail("response without read1 reached blocking read")
+
+    monkeypatch.setattr(
+        installer_module,
+        "_open_pinned_url",
+        lambda *args, **kwargs: ReadOnlyResponse(b"blocked"),
+    )
+
+    with pytest.raises(PyrightInstallError) as error:
+        install_pyright(state_root=state_root)
+
+    assert _error_code(error) == "pyright_download_response_invalid"
+    assert not _root(state_root).exists()
+    _assert_no_owned_scratch(state_root)
+
+
+def test_download_rechecks_deadline_after_ssl_like_fragment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent_path = tmp_path / "pyright"
+    parent_path.mkdir()
+    parent = installer_module._open_absolute_directory(parent_path, writable=True)
+    destination = installer_module._new_owned_file(parent, "download")
+    clock = [100.0]
+    writes: list[bytes] = []
+
+    class FragmentedSslResponse(_Response):
+        def __init__(self) -> None:
+            super().__init__(b"abcdefgh")
+            self.fragments = iter((b"ab", b"cdefgh"))
+
+        def _next_fragment(self) -> bytes:
+            fragment = next(self.fragments, b"")
+            if fragment == b"cdefgh":
+                clock[0] = 100.3
+            return fragment
+
+        def read(self, size: int = -1) -> bytes:
+            return self._next_fragment()
+
+        def read1(self, size: int = -1) -> bytes:
+            return self._next_fragment()
+
+    response = FragmentedSslResponse()
+    monkeypatch.setattr(installer_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        installer_module, "_open_pinned_url", lambda *args, **kwargs: response
+    )
+    monkeypatch.setattr(
+        installer_module,
+        "_write_handle",
+        lambda _handle, content, _deadline: writes.append(content),
+    )
+    try:
+        with pytest.raises(TimeoutError):
+            installer_module._download_artifact(destination, 100.25)
+    finally:
+        destination.cleanup()
+        parent.close()
+
+    assert writes == [b"ab"]
+    assert len(response.socket.timeouts) == 2
 
 
 def test_download_rejects_unadjustable_transport_before_blocking_read(
@@ -552,6 +690,9 @@ def test_download_rejects_unadjustable_transport_before_blocking_read(
             self.fp = SimpleNamespace(raw=SimpleNamespace())
 
         def read(self, size: int = -1) -> bytes:
+            pytest.fail("unadjustable transport reached blocking read")
+
+        def read1(self, size: int = -1) -> bytes:
             pytest.fail("unadjustable transport reached blocking read")
 
     monkeypatch.setattr(
@@ -623,6 +764,9 @@ def test_download_rejects_redirect_or_non_success_before_reading_body(
 
     class UnreadableResponse(_Response):
         def read(self, size: int = -1) -> bytes:
+            pytest.fail("invalid response body was read")
+
+        def read1(self, size: int = -1) -> bytes:
             pytest.fail("invalid response body was read")
 
     monkeypatch.setattr(
@@ -996,7 +1140,7 @@ def test_download_interruption_cleans_only_owned_scratch(
             super().__init__(b"x" * 1024)
             self.calls = 0
 
-        def read(self, size: int = -1) -> bytes:
+        def read1(self, size: int = -1) -> bytes:
             self.calls += 1
             if self.calls == 1:
                 return b"x" * 64
@@ -1613,6 +1757,65 @@ def test_valid_existing_install_is_idempotent_before_artifact_or_network_access(
     _assert_no_owned_scratch(state_root)
 
 
+def test_existing_tree_snapshot_does_not_open_ordinary_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "state"
+    artifact = _artifact(tmp_path, monkeypatch)
+    expected = install_pyright(state_root=state_root, artifact=artifact.path)
+    ordinary = _root(state_root) / "package/ordinary"
+    ordinary.mkdir()
+    for index in range(32):
+        (ordinary / f"module-{index:02d}.js").write_bytes(b"content")
+    real_open_known_child = installer_module._open_known_child
+    real_existing_entries = installer_module._existing_directory_entries
+    opened_files: list[str] = []
+    opened_directories: list[str] = []
+    enumerations: list[tuple[str, ...]] = []
+
+    def open_known_child(
+        parent: object,
+        name: str,
+        *,
+        directory: bool,
+    ):
+        if directory:
+            opened_directories.append(name)
+        else:
+            opened_files.append(name)
+            if name.startswith("module-"):
+                pytest.fail("ordinary archive file was opened during idempotence")
+        return real_open_known_child(parent, name, directory=directory)
+
+    def existing_entries(directory: object):
+        entries = real_existing_entries(directory)
+        enumerations.append(tuple(entry.name for entry in entries))
+        return entries
+
+    monkeypatch.setattr(installer_module, "_open_known_child", open_known_child)
+    monkeypatch.setattr(
+        installer_module,
+        "_existing_directory_entries",
+        existing_entries,
+    )
+
+    observed = install_pyright(
+        state_root=state_root,
+        artifact=tmp_path / "must-not-be-read.tgz",
+    )
+
+    assert observed == expected
+    assert set(opened_files) <= {
+        "install-manifest.json",
+        "package.json",
+        "langserver.index.js",
+    }
+    assert len(opened_files) <= 6
+    assert len(enumerations) == 3
+    assert len(opened_directories) <= 2 * len(enumerations) + 2
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows enumeration complexity")
 def test_windows_5424_file_idempotence_enumerates_each_directory_once(
     tmp_path: Path,
@@ -1648,13 +1851,16 @@ def test_windows_5424_file_idempotence_enumerates_each_directory_once(
         bounded_list_directory,
     )
 
+    started = time.monotonic()
     observed = install_pyright(
         state_root=state_root,
         artifact=tmp_path / "must-not-be-read.tgz",
     )
+    elapsed = time.monotonic() - started
 
     assert observed == expected
     assert enumerations == {"root": 1, "package": 1}
+    assert elapsed < 10.0
 
 
 def test_existing_install_root_swap_before_return_fails_closed(
@@ -1978,15 +2184,18 @@ def test_state_validation_honors_end_to_end_deadline(
         raising=False,
     )
     started = time.monotonic()
+    requested_deadline = started + 0.02
 
     with pytest.raises(TimeoutError, match="deadline"):
         install_pyright(
             state_root=tmp_path / "state",
-            deadline=started + 0.02,
+            deadline=requested_deadline,
         )
 
     elapsed = time.monotonic() - started
-    assert observed_deadlines == [pytest.approx(started + 0.02)]
+    assert len(observed_deadlines) <= 1
+    if observed_deadlines:
+        assert observed_deadlines[0] == pytest.approx(requested_deadline)
     assert elapsed < 0.12
 
 

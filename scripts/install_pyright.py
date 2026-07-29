@@ -242,6 +242,8 @@ class _ExistingEntry:
     name: str
     kind: str
     file_id: bytes | None = None
+    size: int = 0
+    identity: tuple[object, ...] | None = None
 
 
 class _Stage:
@@ -1500,6 +1502,7 @@ def _read_bounded_file(
     deadline: float,
     *,
     expected_identity: tuple[object, ...] | None = None,
+    expected_size: int | None = None,
 ) -> bytes:
     _check_deadline(deadline)
     handle = (
@@ -1514,7 +1517,8 @@ def _read_bounded_file(
     )
     identity = _identity(handle)
     try:
-        if _file_size(handle) > maximum:
+        size = _file_size(handle)
+        if (expected_size is not None and size != expected_size) or size > maximum:
             raise PyrightInstallError("pyright_existing_install_invalid")
         content = bytearray()
         while True:
@@ -1525,7 +1529,7 @@ def _read_bounded_file(
             content.extend(chunk)
             if len(content) > maximum:
                 raise PyrightInstallError("pyright_existing_install_invalid")
-        if _identity(handle) != identity:
+        if _file_size(handle) != size or _identity(handle) != identity:
             raise PyrightInstallError("pyright_existing_install_invalid")
     finally:
         handle.close()
@@ -1541,12 +1545,31 @@ def _read_bounded_file(
 
 def _existing_directory_entries(directory: _Handle) -> tuple[_ExistingEntry, ...]:
     if os.name == "nt":
-        return tuple(
-            _ExistingEntry(entry.name, entry.kind, entry.file_id)
-            for entry in _windows_workspace.list_directory(
-                directory.value, max_entries=MAX_MEMBERS + 2
+        directory_identity = _identity(directory)
+        values = []
+        for entry in _windows_workspace.list_directory(
+            directory.value, max_entries=MAX_MEMBERS + 2
+        ):
+            if (
+                len(entry.file_id) != 16
+                or not any(entry.file_id)
+                or entry.size < 0
+            ):
+                raise PyrightInstallError("pyright_existing_install_invalid")
+            values.append(
+                _ExistingEntry(
+                    entry.name,
+                    entry.kind,
+                    entry.file_id,
+                    entry.size,
+                    (
+                        directory_identity[0],
+                        entry.file_id,
+                        entry.kind == "directory",
+                    ),
+                )
             )
-        )
+        return tuple(values)
     values: list[_ExistingEntry] = []
     with os.scandir(directory.value) as entries:
         for entry in entries:
@@ -1559,24 +1582,34 @@ def _existing_directory_entries(directory: _Handle) -> tuple[_ExistingEntry, ...
                 kind = "file"
             else:
                 kind = "other"
-            values.append(_ExistingEntry(entry.name, kind))
+            size = int(info.st_size)
+            if size < 0:
+                raise PyrightInstallError("pyright_existing_install_invalid")
+            values.append(
+                _ExistingEntry(
+                    entry.name,
+                    kind,
+                    None,
+                    size,
+                    (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)),
+                )
+            )
     return tuple(sorted(values, key=lambda item: item.name))
 
 
 def _validate_existing_tree(
     root: _Handle,
     deadline: float,
-) -> dict[str, tuple[object, ...]]:
+) -> dict[str, _ExistingEntry]:
     count = 0
     total_bytes = 0
     folded_paths: dict[str, str] = {}
-    identities: dict[str, tuple[object, ...]] = {}
+    snapshots: dict[str, _ExistingEntry] = {}
 
     def visit(directory: _Handle, parts: tuple[str, ...]) -> None:
         nonlocal count, total_bytes
         _check_deadline(deadline)
         entries = _existing_directory_entries(directory)
-        directory_identity = _identity(directory)
         if not parts and {entry.name for entry in entries} != {
             "install-manifest.json",
             "package",
@@ -1622,18 +1655,17 @@ def _validate_existing_tree(
                 if kind != expected:
                     raise PyrightInstallError("pyright_existing_install_invalid")
             if kind == "directory":
-                child = _open_known_child(directory, name, directory=True)
+                if entry.identity is None:
+                    raise PyrightInstallError("pyright_existing_install_invalid")
+                child = _open_expected_child(
+                    directory,
+                    name,
+                    directory=True,
+                    expected_identity=entry.identity,
+                )
                 identity = _identity(child)
                 try:
-                    if os.name == "nt" and (
-                        entry.file_id is None
-                        or len(entry.file_id) != 16
-                        or not any(entry.file_id)
-                        or identity[0] != directory_identity[0]
-                        or identity[1] != entry.file_id
-                    ):
-                        raise PyrightInstallError("pyright_existing_install_invalid")
-                    identities[relative] = identity
+                    snapshots[relative] = entry
                     visit(child, child_parts)
                 finally:
                     child.close()
@@ -1645,38 +1677,22 @@ def _validate_existing_tree(
                 if named_identity != identity:
                     raise PyrightInstallError("pyright_existing_install_invalid")
             elif kind == "file":
-                child = _open_known_child(directory, name, directory=False)
-                identity = _identity(child)
-                try:
-                    if os.name == "nt" and (
-                        entry.file_id is None
-                        or len(entry.file_id) != 16
-                        or not any(entry.file_id)
-                        or identity[0] != directory_identity[0]
-                        or identity[1] != entry.file_id
-                    ):
-                        raise PyrightInstallError("pyright_existing_install_invalid")
-                    size = _file_size(child)
-                    if size > MAX_MEMBER_BYTES:
-                        raise PyrightInstallError("pyright_existing_install_invalid")
-                    total_bytes += size
-                    if total_bytes > MAX_TOTAL_FILE_BYTES + _profile.MAX_INSTALL_MANIFEST_BYTES:
-                        raise PyrightInstallError("pyright_existing_install_invalid")
-                    identities[relative] = identity
-                finally:
-                    child.close()
-                named_identity = (
-                    _named_known_identity(directory, name, directory=False)
-                    if os.name == "nt"
-                    else _named_identity(directory, name, directory=False)
-                )
-                if named_identity != identity:
+                if entry.identity is None or entry.size > MAX_MEMBER_BYTES:
                     raise PyrightInstallError("pyright_existing_install_invalid")
+                total_bytes += entry.size
+                if total_bytes > MAX_TOTAL_FILE_BYTES + _profile.MAX_INSTALL_MANIFEST_BYTES:
+                    raise PyrightInstallError("pyright_existing_install_invalid")
+                if relative in {
+                    "install-manifest.json",
+                    "package/package.json",
+                    _profile.PYRIGHT_SERVER_RELATIVE.as_posix(),
+                }:
+                    snapshots[relative] = entry
             else:
                 raise PyrightInstallError("pyright_existing_install_invalid")
 
     visit(root, ())
-    return identities
+    return snapshots
 
 
 def _existing_result(
@@ -1701,26 +1717,23 @@ def _existing_result(
         )
         installation_identity = _identity(installation)
         try:
-            identities = _validate_existing_tree(installation, deadline)
-            manifest_identity = identities.get("install-manifest.json")
-            package_identity = identities.get("package")
-            package_json_identity = identities.get("package/package.json")
-            server_identity = identities.get(
+            snapshots = _validate_existing_tree(installation, deadline)
+            manifest_entry = snapshots.get("install-manifest.json")
+            package_entry = snapshots.get("package")
+            package_json_entry = snapshots.get("package/package.json")
+            server_entry = snapshots.get(
                 _profile.PYRIGHT_SERVER_RELATIVE.as_posix()
             )
-            if None in {
-                manifest_identity,
-                package_identity,
-                package_json_identity,
-                server_identity,
-            }:
+            required = (manifest_entry, package_entry, package_json_entry, server_entry)
+            if any(entry is None or entry.identity is None for entry in required):
                 raise PyrightInstallError("pyright_existing_install_invalid")
             manifest_raw = _read_bounded_file(
                 installation,
                 "install-manifest.json",
                 _profile.MAX_INSTALL_MANIFEST_BYTES,
                 deadline,
-                expected_identity=manifest_identity,
+                expected_identity=manifest_entry.identity,
+                expected_size=manifest_entry.size,
             )
             manifest = _strict_json_object(
                 manifest_raw, "pyright_existing_install_invalid"
@@ -1735,7 +1748,7 @@ def _existing_result(
                 installation,
                 "package",
                 directory=True,
-                expected_identity=package_identity,
+                expected_identity=package_entry.identity,
             )
             try:
                 package_raw = _read_bounded_file(
@@ -1743,7 +1756,8 @@ def _existing_result(
                     "package.json",
                     _profile.MAX_PACKAGE_JSON_BYTES,
                     deadline,
-                    expected_identity=package_json_identity,
+                    expected_identity=package_json_entry.identity,
+                    expected_size=package_json_entry.size,
                 )
                 _validate_package_json(package_raw)
                 server_raw = _read_bounded_file(
@@ -1751,7 +1765,8 @@ def _existing_result(
                     "langserver.index.js",
                     min(MAX_MEMBER_BYTES, _profile.MAX_SERVER_BYTES),
                     deadline,
-                    expected_identity=server_identity,
+                    expected_identity=server_entry.identity,
+                    expected_size=server_entry.size,
                 )
             finally:
                 package.close()
@@ -1996,17 +2011,21 @@ def _download_artifact(
             content_length = _response_content_length(response)
             if content_length is not None and content_length > MAX_COMPRESSED_BYTES:
                 raise PyrightInstallError("pyright_archive_compressed_limit")
+            read1 = getattr(response, "read1", None)
+            if not callable(read1):
+                raise PyrightInstallError("pyright_download_response_invalid")
             sha256, sha512 = _new_hashes()
             total = 0
             while content_length is None or total < content_length:
                 _check_deadline(deadline)
                 try:
                     _set_response_read_timeout(response, deadline)
-                    chunk = response.read(COPY_CHUNK_BYTES)
+                    chunk = read1(COPY_CHUNK_BYTES)
                 except TimeoutError:
                     raise
                 except OSError as exc:
                     raise PyrightInstallError("pyright_download_failed") from exc
+                _check_deadline(deadline)
                 if not isinstance(chunk, bytes):
                     raise PyrightInstallError("pyright_download_response_invalid")
                 if not chunk:

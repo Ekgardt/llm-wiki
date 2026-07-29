@@ -23,6 +23,15 @@ class WindowsEntry:
     name: str
     kind: str
     file_id: bytes
+    size: int = 0
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.size, bool)
+            or not isinstance(self.size, int)
+            or not 0 <= self.size < 2**63
+        ):
+            raise ValueError("Windows entry size must be a bounded non-negative integer")
 
 
 _API = None
@@ -640,6 +649,9 @@ def list_directory(handle: int, *, max_entries: int) -> list[WindowsEntry]:
             )
             if name not in {".", ".."}:
                 attributes = int(information.file_attributes)
+                size = int(information.end_of_file)
+                if size < 0:
+                    raise OSError("Windows directory enumeration returned a negative size")
                 if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
                     kind = "link"
                 elif attributes & _FILE_ATTRIBUTE_DIRECTORY:
@@ -647,7 +659,12 @@ def list_directory(handle: int, *, max_entries: int) -> list[WindowsEntry]:
                 else:
                     kind = "file"
                 entries.append(
-                    WindowsEntry(name, kind, bytes(information.file_id.identifier))
+                    WindowsEntry(
+                        name,
+                        kind,
+                        bytes(information.file_id.identifier),
+                        size,
+                    )
                 )
                 if len(entries) > max_entries:
                     raise ValueError("sealed workspace entry range exceeded")

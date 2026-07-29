@@ -2095,6 +2095,7 @@ def test_windows_workspace_native_operations_are_relative_exclusive_and_bound(
         entries = windows_workspace.list_directory(directory, max_entries=8)
         assert [(entry.name, entry.kind) for entry in entries] == [("app.py", "file")]
         assert entries[0].file_id == file_identity[1]
+        assert entries[0].size == len(b"answer = 42\n")
         reopened = windows_workspace.open_file(directory, "app.py")
         assert windows_workspace.identity(reopened, directory=False) == file_identity
         assert windows_workspace.file_size(reopened) == len(b"answer = 42\n")
