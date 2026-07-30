@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import BinaryIO
+from typing import BinaryIO, TypeVar
 
 import lsp_process_tree as _lsp_process_tree
 import windows_workspace as _windows_workspace
@@ -84,6 +84,7 @@ _WINDOWS_LEASE_RETRY_SECONDS = 0.01
 _LIFECYCLE_REENTRANCY_ERROR = (
     "LSP lifecycle operations are not reentrant from protocol callbacks"
 )
+_PROTOCOL_CALLBACK_CONTEXT = threading.local()
 _CLEANUP_STEPS = (
     "tree_termination",
     "tree_release",
@@ -985,12 +986,6 @@ class _LifecycleCoordinator:
     terminal_state_lock: threading.Lock = field(
         default_factory=threading.Lock, repr=False
     )
-    protocol_owner_lock: threading.Lock = field(
-        default_factory=threading.Lock, repr=False
-    )
-    protocol_callback_owners: set[threading.Thread] = field(
-        default_factory=set, repr=False
-    )
     pending_failure_intents: int = 0
     pending_failure_code: str | None = None
     success_committed: bool = False
@@ -1466,10 +1461,16 @@ def _prepare_generation(
     if coordinator.generation_configuration.generation_bootstrap is not None:
         handler_options = {
             "server_request_handlers": (
-                coordinator.generation_configuration.server_request_handlers
+                {
+                    method: _wrap_protocol_callback(coordinator, handler)
+                    for method, handler in coordinator.generation_configuration.server_request_handlers.items()
+                }
             ),
             "server_notification_handlers": (
-                coordinator.generation_configuration.server_notification_handlers
+                {
+                    method: _wrap_protocol_callback(coordinator, handler)
+                    for method, handler in coordinator.generation_configuration.server_notification_handlers.items()
+                }
             ),
         }
     try:
@@ -1488,7 +1489,6 @@ def _prepare_generation(
         generation.protocol = error.protocol
         raise
     generation.protocol = protocol
-    _register_protocol_callback_owners(coordinator, protocol)
     _require_startup_deadline(deadline, "protocol owner start")
     owner.verify_lexical_identity()
 
@@ -3411,7 +3411,6 @@ def _drive_cleanup_owned(
                 protocol_stop_ok = False
                 _record_cleanup_error(result, current_errors, "protocol_stop", error)
             else:
-                _unregister_protocol_callback_owners(coordinator, protocol)
                 generation.protocol = None
         elif protocol is not None:
             protocol_stop_pending = True
@@ -3869,37 +3868,31 @@ def _fresh_cleanup_deadline() -> float:
     return time.monotonic() + _GRACEFUL_CLEANUP_SECONDS
 
 
-def _register_protocol_callback_owners(
-    coordinator: _LifecycleCoordinator,
-    protocol: LspProtocol,
-) -> None:
-    with coordinator.protocol_owner_lock:
-        coordinator.protocol_callback_owners.update(
-            (protocol.reader_thread, protocol.writer_thread)
-        )
+_CallbackResult = TypeVar("_CallbackResult")
 
 
-def _unregister_protocol_callback_owners(
+def _wrap_protocol_callback(
     coordinator: _LifecycleCoordinator,
-    protocol: LspProtocol,
-) -> None:
-    owners = tuple(
-        owner
-        for owner in (
-            getattr(protocol, "reader_thread", None),
-            getattr(protocol, "writer_thread", None),
-        )
-        if isinstance(owner, threading.Thread)
-    )
-    with coordinator.protocol_owner_lock:
-        coordinator.protocol_callback_owners.difference_update(owners)
+    handler: Callable[[object], _CallbackResult],
+) -> Callable[[object], _CallbackResult]:
+    def marked_handler(params: object) -> _CallbackResult:
+        previous = getattr(_PROTOCOL_CALLBACK_CONTEXT, "coordinators", ())
+        _PROTOCOL_CALLBACK_CONTEXT.coordinators = (*previous, coordinator)
+        try:
+            return handler(params)
+        finally:
+            if previous:
+                _PROTOCOL_CALLBACK_CONTEXT.coordinators = previous
+            else:
+                del _PROTOCOL_CALLBACK_CONTEXT.coordinators
+
+    return marked_handler
 
 
 def _reject_protocol_callback_lifecycle(instance: LspProcess) -> None:
     coordinator = instance._coordinator
-    with coordinator.protocol_owner_lock:
-        reentrant = threading.current_thread() in coordinator.protocol_callback_owners
-    if reentrant:
+    callback_coordinators = getattr(_PROTOCOL_CALLBACK_CONTEXT, "coordinators", ())
+    if any(current is coordinator for current in callback_coordinators):
         raise RuntimeError(_LIFECYCLE_REENTRANCY_ERROR)
 
 

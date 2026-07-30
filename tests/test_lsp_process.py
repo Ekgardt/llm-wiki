@@ -109,6 +109,21 @@ def _command(*arguments: str) -> list[str]:
     return [sys.executable, str(FAKE_SERVER), *arguments]
 
 
+def _hold_protocol_constructor_until_callback(
+    monkeypatch: pytest.MonkeyPatch,
+    callback_finished: threading.Event,
+) -> None:
+    protocol_type = lsp_process.LspProtocol
+
+    class ConstructorCallbackProbe(protocol_type):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+            if not callback_finished.wait(2):
+                raise TimeoutError("startup callback did not run before constructor return")
+
+    monkeypatch.setattr(lsp_process, "LspProtocol", ConstructorCallbackProbe)
+
+
 def _start(tmp_path: Path, *arguments: str) -> LspProcess:
     return LspProcess.start(
         _command(*arguments), cwd=tmp_path, owner_root=tmp_path / OWNER_NONCE
@@ -1284,6 +1299,196 @@ def test_uncaught_progress_handler_lifecycle_error_is_nonfatal_and_bootstrap_con
         assert process._coordinator.terminal_outcome is None
     finally:
         process.close(time.monotonic() + 5)
+
+
+@pytest.mark.parametrize(
+    ("callback_kind", "operation"),
+    [("request", "close"), ("notification", "restart")],
+)
+def test_startup_callback_rejects_own_lifecycle_before_protocol_constructor_returns(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    callback_kind: str,
+    operation: str,
+) -> None:
+    marker = tmp_path / "enable-startup-callback"
+    callback_finished = threading.Event()
+    callback_errors: list[BaseException] = []
+    callback_elapsed: list[float] = []
+    lifecycle_snapshots: list[tuple[object, ...]] = []
+    process: LspProcess | None = None
+
+    def snapshot(current: LspProcess) -> tuple[object, ...]:
+        coordinator = current._coordinator
+        with coordinator.condition:
+            candidate = coordinator.candidate
+            return (
+                current.state,
+                current.restart_count,
+                coordinator.phase,
+                coordinator.terminal_outcome,
+                coordinator.mandatory_failure_intent,
+                coordinator.recovery_attempted,
+                candidate.nonce if candidate is not None else None,
+            )
+
+    def invoke_lifecycle() -> None:
+        assert process is not None
+        lifecycle_snapshots.append(snapshot(process))
+        started = time.monotonic()
+        try:
+            getattr(process, operation)(time.monotonic() + 0.2)
+        except BaseException as error:
+            callback_errors.append(error)
+        finally:
+            callback_elapsed.append(time.monotonic() - started)
+            lifecycle_snapshots.append(snapshot(process))
+            callback_finished.set()
+
+    def request_handler(params: object) -> object:
+        if params == {"startup_callback": True}:
+            invoke_lifecycle()
+        return True
+
+    def notification_handler(params: object) -> None:
+        if params == {"startup_callback": True}:
+            invoke_lifecycle()
+
+    process = LspProcess.start_configured(
+        _command(
+            "--lifecycle",
+            "--bootstrap-handshake",
+            "--startup-callback",
+            callback_kind,
+            "--startup-callback-marker",
+            str(marker),
+        ),
+        cwd=tmp_path,
+        owner_root=tmp_path / OWNER_NONCE,
+        deadline=time.monotonic() + 5,
+        server_request_handlers={"workspace/configuration": request_handler},
+        server_notification_handlers={"$/progress": notification_handler},
+        generation_bootstrap=_initialize_generation,
+    )
+    marker.write_bytes(b"enabled")
+    _hold_protocol_constructor_until_callback(monkeypatch, callback_finished)
+    try:
+        process.restart(time.monotonic() + 5)
+
+        assert callback_finished.is_set()
+        assert len(callback_errors) == 1
+        assert type(callback_errors[0]) is RuntimeError
+        assert str(callback_errors[0]) == (
+            "LSP lifecycle operations are not reentrant from protocol callbacks"
+        )
+        assert callback_elapsed[0] < 0.05
+        assert lifecycle_snapshots[0] == lifecycle_snapshots[1]
+        assert process.restart_count == 1
+        assert process.state is ProcessState.PROTOCOL_INITIALIZED
+        assert process.protocol.fatal is False
+        assert process._coordinator.terminal_outcome is None
+    finally:
+        if lsp_process._coordinator_has_ownership(process._coordinator):
+            process.close(time.monotonic() + 5)
+
+
+def test_startup_callback_can_close_unrelated_process_before_constructor_returns(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    other = LspProcess.start(
+        _command("--lifecycle"),
+        cwd=tmp_path,
+        owner_root=tmp_path / ("f" * 32),
+    )
+    callback_finished = threading.Event()
+    callback_errors: list[BaseException] = []
+    callback_elapsed: list[float] = []
+    source: LspProcess | None = None
+
+    def request_handler(params: object) -> object:
+        if params == {"startup_callback": True}:
+            started = time.monotonic()
+            try:
+                other.close(time.monotonic() + 5)
+            except BaseException as error:
+                callback_errors.append(error)
+            finally:
+                callback_elapsed.append(time.monotonic() - started)
+                callback_finished.set()
+        return True
+
+    _hold_protocol_constructor_until_callback(monkeypatch, callback_finished)
+    try:
+        source = LspProcess.start_configured(
+            _command(
+                "--lifecycle",
+                "--bootstrap-handshake",
+                "--startup-callback",
+                "request",
+            ),
+            cwd=tmp_path,
+            owner_root=tmp_path / ("e" * 32),
+            deadline=time.monotonic() + 5,
+            server_request_handlers={"workspace/configuration": request_handler},
+            server_notification_handlers={"$/progress": lambda _params: None},
+            generation_bootstrap=_initialize_generation,
+        )
+
+        assert callback_finished.is_set()
+        assert callback_errors == []
+        assert len(callback_elapsed) == 1
+        assert source.state is ProcessState.PROTOCOL_INITIALIZED
+        assert source.protocol.fatal is False
+        assert not lsp_process._coordinator_has_ownership(other._coordinator)
+    finally:
+        if source is not None and lsp_process._coordinator_has_ownership(
+            source._coordinator
+        ):
+            source.close(time.monotonic() + 5)
+        if lsp_process._coordinator_has_ownership(other._coordinator):
+            other.close(time.monotonic() + 5)
+
+
+def test_protocol_callback_markers_restore_nested_scopes_and_exceptions() -> None:
+    outer_coordinator = lsp_process._LifecycleCoordinator(None)
+    inner_coordinator = lsp_process._LifecycleCoordinator(None)
+    outer_process = object.__new__(LspProcess)
+    inner_process = object.__new__(LspProcess)
+    outer_process._coordinator = outer_coordinator
+    inner_process._coordinator = inner_coordinator
+    handler_error = ValueError("user handler failed")
+
+    def inner_handler(_params: object) -> None:
+        with pytest.raises(RuntimeError, match="not reentrant"):
+            lsp_process._reject_protocol_callback_lifecycle(outer_process)
+        with pytest.raises(RuntimeError, match="not reentrant"):
+            lsp_process._reject_protocol_callback_lifecycle(inner_process)
+        raise handler_error
+
+    wrapped_inner = lsp_process._wrap_protocol_callback(
+        inner_coordinator, inner_handler
+    )
+
+    def outer_handler(params: object) -> object:
+        with pytest.raises(RuntimeError, match="not reentrant"):
+            lsp_process._reject_protocol_callback_lifecycle(outer_process)
+        with pytest.raises(ValueError) as raised:
+            wrapped_inner(params)
+        assert raised.value is handler_error
+        with pytest.raises(RuntimeError, match="not reentrant"):
+            lsp_process._reject_protocol_callback_lifecycle(outer_process)
+        lsp_process._reject_protocol_callback_lifecycle(inner_process)
+        raise handler_error
+
+    wrapped_outer = lsp_process._wrap_protocol_callback(
+        outer_coordinator, outer_handler
+    )
+    with pytest.raises(ValueError) as raised:
+        wrapped_outer(object())
+    assert raised.value is handler_error
+    lsp_process._reject_protocol_callback_lifecycle(outer_process)
+    lsp_process._reject_protocol_callback_lifecycle(inner_process)
 
 
 def test_close_serializes_behind_restart_bootstrap_and_commits_success(

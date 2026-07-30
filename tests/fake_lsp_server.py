@@ -190,6 +190,11 @@ def _run_process_server() -> None:
     parser.add_argument("--idle-exit-marker")
     parser.add_argument("--hang-then-exit", action="store_true")
     parser.add_argument("--bootstrap-handshake", action="store_true")
+    parser.add_argument(
+        "--startup-callback",
+        choices=("request", "notification"),
+    )
+    parser.add_argument("--startup-callback-marker")
     parser.add_argument("--query-crash-once-marker")
     parser.add_argument("--require-initialized-query", action="store_true")
     args = parser.parse_args()
@@ -258,6 +263,30 @@ def _run_process_server() -> None:
 
     if args.lifecycle:
         initialized = False
+        if args.startup_callback and (
+            args.startup_callback_marker is None
+            or os.path.exists(args.startup_callback_marker)
+        ):
+            startup_message: dict[str, object] = {
+                "jsonrpc": "2.0",
+                "method": (
+                    "workspace/configuration"
+                    if args.startup_callback == "request"
+                    else "$/progress"
+                ),
+                "params": {"startup_callback": True},
+            }
+            if args.startup_callback == "request":
+                startup_message["id"] = "startup-callback"
+            sys.stdout.buffer.write(_frame(startup_message))
+            sys.stdout.buffer.flush()
+            if args.startup_callback == "request":
+                startup_response = _read_message(sys.stdin.buffer)
+                if (
+                    startup_response.get("id") != "startup-callback"
+                    or startup_response.get("result") is not True
+                ):
+                    raise RuntimeError("startup callback request failed")
         if args.idle_exit_marker:
             first = not os.path.exists(args.idle_exit_marker)
             if first:
