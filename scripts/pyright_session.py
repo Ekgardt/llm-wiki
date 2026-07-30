@@ -531,8 +531,12 @@ class _LaunchServerGuard:
         if descriptor is not None:
             os.close(descriptor)
 
-    def __exit__(self, *_args: object) -> None:
-        self.close()
+    def __exit__(self, error_type: object, *_error: object) -> None:
+        try:
+            if error_type is None:
+                self.verify()
+        finally:
+            self.close()
 
 
 class PyrightSession:
@@ -1040,59 +1044,47 @@ class PyrightSession:
                 )
                 _ensure_lsp_parent(self._state_root, deadline=startup_deadline)
                 owner = lsp_owner_root(self._state_root, secrets.token_hex(16))
-                with _LaunchServerGuard(
-                    server,
-                    self._identity.executable_sha256,
+                process = LspProcess.start_configured(
+                    (
+                        str(node),
+                        str(server),
+                        "--stdio",
+                        f"--cancellationReceive=file:{owner / 'cancellation'}",
+                    ),
+                    cwd=Path(self._repository.checkout_root),
+                    owner_root=owner,
                     deadline=startup_deadline,
-                ) as server_guard:
-                    process = LspProcess.start_configured(
-                        (
-                            str(node),
-                            str(server),
-                            "--stdio",
-                            f"--cancellationReceive=file:{owner / 'cancellation'}",
+                    server_request_handlers={
+                        "client/registerCapability": self._benign_server_request,
+                        "client/unregisterCapability": self._benign_server_request,
+                        "window/workDoneProgress/create": self._benign_server_request,
+                        "workspace/configuration": self._configuration,
+                    },
+                    server_notification_handlers={
+                        "$/progress": lambda params: self._progress(
+                            "$/progress", params
                         ),
-                        cwd=Path(self._repository.checkout_root),
-                        owner_root=owner,
-                        deadline=startup_deadline,
-                        server_request_handlers={
-                            "client/registerCapability": self._benign_server_request,
-                            "client/unregisterCapability": self._benign_server_request,
-                            "window/workDoneProgress/create": self._benign_server_request,
-                            "workspace/configuration": self._configuration,
-                        },
-                        server_notification_handlers={
-                            "$/progress": lambda params: self._progress(
-                                "$/progress", params
-                            ),
-                            "pyright/beginProgress": lambda params: self._progress(
-                                "pyright/beginProgress", params
-                            ),
-                            "pyright/endProgress": lambda params: self._progress(
-                                "pyright/endProgress", params
-                            ),
-                            "pyright/reportProgress": lambda params: self._progress(
-                                "pyright/reportProgress", params
-                            ),
-                            "textDocument/publishDiagnostics": self._publish_diagnostics,
-                        },
-                        generation_bootstrap=self._bootstrap_generation,
-                        bootstrap_timeout_seconds=bootstrap_timeout_seconds,
-                    )
-                    try:
-                        server_guard.verify()
-                    except BaseException as verification_error:
-                        try:
-                            process.close(
-                                min(
-                                    startup_deadline,
-                                    time.monotonic() + _OWNER_CLEANUP_SECONDS,
-                                )
-                            )
-                        except BaseException as cleanup_error:
-                            raise cleanup_error from verification_error
-                        process = None
-                        raise
+                        "pyright/beginProgress": lambda params: self._progress(
+                            "pyright/beginProgress", params
+                        ),
+                        "pyright/endProgress": lambda params: self._progress(
+                            "pyright/endProgress", params
+                        ),
+                        "pyright/reportProgress": lambda params: self._progress(
+                            "pyright/reportProgress", params
+                        ),
+                        "textDocument/publishDiagnostics": self._publish_diagnostics,
+                    },
+                    generation_bootstrap=self._bootstrap_generation,
+                    bootstrap_timeout_seconds=bootstrap_timeout_seconds,
+                    generation_guard=lambda _generation_nonce, generation_deadline: (
+                        _LaunchServerGuard(
+                            server,
+                            self._identity.executable_sha256,
+                            deadline=generation_deadline,
+                        )
+                    ),
+                )
             except (TypeError, ValueError):
                 with self._lock:
                     self._starting = False
@@ -1145,7 +1137,8 @@ class PyrightSession:
         }:
             return
         if (
-            self._generation_nonce is not None
+            process.state is ProcessState.DEGRADED
+            and self._generation_nonce is not None
             and self._generation_nonce != process.generation_nonce
         ):
             return

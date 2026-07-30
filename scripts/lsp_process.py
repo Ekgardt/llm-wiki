@@ -15,7 +15,8 @@ import subprocess as _subprocess
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -813,6 +814,7 @@ class ProcessState(str, Enum):
 
 
 GenerationBootstrap = Callable[[LspProtocol, int, str, float], ProcessState]
+GenerationGuardFactory = Callable[[str, float], AbstractContextManager[object]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -821,11 +823,12 @@ class _GenerationConfiguration:
     server_notification_handlers: Mapping[str, Callable[[object], None]]
     generation_bootstrap: GenerationBootstrap | None
     bootstrap_timeout_seconds: float | None
+    generation_guard: GenerationGuardFactory | None
 
 
 def _unconfigured_generation() -> _GenerationConfiguration:
     return _GenerationConfiguration(
-        MappingProxyType({}), MappingProxyType({}), None, None
+        MappingProxyType({}), MappingProxyType({}), None, None, None
     )
 
 
@@ -1118,6 +1121,7 @@ class LspProcess:
         server_notification_handlers: Mapping[str, Callable[[object], None]],
         generation_bootstrap: GenerationBootstrap,
         bootstrap_timeout_seconds: float | None = None,
+        generation_guard: GenerationGuardFactory | None = None,
     ) -> LspProcess:
         return _start_configured_lsp_process(
             cls,
@@ -1129,6 +1133,7 @@ class LspProcess:
             server_notification_handlers=server_notification_handlers,
             generation_bootstrap=generation_bootstrap,
             bootstrap_timeout_seconds=bootstrap_timeout_seconds,
+            generation_guard=generation_guard,
         )
 
     def request(
@@ -1625,6 +1630,33 @@ def _run_generation_bootstrap(
     return state
 
 
+@contextmanager
+def _generation_guard_context(
+    configuration: _GenerationConfiguration,
+    generation_nonce: str,
+    deadline: float,
+) -> Iterator[None]:
+    factory = configuration.generation_guard
+    if factory is None:
+        yield
+        return
+    guard = factory(generation_nonce, deadline)
+    guard_type = type(guard)
+    enter = getattr(guard_type, "__enter__", None)
+    exit_ = getattr(guard_type, "__exit__", None)
+    if not callable(enter) or not callable(exit_):
+        raise TypeError("generation_guard must return a context manager")
+    enter(guard)
+    try:
+        yield
+    except BaseException as error:
+        # Guard cleanup cannot suppress a failed generation and permit a commit.
+        exit_(guard, type(error), error, error.__traceback__)
+        raise
+    else:
+        exit_(guard, None, None, None)
+
+
 def _start_lsp_process(
     cls: type[LspProcess],
     command: Sequence[str],
@@ -1653,6 +1685,7 @@ def _start_configured_lsp_process(
     server_notification_handlers: Mapping[str, Callable[[object], None]],
     generation_bootstrap: GenerationBootstrap,
     bootstrap_timeout_seconds: float | None,
+    generation_guard: GenerationGuardFactory | None,
 ) -> LspProcess:
     configured_deadline = _validated_future_deadline(deadline)
     if bootstrap_timeout_seconds is None:
@@ -1665,6 +1698,7 @@ def _start_configured_lsp_process(
         server_notification_handlers,
         generation_bootstrap,
         bootstrap_timeout_seconds,
+        generation_guard,
     )
     return _start_lsp_process_impl(
         cls,
@@ -1723,47 +1757,54 @@ def _start_lsp_process_impl(
             "started_at": started_at,
             "state": ProcessState.PROCESS_RUNNING.value,
         }
-        generation = _prepare_generation(
-            coordinator,
-            arguments,
-            cwd=cwd,
-            environment=environment,
-            deadline=startup_deadline,
-            generation_nonce=generation_nonce,
-            owner_record=owner_record,
-        )
-        _require_startup_deadline(startup_deadline, "generation preparation")
-        process = generation.process
-        protocol = generation.protocol
-        if process is None or protocol is None:
-            raise RuntimeError("LSP generation did not acquire process and protocol owners")
-        instance = cls(
-            process=process,
-            protocol=protocol,
-            owner_root=owner_root,
-            owner_nonce=owner_nonce,
-            generation_nonce=generation_nonce,
-            state=ProcessState.PROCESS_RUNNING,
-            started_monotonic=started_monotonic,
-            last_used_monotonic=started_monotonic,
-        )
-        instance._coordinator = coordinator
-        instance._command = tuple(arguments)
-        instance._cwd = cwd
-        instance._environment = dict(environment)
-        instance._stderr_projection = generation.stderr
-        instance._stderr_projection_lock = generation.stderr_lock
-        _publish_generation_lease(instance, generation, startup_deadline)
-        _require_startup_deadline(startup_deadline, "initial lease publication")
-        _start_heartbeat_worker(instance, startup_deadline)
-        _require_startup_deadline(startup_deadline, "heartbeat worker start")
         generation_state = ProcessState.PROCESS_RUNNING
-        if generation_configuration.generation_bootstrap is not None:
-            generation_state = _run_generation_bootstrap(
-                generation_configuration,
-                generation,
-                startup_deadline,
+        with _generation_guard_context(
+            generation_configuration, generation_nonce, startup_deadline
+        ):
+            generation = _prepare_generation(
+                coordinator,
+                arguments,
+                cwd=cwd,
+                environment=environment,
+                deadline=startup_deadline,
+                generation_nonce=generation_nonce,
+                owner_record=owner_record,
             )
+            _require_startup_deadline(startup_deadline, "generation preparation")
+            process = generation.process
+            protocol = generation.protocol
+            if process is None or protocol is None:
+                raise RuntimeError(
+                    "LSP generation did not acquire process and protocol owners"
+                )
+            instance = cls(
+                process=process,
+                protocol=protocol,
+                owner_root=owner_root,
+                owner_nonce=owner_nonce,
+                generation_nonce=generation_nonce,
+                state=ProcessState.PROCESS_RUNNING,
+                started_monotonic=started_monotonic,
+                last_used_monotonic=started_monotonic,
+            )
+            instance._coordinator = coordinator
+            instance._command = tuple(arguments)
+            instance._cwd = cwd
+            instance._environment = dict(environment)
+            instance._stderr_projection = generation.stderr
+            instance._stderr_projection_lock = generation.stderr_lock
+            _publish_generation_lease(instance, generation, startup_deadline)
+            _require_startup_deadline(startup_deadline, "initial lease publication")
+            _start_heartbeat_worker(instance, startup_deadline)
+            _require_startup_deadline(startup_deadline, "heartbeat worker start")
+            if generation_configuration.generation_bootstrap is not None:
+                generation_state = _run_generation_bootstrap(
+                    generation_configuration,
+                    generation,
+                    startup_deadline,
+                )
+        _require_startup_deadline(startup_deadline, "generation guard completion")
+        assert instance is not None
 
         _acquire_lifecycle(coordinator, startup_deadline)
         try:
@@ -2755,20 +2796,12 @@ def _restart_generation(
 ) -> None:
     coordinator = instance._coordinator
     driver_acquired = False
-    candidate_prepared = False
     try:
         _acquire_driver(coordinator, deadline)
         driver_acquired = True
-        candidate = _prepare_restart_generation_owned(instance, deadline)
-        candidate_prepared = True
-        _publish_generation_lease(instance, candidate, deadline)
-        generation_state = ProcessState.PROCESS_RUNNING
-        if coordinator.generation_configuration.generation_bootstrap is not None:
-            generation_state = _run_generation_bootstrap(
-                coordinator.generation_configuration,
-                candidate,
-                deadline,
-            )
+        candidate, generation_state = _prepare_restart_generation_owned(
+            instance, deadline
+        )
         _commit_restart_generation_owned(
             instance,
             candidate,
@@ -2776,7 +2809,7 @@ def _restart_generation(
             deadline,
         )
     except BaseException:
-        if candidate_prepared:
+        if driver_acquired:
             _fail_restart_generation(instance, _fresh_cleanup_deadline())
         raise
     finally:
@@ -2787,7 +2820,7 @@ def _restart_generation(
 def _prepare_restart_generation_owned(
     instance: LspProcess,
     deadline: float,
-) -> _Generation:
+) -> tuple[_Generation, ProcessState]:
     coordinator = instance._coordinator
     _acquire_lifecycle(coordinator, deadline)
     try:
@@ -2805,15 +2838,15 @@ def _prepare_restart_generation_owned(
 
     retirement_errors = _drive_cleanup(instance, deadline, terminal=False)
     if retirement_errors or any(not item.released for item in coordinator.retired):
-        _fail_restart_generation(instance, _fresh_cleanup_deadline())
         if retirement_errors:
             raise retirement_errors[0]
         raise TimeoutError("LSP retired generation cleanup is incomplete")
 
-    try:
-        if instance._cwd is None or not instance._command:
-            raise RuntimeError("LSP restart inputs are unavailable")
-        generation_nonce = _new_generation_nonce()
+    if instance._cwd is None or not instance._command:
+        raise RuntimeError("LSP restart inputs are unavailable")
+    generation_nonce = _new_generation_nonce()
+    configuration = coordinator.generation_configuration
+    with _generation_guard_context(configuration, generation_nonce, deadline):
         candidate = _prepare_generation(
             coordinator,
             instance._command,
@@ -2829,10 +2862,16 @@ def _prepare_restart_generation_owned(
             or candidate.protocol.fatal
         ):
             raise RuntimeError("LSP restart candidate failed before commit")
-        return candidate
-    except BaseException:
-        _fail_restart_generation(instance, _fresh_cleanup_deadline())
-        raise
+        _publish_generation_lease(instance, candidate, deadline)
+        generation_state = ProcessState.PROCESS_RUNNING
+        if configuration.generation_bootstrap is not None:
+            generation_state = _run_generation_bootstrap(
+                configuration,
+                candidate,
+                deadline,
+            )
+    _require_startup_deadline(deadline, "generation guard completion")
+    return candidate, generation_state
 
 
 def _commit_restart_generation_owned(
@@ -3873,6 +3912,7 @@ def _validated_generation_configuration(
     server_notification_handlers: Mapping[str, Callable[[object], None]],
     generation_bootstrap: GenerationBootstrap,
     bootstrap_timeout_seconds: float,
+    generation_guard: GenerationGuardFactory | None,
 ) -> _GenerationConfiguration:
     if not callable(generation_bootstrap):
         raise TypeError("generation_bootstrap must be callable")
@@ -3882,11 +3922,14 @@ def _validated_generation_configuration(
     notification_handlers = _copied_handler_mapping(
         server_notification_handlers, "server_notification_handlers"
     )
+    if generation_guard is not None and not callable(generation_guard):
+        raise TypeError("generation_guard must be callable or None")
     return _GenerationConfiguration(
         request_handlers,
         notification_handlers,
         generation_bootstrap,
         _validated_bootstrap_timeout(bootstrap_timeout_seconds),
+        generation_guard,
     )
 
 

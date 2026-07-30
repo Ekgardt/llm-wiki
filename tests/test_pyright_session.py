@@ -14,12 +14,13 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import get_type_hints
 
+import lsp_process
 import pyright_session as pyright_session_module
 import pytest
 from code_intelligence import PositionEncoding
 from lsp_positions import LspPosition, LspRange, SourceAnchor, SourceDocument
 from lsp_process import LspProcess, ProcessState, StartupCleanupError
-from lsp_protocol import MAX_FRAME_BYTES
+from lsp_protocol import MAX_FRAME_BYTES, ProtocolViolation
 from lsp_security import RepositorySource
 from pyright_profile import (
     PYRIGHT_CONFIGURATION,
@@ -239,7 +240,11 @@ def test_server_mutated_after_qualification_never_spawns(
     def forbidden(*_args: object, **_kwargs: object) -> None:
         pytest.fail("a hash-mismatched Pyright server was spawned")
 
-    monkeypatch.setattr(LspProcess, "start_configured", forbidden)
+    monkeypatch.setattr(
+        lsp_process.ProcessTree,
+        "_spawn_with_deadline",
+        classmethod(forbidden),
+    )
     session = PyrightSession(
         resolve_repository_scope(repository),
         identity,
@@ -261,31 +266,33 @@ def test_server_identity_is_held_and_reverified_through_bootstrap(
 ) -> None:
     server, identity = _copied_server_identity(repository, semantic_pyright)
     original = server.read_bytes()
-    real_start = LspProcess.start_configured.__func__
     mutation_errors: list[OSError] = []
-
-    def mutate_after_bootstrap(
-        cls: type[LspProcess],
-        command: object,
-        **options: object,
-    ) -> LspProcess:
-        process = real_start(cls, command, **options)  # type: ignore[arg-type]
-        try:
-            server.write_bytes(original + b"\n# changed during startup\n")
-        except OSError as error:
-            mutation_errors.append(error)
-        return process
-
-    monkeypatch.setattr(
-        LspProcess,
-        "start_configured",
-        classmethod(mutate_after_bootstrap),
-    )
     session = PyrightSession(
         resolve_repository_scope(repository),
         identity,
         state_root=state_root,
     )
+    real_bootstrap = session._bootstrap_generation
+
+    def mutate_during_bootstrap(
+        protocol: object,
+        process_id: int,
+        generation_nonce: str,
+        deadline: float,
+    ) -> ProcessState:
+        state = real_bootstrap(
+            protocol,  # type: ignore[arg-type]
+            process_id,
+            generation_nonce,
+            deadline,
+        )
+        try:
+            server.write_bytes(original + b"\n# changed during startup\n")
+        except OSError as error:
+            mutation_errors.append(error)
+        return state
+
+    monkeypatch.setattr(session, "_bootstrap_generation", mutate_during_bootstrap)
     try:
         session.start(deadline=time.monotonic() + 10)
         if os.name == "nt":
@@ -497,8 +504,9 @@ def test_start_forwards_one_capped_deadline_without_shrinking_restart_budget(
         def verify(self) -> None:
             captured["verify"] = captured["guard"]
 
-        def __exit__(self, *_args: object) -> None:
-            return None
+        def __exit__(self, error_type: object, *_error: object) -> None:
+            if error_type is None:
+                self.verify()
 
     def qualified_paths(*, deadline: float) -> tuple[Path, Path]:
         captured["paths"] = deadline
@@ -519,13 +527,17 @@ def test_start_forwards_one_capped_deadline_without_shrinking_restart_budget(
         *,
         deadline: float,
         bootstrap_timeout_seconds: float,
+        generation_guard: object,
         **_options: object,
     ) -> CapturedProcess:
         assert cls is LspProcess
+        assert callable(generation_guard)
         start_invoked.append(time.monotonic())
         captured["process"] = deadline
         captured["bootstrap_timeout"] = bootstrap_timeout_seconds
-        return CapturedProcess()
+        guard = generation_guard("captured-generation", deadline)
+        with guard:  # type: ignore[attr-defined]
+            return CapturedProcess()
 
     monkeypatch.setattr(session, "_validated_qualified_paths", qualified_paths)
     monkeypatch.setattr(pyright_session_module, "_ensure_lsp_parent", ensure_parent)
@@ -625,6 +637,7 @@ def test_startup_cleanup_uses_effective_caller_deadline(
             deadline: float,
         ) -> None:
             captured["effective"] = deadline
+            self.deadline = deadline
 
         def __enter__(self) -> FailingGuard:
             return self
@@ -633,8 +646,10 @@ def test_startup_cleanup_uses_effective_caller_deadline(
             if failure_stage == "verification":
                 raise RuntimeError("post-bootstrap verification failed")
 
-        def __exit__(self, *_args: object) -> None:
-            return None
+        def __exit__(self, error_type: object, *_error: object) -> None:
+            captured["guard_exit"] = self.deadline
+            if error_type is None:
+                self.verify()
 
     def qualified_paths(*, deadline: float) -> tuple[Path, Path]:
         assert deadline == captured.get("effective", deadline)
@@ -654,14 +669,18 @@ def test_startup_cleanup_uses_effective_caller_deadline(
         *,
         deadline: float,
         bootstrap_timeout_seconds: float,
+        generation_guard: object,
         **_options: object,
     ) -> CapturedProcess:
         assert cls is LspProcess
         assert deadline == captured["effective"]
         assert 0 < bootstrap_timeout_seconds <= STARTUP_SECONDS
-        if failure_stage == "startup_cleanup":
-            raise CapturedCleanupError("configured startup cleanup failed")
-        return CapturedProcess()
+        assert callable(generation_guard)
+        guard = generation_guard("captured-generation", deadline)
+        with guard:  # type: ignore[attr-defined]
+            if failure_stage == "startup_cleanup":
+                raise CapturedCleanupError("configured startup cleanup failed")
+            return CapturedProcess()
 
     monkeypatch.setattr(session, "_validated_qualified_paths", qualified_paths)
     monkeypatch.setattr(pyright_session_module, "_ensure_lsp_parent", ensure_parent)
@@ -675,10 +694,11 @@ def test_startup_cleanup_uses_effective_caller_deadline(
 
     session.start(deadline=caller_deadline)
 
-    cleanup_key = (
-        "process_cleanup" if failure_stage == "verification" else "startup_cleanup"
-    )
-    assert captured[cleanup_key] == captured["effective"] == caller_deadline
+    assert captured["guard_exit"] == captured["effective"] == caller_deadline
+    if failure_stage == "startup_cleanup":
+        assert captured["startup_cleanup"] == caller_deadline
+    else:
+        assert "process_cleanup" not in captured
     assert session.readiness == "not_ready"
     assert session.degradation_codes == ("pyright_startup_failed",)
 
@@ -2109,6 +2129,171 @@ def test_transparent_restart_reinitializes_configures_reopens_and_reprobes(
         session.close(deadline=time.monotonic() + 5)
         session.close(deadline=time.monotonic() + 5)
     assert tuple((state_root / "run/lsp").iterdir()) == ()
+
+
+def test_server_mutated_before_transparent_restart_never_spawns_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+) -> None:
+    marker = repository / ".fake-lsp-crashed"
+    fixture = create_semantic_pyright_fixture(
+        repository,
+        config={
+            "crash_once_method": "textDocument/definition",
+            "crash_marker": str(marker),
+        },
+    )
+    server, identity = _copied_server_identity(repository, fixture)
+    session = PyrightSession(
+        resolve_repository_scope(repository),
+        identity,
+        state_root=state_root,
+    )
+    trees: list[lsp_process.ProcessTree] = []
+    real_spawn = lsp_process.ProcessTree._spawn_with_deadline.__func__
+
+    def record_spawn(
+        cls: type[lsp_process.ProcessTree],
+        command: object,
+        *,
+        cwd: Path,
+        env: object,
+        deadline: float,
+    ) -> lsp_process.ProcessTree:
+        tree = real_spawn(cls, command, cwd=cwd, env=env, deadline=deadline)  # type: ignore[arg-type]
+        trees.append(tree)
+        return tree
+
+    monkeypatch.setattr(
+        lsp_process.ProcessTree,
+        "_spawn_with_deadline",
+        classmethod(record_spawn),
+    )
+    try:
+        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        assert session.readiness == "query_ready"
+        assert len(trees) == 1
+        server.write_bytes(server.read_bytes() + b"\n# changed before restart\n")
+
+        with pytest.raises(ProtocolViolation):
+            result = session.definition(
+                _anchor(repository, "pkg/service.py", 10, 20),
+                deadline=time.monotonic() + 15,
+            )
+            assert result.coverage != "provider_reported"
+
+        process = session._process
+        assert process is not None
+        coordinator = process._coordinator
+        assert len(trees) == 1
+        assert process.restart_count == 0
+        assert process.state is ProcessState.FAILED
+        assert coordinator.active is None
+        assert coordinator.candidate is None
+        assert session.readiness == "not_ready"
+        assert not (process.owner_root / "lease.json").exists()
+        assert not lsp_process._coordinator_has_ownership(coordinator)
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_server_mutated_during_replacement_bootstrap_never_commits_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+) -> None:
+    marker = repository / ".fake-lsp-crashed"
+    fixture = create_semantic_pyright_fixture(
+        repository,
+        config={
+            "crash_once_method": "textDocument/definition",
+            "crash_marker": str(marker),
+        },
+    )
+    server, identity = _copied_server_identity(repository, fixture)
+    session = PyrightSession(
+        resolve_repository_scope(repository),
+        identity,
+        state_root=state_root,
+    )
+    original = server.read_bytes()
+    bootstrap_nonces: list[str] = []
+    mutation_errors: list[OSError] = []
+    trees: list[lsp_process.ProcessTree] = []
+    real_bootstrap = session._bootstrap_generation
+    real_spawn = lsp_process.ProcessTree._spawn_with_deadline.__func__
+
+    def mutate_during_bootstrap(
+        protocol: object,
+        process_id: int,
+        generation_nonce: str,
+        deadline: float,
+    ) -> ProcessState:
+        state = real_bootstrap(
+            protocol,  # type: ignore[arg-type]
+            process_id,
+            generation_nonce,
+            deadline,
+        )
+        bootstrap_nonces.append(generation_nonce)
+        if len(bootstrap_nonces) == 2:
+            try:
+                server.write_bytes(original + b"\n# changed during restart bootstrap\n")
+            except OSError as error:
+                mutation_errors.append(error)
+                raise
+        return state
+
+    def record_spawn(
+        cls: type[lsp_process.ProcessTree],
+        command: object,
+        *,
+        cwd: Path,
+        env: object,
+        deadline: float,
+    ) -> lsp_process.ProcessTree:
+        tree = real_spawn(cls, command, cwd=cwd, env=env, deadline=deadline)  # type: ignore[arg-type]
+        trees.append(tree)
+        return tree
+
+    monkeypatch.setattr(session, "_bootstrap_generation", mutate_during_bootstrap)
+    monkeypatch.setattr(
+        lsp_process.ProcessTree,
+        "_spawn_with_deadline",
+        classmethod(record_spawn),
+    )
+    try:
+        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        first_nonce = session._generation_nonce
+        assert first_nonce is not None
+        assert session.readiness == "query_ready"
+
+        with pytest.raises(ProtocolViolation):
+            result = session.definition(
+                _anchor(repository, "pkg/service.py", 10, 20),
+                deadline=time.monotonic() + 15,
+            )
+            assert result.coverage != "provider_reported"
+
+        process = session._process
+        assert process is not None
+        coordinator = process._coordinator
+        assert len(bootstrap_nonces) == 2
+        assert bootstrap_nonces[1] != first_nonce
+        assert len(trees) == 2
+        assert all(tree.process.poll() is not None for tree in trees)
+        assert mutation_errors if os.name == "nt" else mutation_errors == []
+        assert process.generation_nonce == first_nonce
+        assert process.restart_count == 0
+        assert process.state is ProcessState.FAILED
+        assert coordinator.active is None
+        assert coordinator.candidate is None
+        assert session.readiness == "not_ready"
+        assert not (process.owner_root / "lease.json").exists()
+        assert not lsp_process._coordinator_has_ownership(coordinator)
+    finally:
+        session.close(deadline=time.monotonic() + 5)
 
 
 def test_successful_close_releases_all_protocol_derived_session_state(
