@@ -1117,6 +1117,7 @@ class LspProcess:
         server_request_handlers: Mapping[str, Callable[[object], object]],
         server_notification_handlers: Mapping[str, Callable[[object], None]],
         generation_bootstrap: GenerationBootstrap,
+        bootstrap_timeout_seconds: float | None = None,
     ) -> LspProcess:
         return _start_configured_lsp_process(
             cls,
@@ -1127,6 +1128,7 @@ class LspProcess:
             server_request_handlers=server_request_handlers,
             server_notification_handlers=server_notification_handlers,
             generation_bootstrap=generation_bootstrap,
+            bootstrap_timeout_seconds=bootstrap_timeout_seconds,
         )
 
     def request(
@@ -1650,10 +1652,13 @@ def _start_configured_lsp_process(
     server_request_handlers: Mapping[str, Callable[[object], object]],
     server_notification_handlers: Mapping[str, Callable[[object], None]],
     generation_bootstrap: GenerationBootstrap,
+    bootstrap_timeout_seconds: float | None,
 ) -> LspProcess:
     configured_deadline = _validated_future_deadline(deadline)
+    if bootstrap_timeout_seconds is None:
+        bootstrap_timeout_seconds = configured_deadline - time.monotonic()
     bootstrap_timeout_seconds = _validated_bootstrap_timeout(
-        configured_deadline - time.monotonic()
+        bootstrap_timeout_seconds
     )
     configuration = _validated_generation_configuration(
         server_request_handlers,

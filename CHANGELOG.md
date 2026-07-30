@@ -34,7 +34,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   transactions/tasks/results, the 30-day undo window, and live owners.
 - Recorded the local-filesystem requirement, current `synchronous=FULL`/no-WAL
   policy, bounded defaults and CLI overrides, cooperating-writer CAS boundary, and
-  explicit non-goals. The suite now collects **5049 tests**.
+  explicit non-goals. The suite now collects **5055 tests**.
 - Added canonical `repository-scope/v1` binding for repositories, linked worktrees,
   checkout roots, Git common directories, and captured commits. Generation readers
   reject the wrong repository/worktree scope instead of returning cross-checkout
@@ -70,6 +70,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Cap Pyright session startup at 60 seconds or the shorter caller deadline,
+  apply that absolute deadline to preflight and cleanup, and preserve the
+  entry-time budget for an autonomous configured restart.
 - Require PATH-resolved Node executables to be local regular files outside reparse
   points and network filesystems, probe versions without reader threads through
   platform-qualified whole-tree cleanup before reading inherited pipes, and

@@ -175,6 +175,11 @@ def _validated_deadline(deadline: float) -> float:
     return float(deadline)
 
 
+def _require_startup_deadline(deadline: float) -> None:
+    if time.monotonic() >= deadline:
+        raise TimeoutError("Pyright startup deadline expired")
+
+
 class _BootstrapDegradation(RuntimeError):
     def __init__(self, code: str) -> None:
         super().__init__(code)
@@ -192,7 +197,8 @@ def _path_identity(path: Path) -> os.stat_result:
     return info
 
 
-def _validated_local_file(value: object, label: str) -> Path:
+def _validated_local_file(value: object, label: str, *, deadline: float) -> Path:
+    _require_startup_deadline(deadline)
     if not isinstance(value, Path):
         raise TypeError(f"{label} must be a Path")
     raw = os.fspath(value)
@@ -206,45 +212,58 @@ def _validated_local_file(value: object, label: str) -> Path:
     for parent in value.parents:
         if parent == Path(parent.anchor):
             break
+        _require_startup_deadline(deadline)
         info = _path_identity(parent)
         if not stat.S_ISDIR(info.st_mode):
             raise ValueError(f"{label} parent must be a directory")
+    _require_startup_deadline(deadline)
     info = _path_identity(value)
     if not stat.S_ISREG(info.st_mode) or _known_network_path(value):
         raise ValueError(f"{label} must be a local regular file")
+    _require_startup_deadline(deadline)
     return value
 
 
-def _ensure_lsp_parent(state_root: Path) -> Path:
+def _ensure_lsp_parent(state_root: Path, *, deadline: float) -> Path:
+    _require_startup_deadline(deadline)
     if not state_root.is_absolute() or _known_network_path(state_root):
         raise ValueError("state_root must be an absolute local path")
     for ancestor in state_root.parents:
         if ancestor == Path(ancestor.anchor):
             break
+        _require_startup_deadline(deadline)
         ancestor_info = _path_identity(ancestor)
         if not stat.S_ISDIR(ancestor_info.st_mode):
             raise ValueError("state_root parent must be a directory")
+    _require_startup_deadline(deadline)
     root_info = _path_identity(state_root)
     if not stat.S_ISDIR(root_info.st_mode):
         raise NotADirectoryError(state_root)
     run_root = state_root / "run"
+    _require_startup_deadline(deadline)
     try:
         run_root.mkdir(mode=0o700)
     except FileExistsError:
         pass
+    _require_startup_deadline(deadline)
     run_info = _path_identity(run_root)
     if not stat.S_ISDIR(run_info.st_mode):
         raise PermissionError("LSP run parent must be a directory")
     parent = run_root / "lsp"
+    _require_startup_deadline(deadline)
     try:
         parent.mkdir(mode=0o700)
     except FileExistsError:
         pass
+    _require_startup_deadline(deadline)
     parent_info = _path_identity(parent)
     if not stat.S_ISDIR(parent_info.st_mode):
         raise PermissionError("LSP owner parent must be a directory")
+    _require_startup_deadline(deadline)
     _restrict_owner_only(parent, 0o700)
+    _require_startup_deadline(deadline)
     _verify_owner_only(parent, 0o700)
+    _require_startup_deadline(deadline)
     return parent
 
 
@@ -417,17 +436,26 @@ def _launch_file_state(info: os.stat_result) -> tuple[int, int, int, int, int, i
 
 
 class _LaunchServerGuard:
-    def __init__(self, path: Path, expected_sha256: str) -> None:
+    def __init__(
+        self,
+        path: Path,
+        expected_sha256: str,
+        *,
+        deadline: float,
+    ) -> None:
         self._path = path
         self._expected_sha256 = expected_sha256
+        self._deadline = deadline
         self._descriptor: int | None = None
         self._state: tuple[int, int, int, int, int, int] | None = None
 
     def __enter__(self) -> "_LaunchServerGuard":
+        _require_startup_deadline(self._deadline)
         before = _path_identity(self._path)
         if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_SERVER_BYTES:
             raise _BootstrapDegradation("pyright_executable_digest_mismatch")
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        _require_startup_deadline(self._deadline)
         if os.name == "nt":
             import msvcrt
 
@@ -446,6 +474,7 @@ class _LaunchServerGuard:
             )
         self._descriptor = descriptor
         try:
+            _require_startup_deadline(self._deadline)
             opened = os.fstat(descriptor)
             state = _launch_file_state(opened)
             if _launch_file_state(before) != state or not stat.S_ISREG(opened.st_mode):
@@ -465,7 +494,9 @@ class _LaunchServerGuard:
         digest = hashlib.sha256()
         total = 0
         while True:
+            _require_startup_deadline(self._deadline)
             chunk = os.read(descriptor, 64 * 1024)
+            _require_startup_deadline(self._deadline)
             if not chunk:
                 break
             total += len(chunk)
@@ -475,6 +506,7 @@ class _LaunchServerGuard:
         return digest.hexdigest()
 
     def verify(self) -> None:
+        _require_startup_deadline(self._deadline)
         descriptor = self._descriptor
         state = self._state
         if descriptor is None or state is None:
@@ -482,6 +514,7 @@ class _LaunchServerGuard:
         if _launch_file_state(os.fstat(descriptor)) != state:
             raise _BootstrapDegradation("pyright_executable_digest_mismatch")
         actual = self._digest()
+        _require_startup_deadline(self._deadline)
         after = os.fstat(descriptor)
         current = _path_identity(self._path)
         if (
@@ -490,6 +523,7 @@ class _LaunchServerGuard:
             or _launch_file_state(current) != state
         ):
             raise _BootstrapDegradation("pyright_executable_digest_mismatch")
+        _require_startup_deadline(self._deadline)
 
     def close(self) -> None:
         descriptor = self._descriptor
@@ -931,7 +965,7 @@ class PyrightSession:
             raise
         return ProcessState.PROTOCOL_INITIALIZED
 
-    def _validated_qualified_paths(self) -> tuple[Path, Path]:
+    def _validated_qualified_paths(self, *, deadline: float) -> tuple[Path, Path]:
         identity = self._identity
         if identity.status != "qualified" or identity.degradation_codes:
             raise ValueError("qualified Pyright identity is internally inconsistent")
@@ -947,20 +981,46 @@ class PyrightSession:
             or _SHA256.fullmatch(identity.executable_sha256) is None
         ):
             raise ValueError("Pyright executable identity is invalid")
-        node = _validated_local_file(identity.node_executable, "node_executable")
-        server = _validated_local_file(identity.server_executable, "server_executable")
+        node = _validated_local_file(
+            identity.node_executable,
+            "node_executable",
+            deadline=deadline,
+        )
+        server = _validated_local_file(
+            identity.server_executable,
+            "server_executable",
+            deadline=deadline,
+        )
         return node, server
 
     def start(self, *, deadline: float) -> None:
-        deadline = _validated_deadline(deadline)
-        if time.monotonic() >= deadline:
-            raise ValueError("deadline must be in the future")
+        caller_deadline = _validated_deadline(deadline)
+        startup_started = time.monotonic()
+        startup_deadline = min(
+            caller_deadline,
+            startup_started + STARTUP_SECONDS,
+        )
+        bootstrap_timeout_seconds = startup_deadline - startup_started
         with self._operation():
             with self._lock:
                 if self._closed or self._closing:
                     raise RuntimeError("Pyright session is closed")
+                if bootstrap_timeout_seconds <= 0:
+                    self._readiness = "not_ready"
+                    self._readiness_evidence = ()
+                    self._position_encoding = None
+                    self._capabilities = {}
+                    self._degradation_codes = tuple(
+                        sorted(
+                            {
+                                *self._degradation_codes,
+                                "pyright_startup_timeout",
+                            }
+                        )
+                    )
+                    return
                 while self._starting:
-                    remaining = deadline - time.monotonic()
+                    remaining = startup_deadline - time.monotonic()
                     if remaining <= 0 or not self._condition.wait(remaining):
                         raise TimeoutError("Pyright startup did not finish before deadline")
                 self._reconcile_process_state_locked()
@@ -975,12 +1035,15 @@ class PyrightSession:
 
             process: LspProcess | None = None
             try:
-                node, server = self._validated_qualified_paths()
-                _ensure_lsp_parent(self._state_root)
+                node, server = self._validated_qualified_paths(
+                    deadline=startup_deadline
+                )
+                _ensure_lsp_parent(self._state_root, deadline=startup_deadline)
                 owner = lsp_owner_root(self._state_root, secrets.token_hex(16))
                 with _LaunchServerGuard(
                     server,
                     self._identity.executable_sha256,
+                    deadline=startup_deadline,
                 ) as server_guard:
                     process = LspProcess.start_configured(
                         (
@@ -991,7 +1054,7 @@ class PyrightSession:
                         ),
                         cwd=Path(self._repository.checkout_root),
                         owner_root=owner,
-                        deadline=deadline,
+                        deadline=startup_deadline,
                         server_request_handlers={
                             "client/registerCapability": self._benign_server_request,
                             "client/unregisterCapability": self._benign_server_request,
@@ -1014,13 +1077,17 @@ class PyrightSession:
                             "textDocument/publishDiagnostics": self._publish_diagnostics,
                         },
                         generation_bootstrap=self._bootstrap_generation,
+                        bootstrap_timeout_seconds=bootstrap_timeout_seconds,
                     )
                     try:
                         server_guard.verify()
                     except BaseException as verification_error:
                         try:
                             process.close(
-                                time.monotonic() + _OWNER_CLEANUP_SECONDS
+                                min(
+                                    startup_deadline,
+                                    time.monotonic() + _OWNER_CLEANUP_SECONDS,
+                                )
                             )
                         except BaseException as cleanup_error:
                             raise cleanup_error from verification_error
@@ -1042,7 +1109,10 @@ class PyrightSession:
                 if isinstance(error, StartupCleanupError):
                     with suppress(BaseException):
                         error.retry_cleanup(
-                            time.monotonic() + _OWNER_CLEANUP_SECONDS
+                            min(
+                                startup_deadline,
+                                time.monotonic() + _OWNER_CLEANUP_SECONDS,
+                            )
                         )
                 code = _startup_code(error)
                 with self._lock:

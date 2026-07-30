@@ -68,6 +68,7 @@ def _no_lsp_lifecycle_owner_leaks(monkeypatch: pytest.MonkeyPatch):
         server_request_handlers: object,
         server_notification_handlers: object,
         generation_bootstrap: object,
+        bootstrap_timeout_seconds: float | None = None,
     ) -> LspProcess:
         process = configured_start(
             cls,
@@ -78,6 +79,7 @@ def _no_lsp_lifecycle_owner_leaks(monkeypatch: pytest.MonkeyPatch):
             server_request_handlers=server_request_handlers,
             server_notification_handlers=server_notification_handlers,
             generation_bootstrap=generation_bootstrap,
+            bootstrap_timeout_seconds=bootstrap_timeout_seconds,
         )
         started.append(process)
         return process
@@ -752,6 +754,31 @@ def test_configured_start_passes_caller_deadline_to_tree_protocol_and_bootstrap(
             "protocol": deadline,
             "bootstrap": deadline,
         }
+    finally:
+        process.close(time.monotonic() + 5)
+
+
+def test_configured_start_preserves_explicit_autonomous_bootstrap_budget(
+    tmp_path: Path,
+) -> None:
+    process = LspProcess.start_configured(
+        _command("--lifecycle"),
+        cwd=tmp_path,
+        owner_root=tmp_path / OWNER_NONCE,
+        deadline=time.monotonic() + 5,
+        server_request_handlers={},
+        server_notification_handlers={},
+        generation_bootstrap=lambda *_args: ProcessState.PROCESS_RUNNING,
+        bootstrap_timeout_seconds=1.25,
+    )
+    try:
+        configuration = process._coordinator.generation_configuration
+        assert configuration.bootstrap_timeout_seconds == 1.25
+        started = time.monotonic()
+        restart_deadline = lsp_process._fresh_bootstrap_deadline(
+            process._coordinator
+        )
+        assert started + 1.20 <= restart_deadline <= started + 1.30
     finally:
         process.close(time.monotonic() + 5)
 
@@ -1749,6 +1776,7 @@ def test_legacy_start_signature_budget_and_state_are_unchanged(tmp_path: Path) -
         "server_request_handlers",
         "server_notification_handlers",
         "generation_bootstrap",
+        "bootstrap_timeout_seconds",
     )
 
     started = time.monotonic()

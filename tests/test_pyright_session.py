@@ -18,7 +18,7 @@ import pyright_session as pyright_session_module
 import pytest
 from code_intelligence import PositionEncoding
 from lsp_positions import LspPosition, LspRange, SourceAnchor, SourceDocument
-from lsp_process import LspProcess, ProcessState
+from lsp_process import LspProcess, ProcessState, StartupCleanupError
 from lsp_protocol import MAX_FRAME_BYTES
 from lsp_security import RepositorySource
 from pyright_profile import (
@@ -456,6 +456,231 @@ def test_start_uses_exact_command_initialize_and_configuration_contract(
     finally:
         session.close(deadline=time.monotonic() + 5)
     assert not owner_root.exists()
+
+
+@pytest.mark.parametrize(
+    ("caller_seconds", "preflight_delay"),
+    [(600.0, 0.0), (1.0, 0.05)],
+)
+def test_start_forwards_one_capped_deadline_without_shrinking_restart_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+    caller_seconds: float,
+    preflight_delay: float,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    captured: dict[str, float] = {}
+    start_invoked: list[float] = []
+
+    class CapturedProcess:
+        state = ProcessState.PROTOCOL_INITIALIZED
+        generation_nonce = "captured-generation"
+
+        def close(self, _deadline: float) -> None:
+            return None
+
+    class CapturedGuard:
+        def __init__(
+            self,
+            _path: Path,
+            _expected_sha256: str,
+            *,
+            deadline: float,
+        ) -> None:
+            captured["guard"] = deadline
+
+        def __enter__(self) -> CapturedGuard:
+            return self
+
+        def verify(self) -> None:
+            captured["verify"] = captured["guard"]
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    def qualified_paths(*, deadline: float) -> tuple[Path, Path]:
+        captured["paths"] = deadline
+        if preflight_delay:
+            time.sleep(preflight_delay)
+        return (
+            Path(semantic_pyright.identity.node_executable),  # type: ignore[arg-type]
+            Path(semantic_pyright.identity.server_executable),  # type: ignore[arg-type]
+        )
+
+    def ensure_parent(_state_root: Path, *, deadline: float) -> Path:
+        captured["parent"] = deadline
+        return state_root / "run/lsp"
+
+    def capture_start(
+        cls: type[LspProcess],
+        _command: object,
+        *,
+        deadline: float,
+        bootstrap_timeout_seconds: float,
+        **_options: object,
+    ) -> CapturedProcess:
+        assert cls is LspProcess
+        start_invoked.append(time.monotonic())
+        captured["process"] = deadline
+        captured["bootstrap_timeout"] = bootstrap_timeout_seconds
+        return CapturedProcess()
+
+    monkeypatch.setattr(session, "_validated_qualified_paths", qualified_paths)
+    monkeypatch.setattr(pyright_session_module, "_ensure_lsp_parent", ensure_parent)
+    monkeypatch.setattr(pyright_session_module, "_LaunchServerGuard", CapturedGuard)
+    monkeypatch.setattr(
+        LspProcess,
+        "start_configured",
+        classmethod(capture_start),
+    )
+    before = time.monotonic()
+    caller_deadline = before + caller_seconds
+    try:
+        session.start(deadline=caller_deadline)
+        after = time.monotonic()
+        effective = captured["process"]
+        assert {
+            captured["paths"],
+            captured["parent"],
+            captured["guard"],
+            captured["verify"],
+            effective,
+        } == {effective}
+        if caller_seconds > STARTUP_SECONDS:
+            assert effective < caller_deadline
+            assert before + STARTUP_SECONDS - 0.05 <= effective
+            assert effective <= before + STARTUP_SECONDS + 0.05
+        else:
+            assert effective == caller_deadline
+        expected_budget = min(caller_seconds, STARTUP_SECONDS)
+        assert captured["bootstrap_timeout"] == pytest.approx(
+            expected_budget,
+            abs=0.05,
+        )
+        assert start_invoked
+        invocation_remaining = effective - start_invoked[0]
+        assert captured["bootstrap_timeout"] - invocation_remaining >= (
+            preflight_delay - 0.02
+        )
+        assert effective > after
+    finally:
+        session.close(deadline=time.monotonic() + 1)
+
+
+def test_expired_start_deadline_marks_not_ready_without_startup_work(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("expired startup performed preflight or process work")
+
+    monkeypatch.setattr(session, "_validated_qualified_paths", forbidden)
+    monkeypatch.setattr(pyright_session_module, "_ensure_lsp_parent", forbidden)
+    monkeypatch.setattr(LspProcess, "start_configured", forbidden)
+
+    assert session.start(deadline=time.monotonic() - 1) is None
+    assert session.readiness == "not_ready"
+    assert session.readiness_evidence == ()
+    assert session.position_encoding is None
+    assert dict(session.capabilities) == {}
+    assert session.degradation_codes == ("pyright_startup_timeout",)
+    assert session.active_operations == 0
+    assert not (state_root / "run/lsp").exists()
+
+
+@pytest.mark.parametrize("failure_stage", ["verification", "startup_cleanup"])
+def test_startup_cleanup_uses_effective_caller_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+    failure_stage: str,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    captured: dict[str, float] = {}
+
+    class CapturedProcess:
+        state = ProcessState.PROTOCOL_INITIALIZED
+        generation_nonce = "captured-generation"
+
+        def close(self, deadline: float) -> None:
+            captured["process_cleanup"] = deadline
+
+    class CapturedCleanupError(StartupCleanupError):
+        def retry_cleanup(self, deadline: float) -> None:
+            captured["startup_cleanup"] = deadline
+
+    class FailingGuard:
+        def __init__(
+            self,
+            _path: Path,
+            _expected_sha256: str,
+            *,
+            deadline: float,
+        ) -> None:
+            captured["effective"] = deadline
+
+        def __enter__(self) -> FailingGuard:
+            return self
+
+        def verify(self) -> None:
+            if failure_stage == "verification":
+                raise RuntimeError("post-bootstrap verification failed")
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    def qualified_paths(*, deadline: float) -> tuple[Path, Path]:
+        assert deadline == captured.get("effective", deadline)
+        return (
+            Path(semantic_pyright.identity.node_executable),  # type: ignore[arg-type]
+            Path(semantic_pyright.identity.server_executable),  # type: ignore[arg-type]
+        )
+
+    def ensure_parent(_state_root: Path, *, deadline: float) -> Path:
+        captured.setdefault("effective", deadline)
+        assert deadline == captured["effective"]
+        return state_root / "run/lsp"
+
+    def capture_start(
+        cls: type[LspProcess],
+        _command: object,
+        *,
+        deadline: float,
+        bootstrap_timeout_seconds: float,
+        **_options: object,
+    ) -> CapturedProcess:
+        assert cls is LspProcess
+        assert deadline == captured["effective"]
+        assert 0 < bootstrap_timeout_seconds <= STARTUP_SECONDS
+        if failure_stage == "startup_cleanup":
+            raise CapturedCleanupError("configured startup cleanup failed")
+        return CapturedProcess()
+
+    monkeypatch.setattr(session, "_validated_qualified_paths", qualified_paths)
+    monkeypatch.setattr(pyright_session_module, "_ensure_lsp_parent", ensure_parent)
+    monkeypatch.setattr(pyright_session_module, "_LaunchServerGuard", FailingGuard)
+    monkeypatch.setattr(
+        LspProcess,
+        "start_configured",
+        classmethod(capture_start),
+    )
+    caller_deadline = time.monotonic() + 0.5
+
+    session.start(deadline=caller_deadline)
+
+    cleanup_key = (
+        "process_cleanup" if failure_stage == "verification" else "startup_cleanup"
+    )
+    assert captured[cleanup_key] == captured["effective"] == caller_deadline
+    assert session.readiness == "not_ready"
+    assert session.degradation_codes == ("pyright_startup_failed",)
 
 
 def test_concurrent_start_waits_for_process_publication(
