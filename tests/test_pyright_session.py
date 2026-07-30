@@ -18,7 +18,7 @@ import pyright_session as pyright_session_module
 import pytest
 from code_intelligence import PositionEncoding
 from lsp_positions import LspPosition, LspRange, SourceAnchor, SourceDocument
-from lsp_process import LspProcess
+from lsp_process import LspProcess, ProcessState
 from lsp_protocol import MAX_FRAME_BYTES
 from lsp_security import RepositorySource
 from pyright_profile import (
@@ -86,6 +86,21 @@ def _missing_identity() -> PyrightIdentity:
         configuration_sha256="b" * 64,
         qualified=False,
         degradation_codes=("pyright_missing",),
+    )
+
+
+def _copied_server_identity(
+    repository: Path,
+    fixture: SemanticPyrightFixture,
+) -> tuple[Path, PyrightIdentity]:
+    source = Path(fixture.identity.server_executable)  # type: ignore[union-attr]
+    server = repository / "qualified-server.py"
+    content = source.read_bytes()
+    server.write_bytes(content)
+    return server, replace(
+        fixture.identity,
+        server_executable=server,
+        executable_sha256=hashlib.sha256(content).hexdigest(),
     )
 
 
@@ -210,6 +225,80 @@ def test_unqualified_identity_never_spawns_or_creates_lsp_parent(
     assert session.readiness_evidence == ()
     assert session.degradation_codes == ("pyright_missing",)
     assert not (state_root / "run/lsp").exists()
+
+
+def test_server_mutated_after_qualification_never_spawns(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    server, identity = _copied_server_identity(repository, semantic_pyright)
+    server.write_bytes(server.read_bytes() + b"\n# changed after qualification\n")
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("a hash-mismatched Pyright server was spawned")
+
+    monkeypatch.setattr(LspProcess, "start_configured", forbidden)
+    session = PyrightSession(
+        resolve_repository_scope(repository),
+        identity,
+        state_root=state_root,
+    )
+
+    session.start(deadline=time.monotonic() + 5)
+
+    assert session.readiness == "not_ready"
+    assert session.readiness_evidence == ()
+    assert session.degradation_codes == ("pyright_executable_digest_mismatch",)
+
+
+def test_server_identity_is_held_and_reverified_through_bootstrap(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    server, identity = _copied_server_identity(repository, semantic_pyright)
+    original = server.read_bytes()
+    real_start = LspProcess.start_configured.__func__
+    mutation_errors: list[OSError] = []
+
+    def mutate_after_bootstrap(
+        cls: type[LspProcess],
+        command: object,
+        **options: object,
+    ) -> LspProcess:
+        process = real_start(cls, command, **options)  # type: ignore[arg-type]
+        try:
+            server.write_bytes(original + b"\n# changed during startup\n")
+        except OSError as error:
+            mutation_errors.append(error)
+        return process
+
+    monkeypatch.setattr(
+        LspProcess,
+        "start_configured",
+        classmethod(mutate_after_bootstrap),
+    )
+    session = PyrightSession(
+        resolve_repository_scope(repository),
+        identity,
+        state_root=state_root,
+    )
+    try:
+        session.start(deadline=time.monotonic() + 10)
+        if os.name == "nt":
+            assert mutation_errors
+            assert session.readiness == "protocol_initialized"
+        else:
+            assert mutation_errors == []
+            assert session.readiness == "not_ready"
+            assert session.degradation_codes == (
+                "pyright_executable_digest_mismatch",
+            )
+    finally:
+        session.close(deadline=time.monotonic() + 5)
 
 
 def test_start_uses_exact_command_initialize_and_configuration_contract(
@@ -695,6 +784,93 @@ def test_failed_readiness_probe_retries_without_duplicate_didopen(
         session.close(deadline=time.monotonic() + 5)
 
 
+def test_ready_second_document_cannot_authorize_failed_first_document(
+    repository: Path,
+    state_root: Path,
+) -> None:
+    fixture = create_semantic_pyright_fixture(
+        repository,
+        config={"document_symbol_failure_uris": ["$SERVICE_URI"]},
+    )
+    session = _session(repository, state_root, fixture)
+    try:
+        session.open_document(
+            "pkg/service.py",
+            deadline=time.monotonic() + 10,
+        )
+        session.open_document(
+            "pkg/api.py",
+            deadline=time.monotonic() + 10,
+        )
+        assert session.readiness == "query_ready"
+
+        result = session.definition(
+            _anchor(repository, "pkg/service.py", 10, 20),
+            deadline=time.monotonic() + 10,
+        )
+
+        assert result == ProviderLocations((), "not_ready", True)
+        methods = [
+            event["method"]
+            for event in fixture.events()
+            if event["kind"] == "client-message"
+        ]
+        assert "textDocument/definition" not in methods
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_restart_rebuilds_readiness_per_replayed_document(
+    repository: Path,
+    state_root: Path,
+) -> None:
+    marker = repository / ".fake-lsp-per-document-crash"
+    fixture = create_semantic_pyright_fixture(
+        repository,
+        config={
+            "crash_once_method": "textDocument/definition",
+            "crash_marker": str(marker),
+        },
+    )
+    session = _session(repository, state_root, fixture)
+    try:
+        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        session.open_document("pkg/api.py", deadline=time.monotonic() + 10)
+        config = json.loads(fixture.config_path.read_text(encoding="utf-8"))
+        config["document_symbol_failure_uris"] = ["$SERVICE_URI"]
+        fixture.config_path.write_text(
+            json.dumps(config, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+
+        result = session.definition(
+            _anchor(repository, "pkg/service.py", 10, 20),
+            deadline=time.monotonic() + 15,
+        )
+
+        assert result == ProviderLocations((), "not_ready", True)
+        assert session.readiness == "query_ready"
+        messages = [
+            event
+            for event in fixture.events()
+            if event["kind"] == "client-message"
+        ]
+        pids = tuple(dict.fromkeys(event["pid"] for event in messages))
+        assert len(pids) == 2
+        restarted_probes = [
+            event["message"]["params"]["textDocument"]["uri"]
+            for event in messages
+            if event["pid"] == pids[1]
+            and event["method"] == "textDocument/documentSymbol"
+        ]
+        assert restarted_probes == [
+            (repository / "pkg/service.py").resolve().as_uri(),
+            (repository / "pkg/api.py").resolve().as_uri(),
+        ]
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
 def test_missing_document_symbol_capability_never_sends_probe_or_claims_ready(
     repository: Path,
     state_root: Path,
@@ -721,6 +897,59 @@ def test_missing_document_symbol_capability_never_sends_probe_or_claims_ready(
         assert "textDocument/documentSymbol" not in methods
     finally:
         session.close(deadline=time.monotonic() + 5)
+
+
+def test_malformed_document_symbol_list_cannot_establish_readiness(
+    repository: Path,
+    state_root: Path,
+) -> None:
+    fixture = create_semantic_pyright_fixture(
+        repository,
+        config={"responses": {"textDocument/documentSymbol": [42]}},
+    )
+    session = _session(repository, state_root, fixture)
+    try:
+        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        assert session.readiness == "protocol_initialized"
+        assert session.readiness_evidence == (
+            "initialize",
+            "initialized",
+            "configuration",
+            "didOpen",
+        )
+
+        result = session.definition(
+            _anchor(repository, "pkg/service.py", 10, 20),
+            deadline=time.monotonic() + 10,
+        )
+        assert result == ProviderLocations((), "not_ready", True)
+        methods = [
+            event["method"]
+            for event in fixture.events()
+            if event["kind"] == "client-message"
+        ]
+        assert "textDocument/definition" not in methods
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_document_symbol_normalizer_is_strict_and_accepts_empty_list(
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    uri = (repository / "pkg/service.py").resolve().as_uri()
+    selection = {
+        "start": {"line": 0, "character": 0},
+        "end": {"line": 0, "character": 1},
+    }
+
+    assert session._normalize_document_symbols([], uri) == ((), False)
+    assert session._normalize_document_symbols(
+        [{"selectionRange": selection}],
+        uri,
+    ) == ((), True)
 
 
 @pytest.mark.parametrize(
@@ -755,6 +984,43 @@ def test_open_document_rejects_invalid_utf8_and_frame_sized_content(
         ]
         assert "textDocument/didOpen" not in methods
         assert session.readiness == "protocol_initialized"
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_open_document_propagates_deadline_to_stable_source_read(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    session.start(deadline=time.monotonic() + 10)
+    deadline = time.monotonic() + 5
+    observed: list[float] = []
+
+    def expiring_read(
+        _path: Path,
+        _max_bytes: int,
+        *,
+        label: str,
+        deadline: float,
+    ) -> bytes:
+        assert label == "Pyright source document"
+        observed.append(deadline)
+        raise TimeoutError("stable read deadline expired")
+
+    monkeypatch.setattr(pyright_session_module, "read_stable_bytes", expiring_read)
+    try:
+        with pytest.raises(TimeoutError, match="deadline"):
+            session.open_document("pkg/service.py", deadline=deadline)
+        assert observed == [deadline]
+        methods = [
+            event["method"]
+            for event in semantic_pyright.events()
+            if event["kind"] == "client-message"
+        ]
+        assert "textDocument/didOpen" not in methods
     finally:
         session.close(deadline=time.monotonic() + 5)
 
@@ -863,6 +1129,68 @@ def test_not_ready_never_returns_a_complete_provider_negative(
             if event["kind"] == "client-message"
         ]
         assert "textDocument/definition" not in methods
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_unsupported_document_features_return_before_source_open(
+    repository: Path,
+    state_root: Path,
+) -> None:
+    fixture = create_semantic_pyright_fixture(
+        repository,
+        config={"capabilities": {}},
+    )
+    session = _session(repository, state_root, fixture)
+    anchor = SourceAnchor("missing.py", 1, 0, 0)
+    try:
+        assert session.definition(
+            anchor,
+            deadline=time.monotonic() + 10,
+        ) == ProviderLocations((), "unsupported", True)
+        assert session.hover(
+            anchor,
+            deadline=time.monotonic() + 10,
+        ) == ProviderHover(None, None, True)
+        assert session.incoming_calls(
+            anchor,
+            deadline=time.monotonic() + 10,
+        ) == ProviderCalls("incoming", (), "unsupported", True)
+        assert session.document_symbols(
+            "missing.py",
+            deadline=time.monotonic() + 10,
+        ) == ProviderLocations((), "unsupported", True)
+        methods = [
+            event["method"]
+            for event in fixture.events()
+            if event["kind"] == "client-message"
+        ]
+        assert "textDocument/didOpen" not in methods
+        assert "textDocument/documentSymbol" not in methods
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_unsupported_workspace_symbols_precede_query_readiness(
+    repository: Path,
+    state_root: Path,
+) -> None:
+    fixture = create_semantic_pyright_fixture(
+        repository,
+        config={"capabilities": {"documentSymbolProvider": True}},
+    )
+    session = _session(repository, state_root, fixture)
+    try:
+        assert session.workspace_symbols(
+            "Service",
+            deadline=time.monotonic() + 10,
+        ) == ProviderLocations((), "unsupported", True)
+        methods = [
+            event["method"]
+            for event in fixture.events()
+            if event["kind"] == "client-message"
+        ]
+        assert "workspace/symbol" not in methods
     finally:
         session.close(deadline=time.monotonic() + 5)
 
@@ -1556,6 +1884,92 @@ def test_transparent_restart_reinitializes_configures_reopens_and_reprobes(
         session.close(deadline=time.monotonic() + 5)
         session.close(deadline=time.monotonic() + 5)
     assert tuple((state_root / "run/lsp").iterdir()) == ()
+
+
+def test_successful_close_releases_all_protocol_derived_session_state(
+    repository: Path,
+    state_root: Path,
+) -> None:
+    fixture = create_semantic_pyright_fixture(
+        repository,
+        config={"push_progress": True},
+    )
+    session = _session(repository, state_root, fixture)
+    session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+    assert session.readiness == "query_ready"
+    assert session._documents
+    assert session._ready_uri_generations
+    assert session.progress_events
+
+    session.close(deadline=time.monotonic() + 5)
+
+    assert session.readiness == "not_ready"
+    assert session.readiness_evidence == ()
+    assert session.position_encoding is None
+    assert dict(session.capabilities) == {}
+    assert session.progress_events == ()
+    assert session._documents == {}
+    assert session._readiness_target_uri is None
+    assert session._generation_nonce is None
+    assert session._ready_uri_generations == {}
+    assert session._diagnostics == {}
+
+
+def test_post_start_probe_promotes_owned_process_state(
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    try:
+        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+
+        assert session._process is not None
+        assert session._process.state is ProcessState.WORKSPACE_READY
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+@pytest.mark.parametrize(
+    "terminal_state",
+    [ProcessState.DEGRADED, ProcessState.FAILED],
+)
+def test_terminal_process_state_revokes_session_readiness_before_semantic_use(
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+    terminal_state: ProcessState,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    process: LspProcess | None = None
+    original_state: ProcessState | None = None
+    try:
+        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        process = session._process
+        assert process is not None
+        original_state = process.state
+        process.state = terminal_state
+        definitions_before = sum(
+            event.get("method") == "textDocument/definition"
+            for event in semantic_pyright.events()
+        )
+
+        assert session.readiness == "not_ready"
+        assert session.readiness_evidence == ()
+        assert session.position_encoding is None
+        assert dict(session.capabilities) == {}
+        assert session.definition(
+            _anchor(repository, "pkg/service.py", 10, 20),
+            deadline=time.monotonic() + 10,
+        ) == ProviderLocations((), "not_ready", True)
+        assert sum(
+            event.get("method") == "textDocument/definition"
+            for event in semantic_pyright.events()
+        ) == definitions_before
+    finally:
+        if process is not None and original_state is not None:
+            process.state = original_state
+        session.close(deadline=time.monotonic() + 5)
 
 
 def test_active_operation_and_lru_state_are_released_after_blocking_request(

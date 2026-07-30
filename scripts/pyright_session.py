@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 
+import windows_workspace as _windows_workspace
 from bounded_io import read_stable_bytes
 from code_intelligence import PositionEncoding
 from compile_cache import _restrict_owner_only, _verify_owner_only
@@ -41,6 +42,7 @@ from lsp_security import (
     resolve_repository_source,
 )
 from pyright_profile import (
+    MAX_SERVER_BYTES,
     PYRIGHT_CONFIGURATION,
     PYRIGHT_INITIALIZATION_OPTIONS,
     PYRIGHT_INITIALIZATION_OPTIONS_SHA256,
@@ -403,6 +405,102 @@ def _bounded_text(value: object, max_bytes: int) -> str | None:
     return value if size <= max_bytes else None
 
 
+def _launch_file_state(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        stat.S_IFMT(info.st_mode),
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+class _LaunchServerGuard:
+    def __init__(self, path: Path, expected_sha256: str) -> None:
+        self._path = path
+        self._expected_sha256 = expected_sha256
+        self._descriptor: int | None = None
+        self._state: tuple[int, int, int, int, int, int] | None = None
+
+    def __enter__(self) -> "_LaunchServerGuard":
+        before = _path_identity(self._path)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_SERVER_BYTES:
+            raise _BootstrapDegradation("pyright_executable_digest_mismatch")
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        if os.name == "nt":
+            import msvcrt
+
+            handle = _windows_workspace.open_exclusive_readonly_source_file(
+                self._path
+            )
+            try:
+                descriptor = msvcrt.open_osfhandle(handle, flags)
+            except BaseException:
+                _windows_workspace.close_handle(handle)
+                raise
+        else:
+            descriptor = os.open(
+                self._path,
+                flags | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+        self._descriptor = descriptor
+        try:
+            opened = os.fstat(descriptor)
+            state = _launch_file_state(opened)
+            if _launch_file_state(before) != state or not stat.S_ISREG(opened.st_mode):
+                raise _BootstrapDegradation("pyright_executable_digest_mismatch")
+            self._state = state
+            self.verify()
+        except BaseException:
+            self.close()
+            raise
+        return self
+
+    def _digest(self) -> str:
+        descriptor = self._descriptor
+        if descriptor is None:
+            raise RuntimeError("Pyright launch server guard is closed")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(descriptor, 64 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_SERVER_BYTES:
+                raise _BootstrapDegradation("pyright_executable_digest_mismatch")
+            digest.update(chunk)
+        return digest.hexdigest()
+
+    def verify(self) -> None:
+        descriptor = self._descriptor
+        state = self._state
+        if descriptor is None or state is None:
+            raise RuntimeError("Pyright launch server guard is not open")
+        if _launch_file_state(os.fstat(descriptor)) != state:
+            raise _BootstrapDegradation("pyright_executable_digest_mismatch")
+        actual = self._digest()
+        after = os.fstat(descriptor)
+        current = _path_identity(self._path)
+        if (
+            actual != self._expected_sha256
+            or _launch_file_state(after) != state
+            or _launch_file_state(current) != state
+        ):
+            raise _BootstrapDegradation("pyright_executable_digest_mismatch")
+
+    def close(self) -> None:
+        descriptor = self._descriptor
+        self._descriptor = None
+        if descriptor is not None:
+            os.close(descriptor)
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+
 class PyrightSession:
     """Own one repository-scoped Pyright protocol lifecycle."""
 
@@ -435,6 +533,8 @@ class PyrightSession:
         self._process: LspProcess | None = None
         self._documents: dict[str, OpenDocument] = {}
         self._readiness_target_uri: str | None = None
+        self._generation_nonce: str | None = None
+        self._ready_uri_generations: dict[str, str] = {}
         self._diagnostics: dict[str, _DiagnosticSnapshot] = {}
         self._progress_events: list[tuple[object, ...]] = []
         self._starting = False
@@ -445,16 +545,19 @@ class PyrightSession:
     @property
     def readiness(self) -> str:
         with self._lock:
+            self._reconcile_process_state_locked()
             return self._readiness
 
     @property
     def readiness_evidence(self) -> tuple[str, ...]:
         with self._lock:
+            self._reconcile_process_state_locked()
             return self._readiness_evidence
 
     @property
     def position_encoding(self) -> PositionEncoding | None:
         with self._lock:
+            self._reconcile_process_state_locked()
             return self._position_encoding
 
     @property
@@ -465,6 +568,7 @@ class PyrightSession:
     @property
     def capabilities(self) -> Mapping[str, bool]:
         with self._lock:
+            self._reconcile_process_state_locked()
             return MappingProxyType(dict(self._capabilities))
 
     @property
@@ -755,7 +859,8 @@ class PyrightSession:
         )
         with self._lock:
             documents = tuple(self._documents.values())
-            readiness_target = self._readiness_target_uri
+            self._generation_nonce = _generation_nonce
+            self._ready_uri_generations.clear()
             self._diagnostics.clear()
             self._capabilities = capabilities
             self._position_encoding = encoding
@@ -782,38 +887,39 @@ class PyrightSession:
                     },
                     deadline=deadline,
                 )
-            if (
-                readiness_target is not None
-                and capabilities["document_symbols"]
-                and any(
-                    document.source.uri == readiness_target
-                    for document in documents
-                )
-            ):
-                symbols = protocol.request(
-                    "textDocument/documentSymbol",
-                    {"textDocument": {"uri": readiness_target}},
-                    deadline=deadline,
-                )
-                if symbols is not None and not isinstance(symbols, list):
-                    raise _BootstrapDegradation(
-                        "pyright_document_symbols_invalid"
-                    )
+            if capabilities["document_symbols"]:
+                for document in documents:
+                    try:
+                        symbols = protocol.request(
+                            "textDocument/documentSymbol",
+                            {"textDocument": {"uri": document.source.uri}},
+                            deadline=deadline,
+                        )
+                    except JsonRpcResponseError:
+                        continue
+                    if not self._normalize_document_symbols(
+                        symbols,
+                        document.source.uri,
+                    )[1]:
+                        with self._lock:
+                            if self._generation_nonce == _generation_nonce:
+                                self._ready_uri_generations[
+                                    document.source.uri
+                                ] = _generation_nonce
                 with self._lock:
-                    self._readiness = "query_ready"
-                    self._readiness_evidence = (
-                        "initialize",
-                        "initialized",
-                        "configuration",
-                        "didOpen",
-                        "documentSymbol",
-                    )
-                return ProcessState.WORKSPACE_READY
+                    self._refresh_readiness_locked()
+                    ready = self._readiness == "query_ready"
+                return (
+                    ProcessState.WORKSPACE_READY
+                    if ready
+                    else ProcessState.PROTOCOL_INITIALIZED
+                )
         except BaseException:
             if documents:
                 with self._lock:
                     self._readiness = "not_ready"
                     self._readiness_evidence = ()
+                    self._ready_uri_generations.clear()
                     self._degradation_codes = tuple(
                         sorted(
                             {
@@ -836,6 +942,11 @@ class PyrightSession:
             or _SHA256.fullmatch(identity.configuration_sha256) is None
         ):
             raise ValueError("Pyright configuration identity is invalid")
+        if (
+            not isinstance(identity.executable_sha256, str)
+            or _SHA256.fullmatch(identity.executable_sha256) is None
+        ):
+            raise ValueError("Pyright executable identity is invalid")
         node = _validated_local_file(identity.node_executable, "node_executable")
         server = _validated_local_file(identity.server_executable, "server_executable")
         return node, server
@@ -852,6 +963,7 @@ class PyrightSession:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0 or not self._condition.wait(remaining):
                         raise TimeoutError("Pyright startup did not finish before deadline")
+                self._reconcile_process_state_locked()
                 if self._process is not None or self._readiness != "not_ready":
                     return
                 if not self._identity.qualified:
@@ -866,37 +978,54 @@ class PyrightSession:
                 node, server = self._validated_qualified_paths()
                 _ensure_lsp_parent(self._state_root)
                 owner = lsp_owner_root(self._state_root, secrets.token_hex(16))
-                process = LspProcess.start_configured(
-                    (
-                        str(node),
-                        str(server),
-                        "--stdio",
-                        f"--cancellationReceive=file:{owner / 'cancellation'}",
-                    ),
-                    cwd=Path(self._repository.checkout_root),
-                    owner_root=owner,
-                    deadline=deadline,
-                    server_request_handlers={
-                        "client/registerCapability": self._benign_server_request,
-                        "client/unregisterCapability": self._benign_server_request,
-                        "window/workDoneProgress/create": self._benign_server_request,
-                        "workspace/configuration": self._configuration,
-                    },
-                    server_notification_handlers={
-                        "$/progress": lambda params: self._progress("$/progress", params),
-                        "pyright/beginProgress": lambda params: self._progress(
-                            "pyright/beginProgress", params
+                with _LaunchServerGuard(
+                    server,
+                    self._identity.executable_sha256,
+                ) as server_guard:
+                    process = LspProcess.start_configured(
+                        (
+                            str(node),
+                            str(server),
+                            "--stdio",
+                            f"--cancellationReceive=file:{owner / 'cancellation'}",
                         ),
-                        "pyright/endProgress": lambda params: self._progress(
-                            "pyright/endProgress", params
-                        ),
-                        "pyright/reportProgress": lambda params: self._progress(
-                            "pyright/reportProgress", params
-                        ),
-                        "textDocument/publishDiagnostics": self._publish_diagnostics,
-                    },
-                    generation_bootstrap=self._bootstrap_generation,
-                )
+                        cwd=Path(self._repository.checkout_root),
+                        owner_root=owner,
+                        deadline=deadline,
+                        server_request_handlers={
+                            "client/registerCapability": self._benign_server_request,
+                            "client/unregisterCapability": self._benign_server_request,
+                            "window/workDoneProgress/create": self._benign_server_request,
+                            "workspace/configuration": self._configuration,
+                        },
+                        server_notification_handlers={
+                            "$/progress": lambda params: self._progress(
+                                "$/progress", params
+                            ),
+                            "pyright/beginProgress": lambda params: self._progress(
+                                "pyright/beginProgress", params
+                            ),
+                            "pyright/endProgress": lambda params: self._progress(
+                                "pyright/endProgress", params
+                            ),
+                            "pyright/reportProgress": lambda params: self._progress(
+                                "pyright/reportProgress", params
+                            ),
+                            "textDocument/publishDiagnostics": self._publish_diagnostics,
+                        },
+                        generation_bootstrap=self._bootstrap_generation,
+                    )
+                    try:
+                        server_guard.verify()
+                    except BaseException as verification_error:
+                        try:
+                            process.close(
+                                time.monotonic() + _OWNER_CLEANUP_SECONDS
+                            )
+                        except BaseException as cleanup_error:
+                            raise cleanup_error from verification_error
+                        process = None
+                        raise
             except (TypeError, ValueError):
                 with self._lock:
                     self._starting = False
@@ -934,18 +1063,69 @@ class PyrightSession:
                 self._starting = False
                 self._condition.notify_all()
 
-    def _mark_protocol_initialized(self, *, did_open: bool) -> None:
-        with self._lock:
-            if self._position_encoding is None:
-                self._readiness = "not_ready"
-                return
-            self._readiness = "protocol_initialized"
+    def _document_ready_locked(self, uri: str) -> bool:
+        generation = self._generation_nonce
+        return generation is not None and self._ready_uri_generations.get(uri) == generation
+
+    def _reconcile_process_state_locked(self) -> None:
+        process = self._process
+        if process is None or process.state not in {
+            ProcessState.DEGRADED,
+            ProcessState.FAILED,
+        }:
+            return
+        if (
+            self._generation_nonce is not None
+            and self._generation_nonce != process.generation_nonce
+        ):
+            return
+        self._readiness = "not_ready"
+        self._readiness_evidence = ()
+        self._position_encoding = None
+        self._capabilities = {}
+        self._generation_nonce = None
+        self._ready_uri_generations.clear()
+        self._diagnostics.clear()
+
+    def _refresh_readiness_locked(self) -> None:
+        if self._position_encoding is None:
+            self._readiness = "not_ready"
+            self._readiness_evidence = ()
+            return
+        target = self._readiness_target_uri
+        if target is not None and self._document_ready_locked(target):
+            self._readiness = "query_ready"
             self._readiness_evidence = (
                 "initialize",
                 "initialized",
                 "configuration",
-                *(("didOpen",) if did_open else ()),
+                "didOpen",
+                "documentSymbol",
             )
+            if self._process is not None and self._process.state not in {
+                ProcessState.DEGRADED,
+                ProcessState.FAILED,
+            }:
+                self._process.state = ProcessState.WORKSPACE_READY
+            return
+        self._readiness = "protocol_initialized"
+        self._readiness_evidence = (
+            "initialize",
+            "initialized",
+            "configuration",
+            *(('didOpen',) if self._documents else ()),
+        )
+        if self._process is not None and self._process.state not in {
+            ProcessState.DEGRADED,
+            ProcessState.FAILED,
+        }:
+            self._process.state = ProcessState.PROTOCOL_INITIALIZED
+
+    def _mark_protocol_initialized(self, *, did_open: bool) -> None:
+        with self._lock:
+            if not did_open and self._readiness_target_uri is not None:
+                self._ready_uri_generations.pop(self._readiness_target_uri, None)
+            self._refresh_readiness_locked()
 
     def _probe_document(
         self,
@@ -966,21 +1146,20 @@ class PyrightSession:
                 deadline=deadline,
             )
         except (JsonRpcResponseError, ProtocolViolation, RuntimeError, TimeoutError):
-            self._mark_protocol_initialized(did_open=True)
+            with self._lock:
+                self._ready_uri_generations.pop(document.source.uri, None)
+                self._refresh_readiness_locked()
             return
-        if result is not None and not isinstance(result, list):
-            self._mark_protocol_initialized(did_open=True)
+        if self._normalize_document_symbols(result, document.source.uri)[1]:
+            with self._lock:
+                self._ready_uri_generations.pop(document.source.uri, None)
+                self._refresh_readiness_locked()
             return
         with self._lock:
-            self._readiness_target_uri = document.source.uri
-            self._readiness = "query_ready"
-            self._readiness_evidence = (
-                "initialize",
-                "initialized",
-                "configuration",
-                "didOpen",
-                "documentSymbol",
-            )
+            generation = process.generation_nonce
+            self._generation_nonce = generation
+            self._ready_uri_generations[document.source.uri] = generation
+            self._refresh_readiness_locked()
 
     def open_document(self, path: str, *, deadline: float) -> OpenDocument:
         deadline = _validated_deadline(deadline)
@@ -993,13 +1172,14 @@ class PyrightSession:
                 source.absolute_path,
                 _MAX_DOCUMENT_BYTES,
                 label="Pyright source document",
+                deadline=deadline,
             )
             text = content.decode("utf-8", errors="strict")
             digest = hashlib.sha256(content).hexdigest()
             with self._lock:
                 current = self._documents.get(source.uri)
                 process = self._process
-                readiness = self._readiness
+                ready = self._document_ready_locked(source.uri)
             if process is None:
                 raise RuntimeError("Pyright session is not protocol initialized")
             if current is not None:
@@ -1009,7 +1189,7 @@ class PyrightSession:
                     or current.source_sha256 != digest
                 ):
                     raise RuntimeError("open Pyright document changed without synchronization")
-                if readiness != "query_ready":
+                if not ready:
                     self._probe_document(current, process, deadline=deadline)
                 return current
 
@@ -1035,6 +1215,7 @@ class PyrightSession:
             with self._lock:
                 self._documents[source.uri] = document
                 self._readiness_target_uri = source.uri
+                self._ready_uri_generations.pop(source.uri, None)
             try:
                 process.notify(
                     "textDocument/didOpen",
@@ -1113,17 +1294,19 @@ class PyrightSession:
         with self._operation():
             self.start(deadline=deadline)
             with self._lock:
-                if self._process is None or self._position_encoding is None:
-                    return ProviderLocations((), "not_ready", True)
-            document = self.open_document(anchor.path, deadline=deadline)
-            with self._lock:
-                readiness = self._readiness
-                supported = self._capabilities.get(capability, False)
-                encoding = self._position_encoding
                 process = self._process
+                encoding = self._position_encoding
+                supported = self._capabilities.get(capability, False)
+                if process is None or encoding is None:
+                    return ProviderLocations((), "not_ready", True)
             if not supported:
                 return ProviderLocations((), "unsupported", True)
-            if readiness != "query_ready" or encoding is None or process is None:
+            document = self.open_document(anchor.path, deadline=deadline)
+            with self._lock:
+                ready = self._document_ready_locked(document.source.uri)
+                encoding = self._position_encoding
+                process = self._process
+            if not ready or encoding is None or process is None:
                 return ProviderLocations((), "not_ready", True)
             source_document = SourceDocument.from_bytes(
                 document.source.relative_path,
@@ -1140,6 +1323,9 @@ class PyrightSession:
             if references:
                 params["context"] = {"includeDeclaration": True}
             result = process.request(method, params, deadline=deadline)
+            with self._lock:
+                if not self._document_ready_locked(document.source.uri):
+                    return ProviderLocations((), "not_ready", True)
             locations, filtered = self._normalize_locations(result)
             return ProviderLocations(
                 locations,
@@ -1211,8 +1397,9 @@ class PyrightSession:
             return (), True
         locations: list[LspLocation] = []
         seen: set[tuple[object, ...]] = set()
-        partial = False
-        stack: list[object] = list(reversed(result))
+        seen_nodes: set[int] = set()
+        partial = len(result) > MAX_LOCATIONS
+        stack: list[object] = list(reversed(result[:MAX_LOCATIONS]))
         visited = 0
         while stack and visited < MAX_LOCATIONS:
             value = stack.pop()
@@ -1220,17 +1407,70 @@ class PyrightSession:
             if not isinstance(value, dict):
                 partial = True
                 continue
+            node_id = id(value)
+            if node_id in seen_nodes:
+                partial = True
+                continue
+            seen_nodes.add(node_id)
             children = value.get("children")
             if children is not None:
                 if isinstance(children, list):
-                    stack.extend(reversed(children))
+                    remaining = max(0, MAX_LOCATIONS - visited - len(stack))
+                    if len(children) > remaining:
+                        partial = True
+                    stack.extend(reversed(children[:remaining]))
                 else:
                     partial = True
+            name = _bounded_text(value.get("name"), _MAX_CALL_ITEM_TEXT_BYTES)
+            kind = _lsp_coordinate(value.get("kind"))
+            if name is None or kind in {None, 0}:
+                partial = True
+                continue
+            detail = value.get("detail")
+            if detail is not None and _bounded_text(
+                detail,
+                _MAX_CALL_ITEM_TEXT_BYTES,
+            ) is None:
+                partial = True
+                continue
+            container_name = value.get("containerName")
+            if container_name is not None and _bounded_text(
+                container_name,
+                _MAX_CALL_ITEM_TEXT_BYTES,
+            ) is None:
+                partial = True
+                continue
+            deprecated = value.get("deprecated")
+            if deprecated is not None and not isinstance(deprecated, bool):
+                partial = True
+                continue
+            tags = value.get("tags")
+            if tags is not None and (
+                not isinstance(tags, list)
+                or len(tags) > 32
+                or any(_lsp_coordinate(tag) is None for tag in tags)
+            ):
+                partial = True
+                continue
             if "location" in value:
                 location = self._normalize_location(value.get("location"))
             else:
-                range_ = _lsp_range(value.get("selectionRange"))
-                location = None if range_ is None else LspLocation(uri, range_)
+                range_ = _lsp_range(value.get("range"))
+                selection = _lsp_range(value.get("selectionRange"))
+                if (
+                    range_ is None
+                    or selection is None
+                    or (
+                        selection.start.line,
+                        selection.start.character,
+                    )
+                    < (range_.start.line, range_.start.character)
+                    or (selection.end.line, selection.end.character)
+                    > (range_.end.line, range_.end.character)
+                ):
+                    location = None
+                else:
+                    location = LspLocation(uri, selection)
             if location is None:
                 partial = True
                 continue
@@ -1247,22 +1487,27 @@ class PyrightSession:
         with self._operation():
             self.start(deadline=deadline)
             with self._lock:
-                if self._process is None or self._position_encoding is None:
-                    return ProviderLocations((), "not_ready", True)
-            document = self.open_document(path, deadline=deadline)
-            with self._lock:
-                supported = self._capabilities.get("document_symbols", False)
-                readiness = self._readiness
                 process = self._process
+                initialized = self._position_encoding is not None
+                supported = self._capabilities.get("document_symbols", False)
+                if process is None or not initialized:
+                    return ProviderLocations((), "not_ready", True)
             if not supported:
                 return ProviderLocations((), "unsupported", True)
-            if readiness != "query_ready" or process is None:
+            document = self.open_document(path, deadline=deadline)
+            with self._lock:
+                ready = self._document_ready_locked(document.source.uri)
+                process = self._process
+            if not ready or process is None:
                 return ProviderLocations((), "not_ready", True)
             result = process.request(
                 "textDocument/documentSymbol",
                 {"textDocument": {"uri": document.source.uri}},
                 deadline=deadline,
             )
+            with self._lock:
+                if not self._document_ready_locked(document.source.uri):
+                    return ProviderLocations((), "not_ready", True)
             locations, partial = self._normalize_document_symbols(
                 result,
                 document.source.uri,
@@ -1286,10 +1531,13 @@ class PyrightSession:
                 supported = self._capabilities.get("workspace_symbols", False)
                 readiness = self._readiness
                 process = self._process
-            if readiness != "query_ready" or process is None:
+                initialized = self._position_encoding is not None
+            if process is None or not initialized:
                 return ProviderLocations((), "not_ready", True)
             if not supported:
                 return ProviderLocations((), "unsupported", True)
+            if readiness != "query_ready":
+                return ProviderLocations((), "not_ready", True)
             result = process.request(
                 "workspace/symbol",
                 {"query": query},
@@ -1320,17 +1568,19 @@ class PyrightSession:
         with self._operation():
             self.start(deadline=deadline)
             with self._lock:
-                if self._process is None or self._position_encoding is None:
-                    return ProviderHover(None, None, True)
-            document = self.open_document(anchor.path, deadline=deadline)
-            with self._lock:
-                supported = self._capabilities.get("hover", False)
-                readiness = self._readiness
-                encoding = self._position_encoding
                 process = self._process
+                encoding = self._position_encoding
+                supported = self._capabilities.get("hover", False)
+                if process is None or encoding is None:
+                    return ProviderHover(None, None, True)
             if not supported:
                 return ProviderHover(None, None, True)
-            if readiness != "query_ready" or encoding is None or process is None:
+            document = self.open_document(anchor.path, deadline=deadline)
+            with self._lock:
+                ready = self._document_ready_locked(document.source.uri)
+                encoding = self._position_encoding
+                process = self._process
+            if not ready or encoding is None or process is None:
                 return ProviderHover(None, None, True)
             source_document = SourceDocument.from_bytes(
                 document.source.relative_path,
@@ -1348,6 +1598,9 @@ class PyrightSession:
                 },
                 deadline=deadline,
             )
+            with self._lock:
+                if not self._document_ready_locked(document.source.uri):
+                    return ProviderHover(None, None, True)
             if result is None:
                 return ProviderHover(None, None, False)
             if not isinstance(result, dict) or "contents" not in result:
@@ -1439,17 +1692,19 @@ class PyrightSession:
         with self._operation():
             self.start(deadline=deadline)
             with self._lock:
-                if self._process is None or self._position_encoding is None:
-                    return ProviderCalls(direction, (), "not_ready", True)
-            document = self.open_document(anchor.path, deadline=deadline)
-            with self._lock:
-                supported = self._capabilities.get("calls", False)
-                readiness = self._readiness
-                encoding = self._position_encoding
                 process = self._process
+                encoding = self._position_encoding
+                supported = self._capabilities.get("calls", False)
+                if process is None or encoding is None:
+                    return ProviderCalls(direction, (), "not_ready", True)
             if not supported:
                 return ProviderCalls(direction, (), "unsupported", True)
-            if readiness != "query_ready" or encoding is None or process is None:
+            document = self.open_document(anchor.path, deadline=deadline)
+            with self._lock:
+                ready = self._document_ready_locked(document.source.uri)
+                encoding = self._position_encoding
+                process = self._process
+            if not ready or encoding is None or process is None:
                 return ProviderCalls(direction, (), "not_ready", True)
             source_document = SourceDocument.from_bytes(
                 document.source.relative_path,
@@ -1467,6 +1722,9 @@ class PyrightSession:
                 },
                 deadline=deadline,
             )
+            with self._lock:
+                if not self._document_ready_locked(document.source.uri):
+                    return ProviderCalls(direction, (), "not_ready", True)
             if prepared is None:
                 return ProviderCalls(direction, (), "provider_reported", True)
             if not isinstance(prepared, list):
@@ -1502,6 +1760,9 @@ class PyrightSession:
                     if key not in seen and len(locations) < MAX_LOCATIONS:
                         seen.add(key)
                         locations.append(location)
+            with self._lock:
+                if not self._document_ready_locked(document.source.uri):
+                    return ProviderCalls(direction, (), "not_ready", True)
             return ProviderCalls(
                 direction,
                 tuple(locations),
@@ -1535,9 +1796,11 @@ class PyrightSession:
                 return ProviderDiagnostics((), None, True)
             document = self.open_document(path, deadline=deadline)
             with self._lock:
-                if self._readiness != "query_ready":
+                if not self._document_ready_locked(document.source.uri):
                     return ProviderDiagnostics((), None, True)
                 while True:
+                    if not self._document_ready_locked(document.source.uri):
+                        return ProviderDiagnostics((), None, True)
                     snapshot = self._diagnostics.get(document.source.uri)
                     if (
                         snapshot is not None
@@ -1582,6 +1845,15 @@ class PyrightSession:
             if self._process is process:
                 self._process = None
             self._readiness = "not_ready"
+            self._readiness_evidence = ()
+            self._position_encoding = None
+            self._capabilities = {}
+            self._documents.clear()
+            self._readiness_target_uri = None
+            self._generation_nonce = None
+            self._ready_uri_generations.clear()
+            self._diagnostics.clear()
+            self._progress_events.clear()
             self._closing = False
             self._closed = True
             self._condition.notify_all()

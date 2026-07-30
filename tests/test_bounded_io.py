@@ -36,3 +36,35 @@ def test_parent_swap_to_outside_target_is_rejected_before_bytes_return(
     with pytest.raises(PermissionError, match="changed before open"):
         bounded_io.read_stable_bytes(target, 1024, label="race target")
     assert swapped is True
+
+
+def test_stable_read_stops_at_deadline_between_bounded_chunks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import bounded_io
+
+    target = tmp_path / "large.bin"
+    target.write_bytes(b"x" * (128 * 1024))
+    now = [100.0]
+    real_read = bounded_io.os.read
+    read_calls = 0
+
+    def advancing_read(descriptor: int, size: int) -> bytes:
+        nonlocal read_calls
+        read_calls += 1
+        chunk = real_read(descriptor, size)
+        now[0] += 2.0
+        return chunk
+
+    monkeypatch.setattr(bounded_io.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(bounded_io.os, "read", advancing_read)
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        bounded_io.read_stable_bytes(
+            target,
+            128 * 1024,
+            label="deadline target",
+            deadline=101.0,
+        )
+    assert read_calls == 1

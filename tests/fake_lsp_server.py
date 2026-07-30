@@ -609,15 +609,15 @@ def _run_semantic_server(args: argparse.Namespace) -> None:
             if isinstance(delay, (int, float)) and not isinstance(delay, bool) and delay > 0:
                 time.sleep(delay)
 
+        params = request.get("params")
+        request_uri = None
+        if isinstance(params, dict):
+            text_document = params.get("textDocument")
+            if isinstance(text_document, dict):
+                request_uri = text_document.get("uri")
         if config.get("require_initialized_open", True) and method not in {
             "workspace/symbol",
         }:
-            params = request.get("params")
-            request_uri = None
-            if isinstance(params, dict):
-                text_document = params.get("textDocument")
-                if isinstance(text_document, dict):
-                    request_uri = text_document.get("uri")
             if not initialized or (
                 method.startswith("textDocument/")
                 and isinstance(request_uri, str)
@@ -633,6 +633,23 @@ def _run_semantic_server(args: argparse.Namespace) -> None:
                 continue
 
         if method == "textDocument/documentSymbol":
+            failure_uris = config.get("document_symbol_failure_uris", [])
+            expanded_failure_uris = _semantic_expand(
+                failure_uris,
+                replacements(request_uri or ""),
+            )
+            if (
+                isinstance(expanded_failure_uris, list)
+                and request_uri in expanded_failure_uris
+            ):
+                send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request["id"],
+                        "error": {"code": -32003, "message": "symbols not ready"},
+                    }
+                )
+                continue
             failures = config.get("document_symbol_failures", 0)
             if isinstance(failures, int) and document_symbol_failures < failures:
                 document_symbol_failures += 1
