@@ -1,0 +1,1587 @@
+"""Bounded, capability-honest Pyright language-server session."""
+
+import hashlib
+import math
+import os
+import re
+import secrets
+import stat
+import threading
+import time
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass
+from pathlib import Path
+from types import MappingProxyType
+
+from bounded_io import read_stable_bytes
+from code_intelligence import PositionEncoding
+from compile_cache import _restrict_owner_only, _verify_owner_only
+from lsp_paths import lsp_owner_root
+from lsp_positions import (
+    LspPosition,
+    LspRange,
+    SourceAnchor,
+    SourceDocument,
+    path_to_file_uri,
+)
+from lsp_process import LspProcess, ProcessState, StartupCleanupError
+from lsp_protocol import (
+    MAX_FRAME_BYTES,
+    MAX_HOVER_BYTES,
+    MAX_LOCATIONS,
+    JsonRpcResponseError,
+    LspProtocol,
+    ProtocolViolation,
+    encode_frame,
+)
+from lsp_security import (
+    RepositorySource,
+    normalize_provider_uri,
+    resolve_repository_source,
+)
+from pyright_profile import (
+    PYRIGHT_CONFIGURATION,
+    PYRIGHT_INITIALIZATION_OPTIONS,
+    PYRIGHT_INITIALIZATION_OPTIONS_SHA256,
+    PyrightIdentity,
+    thaw_pyright_profile_value,
+)
+from reliable_memory import _known_network_path
+from repository_scope import RepositoryScope
+
+STARTUP_SECONDS = 60.0
+MAX_LSP_PROCESSES = 4
+
+_OWNER_CLEANUP_SECONDS = 2.0
+_MAX_DOCUMENT_BYTES = MAX_FRAME_BYTES - 1
+_MAX_CONFIGURATION_ITEMS = 64
+_MAX_CONFIGURATION_SECTION_BYTES = 256
+_MAX_PREPARED_CALL_ITEMS = MAX_LOCATIONS
+_MAX_CALL_ITEM_TEXT_BYTES = 4096
+_MAX_DIAGNOSTIC_TEXT_BYTES = 64 * 1024
+_MAX_PROGRESS_TEXT_BYTES = 4096
+_MAX_PROGRESS_EVENTS = 256
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+_LSP_UINTEGER_MAX = 2**31 - 1
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+_CAPABILITY_FIELDS = {
+    "calls": "callHierarchyProvider",
+    "definition": "definitionProvider",
+    "document_symbols": "documentSymbolProvider",
+    "hover": "hoverProvider",
+    "implementations": "implementationProvider",
+    "references": "referencesProvider",
+    "type_definition": "typeDefinitionProvider",
+    "workspace_symbols": "workspaceSymbolProvider",
+}
+_CLIENT_CAPABILITIES = {
+    "general": {"positionEncodings": ("utf-8", "utf-16", "utf-32")},
+    "textDocument": {
+        "callHierarchy": {"dynamicRegistration": False},
+        "definition": {"dynamicRegistration": False, "linkSupport": True},
+        "documentSymbol": {
+            "dynamicRegistration": False,
+            "hierarchicalDocumentSymbolSupport": True,
+        },
+        "hover": {
+            "dynamicRegistration": False,
+            "contentFormat": ("plaintext",),
+        },
+        "implementation": {"dynamicRegistration": False, "linkSupport": True},
+        "publishDiagnostics": {
+            "relatedInformation": True,
+            "versionSupport": True,
+        },
+        "references": {"dynamicRegistration": False},
+        "typeDefinition": {"dynamicRegistration": False, "linkSupport": True},
+    },
+    "window": {"workDoneProgress": True},
+    "workspace": {
+        "configuration": True,
+        "symbol": {"dynamicRegistration": False},
+        "workspaceFolders": True,
+    },
+}
+
+
+@dataclass(frozen=True, slots=True)
+class OpenDocument:
+    source: RepositorySource
+    content: bytes
+    source_sha256: str
+    version: int
+
+
+@dataclass(frozen=True, slots=True)
+class LspLocation:
+    uri: str
+    range: LspRange
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderLocations:
+    locations: tuple[LspLocation, ...]
+    coverage: str
+    partial: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderHover:
+    contents: str | None
+    range: LspRange | None
+    partial: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderCalls:
+    direction: str
+    locations: tuple[LspLocation, ...]
+    coverage: str
+    partial: bool
+
+
+@dataclass(frozen=True, slots=True)
+class LspDiagnostic:
+    uri: str
+    range: LspRange
+    severity: int | None
+    code: str | None
+    message: str
+    related: tuple[tuple[LspLocation, str | None], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderDiagnostics:
+    diagnostics: tuple[LspDiagnostic, ...]
+    document_version: int | None
+    partial: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _DiagnosticSnapshot:
+    diagnostics: tuple[LspDiagnostic, ...]
+    document_version: int | None
+    partial: bool
+
+
+def _validated_deadline(deadline: float) -> float:
+    if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
+        raise TypeError("deadline must be a monotonic timestamp")
+    if not math.isfinite(deadline):
+        raise ValueError("deadline must be finite")
+    return float(deadline)
+
+
+class _BootstrapDegradation(RuntimeError):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+def _path_identity(path: Path) -> os.stat_result:
+    info = path.lstat()
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or int(getattr(info, "st_file_attributes", 0))
+        & _FILE_ATTRIBUTE_REPARSE_POINT
+    ):
+        raise PermissionError(f"path must not traverse a link or reparse point: {path}")
+    return info
+
+
+def _validated_local_file(value: object, label: str) -> Path:
+    if not isinstance(value, Path):
+        raise TypeError(f"{label} must be a Path")
+    raw = os.fspath(value)
+    if (
+        not value.is_absolute()
+        or raw.startswith(("\\\\", "//"))
+        or "\0" in raw
+        or ".." in value.parts
+    ):
+        raise ValueError(f"{label} must be an absolute local path")
+    for parent in value.parents:
+        if parent == Path(parent.anchor):
+            break
+        info = _path_identity(parent)
+        if not stat.S_ISDIR(info.st_mode):
+            raise ValueError(f"{label} parent must be a directory")
+    info = _path_identity(value)
+    if not stat.S_ISREG(info.st_mode) or _known_network_path(value):
+        raise ValueError(f"{label} must be a local regular file")
+    return value
+
+
+def _ensure_lsp_parent(state_root: Path) -> Path:
+    if not state_root.is_absolute() or _known_network_path(state_root):
+        raise ValueError("state_root must be an absolute local path")
+    for ancestor in state_root.parents:
+        if ancestor == Path(ancestor.anchor):
+            break
+        ancestor_info = _path_identity(ancestor)
+        if not stat.S_ISDIR(ancestor_info.st_mode):
+            raise ValueError("state_root parent must be a directory")
+    root_info = _path_identity(state_root)
+    if not stat.S_ISDIR(root_info.st_mode):
+        raise NotADirectoryError(state_root)
+    run_root = state_root / "run"
+    try:
+        run_root.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    run_info = _path_identity(run_root)
+    if not stat.S_ISDIR(run_info.st_mode):
+        raise PermissionError("LSP run parent must be a directory")
+    parent = run_root / "lsp"
+    try:
+        parent.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    parent_info = _path_identity(parent)
+    if not stat.S_ISDIR(parent_info.st_mode):
+        raise PermissionError("LSP owner parent must be a directory")
+    _restrict_owner_only(parent, 0o700)
+    _verify_owner_only(parent, 0o700)
+    return parent
+
+
+def _provider_supported(value: object, label: str) -> bool:
+    if value is None or value is False:
+        return False
+    if value is True or isinstance(value, dict):
+        return True
+    raise _BootstrapDegradation(f"pyright_{label}_capability_invalid")
+
+
+def _parse_server_capabilities(
+    result: object,
+) -> tuple[dict[str, bool], PositionEncoding]:
+    if not isinstance(result, dict) or not isinstance(result.get("capabilities"), dict):
+        raise _BootstrapDegradation("pyright_initialize_result_invalid")
+    server = result["capabilities"]
+    encoding_value = server.get("positionEncoding", "utf-16")
+    encodings = {
+        "utf-8": PositionEncoding.UTF8,
+        "utf-16": PositionEncoding.UTF16,
+        "utf-32": PositionEncoding.UTF32,
+    }
+    if not isinstance(encoding_value, str) or encoding_value not in encodings:
+        raise _BootstrapDegradation("pyright_position_encoding_unsupported")
+    capabilities = {
+        name: _provider_supported(server.get(field), name)
+        for name, field in _CAPABILITY_FIELDS.items()
+    }
+    capabilities["diagnostics"] = True
+    return dict(sorted(capabilities.items())), encodings[encoding_value]
+
+
+def _startup_code(error: BaseException) -> str:
+    current: BaseException | None = error
+    while current is not None:
+        if isinstance(current, _BootstrapDegradation):
+            return current.code
+        if isinstance(current, TimeoutError):
+            return "pyright_startup_timeout"
+        current = current.__cause__
+    return "pyright_startup_failed"
+
+
+def _lsp_coordinate(value: object) -> int | None:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= _LSP_UINTEGER_MAX
+    ):
+        return None
+    return value
+
+
+def _lsp_range(value: object) -> LspRange | None:
+    if not isinstance(value, dict):
+        return None
+    start = value.get("start")
+    end = value.get("end")
+    if not isinstance(start, dict) or not isinstance(end, dict):
+        return None
+    start_line = _lsp_coordinate(start.get("line"))
+    start_character = _lsp_coordinate(start.get("character"))
+    end_line = _lsp_coordinate(end.get("line"))
+    end_character = _lsp_coordinate(end.get("character"))
+    if None in {start_line, start_character, end_line, end_character}:
+        return None
+    assert start_line is not None and start_character is not None
+    assert end_line is not None and end_character is not None
+    if (end_line, end_character) < (start_line, start_character):
+        return None
+    return LspRange(
+        LspPosition(start_line, start_character),
+        LspPosition(end_line, end_character),
+    )
+
+
+def _location_key(location: LspLocation) -> tuple[object, ...]:
+    return (
+        location.uri,
+        location.range.start.line,
+        location.range.start.character,
+        location.range.end.line,
+        location.range.end.character,
+    )
+
+
+def _range_json(value: LspRange) -> dict[str, dict[str, int]]:
+    return {
+        "start": {
+            "line": value.start.line,
+            "character": value.start.character,
+        },
+        "end": {
+            "line": value.end.line,
+            "character": value.end.character,
+        },
+    }
+
+
+def _bounded_hover_string(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        size = len(value.encode("utf-8", errors="strict"))
+    except UnicodeEncodeError:
+        return None
+    if size > MAX_HOVER_BYTES:
+        return None
+    return value
+
+
+def _hover_fragment(value: object) -> str | None:
+    if isinstance(value, str):
+        return _bounded_hover_string(value)
+    if not isinstance(value, dict):
+        return None
+    text = _bounded_hover_string(value.get("value"))
+    if text is None:
+        return None
+    if "kind" in value:
+        return text if value.get("kind") in {"plaintext", "markdown"} else None
+    language = value.get("language")
+    if not isinstance(language, str) or not language:
+        return None
+    return text
+
+
+def _hover_contents(value: object) -> tuple[str | None, bool]:
+    if isinstance(value, list):
+        if len(value) > 1024:
+            return None, True
+        fragments: list[str] = []
+        partial = False
+        for item in value:
+            fragment = _hover_fragment(item)
+            if fragment is None:
+                partial = True
+            else:
+                fragments.append(fragment)
+        if not fragments:
+            return None, True
+        joined = "\n\n".join(fragments)
+        if _bounded_hover_string(joined) is None:
+            return None, True
+        return joined, partial
+    fragment = _hover_fragment(value)
+    return fragment, fragment is None
+
+
+def _bounded_text(value: object, max_bytes: int) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        size = len(value.encode("utf-8", errors="strict"))
+    except UnicodeEncodeError:
+        return None
+    return value if size <= max_bytes else None
+
+
+class PyrightSession:
+    """Own one repository-scoped Pyright protocol lifecycle."""
+
+    def __init__(
+        self,
+        repository: RepositoryScope,
+        identity: PyrightIdentity,
+        *,
+        state_root: Path,
+    ) -> None:
+        if not isinstance(repository, RepositoryScope):
+            raise TypeError("repository must be a RepositoryScope")
+        if not isinstance(identity, PyrightIdentity):
+            raise TypeError("identity must be a PyrightIdentity")
+        if not isinstance(state_root, Path):
+            raise TypeError("state_root must be a Path")
+        self._repository = repository
+        self._identity = identity
+        self._state_root = state_root
+        self._lock = threading.RLock()
+        self._condition = threading.Condition(self._lock)
+        self._document_lock = threading.Lock()
+        self._readiness = "not_ready"
+        self._readiness_evidence: tuple[str, ...] = ()
+        self._position_encoding = None
+        self._degradation_codes = identity.degradation_codes
+        self._capabilities: dict[str, bool] = {}
+        self._active_operations = 0
+        self._last_used_monotonic = time.monotonic()
+        self._process: LspProcess | None = None
+        self._documents: dict[str, OpenDocument] = {}
+        self._readiness_target_uri: str | None = None
+        self._diagnostics: dict[str, _DiagnosticSnapshot] = {}
+        self._progress_events: list[tuple[object, ...]] = []
+        self._starting = False
+        self._startup_attempted = False
+        self._closing = False
+        self._closed = False
+
+    @property
+    def readiness(self) -> str:
+        with self._lock:
+            return self._readiness
+
+    @property
+    def readiness_evidence(self) -> tuple[str, ...]:
+        with self._lock:
+            return self._readiness_evidence
+
+    @property
+    def position_encoding(self) -> PositionEncoding | None:
+        with self._lock:
+            return self._position_encoding
+
+    @property
+    def degradation_codes(self) -> tuple[str, ...]:
+        with self._lock:
+            return self._degradation_codes
+
+    @property
+    def capabilities(self) -> Mapping[str, bool]:
+        with self._lock:
+            return MappingProxyType(dict(self._capabilities))
+
+    @property
+    def active_operations(self) -> int:
+        with self._lock:
+            return self._active_operations
+
+    @property
+    def last_used_monotonic(self) -> float:
+        with self._lock:
+            return self._last_used_monotonic
+
+    @property
+    def progress_events(self) -> tuple[tuple[object, ...], ...]:
+        with self._lock:
+            return tuple(self._progress_events)
+
+    @contextmanager
+    def _operation(self) -> Iterator[None]:
+        now = time.monotonic()
+        with self._lock:
+            self._active_operations += 1
+            self._last_used_monotonic = now
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._active_operations -= 1
+                self._last_used_monotonic = time.monotonic()
+                self._condition.notify_all()
+
+    def _configuration(self, params: object) -> object:
+        settings = thaw_pyright_profile_value(PYRIGHT_CONFIGURATION)
+        assert isinstance(settings, dict)
+        if not isinstance(params, dict) or set(params) - {"items"}:
+            return []
+        items = params.get("items")
+        if not isinstance(items, list) or len(items) > _MAX_CONFIGURATION_ITEMS:
+            return []
+        results: list[object] = []
+        for item in items:
+            if not isinstance(item, dict) or set(item) - {"scopeUri", "section"}:
+                results.append(None)
+                continue
+            scope_uri = item.get("scopeUri")
+            if scope_uri is not None and (
+                not isinstance(scope_uri, str)
+                or len(scope_uri.encode("utf-8", errors="strict")) > 16 * 1024
+            ):
+                results.append(None)
+                continue
+            section = item.get("section")
+            if section is None:
+                results.append(thaw_pyright_profile_value(PYRIGHT_CONFIGURATION))
+                continue
+            if not isinstance(section, str):
+                results.append(None)
+                continue
+            try:
+                section_size = len(section.encode("utf-8", errors="strict"))
+            except UnicodeEncodeError:
+                results.append(None)
+                continue
+            if not section or section_size > _MAX_CONFIGURATION_SECTION_BYTES:
+                results.append(None)
+                continue
+            current: object = settings
+            for component in section.split("."):
+                if not component or not isinstance(current, dict):
+                    current = None
+                    break
+                current = current.get(component)
+            results.append(current)
+        return results
+
+    @staticmethod
+    def _benign_server_request(params: object) -> None:
+        if not isinstance(params, dict):
+            raise ValueError("server request params must be an object")
+        if len(params) > 16:
+            raise ValueError("server request params exceed their bound")
+        return None
+
+    def _retain_progress(self, event: tuple[object, ...]) -> None:
+        with self._lock:
+            self._progress_events.append(event)
+            if len(self._progress_events) > _MAX_PROGRESS_EVENTS:
+                del self._progress_events[: -_MAX_PROGRESS_EVENTS]
+
+    def _progress(self, method: str, params: object) -> None:
+        if method == "$/progress":
+            if not isinstance(params, dict) or set(params) != {"token", "value"}:
+                return
+            token = params["token"]
+            if isinstance(token, str):
+                token = _bounded_text(token, 256)
+            elif isinstance(token, bool) or not isinstance(token, int):
+                return
+            if token is None:
+                return
+            value = params["value"]
+            if not isinstance(value, dict):
+                return
+            kind = value.get("kind")
+            if kind not in {"begin", "report", "end"}:
+                return
+            text_value = value.get("title") if kind == "begin" else value.get("message")
+            if text_value is None:
+                text = ""
+            else:
+                text = _bounded_text(text_value, _MAX_PROGRESS_TEXT_BYTES)
+                if text is None:
+                    return
+            self._retain_progress((method, token, kind, text))
+            return
+        if method in {"pyright/beginProgress", "pyright/endProgress"}:
+            if params is None or params == {}:
+                self._retain_progress((method,))
+            return
+        if method == "pyright/reportProgress":
+            value = params.get("message") if isinstance(params, dict) else params
+            text = _bounded_text(value, _MAX_PROGRESS_TEXT_BYTES)
+            if text is not None:
+                self._retain_progress((method, text))
+
+    def _parse_diagnostic(
+        self,
+        value: object,
+        uri: str,
+    ) -> tuple[LspDiagnostic | None, bool]:
+        if not isinstance(value, dict):
+            return None, True
+        range_ = _lsp_range(value.get("range"))
+        message = _bounded_text(value.get("message"), _MAX_DIAGNOSTIC_TEXT_BYTES)
+        if range_ is None or message is None:
+            return None, True
+        severity_value = value.get("severity")
+        if severity_value is None:
+            severity = None
+        elif (
+            isinstance(severity_value, bool)
+            or not isinstance(severity_value, int)
+            or severity_value not in {1, 2, 3, 4}
+        ):
+            return None, True
+        else:
+            severity = severity_value
+        code_value = value.get("code")
+        if code_value is None:
+            code = None
+        elif isinstance(code_value, str):
+            code = _bounded_text(code_value, 4096)
+            if code is None:
+                return None, True
+        elif (
+            isinstance(code_value, bool)
+            or not isinstance(code_value, int)
+            or not -(2**31) <= code_value <= 2**31 - 1
+        ):
+            return None, True
+        else:
+            code = str(code_value)
+
+        related: list[tuple[LspLocation, str | None]] = []
+        partial = False
+        related_value = value.get("relatedInformation")
+        if related_value is not None:
+            if not isinstance(related_value, list):
+                partial = True
+            else:
+                if len(related_value) > MAX_LOCATIONS:
+                    partial = True
+                for relation in related_value[:MAX_LOCATIONS]:
+                    if not isinstance(relation, dict):
+                        partial = True
+                        continue
+                    location = self._normalize_location(relation.get("location"))
+                    related_message_value = relation.get("message")
+                    related_message = (
+                        None
+                        if related_message_value is None
+                        else _bounded_text(
+                            related_message_value,
+                            _MAX_DIAGNOSTIC_TEXT_BYTES,
+                        )
+                    )
+                    if location is None or (
+                        related_message_value is not None and related_message is None
+                    ):
+                        partial = True
+                        continue
+                    related.append((location, related_message))
+        return (
+            LspDiagnostic(
+                uri,
+                range_,
+                severity,
+                code,
+                message,
+                tuple(related),
+            ),
+            partial,
+        )
+
+    def _publish_diagnostics(self, params: object) -> None:
+        if not isinstance(params, dict):
+            return
+        uri_value = params.get("uri")
+        diagnostics_value = params.get("diagnostics")
+        if not isinstance(uri_value, str) or not isinstance(diagnostics_value, list):
+            return
+        source = normalize_provider_uri(self._repository, uri_value)
+        if source is None:
+            return
+        version_value = params.get("version")
+        if version_value is None:
+            version = None
+        else:
+            version = _lsp_coordinate(version_value)
+            if version is None:
+                return
+        with self._lock:
+            document = self._documents.get(source.uri)
+            existing = self._diagnostics.get(source.uri)
+            if (
+                version is not None
+                and document is not None
+                and version < document.version
+            ):
+                return
+            if existing is not None:
+                if (
+                    version is not None
+                    and existing.document_version is not None
+                    and version < existing.document_version
+                ) or (version is None and existing.document_version is not None):
+                    return
+
+        partial = len(diagnostics_value) > MAX_LOCATIONS
+        diagnostics: list[LspDiagnostic] = []
+        for value in diagnostics_value[:MAX_LOCATIONS]:
+            diagnostic, filtered = self._parse_diagnostic(value, source.uri)
+            partial = partial or filtered
+            if diagnostic is not None:
+                diagnostics.append(diagnostic)
+        snapshot = _DiagnosticSnapshot(tuple(diagnostics), version, partial)
+        with self._lock:
+            existing = self._diagnostics.get(source.uri)
+            if (
+                existing is not None
+                and version is not None
+                and existing.document_version is not None
+                and version < existing.document_version
+            ):
+                return
+            self._diagnostics[source.uri] = snapshot
+            self._condition.notify_all()
+
+    def _bootstrap_generation(
+        self,
+        protocol: LspProtocol,
+        _process_id: int,
+        _generation_nonce: str,
+        deadline: float,
+    ) -> ProcessState:
+        root = Path(self._repository.checkout_root)
+        root_uri = path_to_file_uri(root)
+        result = protocol.request(
+            "initialize",
+            {
+                "processId": os.getpid(),
+                "clientInfo": {"name": "llm-wiki"},
+                "rootUri": root_uri,
+                "workspaceFolders": [{"uri": root_uri, "name": root.name}],
+                "initializationOptions": thaw_pyright_profile_value(
+                    PYRIGHT_INITIALIZATION_OPTIONS
+                ),
+                "capabilities": thaw_pyright_profile_value(_CLIENT_CAPABILITIES),
+            },
+            deadline=deadline,
+        )
+        capabilities, encoding = _parse_server_capabilities(result)
+        protocol.notify("initialized", {}, deadline=deadline)
+        protocol.notify(
+            "workspace/didChangeConfiguration",
+            {"settings": thaw_pyright_profile_value(PYRIGHT_CONFIGURATION)},
+            deadline=deadline,
+        )
+        with self._lock:
+            documents = tuple(self._documents.values())
+            readiness_target = self._readiness_target_uri
+            self._diagnostics.clear()
+            self._capabilities = capabilities
+            self._position_encoding = encoding
+            self._readiness_evidence = (
+                "initialize",
+                "initialized",
+                "configuration",
+            )
+            self._readiness = "protocol_initialized"
+        try:
+            for document in documents:
+                protocol.notify(
+                    "textDocument/didOpen",
+                    {
+                        "textDocument": {
+                            "uri": document.source.uri,
+                            "languageId": "python",
+                            "version": document.version,
+                            "text": document.content.decode(
+                                "utf-8",
+                                errors="strict",
+                            ),
+                        }
+                    },
+                    deadline=deadline,
+                )
+            if (
+                readiness_target is not None
+                and capabilities["document_symbols"]
+                and any(
+                    document.source.uri == readiness_target
+                    for document in documents
+                )
+            ):
+                symbols = protocol.request(
+                    "textDocument/documentSymbol",
+                    {"textDocument": {"uri": readiness_target}},
+                    deadline=deadline,
+                )
+                if symbols is not None and not isinstance(symbols, list):
+                    raise _BootstrapDegradation(
+                        "pyright_document_symbols_invalid"
+                    )
+                with self._lock:
+                    self._readiness = "query_ready"
+                    self._readiness_evidence = (
+                        "initialize",
+                        "initialized",
+                        "configuration",
+                        "didOpen",
+                        "documentSymbol",
+                    )
+                return ProcessState.WORKSPACE_READY
+        except BaseException:
+            if documents:
+                with self._lock:
+                    self._readiness = "not_ready"
+                    self._readiness_evidence = ()
+                    self._degradation_codes = tuple(
+                        sorted(
+                            {
+                                *self._degradation_codes,
+                                "pyright_restart_bootstrap_failed",
+                            }
+                        )
+                    )
+            raise
+        return ProcessState.PROTOCOL_INITIALIZED
+
+    def _validated_qualified_paths(self) -> tuple[Path, Path]:
+        identity = self._identity
+        if identity.status != "qualified" or identity.degradation_codes:
+            raise ValueError("qualified Pyright identity is internally inconsistent")
+        if identity.initialization_options_sha256 != PYRIGHT_INITIALIZATION_OPTIONS_SHA256:
+            raise ValueError("Pyright initialization options identity is inconsistent")
+        if (
+            not isinstance(identity.configuration_sha256, str)
+            or _SHA256.fullmatch(identity.configuration_sha256) is None
+        ):
+            raise ValueError("Pyright configuration identity is invalid")
+        node = _validated_local_file(identity.node_executable, "node_executable")
+        server = _validated_local_file(identity.server_executable, "server_executable")
+        return node, server
+
+    def start(self, *, deadline: float) -> None:
+        deadline = _validated_deadline(deadline)
+        if time.monotonic() >= deadline:
+            raise ValueError("deadline must be in the future")
+        with self._operation():
+            with self._lock:
+                if self._closed or self._closing:
+                    raise RuntimeError("Pyright session is closed")
+                while self._starting:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or not self._condition.wait(remaining):
+                        raise TimeoutError("Pyright startup did not finish before deadline")
+                if self._process is not None or self._readiness != "not_ready":
+                    return
+                if not self._identity.qualified:
+                    return
+                if self._startup_attempted:
+                    return
+                self._starting = True
+                self._startup_attempted = True
+
+            process: LspProcess | None = None
+            try:
+                node, server = self._validated_qualified_paths()
+                _ensure_lsp_parent(self._state_root)
+                owner = lsp_owner_root(self._state_root, secrets.token_hex(16))
+                process = LspProcess.start_configured(
+                    (
+                        str(node),
+                        str(server),
+                        "--stdio",
+                        f"--cancellationReceive=file:{owner / 'cancellation'}",
+                    ),
+                    cwd=Path(self._repository.checkout_root),
+                    owner_root=owner,
+                    deadline=deadline,
+                    server_request_handlers={
+                        "client/registerCapability": self._benign_server_request,
+                        "client/unregisterCapability": self._benign_server_request,
+                        "window/workDoneProgress/create": self._benign_server_request,
+                        "workspace/configuration": self._configuration,
+                    },
+                    server_notification_handlers={
+                        "$/progress": lambda params: self._progress("$/progress", params),
+                        "pyright/beginProgress": lambda params: self._progress(
+                            "pyright/beginProgress", params
+                        ),
+                        "pyright/endProgress": lambda params: self._progress(
+                            "pyright/endProgress", params
+                        ),
+                        "pyright/reportProgress": lambda params: self._progress(
+                            "pyright/reportProgress", params
+                        ),
+                        "textDocument/publishDiagnostics": self._publish_diagnostics,
+                    },
+                    generation_bootstrap=self._bootstrap_generation,
+                )
+            except (TypeError, ValueError):
+                with self._lock:
+                    self._starting = False
+                    self._startup_attempted = False
+                    self._condition.notify_all()
+                raise
+            except (
+                JsonRpcResponseError,
+                OSError,
+                ProtocolViolation,
+                RuntimeError,
+                TimeoutError,
+            ) as error:
+                if isinstance(error, StartupCleanupError):
+                    with suppress(BaseException):
+                        error.retry_cleanup(
+                            time.monotonic() + _OWNER_CLEANUP_SECONDS
+                        )
+                code = _startup_code(error)
+                with self._lock:
+                    self._process = None
+                    self._readiness = "not_ready"
+                    self._readiness_evidence = ()
+                    self._position_encoding = None
+                    self._capabilities = {}
+                    self._degradation_codes = tuple(
+                        sorted({*self._degradation_codes, code})
+                    )
+                    self._starting = False
+                    self._condition.notify_all()
+                return
+
+            with self._lock:
+                self._process = process
+                self._starting = False
+                self._condition.notify_all()
+
+    def _mark_protocol_initialized(self, *, did_open: bool) -> None:
+        with self._lock:
+            if self._position_encoding is None:
+                self._readiness = "not_ready"
+                return
+            self._readiness = "protocol_initialized"
+            self._readiness_evidence = (
+                "initialize",
+                "initialized",
+                "configuration",
+                *(("didOpen",) if did_open else ()),
+            )
+
+    def _probe_document(
+        self,
+        document: OpenDocument,
+        process: LspProcess,
+        *,
+        deadline: float,
+    ) -> None:
+        with self._lock:
+            supported = self._capabilities.get("document_symbols", False)
+        if not supported:
+            self._mark_protocol_initialized(did_open=True)
+            return
+        try:
+            result = process.request(
+                "textDocument/documentSymbol",
+                {"textDocument": {"uri": document.source.uri}},
+                deadline=deadline,
+            )
+        except (JsonRpcResponseError, ProtocolViolation, RuntimeError, TimeoutError):
+            self._mark_protocol_initialized(did_open=True)
+            return
+        if result is not None and not isinstance(result, list):
+            self._mark_protocol_initialized(did_open=True)
+            return
+        with self._lock:
+            self._readiness_target_uri = document.source.uri
+            self._readiness = "query_ready"
+            self._readiness_evidence = (
+                "initialize",
+                "initialized",
+                "configuration",
+                "didOpen",
+                "documentSymbol",
+            )
+
+    def open_document(self, path: str, *, deadline: float) -> OpenDocument:
+        deadline = _validated_deadline(deadline)
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Pyright document deadline expired")
+        with self._operation(), self._document_lock:
+            self.start(deadline=deadline)
+            source = resolve_repository_source(self._repository, path)
+            content = read_stable_bytes(
+                source.absolute_path,
+                _MAX_DOCUMENT_BYTES,
+                label="Pyright source document",
+            )
+            text = content.decode("utf-8", errors="strict")
+            digest = hashlib.sha256(content).hexdigest()
+            with self._lock:
+                current = self._documents.get(source.uri)
+                process = self._process
+                readiness = self._readiness
+            if process is None:
+                raise RuntimeError("Pyright session is not protocol initialized")
+            if current is not None:
+                if (
+                    current.source != source
+                    or current.content != content
+                    or current.source_sha256 != digest
+                ):
+                    raise RuntimeError("open Pyright document changed without synchronization")
+                if readiness != "query_ready":
+                    self._probe_document(current, process, deadline=deadline)
+                return current
+
+            document = OpenDocument(source, content, digest, 1)
+            did_open = {
+                "textDocument": {
+                    "uri": source.uri,
+                    "languageId": "python",
+                    "version": document.version,
+                    "text": text,
+                }
+            }
+            try:
+                encode_frame(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "textDocument/didOpen",
+                        "params": did_open,
+                    }
+                )
+            except ProtocolViolation as error:
+                raise ValueError("Pyright source document exceeds the LSP frame") from error
+            with self._lock:
+                self._documents[source.uri] = document
+                self._readiness_target_uri = source.uri
+            try:
+                process.notify(
+                    "textDocument/didOpen",
+                    did_open,
+                    deadline=deadline,
+                )
+            except (ProtocolViolation, RuntimeError, TimeoutError):
+                self._mark_protocol_initialized(did_open=False)
+                return document
+            self._mark_protocol_initialized(did_open=True)
+            self._probe_document(document, process, deadline=deadline)
+            return document
+
+    def _normalize_location(self, value: object) -> LspLocation | None:
+        if not isinstance(value, dict):
+            return None
+        if "targetUri" in value or "targetSelectionRange" in value:
+            uri = value.get("targetUri")
+            range_value = value.get("targetSelectionRange")
+            if _lsp_range(value.get("targetRange")) is None:
+                return None
+        else:
+            uri = value.get("uri")
+            range_value = value.get("range")
+        if not isinstance(uri, str):
+            return None
+        range_ = _lsp_range(range_value)
+        if range_ is None:
+            return None
+        source = normalize_provider_uri(self._repository, uri)
+        if source is None:
+            return None
+        return LspLocation(source.uri, range_)
+
+    def _normalize_locations(
+        self,
+        result: object,
+    ) -> tuple[tuple[LspLocation, ...], bool]:
+        if result is None:
+            return (), False
+        if isinstance(result, dict):
+            raw = [result]
+        elif isinstance(result, list):
+            raw = result
+        else:
+            return (), True
+        partial = len(raw) > MAX_LOCATIONS
+        locations: list[LspLocation] = []
+        seen: set[tuple[object, ...]] = set()
+        for value in raw[:MAX_LOCATIONS]:
+            location = self._normalize_location(value)
+            if location is None:
+                partial = True
+                continue
+            key = _location_key(location)
+            if key in seen:
+                continue
+            seen.add(key)
+            locations.append(location)
+        return tuple(locations), partial
+
+    def _location_feature(
+        self,
+        anchor: SourceAnchor,
+        *,
+        capability: str,
+        method: str,
+        deadline: float,
+        references: bool = False,
+    ) -> ProviderLocations:
+        if not isinstance(anchor, SourceAnchor):
+            raise TypeError("anchor must be a SourceAnchor")
+        deadline = _validated_deadline(deadline)
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Pyright semantic request deadline expired")
+        with self._operation():
+            self.start(deadline=deadline)
+            with self._lock:
+                if self._process is None or self._position_encoding is None:
+                    return ProviderLocations((), "not_ready", True)
+            document = self.open_document(anchor.path, deadline=deadline)
+            with self._lock:
+                readiness = self._readiness
+                supported = self._capabilities.get(capability, False)
+                encoding = self._position_encoding
+                process = self._process
+            if not supported:
+                return ProviderLocations((), "unsupported", True)
+            if readiness != "query_ready" or encoding is None or process is None:
+                return ProviderLocations((), "not_ready", True)
+            source_document = SourceDocument.from_bytes(
+                document.source.relative_path,
+                document.content,
+            )
+            position = source_document.to_lsp(anchor, encoding)
+            params: dict[str, object] = {
+                "textDocument": {"uri": document.source.uri},
+                "position": {
+                    "line": position.line,
+                    "character": position.character,
+                },
+            }
+            if references:
+                params["context"] = {"includeDeclaration": True}
+            result = process.request(method, params, deadline=deadline)
+            locations, filtered = self._normalize_locations(result)
+            return ProviderLocations(
+                locations,
+                "provider_reported",
+                True if references else filtered,
+            )
+
+    def definition(
+        self,
+        anchor: SourceAnchor,
+        *,
+        deadline: float,
+    ) -> ProviderLocations:
+        return self._location_feature(
+            anchor,
+            capability="definition",
+            method="textDocument/definition",
+            deadline=deadline,
+        )
+
+    def references(
+        self,
+        anchor: SourceAnchor,
+        *,
+        deadline: float,
+    ) -> ProviderLocations:
+        return self._location_feature(
+            anchor,
+            capability="references",
+            method="textDocument/references",
+            deadline=deadline,
+            references=True,
+        )
+
+    def implementations(
+        self,
+        anchor: SourceAnchor,
+        *,
+        deadline: float,
+    ) -> ProviderLocations:
+        return self._location_feature(
+            anchor,
+            capability="implementations",
+            method="textDocument/implementation",
+            deadline=deadline,
+        )
+
+    def type_definition(
+        self,
+        anchor: SourceAnchor,
+        *,
+        deadline: float,
+    ) -> ProviderLocations:
+        return self._location_feature(
+            anchor,
+            capability="type_definition",
+            method="textDocument/typeDefinition",
+            deadline=deadline,
+        )
+
+    def _normalize_document_symbols(
+        self,
+        result: object,
+        uri: str,
+    ) -> tuple[tuple[LspLocation, ...], bool]:
+        if result is None:
+            return (), False
+        if not isinstance(result, list):
+            return (), True
+        locations: list[LspLocation] = []
+        seen: set[tuple[object, ...]] = set()
+        partial = False
+        stack: list[object] = list(reversed(result))
+        visited = 0
+        while stack and visited < MAX_LOCATIONS:
+            value = stack.pop()
+            visited += 1
+            if not isinstance(value, dict):
+                partial = True
+                continue
+            children = value.get("children")
+            if children is not None:
+                if isinstance(children, list):
+                    stack.extend(reversed(children))
+                else:
+                    partial = True
+            if "location" in value:
+                location = self._normalize_location(value.get("location"))
+            else:
+                range_ = _lsp_range(value.get("selectionRange"))
+                location = None if range_ is None else LspLocation(uri, range_)
+            if location is None:
+                partial = True
+                continue
+            key = _location_key(location)
+            if key not in seen:
+                seen.add(key)
+                locations.append(location)
+        if stack:
+            partial = True
+        return tuple(locations), partial
+
+    def document_symbols(self, path: str, *, deadline: float) -> ProviderLocations:
+        deadline = _validated_deadline(deadline)
+        with self._operation():
+            self.start(deadline=deadline)
+            with self._lock:
+                if self._process is None or self._position_encoding is None:
+                    return ProviderLocations((), "not_ready", True)
+            document = self.open_document(path, deadline=deadline)
+            with self._lock:
+                supported = self._capabilities.get("document_symbols", False)
+                readiness = self._readiness
+                process = self._process
+            if not supported:
+                return ProviderLocations((), "unsupported", True)
+            if readiness != "query_ready" or process is None:
+                return ProviderLocations((), "not_ready", True)
+            result = process.request(
+                "textDocument/documentSymbol",
+                {"textDocument": {"uri": document.source.uri}},
+                deadline=deadline,
+            )
+            locations, partial = self._normalize_document_symbols(
+                result,
+                document.source.uri,
+            )
+            return ProviderLocations(locations, "provider_reported", partial)
+
+    def workspace_symbols(
+        self,
+        query: str,
+        *,
+        deadline: float,
+    ) -> ProviderLocations:
+        if not isinstance(query, str):
+            raise TypeError("query must be a string")
+        if len(query.encode("utf-8", errors="strict")) > 4096:
+            raise ValueError("query exceeds 4096 bytes")
+        deadline = _validated_deadline(deadline)
+        with self._operation():
+            self.start(deadline=deadline)
+            with self._lock:
+                supported = self._capabilities.get("workspace_symbols", False)
+                readiness = self._readiness
+                process = self._process
+            if readiness != "query_ready" or process is None:
+                return ProviderLocations((), "not_ready", True)
+            if not supported:
+                return ProviderLocations((), "unsupported", True)
+            result = process.request(
+                "workspace/symbol",
+                {"query": query},
+                deadline=deadline,
+            )
+            if result is None:
+                return ProviderLocations((), "provider_reported", False)
+            if not isinstance(result, list):
+                return ProviderLocations((), "provider_reported", True)
+            values: list[object] = []
+            partial = len(result) > MAX_LOCATIONS
+            for symbol in result[:MAX_LOCATIONS]:
+                if not isinstance(symbol, dict) or "location" not in symbol:
+                    partial = True
+                    continue
+                values.append(symbol["location"])
+            locations, filtered = self._normalize_locations(values)
+            return ProviderLocations(
+                locations,
+                "provider_reported",
+                partial or filtered,
+            )
+
+    def hover(self, anchor: SourceAnchor, *, deadline: float) -> ProviderHover:
+        if not isinstance(anchor, SourceAnchor):
+            raise TypeError("anchor must be a SourceAnchor")
+        deadline = _validated_deadline(deadline)
+        with self._operation():
+            self.start(deadline=deadline)
+            with self._lock:
+                if self._process is None or self._position_encoding is None:
+                    return ProviderHover(None, None, True)
+            document = self.open_document(anchor.path, deadline=deadline)
+            with self._lock:
+                supported = self._capabilities.get("hover", False)
+                readiness = self._readiness
+                encoding = self._position_encoding
+                process = self._process
+            if not supported:
+                return ProviderHover(None, None, True)
+            if readiness != "query_ready" or encoding is None or process is None:
+                return ProviderHover(None, None, True)
+            source_document = SourceDocument.from_bytes(
+                document.source.relative_path,
+                document.content,
+            )
+            position = source_document.to_lsp(anchor, encoding)
+            result = process.request(
+                "textDocument/hover",
+                {
+                    "textDocument": {"uri": document.source.uri},
+                    "position": {
+                        "line": position.line,
+                        "character": position.character,
+                    },
+                },
+                deadline=deadline,
+            )
+            if result is None:
+                return ProviderHover(None, None, False)
+            if not isinstance(result, dict) or "contents" not in result:
+                return ProviderHover(None, None, True)
+            contents, partial = _hover_contents(result["contents"])
+            range_ = None
+            if "range" in result:
+                range_ = _lsp_range(result["range"])
+                if range_ is None:
+                    partial = True
+            return ProviderHover(contents, range_, partial)
+
+    def _sanitize_call_item(self, value: object) -> dict[str, object] | None:
+        if not isinstance(value, dict):
+            return None
+        name = _bounded_text(value.get("name"), _MAX_CALL_ITEM_TEXT_BYTES)
+        kind = _lsp_coordinate(value.get("kind"))
+        uri = value.get("uri")
+        range_ = _lsp_range(value.get("range"))
+        selection = _lsp_range(value.get("selectionRange"))
+        if (
+            not name
+            or kind is None
+            or kind == 0
+            or not isinstance(uri, str)
+            or range_ is None
+            or selection is None
+        ):
+            return None
+        if (
+            (selection.start.line, selection.start.character)
+            < (range_.start.line, range_.start.character)
+            or (selection.end.line, selection.end.character)
+            > (range_.end.line, range_.end.character)
+        ):
+            return None
+        source = normalize_provider_uri(self._repository, uri)
+        if source is None:
+            return None
+        item: dict[str, object] = {
+            "name": name,
+            "kind": kind,
+            "uri": source.uri,
+            "range": _range_json(range_),
+            "selectionRange": _range_json(selection),
+        }
+        detail = value.get("detail")
+        if detail is not None:
+            detail = _bounded_text(detail, _MAX_CALL_ITEM_TEXT_BYTES)
+            if detail is None:
+                return None
+            item["detail"] = detail
+        tags = value.get("tags")
+        if tags is not None:
+            if (
+                not isinstance(tags, list)
+                or len(tags) > 32
+                or any(_lsp_coordinate(tag) is None for tag in tags)
+            ):
+                return None
+            item["tags"] = list(tags)
+        if "data" in value:
+            item["data"] = value["data"]
+        return item
+
+    def _call_location(self, value: object) -> LspLocation | None:
+        if not isinstance(value, dict) or not isinstance(value.get("uri"), str):
+            return None
+        source = normalize_provider_uri(self._repository, value["uri"])
+        if source is None:
+            return None
+        range_ = _lsp_range(value.get("selectionRange"))
+        if range_ is None:
+            range_ = _lsp_range(value.get("range"))
+        if range_ is None:
+            return None
+        return LspLocation(source.uri, range_)
+
+    def _calls(
+        self,
+        anchor: SourceAnchor,
+        *,
+        direction: str,
+        deadline: float,
+    ) -> ProviderCalls:
+        if not isinstance(anchor, SourceAnchor):
+            raise TypeError("anchor must be a SourceAnchor")
+        deadline = _validated_deadline(deadline)
+        with self._operation():
+            self.start(deadline=deadline)
+            with self._lock:
+                if self._process is None or self._position_encoding is None:
+                    return ProviderCalls(direction, (), "not_ready", True)
+            document = self.open_document(anchor.path, deadline=deadline)
+            with self._lock:
+                supported = self._capabilities.get("calls", False)
+                readiness = self._readiness
+                encoding = self._position_encoding
+                process = self._process
+            if not supported:
+                return ProviderCalls(direction, (), "unsupported", True)
+            if readiness != "query_ready" or encoding is None or process is None:
+                return ProviderCalls(direction, (), "not_ready", True)
+            source_document = SourceDocument.from_bytes(
+                document.source.relative_path,
+                document.content,
+            )
+            position = source_document.to_lsp(anchor, encoding)
+            prepared = process.request(
+                "textDocument/prepareCallHierarchy",
+                {
+                    "textDocument": {"uri": document.source.uri},
+                    "position": {
+                        "line": position.line,
+                        "character": position.character,
+                    },
+                },
+                deadline=deadline,
+            )
+            if prepared is None:
+                return ProviderCalls(direction, (), "provider_reported", True)
+            if not isinstance(prepared, list):
+                return ProviderCalls(direction, (), "provider_reported", True)
+            items = [
+                item
+                for value in prepared[:_MAX_PREPARED_CALL_ITEMS]
+                if (item := self._sanitize_call_item(value)) is not None
+            ]
+            method = (
+                "callHierarchy/incomingCalls"
+                if direction == "incoming"
+                else "callHierarchy/outgoingCalls"
+            )
+            result_key = "from" if direction == "incoming" else "to"
+            locations: list[LspLocation] = []
+            seen: set[tuple[object, ...]] = set()
+            for item in items:
+                result = process.request(
+                    method,
+                    {"item": item},
+                    deadline=deadline,
+                )
+                if not isinstance(result, list):
+                    continue
+                for call in result[:MAX_LOCATIONS]:
+                    if not isinstance(call, dict):
+                        continue
+                    location = self._call_location(call.get(result_key))
+                    if location is None:
+                        continue
+                    key = _location_key(location)
+                    if key not in seen and len(locations) < MAX_LOCATIONS:
+                        seen.add(key)
+                        locations.append(location)
+            return ProviderCalls(
+                direction,
+                tuple(locations),
+                "provider_reported",
+                True,
+            )
+
+    def incoming_calls(
+        self,
+        anchor: SourceAnchor,
+        *,
+        deadline: float,
+    ) -> ProviderCalls:
+        return self._calls(anchor, direction="incoming", deadline=deadline)
+
+    def outgoing_calls(
+        self,
+        anchor: SourceAnchor,
+        *,
+        deadline: float,
+    ) -> ProviderCalls:
+        return self._calls(anchor, direction="outgoing", deadline=deadline)
+
+    def diagnostics(self, path: str, *, deadline: float) -> ProviderDiagnostics:
+        deadline = _validated_deadline(deadline)
+        with self._operation():
+            self.start(deadline=deadline)
+            with self._lock:
+                initialized = self._process is not None and self._position_encoding is not None
+            if not initialized:
+                return ProviderDiagnostics((), None, True)
+            document = self.open_document(path, deadline=deadline)
+            with self._lock:
+                if self._readiness != "query_ready":
+                    return ProviderDiagnostics((), None, True)
+                while True:
+                    snapshot = self._diagnostics.get(document.source.uri)
+                    if (
+                        snapshot is not None
+                        and snapshot.document_version == document.version
+                    ):
+                        return ProviderDiagnostics(
+                            snapshot.diagnostics,
+                            snapshot.document_version,
+                            snapshot.partial,
+                        )
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        if snapshot is not None and snapshot.document_version is None:
+                            return ProviderDiagnostics(
+                                snapshot.diagnostics,
+                                None,
+                                True,
+                            )
+                        return ProviderDiagnostics((), None, True)
+                    self._condition.wait(remaining)
+
+    def close(self, *, deadline: float) -> None:
+        deadline = _validated_deadline(deadline)
+        with self._lock:
+            while self._starting:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not self._condition.wait(remaining):
+                    raise TimeoutError("Pyright startup did not finish before close")
+            if self._closed and self._process is None:
+                return
+            process = self._process
+            self._closing = True
+        try:
+            if process is not None:
+                process.close(deadline)
+        except BaseException:
+            with self._lock:
+                self._closing = False
+                self._condition.notify_all()
+            raise
+        with self._lock:
+            if self._process is process:
+                self._process = None
+            self._readiness = "not_ready"
+            self._closing = False
+            self._closed = True
+            self._condition.notify_all()

@@ -11,6 +11,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import tarfile
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -80,6 +81,62 @@ class PyrightInstallArtifactFixture:
     package_sha256: str
     package_integrity: str
     server_bytes: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticPyrightFixture:
+    identity: object
+    config_path: Path
+    event_log: Path
+
+    def events(self) -> tuple[dict[str, object], ...]:
+        if not self.event_log.exists():
+            return ()
+        return tuple(
+            json.loads(line)
+            for line in self.event_log.read_text(encoding="utf-8").splitlines()
+            if line
+        )
+
+
+def create_semantic_pyright_fixture(
+    repository: Path,
+    *,
+    config: Mapping[str, object] | None = None,
+) -> SemanticPyrightFixture:
+    """Create a qualified identity backed by the deterministic fake LSP peer."""
+    from pyright_profile import (
+        PYRIGHT_CONFIGURATION_SHA256,
+        PYRIGHT_INITIALIZATION_OPTIONS_SHA256,
+        PyrightIdentity,
+    )
+
+    server = Path(__file__).with_name("fake_lsp_server.py").resolve()
+    node = Path(sys.executable).resolve()
+    event_log = repository / ".fake-lsp-events.jsonl"
+    config_path = repository / ".fake-lsp-server.json"
+    value = dict(config or {})
+    value["event_log"] = str(event_log)
+    config_path.write_text(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False),
+        encoding="utf-8",
+    )
+    identity = PyrightIdentity(
+        status="qualified",
+        source="test-fixture",
+        version="1.1.411",
+        node_executable=node,
+        node_version="v22.0.0",
+        node_major=22,
+        server_executable=server,
+        executable_sha256=hashlib.sha256(server.read_bytes()).hexdigest(),
+        package_sha256=hashlib.sha256(b"semantic-pyright-fixture").hexdigest(),
+        initialization_options_sha256=PYRIGHT_INITIALIZATION_OPTIONS_SHA256,
+        configuration_sha256=PYRIGHT_CONFIGURATION_SHA256,
+        qualified=True,
+        degradation_codes=(),
+    )
+    return SemanticPyrightFixture(identity, config_path, event_log)
 
 
 def create_pyright_install_artifact(

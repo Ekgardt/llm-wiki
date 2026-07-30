@@ -34,7 +34,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   transactions/tasks/results, the 30-day undo window, and live owners.
 - Recorded the local-filesystem requirement, current `synchronous=FULL`/no-WAL
   policy, bounded defaults and CLI overrides, cooperating-writer CAS boundary, and
-  explicit non-goals. The suite now collects **4980 tests**.
+  explicit non-goals. The suite now collects **5035 tests**.
 - Added canonical `repository-scope/v1` binding for repositories, linked worktrees,
   checkout roots, Git common directories, and captured commits. Generation readers
   reject the wrong repository/worktree scope instead of returning cross-checkout
@@ -62,6 +62,11 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   heartbeat, and cleanup ownership. Terminal identity and deadlines are immutable,
   lease refresh remains independent during cleanup, and Windows process and file handles
   remain owned until exact PID exit and successful handle closure are proven.
+- Added the repository-scoped Pyright provider-session core with exact initialization,
+  capability/readiness evidence, bounded document opening, semantic locations, hover,
+  call hierarchy, push diagnostics, progress handling, and restart replay. Document
+  synchronization, session-manager capacity, the normalized navigation facade, and MCP
+  routing remain pending and are not advertised as complete.
 
 ### Fixed
 

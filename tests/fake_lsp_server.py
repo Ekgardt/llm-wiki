@@ -12,7 +12,9 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, BinaryIO
+from urllib.parse import unquote, urlsplit
 
 
 def _frame(message: object) -> bytes:
@@ -166,6 +168,500 @@ class FakeLspServer:
             raise self.failures[0]
 
 
+def _semantic_local_path(uri: str) -> Path:
+    parsed = urlsplit(uri)
+    path = unquote(parsed.path)
+    if os.name == "nt" and len(path) >= 3 and path[0] == "/" and path[2] == ":":
+        path = path[1:]
+    return Path(path)
+
+
+def _semantic_expand(value: object, replacements: dict[str, str]) -> object:
+    if isinstance(value, str):
+        for marker, replacement in replacements.items():
+            value = value.replace(marker, replacement)
+        return value
+    if isinstance(value, list):
+        return [_semantic_expand(item, replacements) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): _semantic_expand(item, replacements)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _run_semantic_server(args: argparse.Namespace) -> None:
+    reader = sys.stdin.buffer
+    writer = sys.stdout.buffer
+    write_lock = threading.Lock()
+    config: dict[str, Any] = {}
+    event_log: Path | None = None
+    initialized = False
+    documents: dict[str, int] = {}
+    root_uri = ""
+    root_path: Path | None = None
+    document_symbol_failures = 0
+
+    def send(message: object) -> None:
+        with write_lock:
+            writer.write(_frame(message))
+            writer.flush()
+
+    def record(kind: str, **values: object) -> None:
+        if event_log is None:
+            return
+        event = {"kind": kind, "pid": os.getpid(), **values}
+        with event_log.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(event, sort_keys=True, separators=(",", ":")))
+            stream.write("\n")
+
+    def load_config(initialize: dict[str, Any]) -> None:
+        nonlocal config, event_log, root_uri, root_path
+        params = initialize.get("params")
+        if not isinstance(params, dict) or not isinstance(params.get("rootUri"), str):
+            raise RuntimeError("semantic initialize rootUri missing")
+        root_uri = params["rootUri"].rstrip("/")
+        root_path = _semantic_local_path(root_uri)
+        config_path = root_path / ".fake-lsp-server.json"
+        if config_path.exists():
+            loaded = json.loads(config_path.read_text(encoding="utf-8"))
+            if not isinstance(loaded, dict):
+                raise RuntimeError("semantic configuration must be an object")
+            config = loaded
+        log_value = config.get("event_log")
+        if isinstance(log_value, str):
+            event_log = Path(log_value)
+
+    def replacements(request_uri: str = "") -> dict[str, str]:
+        assert root_path is not None
+        return {
+            "$ROOT_URI": root_uri,
+            "$SERVICE_URI": root_uri + "/pkg/service.py",
+            "$API_URI": root_uri + "/pkg/api.py",
+            "$UNICODE_URI": root_uri + "/pkg/unicode_api.py",
+            "$EXTERNAL_URI": (root_path.parent / "external.py").resolve().as_uri(),
+            "$REQUEST_URI": request_uri,
+        }
+
+    def response(request: dict[str, Any], result: object) -> None:
+        send({"jsonrpc": "2.0", "id": request["id"], "result": result})
+
+    def server_request(request_id: str, method: str, params: object) -> object:
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": method,
+                "params": params,
+            }
+        )
+        reply = _read_message(reader)
+        record("client-response", request_id=request_id, response=reply)
+        if reply.get("id") != request_id or "result" not in reply:
+            raise RuntimeError(f"semantic client did not answer {method}")
+        return reply["result"]
+
+    def default_capabilities() -> dict[str, object]:
+        return {
+            "callHierarchyProvider": True,
+            "definitionProvider": {"workDoneProgress": True},
+            "documentSymbolProvider": {"workDoneProgress": True},
+            "hoverProvider": {"workDoneProgress": True},
+            "referencesProvider": {"workDoneProgress": True},
+            "textDocumentSync": 2,
+            "typeDefinitionProvider": {"workDoneProgress": True},
+            "workspaceSymbolProvider": {"workDoneProgress": True},
+        }
+
+    def default_document_symbols() -> list[dict[str, object]]:
+        return [
+            {
+                "name": "Service",
+                "kind": 5,
+                "range": {
+                    "start": {"line": 4, "character": 0},
+                    "end": {"line": 9, "character": 37},
+                },
+                "selectionRange": {
+                    "start": {"line": 4, "character": 6},
+                    "end": {"line": 4, "character": 13},
+                },
+                "children": [
+                    {
+                        "name": "execute",
+                        "kind": 6,
+                        "range": {
+                            "start": {"line": 8, "character": 4},
+                            "end": {"line": 9, "character": 37},
+                        },
+                        "selectionRange": {
+                            "start": {"line": 8, "character": 8},
+                            "end": {"line": 8, "character": 15},
+                        },
+                    }
+                ],
+            }
+        ]
+
+    def default_call_item(uri: str, name: str, line: int) -> dict[str, object]:
+        return {
+            "name": name,
+            "kind": 12,
+            "uri": uri,
+            "range": {
+                "start": {"line": line, "character": 0},
+                "end": {"line": line, "character": 20},
+            },
+            "selectionRange": {
+                "start": {"line": line, "character": 4},
+                "end": {"line": line, "character": 11},
+            },
+            "data": {"fixture": name},
+        }
+
+    def default_result(method: str, request: dict[str, Any]) -> object:
+        params = request.get("params")
+        request_uri = ""
+        if isinstance(params, dict):
+            text_document = params.get("textDocument")
+            if isinstance(text_document, dict) and isinstance(text_document.get("uri"), str):
+                request_uri = text_document["uri"]
+        values = replacements(request_uri)
+        service_uri = values["$SERVICE_URI"]
+        api_uri = values["$API_URI"]
+        if method == "textDocument/documentSymbol":
+            return default_document_symbols()
+        if method == "textDocument/definition":
+            return [
+                {
+                    "uri": api_uri,
+                    "range": {
+                        "start": {"line": 1, "character": 8},
+                        "end": {"line": 1, "character": 14},
+                    },
+                }
+            ]
+        if method == "textDocument/references":
+            return [
+                {
+                    "uri": service_uri,
+                    "range": {
+                        "start": {"line": 9, "character": 15},
+                        "end": {"line": 9, "character": 25},
+                    },
+                },
+                {
+                    "targetUri": api_uri,
+                    "targetRange": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 2, "character": 28},
+                    },
+                    "targetSelectionRange": {
+                        "start": {"line": 1, "character": 8},
+                        "end": {"line": 1, "character": 14},
+                    },
+                },
+            ]
+        if method == "textDocument/typeDefinition":
+            return {
+                "targetUri": api_uri,
+                "targetRange": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": 2, "character": 28},
+                },
+                "targetSelectionRange": {
+                    "start": {"line": 0, "character": 6},
+                    "end": {"line": 0, "character": 15},
+                },
+            }
+        if method == "textDocument/implementation":
+            return [
+                {
+                    "uri": service_uri,
+                    "range": {
+                        "start": {"line": 4, "character": 6},
+                        "end": {"line": 4, "character": 13},
+                    },
+                }
+            ]
+        if method == "textDocument/hover":
+            return {
+                "contents": [
+                    {"language": "python", "value": "def execute(value: str) -> str"},
+                    {"kind": "plaintext", "value": "Execute the service."},
+                ],
+                "range": {
+                    "start": {"line": 8, "character": 8},
+                    "end": {"line": 8, "character": 15},
+                },
+            }
+        if method == "workspace/symbol":
+            return [
+                {
+                    "name": "Service",
+                    "kind": 5,
+                    "location": {
+                        "uri": service_uri,
+                        "range": {
+                            "start": {"line": 4, "character": 6},
+                            "end": {"line": 4, "character": 13},
+                        },
+                    },
+                },
+                {
+                    "name": "PublicApi",
+                    "kind": 5,
+                    "location": {
+                        "uri": api_uri,
+                        "range": {
+                            "start": {"line": 0, "character": 6},
+                            "end": {"line": 0, "character": 15},
+                        },
+                    },
+                },
+            ]
+        if method == "textDocument/prepareCallHierarchy":
+            return [default_call_item(service_uri, "execute", 8)]
+        if method == "callHierarchy/incomingCalls":
+            return [
+                {
+                    "from": default_call_item(service_uri, "format_value", 12),
+                    "fromRanges": [
+                        {
+                            "start": {"line": 14, "character": 11},
+                            "end": {"line": 14, "character": 31},
+                        }
+                    ],
+                }
+            ]
+        if method == "callHierarchy/outgoingCalls":
+            return [
+                {
+                    "to": default_call_item(api_uri, "format", 1),
+                    "fromRanges": [
+                        {
+                            "start": {"line": 9, "character": 15},
+                            "end": {"line": 9, "character": 25},
+                        }
+                    ],
+                }
+            ]
+        return None
+
+    def publish_diagnostics(uri: str, version: int) -> None:
+        notifications = config.get("diagnostic_notifications")
+        if not isinstance(notifications, list):
+            notifications = [
+                {
+                    "uri": uri,
+                    "version": version,
+                    "diagnostics": [
+                        {
+                            "range": {
+                                "start": {"line": 9, "character": 15},
+                                "end": {"line": 9, "character": 25},
+                            },
+                            "severity": 2,
+                            "code": "reportUnknownMemberType",
+                            "message": "Member type is unknown",
+                            "relatedInformation": [
+                                {
+                                    "location": {
+                                        "uri": root_uri + "/pkg/api.py",
+                                        "range": {
+                                            "start": {"line": 1, "character": 8},
+                                            "end": {"line": 1, "character": 14},
+                                        },
+                                    },
+                                    "message": "Declared here",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ]
+        expanded = _semantic_expand(notifications, replacements(uri))
+        assert isinstance(expanded, list)
+        for notification in expanded:
+            if not isinstance(notification, dict):
+                continue
+            send(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/publishDiagnostics",
+                    "params": notification,
+                }
+            )
+
+    while True:
+        request = _read_message(reader)
+        method = request.get("method")
+        if method == "initialize":
+            load_config(request)
+        record("client-message", method=method, message=request)
+
+        if method == "initialize":
+            behavior = config.get("initialize_behavior")
+            if behavior == "broken":
+                return
+            if behavior == "timeout":
+                time.sleep(60)
+                return
+            items = config.get(
+                "configuration_items",
+                [
+                    {"section": "python"},
+                    {"section": "python.analysis"},
+                    {"section": "pyright"},
+                    {"section": "unknown"},
+                ],
+            )
+            configuration = server_request(
+                "semantic-configuration",
+                "workspace/configuration",
+                {"items": items},
+            )
+            record("configuration", values=configuration)
+            if config.get("benign_requests"):
+                server_request(
+                    "semantic-progress-create",
+                    "window/workDoneProgress/create",
+                    {"token": "semantic-progress"},
+                )
+                server_request(
+                    "semantic-register",
+                    "client/registerCapability",
+                    {"registrations": []},
+                )
+                server_request(
+                    "semantic-unregister",
+                    "client/unregisterCapability",
+                    {"unregisterations": []},
+                )
+            if config.get("push_progress"):
+                send(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "$/progress",
+                        "params": {
+                            "token": "semantic-progress",
+                            "value": {"kind": "begin", "title": "Analyzing"},
+                        },
+                    }
+                )
+                send({"jsonrpc": "2.0", "method": "pyright/beginProgress"})
+                send(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "pyright/reportProgress",
+                        "params": {"message": "Analyzing files"},
+                    }
+                )
+                send({"jsonrpc": "2.0", "method": "pyright/endProgress"})
+            capabilities = config.get("capabilities", default_capabilities())
+            response(request, {"capabilities": capabilities})
+            continue
+
+        if method == "initialized":
+            initialized = True
+            continue
+
+        if method == "workspace/didChangeConfiguration":
+            continue
+
+        if method == "textDocument/didOpen":
+            params = request.get("params")
+            text_document = params.get("textDocument") if isinstance(params, dict) else None
+            if isinstance(text_document, dict):
+                uri = text_document.get("uri")
+                version = text_document.get("version")
+                if isinstance(uri, str) and isinstance(version, int):
+                    documents[uri] = version
+                    delay = config.get("diagnostics_delay_seconds", 0)
+                    if isinstance(delay, (int, float)) and delay > 0:
+                        timer = threading.Timer(delay, publish_diagnostics, args=(uri, version))
+                        timer.daemon = True
+                        timer.start()
+                    elif config.get("push_diagnostics", True):
+                        publish_diagnostics(uri, version)
+            continue
+
+        if method == "shutdown":
+            response(request, None)
+            continue
+        if method == "exit":
+            return
+        if "id" not in request:
+            continue
+
+        crash_method = config.get("crash_once_method")
+        crash_marker = config.get("crash_marker")
+        if method == crash_method and isinstance(crash_marker, str):
+            marker = Path(crash_marker)
+            if not marker.exists():
+                marker.write_bytes(b"crashed\n")
+                return
+
+        response_delays = config.get("response_delays")
+        if isinstance(response_delays, dict):
+            delay = response_delays.get(method)
+            if isinstance(delay, (int, float)) and not isinstance(delay, bool) and delay > 0:
+                time.sleep(delay)
+
+        if config.get("require_initialized_open", True) and method not in {
+            "workspace/symbol",
+        }:
+            params = request.get("params")
+            request_uri = None
+            if isinstance(params, dict):
+                text_document = params.get("textDocument")
+                if isinstance(text_document, dict):
+                    request_uri = text_document.get("uri")
+            if not initialized or (
+                method.startswith("textDocument/")
+                and isinstance(request_uri, str)
+                and request_uri not in documents
+            ):
+                send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request["id"],
+                        "error": {"code": -32002, "message": "document is not ready"},
+                    }
+                )
+                continue
+
+        if method == "textDocument/documentSymbol":
+            failures = config.get("document_symbol_failures", 0)
+            if isinstance(failures, int) and document_symbol_failures < failures:
+                document_symbol_failures += 1
+                send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request["id"],
+                        "error": {"code": -32003, "message": "symbols not ready"},
+                    }
+                )
+                continue
+
+        configured_responses = config.get("responses")
+        if isinstance(configured_responses, dict) and method in configured_responses:
+            params = request.get("params")
+            request_uri = ""
+            if isinstance(params, dict):
+                text_document = params.get("textDocument")
+                if isinstance(text_document, dict) and isinstance(text_document.get("uri"), str):
+                    request_uri = text_document["uri"]
+            result = _semantic_expand(
+                configured_responses[method],
+                replacements(request_uri),
+            )
+        else:
+            result = default_result(str(method), request)
+        response(request, result)
+
+
 def _run_process_server() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--stderr-bytes", type=int, default=0)
@@ -197,7 +693,13 @@ def _run_process_server() -> None:
     parser.add_argument("--startup-callback-marker")
     parser.add_argument("--query-crash-once-marker")
     parser.add_argument("--require-initialized-query", action="store_true")
+    parser.add_argument("--stdio", action="store_true")
+    parser.add_argument("--cancellationReceive")
     args = parser.parse_args()
+
+    if args.stdio:
+        _run_semantic_server(args)
+        return
 
     if args.spawn_setsid_descendant:
         if os.name != "posix":

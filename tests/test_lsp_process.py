@@ -7061,7 +7061,13 @@ def _exercise_explicit_restart_retirement_deadline_finishes_without_caller_retry
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    process = _start(tmp_path, "--lifecycle", "--sleep-seconds", "30")
+    process = _start(
+        tmp_path,
+        "--lifecycle",
+        "--spawn-descendant",
+        "--sleep-seconds",
+        "30",
+    )
     coordinator = process._coordinator
     generation = coordinator.active
     recovery = coordinator.recovery_thread

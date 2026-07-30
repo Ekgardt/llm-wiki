@@ -1145,6 +1145,10 @@ class LspProcess:
             cancellation=cancellation,
         )
 
+    def notify(self, method: str, params: object, *, deadline: float) -> None:
+        """Send once through the active generation without transparent replay."""
+        _notify_lsp_process(self, method, params, deadline=deadline)
+
     def shutdown(self, deadline: float) -> None:
         _shutdown_lsp_process(self, deadline)
 
@@ -2530,6 +2534,38 @@ def _request_lsp_process(
                 continue
             raise
     raise RuntimeError("LSP request retry invariant breached")
+
+
+def _notify_lsp_process(
+    instance: LspProcess,
+    method: str,
+    params: object,
+    *,
+    deadline: float,
+) -> None:
+    deadline = _validated_deadline(deadline)
+    generation = _request_generation(instance, deadline)
+    protocol = generation.protocol
+    process = generation.process
+    assert protocol is not None and process is not None
+    expired = protocol.expired_drain_keys(time.monotonic())
+    if expired or process.poll() is not None or protocol.fatal:
+        _queue_generation_failure(
+            instance._coordinator,
+            generation,
+            "expired drain" if expired else _PROCESS_EXITED,
+        )
+        raise ProtocolViolation("LSP generation is fatally unavailable")
+    try:
+        protocol.notify(method, params, deadline=deadline)
+    except ProtocolViolation:
+        if protocol.fatal or process.poll() is not None:
+            _queue_generation_failure(
+                instance._coordinator,
+                generation,
+                _PROCESS_EXITED,
+            )
+        raise
 
 
 def _failure_identity(
