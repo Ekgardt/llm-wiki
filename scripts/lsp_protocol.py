@@ -20,6 +20,7 @@ if os.name == "nt":
 
     _ERROR_NOT_FOUND = 1168
     _DUPLICATE_SAME_ACCESS = 0x00000002
+    _THREAD_ALL_ACCESS = 0x1F03FF
     _KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _KERNEL32.GetCurrentProcess.argtypes = ()
     _KERNEL32.GetCurrentProcess.restype = wintypes.HANDLE
@@ -35,6 +36,8 @@ if os.name == "nt":
         wintypes.DWORD,
     )
     _KERNEL32.DuplicateHandle.restype = wintypes.BOOL
+    _KERNEL32.OpenThread.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    _KERNEL32.OpenThread.restype = wintypes.HANDLE
     _KERNEL32.CancelSynchronousIo.argtypes = (wintypes.HANDLE,)
     _KERNEL32.CancelSynchronousIo.restype = wintypes.BOOL
     _KERNEL32.CloseHandle.argtypes = (wintypes.HANDLE,)
@@ -1488,21 +1491,6 @@ class LspProtocol:
             raise release_error
 
     def _register_owner(self, name: str, started: threading.Event) -> bool:
-        if os.name != "nt":
-            started.set()
-            return True
-        try:
-            handle = _duplicate_current_thread_handle()
-        except BaseException as error:
-            with self._owner_handle_lock:
-                self._owner_start_errors[name] = error
-            started.set()
-            return False
-        with self._owner_handle_lock:
-            if name == "reader":
-                self._reader_os_handle = handle
-            else:
-                self._writer_os_handle = handle
         started.set()
         return True
 
@@ -1513,37 +1501,32 @@ class LspProtocol:
             raise errors[0]
 
     def _release_owner(self, name: str) -> None:
-        if os.name != "nt":
-            return
-        with self._owner_handle_lock:
-            handle = self._reader_os_handle if name == "reader" else self._writer_os_handle
-            if handle is None:
-                return
-            if not _KERNEL32.CloseHandle(handle):
-                self._owner_release_errors[name] = ctypes.WinError(ctypes.get_last_error())
-                return
-            self._owner_release_errors.pop(name, None)
-            if name == "reader":
-                self._reader_os_handle = None
-            else:
-                self._writer_os_handle = None
+        return
 
     def _cancel_owner_io(self, owner: threading.Thread) -> None:
         if os.name != "nt" or owner is threading.current_thread():
             return
         name = "reader" if owner is self.reader_thread else "writer"
-        with self._owner_handle_lock:
-            handle = self._reader_os_handle if name == "reader" else self._writer_os_handle
-            if handle is None:
-                return
+        tid = self.stdout_reader_owner if name == "reader" else self.stdin_writer_owner
+        if tid is None:
+            return
+        handle = _KERNEL32.OpenThread(_THREAD_ALL_ACCESS, False, tid)
+        if not handle:
+            return
+        try:
             if _KERNEL32.CancelSynchronousIo(handle):
-                self._owner_interrupt_errors.pop(name, None)
+                with self._owner_handle_lock:
+                    self._owner_interrupt_errors.pop(name, None)
                 return
             error_number = ctypes.get_last_error()
             if error_number == _ERROR_NOT_FOUND:
-                self._owner_interrupt_errors.pop(name, None)
+                with self._owner_handle_lock:
+                    self._owner_interrupt_errors.pop(name, None)
                 return
-            self._owner_interrupt_errors[name] = ctypes.WinError(error_number)
+            with self._owner_handle_lock:
+                self._owner_interrupt_errors[name] = ctypes.WinError(error_number)
+        finally:
+            _KERNEL32.CloseHandle(handle)
 
 
 if os.name == "nt":
