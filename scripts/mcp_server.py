@@ -1131,6 +1131,106 @@ def _analyze_impact(
     )
 
 
+_NAVIGATION_MANAGER: object | None = None
+_NAVIGATION_MANAGER_LOCK = threading.Lock()
+
+_PRECISE_MODE_CAPABILITY = {
+    "definition": "DEFINITIONS",
+    "references": "REFERENCES",
+    "implementations": "IMPLEMENTATIONS",
+    "type": "TYPES",
+    "diagnostics": "DIAGNOSTICS",
+}
+
+
+def _navigation_session_manager():
+    global _NAVIGATION_MANAGER
+    if _NAVIGATION_MANAGER is None:
+        with _NAVIGATION_MANAGER_LOCK:
+            if _NAVIGATION_MANAGER is None:
+                from memory_state import STATE_ROOT
+                from pyright_session import PyrightSessionManager
+
+                _NAVIGATION_MANAGER = PyrightSessionManager(state_root=STATE_ROOT)
+    return _NAVIGATION_MANAGER
+
+
+def _is_precise_architecture_request(arguments: dict) -> bool:
+    mode = arguments.get("mode", "summary")
+    if mode in PRECISE_ARCHITECTURE_MODES:
+        return True
+    if mode in {"callers", "callees"} and all(
+        key in arguments for key in ("path", "line", "character")
+    ):
+        return True
+    return False
+
+
+def _get_precise_architecture(
+    directory: str,
+    *,
+    mode: str,
+    path: str,
+    line: int,
+    character: int,
+    offset: int = 0,
+    limit: int = 10,
+    deadline: float | None = None,
+) -> dict:
+    """Route precise modes through the owned CodeNavigation facade."""
+    from code_intelligence import Capability
+    from code_navigation import CodeNavigation, NavigationRequest
+    from code_navigation_renderer import render_navigation
+    from repository_scope import resolve_repository_scope
+
+    resolved, error = _validated_code_directory(directory, deadline=deadline)
+    if error:
+        return {"error": error}
+    scope = resolve_repository_scope(resolved)
+    if str(resolved) != str(scope.checkout_root):
+        return {"error": "directory must equal the resolved checkout root"}
+    if path != str(Path(path).as_posix()) or "\\" in path or path.startswith("/"):
+        return {"error": "path must be repository-relative"}
+    manager = _navigation_session_manager()
+    effective_deadline = deadline if deadline is not None else time.monotonic() + MCP_LSP_STARTUP_SECONDS
+    session = manager.get(scope, deadline=effective_deadline)
+    identity = session._identity
+    navigation = CodeNavigation(scope, session, identity)
+    if mode in _PRECISE_MODE_CAPABILITY:
+        capability = Capability[_PRECISE_MODE_CAPABILITY[mode]]
+        request = NavigationRequest(
+            scope,
+            capability,
+            path,
+            line,
+            character,
+            offset=offset,
+            limit=limit,
+        )
+    else:
+        direction = "incoming" if mode == "callers" else "outgoing"
+        request = NavigationRequest(
+            scope,
+            Capability.CALLS,
+            path,
+            line,
+            character,
+            offset=offset,
+            limit=limit,
+            direction=direction,
+        )
+    result = navigation.query(request, deadline=effective_deadline)
+    rendered = render_navigation(result, offset=offset, limit=limit)
+    non_ok = result.status.value != "ok"
+    data = {
+        "directory": str(resolved),
+        "mode": mode,
+        **rendered,
+    }
+    data["_navigation_partial"] = non_ok
+    return data
+
+
 def _operator_result(
     action: str,
     *,
@@ -1802,6 +1902,16 @@ def _quality_for(
             "warnings": list(data.get("warnings", [])) or ["Impact analysis is unresolved."],
         }
     if name in {"find_dead_code", "get_architecture"}:
+        if isinstance(data, dict) and "_navigation_partial" in data:
+            partial = bool(data.get("_navigation_partial"))
+            data.pop("_navigation_partial", None)
+            return {
+                "coverage": 0.9 if not partial else 0.5,
+                "confidence": 0.85 if not partial else 0.4,
+                "fallback": False,
+                "partial": partial,
+                "warnings": list(data.get("warnings", ())),
+            }
         if isinstance(data, dict) and data.get("fallback") is False:
             unresolved = data.get("unresolved_count")
             if data.get("graph_complete") is True and unresolved == 0:
@@ -2081,7 +2191,18 @@ def _execute_tool_call(name: str, arguments, operation_deadline: float) -> str:
                         deadline=operation_deadline,
                     )
                 elif name == "get_architecture":
-                    if arguments.get("mode", "summary") == "impact":
+                    if _is_precise_architecture_request(arguments):
+                        data = _get_precise_architecture(
+                            arguments["directory"],
+                            mode=arguments.get("mode"),
+                            path=arguments["path"],
+                            line=arguments["line"],
+                            character=arguments["character"],
+                            offset=arguments.get("offset", 0),
+                            limit=arguments.get("limit", 10),
+                            deadline=operation_deadline,
+                        )
+                    elif arguments.get("mode", "summary") == "impact":
                         data = _analyze_impact(
                             directory=arguments["directory"],
                             comparison=arguments.get("comparison", "dirty"),

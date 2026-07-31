@@ -3569,3 +3569,56 @@ def test_navigation_deadline_is_10s_for_existing_modes() -> None:
         mcp_server._tool_operation_seconds("recall", {"query": "x"})
         == mcp_server.MCP_OPERATION_SECONDS
     )
+
+
+def test_precise_request_classification_is_exact() -> None:
+    import mcp_server
+
+    assert mcp_server._is_precise_architecture_request(
+        {"mode": "definition", "path": "p.py", "line": 1, "character": 0}
+    )
+    assert mcp_server._is_precise_architecture_request(
+        {"mode": "callers", "path": "p.py", "line": 1, "character": 0}
+    )
+    assert not mcp_server._is_precise_architecture_request(
+        {"mode": "callers", "symbol": "f"}
+    )
+    assert not mcp_server._is_precise_architecture_request({"mode": "summary"})
+    assert not mcp_server._is_precise_architecture_request(
+        {"mode": "callers", "path": "p.py", "line": 1}
+    )
+
+
+def test_precise_architecture_rejects_non_checkout_directory(
+    monkeypatch,
+) -> None:
+    import mcp_server
+
+    def _fail_get(*args, **kwargs):
+        raise AssertionError("session manager must not be called for bad directory")
+
+    monkeypatch.setattr(mcp_server, "_navigation_session_manager", _fail_get)
+    data = mcp_server._get_precise_architecture(
+        "not-a-real-directory",
+        mode="definition",
+        path="pkg/api.py",
+        line=1,
+        character=0,
+        deadline=None,
+    )
+    assert "error" in data
+
+
+def test_structural_callers_not_routed_as_precise(monkeypatch) -> None:
+    import mcp_server
+
+    def _fail_precise(*args, **kwargs):
+        raise AssertionError("precise routing must not run for structural callers")
+
+    monkeypatch.setattr(mcp_server, "_get_precise_architecture", _fail_precise)
+    monkeypatch.setattr("code_graph.find_callers", lambda *a, **k: {"callers": []})
+    resolved = str(Path(__file__).resolve().parent.parent)
+    data = mcp_server._get_architecture_mode(
+        resolved, mode="callers", symbol="f", deadline=time.monotonic() + 5
+    )
+    assert data.get("mode", "callers") == "callers" or "callers" in data
