@@ -86,3 +86,55 @@ jobs:
       - name: Fixed BM25 benchmark gate
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.13'
         run: uv run python benchmark/run_benchmark.py --legacy-only
+
+  pyright-navigation:
+    # Cross-platform real-Pyright protocol, process-tree, and security tests.
+    # Pins Node 22.23.1 (qualified release; 22.23.2 exists but is not qualified).
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.10"]
+        node: ["22.23.1"]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      LLM_WIKI_STATE_ROOT: ${{ runner.temp }}/llm-wiki-state
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.2.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5.4.2
+        with:
+          enable-cache: true
+
+      - name: Install Python ${{ matrix.python }}
+        run: uv python install ${{ matrix.python }}
+
+      - name: Pin Python ${{ matrix.python }}
+        run: uv python pin ${{ matrix.python }}
+
+      - name: Sync dev dependencies
+        run: uv sync --locked --dev
+
+      - name: Setup Node ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Explicit Pyright install
+        # The only step that downloads the pinned artifact. No test or query
+        # performs a download.
+        run: uv run python scripts/install_pyright.py --state-root "$LLM_WIKI_STATE_ROOT"
+
+      - name: Protocol, process-tree, and security tests
+        run: uv run pytest tests/test_lsp_protocol.py tests/test_lsp_process.py tests/test_lsp_process_tree.py tests/test_lsp_security.py tests/test_pyright_session.py tests/test_code_navigation.py tests/test_code_navigation_renderer.py -q
+
+      - name: Correctness benchmark gate
+        run: uv run python benchmark/run_code_navigation.py --fixture --correctness-only --require-gates
+
+      - name: Fixed 100 KLOC Python qualification gate
+        if: matrix.os == 'ubuntu-latest'
+        run: uv run python benchmark/run_code_navigation.py --fixture --qualification --require-gates

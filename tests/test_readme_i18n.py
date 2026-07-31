@@ -44,32 +44,18 @@ def test_all_readmes_exist():
         assert p.is_file(), f"missing {p.name}"
 
 
-def test_all_readmes_share_live_test_count():
-    """Every language README must state the same live pytest count."""
-    live = _collect_test_count()
-    for p in README_FILES:
-        text = p.read_text(encoding="utf-8")
-        # badge or prose: 171
-        assert re.search(rf"\b{live}\b", text), (
-            f"{p.name} must mention live test count {live} "
-            f"(update i18n READMEs before release)"
+def test_all_readmes_share_full_regression_suite_wording():
+    """Every language README must use full-regression-suite wording, not a brittle count."""
+    for p, text in _readmes():
+        assert "tests-full%20regression%20suite-" in text, (
+            f"{p.name}: badge must describe the full regression suite, not a brittle count"
         )
-        assert f"tests-{live}%20collected-" in text, (
-            f"{p.name}: badge must describe collection, not passing tests"
-        )
-        assert f"tests-{live}%20passing-" not in text
+        assert "tests-" not in text.replace(
+            "tests-full%20regression%20suite-", ""
+        ) or "collected" not in text.split("tests-")[1].split("-")[0] if "tests-" in text else True
         assert "uv sync --locked --extra mcp-server" in text, (
             f"{p.name}: manual install must include the MCP baseline"
         )
-        # ban known stale counts when suite is larger
-        for stale in (106, 155, 160):
-            if stale == live:
-                continue
-            if stale < live:
-                # allow historical "was 106" only in CHANGELOG, not README badge
-                assert f"tests-{stale}" not in text, (
-                    f"{p.name} still has badge/tests-{stale}; should be {live}"
-                )
 
 
 def test_all_readmes_use_correct_github_repo():
@@ -100,19 +86,19 @@ def test_all_readmes_mention_current_version():
     critical_markers = {
         "README.md": (
             "12 task-shaped",
-            "5087 tests collected",
+            "full regression suite",
             "Historical current 112",
             "optional Obsidian viewer",
         ),
         "README.ru.md": (
             "12 task-shaped",
-            "5087 регрессионных тестов",
+            "полный регрессионный набор",
             "Исторические текущие 112",
             "Obsidian как опциональный viewer",
         ),
         "README.zh-CN.md": (
             "12 个 task-shaped",
-            "5087 个测试",
+            "完整回归套件",
             "历史当前 112",
             "Obsidian 为可选 viewer",
         ),
@@ -154,3 +140,33 @@ def test_all_readmes_share_reliable_memory_operator_commands():
     for path, text in _readmes():
         for command in commands:
             assert command in text, f"{path.name}: missing operator command {command!r}"
+
+
+def test_ci_qualifies_real_pyright_on_all_supported_os_families():
+    import yaml
+
+    workflow = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+    )
+    job = workflow["jobs"]["pyright-navigation"]
+    assert job["strategy"]["matrix"]["os"] == [
+        "ubuntu-latest",
+        "windows-latest",
+        "macos-latest",
+    ]
+    assert job["strategy"]["matrix"]["python"] == ["3.10"]
+    assert job["strategy"]["matrix"]["node"] == ["22.23.1"]
+
+
+def test_docs_state_security_install_and_market_truth():
+    text = (ROOT / "docs" / "CODE-NAVIGATION.md").read_text(encoding="utf-8")
+    for value in (
+        "trusted local repositories",
+        "not an OS sandbox",
+        "Pyright 1.1.411",
+        "cache/code-tools/pyright/1.1.411/",
+        "run/lsp/<owner-nonce>/",
+        "never downloads during a query",
+        "Market superiority remains unclaimed",
+    ):
+        assert value in text, f"CODE-NAVIGATION.md missing {value!r}"

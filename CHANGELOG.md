@@ -8,6 +8,15 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Read-only Python code navigation through pinned Pyright 1.1.411: bounded stdlib
+  LSP protocol, generation-aware process lifecycle ownership, workspace-revision
+  freshness retry, normalized navigation facade, deterministic renderer, precise
+  `get_architecture` modes, Pyright doctor diagnostics, seven-day LSP runtime
+  retention, and a deterministic 100 KLOC qualification corpus with closed gates.
+  Navigation adds no MCP tool, graph, semantic cache, daemon, or runtime root;
+  Pyright is installed by one explicit operator command and never downloads
+  during a query. Market superiority remains unclaimed.
+
 - Documented the integrated Tasks 1-29 unified evidence contracts: Markdown/Git/
   project-journal authority, immutable derived generations, register-then-CAS
   activation, seal validation, prior-generation recovery, cache deletion, truthful
