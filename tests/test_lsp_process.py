@@ -529,6 +529,70 @@ def test_transparent_restart_bootstraps_fresh_generation_before_request_replay(
         process.close(time.monotonic() + 5)
 
 
+def test_generation_bound_notification_refuses_replacement_generation(
+    tmp_path: Path,
+) -> None:
+    process = LspProcess.start_configured(
+        _command("--lifecycle", "--bootstrap-handshake"),
+        cwd=tmp_path,
+        owner_root=tmp_path / OWNER_NONCE,
+        deadline=time.monotonic() + 5,
+        server_request_handlers={"workspace/configuration": lambda _params: True},
+        server_notification_handlers={"$/progress": lambda _params: None},
+        generation_bootstrap=_initialize_generation,
+    )
+    first_nonce = process.generation_nonce
+    try:
+        process.restart(time.monotonic() + 5)
+
+        assert process.generation_nonce != first_nonce
+        assert process.notify_generation(
+            "initialized/noop",
+            {},
+            generation_nonce=first_nonce,
+            deadline=time.monotonic() + 1,
+        ) is False
+    finally:
+        process.close(time.monotonic() + 5)
+
+
+def test_workspace_ready_promotion_rejects_pending_terminal_failure(
+    tmp_path: Path,
+) -> None:
+    process = LspProcess.start_configured(
+        _command("--lifecycle", "--bootstrap-handshake"),
+        cwd=tmp_path,
+        owner_root=tmp_path / OWNER_NONCE,
+        deadline=time.monotonic() + 5,
+        server_request_handlers={"workspace/configuration": lambda _params: True},
+        server_notification_handlers={"$/progress": lambda _params: None},
+        generation_bootstrap=_initialize_generation,
+    )
+    coordinator = process._coordinator
+    try:
+        with coordinator.driver:
+            assert lsp_process._enqueue_failure_intent(
+                coordinator,
+                lsp_process._FailureIntent(
+                    process.generation_nonce,
+                    "test terminal race",
+                    False,
+                    time.monotonic(),
+                ),
+            )
+
+            assert process.promote_workspace_ready(
+                generation_nonce=process.generation_nonce,
+                deadline=time.monotonic() + 1,
+            ) is False
+            assert process.state is ProcessState.PROTOCOL_INITIALIZED
+
+            coordinator.failure_queue.get_nowait()
+            lsp_process._acknowledge_failure_intent(coordinator)
+    finally:
+        process.close(time.monotonic() + 5)
+
+
 def test_generation_guard_wraps_each_autonomous_generation_without_transition_locks(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -671,6 +735,67 @@ def test_generation_guard_wraps_each_autonomous_generation_without_transition_lo
         assert process.restart_count == 1
     finally:
         process.close(time.monotonic() + 5)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX verified launch descriptor")
+def test_generation_guard_launches_from_inherited_descriptor_after_path_replacement(
+    tmp_path: Path,
+) -> None:
+    server = tmp_path / "server.py"
+    retired = tmp_path / "retired.py"
+    server.write_bytes(FAKE_SERVER.read_bytes())
+    descriptors: list[int] = []
+
+    class Guard:
+        def __enter__(self) -> object:
+            descriptor = os.open(server, os.O_RDONLY)
+            descriptors.append(descriptor)
+            server.replace(retired)
+            server.write_text("raise SystemExit(73)\n", encoding="utf-8")
+            descriptor_path = (
+                f"/proc/self/fd/{descriptor}"
+                if Path("/proc/self/fd").is_dir()
+                else f"/dev/fd/{descriptor}"
+            )
+            return lsp_process.GenerationLaunch(
+                (
+                    sys.executable,
+                    descriptor_path,
+                    "--lifecycle",
+                    "--bootstrap-handshake",
+                ),
+                (descriptor,),
+            )
+
+        def __exit__(self, *_error: object) -> None:
+            os.close(descriptors.pop())
+
+    process = LspProcess.start_configured(
+        (sys.executable, str(server), "--lifecycle", "--bootstrap-handshake"),
+        cwd=tmp_path,
+        owner_root=tmp_path / OWNER_NONCE,
+        deadline=time.monotonic() + 5,
+        server_request_handlers={"workspace/configuration": lambda _params: True},
+        server_notification_handlers={"$/progress": lambda _params: None},
+        generation_bootstrap=_initialize_generation,
+        generation_guard=lambda _nonce, _deadline: Guard(),
+    )
+    try:
+        assert process.state is ProcessState.PROTOCOL_INITIALIZED
+    finally:
+        process.close(time.monotonic() + 5)
+
+
+def test_generation_guard_command_override_is_bounded_before_spawn(
+    tmp_path: Path,
+) -> None:
+    command = tuple(_command("--lifecycle"))
+    launch = lsp_process.GenerationLaunch(
+        (command[0], "x" * (64 * 1024 + 1)),
+    )
+
+    with pytest.raises(ValueError, match="generation launch command"):
+        lsp_process._generation_launch(command, launch, cwd=tmp_path)
 
 
 def test_generation_guard_enter_failure_prevents_spawn_and_cleans_owner(
@@ -2765,32 +2890,50 @@ def test_idle_fatal_restarts_once_then_second_idle_fatal_is_terminal(
     tmp_path: Path,
 ) -> None:
     marker = tmp_path / "idle-exit-marker"
-    process = _start(tmp_path, "--lifecycle", "--idle-exit-marker", str(marker))
-    first_generation = process.generation_nonce
-    deadline = time.monotonic() + 3
-
-    lease_path = process.owner_root / "lease.json"
-    while (
-        (process.restart_count == 0 or not lease_path.exists())
-        and time.monotonic() < deadline
-    ):
-        time.sleep(0.01)
-
-    assert process.restart_count == 1
-    assert process.generation_nonce != first_generation
-    lease = json.loads(lease_path.read_bytes())
-    assert lease["generation_nonce"] == process.generation_nonce
-    assert lease["server_pid"] == process.process.pid
-
-    assert _coordinator_wait(
-        process,
-        lambda: process._coordinator.phase
-        is lsp_process._LifecyclePhase.STOPPED_FAILURE,
+    gate_prefix = tmp_path / "idle-exit-gate"
+    first_gate = Path(f"{gate_prefix}.first")
+    second_gate = Path(f"{gate_prefix}.second")
+    process = _start(
+        tmp_path,
+        "--lifecycle",
+        "--idle-exit-marker",
+        str(marker),
+        "--idle-exit-gate-prefix",
+        str(gate_prefix),
     )
-    assert process.state is ProcessState.FAILED
-    assert process._tree is None
-    assert (process.owner_root / "failure.json").is_file()
-    assert not lease_path.exists()
+    try:
+        first_generation = process.generation_nonce
+        first_gate.write_bytes(b"")
+        deadline = time.monotonic() + 3
+
+        lease_path = process.owner_root / "lease.json"
+        while (
+            (process.restart_count == 0 or not lease_path.exists())
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+
+        assert process.restart_count == 1
+        assert process.generation_nonce != first_generation
+        lease = json.loads(lease_path.read_bytes())
+        assert lease["generation_nonce"] == process.generation_nonce
+        assert lease["server_pid"] == process.process.pid
+
+        second_gate.write_bytes(b"")
+        assert _coordinator_wait(
+            process,
+            lambda: process._coordinator.phase
+            is lsp_process._LifecyclePhase.STOPPED_FAILURE,
+        )
+        assert process.state is ProcessState.FAILED
+        assert process._tree is None
+        assert (process.owner_root / "failure.json").is_file()
+        assert not lease_path.exists()
+    finally:
+        first_gate.touch(exist_ok=True)
+        second_gate.touch(exist_ok=True)
+        if lsp_process._coordinator_has_ownership(process._coordinator):
+            process.close(time.monotonic() + 5)
 
 
 @pytest.mark.parametrize("ending", ["crash", "timeout"])

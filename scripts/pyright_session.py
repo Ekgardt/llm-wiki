@@ -1,18 +1,21 @@
 """Bounded, capability-honest Pyright language-server session."""
 
+import atexit
 import hashlib
 import math
 import os
 import re
 import secrets
 import stat
+import tempfile
 import threading
 import time
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager, suppress
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
+from typing import BinaryIO
 
 import windows_workspace as _windows_workspace
 from bounded_io import read_stable_bytes
@@ -26,7 +29,7 @@ from lsp_positions import (
     SourceDocument,
     path_to_file_uri,
 )
-from lsp_process import LspProcess, ProcessState, StartupCleanupError
+from lsp_process import GenerationLaunch, LspProcess, ProcessState, StartupCleanupError
 from lsp_protocol import (
     MAX_FRAME_BYTES,
     MAX_HOVER_BYTES,
@@ -57,13 +60,21 @@ MAX_LSP_PROCESSES = 4
 
 _OWNER_CLEANUP_SECONDS = 2.0
 _MAX_DOCUMENT_BYTES = MAX_FRAME_BYTES - 1
+_MAX_OPEN_DOCUMENTS = 256
+_MAX_OPEN_DOCUMENT_BYTES = 64 * 1024 * 1024
 _MAX_CONFIGURATION_ITEMS = 64
 _MAX_CONFIGURATION_SECTION_BYTES = 256
 _MAX_PREPARED_CALL_ITEMS = MAX_LOCATIONS
 _MAX_CALL_ITEM_TEXT_BYTES = 4096
 _MAX_DIAGNOSTIC_TEXT_BYTES = 64 * 1024
+_MAX_DIAGNOSTIC_URIS = 256
+_MAX_DIAGNOSTIC_BYTES = 16 * 1024 * 1024
+_DIAGNOSTIC_BASE_BYTES = 128
+_DIAGNOSTIC_RELATED_BASE_BYTES = 96
 _MAX_PROGRESS_TEXT_BYTES = 4096
 _MAX_PROGRESS_EVENTS = 256
+_MAX_PROGRESS_BYTES = 1024 * 1024
+_PROGRESS_EVENT_BASE_BYTES = 32
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 _LSP_UINTEGER_MAX = 2**31 - 1
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -77,6 +88,32 @@ _CAPABILITY_FIELDS = {
     "type_definition": "typeDefinitionProvider",
     "workspace_symbols": "workspaceSymbolProvider",
 }
+_NODE_MAIN_LOADER = "\n".join(
+    (
+        '"use strict";',
+        'const fs = require("node:fs");',
+        'const path = require("node:path");',
+        'const Module = require("node:module");',
+        "const descriptorText = process.argv[1];",
+        "const filename = process.argv[2];",
+        'if (!/^(0|[1-9][0-9]*)$/.test(descriptorText)) throw new Error("invalid held descriptor");',
+        "const descriptor = Number(descriptorText);",
+        'if (!Number.isSafeInteger(descriptor)) throw new Error("invalid held descriptor");',
+        'const source = fs.readFileSync(descriptor, "utf8");',
+        "fs.closeSync(descriptor);",
+        "const argv = process.argv.slice(3);",
+        "process.argv = [process.execPath, filename, ...argv];",
+        "const main = new Module(filename, null);",
+        'main.id = ".";',
+        "main.path = path.dirname(filename);",
+        "main.filename = filename;",
+        "main.paths = Module._nodeModulePaths(main.path);",
+        "process.mainModule = main;",
+        "Module._cache[filename] = main;",
+        "main._compile(source, filename);",
+        "main.loaded = true;",
+    )
+)
 _CLIENT_CAPABILITIES = {
     "general": {"positionEncodings": ("utf-8", "utf-16", "utf-32")},
     "textDocument": {
@@ -165,6 +202,7 @@ class _DiagnosticSnapshot:
     diagnostics: tuple[LspDiagnostic, ...]
     document_version: int | None
     partial: bool
+    retained_bytes: int
 
 
 def _validated_deadline(deadline: float) -> float:
@@ -308,6 +346,19 @@ def _startup_code(error: BaseException) -> str:
     return "pyright_startup_failed"
 
 
+def _startup_interruption(
+    error: BaseException,
+) -> KeyboardInterrupt | SystemExit | None:
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (KeyboardInterrupt, SystemExit)):
+            return current
+        current = current.__cause__
+    return None
+
+
 def _lsp_coordinate(value: object) -> int | None:
     if (
         isinstance(value, bool)
@@ -441,15 +492,20 @@ class _LaunchServerGuard:
         path: Path,
         expected_sha256: str,
         *,
+        command: tuple[str, ...],
         deadline: float,
     ) -> None:
         self._path = path
         self._expected_sha256 = expected_sha256
+        self._command = command
         self._deadline = deadline
         self._descriptor: int | None = None
+        self._snapshot: BinaryIO | None = None
+        self._snapshot_path: Path | None = None
+        self._launch_descriptor: int | None = None
         self._state: tuple[int, int, int, int, int, int] | None = None
 
-    def __enter__(self) -> "_LaunchServerGuard":
+    def __enter__(self) -> "_LaunchServerGuard | GenerationLaunch":
         _require_startup_deadline(self._deadline)
         before = _path_identity(self._path)
         if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_SERVER_BYTES:
@@ -480,11 +536,95 @@ class _LaunchServerGuard:
             if _launch_file_state(before) != state or not stat.S_ISREG(opened.st_mode):
                 raise _BootstrapDegradation("pyright_executable_digest_mismatch")
             self._state = state
+            if os.name == "posix":
+                snapshot_descriptor, snapshot_name = tempfile.mkstemp()
+                self._snapshot_path = Path(snapshot_name)
+                try:
+                    snapshot = os.fdopen(snapshot_descriptor, "w+b")
+                except BaseException:
+                    os.close(snapshot_descriptor)
+                    raise
+                self._snapshot = snapshot
+                actual = self._copy_snapshot(snapshot)
+                self._verify_digest(actual)
+                launch_descriptor = os.open(
+                    self._snapshot_path,
+                    os.O_RDONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                )
+                self._launch_descriptor = launch_descriptor
+                launch_info = os.fstat(launch_descriptor)
+                snapshot_info = os.fstat(snapshot.fileno())
+                if (
+                    not stat.S_ISREG(launch_info.st_mode)
+                    or launch_info.st_size != before.st_size
+                    or _launch_file_state(launch_info)
+                    != _launch_file_state(snapshot_info)
+                ):
+                    raise _BootstrapDegradation(
+                        "pyright_executable_digest_mismatch"
+                    )
+                os.unlink(self._snapshot_path)
+                self._snapshot_path = None
+                snapshot.close()
+                self._snapshot = None
+                return GenerationLaunch(
+                    self._posix_launch_command(launch_descriptor),
+                    (launch_descriptor,),
+                )
             self.verify()
         except BaseException:
             self.close()
             raise
         return self
+
+    @staticmethod
+    def _descriptor_path(descriptor: int) -> str:
+        for root in (Path("/proc/self/fd"), Path("/dev/fd")):
+            if root.is_dir():
+                return str(root / str(descriptor))
+        raise RuntimeError("POSIX inherited descriptor paths are unavailable")
+
+    def _posix_launch_command(self, descriptor: int) -> tuple[str, ...]:
+        if self._path.suffix.casefold() == ".js":
+            return (
+                self._command[0],
+                "--eval",
+                _NODE_MAIN_LOADER,
+                "--",
+                str(descriptor),
+                str(self._path),
+                *self._command[2:],
+            )
+        return (
+            self._command[0],
+            self._descriptor_path(descriptor),
+            *self._command[2:],
+        )
+
+    def _copy_snapshot(self, snapshot: BinaryIO) -> str:
+        descriptor = self._descriptor
+        if descriptor is None:
+            raise RuntimeError("Pyright launch server guard is closed")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        snapshot.seek(0)
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            _require_startup_deadline(self._deadline)
+            chunk = os.read(descriptor, 64 * 1024)
+            _require_startup_deadline(self._deadline)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_SERVER_BYTES:
+                raise _BootstrapDegradation("pyright_executable_digest_mismatch")
+            snapshot.write(chunk)
+            digest.update(chunk)
+        snapshot.flush()
+        snapshot.seek(0)
+        return digest.hexdigest()
 
     def _digest(self) -> str:
         descriptor = self._descriptor
@@ -514,6 +654,13 @@ class _LaunchServerGuard:
         if _launch_file_state(os.fstat(descriptor)) != state:
             raise _BootstrapDegradation("pyright_executable_digest_mismatch")
         actual = self._digest()
+        self._verify_digest(actual)
+
+    def _verify_digest(self, actual: str) -> None:
+        descriptor = self._descriptor
+        state = self._state
+        if descriptor is None or state is None:
+            raise RuntimeError("Pyright launch server guard is not open")
         _require_startup_deadline(self._deadline)
         after = os.fstat(descriptor)
         current = _path_identity(self._path)
@@ -526,10 +673,42 @@ class _LaunchServerGuard:
         _require_startup_deadline(self._deadline)
 
     def close(self) -> None:
+        snapshot = self._snapshot
+        self._snapshot = None
+        snapshot_path = self._snapshot_path
+        self._snapshot_path = None
+        launch_descriptor = self._launch_descriptor
+        self._launch_descriptor = None
         descriptor = self._descriptor
         self._descriptor = None
+        first_error: BaseException | None = None
+        if snapshot is not None:
+            try:
+                snapshot.close()
+            except BaseException as error:
+                first_error = error
+        if snapshot_path is not None:
+            try:
+                os.unlink(snapshot_path)
+            except FileNotFoundError:
+                pass
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
+        if launch_descriptor is not None:
+            try:
+                os.close(launch_descriptor)
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
         if descriptor is not None:
-            os.close(descriptor)
+            try:
+                os.close(descriptor)
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            raise first_error
 
     def __exit__(self, error_type: object, *_error: object) -> None:
         try:
@@ -561,6 +740,7 @@ class PyrightSession:
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
         self._document_lock = threading.Lock()
+        self._wire_condition = threading.Condition(threading.Lock())
         self._readiness = "not_ready"
         self._readiness_evidence: tuple[str, ...] = ()
         self._position_encoding = None
@@ -570,13 +750,23 @@ class PyrightSession:
         self._last_used_monotonic = time.monotonic()
         self._process: LspProcess | None = None
         self._documents: dict[str, OpenDocument] = {}
+        self._document_bytes = 0
         self._readiness_target_uri: str | None = None
         self._generation_nonce: str | None = None
         self._ready_uri_generations: dict[str, str] = {}
         self._diagnostics: dict[str, _DiagnosticSnapshot] = {}
+        self._diagnostic_bytes = 0
         self._progress_events: list[tuple[object, ...]] = []
+        self._progress_bytes = 0
+        self._wire_generation: str | None = None
+        self._wire_opened: set[tuple[str, str, int]] = set()
+        self._wire_failed: set[tuple[str, str, int]] = set()
+        self._wire_sending: set[tuple[str, str, int]] = set()
         self._starting = False
         self._startup_attempted = False
+        self._startup_cleanup_error: StartupCleanupError | None = None
+        self._startup_process: LspProcess | None = None
+        self._startup_atexit_registered = False
         self._closing = False
         self._closed = False
 
@@ -623,6 +813,29 @@ class PyrightSession:
     def progress_events(self) -> tuple[tuple[object, ...], ...]:
         with self._lock:
             return tuple(self._progress_events)
+
+    def _sync_startup_atexit_locked(self) -> None:
+        retained = (
+            self._startup_cleanup_error is not None
+            or self._startup_process is not None
+        )
+        if retained and not self._startup_atexit_registered:
+            atexit.register(self._atexit_cleanup)
+            self._startup_atexit_registered = True
+        elif not retained and self._startup_atexit_registered:
+            atexit.unregister(self._atexit_cleanup)
+            self._startup_atexit_registered = False
+
+    def _retain_startup_cleanup_locked(self, error: StartupCleanupError) -> None:
+        self._startup_cleanup_error = error
+        self._sync_startup_atexit_locked()
+        error.transfer_cleanup_ownership()
+
+    def _atexit_cleanup(self) -> None:
+        try:
+            self.close(deadline=time.monotonic() + _OWNER_CLEANUP_SECONDS)
+        except BaseException:
+            pass
 
     @contextmanager
     def _operation(self) -> Iterator[None]:
@@ -690,11 +903,161 @@ class PyrightSession:
             raise ValueError("server request params exceed their bound")
         return None
 
+    @staticmethod
+    def _progress_event_bytes(event: tuple[object, ...]) -> int:
+        return _PROGRESS_EVENT_BASE_BYTES + sum(
+            len(value.encode("utf-8", errors="strict"))
+            for value in event
+            if isinstance(value, str)
+        )
+
     def _retain_progress(self, event: tuple[object, ...]) -> None:
+        event_bytes = self._progress_event_bytes(event)
+        if event_bytes > _MAX_PROGRESS_BYTES:
+            return
         with self._lock:
             self._progress_events.append(event)
-            if len(self._progress_events) > _MAX_PROGRESS_EVENTS:
-                del self._progress_events[: -_MAX_PROGRESS_EVENTS]
+            self._progress_bytes += event_bytes
+            while (
+                len(self._progress_events) > _MAX_PROGRESS_EVENTS
+                or self._progress_bytes > _MAX_PROGRESS_BYTES
+            ):
+                removed = self._progress_events.pop(0)
+                self._progress_bytes -= self._progress_event_bytes(removed)
+
+    def _begin_wire_generation(self, generation_nonce: str) -> None:
+        with self._wire_condition:
+            self._wire_generation = generation_nonce
+            self._wire_opened.clear()
+            self._wire_failed.clear()
+            self._wire_condition.notify_all()
+
+    def _discard_wire_generation(self, generation_nonce: str) -> None:
+        with self._wire_condition:
+            if self._wire_generation == generation_nonce:
+                self._wire_generation = None
+                self._wire_opened.clear()
+                self._wire_failed.clear()
+            self._wire_condition.notify_all()
+
+    def _clear_wire_state(self) -> None:
+        with self._wire_condition:
+            self._wire_generation = None
+            self._wire_opened.clear()
+            self._wire_failed.clear()
+            self._wire_condition.notify_all()
+
+    def _wire_document_opened(
+        self,
+        document: OpenDocument,
+        generation_nonce: str | None,
+    ) -> bool:
+        if generation_nonce is None:
+            return False
+        key = (generation_nonce, document.source.uri, document.version)
+        with self._wire_condition:
+            return self._wire_generation == generation_nonce and key in self._wire_opened
+
+    def _send_did_open_once(
+        self,
+        document: OpenDocument,
+        generation_nonce: str,
+        *,
+        deadline: float,
+        notify: Callable[[], bool | None],
+    ) -> bool:
+        key = (generation_nonce, document.source.uri, document.version)
+        with self._wire_condition:
+            while key in self._wire_sending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not self._wire_condition.wait(remaining):
+                    raise TimeoutError("Pyright didOpen send gate deadline expired")
+            if self._wire_generation != generation_nonce:
+                return False
+            if key in self._wire_opened:
+                return True
+            if key in self._wire_failed:
+                return False
+            self._wire_sending.add(key)
+
+        sent = False
+        try:
+            sent = notify() is not False
+        except BaseException:
+            with self._wire_condition:
+                if self._wire_generation == generation_nonce:
+                    self._wire_failed.add(key)
+            raise
+        finally:
+            with self._wire_condition:
+                self._wire_sending.remove(key)
+                retained = sent and self._wire_generation == generation_nonce
+                if retained:
+                    self._wire_opened.add(key)
+                self._wire_condition.notify_all()
+        return retained
+
+    @staticmethod
+    def _did_open_params(document: OpenDocument) -> dict[str, object]:
+        return {
+            "textDocument": {
+                "uri": document.source.uri,
+                "languageId": "python",
+                "version": document.version,
+                "text": document.content.decode("utf-8", errors="strict"),
+            }
+        }
+
+    def _send_protocol_did_open(
+        self,
+        document: OpenDocument,
+        protocol: LspProtocol,
+        generation_nonce: str,
+        *,
+        deadline: float,
+    ) -> bool:
+        params = self._did_open_params(document)
+        return self._send_did_open_once(
+            document,
+            generation_nonce,
+            deadline=deadline,
+            notify=lambda: protocol.notify(
+                "textDocument/didOpen",
+                params,
+                deadline=deadline,
+            ),
+        )
+
+    def _send_process_did_open(
+        self,
+        document: OpenDocument,
+        process: LspProcess,
+        *,
+        deadline: float,
+    ) -> bool:
+        attempted: set[str] = set()
+        while True:
+            with self._lock:
+                generation_nonce = self._generation_nonce
+            if generation_nonce is None or generation_nonce in attempted:
+                return False
+            attempted.add(generation_nonce)
+            params = self._did_open_params(document)
+            if self._send_did_open_once(
+                document,
+                generation_nonce,
+                deadline=deadline,
+                notify=lambda: process.notify_generation(
+                    "textDocument/didOpen",
+                    params,
+                    generation_nonce=generation_nonce,
+                    deadline=deadline,
+                ),
+            ):
+                return True
+            with self._lock:
+                if self._generation_nonce == generation_nonce:
+                    return False
 
     def _progress(self, method: str, params: object) -> None:
         if method == "$/progress":
@@ -811,6 +1174,38 @@ class PyrightSession:
             partial,
         )
 
+    @staticmethod
+    def _diagnostic_retained_bytes(diagnostic: LspDiagnostic) -> int:
+        size = (
+            _DIAGNOSTIC_BASE_BYTES
+            + len(diagnostic.uri.encode("utf-8", errors="strict"))
+            + len(diagnostic.message.encode("utf-8", errors="strict"))
+        )
+        if diagnostic.code is not None:
+            size += len(diagnostic.code.encode("utf-8", errors="strict"))
+        for location, message in diagnostic.related:
+            size += _DIAGNOSTIC_RELATED_BASE_BYTES
+            size += len(location.uri.encode("utf-8", errors="strict"))
+            if message is not None:
+                size += len(message.encode("utf-8", errors="strict"))
+        return size
+
+    @staticmethod
+    def _diagnostic_update_is_stale(
+        document: OpenDocument,
+        existing: _DiagnosticSnapshot | None,
+        version: int | None,
+    ) -> bool:
+        if version is not None and version < document.version:
+            return True
+        if existing is None:
+            return False
+        return (
+            version is not None
+            and existing.document_version is not None
+            and version < existing.document_version
+        ) or (version is None and existing.document_version is not None)
+
     def _publish_diagnostics(self, params: object) -> None:
         if not isinstance(params, dict):
             return
@@ -830,20 +1225,13 @@ class PyrightSession:
                 return
         with self._lock:
             document = self._documents.get(source.uri)
-            existing = self._diagnostics.get(source.uri)
-            if (
-                version is not None
-                and document is not None
-                and version < document.version
-            ):
+            if document is None:
                 return
-            if existing is not None:
-                if (
-                    version is not None
-                    and existing.document_version is not None
-                    and version < existing.document_version
-                ) or (version is None and existing.document_version is not None):
-                    return
+            existing = self._diagnostics.get(source.uri)
+            if self._diagnostic_update_is_stale(document, existing, version):
+                return
+            if existing is None and len(self._diagnostics) >= _MAX_DIAGNOSTIC_URIS:
+                return
 
         partial = len(diagnostics_value) > MAX_LOCATIONS
         diagnostics: list[LspDiagnostic] = []
@@ -852,17 +1240,36 @@ class PyrightSession:
             partial = partial or filtered
             if diagnostic is not None:
                 diagnostics.append(diagnostic)
-        snapshot = _DiagnosticSnapshot(tuple(diagnostics), version, partial)
+        retained_bytes = _DIAGNOSTIC_BASE_BYTES + sum(
+            self._diagnostic_retained_bytes(diagnostic) for diagnostic in diagnostics
+        )
+        if retained_bytes > _MAX_DIAGNOSTIC_BYTES:
+            return
+        snapshot = _DiagnosticSnapshot(
+            tuple(diagnostics),
+            version,
+            partial,
+            retained_bytes,
+        )
         with self._lock:
+            current_document = self._documents.get(source.uri)
+            if current_document is None:
+                return
             existing = self._diagnostics.get(source.uri)
-            if (
-                existing is not None
-                and version is not None
-                and existing.document_version is not None
-                and version < existing.document_version
+            if self._diagnostic_update_is_stale(
+                current_document,
+                existing,
+                version,
             ):
                 return
+            if existing is None and len(self._diagnostics) >= _MAX_DIAGNOSTIC_URIS:
+                return
+            previous_bytes = existing.retained_bytes if existing is not None else 0
+            aggregate_bytes = self._diagnostic_bytes - previous_bytes + retained_bytes
+            if aggregate_bytes > _MAX_DIAGNOSTIC_BYTES:
+                return
             self._diagnostics[source.uri] = snapshot
+            self._diagnostic_bytes = aggregate_bytes
             self._condition.notify_all()
 
     def _bootstrap_generation(
@@ -895,36 +1302,31 @@ class PyrightSession:
             {"settings": thaw_pyright_profile_value(PYRIGHT_CONFIGURATION)},
             deadline=deadline,
         )
-        with self._lock:
-            documents = tuple(self._documents.values())
-            self._generation_nonce = _generation_nonce
-            self._ready_uri_generations.clear()
-            self._diagnostics.clear()
-            self._capabilities = capabilities
-            self._position_encoding = encoding
-            self._readiness_evidence = (
-                "initialize",
-                "initialized",
-                "configuration",
-            )
-            self._readiness = "protocol_initialized"
+        documents: tuple[OpenDocument, ...] = ()
         try:
-            for document in documents:
-                protocol.notify(
-                    "textDocument/didOpen",
-                    {
-                        "textDocument": {
-                            "uri": document.source.uri,
-                            "languageId": "python",
-                            "version": document.version,
-                            "text": document.content.decode(
-                                "utf-8",
-                                errors="strict",
-                            ),
-                        }
-                    },
-                    deadline=deadline,
+            self._begin_wire_generation(_generation_nonce)
+            with self._lock:
+                documents = tuple(self._documents.values())
+                self._generation_nonce = _generation_nonce
+                self._ready_uri_generations.clear()
+                self._diagnostics.clear()
+                self._diagnostic_bytes = 0
+                self._capabilities = capabilities
+                self._position_encoding = encoding
+                self._readiness_evidence = (
+                    "initialize",
+                    "initialized",
+                    "configuration",
                 )
+                self._readiness = "protocol_initialized"
+            for document in documents:
+                if not self._send_protocol_did_open(
+                    document,
+                    protocol,
+                    _generation_nonce,
+                    deadline=deadline,
+                ):
+                    raise RuntimeError("Pyright generation changed during didOpen")
             if capabilities["document_symbols"]:
                 for document in documents:
                     try:
@@ -945,7 +1347,7 @@ class PyrightSession:
                                     document.source.uri
                                 ] = _generation_nonce
                 with self._lock:
-                    self._refresh_readiness_locked()
+                    self._refresh_readiness_locked(deadline=deadline)
                     ready = self._readiness == "query_ready"
                 return (
                     ProcessState.WORKSPACE_READY
@@ -966,6 +1368,7 @@ class PyrightSession:
                             }
                         )
                     )
+            self._discard_wire_generation(_generation_nonce)
             raise
         return ProcessState.PROTOCOL_INITIALIZED
 
@@ -1006,6 +1409,8 @@ class PyrightSession:
         )
         bootstrap_timeout_seconds = startup_deadline - startup_started
         with self._operation():
+            retained_cleanup: StartupCleanupError | None = None
+            retained_process: LspProcess | None = None
             with self._lock:
                 if self._closed or self._closing:
                     raise RuntimeError("Pyright session is closed")
@@ -1032,102 +1437,210 @@ class PyrightSession:
                     return
                 if not self._identity.qualified:
                     return
-                if self._startup_attempted:
+                retained_cleanup = self._startup_cleanup_error
+                retained_process = self._startup_process
+                if (
+                    self._startup_attempted
+                    and retained_cleanup is None
+                    and retained_process is None
+                ):
                     return
                 self._starting = True
-                self._startup_attempted = True
+                if retained_cleanup is None and retained_process is None:
+                    self._startup_attempted = True
 
             process: LspProcess | None = None
             try:
-                node, server = self._validated_qualified_paths(
-                    deadline=startup_deadline
-                )
-                _ensure_lsp_parent(self._state_root, deadline=startup_deadline)
-                owner = lsp_owner_root(self._state_root, secrets.token_hex(16))
-                process = LspProcess.start_configured(
-                    (
-                        str(node),
-                        str(server),
-                        "--stdio",
-                        f"--cancellationReceive=file:{owner / 'cancellation'}",
-                    ),
-                    cwd=Path(self._repository.checkout_root),
-                    owner_root=owner,
-                    deadline=startup_deadline,
-                    server_request_handlers={
-                        "client/registerCapability": self._benign_server_request,
-                        "client/unregisterCapability": self._benign_server_request,
-                        "window/workDoneProgress/create": self._benign_server_request,
-                        "workspace/configuration": self._configuration,
-                    },
-                    server_notification_handlers={
-                        "$/progress": lambda params: self._progress(
-                            "$/progress", params
-                        ),
-                        "pyright/beginProgress": lambda params: self._progress(
-                            "pyright/beginProgress", params
-                        ),
-                        "pyright/endProgress": lambda params: self._progress(
-                            "pyright/endProgress", params
-                        ),
-                        "pyright/reportProgress": lambda params: self._progress(
-                            "pyright/reportProgress", params
-                        ),
-                        "textDocument/publishDiagnostics": self._publish_diagnostics,
-                    },
-                    generation_bootstrap=self._bootstrap_generation,
-                    bootstrap_timeout_seconds=bootstrap_timeout_seconds,
-                    generation_guard=lambda _generation_nonce, generation_deadline: (
-                        _LaunchServerGuard(
-                            server,
-                            self._identity.executable_sha256,
-                            deadline=generation_deadline,
-                        )
-                    ),
-                )
-            except (TypeError, ValueError):
-                with self._lock:
-                    self._starting = False
-                    self._startup_attempted = False
-                    self._condition.notify_all()
-                raise
-            except (
-                JsonRpcResponseError,
-                OSError,
-                ProtocolViolation,
-                RuntimeError,
-                TimeoutError,
-            ) as error:
-                if isinstance(error, StartupCleanupError):
-                    with suppress(BaseException):
-                        error.retry_cleanup(
-                            min(
-                                startup_deadline,
-                                time.monotonic() + _OWNER_CLEANUP_SECONDS,
-                            )
-                        )
-                code = _startup_code(error)
-                with self._lock:
-                    self._process = None
-                    self._readiness = "not_ready"
-                    self._readiness_evidence = ()
-                    self._position_encoding = None
-                    self._capabilities = {}
-                    self._degradation_codes = tuple(
-                        sorted({*self._degradation_codes, code})
-                    )
-                    self._starting = False
-                    self._condition.notify_all()
-                return
+                if retained_cleanup is not None:
+                    try:
+                        retained_cleanup.retry_cleanup(startup_deadline)
+                    except (KeyboardInterrupt, SystemExit):
+                        raise
+                    except (OSError, RuntimeError, TimeoutError):
+                        return
+                    with self._lock:
+                        if self._startup_cleanup_error is retained_cleanup:
+                            self._startup_cleanup_error = None
+                            self._sync_startup_atexit_locked()
 
-            with self._lock:
-                self._process = process
-                self._starting = False
-                self._condition.notify_all()
+                if retained_process is not None:
+                    try:
+                        retained_process.close(startup_deadline)
+                    except (KeyboardInterrupt, SystemExit):
+                        raise
+                    except (OSError, RuntimeError, TimeoutError):
+                        return
+                    with self._lock:
+                        if self._startup_process is retained_process:
+                            self._startup_process = None
+                            self._sync_startup_atexit_locked()
+
+                with self._lock:
+                    self._startup_attempted = True
+
+                try:
+                    node, server = self._validated_qualified_paths(
+                        deadline=startup_deadline
+                    )
+                    _ensure_lsp_parent(self._state_root, deadline=startup_deadline)
+                    owner = lsp_owner_root(self._state_root, secrets.token_hex(16))
+                    process = LspProcess.start_configured(
+                        (
+                            str(node),
+                            str(server),
+                            "--stdio",
+                            f"--cancellationReceive=file:{owner / 'cancellation'}",
+                        ),
+                        cwd=Path(self._repository.checkout_root),
+                        owner_root=owner,
+                        deadline=startup_deadline,
+                        server_request_handlers={
+                            "client/registerCapability": self._benign_server_request,
+                            "client/unregisterCapability": self._benign_server_request,
+                            "window/workDoneProgress/create": self._benign_server_request,
+                            "workspace/configuration": self._configuration,
+                        },
+                        server_notification_handlers={
+                            "$/progress": lambda params: self._progress(
+                                "$/progress", params
+                            ),
+                            "pyright/beginProgress": lambda params: self._progress(
+                                "pyright/beginProgress", params
+                            ),
+                            "pyright/endProgress": lambda params: self._progress(
+                                "pyright/endProgress", params
+                            ),
+                            "pyright/reportProgress": lambda params: self._progress(
+                                "pyright/reportProgress", params
+                            ),
+                            "textDocument/publishDiagnostics": self._publish_diagnostics,
+                        },
+                        generation_bootstrap=self._bootstrap_generation,
+                        bootstrap_timeout_seconds=bootstrap_timeout_seconds,
+                        generation_guard=(
+                            lambda _generation_nonce, generation_deadline: (
+                                _LaunchServerGuard(
+                                    server,
+                                    self._identity.executable_sha256,
+                                    command=(
+                                        str(node),
+                                        str(server),
+                                        "--stdio",
+                                        f"--cancellationReceive=file:{owner / 'cancellation'}",
+                                    ),
+                                    deadline=generation_deadline,
+                                )
+                            )
+                        ),
+                    )
+                except BaseException as error:
+                    interruption = _startup_interruption(error)
+                    retained_error: StartupCleanupError | None = None
+                    if isinstance(error, StartupCleanupError):
+                        try:
+                            error.retry_cleanup(
+                                min(
+                                    startup_deadline,
+                                    time.monotonic() + _OWNER_CLEANUP_SECONDS,
+                                )
+                            )
+                        except (KeyboardInterrupt, SystemExit):
+                            with self._lock:
+                                self._retain_startup_cleanup_locked(error)
+                            raise
+                        except BaseException:
+                            retained_error = error
+                    if interruption is not None:
+                        with self._lock:
+                            if retained_error is not None:
+                                self._retain_startup_cleanup_locked(retained_error)
+                            else:
+                                self._startup_cleanup_error = None
+                                self._sync_startup_atexit_locked()
+                        if interruption is error:
+                            raise
+                        raise interruption.with_traceback(
+                            interruption.__traceback__
+                        ) from error
+                    if isinstance(error, (TypeError, ValueError)):
+                        with self._lock:
+                            self._startup_attempted = False
+                        raise
+                    if not isinstance(
+                        error,
+                        (
+                            JsonRpcResponseError,
+                            OSError,
+                            ProtocolViolation,
+                            RuntimeError,
+                            TimeoutError,
+                        ),
+                    ):
+                        raise
+                    code = _startup_code(error)
+                    with self._lock:
+                        self._process = None
+                        if retained_error is not None:
+                            self._retain_startup_cleanup_locked(retained_error)
+                        else:
+                            self._startup_cleanup_error = None
+                            self._sync_startup_atexit_locked()
+                        self._readiness = "not_ready"
+                        self._readiness_evidence = ()
+                        self._position_encoding = None
+                        self._capabilities = {}
+                        self._degradation_codes = tuple(
+                            sorted({*self._degradation_codes, code})
+                        )
+                    return
+
+                with self._lock:
+                    self._process = process
+                    self._startup_process = None
+                    self._sync_startup_atexit_locked()
+            except BaseException as error:
+                if process is not None:
+                    cleanup_deadline = min(
+                        startup_deadline,
+                        time.monotonic() + _OWNER_CLEANUP_SECONDS,
+                    )
+                    retained_process_owner: LspProcess | None = None
+                    try:
+                        process.close(cleanup_deadline)
+                    except BaseException:
+                        retained_process_owner = process
+                    with self._lock:
+                        if self._process is process:
+                            self._process = None
+                        self._startup_process = retained_process_owner
+                        self._sync_startup_atexit_locked()
+                        self._readiness = "not_ready"
+                        self._readiness_evidence = ()
+                        self._position_encoding = None
+                        self._capabilities = {}
+                        self._generation_nonce = None
+                        self._ready_uri_generations.clear()
+                        self._diagnostics.clear()
+                        self._diagnostic_bytes = 0
+                        self._clear_wire_state()
+                if _startup_interruption(error) is not None:
+                    with self._lock:
+                        self._startup_attempted = False
+                raise
+            finally:
+                with self._lock:
+                    self._starting = False
+                    self._condition.notify_all()
 
     def _document_ready_locked(self, uri: str) -> bool:
         generation = self._generation_nonce
-        return generation is not None and self._ready_uri_generations.get(uri) == generation
+        document = self._documents.get(uri)
+        return (
+            generation is not None
+            and document is not None
+            and self._ready_uri_generations.get(uri) == generation
+            and self._wire_document_opened(document, generation)
+        )
 
     def _reconcile_process_state_locked(self) -> None:
         process = self._process
@@ -1149,14 +1662,48 @@ class PyrightSession:
         self._generation_nonce = None
         self._ready_uri_generations.clear()
         self._diagnostics.clear()
+        self._diagnostic_bytes = 0
+        self._clear_wire_state()
 
-    def _refresh_readiness_locked(self) -> None:
+    def _refresh_readiness_locked(self, *, deadline: float) -> None:
         if self._position_encoding is None:
             self._readiness = "not_ready"
             self._readiness_evidence = ()
             return
         target = self._readiness_target_uri
+        process = self._process
+        generation = self._generation_nonce
         if target is not None and self._document_ready_locked(target):
+            if (
+                process is not None
+                and generation is not None
+                and process.generation_nonce == generation
+            ):
+                try:
+                    promoted = process.promote_workspace_ready(
+                        generation_nonce=generation,
+                        deadline=deadline,
+                    )
+                except BaseException:
+                    self._ready_uri_generations.pop(target, None)
+                    self._readiness = "protocol_initialized"
+                    self._readiness_evidence = (
+                        "initialize",
+                        "initialized",
+                        "configuration",
+                        "didOpen",
+                    )
+                    raise
+                if not promoted:
+                    self._ready_uri_generations.pop(target, None)
+                    self._readiness = "protocol_initialized"
+                    self._readiness_evidence = (
+                        "initialize",
+                        "initialized",
+                        "configuration",
+                        "didOpen",
+                    )
+                    return
             self._readiness = "query_ready"
             self._readiness_evidence = (
                 "initialize",
@@ -1165,30 +1712,24 @@ class PyrightSession:
                 "didOpen",
                 "documentSymbol",
             )
-            if self._process is not None and self._process.state not in {
-                ProcessState.DEGRADED,
-                ProcessState.FAILED,
-            }:
-                self._process.state = ProcessState.WORKSPACE_READY
             return
         self._readiness = "protocol_initialized"
+        did_open = any(
+            self._wire_document_opened(document, generation)
+            for document in self._documents.values()
+        )
         self._readiness_evidence = (
             "initialize",
             "initialized",
             "configuration",
-            *(('didOpen',) if self._documents else ()),
+            *(("didOpen",) if did_open else ()),
         )
-        if self._process is not None and self._process.state not in {
-            ProcessState.DEGRADED,
-            ProcessState.FAILED,
-        }:
-            self._process.state = ProcessState.PROTOCOL_INITIALIZED
 
-    def _mark_protocol_initialized(self, *, did_open: bool) -> None:
+    def _mark_protocol_initialized(self, *, did_open: bool, deadline: float) -> None:
         with self._lock:
             if not did_open and self._readiness_target_uri is not None:
                 self._ready_uri_generations.pop(self._readiness_target_uri, None)
-            self._refresh_readiness_locked()
+            self._refresh_readiness_locked(deadline=deadline)
 
     def _probe_document(
         self,
@@ -1200,7 +1741,7 @@ class PyrightSession:
         with self._lock:
             supported = self._capabilities.get("document_symbols", False)
         if not supported:
-            self._mark_protocol_initialized(did_open=True)
+            self._mark_protocol_initialized(did_open=True, deadline=deadline)
             return
         try:
             result = process.request(
@@ -1211,18 +1752,18 @@ class PyrightSession:
         except (JsonRpcResponseError, ProtocolViolation, RuntimeError, TimeoutError):
             with self._lock:
                 self._ready_uri_generations.pop(document.source.uri, None)
-                self._refresh_readiness_locked()
+                self._refresh_readiness_locked(deadline=deadline)
             return
         if self._normalize_document_symbols(result, document.source.uri)[1]:
             with self._lock:
                 self._ready_uri_generations.pop(document.source.uri, None)
-                self._refresh_readiness_locked()
+                self._refresh_readiness_locked(deadline=deadline)
             return
         with self._lock:
             generation = process.generation_nonce
             self._generation_nonce = generation
             self._ready_uri_generations[document.source.uri] = generation
-            self._refresh_readiness_locked()
+            self._refresh_readiness_locked(deadline=deadline)
 
     def open_document(self, path: str, *, deadline: float) -> OpenDocument:
         deadline = _validated_deadline(deadline)
@@ -1237,7 +1778,7 @@ class PyrightSession:
                 label="Pyright source document",
                 deadline=deadline,
             )
-            text = content.decode("utf-8", errors="strict")
+            content.decode("utf-8", errors="strict")
             digest = hashlib.sha256(content).hexdigest()
             with self._lock:
                 current = self._documents.get(source.uri)
@@ -1253,18 +1794,25 @@ class PyrightSession:
                 ):
                     raise RuntimeError("open Pyright document changed without synchronization")
                 if not ready:
+                    try:
+                        did_open = self._send_process_did_open(
+                            current,
+                            process,
+                            deadline=deadline,
+                        )
+                    except (ProtocolViolation, RuntimeError, TimeoutError):
+                        did_open = False
+                    self._mark_protocol_initialized(
+                        did_open=did_open,
+                        deadline=deadline,
+                    )
+                    if not did_open:
+                        return current
                     self._probe_document(current, process, deadline=deadline)
                 return current
 
             document = OpenDocument(source, content, digest, 1)
-            did_open = {
-                "textDocument": {
-                    "uri": source.uri,
-                    "languageId": "python",
-                    "version": document.version,
-                    "text": text,
-                }
-            }
+            did_open = self._did_open_params(document)
             try:
                 encode_frame(
                     {
@@ -1276,19 +1824,29 @@ class PyrightSession:
             except ProtocolViolation as error:
                 raise ValueError("Pyright source document exceeds the LSP frame") from error
             with self._lock:
+                if len(self._documents) >= _MAX_OPEN_DOCUMENTS:
+                    raise RuntimeError("Pyright open document count limit exceeded")
+                document_bytes = self._document_bytes + len(content)
+                if document_bytes > _MAX_OPEN_DOCUMENT_BYTES:
+                    raise RuntimeError(
+                        "Pyright open document source bytes limit exceeded"
+                    )
                 self._documents[source.uri] = document
+                self._document_bytes = document_bytes
                 self._readiness_target_uri = source.uri
                 self._ready_uri_generations.pop(source.uri, None)
             try:
-                process.notify(
-                    "textDocument/didOpen",
-                    did_open,
+                sent = self._send_process_did_open(
+                    document,
+                    process,
                     deadline=deadline,
                 )
             except (ProtocolViolation, RuntimeError, TimeoutError):
-                self._mark_protocol_initialized(did_open=False)
+                self._mark_protocol_initialized(did_open=False, deadline=deadline)
                 return document
-            self._mark_protocol_initialized(did_open=True)
+            self._mark_protocol_initialized(did_open=sent, deadline=deadline)
+            if not sent:
+                return document
             self._probe_document(document, process, deadline=deadline)
             return document
 
@@ -1892,11 +2450,22 @@ class PyrightSession:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or not self._condition.wait(remaining):
                     raise TimeoutError("Pyright startup did not finish before close")
-            if self._closed and self._process is None:
+            cleanup_error = self._startup_cleanup_error
+            startup_process = self._startup_process
+            if (
+                self._closed
+                and self._process is None
+                and cleanup_error is None
+                and startup_process is None
+            ):
                 return
             process = self._process
             self._closing = True
         try:
+            if cleanup_error is not None:
+                cleanup_error.retry_cleanup(deadline)
+            if startup_process is not None:
+                startup_process.close(deadline)
             if process is not None:
                 process.close(deadline)
         except BaseException:
@@ -1905,6 +2474,11 @@ class PyrightSession:
                 self._condition.notify_all()
             raise
         with self._lock:
+            if self._startup_cleanup_error is cleanup_error:
+                self._startup_cleanup_error = None
+            if self._startup_process is startup_process:
+                self._startup_process = None
+            self._sync_startup_atexit_locked()
             if self._process is process:
                 self._process = None
             self._readiness = "not_ready"
@@ -1912,11 +2486,15 @@ class PyrightSession:
             self._position_encoding = None
             self._capabilities = {}
             self._documents.clear()
+            self._document_bytes = 0
             self._readiness_target_uri = None
             self._generation_nonce = None
             self._ready_uri_generations.clear()
             self._diagnostics.clear()
+            self._diagnostic_bytes = 0
             self._progress_events.clear()
+            self._progress_bytes = 0
+            self._clear_wire_state()
             self._closing = False
             self._closed = True
             self._condition.notify_all()

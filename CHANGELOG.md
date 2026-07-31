@@ -34,7 +34,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   transactions/tasks/results, the 30-day undo window, and live owners.
 - Recorded the local-filesystem requirement, current `synchronous=FULL`/no-WAL
   policy, bounded defaults and CLI overrides, cooperating-writer CAS boundary, and
-  explicit non-goals. The suite now collects **5063 tests**.
+  explicit non-goals. The suite now collects **5087 tests**.
 - Added canonical `repository-scope/v1` binding for repositories, linked worktrees,
   checkout roots, Git common directories, and captured commits. Generation readers
   reject the wrong repository/worktree scope instead of returning cross-checkout
@@ -70,6 +70,10 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Harden Pyright session ownership, generation-scoped `didOpen`, aggregate source and
+  diagnostic bounds, interrupt cleanup, and lifecycle-owned readiness promotion. On
+  POSIX, execute digest-verified server bytes from a held read-only descriptor through
+  a bounded Node loader that preserves the original CommonJS filename and arguments.
 - Requalify the pinned Pyright server before every initial or replacement LSP
   generation, hold its launch guard through bootstrap, and reject changed
   executables before a candidate generation can become active.
@@ -130,9 +134,9 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   deadline and the previously published lease expiry, so a reader cannot cause a
   refresh to outlive the lease silently.
 - Retain incomplete LSP startup ownership in a bounded module registry before the
-  first owned mutation. Normal interpreter exit retries the registry under one
-  deadline, and `StartupCleanupError.retry_cleanup()` exposes the same bounded path
-  to callers.
+  first owned mutation. Normal interpreter exit retries unadopted owners under one
+  deadline; higher-level sessions can adopt returned cleanup ownership without
+  consuming registry capacity and use the same bounded retry path.
 - Bound retained LSP cleanup diagnostics to one sanitized current record per step.
   Stored records contain no raw exception, message, path, traceback, or frame graph,
   and successful retries clear stale records.

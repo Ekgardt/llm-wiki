@@ -80,6 +80,8 @@ _RECOVERY_RETRY_SECONDS = 0.05
 _MAX_PENDING_CHILD_HANDLES = 8
 _MAX_PENDING_TEMP_NAMES = 1
 _MAX_STARTUP_CLEANUP_OWNERS = 8
+_MAX_GENERATION_LAUNCH_ARGUMENTS = 64
+_MAX_GENERATION_LAUNCH_BYTES = 64 * 1024
 _WINDOWS_LEASE_RETRY_ERRORS = frozenset({5, 32, 33})
 _WINDOWS_LEASE_RETRY_SECONDS = 0.01
 _LIFECYCLE_REENTRANCY_ERROR = (
@@ -119,6 +121,12 @@ class StartupCleanupError(RuntimeError):
         if coordinator is None:
             return
         _retry_startup_cleanup(coordinator, deadline)
+
+    def transfer_cleanup_ownership(self) -> None:
+        """Transfer retry responsibility from the module registry to a caller."""
+        coordinator = self.coordinator
+        if coordinator is not None:
+            _unregister_startup_cleanup(coordinator)
 
 
 @dataclass(frozen=True, slots=True)
@@ -813,6 +821,12 @@ class ProcessState(str, Enum):
     FAILED = "failed"
 
 
+@dataclass(frozen=True, slots=True)
+class GenerationLaunch:
+    command: tuple[str, ...]
+    pass_fds: tuple[int, ...] = ()
+
+
 GenerationBootstrap = Callable[[LspProtocol, int, str, float], ProcessState]
 GenerationGuardFactory = Callable[[str, float], AbstractContextManager[object]]
 
@@ -1156,6 +1170,36 @@ class LspProcess:
         """Send once through the active generation without transparent replay."""
         _notify_lsp_process(self, method, params, deadline=deadline)
 
+    def notify_generation(
+        self,
+        method: str,
+        params: object,
+        *,
+        generation_nonce: str,
+        deadline: float,
+    ) -> bool:
+        """Notify only if the named generation is still active."""
+        return _notify_lsp_process_generation(
+            self,
+            method,
+            params,
+            generation_nonce=generation_nonce,
+            deadline=deadline,
+        )
+
+    def promote_workspace_ready(
+        self,
+        *,
+        generation_nonce: str,
+        deadline: float,
+    ) -> bool:
+        """Promote the active generation without racing a terminal transition."""
+        return _promote_lsp_process_workspace_ready(
+            self,
+            generation_nonce=generation_nonce,
+            deadline=deadline,
+        )
+
     def shutdown(self, deadline: float) -> None:
         _shutdown_lsp_process(self, deadline)
 
@@ -1417,15 +1461,20 @@ def _prepare_generation(
     deadline: float,
     generation_nonce: str,
     owner_record: Mapping[str, object] | None = None,
+    pass_fds: Sequence[int] = (),
 ) -> _Generation:
     generation = _Generation(generation_nonce, None, None)
     _assign_candidate(coordinator, generation, deadline)
     try:
+        spawn_options: dict[str, object] = {}
+        if pass_fds:
+            spawn_options["pass_fds"] = pass_fds
         tree = ProcessTree._spawn_with_deadline(
             command,
             cwd=cwd,
             env=environment,
             deadline=deadline,
+            **spawn_options,
         )
     except _lsp_process_tree._ProcessTreeSpawnError as error:
         generation.tree = error.tree
@@ -1635,10 +1684,10 @@ def _generation_guard_context(
     configuration: _GenerationConfiguration,
     generation_nonce: str,
     deadline: float,
-) -> Iterator[None]:
+) -> Iterator[GenerationLaunch | None]:
     factory = configuration.generation_guard
     if factory is None:
-        yield
+        yield None
         return
     guard = factory(generation_nonce, deadline)
     guard_type = type(guard)
@@ -1646,9 +1695,10 @@ def _generation_guard_context(
     exit_ = getattr(guard_type, "__exit__", None)
     if not callable(enter) or not callable(exit_):
         raise TypeError("generation_guard must return a context manager")
-    enter(guard)
+    entered = enter(guard)
+    launch = entered if isinstance(entered, GenerationLaunch) else None
     try:
-        yield
+        yield launch
     except BaseException as error:
         # Guard cleanup cannot suppress a failed generation and permit a commit.
         exit_(guard, type(error), error, error.__traceback__)
@@ -1760,15 +1810,21 @@ def _start_lsp_process_impl(
         generation_state = ProcessState.PROCESS_RUNNING
         with _generation_guard_context(
             generation_configuration, generation_nonce, startup_deadline
-        ):
+        ) as guarded_launch:
+            generation_command, pass_fds = _generation_launch(
+                arguments,
+                guarded_launch,
+                cwd=cwd,
+            )
             generation = _prepare_generation(
                 coordinator,
-                arguments,
+                generation_command,
                 cwd=cwd,
                 environment=environment,
                 deadline=startup_deadline,
                 generation_nonce=generation_nonce,
                 owner_record=owner_record,
+                pass_fds=pass_fds,
             )
             _require_startup_deadline(startup_deadline, "generation preparation")
             process = generation.process
@@ -2487,6 +2543,55 @@ def _request_generation(instance: LspProcess, deadline: float) -> _Generation:
         _release_lifecycle(coordinator)
 
 
+def _promote_lsp_process_workspace_ready(
+    instance: LspProcess,
+    *,
+    generation_nonce: str,
+    deadline: float,
+) -> bool:
+    deadline = _validated_deadline(deadline)
+    if not isinstance(generation_nonce, str):
+        raise TypeError("generation_nonce must be a string")
+    if re.fullmatch(r"[0-9a-f]{32}", generation_nonce) is None:
+        raise ValueError("generation_nonce must be 32 lowercase hexadecimal characters")
+
+    coordinator = instance._coordinator
+    _acquire_lifecycle(coordinator, deadline)
+    try:
+        generation = coordinator.active
+        if (
+            coordinator.phase is not _LifecyclePhase.RUNNING
+            or coordinator.terminal_outcome is not None
+            or generation is None
+            or generation.nonce != generation_nonce
+            or instance.generation_nonce != generation_nonce
+            or generation.process is None
+            or generation.protocol is None
+        ):
+            return False
+        with generation.failure_lock:
+            if (
+                generation._exit_observed
+                or generation.failure_queued
+                or generation.expected_exit.is_set()
+                or generation.process.poll() is not None
+                or generation.protocol.fatal
+            ):
+                return False
+            with coordinator.terminal_state_lock:
+                if (
+                    coordinator.success_committed
+                    or coordinator.mandatory_failure_intent is not None
+                    or coordinator.pending_failure_intents > 0
+                ):
+                    return False
+                instance.state = ProcessState.WORKSPACE_READY
+        _notify_lifecycle_locked(coordinator)
+        return True
+    finally:
+        _release_lifecycle(coordinator)
+
+
 def _wait_for_generation_change(
     instance: LspProcess,
     generation_nonce: str,
@@ -2612,6 +2717,85 @@ def _notify_lsp_process(
                 _PROCESS_EXITED,
             )
         raise
+
+
+def _notify_lsp_process_generation(
+    instance: LspProcess,
+    method: str,
+    params: object,
+    *,
+    generation_nonce: str,
+    deadline: float,
+) -> bool:
+    deadline = _validated_deadline(deadline)
+    if not isinstance(generation_nonce, str):
+        raise TypeError("generation_nonce must be a string")
+    if re.fullmatch(r"[0-9a-f]{32}", generation_nonce) is None:
+        raise ValueError("generation_nonce must be 32 lowercase hexadecimal characters")
+    generation = _request_generation(instance, deadline)
+    if generation.nonce != generation_nonce:
+        return False
+    coordinator = instance._coordinator
+    queue_reason: str | None = None
+    protocol_error: ProtocolViolation | None = None
+    sent = False
+    _acquire_lifecycle(coordinator, deadline)
+    try:
+        if (
+            coordinator.phase is not _LifecyclePhase.RUNNING
+            or coordinator.terminal_outcome is not None
+            or coordinator.active is not generation
+            or instance.generation_nonce != generation_nonce
+        ):
+            return False
+        protocol = generation.protocol
+        process = generation.process
+        if protocol is None or process is None:
+            return False
+        with generation.failure_lock:
+            unavailable = (
+                generation._exit_observed
+                or generation.failure_queued
+                or generation.expected_exit.is_set()
+            )
+        with coordinator.terminal_state_lock:
+            terminal_pending = (
+                coordinator.success_committed
+                or coordinator.mandatory_failure_intent is not None
+                or coordinator.pending_failure_intents > 0
+            )
+        expired = protocol.expired_drain_keys(time.monotonic())
+        exited = process.poll() is not None
+        if unavailable or terminal_pending:
+            return False
+        if expired or exited or protocol.fatal:
+            queue_reason = "expired drain" if expired else _PROCESS_EXITED
+        else:
+            try:
+                protocol.notify(method, params, deadline=deadline)
+            except ProtocolViolation as error:
+                protocol_error = error
+            else:
+                sent = True
+    finally:
+        _release_lifecycle(coordinator)
+    if queue_reason is not None:
+        _queue_generation_failure(coordinator, generation, queue_reason)
+    if protocol_error is not None:
+        protocol = generation.protocol
+        process = generation.process
+        if (
+            protocol is not None
+            and process is not None
+            and (protocol.fatal or process.poll() is not None)
+        ):
+            _queue_generation_failure(
+                coordinator,
+                generation,
+                _PROCESS_EXITED,
+            )
+        raise protocol_error
+    return sent
 
 
 def _failure_identity(
@@ -2846,14 +3030,22 @@ def _prepare_restart_generation_owned(
         raise RuntimeError("LSP restart inputs are unavailable")
     generation_nonce = _new_generation_nonce()
     configuration = coordinator.generation_configuration
-    with _generation_guard_context(configuration, generation_nonce, deadline):
+    with _generation_guard_context(
+        configuration, generation_nonce, deadline
+    ) as guarded_launch:
+        generation_command, pass_fds = _generation_launch(
+            instance._command,
+            guarded_launch,
+            cwd=instance._cwd,
+        )
         candidate = _prepare_generation(
             coordinator,
-            instance._command,
+            generation_command,
             cwd=instance._cwd,
             environment=instance._environment,
             deadline=deadline,
             generation_nonce=generation_nonce,
+            pass_fds=pass_fds,
         )
         if (
             candidate.process is None
@@ -3848,6 +4040,38 @@ def _coordinator_has_ownership(coordinator: _LifecycleCoordinator) -> bool:
         return _coordinator_has_ownership_locked(coordinator)
     finally:
         coordinator.lock.release()
+
+
+def _generation_launch(
+    command: Sequence[str],
+    launch: GenerationLaunch | None,
+    *,
+    cwd: Path,
+) -> tuple[tuple[str, ...], tuple[int, ...]]:
+    if launch is None:
+        return tuple(command), ()
+    if not isinstance(launch.command, tuple):
+        raise TypeError("generation launch command must be a tuple")
+    arguments = tuple(_validated_command(launch.command, cwd))
+    if len(arguments) > _MAX_GENERATION_LAUNCH_ARGUMENTS:
+        raise ValueError("generation launch command exceeds its argument bound")
+    try:
+        command_bytes = sum(
+            len(argument.encode("utf-8", errors="strict")) + 1
+            for argument in arguments
+        )
+    except UnicodeEncodeError as error:
+        raise ValueError("generation launch command must be valid UTF-8") from error
+    if command_bytes > _MAX_GENERATION_LAUNCH_BYTES:
+        raise ValueError("generation launch command exceeds its byte bound")
+    if not arguments or arguments[0] != command[0]:
+        raise ValueError("generation launch cannot replace the configured executable")
+    if not isinstance(launch.pass_fds, tuple):
+        raise TypeError("generation launch pass_fds must be a tuple")
+    pass_fds = tuple(launch.pass_fds)
+    if pass_fds and os.name != "posix":
+        raise ValueError("generation launch pass_fds are supported only on POSIX")
+    return arguments, pass_fds
 
 
 def _validated_command(command: Sequence[str], cwd: Path) -> list[str]:

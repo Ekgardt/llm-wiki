@@ -182,7 +182,9 @@ discarded only after direct-process reap and bounded stable active zero; unknown
 over-bound, or nonzero active state remains fail-closed. Second-fatal recovery
 quiesces its own tracked recovery role and completes terminal cleanup without caller
 intervention. Incomplete startup ownership enters an eight-entry module registry
-before its first owned mutation and has normal-exit plus public bounded retry paths.
+before its first owned mutation. A Pyright session atomically adopts a returned
+cleanup owner, removes it from that bounded registry, and retains normal-exit plus
+`start()`/`close()` deadline-bounded retry paths; unadopted owners remain registered.
 Windows lease replacement retries only errors 5, 32, and 33 before the earlier of
 the operation deadline or previous lease expiry. Retained cleanup diagnostics are
 sanitized, current per fixed step, and traceback-free.

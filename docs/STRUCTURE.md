@@ -44,7 +44,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── impact_analysis.py           v4.0: LINK layer (code→wiki impact)
 │   ├── build_tiers.py               v4.0: L0/L1/L2 progressive disclosure
 │   └── queries/                     v4.0: 12 tree-sitter .scm language queries
-├── tests/                         CODE — regression suite (pytest, 5063 tests)
+├── tests/                         CODE — regression suite (pytest, 5087 tests)
 ├── docs/                          CODE — architecture + user guide
 ├── skills/                        CODE — 9 agent skills (SKILL.md)
 ├── rules/                         CODE — file-handling policies
@@ -209,9 +209,11 @@ or retained failure evidence as protected operational state.
 
 Every startup coordinator enters an eight-entry module registry before its first
 owned mutation. Successful startup hands ownership to the instance's existing
-normal-exit callback and leaves the registry. Incomplete startup stays registered;
-the module normal-exit hook and `StartupCleanupError.retry_cleanup(deadline)` use
-the same absolute-deadline cleanup driver.
+normal-exit callback and leaves the registry. A higher-level owner may atomically
+adopt `StartupCleanupError`; `PyrightSession` then removes that coordinator from the
+bounded registry, retains the error, installs its own normal-exit cleanup, and retries
+from `start()` or `close()` under the caller deadline. Unadopted incomplete startups
+stay in the module registry. Both paths use the same absolute-deadline cleanup driver.
 
 While lifecycle ownership is live, `run/lsp/<owner-nonce>/lease.json` is a bounded
 mutable live lease distinct from immutable create-only `owner.json` and
@@ -272,7 +274,7 @@ or nonzero active state remains fail-closed.
   `maybe_compile.py` (PID-locked spawn), `search_memory.py` (triple-RRF),
   `llm_client.py` (5 backends + fake), `integration_adapter.py` (thin host
   lifecycle boundary), `mcp_server.py` (12 task-shaped tools), and `doctor.py`.
-- `tests/` — 5063 tests collected. Hermetic via `conftest.py` (pins
+- `tests/` — 5087 tests collected. Hermetic via `conftest.py` (pins
   `LLM_WIKI_ROOT` to checkout, redirects `LLM_WIKI_STATE_ROOT` to a temp
   dir, defaults `MEMORY_LLM_PROVIDER=fake`).
 - `docs/` — `ARCHITECTURE.md`, `USER-GUIDE.md`, `AGENTS.md` (knowledge

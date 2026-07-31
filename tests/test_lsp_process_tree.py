@@ -191,6 +191,63 @@ def test_public_deadline_spawn_rejects_expiry_before_platform_mutation(
         )
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor inheritance")
+def test_posix_spawn_inherits_explicit_verified_descriptor(tmp_path: Path) -> None:
+    read_descriptor, write_descriptor = os.pipe()
+    tree: ProcessTree | None = None
+    try:
+        os.write(write_descriptor, b"verified descriptor bytes")
+        os.close(write_descriptor)
+        write_descriptor = -1
+        tree = ProcessTree.spawn_with_deadline(
+            (
+                sys.executable,
+                "-c",
+                (
+                    "import os,sys;"
+                    "sys.stdout.buffer.write(os.read(int(sys.argv[1]), 64))"
+                ),
+                str(read_descriptor),
+            ),
+            cwd=tmp_path,
+            env=dict(os.environ),
+            deadline=time.monotonic() + 5,
+            pass_fds=(read_descriptor,),
+        )
+        assert tree.process.stdout is not None
+        assert tree.process.stdout.read() == b"verified descriptor bytes"
+        assert tree.process.wait(timeout=5) == 0
+        tree.close()
+    finally:
+        if write_descriptor >= 0:
+            os.close(write_descriptor)
+        os.close(read_descriptor)
+        if tree is not None and tree.process.poll() is None:
+            tree.process.kill()
+            tree.process.wait(timeout=5)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor inheritance")
+def test_posix_spawn_rejects_writable_inherited_descriptor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    snapshot = tmp_path / "writable-snapshot"
+    with snapshot.open("w+b") as stream:
+        def forbidden_spawn(*_args: object, **_kwargs: object) -> None:
+            pytest.fail("a writable inherited descriptor reached process creation")
+
+        monkeypatch.setattr(lsp_process_tree.subprocess, "Popen", forbidden_spawn)
+        with pytest.raises(ValueError, match="read-only"):
+            ProcessTree.spawn_with_deadline(
+                (sys.executable, "-c", "pass"),
+                cwd=tmp_path,
+                env=dict(os.environ),
+                deadline=time.monotonic() + 5,
+                pass_fds=(stream.fileno(),),
+            )
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows Job observation boundary")
 def test_windows_tree_wait_requires_stable_empty_job_observation(
     monkeypatch: pytest.MonkeyPatch,

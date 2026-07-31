@@ -577,6 +577,9 @@ def _run_semantic_server(args: argparse.Namespace) -> None:
                 uri = text_document.get("uri")
                 version = text_document.get("version")
                 if isinstance(uri, str) and isinstance(version, int):
+                    if uri in documents:
+                        record("duplicate-did-open", uri=uri, version=version)
+                        raise RuntimeError("duplicate textDocument/didOpen")
                     documents[uri] = version
                     delay = config.get("diagnostics_delay_seconds", 0)
                     if isinstance(delay, (int, float)) and delay > 0:
@@ -701,6 +704,7 @@ def _run_process_server() -> None:
     parser.add_argument("--application-error", action="store_true")
     parser.add_argument("--hang-once-marker")
     parser.add_argument("--idle-exit-marker")
+    parser.add_argument("--idle-exit-gate-prefix")
     parser.add_argument("--hang-then-exit", action="store_true")
     parser.add_argument("--bootstrap-handshake", action="store_true")
     parser.add_argument(
@@ -811,7 +815,16 @@ def _run_process_server() -> None:
             if first:
                 with open(args.idle_exit_marker, "wb"):
                     pass
-            time.sleep(0.05 if first else 0.75)
+            if args.idle_exit_gate_prefix:
+                suffix = "first" if first else "second"
+                gate = Path(f"{args.idle_exit_gate_prefix}.{suffix}")
+                deadline = time.monotonic() + 10
+                while not gate.exists():
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("idle exit gate was not released")
+                    time.sleep(0.01)
+            else:
+                time.sleep(0.05 if first else 0.75)
             return
         while True:
             request = _read_message(sys.stdin.buffer)

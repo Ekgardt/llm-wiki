@@ -18,9 +18,13 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+if os.name == "posix":
+    import fcntl
+
 _LINUX_PROC_SCAN_LIMIT = 131_072
 _LINUX_PROC_STAT_LIMIT = 4096
 _LINUX_DEAD_STATES = frozenset({b"Z", b"X", b"x"})
+_MAX_PASS_FDS = 8
 
 if os.name == "nt":
     import ctypes
@@ -186,6 +190,7 @@ class ProcessTree:
         cwd: Path,
         env: Mapping[str, str],
         deadline: float,
+        pass_fds: Sequence[int] = (),
     ) -> ProcessTree:
         """Spawn only while the caller's absolute operation deadline is live."""
         return cls._spawn_with_deadline(
@@ -193,6 +198,7 @@ class ProcessTree:
             cwd=cwd,
             env=env,
             deadline=deadline,
+            pass_fds=pass_fds,
         )
 
     @classmethod
@@ -203,10 +209,35 @@ class ProcessTree:
         cwd: Path,
         env: Mapping[str, str],
         deadline: float,
+        pass_fds: Sequence[int] = (),
     ) -> ProcessTree:
         deadline = _deadline(deadline)
         if time.monotonic() >= deadline:
             raise TimeoutError("LSP process-tree spawn deadline expired")
+        if isinstance(pass_fds, (str, bytes)) or not isinstance(pass_fds, Sequence):
+            raise TypeError("pass_fds must be a sequence of file descriptors")
+        inherited_descriptors = tuple(pass_fds)
+        if any(
+            isinstance(descriptor, bool)
+            or not isinstance(descriptor, int)
+            or descriptor < 0
+            for descriptor in inherited_descriptors
+        ):
+            raise ValueError("pass_fds must contain nonnegative integers")
+        if len(set(inherited_descriptors)) != len(inherited_descriptors):
+            raise ValueError("pass_fds must not contain duplicates")
+        if len(inherited_descriptors) > _MAX_PASS_FDS:
+            raise ValueError(f"pass_fds must contain at most {_MAX_PASS_FDS} descriptors")
+        if inherited_descriptors and os.name != "posix":
+            raise ValueError("pass_fds are supported only on POSIX")
+        if os.name == "posix":
+            for descriptor in inherited_descriptors:
+                try:
+                    flags = fcntl.fcntl(descriptor, fcntl.F_GETFL)
+                except OSError as error:
+                    raise ValueError("pass_fds must contain open descriptors") from error
+                if flags & os.O_ACCMODE != os.O_RDONLY:
+                    raise ValueError("pass_fds must contain read-only descriptors")
         options: dict[str, object] = {
             "cwd": cwd,
             "env": env,
@@ -217,6 +248,8 @@ class ProcessTree:
             "close_fds": True,
         }
         if os.name == "posix":
+            if inherited_descriptors:
+                options["pass_fds"] = inherited_descriptors
             process = subprocess.Popen(list(command), start_new_session=True, **options)
             return cls(process, None, process.pid)
         if os.name != "nt":

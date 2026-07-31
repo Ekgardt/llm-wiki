@@ -6,6 +6,7 @@ import hashlib
 import inspect
 import json
 import os
+import shutil
 import stat
 import threading
 import time
@@ -258,6 +259,137 @@ def test_server_mutated_after_qualification_never_spawns(
     assert session.degradation_codes == ("pyright_executable_digest_mismatch",)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX verified launch descriptor")
+def test_server_replaced_at_spawn_never_executes_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    server, identity = _copied_server_identity(repository, semantic_pyright)
+    retired = repository / "retired-server.py"
+    replacement_marker = repository / "replacement-executed"
+    real_spawn = lsp_process.ProcessTree._spawn_with_deadline.__func__
+    replaced = False
+
+    def replace_before_spawn(
+        cls: type[lsp_process.ProcessTree],
+        command: object,
+        *,
+        cwd: Path,
+        env: object,
+        deadline: float,
+        pass_fds: object = (),
+    ) -> lsp_process.ProcessTree:
+        nonlocal replaced
+        if not replaced:
+            replaced = True
+            server.replace(retired)
+            server.write_text(
+                "from pathlib import Path\n"
+                f"Path({str(replacement_marker)!r}).write_bytes(b'executed')\n",
+                encoding="utf-8",
+            )
+        return real_spawn(
+            cls,
+            command,
+            cwd=cwd,
+            env=env,
+            deadline=deadline,
+            pass_fds=pass_fds,
+        )  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        lsp_process.ProcessTree,
+        "_spawn_with_deadline",
+        classmethod(replace_before_spawn),
+    )
+    session = PyrightSession(
+        resolve_repository_scope(repository),
+        identity,
+        state_root=state_root,
+    )
+    try:
+        session.start(deadline=time.monotonic() + 10)
+
+        assert replaced is True
+        assert not replacement_marker.exists()
+        assert session.readiness == "not_ready"
+        assert session.degradation_codes == (
+            "pyright_executable_digest_mismatch",
+        )
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX verified Node loader")
+def test_posix_node_loader_preserves_main_module_and_original_paths(
+    repository: Path,
+) -> None:
+    node_value = shutil.which("node")
+    if node_value is None:
+        pytest.skip("Node.js is unavailable")
+    node = Path(node_value).resolve()
+    root = repository / "loader ' quoted"
+    root.mkdir()
+    dependency = root / "dependency.cjs"
+    dependency.write_text("module.exports = 'dependency-loaded';\n", encoding="utf-8")
+    output = root / "loader-output.json"
+    server = root / "server.js"
+    server.write_text(
+        "const fs = require('node:fs');\n"
+        "const path = require('node:path');\n"
+        "const dependency = require('./dependency.cjs');\n"
+        "fs.writeFileSync(process.argv[2], JSON.stringify({\n"
+        "  argv: process.argv,\n"
+        "  dirname: __dirname,\n"
+        "  filename: __filename,\n"
+        "  isMain: require.main === module,\n"
+        "  modulePath: module.paths[0],\n"
+        "  dependency,\n"
+        "}));\n",
+        encoding="utf-8",
+    )
+    descriptor = -1
+    guard = pyright_session_module._LaunchServerGuard(
+        server,
+        hashlib.sha256(server.read_bytes()).hexdigest(),
+        command=(str(node), str(server), str(output)),
+        deadline=time.monotonic() + 10,
+    )
+
+    with guard as launch:
+        assert isinstance(launch, lsp_process.GenerationLaunch)
+        assert len(launch.pass_fds) == 1
+        descriptor = launch.pass_fds[0]
+        import fcntl
+
+        assert fcntl.fcntl(descriptor, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY
+        tree = lsp_process.ProcessTree.spawn_with_deadline(
+            launch.command,
+            cwd=repository,
+            env=dict(os.environ),
+            deadline=time.monotonic() + 10,
+            pass_fds=launch.pass_fds,
+        )
+        try:
+            assert tree.process.wait(timeout=10) == 0
+        finally:
+            tree.close()
+
+    with pytest.raises(OSError):
+        os.fstat(descriptor)
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload == {
+        "argv": [str(node), str(server), str(output)],
+        "dirname": str(root),
+        "filename": str(server),
+        "isMain": True,
+        "modulePath": str(root / "node_modules"),
+        "dependency": "dependency-loaded",
+    }
+
+
 def test_server_identity_is_held_and_reverified_through_bootstrap(
     monkeypatch: pytest.MonkeyPatch,
     repository: Path,
@@ -494,8 +626,10 @@ def test_start_forwards_one_capped_deadline_without_shrinking_restart_budget(
             _path: Path,
             _expected_sha256: str,
             *,
+            command: tuple[str, ...],
             deadline: float,
         ) -> None:
+            assert command[1] == str(semantic_pyright.identity.server_executable)
             captured["guard"] = deadline
 
         def __enter__(self) -> CapturedGuard:
@@ -634,8 +768,10 @@ def test_startup_cleanup_uses_effective_caller_deadline(
             _path: Path,
             _expected_sha256: str,
             *,
+            command: tuple[str, ...],
             deadline: float,
         ) -> None:
+            assert command[1] == str(semantic_pyright.identity.server_executable)
             captured["effective"] = deadline
             self.deadline = deadline
 
@@ -701,6 +837,280 @@ def test_startup_cleanup_uses_effective_caller_deadline(
         assert "process_cleanup" not in captured
     assert session.readiness == "not_ready"
     assert session.degradation_codes == ("pyright_startup_failed",)
+
+
+def test_close_retries_startup_cleanup_retained_by_session(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    cleanup_deadlines: list[float] = []
+
+    class RetainedCleanupError(StartupCleanupError):
+        def retry_cleanup(self, deadline: float) -> None:
+            cleanup_deadlines.append(deadline)
+            if len(cleanup_deadlines) == 1:
+                raise TimeoutError("startup owner remains live")
+
+    def fail_start(*_args: object, **_kwargs: object) -> None:
+        raise RetainedCleanupError("configured startup retained ownership")
+
+    monkeypatch.setattr(LspProcess, "start_configured", fail_start)
+
+    session.start(deadline=time.monotonic() + 5)
+    assert len(cleanup_deadlines) == 1
+
+    session.close(deadline=time.monotonic() + 5)
+
+    assert len(cleanup_deadlines) == 2
+    assert cleanup_deadlines[1] > time.monotonic()
+
+
+def test_start_retries_retained_cleanup_before_new_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    cleanup_attempts = 0
+    start_attempts = 0
+
+    class RetainedCleanupError(StartupCleanupError):
+        def retry_cleanup(self, _deadline: float) -> None:
+            nonlocal cleanup_attempts
+            cleanup_attempts += 1
+            if cleanup_attempts == 1:
+                raise TimeoutError("startup owner remains live")
+
+    class CapturedProcess:
+        state = ProcessState.PROTOCOL_INITIALIZED
+        generation_nonce = "captured-generation"
+
+        @staticmethod
+        def close(_deadline: float) -> None:
+            return None
+
+    def start(*_args: object, **_kwargs: object) -> CapturedProcess:
+        nonlocal start_attempts
+        start_attempts += 1
+        if start_attempts == 1:
+            raise RetainedCleanupError("configured startup retained ownership")
+        return CapturedProcess()
+
+    monkeypatch.setattr(LspProcess, "start_configured", start)
+
+    session.start(deadline=time.monotonic() + 5)
+    session.start(deadline=time.monotonic() + 5)
+
+    assert cleanup_attempts == 2
+    assert start_attempts == 2
+    assert session._process is not None
+    session.close(deadline=time.monotonic() + 5)
+
+
+def test_session_adopts_cleanup_owner_without_exhausting_global_registry(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    baseline = {
+        id(coordinator)
+        for coordinator in lsp_process._pending_startup_cleanup_snapshot()
+    }
+    sessions: list[PyrightSession] = []
+    errors: list[StartupCleanupError] = []
+    cleanup_attempts: dict[int, int] = {}
+
+    class RetainedCleanupError(StartupCleanupError):
+        def retry_cleanup(self, _deadline: float) -> None:
+            coordinator = self.coordinator
+            assert coordinator is not None
+            key = id(coordinator)
+            cleanup_attempts[key] = cleanup_attempts.get(key, 0) + 1
+            if cleanup_attempts[key] == 1:
+                raise TimeoutError("startup owner remains live")
+
+    def fail_start(*_args: object, **_kwargs: object) -> None:
+        coordinator = lsp_process._LifecycleCoordinator(None)
+        lsp_process._register_startup_cleanup(coordinator)
+        error = RetainedCleanupError(
+            "configured startup retained ownership",
+            coordinator=coordinator,
+        )
+        errors.append(error)
+        raise error
+
+    monkeypatch.setattr(LspProcess, "start_configured", fail_start)
+    try:
+        for _index in range(lsp_process._MAX_STARTUP_CLEANUP_OWNERS + 1):
+            session = _session(repository, state_root, semantic_pyright)
+            sessions.append(session)
+            session.start(deadline=time.monotonic() + 5)
+
+        assert len(errors) == lsp_process._MAX_STARTUP_CLEANUP_OWNERS + 1
+        assert {
+            id(coordinator)
+            for coordinator in lsp_process._pending_startup_cleanup_snapshot()
+        } == baseline
+        assert [session._startup_cleanup_error for session in sessions] == errors
+    finally:
+        for session in sessions:
+            session.close(deadline=time.monotonic() + 5)
+        for error in errors:
+            coordinator = error.coordinator
+            if coordinator is not None:
+                lsp_process._unregister_startup_cleanup(coordinator)
+
+
+def test_failed_session_atexit_registration_keeps_global_cleanup_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    coordinator = lsp_process._LifecycleCoordinator(None)
+    lsp_process._register_startup_cleanup(coordinator)
+    error = StartupCleanupError(
+        "configured startup retained ownership",
+        coordinator=coordinator,
+    )
+
+    def fail_registration(_callback: object) -> None:
+        raise RuntimeError("atexit registration failed")
+
+    monkeypatch.setattr(pyright_session_module.atexit, "register", fail_registration)
+    try:
+        with session._lock, pytest.raises(RuntimeError, match="atexit registration"):
+            session._retain_startup_cleanup_locked(error)
+
+        assert coordinator in lsp_process._pending_startup_cleanup_snapshot()
+        assert session._startup_atexit_registered is False
+    finally:
+        lsp_process._unregister_startup_cleanup(coordinator)
+        with session._lock:
+            session._startup_cleanup_error = None
+
+
+def test_interrupt_during_retained_cleanup_is_rethrown_and_next_start_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    cleanup_attempts = 0
+    start_attempts = 0
+
+    class InterruptingCleanupError(StartupCleanupError):
+        def retry_cleanup(self, _deadline: float) -> None:
+            nonlocal cleanup_attempts
+            cleanup_attempts += 1
+            if cleanup_attempts == 1:
+                raise SystemExit(17)
+
+    retained = InterruptingCleanupError("startup owner remains live")
+
+    class CapturedProcess:
+        state = ProcessState.PROTOCOL_INITIALIZED
+        generation_nonce = "captured-generation"
+
+        @staticmethod
+        def close(_deadline: float) -> None:
+            return None
+
+    def start(*_args: object, **_kwargs: object) -> CapturedProcess:
+        nonlocal start_attempts
+        start_attempts += 1
+        if start_attempts == 1:
+            raise retained
+        return CapturedProcess()
+
+    monkeypatch.setattr(LspProcess, "start_configured", start)
+
+    with pytest.raises(SystemExit) as raised:
+        session.start(deadline=time.monotonic() + 5)
+    assert raised.value.code == 17
+    assert session._startup_cleanup_error is retained
+    assert session._starting is False
+
+    session.start(deadline=time.monotonic() + 5)
+    assert cleanup_attempts == 2
+    assert start_attempts == 2
+    assert session._process is not None
+    session.close(deadline=time.monotonic() + 5)
+
+
+def test_keyboard_interrupt_resets_starting_and_notifies_waiting_start(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+    first_errors: list[BaseException] = []
+    second_errors: list[BaseException] = []
+
+    class CapturedProcess:
+        state = ProcessState.PROTOCOL_INITIALIZED
+        generation_nonce = "captured-generation"
+
+        @staticmethod
+        def close(_deadline: float) -> None:
+            return None
+
+    def start(*_args: object, **_kwargs: object) -> CapturedProcess:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            assert release.wait(2)
+            raise KeyboardInterrupt("interrupted startup")
+        return CapturedProcess()
+
+    def first_start() -> None:
+        try:
+            session.start(deadline=time.monotonic() + 2)
+        except BaseException as error:
+            first_errors.append(error)
+
+    def second_start() -> None:
+        try:
+            session.start(deadline=time.monotonic() + 2)
+        except BaseException as error:
+            second_errors.append(error)
+
+    monkeypatch.setattr(LspProcess, "start_configured", start)
+    first = threading.Thread(target=first_start)
+    second = threading.Thread(target=second_start)
+    first.start()
+    assert entered.wait(1)
+    second.start()
+    try:
+        time.sleep(0.05)
+        assert second.is_alive()
+        release.set()
+        first.join(3)
+        second.join(3)
+        assert not first.is_alive()
+        assert not second.is_alive()
+        assert len(first_errors) == 1
+        assert isinstance(first_errors[0], KeyboardInterrupt)
+        assert second_errors == []
+        assert session._starting is False
+        assert session._process is not None
+    finally:
+        release.set()
+        first.join(3)
+        second.join(3)
+        session.close(deadline=time.monotonic() + 5)
 
 
 def test_concurrent_start_waits_for_process_publication(
@@ -987,6 +1397,130 @@ def test_concurrent_first_open_sends_one_didopen(
             if event["kind"] == "client-message"
         ]
         assert methods.count("textDocument/didOpen") == 1
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_open_racing_restart_sends_didopen_once_for_replacement_generation(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    real_notify = LspProcess.notify
+    real_notify_generation = LspProcess.notify_generation
+    restarted = False
+
+    def restart_once(process: LspProcess, method: str, deadline: float) -> None:
+        nonlocal restarted
+        if method == "textDocument/didOpen" and not restarted:
+            restarted = True
+            process.restart(deadline)
+
+    def notify(
+        process: LspProcess,
+        method: str,
+        params: object,
+        *,
+        deadline: float,
+    ) -> None:
+        restart_once(process, method, deadline)
+        real_notify(process, method, params, deadline=deadline)
+
+    def notify_generation(
+        process: LspProcess,
+        method: str,
+        params: object,
+        *,
+        generation_nonce: str,
+        deadline: float,
+    ) -> bool:
+        restart_once(process, method, deadline)
+        return real_notify_generation(
+            process,
+            method,
+            params,
+            generation_nonce=generation_nonce,
+            deadline=deadline,
+        )
+
+    try:
+        session.start(deadline=time.monotonic() + 10)
+        monkeypatch.setattr(LspProcess, "notify", notify)
+        monkeypatch.setattr(LspProcess, "notify_generation", notify_generation)
+
+        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+
+        process = session._process
+        assert restarted is True
+        assert process is not None
+        assert process.restart_count == 1
+        events = semantic_pyright.events()
+        pids = tuple(
+            dict.fromkeys(
+                event["pid"]
+                for event in events
+                if event["kind"] == "client-message"
+            )
+        )
+        assert len(pids) == 2
+        replacement_pid = pids[-1]
+        replacement_opens = [
+            event
+            for event in events
+            if event["pid"] == replacement_pid
+            and event.get("method") == "textDocument/didOpen"
+        ]
+        assert len(replacement_opens) == 1
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_failed_generation_notify_records_no_didopen_and_retries_later(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    real_notify_generation = LspProcess.notify_generation
+
+    def reject_notify(
+        _process: LspProcess,
+        _method: str,
+        _params: object,
+        *,
+        generation_nonce: str,
+        deadline: float,
+    ) -> bool:
+        assert generation_nonce
+        assert deadline > time.monotonic()
+        return False
+
+    try:
+        session.start(deadline=time.monotonic() + 10)
+        monkeypatch.setattr(LspProcess, "notify_generation", reject_notify)
+        first = session.open_document(
+            "pkg/service.py",
+            deadline=time.monotonic() + 10,
+        )
+        assert not any(
+            event.get("method") == "textDocument/didOpen"
+            for event in semantic_pyright.events()
+        )
+        assert "didOpen" not in session.readiness_evidence
+
+        monkeypatch.setattr(LspProcess, "notify_generation", real_notify_generation)
+        second = session.open_document(
+            "pkg/service.py",
+            deadline=time.monotonic() + 10,
+        )
+        assert second is first
+        assert sum(
+            event.get("method") == "textDocument/didOpen"
+            for event in semantic_pyright.events()
+        ) == 1
     finally:
         session.close(deadline=time.monotonic() + 5)
 
@@ -2021,6 +2555,154 @@ def test_not_ready_diagnostics_are_partial_even_when_push_arrived(
         session.close(deadline=time.monotonic() + 5)
 
 
+def test_diagnostics_ignore_unopened_uri(
+    repository: Path,
+    state_root: Path,
+) -> None:
+    fixture = create_semantic_pyright_fixture(
+        repository,
+        config={"push_diagnostics": False},
+    )
+    session = _session(repository, state_root, fixture)
+    api_uri = (repository / "pkg/api.py").resolve().as_uri()
+    diagnostic = {
+        "range": {
+            "start": {"line": 0, "character": 0},
+            "end": {"line": 0, "character": 1},
+        },
+        "message": "must not be retained",
+    }
+    try:
+        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        session._publish_diagnostics(
+            {"uri": api_uri, "version": 1, "diagnostics": [diagnostic]}
+        )
+
+        assert api_uri not in session._diagnostics
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_diagnostic_aggregate_rejection_preserves_previous_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+) -> None:
+    fixture = create_semantic_pyright_fixture(
+        repository,
+        config={"push_diagnostics": False},
+    )
+    session = _session(repository, state_root, fixture)
+    uri = (repository / "pkg/service.py").resolve().as_uri()
+    base = {
+        "range": {
+            "start": {"line": 0, "character": 0},
+            "end": {"line": 0, "character": 1},
+        },
+    }
+    monkeypatch.setattr(
+        pyright_session_module,
+        "_MAX_DIAGNOSTIC_BYTES",
+        512,
+        raising=False,
+    )
+    try:
+        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        session._publish_diagnostics(
+            {
+                "uri": uri,
+                "version": 1,
+                "diagnostics": [{**base, "message": "kept"}],
+            }
+        )
+        previous = session._diagnostics[uri]
+        session._publish_diagnostics(
+            {
+                "uri": uri,
+                "version": 1,
+                "diagnostics": [{**base, "message": "x" * 1024}],
+            }
+        )
+
+        assert session._diagnostics[uri] is previous
+        assert session._diagnostic_bytes == previous.retained_bytes
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_diagnostic_replacement_and_stale_accounting_are_exact(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+) -> None:
+    fixture = create_semantic_pyright_fixture(
+        repository,
+        config={"push_diagnostics": False},
+    )
+    session = _session(repository, state_root, fixture)
+    service_uri = (repository / "pkg/service.py").resolve().as_uri()
+    api_uri = (repository / "pkg/api.py").resolve().as_uri()
+    base = {
+        "range": {
+            "start": {"line": 0, "character": 0},
+            "end": {"line": 0, "character": 1},
+        },
+    }
+    monkeypatch.setattr(
+        pyright_session_module,
+        "_MAX_DIAGNOSTIC_BYTES",
+        1400,
+        raising=False,
+    )
+    try:
+        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        session.open_document("pkg/api.py", deadline=time.monotonic() + 10)
+        session._publish_diagnostics(
+            {
+                "uri": service_uri,
+                "version": 1,
+                "diagnostics": [{**base, "message": "a" * 600}],
+            }
+        )
+        first_size = session._diagnostic_bytes
+        session._publish_diagnostics(
+            {
+                "uri": service_uri,
+                "version": 1,
+                "diagnostics": [{**base, "message": "small"}],
+            }
+        )
+        replacement_size = session._diagnostic_bytes
+        assert replacement_size < first_size
+
+        session._publish_diagnostics(
+            {
+                "uri": api_uri,
+                "version": 1,
+                "diagnostics": [{**base, "message": "b" * 600}],
+            }
+        )
+        assert set(session._diagnostics) == {service_uri, api_uri}
+        assert session._diagnostic_bytes == sum(
+            snapshot.retained_bytes for snapshot in session._diagnostics.values()
+        )
+        assert session._diagnostic_bytes <= 1400
+
+        retained_bytes = session._diagnostic_bytes
+        retained = session._diagnostics[service_uri]
+        session._publish_diagnostics(
+            {
+                "uri": service_uri,
+                "version": 0,
+                "diagnostics": [{**base, "message": "stale" * 200}],
+            }
+        )
+        assert session._diagnostics[service_uri] is retained
+        assert session._diagnostic_bytes == retained_bytes
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
 def test_benign_server_requests_and_progress_are_bounded_in_memory_only(
     repository: Path,
     state_root: Path,
@@ -2054,6 +2736,34 @@ def test_benign_server_requests_and_progress_are_bounded_in_memory_only(
         assert all("progress" not in path and "diagnostic" not in path for path in runtime_files)
     finally:
         session.close(deadline=time.monotonic() + 5)
+
+
+def test_progress_retention_has_count_and_aggregate_byte_bounds(
+    repository: Path,
+    state_root: Path,
+) -> None:
+    session = PyrightSession(
+        resolve_repository_scope(repository),
+        _missing_identity(),
+        state_root=state_root,
+    )
+    for index in range(300):
+        session._progress(
+            "$/progress",
+            {
+                "token": f"{index:03d}" + "t" * 253,
+                "value": {"kind": "report", "message": "m" * 4096},
+            },
+        )
+
+    events = session.progress_events
+    assert len(events) <= 256
+    assert sum(
+        len(value.encode("utf-8"))
+        for event in events
+        for value in event
+        if isinstance(value, str)
+    ) <= 1024 * 1024
 
 
 def test_transparent_restart_reinitializes_configures_reopens_and_reprobes(
@@ -2160,8 +2870,16 @@ def test_server_mutated_before_transparent_restart_never_spawns_replacement(
         cwd: Path,
         env: object,
         deadline: float,
+        pass_fds: object = (),
     ) -> lsp_process.ProcessTree:
-        tree = real_spawn(cls, command, cwd=cwd, env=env, deadline=deadline)  # type: ignore[arg-type]
+        tree = real_spawn(
+            cls,
+            command,
+            cwd=cwd,
+            env=env,
+            deadline=deadline,
+            pass_fds=pass_fds,
+        )  # type: ignore[arg-type]
         trees.append(tree)
         return tree
 
@@ -2252,8 +2970,16 @@ def test_server_mutated_during_replacement_bootstrap_never_commits_candidate(
         cwd: Path,
         env: object,
         deadline: float,
+        pass_fds: object = (),
     ) -> lsp_process.ProcessTree:
-        tree = real_spawn(cls, command, cwd=cwd, env=env, deadline=deadline)  # type: ignore[arg-type]
+        tree = real_spawn(
+            cls,
+            command,
+            cwd=cwd,
+            env=env,
+            deadline=deadline,
+            pass_fds=pass_fds,
+        )  # type: ignore[arg-type]
         trees.append(tree)
         return tree
 
@@ -2336,6 +3062,91 @@ def test_post_start_probe_promotes_owned_process_state(
 
         assert session._process is not None
         assert session._process.state is ProcessState.WORKSPACE_READY
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_rejected_lifecycle_promotion_cannot_claim_query_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    transitions: list[str] = []
+
+    def reject_transition(
+        self: LspProcess,
+        *,
+        generation_nonce: str,
+        deadline: float,
+    ) -> bool:
+        assert self is session._process
+        assert deadline > time.monotonic()
+        transitions.append(generation_nonce)
+        return False
+
+    try:
+        session.start(deadline=time.monotonic() + 10)
+        process = session._process
+        assert process is not None
+        monkeypatch.setattr(LspProcess, "promote_workspace_ready", reject_transition)
+
+        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+
+        assert transitions == [process.generation_nonce]
+        assert session.readiness == "protocol_initialized"
+        assert process.state is ProcessState.PROTOCOL_INITIALIZED
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_timed_out_lifecycle_promotion_cannot_leave_query_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+
+    def timeout_transition(
+        self: LspProcess,
+        *,
+        generation_nonce: str,
+        deadline: float,
+    ) -> bool:
+        assert self is session._process
+        assert generation_nonce == self.generation_nonce
+        assert deadline > 0
+        raise TimeoutError("lifecycle promotion deadline expired")
+
+    try:
+        session.start(deadline=time.monotonic() + 10)
+        process = session._process
+        assert process is not None
+        monkeypatch.setattr(
+            LspProcess,
+            "promote_workspace_ready",
+            timeout_transition,
+        )
+
+        with pytest.raises(TimeoutError, match="promotion deadline"):
+            session.open_document(
+                "pkg/service.py",
+                deadline=time.monotonic() + 10,
+            )
+
+        assert session.readiness == "protocol_initialized"
+        assert session.readiness_evidence == (
+            "initialize",
+            "initialized",
+            "configuration",
+            "didOpen",
+        )
+        assert not session._document_ready_locked(
+            (repository / "pkg/service.py").resolve().as_uri()
+        )
+        assert process.state is ProcessState.PROTOCOL_INITIALIZED
     finally:
         session.close(deadline=time.monotonic() + 5)
 
@@ -2664,6 +3475,71 @@ def test_multimegabyte_document_below_frame_limit_can_be_opened(
         )
         assert document.content == content
         assert session.readiness == "query_ready"
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_document_count_limit_rejects_without_partial_session_state(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    first_path = repository / "first.py"
+    second_path = repository / "second.py"
+    first_path.write_text("first = 1\n", encoding="utf-8")
+    second_path.write_text("second = 2\n", encoding="utf-8")
+    monkeypatch.setattr(
+        pyright_session_module,
+        "_MAX_OPEN_DOCUMENTS",
+        1,
+        raising=False,
+    )
+    session = _session(repository, state_root, semantic_pyright)
+    try:
+        first = session.open_document("first.py", deadline=time.monotonic() + 10)
+        target = session._readiness_target_uri
+        with pytest.raises(RuntimeError, match="document count"):
+            session.open_document("second.py", deadline=time.monotonic() + 10)
+
+        assert session._documents == {first.source.uri: first}
+        assert session._readiness_target_uri == target
+        assert session._document_bytes == len(first.content)
+        assert sum(
+            event.get("method") == "textDocument/didOpen"
+            for event in semantic_pyright.events()
+        ) == 1
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_document_byte_limit_rejects_without_partial_session_state(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    first_path = repository / "first.py"
+    second_path = repository / "second.py"
+    first_path.write_text("first = 1\n", encoding="utf-8")
+    second_path.write_text("second = 2\n", encoding="utf-8")
+    first_size = first_path.stat().st_size
+    monkeypatch.setattr(
+        pyright_session_module,
+        "_MAX_OPEN_DOCUMENT_BYTES",
+        first_size,
+        raising=False,
+    )
+    session = _session(repository, state_root, semantic_pyright)
+    try:
+        first = session.open_document("first.py", deadline=time.monotonic() + 10)
+        target = session._readiness_target_uri
+        with pytest.raises(RuntimeError, match="document source bytes"):
+            session.open_document("second.py", deadline=time.monotonic() + 10)
+
+        assert session._documents == {first.source.uri: first}
+        assert session._readiness_target_uri == target
+        assert session._document_bytes == len(first.content)
     finally:
         session.close(deadline=time.monotonic() + 5)
 
