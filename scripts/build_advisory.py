@@ -21,7 +21,14 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import REPORTS_DIR, ROOT  # noqa: E402
+from memory_state import (  # noqa: E402
+    REPORTS_DIR,
+    ROOT,
+    BoundedPathInventory,
+    bounded_path_inventory,
+    parse_frontmatter_scalar,
+    parse_project_scope,
+)
 
 PROJECTS_DIR = ROOT / "knowledge" / "projects"
 KNOWLEDGE = ROOT / "knowledge" / "notes"
@@ -29,13 +36,63 @@ DAILY_DIR = ROOT / "knowledge" / "daily"
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 TIMESTAMP_RE = re.compile(r"^timestamp:\s*(.+?)\s*$", re.MULTILINE)
-TYPE_RE = re.compile(r"^type:\s*(.+?)\s*$", re.MULTILINE)
-STATUS_RE = re.compile(r"^status:\s*(.+?)\s*$", re.MULTILINE)
-PROJECT_RE = re.compile(r"^project:\s*[\"']?([^\"'\n]+)[\"']?\s*$", re.MULTILINE)
 H1_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
 SUMMARY_RE = re.compile(
     r"^One-sentence summary:\s*(.+?)\s*$", re.MULTILINE | re.IGNORECASE
 )
+MAX_NOTE_BYTES = 64 * 1024
+MAX_STATE_BYTES = 64 * 1024
+MAX_LINT_REPORT_BYTES = 128 * 1024
+MAX_NOTE_FILES_SCANNED = 1_000
+MAX_LINT_REPORTS_SCANNED = 100
+
+
+def _bounded_files(
+    directory: Path,
+    pattern: str,
+    limit: int,
+    *,
+    recursive: bool,
+) -> BoundedPathInventory:
+    return bounded_path_inventory(
+        directory,
+        pattern,
+        limit,
+        recursive=recursive,
+        kind="file",
+    )
+
+
+def _note_inventory() -> BoundedPathInventory:
+    return _bounded_files(
+        KNOWLEDGE,
+        "*.md",
+        MAX_NOTE_FILES_SCANNED,
+        recursive=True,
+    )
+
+
+def _lint_report_inventory() -> BoundedPathInventory:
+    return _bounded_files(
+        REPORTS_DIR,
+        "lint-*.md",
+        MAX_LINT_REPORTS_SCANNED,
+        recursive=False,
+    )
+
+
+def _read_text_bounded(path: Path, max_bytes: int) -> str | None:
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(max_bytes + 1)
+    except OSError:
+        return None
+    if len(raw) > max_bytes:
+        return None
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
 def _fm_field(content: str, pattern: re.Pattern) -> str | None:
@@ -46,21 +103,21 @@ def _fm_field(content: str, pattern: re.Pattern) -> str | None:
     return m.group(1).strip() if m else None
 
 
-def _read_open_threads(slug: str) -> list[str]:
+def _read_open_threads(slug: str, state_path: Path | None) -> list[str]:
     """Extract open threads from project state.md."""
-    # Validate by containment rather than ASCII slug format —
-    # session_start_project_state.py may generate Unicode slugs.
-    state_path = (PROJECTS_DIR / slug / "state.md").resolve()
+    if state_path is None:
+        return []
     try:
+        state_path = state_path.resolve()
         state_path.relative_to(PROJECTS_DIR.resolve())
-    except ValueError:
+        from session_start_project_state import _recorded_runtime_slug
+
+        ownership = _read_text_bounded(state_path, MAX_STATE_BYTES)
+        if ownership is None or _recorded_runtime_slug(ownership) != slug:
+            return []
+    except (ImportError, OSError, RuntimeError, ValueError):
         return []
-    if not state_path.exists():
-        return []
-    try:
-        content = state_path.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return []
+    content = ownership
     match = re.search(
         r"^##\s*Open threads\s*$\n(.*?)(?=\n##\s|\Z)",
         content,
@@ -76,31 +133,40 @@ def _read_open_threads(slug: str) -> list[str]:
     return threads[:5]
 
 
-def _find_last_decision(slug: str | None = None) -> dict | None:
+def _find_last_decision(
+    slug: str | None = None,
+    inventory: BoundedPathInventory | None = None,
+) -> dict | None:
     """Find the most recent decision page (optionally filtered by project).
 
     The compiler writes decisions FLAT under knowledge/notes/ (not in a
     decisions/ subdir), so we scan all .md files and filter by
     frontmatter `type: decision`.
     """
-    if not KNOWLEDGE.exists():
+    current = _note_inventory() if inventory is None else inventory
+    if current.incomplete:
         return None
     candidates = []
-    for md in KNOWLEDGE.rglob("*.md"):
-        try:
-            content = md.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
+    for md in current.paths:
+        content = _read_text_bounded(md, MAX_NOTE_BYTES)
+        if content is None:
             continue
-        page_type = _fm_field(content, TYPE_RE)
-        if not page_type or page_type.strip().strip("\"'").lower() != "decision":
+        page_type = parse_frontmatter_scalar(content, "type")
+        if page_type.value is None or page_type.value.casefold() != "decision":
             continue
-        status = _fm_field(content, STATUS_RE) or "active"
-        if status == "superseded":
+        status = parse_frontmatter_scalar(content, "status")
+        if status.present and (
+            status.value is None
+            or status.value.casefold() in {"archived", "superseded"}
+        ):
             continue
         ts = _fm_field(content, TIMESTAMP_RE)
         if not ts:
             continue
-        project = _fm_field(content, PROJECT_RE)
+        scope = parse_project_scope(content)
+        if scope.present and scope.value is None:
+            continue
+        project = scope.value
         if slug and project and project.lower() != slug.lower():
             continue
         title_match = H1_RE.search(content)
@@ -119,18 +185,16 @@ def _find_last_decision(slug: str | None = None) -> dict | None:
     return candidates[0]
 
 
-def _find_contradictions() -> list[str]:
+def _find_contradictions(
+    inventory: BoundedPathInventory | None = None,
+) -> list[str]:
     """Check lint report for contradiction findings."""
     # Check if the last lint report exists and has findings
-    reports_dir = REPORTS_DIR
-    if not reports_dir.exists():
+    current = _lint_report_inventory() if inventory is None else inventory
+    if current.incomplete or not current.paths:
         return []
-    reports = sorted(reports_dir.glob("lint-*.md"), reverse=True)
-    if not reports:
-        return []
-    try:
-        report = reports[0].read_text(encoding="utf-8", errors="ignore")
-    except OSError:
+    report = _read_text_bounded(current.paths[-1], MAX_LINT_REPORT_BYTES)
+    if report is None:
         return []
     # Extract broken_wikilinks findings (actionable)
     hits = []
@@ -146,19 +210,25 @@ def _find_contradictions() -> list[str]:
     return hits[:3]
 
 
-def _find_cross_project_insights(slug: str) -> list[str]:
+def _find_cross_project_insights(
+    slug: str,
+    inventory: BoundedPathInventory | None = None,
+) -> list[str]:
     """Find knowledge pages in OTHER projects that share concepts with this project."""
     # Get this project's pages' titles
     project_titles: set[str] = set()
     other_pages: list[dict] = []
-    if not KNOWLEDGE.exists():
+    current = _note_inventory() if inventory is None else inventory
+    if current.incomplete:
         return []
-    for md in sorted(KNOWLEDGE.rglob("*.md")):
-        try:
-            content = md.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
+    for md in current.paths:
+        content = _read_text_bounded(md, MAX_NOTE_BYTES)
+        if content is None:
             continue
-        project = _fm_field(content, PROJECT_RE)
+        scope = parse_project_scope(content)
+        if scope.present and scope.value is None:
+            continue
+        project = scope.value
         title_match = H1_RE.search(content)
         title = title_match.group(1).strip().lower() if title_match else ""
         summary_match = SUMMARY_RE.search(content)
@@ -190,26 +260,39 @@ def _find_cross_project_insights(slug: str) -> list[str]:
     return insights[:3]
 
 
-def _find_stale_pages() -> int:
+def _find_stale_pages(inventory: BoundedPathInventory | None = None) -> int:
     """Count pages older than 90 days without supersede."""
     cutoff = (datetime.now().timestamp()) - (90 * 86400)
     count = 0
-    if not KNOWLEDGE.exists():
+    current = _note_inventory() if inventory is None else inventory
+    if current.incomplete:
         return 0
-    for md in KNOWLEDGE.rglob("*.md"):
+    for md in current.paths:
         try:
-            content = md.read_text(encoding="utf-8", errors="ignore")
+            content = _read_text_bounded(md, MAX_NOTE_BYTES)
+            if content is None:
+                continue
+            modified = md.stat().st_mtime
         except OSError:
             continue
-        status = _fm_field(content, STATUS_RE)
-        if status == "superseded":
+        status = parse_frontmatter_scalar(content, "status")
+        if status.present and (
+            status.value is None
+            or status.value.casefold() in {"archived", "superseded"}
+        ):
             continue
-        if md.stat().st_mtime < cutoff:
+        if modified < cutoff:
             count += 1
     return count
 
 
-def build_advisory(slug: str | None = None, max_chars: int = 800, use_llm: bool = False) -> str:
+def build_advisory(
+    slug: str | None = None,
+    max_chars: int = 800,
+    use_llm: bool = False,
+    *,
+    state_path: Path | None = None,
+) -> str:
     """Build the proactive advisory block for SessionStart injection.
 
     This is the "navigator" layer — actionable intelligence, not just inventory.
@@ -221,7 +304,7 @@ def build_advisory(slug: str | None = None, max_chars: int = 800, use_llm: bool 
         use_llm: If True and LLM available, generate a richer insight paragraph.
     """
     # Always build the rule-based advisory first (fast, reliable)
-    rule_based = _build_rule_based_advisory(slug, max_chars)
+    rule_based = _build_rule_based_advisory(slug, max_chars, state_path)
 
     if not use_llm:
         return rule_based
@@ -268,13 +351,19 @@ Respond with only the insight paragraph (2-3 sentences). No preamble."""
     return rule_based
 
 
-def _build_rule_based_advisory(slug: str | None, max_chars: int) -> str:
+def _build_rule_based_advisory(
+    slug: str | None,
+    max_chars: int,
+    state_path: Path | None = None,
+) -> str:
     """Build the fast rule-based advisory (no LLM)."""
     parts: list[str] = []
+    note_inventory = _note_inventory()
+    lint_inventory = _lint_report_inventory()
 
     # 1. Open threads (most actionable)
     if slug:
-        threads = _read_open_threads(slug)
+        threads = _read_open_threads(slug, state_path)
         if threads:
             parts.append(f"**Open threads ({len(threads)}):**")
             for t in threads:
@@ -282,23 +371,31 @@ def _build_rule_based_advisory(slug: str | None, max_chars: int) -> str:
             parts.append("")
 
     # 2. Last decision
-    last = _find_last_decision(slug)
-    if last:
-        parts.append(f"**Last decision** ({last['timestamp']}):")
-        parts.append(f"- {last['title']}: {last['summary']}")
+    if note_inventory.incomplete:
+        parts.append("**Advisory sources:** knowledge inventory unavailable.")
         parts.append("")
+    else:
+        last = _find_last_decision(slug, note_inventory)
+        if last:
+            parts.append(f"**Last decision** ({last['timestamp']}):")
+            parts.append(f"- {last['title']}: {last['summary']}")
+            parts.append("")
 
     # 3. Potential contradictions
-    contradictions = _find_contradictions()
-    if contradictions:
-        parts.append(f"**Lint alerts ({len(contradictions)}):**")
-        for c in contradictions:
-            parts.append(f"- {c}")
+    if lint_inventory.incomplete:
+        parts.append("**Advisory sources:** lint report inventory unavailable.")
         parts.append("")
+    else:
+        contradictions = _find_contradictions(lint_inventory)
+        if contradictions:
+            parts.append(f"**Lint alerts ({len(contradictions)}):**")
+            for c in contradictions:
+                parts.append(f"- {c}")
+            parts.append("")
 
     # 4. Cross-project insights
-    if slug:
-        insights = _find_cross_project_insights(slug)
+    if slug and not note_inventory.incomplete:
+        insights = _find_cross_project_insights(slug, note_inventory)
         if insights:
             parts.append("**Cross-project insights:**")
             for i in insights:
@@ -306,9 +403,10 @@ def _build_rule_based_advisory(slug: str | None, max_chars: int) -> str:
             parts.append("")
 
     # 5. Stale page count (gentle nudge)
-    stale = _find_stale_pages()
-    if stale > 5:
-        parts.append(f"**Vault health:** {stale} pages older than 90 days — consider archiving.")
+    if not note_inventory.incomplete:
+        stale = _find_stale_pages(note_inventory)
+        if stale > 5:
+            parts.append(f"**Vault health:** {stale} pages older than 90 days — consider archiving.")
 
     if not parts:
         return ""

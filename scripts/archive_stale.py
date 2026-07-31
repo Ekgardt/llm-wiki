@@ -25,7 +25,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT  # noqa: E402
+from memory_state import ROOT, parse_frontmatter_scalar  # noqa: E402
 from okf_types import NEVER_ARCHIVE_TYPES  # noqa: E402
 
 KNOWLEDGE = ROOT / "knowledge" / "notes"
@@ -33,10 +33,7 @@ KNOWLEDGE = ROOT / "knowledge" / "notes"
 ARCHIVE_ROOT = ROOT / "knowledge" / "notes" / "archive"
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
-STATUS_RE = re.compile(r"^status:\s*(.+?)\s*$", re.MULTILINE)
 TIMESTAMP_RE = re.compile(r"^timestamp:\s*(.+?)\s*$", re.MULTILINE)
-
-TYPE_RE = re.compile(r"^type:\s*(.+?)\s*$", re.MULTILINE)
 
 # Type-specific age thresholds (Dorabotka D: smart archive by type)
 TYPE_AGE_DAYS = {
@@ -49,6 +46,35 @@ TYPE_AGE_DAYS = {
 
 # Default for untyped pages
 DEFAULT_AGE_DAYS = 180
+
+
+def _with_archived_status(content: str) -> str | None:
+    status = parse_frontmatter_scalar(content, "status")
+    if status.present and status.value is None:
+        return None
+    if not FRONTMATTER_RE.match(content):
+        return f"---\nstatus: archived\n---\n\n{content}"
+    lines = content.splitlines(keepends=True)
+    closing = next(
+        (index for index, line in enumerate(lines[1:], 1) if line.rstrip() == "---"),
+        None,
+    )
+    if closing is None:
+        return None
+    if not status.present:
+        lines.insert(1, "status: archived\n")
+        return "".join(lines)
+    for index in range(1, closing):
+        raw = lines[index]
+        line = raw.rstrip("\r\n")
+        if not line or line[0].isspace() or line.startswith("#"):
+            continue
+        parsed = parse_frontmatter_scalar(f"---\n{line}\n---\n", "status")
+        if parsed.present and parsed.value is not None:
+            ending = raw[len(line) :]
+            lines[index] = f"status: archived{ending}"
+            return "".join(lines)
+    return None
 
 
 def _get_type_threshold(page_type: str) -> int:
@@ -67,14 +93,24 @@ def _is_stale(md: Path, default_cutoff_ts: float, default_days: int) -> bool:
         content = md.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return False
+    status = parse_frontmatter_scalar(content, "status")
+    page_type_field = parse_frontmatter_scalar(content, "type")
+    if (
+        status.present
+        and status.value is None
+        or page_type_field.present
+        and page_type_field.value is None
+    ):
+        return False
     # Skip if already superseded or archived
     fm = FRONTMATTER_RE.match(content)
     if fm:
-        status_m = STATUS_RE.search(fm.group(1))
-        if status_m and status_m.group(1).strip() in ("superseded", "archived"):
+        if status.value is not None and status.value.casefold() in {
+            "superseded",
+            "archived",
+        }:
             return False
-        type_m = TYPE_RE.search(fm.group(1))
-        page_type = type_m.group(1).strip() if type_m else ""
+        page_type = page_type_field.value or ""
         # Evergreen types: never archive
         if page_type in NEVER_ARCHIVE_TYPES:
             return False
@@ -109,22 +145,9 @@ def _archive_page(md: Path, apply: bool) -> str:
             content = md.read_text(encoding="utf-8")
         except OSError:
             return f"READ_ERROR: {md}"
-        # Set status: archived — replace existing status value or insert new.
-        if FRONTMATTER_RE.match(content):
-            fm_text = FRONTMATTER_RE.match(content).group(1)
-            if STATUS_RE.search(fm_text):
-                # Replace existing status value with "archived".
-                content = re.sub(
-                    r"(^status:\s*).+$", r"\1archived", content,
-                    count=1, flags=re.MULTILINE,
-                )
-            else:
-                # No status field yet — insert after opening ---.
-                content = re.sub(
-                    r"^(---\s*\n)", r"\1status: archived\n", content, count=1,
-                )
-        elif "status:" not in content:
-            content = f"---\nstatus: archived\n---\n\n{content}"
+        content = _with_archived_status(content)
+        if content is None:
+            return f"METADATA_ERROR: {md}"
 
         archive_path.parent.mkdir(parents=True, exist_ok=True)
         if archive_path.exists():

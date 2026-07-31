@@ -14,7 +14,7 @@ All durable and episodic content lives under this tree. Runtime state does **not
 
 ## Runtime (not here)
 
-Indexes, PID locks, queues, lint reports:
+Derived indexes, OS-held locks, durable queues/recovery state, and lint reports:
 
 ```
 $LLM_WIKI_STATE_ROOT/{run,logs,cache}

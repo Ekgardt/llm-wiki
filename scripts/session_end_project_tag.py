@@ -25,6 +25,7 @@ Daily entry format (one append per session end):
     - Project slug: `<slug>`
     - Project root: `<absolute path>`
     - Transcript: `<transcript path>`
+    <!-- llm-wiki-record-complete -->
 
 This format mirrors the existing project-level entries so downstream
 tooling (flush_memory, compile_memory, session_start_context preview)
@@ -35,7 +36,6 @@ from __future__ import annotations
 import io
 import json
 import os
-import re
 import sys
 import traceback
 from datetime import datetime
@@ -47,17 +47,21 @@ if hasattr(sys.stdout, "reconfigure"):
     except (AttributeError, io.UnsupportedOperation):
         pass
 
-SLUG_UNSAFE_RE = re.compile(r"[\s_/\\:*?\"<>|]+")
-
 from daily_log_append import locked_append  # noqa: E402
-from secret_redact import redact_secrets  # noqa: E402
-
-# Match the Source line that session_start_project_state.py writes into
-# newly-created state.md pages. Used to find the slug that SessionStart
-# already assigned to this project, so SessionEnd tags with the same one.
-STATE_SOURCE_LINE_RE = re.compile(
-    r"^- Project root:\s*`([^`]+)`", re.MULTILINE
+from memory_state import (  # noqa: E402
+    MAX_HOOK_STDIN_BYTES,
+    read_json_object_bounded,
 )
+from secret_redact import redact_secrets  # noqa: E402
+from session_start_context import parse_daily_records  # noqa: E402
+from session_start_project_state import (  # noqa: E402
+    _path_comparison_key,
+    confirm_project_identity,
+    resolve_project_root,
+)
+
+DAILY_RECORD_COMPLETION_MARKER = "<!-- llm-wiki-record-complete -->"
+MAX_PROVENANCE_CHARS = 500
 
 
 def _resolve_state_root() -> Path | None:
@@ -90,84 +94,34 @@ def _safe_write_error(err: str) -> None:
         pass
 
 
-def _base_slug(project_dir: Path) -> str:
-    """Sanitized parent folder name, or `root` fallback."""
-    base = project_dir.name or "root"
-    slug = base.lower()
-    slug = SLUG_UNSAFE_RE.sub("-", slug)
-    slug = slug.strip("-")
-    if not slug or slug in {".", ".."}:
-        return "root"
-    return slug
-
-
 def _lookup_existing_slug(project_dir: Path, projects_dir: Path) -> str | None:
-    """If SessionStart already created a state.md for this project, return
-    the slug it chose (may be collision-resolved to e.g. `backend-your-app`).
-
-    Returns None if no matching state.md is found — caller falls back to
-    the base slug. This keeps SessionStart and SessionEnd in sync without
-    duplicating the collision-resolution logic.
-    """
-    if not projects_dir.is_dir():
-        return None
+    """Return safe runtime identity only after ownership is confirmed."""
     try:
-        current_norm = project_dir.resolve().as_posix().lower()
-    except (OSError, ValueError):
+        confirmed = confirm_project_identity(project_dir, projects_dir)
+    except Exception:  # noqa: BLE001 - SessionEnd must fail closed
         return None
-    for slug_dir in projects_dir.iterdir():
-        if not slug_dir.is_dir() or slug_dir.name.startswith("_"):
-            continue
-        state_md = slug_dir / "state.md"
-        if not state_md.is_file():
-            continue
-        try:
-            body = state_md.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        m = STATE_SOURCE_LINE_RE.search(body)
-        if not m:
-            continue
-        try:
-            recorded_norm = Path(m.group(1).strip()).resolve().as_posix().lower()
-        except (OSError, ValueError):
-            continue
-        if recorded_norm == current_norm:
-            return slug_dir.name
-    return None
+    return confirmed[0] if confirmed is not None else None
 
 
-def _compute_slug(project_dir: Path, projects_dir: Path) -> str:
-    """Return the slug for this project — the one SessionStart picked if
-    available, else the base slug.
-
-    SessionEnd's slug is just a tag in the shared daily log; we don't
-    create files, so collision detection here would just duplicate logic.
-    Instead, defer to whatever SessionStart already recorded. Falls back
-    to base slug when SessionStart hasn't run (unusual) or when the
-    folder has no marker (SessionStart would have no-op'd).
-    """
-    existing = _lookup_existing_slug(project_dir, projects_dir)
-    if existing:
-        return existing
-    return _base_slug(project_dir)
+def _compute_slug(project_dir: Path, projects_dir: Path) -> str | None:
+    """Return the confirmed alias, never a folder-derived candidate."""
+    return _lookup_existing_slug(project_dir, projects_dir)
 
 
-def _resolve_project_dir() -> Path:
-    raw = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
-    return Path(raw).resolve()
+def _resolve_project_dir(payload: dict) -> Path | None:
+    return resolve_project_root(
+        payload,
+        env=os.environ,
+        fallback_cwd=os.getcwd(),
+    ).root
 
 
-def _read_payload() -> dict:
-    """Read the SessionEnd JSON payload from stdin. Return {} on any failure."""
-    try:
-        raw = sys.stdin.read()
-        if not raw.strip():
-            return {}
-        result = json.loads(raw)
-        return result if isinstance(result, dict) else {}
-    except (json.JSONDecodeError, ValueError, OSError):
-        return {}
+def _read_payload() -> dict | None:
+    """Read the SessionEnd JSON payload, returning ``None`` on rejection."""
+    return read_json_object_bounded(
+        sys.stdin,
+        max_bytes=MAX_HOOK_STDIN_BYTES,
+    )
 
 
 def _is_inside_vault(project_dir: Path, vault: Path) -> bool:
@@ -198,8 +152,38 @@ def _append_entry(daily_path: Path, entry: str) -> None:
     locked_append(daily_path, entry)
 
 
+def _sanitize_provenance(value: object, default: str) -> str:
+    redacted = redact_secrets(str(value or default))
+    one_line = " ".join(redacted.split())
+    safe = one_line.replace("`", "'").replace("|", "/")
+    return safe[:MAX_PROVENANCE_CHARS] or default
+
+
+def _entry_matches_project(entry: str, slug: str, project_dir: Path) -> bool:
+    try:
+        records = parse_daily_records(entry)
+        if len(records) != 1:
+            return False
+        record = records[0]
+        return (
+            record.kind == "heading"
+            and record.meaningful is False
+            and isinstance(record.slug, str)
+            and record.slug.casefold() == slug.casefold()
+            and isinstance(record.project_root, str)
+            and _path_comparison_key(Path(record.project_root).resolve())
+            == _path_comparison_key(project_dir.resolve())
+        )
+    except Exception:  # noqa: BLE001 - unverified records must never persist
+        return False
+
+
 def main() -> int:
     try:
+        payload = _read_payload()
+        if payload is None:
+            return 0
+
         vault_root = os.environ.get("LLM_WIKI_ROOT")
         if not vault_root:
             return 0
@@ -209,7 +193,9 @@ def main() -> int:
             _safe_write_error(f"knowledge/ dir missing under {vault}")
             return 0
 
-        project_dir = _resolve_project_dir()
+        project_dir = _resolve_project_dir(payload)
+        if project_dir is None:
+            return 0
 
         # Skip if inside the vault — the project-level SessionEnd hook
         # (`session_end_capture.py`) handles that case with richer content
@@ -225,24 +211,24 @@ def main() -> int:
 
         projects_dir = vault / "knowledge" / "projects"
         slug = _compute_slug(project_dir, projects_dir)
-        payload = _read_payload()
+        if slug is None:
+            return 0
         now = datetime.now()
-        session_id = str(payload.get("session_id", "unknown"))
-        reason = str(payload.get("reason", "other"))
-        transcript = str(payload.get("transcript_path", ""))
+        session_id = _sanitize_provenance(payload.get("session_id"), "unknown")
+        reason = _sanitize_provenance(payload.get("reason"), "other")
+        transcript = _sanitize_provenance(payload.get("transcript_path"), "")
 
         today_file = daily_dir / f"{now.strftime('%Y-%m-%d')}.md"
         entry = (
             f"## [{now.strftime('%H:%M:%S')}] session-end | {session_id}\n"
             f"- Trigger: `{reason}`\n"
             f"- Project slug: `{slug}`\n"
-            f"- Project root: `{project_dir}`\n"
+            f"- Project root JSON: {json.dumps(str(project_dir), ensure_ascii=False)}\n"
             + (f"- Transcript: `{transcript}`\n" if transcript else "")
-            + "\n"
+            + f"{DAILY_RECORD_COMPLETION_MARKER}\n\n"
         )
-        # Mandatory redaction boundary: strip secrets before the entry lands
-        # in the durable daily log (mirrors post_tool_capture.py:66-72).
-        entry = redact_secrets(entry)
+        if not _entry_matches_project(entry, slug, project_dir):
+            return 0
         _append_entry(today_file, entry)
         return 0
 

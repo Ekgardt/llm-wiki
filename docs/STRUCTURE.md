@@ -27,9 +27,9 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── inbox/                       unprocessed staging
 │   └── feedback/                    correction candidates
 │
-├── cache/                        RUNTIME — gitignored (search/QMD/vector)
-├── logs/                         RUNTIME — gitignored (lint/compile logs)
-├── run/                          RUNTIME — gitignored (state.json/pid/queue)
+├── cache/                        RUNTIME — gitignored, derived indexes/caches
+├── logs/                         RUNTIME — gitignored, diagnostic output
+├── run/                          RUNTIME — gitignored, durable automation state
 │
 ├── AGENTS.md                     ROOT — agent contract (byte-identical to CLAUDE.md)
 ├── CLAUDE.md                     ROOT — agent contract (byte-identical to AGENTS.md)
@@ -58,15 +58,29 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 | `$LLM_WIKI_STATE_ROOT` | **The vault root itself** | Runtime root → `cache/`, `logs/`, `run/` at vault root. Override for multi-disk or hermetic tests. |
 | `$MEMORY_LLM_PROVIDER` | Auto-detected (`opencode` → `codex` → `claude` → `openai` → `ollama`) | LLM backend for compile/flush/query. `fake` for tests. |
 
+### External integration paths
+
+- OpenCode plugins install under `$XDG_CONFIG_HOME/opencode/plugins/` when
+  `XDG_CONFIG_HOME` is an absolute path. Unset, empty, or relative values are
+  ignored and the absolute `~/.config/opencode/plugins/` fallback is used.
+- On Windows, the installer also targets the `~/.config/opencode/plugins/`
+  compatibility location when it differs from the effective XDG path.
+  Destinations are normalized and compared case-insensitively before copying,
+  so one physical path receives only one copy.
+- These are client configuration paths outside the vault. They do not change
+  `$LLM_WIKI_ROOT` or the three-zone layout.
+
 ## What lives where
 
 ### CODE zone (tracked in git)
-- `scripts/` — 45 Python files + 3 helpers (`.ps1`, `.js`). Central hub:
+- `scripts/` — pipeline and integration helpers. Central hub:
   `memory_state.py` (path/lock/state), `compile_memory.py` (LLM compile +
   VERIFY-BEFORE-WRITE), `flush_memory.py` (3-tier classification),
-  `maybe_compile.py` (PID-locked spawn), `search_memory.py` (triple-RRF),
+  `maybe_compile.py` (OS-lock-aware spawn), `search_memory.py` (triple-RRF),
   `llm_client.py` (5 backends + fake).
-- `tests/` — 25 test files, 281 tests collected in 0.26s. Hermetic via `conftest.py` (pins
+- `tests/` — 32 test files, 1903 collected on every platform; local Windows
+  verification: 1868 passed, 35 skipped. Skip count varies with optional Bash,
+  PowerShell, and symlink availability. Hermetic via `conftest.py` (pins
   `LLM_WIKI_ROOT` to checkout, redirects `LLM_WIKI_STATE_ROOT` to a temp
   dir, defaults `MEMORY_LLM_PROVIDER=fake`).
 - `docs/` — `ARCHITECTURE.md`, `USER-GUIDE.md`, `AGENTS.md` (knowledge
@@ -78,7 +92,8 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
   crystallize-playbook, bridge-promote-insight, session-memory-compile,
   session-memory-review).
 - `rules/` — 3 rule files (wiki-files, raw-files, output-files).
-- `integrations/` — claude-code (settings.json), cursor (rules),
+- `integrations/` — claude-code (settings.json), codex
+  (`hooks.template.json` for native lifecycle hooks), cursor (rules),
   antigravity (AGENTS.md), obsidian (Web Clipper template).
 - `benchmark/` — `run_benchmark.py` + `report.md`.
 
@@ -95,14 +110,31 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 - `knowledge/feedback/` — correction candidates (JSON). Gitignored.
 
 ### RUNTIME zone (always gitignored, inside vault)
-- `cache/` — `index.sqlite` (FTS5), `vectors.json` (embeddings), QMD index.
-- `logs/` — `lint-YYYY-MM-DD.md`, `compile-last.log`, `session-start-last.txt`.
-- `run/` — `state.json` (compile hashes, dedupe, heartbeats),
-  `compile.pid` (maybe_compile lock), `queue/` (deferred LLM tasks),
-  `state.json.lock`.
+- `cache/` — regenerable derived data: `index.sqlite` (FTS5), `vectors.json`
+  (embeddings), QMD index.
+- `logs/` — diagnostic output that may be rotated: `lint-YYYY-MM-DD.md`,
+  `compile-last.log`, `session-start-last.txt`.
+- `run/` — durable automation and recovery state: `state.json` (compile hashes,
+  byte-prefix checkpoints, dedupe, heartbeats),
+  `compile.pid` (fixed OS-backed compile lock file; contents are not a PID),
+  `compile-journal/` (durable accepted plans and replay state),
+  `compile-manifests/` (immutable per-source generation layouts),
+  `queue/` (deferred LLM tasks), `queue-sequence` (durable FIFO counter),
+  `queue-order.lock` (cross-process ordering lock), `queue-migration.json`
+  (temporary resumable legacy migration journal), `project-state-claim.lock`
+  (serialized slug allocation), `bootstrap-project/<slug>.lock` (per-project
+  bootstrap exclusion), `backups/<timestamp>/`
+  (repair manifests, staged files, and transaction journals), `state.json.lock`.
 - `cache/cognee/` — optional semantic graph data (only if Cognee installed).
 
-**Runtime is regenerated on demand.** Deleting `cache/`, `logs/`, `run/` is safe — the next pipeline run recreates them.
+`cache/` is derived and can be rebuilt. `logs/` may be rotated after preserving
+any diagnostics needed for an investigation. **Never delete `run/` wholesale.**
+Queue tasks, compile journals/manifests, checkpoints, and repair transactions
+carry durable ownership and recovery state. Inspect queues with
+`memory_queue.py status|list`; let compile retry service journals/manifests via
+`compile_memory.py`/`maybe_compile.py`; and use
+`repair_installed_memory.py audit|apply|verify` with the recorded manifest for
+repair transactions. Do not manually remove these artifacts to clear an error.
 
 ## Forbidden at vault root
 

@@ -28,3 +28,4 @@ Follow-up: if a new hook appears to "lose" captures, check first whether it was 
 
 ## Related
 - [[docs/operating-model]] — compile cadence and the `knowledge/daily/` ↔ `knowledge/notes/` boundary this centralization protects.
+- [[knowledge/notes/xdg-opencode-plugin-destination]] — keeps OpenCode's installed plugin location portable while the vault remains centralized.

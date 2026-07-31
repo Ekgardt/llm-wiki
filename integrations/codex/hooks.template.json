@@ -1,0 +1,74 @@
+{
+  "description": "LLM Wiki lifecycle integration for Codex.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact|fork",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --directory {{VAULT_ROOT_POSIX}} python {{SESSION_START_CONTEXT_POSIX}} --omit-project-state",
+            "commandWindows": "uv run --directory {{VAULT_ROOT_WINDOWS}} python {{SESSION_START_CONTEXT_WINDOWS}} --omit-project-state",
+            "timeout": 15,
+            "statusMessage": "[LLM Wiki] Loading memory context"
+          },
+          {
+            "type": "command",
+            "command": "uv run --directory {{VAULT_ROOT_POSIX}} python {{SESSION_START_PROJECT_STATE_POSIX}}",
+            "commandWindows": "uv run --directory {{VAULT_ROOT_WINDOWS}} python {{SESSION_START_PROJECT_STATE_WINDOWS}}",
+            "timeout": 10,
+            "statusMessage": "[LLM Wiki] Loading project state"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|apply_patch|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --directory {{VAULT_ROOT_POSIX}} python {{POST_TOOL_CAPTURE_POSIX}}",
+            "commandWindows": "uv run --directory {{VAULT_ROOT_WINDOWS}} python {{POST_TOOL_CAPTURE_WINDOWS}}",
+            "timeout": 5,
+            "statusMessage": "[LLM Wiki] Capturing file mutation"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --directory {{VAULT_ROOT_POSIX}} python {{PRECOMPACT_CAPTURE_POSIX}}",
+            "commandWindows": "uv run --directory {{VAULT_ROOT_WINDOWS}} python {{PRECOMPACT_CAPTURE_WINDOWS}}",
+            "timeout": 15,
+            "statusMessage": "[LLM Wiki] Preserving pre-compact memory"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --directory {{VAULT_ROOT_POSIX}} python {{SESSION_END_CAPTURE_POSIX}}",
+            "commandWindows": "uv run --directory {{VAULT_ROOT_WINDOWS}} python {{SESSION_END_CAPTURE_WINDOWS}}",
+            "timeout": 15,
+            "statusMessage": "[LLM Wiki] Preserving session memory"
+          },
+          {
+            "type": "command",
+            "command": "uv run --directory {{VAULT_ROOT_POSIX}} python {{SESSION_END_PROJECT_TAG_POSIX}}",
+            "commandWindows": "uv run --directory {{VAULT_ROOT_WINDOWS}} python {{SESSION_END_PROJECT_TAG_WINDOWS}}",
+            "timeout": 10,
+            "statusMessage": "[LLM Wiki] Tagging project session"
+          }
+        ]
+      }
+    ]
+  }
+}

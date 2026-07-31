@@ -1,6 +1,6 @@
 # LLM Wiki
 
-[![Tests](https://img.shields.io/badge/tests-281%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://img.shields.io/badge/tests-1903%20collected-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-3.4.0-blue.svg)](CHANGELOG.md)
@@ -53,19 +53,22 @@ LLM Wiki 为你使用的每一个 AI 编码智能体——OpenCode、Codex、Cla
 
 ### 捕获流水线
 - **5 个 Claude Code 钩子**：SessionStart、PreCompact、SessionEnd、UserPromptSubmit、PostToolUse——完整生命周期覆盖
-- **OpenCode 插件**（JS）——session.created、tool.execute.after、session.idle、experimental.session.compacting
-- **Codex 包装器**（PowerShell）——包装 `codex` CLI，退出时捕获
+- **OpenCode 插件**（JS）——官方生命周期路由、先按 `worktree` 再按 `directory` 进行项目归因、prompt 捕获、自动上下文注入、原生工具和已认证的 SDK 编译
+- **Codex 原生钩子**——`merge_codex_hooks.py` 安装跨平台生命周期捕获；保留的 Windows 包装器仅作为兼容/退出捕获后备
 - **3 级会话分类**：FLUSH_MAJOR（决策/经验→触发编译）、FLUSH_MINOR（注意事项→仅保存）、FLUSH_OK（闲聊→跳过）
-- **非 LLM breadcrumbs**——prompt 和 tool 调用标记，毫秒级延迟，无 API 调用
+- **非 LLM breadcrumbs**——prompt 仍会捕获，但 tool breadcrumb 仅来自直接修改文件的工具；read、search 和 shell 不会生成 breadcrumb，目标与 provenance 均有界且经过脱敏
 - **密钥脱敏**——API 密钥、令牌、长 base64 字符串在任何写入前清除
 
 ### 编译流水线
 - **JSON 协议编译**——无需智能体 tool-use，适用于任何 LLM 后端
 - **VERIFY-BEFORE-WRITE**——Python 端确定性引用验证；LLM 无法伪造证据
+- **确定性准入**——在写 journal 或执行 mutation 前，Python 要求引用持久内容分区并满足 lifecycle/字数边界，同时拒绝 live corpus 或同一 plan 内的重复项；provider 计数器不能绕过准入，模糊配对只报告不修改
 - **语义去重**——优先 update 而非 create；矛盾时自动 supersede
 - **增量编译**——SHA-256 哈希；仅重新编译变更的 daily 日志
-- **并发安全**——PID 锁 + stale 检测；同时只运行一个编译
-- **持久任务队列**——离线容错；延迟 LLM 任务在下次会话时排空
+- **并发安全**——Windows 和 POSIX 上由一个操作系统持有的固定锁文件串行化编译；进程退出即释放锁所有权
+- **有界、日志化恢复**——有意义的时间戳块在可配置 prompt 预算内编译；接受的计划与操作进度在修改笔记前持久化，有界 journal/manifest 可从非破坏性的 retired store 重新激活，并在真实配额处失败关闭
+- **真实完成状态**——只有所有固定 batch 均提交、Markdown 索引重建成功且发布自校验 effect receipt 后，daily 日志才标记为已编译；receipt 陈旧或缺失会使信任失效并触发 replay
+- **持久任务队列**——可执行任务按单调 FIFO 顺序处理，使用跨进程 lease，并在仍有 eligible 工作时执行有界、可重复的 pass/continuation；另含 10 分钟陈旧 lease 恢复、60 秒重试退避和 5 次尝试上限，持久 task provenance 只应用一次，legacy provenance 会明确标出
 
 ### 搜索与检索
 - **Triple-fusion 搜索**：BM25（FTS5）+ Vector（sentence-transformers）+ Graph-neighbor（wikilink RRF）
@@ -79,11 +82,12 @@ LLM Wiki 为你使用的每一个 AI 编码智能体——OpenCode、Codex、Cla
 - **Guardrails**——在 SessionStart 自动注入已学习的纠正（防止重复犯错）
 - **Advisory**——呈现开放线程、最近决策、lint 告警、跨项目洞察
 - **元认知上下文**——vault 清单、编译积压、flush 层级分布
+- **项目安全的 daily 上下文**——在内存中统一规范时间戳块和 legacy heading/bullet 摘要；优先使用项目匹配的持久摘要与用户 prompt，并排除 tool breadcrumb
 - **反馈捕获**——检测记录中的纠正/偏好，保存为提升候选
 
 ### 多项目与多智能体
 - **一个 vault，多个项目**——5 步 collision-safe slug 系统，每个项目独立的 `state.md`
-- **项目引导**——从 git 历史、README、技术栈自动生成上下文
+- **项目引导**——从 git 历史、README、技术栈自动生成上下文，并在下一次 SessionStart 中呈现
 - **Blackboard 协议**——并行智能体认领任务、信号完成、检测冲突
 - **循环检测器**——标记重复编辑循环（fix → review → redo）
 - **智能体时间线**——归因：哪个智能体何时做了什么决策
@@ -91,14 +95,18 @@ LLM Wiki 为你使用的每一个 AI 编码智能体——OpenCode、Codex、Cla
 ### 维护
 - **14 项 lint 检查（13 项结构性 + 1 项 LLM 判定矛盾）**——损坏的 wikilinks、孤儿页面、缺失 frontmatter、无效 supersede 链、时间有效性、gap、稀疏页面、缺失来源、矛盾
 - **类型感知归档**——debugging 60 天、patterns 180 天、decisions 永不
-- **Nightly + weekly 计划**——编译、lint、归档、OKF 迁移（Windows 上 Task Scheduler，Unix 上 cron）
+- **真实 nightly 状态**——队列、编译、lint、派生索引失败或仍有待处理工作时返回非零退出码
+- **单 lease weekly 维护**——一个 maintenance 锁覆盖 nightly 工作、OKF 迁移、持久失败队列报告（不删除任务）、归档、可选矛盾检查以及最终 Markdown/FTS/graph 重建
+- **可审计的已安装 vault 修复**——audit、已验证 backup-only、manifest 绑定 apply 和 verify 分离；只有操作者审阅并运行后才算执行 cleanup
 - **OKF v0.1 frontmatter**——`type`、`confidence`、`source_authority`、`supersede` 字段；从遗留页面自动迁移
 
 ### 基础设施
 - **5 个 LLM 后端**（自动检测）：OpenCode → Codex → Claude CLI → OpenAI → Ollama
+- **精确 OpenCode 服务契约**——SDK-only 分类、编译和延迟队列 prompt 固定使用 `openai/gpt-5.6-luna`；每个操作独占一个临时 `memory-*` 会话，并在 `finally` 中先 abort 再 delete，不回退到 CLI 或较低模型
 - **跨平台**：Windows、macOS、Linux、WSL2
+- **无控制台窗口的 Windows 维护**——Task Scheduler 使用 `pythonw` 启动任务，维护子进程也不会创建控制台窗口
 - **零运行时依赖**——基础安装仅用标准库；sentence-transformers 和 Cognee 为可选
-- **281 个回归测试**，CI 在 Ubuntu + Windows + macOS 上通过，Python 3.10 + 3.13
+- **各平台稳定收集 1903 个测试；本地 Windows 验证：1868 个通过，35 个跳过**。跳过数量取决于可选 Bash、PowerShell 和符号链接支持；CI 目标为 Ubuntu + Windows + macOS、Python 3.10 + 3.13。
 - **Pre-commit 钩子**：ruff（静态分析）+ 结构 lint + gitleaks（密钥扫描）
 
 ---
@@ -129,9 +137,9 @@ irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 1. 检查前置条件（Python 3.10+、git）
 2. 如缺失则安装 `uv`（快速 Python 包管理器）
 3. 同步依赖（`uv sync`）
-4. 运行测试套件（281 个测试）
+4. 运行测试套件（各平台收集 1903 个；本地 Windows：1868 个通过，35 个跳过；跳过数量取决于 shell/符号链接支持）
 5. 设置 `LLM_WIKI_ROOT` 环境变量（用户级）
-6. 创建运行时目录（`cache/`、`logs/`、`run/`、`cache/cognee/`——gitignored）
+6. 创建 gitignored 运行时目录（`cache/` 和日志可替换；`run/` 保存持久自动化与恢复状态）
 7. 注册计划维护（Unix 上 cron，Windows 上 Task Scheduler）
 8. 检测你的智能体并完成接入
 9. 构建 FTS5 搜索索引
@@ -142,7 +150,7 @@ irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync
-uv run pytest -q          # 281 个测试应通过
+uv run pytest -q          # 收集 1903 个；本地 Windows：1868 个通过，35 个跳过；跳过数依环境而异
 ```
 
 ### 验证可用
@@ -160,14 +168,18 @@ LLM Wiki 在安装时自动检测已安装的智能体。以下是接入内容�
 
 | 智能体 | 集成方式 | 如何接入 |
 |--------|----------|----------|
-| **OpenCode** | JS 插件 | 复制到 `~/.config/opencode/plugins/llm-wiki-memory.js` |
-| **Codex CLI** | PowerShell 包装器 | 加入 `$PROFILE`（Windows） |
+| **OpenCode** | JS 插件 | 安装到有效的 `$XDG_CONFIG_HOME/opencode/plugins/`；XDG 未设置或无效时回退到 `~/.config`，Windows 在路径不同时还会安装兼容路径 |
+| **Codex** | 原生生命周期钩子 | `merge_codex_hooks.py` 跨平台合并到 `~/.codex/hooks.json` 并备份；通过 `/hooks` 审查。安装器保留 Windows 包装器时，它仅作为兼容/退出捕获后备。 |
 | **Claude Code** | settings.json 钩子 | 合并到 `~/.claude/settings.json`（5 个钩子：SessionStart、PreCompact、SessionEnd、UserPromptSubmit、PostToolUse） |
 | **Cursor** | 规则文件 | 手动复制 `integrations/cursor/rules/llm-wiki.mdc` |
 | **Antigravity** | AGENTS.md 片段 | 手动复制 `integrations/antigravity/AGENTS.md` |
 | **Obsidian** | Web Clipper 模板 | 导入 `integrations/obsidian/Article-to-Inbox.json` |
 
 所有智能体共享同一个 vault——Cursor 记录的决策在 OpenCode 的下次会话中可见。
+
+仅当 `XDG_CONFIG_HOME` 是绝对路径时，它才拥有 OpenCode 的有效配置位置。
+空值或相对路径会被忽略。Unix 只安装一个有效目标；Windows 在规范化路径不同时，
+还会安装到 `~/.config/opencode`。
 
 ### 可选：语义搜索
 
@@ -199,7 +211,11 @@ RUNTIME       cache/  logs/  run/  cache/cognee/   （gitignored，vault 内）
 
 - **CODE**——git 跟踪。流水线、测试、文档、技能、规则、集成。
 - **KNOWLEDGE**——git 跟踪（源码中仅公开示例）。完整用户数据位于已安装的 vault 中。Daily 日志和个人页面 gitignored。
-- **RUNTIME**——gitignored，按需重新生成。搜索索引、编译日志、state.json、任务队列。
+- **RUNTIME**——位于 vault 内且 gitignored。`cache/` 可重建，`logs/` 可轮换；`run/` 是持久自动化与恢复状态，包含队列任务、编译 journal/manifest、checkpoint 和修复事务。
+
+切勿为恢复错误而整体删除 `run/`。使用 `memory_queue.py status|list` 检查
+队列，通过 `compile_memory.py` 或 `maybe_compile.py` 重试编译，并对 manifest
+绑定的修复事务使用 `repair_installed_memory.py audit|apply|verify`。
 
 完整设计原理（7 条公理、系统架构图、记忆分类法、搜索架构）见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 

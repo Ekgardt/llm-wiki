@@ -36,26 +36,160 @@ ok()    { echo -e "${GREEN}[OK]${NC} $1"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 fail()  { echo -e "${RED}[FAIL]${NC} $1"; exit 1; }
 
+resolve_opencode_config_home() {
+  local candidate="${XDG_CONFIG_HOME:-}"
+  if [[ -n "$candidate" ]] && [[ "$candidate" == /* ]]; then
+    printf '%s' "$candidate"
+  else
+    printf '%s' "$HOME/.config"
+  fi
+}
+
+shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\\\''/g"
+  printf "'"
+}
+
+cron_quote() {
+  shell_quote "$1" | sed 's/%/\\%/g'
+}
+
+is_llm_wiki_checkout() {
+  local root="$1"
+  [[ -f "$root/pyproject.toml" ]] || return 1
+  awk '
+    /^\[project\][[:space:]]*$/ { in_project = 1; next }
+    /^\[/ { in_project = 0 }
+    in_project && /^[[:space:]]*name[[:space:]]*=[[:space:]]*"llm-wiki"[[:space:]]*$/ {
+      found = 1
+    }
+    END { exit found ? 0 : 1 }
+  ' "$root/pyproject.toml"
+}
+
+update_shell_profile() {
+  local original_profile="$1"
+  local vault_root="$2"
+  local state_root="$3"
+  local provider="$4"
+  local target
+  local current_target
+  local target_dir
+  local target_name
+  local base
+  local temporary
+  local had_base=0
+
+  resolve_profile_target() {
+    local candidate="$1"
+    local link_target
+    local link_count=0
+    local candidate_dir
+    local candidate_name
+
+    while [[ -L "$candidate" ]]; do
+      link_count=$((link_count + 1))
+      [[ "$link_count" -le 40 ]] || return 1
+      link_target=$(readlink "$candidate") || return 1
+      if [[ "$link_target" == /* ]]; then
+        candidate="$link_target"
+      else
+        candidate="$(dirname "$candidate")/$link_target"
+      fi
+    done
+    candidate_dir=$(cd -P "$(dirname "$candidate")" && pwd) || return 1
+    candidate_name=$(basename "$candidate")
+    printf '%s/%s' "$candidate_dir" "$candidate_name"
+  }
+
+  target=$(resolve_profile_target "$original_profile") || return 1
+  target_dir=$(dirname "$target")
+  target_name=$(basename "$target")
+
+  base=$(mktemp "$target_dir/.${target_name}.llm-wiki.base.XXXXXX") || return 1
+  temporary=$(mktemp "$target_dir/.${target_name}.llm-wiki.tmp.XXXXXX") || {
+    rm -f "$base"
+    return 1
+  }
+  if [[ -e "$target" ]]; then
+    if [[ ! -f "$target" ]] || [[ -L "$target" ]]; then
+      rm -f "$base" "$temporary"
+      return 1
+    fi
+    had_base=1
+    if ! cp -p "$target" "$base" || ! cp -p "$base" "$temporary"; then
+      rm -f "$base" "$temporary"
+      return 1
+    fi
+    if ! awk \
+        '!/^export (LLM_WIKI_ROOT|LLM_WIKI_STATE_ROOT|MEMORY_LLM_PROVIDER)=/' \
+        "$base" > "$temporary"; then
+      rm -f "$base" "$temporary"
+      return 1
+    fi
+  else
+    : > "$temporary"
+  fi
+  if ! {
+    printf 'export LLM_WIKI_ROOT=%s\n' "$(shell_quote "$vault_root")"
+    printf 'export LLM_WIKI_STATE_ROOT=%s\n' "$(shell_quote "$state_root")"
+    printf 'export MEMORY_LLM_PROVIDER=%s\n' "$(shell_quote "$provider")"
+  } >> "$temporary"; then
+    rm -f "$base" "$temporary"
+    return 1
+  fi
+  current_target=$(resolve_profile_target "$original_profile") || {
+    rm -f "$base" "$temporary"
+    return 1
+  }
+  if [[ "$current_target" != "$target" ]]; then
+    rm -f "$base" "$temporary"
+    return 1
+  fi
+  if [[ "$had_base" -eq 1 ]]; then
+    if ! cmp -s "$base" "$target"; then
+      rm -f "$base" "$temporary"
+      return 1
+    fi
+  elif [[ -e "$target" ]] || [[ -L "$target" ]]; then
+    rm -f "$base" "$temporary"
+    return 1
+  fi
+  if ! mv -f "$temporary" "$target"; then
+    rm -f "$base" "$temporary"
+    return 1
+  fi
+  rm -f "$base"
+}
+
 # ─── 1. Resolve vault root ──────────────────────────────────────────
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VAULT_ROOT="${LLM_WIKI_ROOT:-$SCRIPT_DIR}"
+SCRIPT_PATH="${BASH_SOURCE[0]:-}"
+SCRIPT_DIR=""
+if [[ -n "$SCRIPT_PATH" ]] && [[ -f "$SCRIPT_PATH" ]]; then
+  SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+fi
+if [[ -n "$SCRIPT_DIR" ]] && is_llm_wiki_checkout "$SCRIPT_DIR"; then
+  VAULT_ROOT="$SCRIPT_DIR"
+elif [[ -n "${LLM_WIKI_ROOT:-}" ]] && is_llm_wiki_checkout "$LLM_WIKI_ROOT"; then
+  VAULT_ROOT="$LLM_WIKI_ROOT"
+else
+  VAULT_ROOT=""
+fi
 
 # If running from curl pipe, we need to clone first
-if [[ ! -f "$VAULT_ROOT/pyproject.toml" ]]; then
+if ! is_llm_wiki_checkout "$VAULT_ROOT"; then
   info "Cloning LLM-Wiki repository..."
   INSTALL_DIR="${HOME}/LLM-wiki"
   git clone --branch v3.4.0 --depth 1 https://github.com/Ekgardt/llm-wiki.git "$INSTALL_DIR"
   VAULT_ROOT="$INSTALL_DIR"
+  is_llm_wiki_checkout "$VAULT_ROOT" || fail "Cloned repository is not a valid LLM-Wiki checkout"
   cd "$VAULT_ROOT"
 fi
 
 cd "$VAULT_ROOT"
 info "Vault root: $VAULT_ROOT"
-
-# Prevent accidental pushes from the installed vault
-git -C "$VAULT_ROOT" remote set-url --push origin no-push
-ok "Push disabled (no-push) — installed vault cannot push to public remote"
 
 # ─── 2. Check prerequisites ────────────────────────────────────────
 
@@ -93,17 +227,22 @@ ok "uv $(uv --version 2>/dev/null || echo 'installed')"
 # ─── 3. Install dependencies ───────────────────────────────────────
 
 info "Installing Python dependencies..."
-uv sync --locked --quiet
+if ! uv sync --locked --quiet; then
+  fail "Dependency installation failed"
+fi
 ok "Dependencies installed"
 
 # ─── 4. Run tests ──────────────────────────────────────────────────
 
 info "Running test suite..."
-if uv run pytest -q 2>&1 | tail -1 | grep -q "passed"; then
-  ok "All tests passed"
-else
-  warn "Some tests failed — core features will still work, but please report issues"
+if ! uv run pytest -q; then
+  fail "Test suite failed"
 fi
+ok "All tests passed"
+
+# Prevent accidental pushes only after all validation gates pass.
+git -C "$VAULT_ROOT" remote set-url --push origin no-push
+ok "Push disabled (no-push) — installed vault cannot push to public remote"
 
 # ─── 5. Set environment variables ──────────────────────────────────
 
@@ -118,38 +257,29 @@ if [ -n "${LLM_WIKI_STATE_ROOT:-}" ] && [ "$LLM_WIKI_STATE_ROOT" != "$VAULT_ROOT
 fi
 
 # Detect shell profile
-if [[ -n "${ZSH_VERSION:-}" ]] || [[ "$SHELL" == */zsh ]]; then
+if [[ -n "${ZSH_VERSION:-}" ]] || [[ "${SHELL:-}" == */zsh ]]; then
   PROFILE="${HOME}/.zshrc"
-elif [[ -n "${BASH_VERSION:-}" ]] || [[ "$SHELL" == */bash ]]; then
+elif [[ -n "${BASH_VERSION:-}" ]] || [[ "${SHELL:-}" == */bash ]]; then
   PROFILE="${HOME}/.bashrc"
 else
   PROFILE="${HOME}/.profile"
-fi
-
-# Set LLM_WIKI_ROOT (idempotent per-var, so a re-install updates STATE_ROOT
-# even if LLM_WIKI_ROOT was already written by an older installer).
-if ! grep -q "LLM_WIKI_ROOT=" "$PROFILE" 2>/dev/null; then
-  echo "" >> "$PROFILE"
-  echo "# LLM-Wiki memory system" >> "$PROFILE"
-  echo "export LLM_WIKI_ROOT=\"$VAULT_ROOT\"" >> "$PROFILE"
-  ok "Added LLM_WIKI_ROOT to $PROFILE"
-else
-  ok "LLM_WIKI_ROOT already in $PROFILE"
 fi
 
 # Runtime lives inside the vault as gitignored cache/logs/run dirs.
 # LLM_WIKI_STATE_ROOT defaults to the vault itself; set it explicitly only
 # if you want runtime on a different disk.
 STATE_ROOT="$VAULT_ROOT"
-if ! grep -q "LLM_WIKI_STATE_ROOT=" "$PROFILE" 2>/dev/null; then
-  echo "export LLM_WIKI_STATE_ROOT=\"$STATE_ROOT\"" >> "$PROFILE"
-  ok "Added LLM_WIKI_STATE_ROOT to $PROFILE"
-else
-  ok "LLM_WIKI_STATE_ROOT already in $PROFILE"
+if ! update_shell_profile \
+    "$PROFILE" "$VAULT_ROOT" "$STATE_ROOT" "opencode-sdk"; then
+  fail "Could not update shell profile atomically: $PROFILE"
 fi
+ok "Updated LLM-Wiki environment in $PROFILE"
+
+export LLM_WIKI_ROOT="$VAULT_ROOT"
+export LLM_WIKI_STATE_ROOT="$STATE_ROOT"
+export MEMORY_LLM_PROVIDER="opencode-sdk"
 
 # Create runtime dirs inside the vault (gitignored)
-STATE_ROOT="${LLM_WIKI_STATE_ROOT:-$VAULT_ROOT}"
 mkdir -p "$STATE_ROOT/run" "$STATE_ROOT/run/queue" "$STATE_ROOT/logs" "$STATE_ROOT/cache" "$STATE_ROOT/cache/cognee"
 ok "Runtime dirs: $STATE_ROOT/{run,logs,cache} (gitignored)"
 
@@ -163,8 +293,15 @@ ok "Search index built"
 
 info "Setting up scheduled maintenance..."
 
-CRON_NIGHTLY="0 3 * * * cd '$VAULT_ROOT' && $(which uv) run python scripts/scheduled_nightly.py >> '$STATE_ROOT/logs/cron-nightly.log' 2>&1"
-CRON_WEEKLY="0 4 * * 0 cd '$VAULT_ROOT' && $(which uv) run python scripts/scheduled_weekly.py >> '$STATE_ROOT/logs/cron-weekly.log' 2>&1"
+UV_BIN="$(command -v uv)"
+VAULT_ROOT_Q=$(cron_quote "$VAULT_ROOT")
+STATE_ROOT_Q=$(cron_quote "$STATE_ROOT")
+UV_BIN_Q=$(cron_quote "$UV_BIN")
+NIGHTLY_LOG_Q=$(cron_quote "$STATE_ROOT/logs/cron-nightly.log")
+WEEKLY_LOG_Q=$(cron_quote "$STATE_ROOT/logs/cron-weekly.log")
+CRON_ENV="LLM_WIKI_ROOT=$VAULT_ROOT_Q LLM_WIKI_STATE_ROOT=$STATE_ROOT_Q MEMORY_LLM_PROVIDER=opencode-sdk"
+CRON_NIGHTLY="0 3 * * * cd $VAULT_ROOT_Q && $CRON_ENV $UV_BIN_Q run python scripts/scheduled_nightly.py >> $NIGHTLY_LOG_Q 2>&1"
+CRON_WEEKLY="0 4 * * 0 cd $VAULT_ROOT_Q && $CRON_ENV $UV_BIN_Q run python scripts/scheduled_weekly.py >> $WEEKLY_LOG_Q 2>&1"
 
 # Remove old LLM-Wiki cron block (between markers only)
 if crontab -l 2>/dev/null | grep -q "LLM-Wiki-cron-start"; then
@@ -183,9 +320,10 @@ info "Detecting installed agents..."
 AGENTS_FOUND=""
 
 # OpenCode
-if [ -d "$HOME/.config/opencode" ] || command -v opencode &>/dev/null; then
+OPENCODE_CONFIG_HOME="$(resolve_opencode_config_home)/opencode"
+if [ -d "$OPENCODE_CONFIG_HOME" ] || command -v opencode &>/dev/null; then
   AGENTS_FOUND="$AGENTS_FOUND OpenCode"
-  PLUGIN_DIR="$HOME/.config/opencode/plugins"
+  PLUGIN_DIR="$OPENCODE_CONFIG_HOME/plugins"
   mkdir -p "$PLUGIN_DIR"
   if [ -f "$VAULT_ROOT/scripts/llm-wiki-memory-opencode.js" ]; then
     cp -f "$VAULT_ROOT/scripts/llm-wiki-memory-opencode.js" "$PLUGIN_DIR/llm-wiki-memory.js"
@@ -199,8 +337,15 @@ if [ -d "$HOME/.config/opencode" ] || command -v opencode &>/dev/null; then
 fi
 
 # Codex CLI
-if command -v codex &>/dev/null; then
+if command -v codex &>/dev/null || [ -d "$HOME/.codex" ]; then
   AGENTS_FOUND="$AGENTS_FOUND Codex"
+  info "Merging native LLM-wiki hooks into Codex config (backup first)..."
+  if uv run python "$VAULT_ROOT/scripts/merge_codex_hooks.py" --vault-root "$VAULT_ROOT"; then
+    ok "Codex hooks merged → ~/.codex/hooks.json"
+    warn "Review and trust the new hooks with /hooks in Codex."
+  else
+    warn "Codex hooks merge failed — run: uv run python scripts/merge_codex_hooks.py"
+  fi
   info "Codex CLI detected. Add this to your shell profile:"
   info "  alias codex-mem='uv run python $VAULT_ROOT/scripts/codex_memory.py daily-log --cwd \$(pwd) --reason codex-session-end --json'"
 fi
@@ -231,7 +376,8 @@ if command -v claude &>/dev/null || [ -d "$HOME/.claude" ]; then
   info "Merging LLM-wiki hooks into Claude user settings (backup first)..."
   if uv run python "$VAULT_ROOT/scripts/merge_claude_settings.py" \
       --vault-root "$VAULT_ROOT" \
-      --state-root "$STATE_ROOT"; then
+      --state-root "$STATE_ROOT" \
+      --legacy-shell bash; then
     ok "Claude settings merged → ~/.claude/settings.json"
   else
     warn "Claude settings merge failed — run: uv run python scripts/merge_claude_settings.py"

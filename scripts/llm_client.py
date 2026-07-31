@@ -10,10 +10,10 @@ Backend priority (auto-detected, first alive wins):
   4. OpenAI-compatible API (if OPENAI_API_KEY)
   5. Ollama HTTP API (if localhost:11434 alive)
 
-If NONE available: returns None. Callers handle this gracefully (compile
-skips, flush treats as FLUSH_OK, query returns error string). The queue
-(``scripts/memory_queue.py``) is available as an explicit API for callers
-that want deferred execution — ``memory_queue.enqueue()``.
+For a nonblank prompt, backend unavailability or failure returns ``None``.
+There is no automatic queue fallback. Queue-capable callers that need deferred
+execution explicitly call ``memory_queue.enqueue()``; other callers handle
+``None`` according to their own contract.
 
 Override backend via MEMORY_LLM_PROVIDER env var:
     MEMORY_LLM_PROVIDER=opencode  (default — uses OpenCode HTTP API)
@@ -24,8 +24,9 @@ Override backend via MEMORY_LLM_PROVIDER env var:
     MEMORY_LLM_PROVIDER=fake      (tests/e2e — returns MEMORY_LLM_FAKE_RESPONSE)
 
 Design:
-- NEVER crash the caller: on any LLM failure, return "" (empty string).
-- On no-backend-available: enqueue the call as a deferred task.
+- NEVER crash the caller: backend unavailability or failure returns ``None``.
+- NEVER enqueue automatically: queue-capable callers explicitly persist work.
+- A blank prompt returns ``""`` without selecting a backend.
 - Bounded timeouts: 90s per HTTP call. The OpenCode backend makes up to
   three sequential calls (session create, system inject, prompt), so its
   aggregate wall time may reach ~270s; all other backends are single-call.
@@ -50,13 +51,11 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 def call_llm(prompt: str, system_prompt: str = "", max_tokens: int = 2000) -> str | None:
-    """Synchronous LLM call. Returns response text, "" on soft failure,
-    or None when no backend is available.
+    """Return response text, or ``None`` when every selected backend is unavailable or fails.
 
-    When no backend is available, None is returned. Callers treat this
-    gracefully (compile skips, flush treats as FLUSH_OK, query returns
-    error string). The queue (``scripts/memory_queue.py``) is available
-    as an explicit API for callers that want deferred execution.
+    This function never enqueues automatically. Queue-capable callers explicitly
+    call ``memory_queue.enqueue()`` when they need deferred execution. A blank
+    prompt is the sole empty-string return and performs no backend call.
     """
     if not prompt or not prompt.strip():
         return ""
@@ -66,7 +65,7 @@ def call_llm(prompt: str, system_prompt: str = "", max_tokens: int = 2000) -> st
     if forced == "fake":
         return os.environ.get(
             "MEMORY_LLM_FAKE_RESPONSE",
-            '{"operations": [], "audit": {"verified": 0, "dedup": 0, "stubs": 0, "contradictions": 0, "rejected": 0}}\nCOMPILE_AUDIT: verified 0 evidence citations; 0 dedup checks performed; 0 stubs skipped; 0 contradictions handled; 0 pages rejected as below-threshold',
+            '{"operations": [], "audit": {"verified": 0, "dedup": 0, "stubs": 0, "contradictions": 0, "rejected": 0}}',
         ).strip()
 
     candidates = _candidate_order(forced)
@@ -80,29 +79,41 @@ def call_llm(prompt: str, system_prompt: str = "", max_tokens: int = 2000) -> st
             if not caller:
                 continue
             result = caller(prompt, system_prompt, max_tokens)
-            if result and result.strip():
+            if result and result.strip() and not _is_backend_error_text(result):
                 return result.strip()
         except Exception as e:  # noqa: BLE001
             print(f"llm_client: {name} backend failed: {type(e).__name__}: {e}", file=sys.stderr)
             continue
 
-    # No backend available — return None. Callers handle this gracefully
-    # (compile skips, flush treats as FLUSH_OK, query returns error string).
-    # The queue is available as an explicit API for deferred execution.
+    # All selected backends were unavailable or failed. Queue-capable callers
+    # decide explicitly whether to persist deferred work.
     return None
+
+
+def _is_backend_error_text(text: str) -> bool:
+    """Recognize setup/authentication failures that are not model output."""
+    normalized = " ".join(text.lower().split())
+    markers = (
+        "not logged in",
+        "please run /login",
+        "requires a newer version of codex",
+        "authentication required",
+        "auth required",
+    )
+    return any(marker in normalized for marker in markers)
 
 
 def _candidate_order(forced: str) -> list[str]:
     """Order in which to try backends.
 
-    When ``forced`` is set to a known backend, ONLY that backend is tried —
-    a strict override. If it fails, the call returns None rather than
-    silently falling through to another provider. When ``forced`` is empty
-    or unknown, the full default order is used (auto-detection).
+    Any explicit provider is strict. Unknown values (including the plugin-only
+    ``opencode-sdk`` route) select no synchronous backend.
     """
     defaults = ["opencode", "codex", "claude", "openai", "ollama"]
     if forced and forced in defaults:
         return [forced]
+    if forced:
+        return []
     return defaults
 
 
@@ -290,13 +301,15 @@ def _call_codex(prompt: str, system_prompt: str, max_tokens: int) -> str:
             cmd.extend(["-m", model])
 
         with open(prompt_path, "rb") as stdin_handle:
-            subprocess.run(
+            result = subprocess.run(
                 cmd,
                 stdin=stdin_handle,
                 capture_output=True,
                 timeout=_timeout_s(),
                 check=False,
             )
+        if result.returncode != 0:
+            return ""
         try:
             return Path(out_path).read_text(encoding="utf-8", errors="ignore")
         except OSError:
@@ -347,6 +360,8 @@ def _call_claude(prompt: str, system_prompt: str, max_tokens: int) -> str:
             encoding="utf-8",
             errors="ignore",
         )
+        if result.returncode != 0:
+            return ""
         return result.stdout or ""
     except (subprocess.TimeoutExpired, OSError):
         return ""
@@ -467,4 +482,3 @@ def _cli() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(_cli())
-

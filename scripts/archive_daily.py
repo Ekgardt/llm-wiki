@@ -39,7 +39,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT, file_hash, load_state  # noqa: E402
+from memory_state import (  # noqa: E402
+    ROOT,
+    file_hash,
+    load_state,
+    trusted_compiled_daily_hashes,
+)
 
 DAILY_DIR = ROOT / "knowledge" / "daily"
 ARCHIVE_DIR = DAILY_DIR / "archive"
@@ -139,7 +144,7 @@ def main() -> int:
         return 0
 
     state = load_state()
-    compiled = state.get("compiled_daily_hashes", {})
+    compiled = trusted_compiled_daily_hashes(state, root=ROOT)
 
     candidates = find_candidates(dailies, args.max_age, compiled)
     if not candidates:

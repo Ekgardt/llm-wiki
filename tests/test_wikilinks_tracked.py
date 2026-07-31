@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 
 import lint_memory
+import pytest
 
 
 def _tracked_knowledge_pages() -> list[Path]:
@@ -31,6 +32,13 @@ def _tracked_knowledge_pages() -> list[Path]:
 
 def test_no_broken_wikilinks_in_tracked_knowledge():
     """Same bar as CI: only files that ship in git."""
+    push_url = subprocess.check_output(
+        ["git", "remote", "get-url", "--push", "origin"],
+        cwd=str(lint_memory.ROOT),
+        text=True,
+    ).strip()
+    if push_url == "no-push":
+        pytest.skip("installed vault index intentionally references personal gitignored pages")
     pages = _tracked_knowledge_pages()
     assert pages, "expected tracked knowledge pages"
     broken = lint_memory.check_broken_links(
@@ -65,3 +73,37 @@ def test_untracked_target_is_reported(tmp_path, monkeypatch):
     broken = lint_memory.check_broken_links([page], [vault / "knowledge", notes])
     assert broken, "expected untracked target to be reported as broken"
     assert any("untracked" in b for b in broken)
+
+
+def test_untracked_source_does_not_require_backlink(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    notes = vault / "knowledge" / "notes"
+    notes.mkdir(parents=True)
+    tracked = notes / "tracked.md"
+    tracked.write_text("# Tracked\n", encoding="utf-8")
+    personal = notes / "personal.md"
+    personal.write_text("# Personal\n\n[[tracked]]\n", encoding="utf-8")
+
+    monkeypatch.setattr(lint_memory, "ROOT", vault)
+    monkeypatch.setattr(
+        lint_memory, "_git_tracked_paths", lambda: {"knowledge/notes/tracked.md"}
+    )
+
+    missing = lint_memory.check_missing_backlinks([tracked, personal], [notes])
+    assert missing == []
+
+
+def test_untracked_page_is_not_reported_as_orphan(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    notes = vault / "knowledge" / "notes"
+    notes.mkdir(parents=True)
+    index = vault / "knowledge" / "index.md"
+    index.write_text("# Index\n", encoding="utf-8")
+    personal = notes / "personal.md"
+    personal.write_text("# Personal\n", encoding="utf-8")
+
+    monkeypatch.setattr(lint_memory, "ROOT", vault)
+    monkeypatch.setattr(lint_memory, "_git_tracked_paths", lambda: set())
+
+    orphans = lint_memory.check_orphans_against_index([personal], index)
+    assert orphans == []

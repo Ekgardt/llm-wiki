@@ -74,14 +74,6 @@ function codex {
     $cwdBefore = (Get-Location).Path
 
     try {
-        # Generate session context file for knowledge injection.
-        # Codex reads AGENTS.md at startup; the global AGENTS.md instructs
-        # it to read this file for project knowledge state.
-        try {
-            $contextFile = Join-Path $env:LLM_WIKI_STATE_ROOT "cache\session-context.md"
-            & uv run python "$env:LLM_WIKI_ROOT\scripts\session_start_context.py" --output-file $contextFile 2>$null | Out-Null
-        } catch {}
-
         # Invoke the real codex binary with all forwarded args.
         & $REAL_CODEX @fwdArgs
         $exitCode = $LASTEXITCODE
@@ -102,20 +94,13 @@ function codex {
                         --reason $reason `
                         --json 2>$null | Out-Null
 
-                    # Drain pending memory-pipeline queue: any tasks that were
-                    # enqueued while no backend was available get serviced now
-                    # by Codex LLM (via llm_client.py auto-detection).
-                    $drainResult = & uv run python scripts/memory_queue.py drain 2>&1
-                    if ($drainResult -match "drain complete") {
-                        Write-Host "[codex-memory] $drainResult" -ForegroundColor DarkGray
-                    }
-
-                    # Fire-and-forget compile trigger. Checks concurrency lock
-                    # + pending work; spawns detached compile_memory.py if both
-                    # pass. Returns immediately — compile runs in background
-                    # and won't block the next codex invocation.
-                    & uv run python scripts/maybe_compile.py 2>&1 | ForEach-Object {
-                        Write-Host "[codex-memory] $_" -ForegroundColor DarkGray
+                    # OpenCode SDK mode leaves LLM work pending for an active
+                    # authenticated OpenCode session instead of invoking a CLI.
+                    if ($env:MEMORY_LLM_PROVIDER -ne "opencode-sdk") {
+                        & uv run python scripts/memory_queue.py drain 2>&1 | Out-Null
+                        & uv run python scripts/maybe_compile.py 2>&1 | ForEach-Object {
+                            Write-Host "[codex-memory] $_" -ForegroundColor DarkGray
+                        }
                     }
                 }
                 finally {
@@ -213,6 +198,11 @@ function codex-memory-compile {
     )
     Push-Location $env:LLM_WIKI_ROOT
     try {
+        if ($env:MEMORY_LLM_PROVIDER -eq "opencode-sdk") {
+            & uv run python scripts/maybe_compile.py
+            Write-Host "Open or restart OpenCode to compile pending memory through its active model." -ForegroundColor Yellow
+            return
+        }
         $pyArgs = @("run", "python", "scripts/compile_memory.py")
         if ($All) { $pyArgs += "--all" }
         & uv @pyArgs

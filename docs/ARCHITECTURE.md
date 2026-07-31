@@ -1,4 +1,4 @@
-# Architecture — LLM-Wiki Memory System v3.3
+# Architecture — LLM-Wiki Memory System v3.4 + Unreleased
 
 This document explains **why** the system is shaped the way it is. For **how to use it**, see [USER-GUIDE.md](USER-GUIDE.md).
 
@@ -7,12 +7,13 @@ This document explains **why** the system is shaped the way it is. For **how to 
 ```
 CODE          scripts/  tests/  docs/  skills/  rules/  integrations/  benchmark/
 KNOWLEDGE     knowledge/{daily,notes,projects,raw,inbox,feedback}
-RUNTIME       cache/  cache/cognee/  logs/  run/   # inside vault, gitignored
+RUNTIME       cache/  cache/cognee/  logs/  run/   # derived + durable, gitignored
               Override root via LLM_WIKI_STATE_ROOT (tests use a temp dir).
 ```
 
-- `cache/`, `logs/`, `run/` live inside the vault as gitignored
-  dirs — single-checkout portability, git never tracks their churn.
+- `cache/`, `logs/`, `run/` live inside the vault as gitignored dirs.
+  `cache/` is derived, logs are diagnostic, and `run/` is durable automation
+  and recovery state that must not be deleted wholesale.
 - Public source develops code; installed vault (`$LLM_WIKI_ROOT`) holds
   user knowledge + live runtime data.
 
@@ -39,18 +40,18 @@ Karpathy rule 7. When a new fact contradicts an old one, the old page is marked 
 LangChain's memory loop pattern. Raw signal is captured cheaply in real-time. Analysis happens at session end. Updates happen in detached background compiles.
 
 ### 7. One brain, many projects
-The slug system (5-step collision resolution) lets a single vault track unlimited projects without namespace conflicts.
+The slug system combines persisted aliases with verified deterministic and bounded UUID collision resolution so one vault can isolate many projects.
 
 ---
 
-## System Architecture (v3.3)
+## System Architecture (v3.4 + Unreleased)
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │  AGENTS (5 supported)                                                 │
 │                                                                       │
 │  OpenCode ──→ plugin (JS, autoload, OpenCode SDK for LLM)            │
-│  Codex CLI ──→ PowerShell wrapper (auto-capture on exit)             │
+│  Codex CLI ──→ native hooks (wrapper is Windows compatibility only)  │
 │  Claude Code → settings.json hooks (SessionStart/End/Prompt/Tool)    │
 │  Cursor ────→ rules file (.cursor/rules/llm-wiki.mdc)               │
 │  Antigravity → AGENTS.md snippet                                      │
@@ -59,26 +60,32 @@ The slug system (5-step collision resolution) lets a single vault track unlimite
 ┌──────────────────────────────────────────────────────────────────────┐
 │  LLM BACKEND (llm_client.py — 5 auto-detected backends)              │
 │                                                                       │
-│  Priority: OpenCode SDK → Codex exec → Claude CLI → OpenAI → Ollama  │
-│  If none available → task enqueued to persistent queue                │
+│  Sync priority: OpenCode HTTP → Codex → Claude → OpenAI → Ollama     │
+│  Unavailable → None; only queue-capable callers explicitly enqueue   │
+│  OpenCode SDK maintenance explicitly uses Luna + the queue bridge     │
 └──────────────────────────┬───────────────────────────────────────────┘
                            ↓
 ┌──────────────────────────────────────────────────────────────────────┐
 │  CAPTURE LAYER (real-time, non-LLM)                                  │
 │                                                                       │
 │  user_prompt_capture.py ── breadcrumb per prompt (ms-fast)           │
-│  post_tool_capture.py ──── breadcrumb per Edit/Write/Bash            │
+│  post_tool_capture.py ──── mutation-only direct file tools           │
 │  daily_log_append.py ───── structured FLUSH block append             │
 │  heartbeat_record.py ───── project activity signal                    │
 │  feedback_capture.py ───── correction/preference detection           │
 └──────────────────────────┬───────────────────────────────────────────┘
+
+`post_tool_capture.py` records mutation-only direct file tools (`Edit`,
+`Write`, `MultiEdit`, `NotebookEdit`, and `apply_patch`). Shell, read, and
+search activity is not captured and never creates a breadcrumb.
+
                            ↓
 ┌──────────────────────────────────────────────────────────────────────┤
 │  CLASSIFY + COMPILE LAYER (session end, background)                  │
 │                                                                       │
 │  flush_memory.py ── 3-tier FLUSH classifier (MAJOR/MINOR/OK)        │
 │  compile_memory.py ─ JSON protocol → VERIFY-BEFORE-WRITE → pages    │
-│  maybe_compile.py ── PID lock + stale detection + detached spawn    │
+│  maybe_compile.py ── OS-lock probe + detached spawn                  │
 │  memory_queue.py ─── persistent deferred task queue (crash-safe)    │
 └──────────────────────────┬───────────────────────────────────────────┘
                            ↓
@@ -115,11 +122,24 @@ The slug system (5-step collision resolution) lets a single vault track unlimite
 │  MAINTENANCE (automatic, scheduled)                                   │
 │                                                                       │
 │  scheduled_nightly.py (03:00) ── compile + lint + index + graph     │
-│  scheduled_weekly.py (Sun 04:00) ── OKF sweep + archive + prune     │
+│  scheduled_weekly.py (Sun 04:00) ── OKF + archive + queue report    │
 │  archive_stale.py ── type-aware thresholds (decisions never expire)  │
 │  lint_memory.py ─── 14 checks (13 structural + 1 LLM contradiction)    │
 └──────────────────────────────────────────────────────────────────────┘
 ```
+
+Project-scoped SessionStart context is exposed only after a runtime advisory
+lock has serialized slug allocation and a complete `state.md` with native
+absolute ownership and a persisted runtime alias has been atomically published.
+Bounded contained scans also reuse valid legacy-owned state paths. Bootstrap scanning is detached
+from SessionStart, retried while `bootstrap.md` is absent, serialized per
+project, and atomically published. Both project context paths expose a bounded,
+explicitly untrusted bootstrap excerpt on the next SessionStart; bootstrap data
+is SessionStart-only and is not added to the search index. Project slugs use a
+single bounded grammar of Unicode alphanumerics plus internal `.` and `-`.
+Compile health reads no daily contents or hashes on this latency-sensitive path;
+it uses file metadata plus durable compile-generation, index, status, timestamp,
+and queue evidence and labels failures and uncertain states explicitly.
 
 ---
 

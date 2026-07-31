@@ -40,9 +40,17 @@ if hasattr(sys.stdout, "reconfigure"):
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
-    from memory_state import ROOT as _MS_ROOT  # noqa: E402
-    from memory_state import STATE_ROOT as _MS_STATE
-    from memory_state import update_state
+    from memory_state import (  # noqa: E402
+        MAX_HOOK_STDIN_BYTES,
+        read_json_object_bounded,
+        update_state,
+    )
+    from memory_state import (
+        ROOT as _MS_ROOT,
+    )
+    from memory_state import (
+        STATE_ROOT as _MS_STATE,
+    )
     ROOT = Path(os.environ.get("LLM_WIKI_ROOT", str(_MS_ROOT))).resolve()
     STATE_ROOT = Path(os.environ.get("LLM_WIKI_STATE_ROOT", str(_MS_STATE))).resolve()
 except Exception:  # noqa: BLE001
@@ -54,10 +62,13 @@ except Exception:  # noqa: BLE001
     ).resolve()
 
     def update_state(mutator):  # type: ignore[misc]
-        """No-op stub — safe skip when memory_state is unavailable."""
-        pass
+        """Run capture without persistence when memory_state is unavailable."""
+        state: dict = {}
+        mutator(state)
+        return state
 
 from secret_redact import redact_secrets  # noqa: E402
+from session_start_project_state import resolve_project_root  # noqa: E402
 
 DAILY_DIR = ROOT / "knowledge" / "daily"
 
@@ -77,94 +88,85 @@ MAX_PROMPT_PREVIEW = 140
 def _read_hook_input() -> dict:
     """Parse Claude Code hook JSON from stdin. Tolerant of empty stdin."""
     try:
-        raw = sys.stdin.read()
+        result = read_json_object_bounded(
+            sys.stdin,
+            max_bytes=MAX_HOOK_STDIN_BYTES,
+        )
     except Exception:  # noqa: BLE001
         return {}
-    if not raw or not raw.strip():
-        return {}
-    try:
-        result = json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
-    return result if isinstance(result, dict) else {}
+    return result if result is not None else {}
 
 
-def _compute_slug_from_cwd(cwd: str) -> str:
-    """Resolve project slug using the existing 5-step collision logic.
-
-    Reuses session_start_project_state._compute_slug so prompts are
-    tagged with the SAME slug that state.md uses — no drift.
-    """
+def _compute_slug_from_cwd(cwd: str) -> str | None:
+    """Return a persisted alias only after ownership is confirmed."""
     projects_dir = ROOT / "knowledge" / "projects"
     try:
         sys.path.insert(0, str(ROOT / "scripts"))
-        from session_start_project_state import _compute_slug  # type: ignore
+        from session_start_project_state import confirm_project_identity  # type: ignore
 
-        return _compute_slug(Path(cwd).resolve(), projects_dir)
+        project_dir = Path(cwd).resolve()
+        confirmed = confirm_project_identity(project_dir, projects_dir)
+        return confirmed[0] if confirmed is not None else None
     except Exception:  # noqa: BLE001
-        # Fall back to parent-dir name lowercased — same as the
-        # first step of the full slug algorithm.
-        try:
-            return Path(cwd).resolve().name.lower().replace(" ", "-")
-        except Exception:  # noqa: BLE001
-            return "unknown"
+        return None
 
 
-def _rate_limited(slug: str, prompt_hash: str) -> bool:
-    """True if this (slug, prompt) was logged in the last RATE_LIMIT_SECONDS."""
-    try:
-        state_file = STATE_ROOT / "run" / "state.json"
-        if not state_file.exists():
-            return False
-        state = json.loads(state_file.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001
-        return False
+def _append_prompt_tag(
+    slug: str,
+    project_root: Path,
+    session_id: str,
+    preview: str,
+) -> None:
+    """Append a one-line breadcrumb to today's daily log."""
+    from daily_log_append import append_daily
+
+    ts = datetime.now().strftime("%H:%M:%S")
+    safe = " ".join(redact_secrets(preview).split())[:MAX_PROMPT_PREVIEW]
+    block = (
+        f"- `[{ts}] prompt | {session_id[:8]} | {slug}` "
+        f"project-root-json={json.dumps(str(project_root), ensure_ascii=False)} | {safe}"
+    )
+    append_daily(slug, session_id, block)
+
+
+def _capture_prompt_once(
+    slug: str,
+    project_root: Path,
+    session_id: str,
+    prompt: str,
+    prompt_hash: str,
+) -> bool:
+    """Atomically dedupe, append, then record a successful prompt capture."""
     key = f"{slug}::{prompt_hash}"
-    last = state.get("prompt_capture_dedupe", {}).get(key)
-    if not last:
-        return False
+    now = datetime.now()
+    appended = False
+
+    def _mutate(state: dict) -> None:
+        nonlocal appended
+        dedupe = state.get("prompt_capture_dedupe")
+        if not isinstance(dedupe, dict):
+            dedupe = {}
+            state["prompt_capture_dedupe"] = dedupe
+        last = dedupe.get(key)
+        if last:
+            try:
+                if (now - datetime.fromisoformat(str(last))).total_seconds() < RATE_LIMIT_SECONDS:
+                    return
+            except (ValueError, TypeError):
+                pass
+        _append_prompt_tag(slug, project_root, session_id, prompt)
+        dedupe[key] = now.isoformat(timespec="seconds")
+        if len(dedupe) > 100:
+            state["prompt_capture_dedupe"] = dict(
+                sorted(dedupe.items(), key=lambda item: item[1], reverse=True)[:100]
+            )
+        appended = True
+
     try:
-        age = (datetime.now() - datetime.fromisoformat(last)).total_seconds()
-        return age < RATE_LIMIT_SECONDS
-    except (ValueError, TypeError):
-        return False
-
-
-def _record_dedupe(slug: str, prompt_hash: str) -> None:
-    """Record this (slug, prompt) in the dedupe map. Best-effort."""
-    try:
-        key = f"{slug}::{prompt_hash}"
-        now = datetime.now().isoformat(timespec="seconds")
-
-        def _mutate(state: dict) -> None:
-            state.setdefault("prompt_capture_dedupe", {})[key] = now
-            if len(state["prompt_capture_dedupe"]) > 100:
-                items = sorted(
-                    state["prompt_capture_dedupe"].items(),
-                    key=lambda kv: kv[1],
-                    reverse=True,
-                )[:100]
-                state["prompt_capture_dedupe"] = dict(items)
-
         update_state(_mutate)
     except Exception:  # noqa: BLE001
-        pass  # never fail the hook on dedupe-bookkeeping
-
-
-def _append_prompt_tag(slug: str, session_id: str, preview: str) -> None:
-    """Append a one-line breadcrumb to today's daily log."""
-    try:
-        from daily_log_append import append_daily
-
-        ts = datetime.now().strftime("%H:%M:%S")
-        safe = redact_secrets(preview)[:MAX_PROMPT_PREVIEW]
-        block = (
-            f"- `[{ts}] prompt | {session_id[:8]} | {slug}` "
-            f"{safe}"
-        )
-        append_daily(slug, session_id, block)
-    except Exception:  # noqa: BLE001
-        pass  # never fail the hook on disk-write
+        return False
+    return appended
 
 
 def main() -> int:
@@ -172,30 +174,34 @@ def main() -> int:
         hook = _read_hook_input()
         prompt = (hook.get("prompt") or "").strip()
         session_id = hook.get("session_id") or "unknown"
-        cwd = hook.get("cwd") or os.getcwd()
+        resolution = resolve_project_root(
+            hook,
+            env=os.environ,
+            fallback_cwd=os.getcwd(),
+        )
+        project_root = resolution.root
 
         # Skip prompts that are too short to be meaningful.
         if len(prompt) < MIN_PROMPT_CHARS:
             return 0
+        if project_root is None:
+            return 0
 
         # Skip sessions inside the vault itself (maintenance loops).
         try:
-            cwd_resolved = Path(cwd).resolve()
-            if cwd_resolved.is_relative_to(ROOT):
+            if project_root.is_relative_to(ROOT):
                 return 0
         except Exception:  # noqa: BLE001
             pass
 
-        slug = _compute_slug_from_cwd(cwd)
+        slug = _compute_slug_from_cwd(str(project_root))
+        if slug is None:
+            return 0
 
         # Rate-limit by prompt content hash (so the same question
         # retried 5 times in a row only logs once per window).
         prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
-        if _rate_limited(slug, prompt_hash):
-            return 0
-
-        _append_prompt_tag(slug, session_id, prompt)
-        _record_dedupe(slug, prompt_hash)
+        _capture_prompt_once(slug, project_root, session_id, prompt, prompt_hash)
     except Exception:  # noqa: BLE001
         # Last-resort: never break the user's session over a logging hook.
         pass

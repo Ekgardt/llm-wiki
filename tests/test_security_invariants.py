@@ -14,6 +14,7 @@ OWASP LLM Top 10 (2025) coverage:
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -128,10 +129,33 @@ class TestRedactionBeforePersistence:
     ]
 
     def test_secret_redact_importable(self):
-        """secret_redact must be importable with zero deps."""
+        """secret_redact is importable and exposes a bounded stdin CLI."""
         from secret_redact import redact_secrets
 
         assert callable(redact_secrets)
+        secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS / "secret_redact.py"), "--stdin"],
+            input=f"token={secret}",
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        assert secret not in result.stdout
+        assert "REDACTED" in result.stdout
+
+        oversized = subprocess.run(
+            [sys.executable, str(SCRIPTS / "secret_redact.py"), "--stdin"],
+            input="x" * 8_001,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        assert oversized.returncode != 0
+        assert oversized.stdout == ""
 
     def test_redact_catches_bearer(self):
         from secret_redact import redact_secrets
@@ -148,7 +172,7 @@ class TestRedactionBeforePersistence:
     def test_redact_catches_jwt(self):
         from secret_redact import redact_secrets
 
-        jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUPCTHLak8"
+        jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUPCTHLak8"  # gitleaks:allow — public example JWT from jwt.io, not a real secret
         out = redact_secrets(f"token: {jwt}")
         assert jwt not in out
 
@@ -159,6 +183,18 @@ class TestRedactionBeforePersistence:
         sha = "a" * 64  # 64 hex chars = SHA-256
         out = redact_secrets(f"commit {sha}")
         assert sha in out, "SHA-256 hash was incorrectly redacted"
+
+    def test_redact_high_entropy_token_after_equals_preserves_git_sha(self):
+        """Assignment-form entropy tokens are secrets; Git SHAs are not."""
+        from secret_redact import redact_secrets
+
+        token = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789+/ABCD"
+        git_sha = "0123456789abcdef0123456789abcdef01234567"
+        out = redact_secrets(f"entropy={token} commit={git_sha}")
+
+        assert token not in out
+        assert "[REDACTED_TOKEN]" in out
+        assert git_sha in out
 
     def test_redact_does_not_redact_normal_text(self):
         """Normal prose with alphanumeric strings over 40 chars should survive."""
@@ -402,6 +438,12 @@ class TestDailyLockExclusivity:
         # Verify: each START/MIDDLE/END triple must be contiguous
         content = daily_path.read_text(encoding="utf-8")
         lines = content.strip().splitlines()
+        assert len(lines) == 50 * 3
+        assert {line.removeprefix("START-") for line in lines if line.startswith("START-")} == {
+            f"{thread_id}-{write_id}"
+            for thread_id in range(5)
+            for write_id in range(10)
+        }
         i = 0
         while i < len(lines):
             if not lines[i].startswith("START-"):
@@ -419,22 +461,137 @@ class TestDailyLockExclusivity:
             )
             i += 3
 
-    def test_lock_is_fail_closed(self, tmp_path, monkeypatch):
-        """If lock can't be acquired, it must raise (not silently write)."""
+    def test_stale_lock_metadata_is_never_unlinked_or_replaced(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
         import daily_log_append
+
+        monkeypatch.setattr(daily_log_append, "STATE_ROOT", tmp_path)
+        lock_file = tmp_path / "run" / "daily-append.lock"
+        lock_file.parent.mkdir(parents=True)
+        lock_file.write_text("999999", encoding="utf-8")
+        old = __import__("time").time() - 60
+        __import__("os").utime(lock_file, (old, old))
+        original = lock_file.stat()
+
+        def forbidden_unlink(path, *_args, **_kwargs):
+            if path == lock_file:
+                raise AssertionError("fixed advisory lock path must never be unlinked")
+            raise AssertionError(f"unexpected unlink: {path}")
+
+        monkeypatch.setattr(Path, "unlink", forbidden_unlink)
+
+        with daily_log_append._daily_lock(timeout=1):
+            assert lock_file.exists()
+
+        current = lock_file.stat()
+        assert (current.st_dev, current.st_ino) == (original.st_dev, original.st_ino)
+        assert lock_file.read_text(encoding="utf-8") == "999999"
+
+    def test_lock_is_fail_closed(self, tmp_path, monkeypatch):
+        """A held descriptor lock must time out rather than fail open."""
+        import daily_log_append
+        import memory_state
 
         lock_dir = tmp_path / "run"
         lock_dir.mkdir(parents=True, exist_ok=True)
         lock_file = lock_dir / "daily-append.lock"
         monkeypatch.setattr(daily_log_append, "STATE_ROOT", tmp_path)
 
-        # Pre-create a fresh lock owned by a "live" PID (ours)
-        lock_file.write_text(str(__import__("os").getpid()), encoding="utf-8")
+        with memory_state.advisory_file_lock(lock_file, timeout=1):
+            with pytest.raises(TimeoutError):
+                with daily_log_append._daily_lock(timeout=0.05, poll=0.01):
+                    pass
 
-        # Should raise TimeoutError, not silently proceed
+    def test_daily_lock_timeout_does_not_oversleep_large_poll(self, tmp_path, monkeypatch):
+        import time
+
+        import daily_log_append
+        import memory_state
+
+        monkeypatch.setattr(daily_log_append, "STATE_ROOT", tmp_path)
+        lock_file = tmp_path / "run" / "daily-append.lock"
+        with memory_state.advisory_file_lock(lock_file, timeout=1):
+            started = time.monotonic()
+            with pytest.raises(TimeoutError):
+                with daily_log_append._daily_lock(timeout=0.05, poll=0.5):
+                    pass
+            assert time.monotonic() - started < 0.2
+
+
+def test_state_lock_timeout_does_not_oversleep_large_poll(tmp_path, monkeypatch):
+    import time
+
+    import memory_state
+
+    state_dir = tmp_path / "run"
+    lock_file = state_dir / "state.json.lock"
+    state_dir.mkdir(parents=True)
+    monkeypatch.setattr(memory_state, "STATE_DIR", state_dir)
+    monkeypatch.setattr(memory_state, "LOCK_FILE", lock_file)
+
+    with memory_state.advisory_file_lock(lock_file, timeout=1):
+        started = time.monotonic()
         with pytest.raises(TimeoutError):
-            with daily_log_append._daily_lock(timeout=0.5):
+            with memory_state._state_lock(timeout=0.05, poll=0.5):
                 pass
+        assert time.monotonic() - started < 0.2
+
+
+def test_state_lock_never_unlinks_or_replaces_stale_metadata(tmp_path, monkeypatch):
+    import memory_state
+
+    state_dir = tmp_path / "run"
+    lock_file = state_dir / "state.json.lock"
+    state_dir.mkdir(parents=True)
+    lock_file.write_text("999999", encoding="utf-8")
+    old = __import__("time").time() - 60
+    __import__("os").utime(lock_file, (old, old))
+    original = lock_file.stat()
+    monkeypatch.setattr(memory_state, "STATE_DIR", state_dir)
+    monkeypatch.setattr(memory_state, "LOCK_FILE", lock_file)
+
+    def forbidden_unlink(path, *_args, **_kwargs):
+        if path == lock_file:
+            raise AssertionError("fixed advisory lock path must never be unlinked")
+        raise AssertionError(f"unexpected unlink: {path}")
+
+    monkeypatch.setattr(Path, "unlink", forbidden_unlink)
+
+    with memory_state._state_lock(timeout=1):
+        assert lock_file.exists()
+
+    current = lock_file.stat()
+    assert (current.st_dev, current.st_ino) == (original.st_dev, original.st_ino)
+    assert lock_file.read_text(encoding="utf-8") == "999999"
+
+
+def test_advisory_lock_timeout_does_not_oversleep_large_poll(tmp_path):
+    import time
+
+    import memory_state
+
+    lock_file = tmp_path / "advisory.lock"
+    with memory_state.advisory_file_lock(lock_file, timeout=1):
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            with memory_state.advisory_file_lock(lock_file, timeout=0.05, poll=0.5):
+                pass
+        assert time.monotonic() - started < 0.2
+
+
+def test_advisory_lock_does_not_race_to_initialize_an_empty_lock_file(tmp_path):
+    import memory_state
+
+    lock_file = tmp_path / "advisory.lock"
+    lock_file.touch()
+
+    with memory_state.advisory_file_lock(lock_file, timeout=1):
+        pass
+
+    assert lock_file.read_bytes() == b""
 
 
 # ---------------------------------------------------------------------------
@@ -494,14 +651,17 @@ class TestCompileEvidenceEnforcement:
                     "slug": "with-evidence-test",
                     "title": "Test",
                     "summary": "s",
+                    "body_section": "Lesson",
                     "body_markdown": "b",
                     "evidence": [
                         {
                             "daily_date": "2026-07-11",
                             "timestamp": "10:00:00",
+                            "quoted_text": "test evidence",
                             "claim": "test claim",
                         }
                     ],
+                    "related": [],
                 }
             ],
             "audit": {},

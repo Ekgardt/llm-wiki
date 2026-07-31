@@ -10,7 +10,12 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT  # noqa: E402
+from memory_state import (  # noqa: E402
+    ROOT,
+    atomic_write,
+    parse_frontmatter_scalar,
+    parse_project_scope,
+)
 
 memory = ROOT / "knowledge"
 knowledge = memory / "notes"
@@ -39,9 +44,20 @@ SUBDIR_SECTIONS = {
 }
 
 SUMMARY_RE = re.compile(r"^One-sentence summary:\s*(.+?)\s*$", re.MULTILINE)
-TYPE_RE = re.compile(r"^type:\s*(.+?)\s*$", re.MULTILINE)
-STATUS_RE = re.compile(r"^status:\s*(.+?)\s*$", re.MULTILINE)
 SKIP_NAMES = {"README.md", "index.md", "log.md"}
+
+
+def _page_is_active(content: str) -> bool:
+    status = parse_frontmatter_scalar(content, "status")
+    project = parse_project_scope(content)
+    return not (
+        status.present
+        and status.value is None
+        or project.present
+        and project.value is None
+        or status.value is not None
+        and status.value.casefold() in {"superseded", "archived"}
+    )
 
 
 def extract_hook(md_path: Path) -> str:
@@ -64,8 +80,8 @@ def extract_type(md_path: Path) -> str:
         text = md_path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return ""
-    m = TYPE_RE.search(text)
-    return m.group(1).strip().strip("\"'") if m else ""
+    field = parse_frontmatter_scalar(text, "type")
+    return field.value or ""
 
 
 def rel_link(md_path: Path) -> str:
@@ -88,8 +104,7 @@ def collect_pages() -> dict[str, list[Path]]:
             for p in pages:
                 try:
                     content = p.read_text(encoding="utf-8", errors="ignore")
-                    status_m = STATUS_RE.search(content)
-                    if status_m and status_m.group(1).strip() in ("superseded", "archived"):
+                    if not _page_is_active(content):
                         continue
                 except OSError:
                     continue
@@ -109,8 +124,7 @@ def collect_pages() -> dict[str, list[Path]]:
             # Skip superseded/archived pages from the index
             try:
                 content = p.read_text(encoding="utf-8", errors="ignore")
-                status_m = STATUS_RE.search(content)
-                if status_m and status_m.group(1).strip() in ("superseded", "archived"):
+                if not _page_is_active(content):
                     continue
             except OSError:
                 continue
@@ -159,7 +173,7 @@ def main() -> int:
         ]
     )
 
-    out.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    atomic_write(out, "\n".join(lines).rstrip() + "\n")
     return 0
 
 

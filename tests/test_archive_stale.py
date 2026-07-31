@@ -66,6 +66,25 @@ def test_decision_never_archives(fake_file):
     assert archive_stale._is_stale(md, cutoff, 180) is False
 
 
+def test_escaped_quoted_decision_type_never_archives(fake_file):
+    """Shared scalar parsing protects escaped evergreen types."""
+    import archive_stale
+
+    md = fake_file("old-quoted-decision.md", '"deci\\x73ion"', age_days=999)
+    cutoff = datetime.now().timestamp() - (180 * 86400)
+
+    assert archive_stale._is_stale(md, cutoff, 180) is False
+
+
+def test_invalid_type_metadata_fails_closed_before_archive(fake_file):
+    import archive_stale
+
+    md = fake_file("invalid-type.md", '"deci\\qision"', age_days=999)
+    cutoff = datetime.now().timestamp() - (180 * 86400)
+
+    assert archive_stale._is_stale(md, cutoff, 180) is False
+
+
 def test_concept_never_archives(fake_file):
     """Concept type is evergreen."""
     import archive_stale
@@ -87,6 +106,64 @@ def test_superseded_not_archived_again(fake_file):
 
     cutoff = datetime.now().timestamp() - (180 * 86400)
     assert archive_stale._is_stale(md, cutoff, 180) is False
+
+
+@pytest.mark.parametrize(
+    "status_line",
+    (
+        'status: "super\\x73eded"',
+        'status: "\\qactive"',
+        '"sta\\x74us": superseded',
+    ),
+)
+def test_archive_filter_uses_shared_status_parser_fail_closed(
+    fake_file,
+    status_line,
+):
+    import archive_stale
+
+    md = fake_file("shared-status.md", "pattern", age_days=999)
+    content = md.read_text(encoding="utf-8").replace(
+        "type: pattern",
+        f"type: pattern\n{status_line}",
+    )
+    md.write_text(content, encoding="utf-8")
+    old_time = time.time() - (999 * 86400)
+    os.utime(md, (old_time, old_time))
+    cutoff = datetime.now().timestamp() - (180 * 86400)
+
+    assert archive_stale._is_stale(md, cutoff, 180) is False
+
+
+def test_archive_rewrites_escaped_status_without_duplicate_decoded_key(
+    fake_file,
+    tmp_path,
+    monkeypatch,
+):
+    import archive_stale
+    import memory_state
+
+    md = fake_file("escaped-active.md", "pattern", age_days=999)
+    md.write_text(
+        md.read_text(encoding="utf-8").replace(
+            "type: pattern",
+            'type: pattern\n"sta\\x74us": active',
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(archive_stale, "ROOT", tmp_path)
+    monkeypatch.setattr(archive_stale, "KNOWLEDGE", tmp_path)
+    monkeypatch.setattr(archive_stale, "ARCHIVE_ROOT", tmp_path / "archive")
+
+    result = archive_stale._archive_page(md, apply=True)
+    archived = next((tmp_path / "archive").rglob("escaped-active.md"))
+    parsed = memory_state.parse_frontmatter_scalar(
+        archived.read_text(encoding="utf-8"),
+        "status",
+    )
+
+    assert result.startswith("ARCHIVED:")
+    assert parsed == memory_state.FrontmatterScalar(True, "archived")
 
 
 def test_already_archived_skipped(fake_file):

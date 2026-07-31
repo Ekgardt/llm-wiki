@@ -56,7 +56,7 @@ def test_all_readmes_share_live_test_count():
                 continue
             if stale < live:
                 # allow historical "was 106" only in CHANGELOG, not README badge
-                assert f"tests-{stale}" not in text, (
+                assert not re.search(rf"tests-{stale}(?!\d)", text), (
                     f"{p.name} still has badge/tests-{stale}; should be {live}"
                 )
 

@@ -9,6 +9,8 @@ Locks in:
 """
 from __future__ import annotations
 
+import io
+import sqlite3
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -122,6 +124,75 @@ def test_collect_pages_skips_editorial():
         search_memory.KNOWLEDGE_DIR.exists = MagicMock(return_value=False)
         pages = search_memory._collect_pages("all")
         assert pages == []
+
+
+def test_search_collection_and_index_use_shared_sensitive_frontmatter_parser(
+    tmp_path,
+    monkeypatch,
+):
+    import search_memory
+
+    root = tmp_path / "vault"
+    notes = root / "knowledge" / "notes"
+    cache = tmp_path / "cache"
+    notes.mkdir(parents=True)
+
+    def page(name: str, metadata: str) -> Path:
+        path = notes / name
+        path.write_text(
+            f"---\ntype: pattern\n{metadata}\n---\n\n# {name}\n\nsearch needle\n",
+            encoding="utf-8",
+        )
+        return path
+
+    active = page("active.md", 'project: "be\\x74a"\nstatus: active')
+    page("inactive.md", 'project: beta\nstatus: "super\\x73eded"')
+    page("invalid-status.md", 'project: beta\nstatus: "\\qactive"')
+    page("invalid-project.md", 'project: "\\qbeta"\nstatus: active')
+    monkeypatch.setattr(search_memory, "ROOT", root)
+    monkeypatch.setattr(search_memory, "KNOWLEDGE_DIR", notes)
+    monkeypatch.setattr(search_memory, "WIKI_DIR", notes)
+    monkeypatch.setattr(search_memory, "INDEX_DIR", cache)
+    monkeypatch.setattr(search_memory, "INDEX_FILE", cache / "index.sqlite")
+    monkeypatch.setattr(search_memory, "INDEX_MANIFEST", cache / ".paths-manifest")
+
+    pages = search_memory._collect_pages()
+    search_memory._build_index(pages)
+
+    assert pages == [active]
+    with sqlite3.connect(search_memory.INDEX_FILE) as connection:
+        rows = connection.execute("SELECT path, project FROM pages").fetchall()
+    assert rows == [("knowledge/notes/active.md", "beta")]
+
+
+def test_stdin_query_rejects_oversize_before_search(monkeypatch, capsys):
+    import search_memory
+
+    class BoundedOnlyInput(io.StringIO):
+        def __init__(self, value: str):
+            super().__init__(value)
+            self.request_sizes: list[int] = []
+
+        def read(self, size: int = -1) -> str:
+            self.request_sizes.append(size)
+            assert size > 0, "reader requested an unbounded allocation"
+            return super().read(size)
+
+    stream = BoundedOnlyInput("attacker query " + "x" * 256)
+    searches: list[str] = []
+    monkeypatch.setattr(search_memory, "MAX_STDIN_QUERY_BYTES", 64, raising=False)
+    monkeypatch.setattr(
+        search_memory,
+        "search",
+        lambda query, *_args, **_kwargs: searches.append(query) or [],
+    )
+    monkeypatch.setattr(sys, "stdin", stream)
+    monkeypatch.setattr(sys, "argv", ["search_memory.py", "--stdin"])
+
+    assert search_memory.main() == 2
+    assert "stdin query" in capsys.readouterr().err.lower()
+    assert stream.request_sizes and all(size > 0 for size in stream.request_sizes)
+    assert searches == []
 
 
 def test_needs_rebuild_no_index():

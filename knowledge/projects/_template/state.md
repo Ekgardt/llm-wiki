@@ -21,6 +21,8 @@ One-sentence summary: <what this project is, in one sentence>.
 <Wikilinks to related pages in this vault: concepts used, sibling projects, raw sources. Wikilinks only — external URLs belong inside the content above with context.>
 
 ## Source
+- Project root JSON: <absolute path JSON>
+- Runtime slug JSON: "<Project Name>"
 - Project root: `<absolute path>`
 - Git remote (if any): `<remote url>`
 

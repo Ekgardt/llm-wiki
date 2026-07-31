@@ -13,7 +13,7 @@ Never fails on input parse — exits non-zero only on state write failure.
 from __future__ import annotations
 
 import io
-import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -25,25 +25,55 @@ if hasattr(sys.stdout, "reconfigure"):
     except (AttributeError, io.UnsupportedOperation):
         pass
 
+from memory_state import (  # noqa: E402
+    MAX_HOOK_STDIN_BYTES,
+    read_json_object_bounded,
+)
+
 
 def main() -> int:
-    try:
-        raw = sys.stdin.read()
-        payload = json.loads(raw) if raw.strip() else {}
-    except (json.JSONDecodeError, OSError):
+    payload = read_json_object_bounded(
+        sys.stdin,
+        max_bytes=MAX_HOOK_STDIN_BYTES,
+    )
+    if payload is None:
         return 0
 
-    if not isinstance(payload, dict):
+    explicit_slug = str(payload.get("slug") or "").strip()
+    raw_root = str(payload.get("projectRoot") or "").strip()
+    if not explicit_slug or not raw_root:
         return 0
-
-    slug = payload.get("slug") or "unknown"
     reason = payload.get("reason") or "opencode-heartbeat"
     session_id = payload.get("sessionId") or "opencode"
-    project_root = payload.get("projectRoot") or ""
 
     try:
         from memory_state import update_state  # type: ignore
-    except ImportError:
+        from session_start_project_state import (
+            _slug_identity_key,
+            confirm_project_identity,
+            resolve_project_root,
+        )
+
+        resolution = resolve_project_root(payload, explicit_root=raw_root, env={})
+        if resolution.root is None:
+            return 0
+        project_root = resolution.root
+        vault = Path(
+            os.environ.get(
+                "LLM_WIKI_ROOT",
+                str(Path(__file__).resolve().parent.parent),
+            )
+        ).resolve()
+        confirmed = confirm_project_identity(
+            project_root,
+            vault / "knowledge" / "projects",
+        )
+        if confirmed is None or _slug_identity_key(confirmed[0]) != _slug_identity_key(
+            explicit_slug
+        ):
+            return 0
+        slug = confirmed[0]
+    except (ImportError, OSError, RuntimeError, ValueError):
         return 0
 
     now_iso = datetime.now().isoformat(timespec="seconds")
@@ -54,7 +84,7 @@ def main() -> int:
             "at": now_iso,
             "reason": reason,
             "session_id": session_id,
-            "project_root": project_root,
+            "project_root": str(project_root),
             "source": "opencode",
         }
         # Bound the heartbeat map (same as codex_memory.py).

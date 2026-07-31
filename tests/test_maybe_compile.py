@@ -1,18 +1,9 @@
-"""Tests for maybe_compile.py — concurrency-safe compile trigger.
-
-Locks in:
-1. PID liveness probe (Windows OpenProcess + POSIX signal 0).
-2. Lock is created when spawn happens; stale lock (dead PID) is stolen.
-3. Lock is cleared when compile_memory finishes.
-4. Multiple concurrent spawn attempts only one succeeds.
-5. --force ignores existing lock.
-6. _has_pending_work returns False when all hashes match.
-"""
+"""Behavioral tests for the nonblocking compile trigger."""
 from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timedelta
+import threading
 from pathlib import Path
 
 import pytest
@@ -24,196 +15,229 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 @pytest.fixture
 def fake_env(tmp_path, monkeypatch):
-    """Point maybe_compile at a tmp state root + tmp daily log dir."""
     fake_root = tmp_path / "vault"
     fake_state = tmp_path / "state"
-    fake_state.mkdir(parents=True)
     (fake_state / "run").mkdir(parents=True)
 
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(fake_state))
     monkeypatch.setenv("LLM_WIKI_ROOT", str(fake_root))
+    monkeypatch.delenv("MEMORY_LLM_PROVIDER", raising=False)
+    for module in ("maybe_compile", "memory_queue", "memory_state"):
+        sys.modules.pop(module, None)
 
-    # Force re-import so module-level path reads pick up the env.
-    for mod in ("maybe_compile", "memory_state"):
-        if mod in sys.modules:
-            del sys.modules[mod]
     import maybe_compile
 
     monkeypatch.setattr(maybe_compile, "ROOT", fake_root)
     monkeypatch.setattr(maybe_compile, "STATE_ROOT", fake_state)
-    monkeypatch.setattr(maybe_compile, "LOCK_FILE", fake_state / "run" / "compile.pid")
-    monkeypatch.setattr(maybe_compile, "COMPILE_SCRIPT", fake_root / "scripts" / "compile_memory.py")
+    monkeypatch.setattr(
+        maybe_compile, "LOCK_FILE", fake_state / "run" / "compile.pid"
+    )
+    monkeypatch.setattr(
+        maybe_compile,
+        "COMPILE_SCRIPT",
+        fake_root / "scripts" / "compile_memory.py",
+    )
     return maybe_compile
 
 
-def test_is_pid_alive_current_process(fake_env):
-    """Current process PID is always alive."""
-    import os
+def test_unlocked_fixed_file_is_idle_regardless_of_contents(fake_env):
+    fake_env.LOCK_FILE.write_text("not a pid file\n", encoding="utf-8")
 
-    assert fake_env._is_pid_alive(os.getpid()) is True
+    running, reason = fake_env._is_compile_running()
 
-
-def test_is_pid_alive_dead_pid(fake_env):
-    """A PID that doesn't exist returns False."""
-    # Use a PID that's valid on all platforms (Linux pid_t is signed 32-bit,
-    # so max is 2^31-1 = 2147483647). 999999 is almost never a real process.
-    assert fake_env._is_pid_alive(999999) is False
-
-
-def test_lock_write_and_read_roundtrip(fake_env, tmp_path):
-    fake_env._write_lock(12345)
-    lock = fake_env._read_lock()
-    assert lock is not None
-    assert lock["pid"] == 12345
-    assert lock["started_at"]  # ISO timestamp present
-
-
-def test_clear_lock(fake_env):
-    fake_env._write_lock(99999)
+    assert running is False
+    assert "idle" in reason
     assert fake_env.LOCK_FILE.exists()
-    fake_env._clear_lock()
-    assert not fake_env.LOCK_FILE.exists()
 
 
-def test_clear_lock_idempotent(fake_env):
-    """Clearing a non-existent lock doesn't crash."""
-    fake_env._clear_lock()  # no error
-    fake_env._clear_lock()  # still no error
+def test_held_os_lock_is_running_then_becomes_idle_without_unlink(fake_env):
+    acquired = threading.Event()
+    release = threading.Event()
+
+    def hold_lock():
+        with fake_env.compile_file_lock(fake_env.LOCK_FILE, timeout=1):
+            acquired.set()
+            release.wait(timeout=5)
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    assert acquired.wait(timeout=2)
+    try:
+        running, reason = fake_env._is_compile_running()
+        assert running is True
+        assert "held" in reason
+    finally:
+        release.set()
+        holder.join(timeout=5)
+
+    running, reason = fake_env._is_compile_running()
+    assert running is False
+    assert "idle" in reason
+    assert fake_env.LOCK_FILE.exists()
 
 
-def test_is_compile_running_no_lock(fake_env):
-    is_running, reason = fake_env._is_compile_running()
-    assert is_running is False
-    assert "no lock" in reason
-
-
-def test_is_compile_running_with_dead_pid(fake_env, monkeypatch):
-    """Stale lock with a dead PID is reported as not-running."""
-    fake_env._write_lock(99999)  # almost certainly dead
-    # Force _is_pid_alive to confirm dead (don't rely on real OS state).
-    monkeypatch.setattr(fake_env, "_is_pid_alive", lambda pid: False)
-    is_running, reason = fake_env._is_compile_running()
-    assert is_running is False
-    assert "stale" in reason.lower()
-
-
-def test_is_compile_running_with_alive_pid(fake_env, monkeypatch):
-    """Lock with alive PID within timeout = running."""
-    import os
-
-    fake_env._write_lock(os.getpid())
-    monkeypatch.setattr(fake_env, "_is_pid_alive", lambda pid: True)
-    is_running, reason = fake_env._is_compile_running()
-    assert is_running is True
-    assert "running" in reason
-
-
-def test_is_compile_running_lock_too_old(fake_env, monkeypatch):
-    """Lock older than MAX_COMPILE_DURATION_S is treated as stale."""
-    fake_env._write_lock(99999)
-    # Manually backdate the lock timestamp.
-    old = (datetime.now() - timedelta(hours=2)).isoformat(timespec="seconds")
-    fake_env.LOCK_FILE.write_text(f"99999\n{old}\n", encoding="utf-8")
-    monkeypatch.setattr(fake_env, "_is_pid_alive", lambda pid: True)
-    is_running, reason = fake_env._is_compile_running()
-    assert is_running is False
-    assert "stale" in reason.lower()
-
-
-def test_spawn_skipped_when_already_running(fake_env, monkeypatch):
-    """If a compile is already running, don't spawn another."""
-    # Pretend a compile is running.
-    fake_env._write_lock(99999)
-    monkeypatch.setattr(fake_env, "_is_pid_alive", lambda pid: True)
-
+def test_spawn_skipped_while_os_lock_is_held(fake_env, monkeypatch):
+    monkeypatch.setattr(fake_env, "_has_pending_work", lambda: True)
     spawned_calls = []
     monkeypatch.setattr(
-        fake_env, "spawn_detached", lambda *a, **kw: spawned_calls.append(1) or 12345
+        fake_env,
+        "spawn_detached",
+        lambda *args, **kwargs: spawned_calls.append(1) or 12345,
     )
+    acquired = threading.Event()
+    release = threading.Event()
 
-    spawned, reason = fake_env.spawn_compile_if_idle()
+    def hold_lock():
+        with fake_env.compile_file_lock(fake_env.LOCK_FILE, timeout=1):
+            acquired.set()
+            release.wait(timeout=5)
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    assert acquired.wait(timeout=2)
+    try:
+        spawned, reason = fake_env.spawn_compile_if_idle()
+    finally:
+        release.set()
+        holder.join(timeout=5)
+
     assert spawned is False
     assert "skipped" in reason
-    assert spawned_calls == []  # spawn_detached was NOT called
+    assert spawned_calls == []
+
+
+def test_force_refuses_held_os_lock(fake_env, monkeypatch):
+    monkeypatch.setattr(fake_env, "_has_pending_work", lambda: False)
+    acquired = threading.Event()
+    release = threading.Event()
+
+    def hold_lock():
+        with fake_env.compile_file_lock(fake_env.LOCK_FILE, timeout=1):
+            acquired.set()
+            release.wait(timeout=5)
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    assert acquired.wait(timeout=2)
+    try:
+        spawned, reason = fake_env.spawn_compile_if_idle(force=True)
+    finally:
+        release.set()
+        holder.join(timeout=5)
+
+    assert spawned is False
+    assert "force refused" in reason
 
 
 def test_spawn_skipped_when_no_pending_work(fake_env, monkeypatch):
-    """If no daily logs differ from last compile, skip spawn."""
     monkeypatch.setattr(fake_env, "_has_pending_work", lambda: False)
     spawned_calls = []
     monkeypatch.setattr(
-        fake_env, "spawn_detached", lambda *a, **kw: spawned_calls.append(1) or 12345
+        fake_env,
+        "spawn_detached",
+        lambda *args, **kwargs: spawned_calls.append(1) or 12345,
     )
 
     spawned, reason = fake_env.spawn_compile_if_idle()
+
     assert spawned is False
     assert "no pending" in reason
     assert spawned_calls == []
 
 
 def test_spawn_happens_when_idle_and_work_pending(fake_env, monkeypatch):
-    """Normal path: idle + work pending → spawn + write lock."""
     monkeypatch.setattr(fake_env, "_has_pending_work", lambda: True)
-    monkeypatch.setattr(fake_env, "_is_pid_alive", lambda pid: True)
-    spawned_pid = [12345]
-    monkeypatch.setattr(
-        fake_env, "spawn_detached", lambda *a, **kw: spawned_pid[0]
-    )
+    monkeypatch.setattr(fake_env, "spawn_detached", lambda *args, **kwargs: 12345)
 
     spawned, reason = fake_env.spawn_compile_if_idle()
+
     assert spawned is True
-    assert "spawned" in reason.lower()
-    # Lock file written with the spawned PID.
-    lock = fake_env._read_lock()
-    assert lock is not None
-    assert lock["pid"] == 12345
+    assert reason == "spawned compile pid=12345"
+    assert fake_env.LOCK_FILE.exists()
+    assert fake_env._is_compile_running()[0] is False
 
 
-def test_force_refuses_live_lock(fake_env, monkeypatch):
-    """--force refuses to steal a LIVE lock (race risk); prints a warning."""
-    fake_env._write_lock(99999)
-    monkeypatch.setattr(fake_env, "_is_pid_alive", lambda pid: True)
-    monkeypatch.setattr(fake_env, "_has_pending_work", lambda: False)
-    monkeypatch.setattr(fake_env, "spawn_detached", lambda *a, **kw: 55555)
+def test_spawn_failure_does_not_remove_fixed_lock_file(fake_env, monkeypatch):
+    fake_env.LOCK_FILE.write_text("fixed\n", encoding="utf-8")
+    monkeypatch.setattr(fake_env, "_has_pending_work", lambda: True)
+    monkeypatch.setattr(fake_env, "spawn_detached", lambda *args, **kwargs: None)
 
-    spawned, reason = fake_env.spawn_compile_if_idle(force=True)
+    spawned, reason = fake_env.spawn_compile_if_idle()
+
     assert spawned is False
-    assert "skipped" in reason
-    # The live lock is left intact.
-    lock = fake_env._read_lock()
-    assert lock is not None
-    assert lock["pid"] == 99999
+    assert reason == "spawn failed"
+    assert fake_env.LOCK_FILE.read_text(encoding="utf-8") == "fixed\n"
 
 
-def test_force_proceeds_on_stale_lock(fake_env, monkeypatch):
-    """--force proceeds when the lock is stale (dead PID), bypassing the
-    pending-work gate."""
-    fake_env._write_lock(99999)  # dead PID
-    monkeypatch.setattr(fake_env, "_is_pid_alive", lambda pid: False)
-    monkeypatch.setattr(fake_env, "_has_pending_work", lambda: False)
-    monkeypatch.setattr(fake_env, "spawn_detached", lambda *a, **kw: 55555)
-
-    spawned, reason = fake_env.spawn_compile_if_idle(force=True)
-    assert spawned is True
-    lock = fake_env._read_lock()
-    assert lock["pid"] == 55555
-
-
-def test_has_pending_work_false_when_all_compiled(fake_env, monkeypatch):
-    """All daily hashes match state.json → no pending work."""
+def test_opencode_sdk_mode_ensures_one_durable_control_without_spawning(
+    fake_env, monkeypatch
+):
+    monkeypatch.setenv("MEMORY_LLM_PROVIDER", "opencode-sdk")
     daily_dir = fake_env.ROOT / "knowledge" / "daily"
     daily_dir.mkdir(parents=True)
-    p = daily_dir / "2026-07-01.md"
-    p.write_text("test content", encoding="utf-8")
+    (daily_dir / "2026-07-01.md").write_text("pending", encoding="utf-8")
+    spawned_calls = []
+    monkeypatch.setattr(
+        fake_env,
+        "spawn_detached",
+        lambda *args, **kwargs: spawned_calls.append(1),
+    )
 
-    # State.json says the hash matches.
+    first = fake_env.spawn_compile_if_idle()
+    second = fake_env.spawn_compile_if_idle()
+
+    assert first == (False, "skipped: pending compile queued for OpenCode SDK")
+    assert second == (False, "skipped: pending compile already queued for OpenCode SDK")
+    assert spawned_calls == []
+    [control_path] = (fake_env.STATE_ROOT / "run" / "queue").glob("*.json")
+    control = json.loads(control_path.read_text(encoding="utf-8"))
+    assert control["type"] == "compile"
+
+
+def test_opencode_sdk_mode_does_not_create_control_without_compile_work(
+    fake_env, monkeypatch
+):
+    monkeypatch.setenv("MEMORY_LLM_PROVIDER", "opencode-sdk")
+
+    assert fake_env.spawn_compile_if_idle(force=True) == (
+        False,
+        "skipped: no pending work (all daily logs compiled)",
+    )
+    assert not list((fake_env.STATE_ROOT / "run").glob("queue/*.json"))
+
+
+def test_has_pending_work_false_when_all_compiled(fake_env):
+    daily_dir = fake_env.ROOT / "knowledge" / "daily"
+    daily_dir.mkdir(parents=True)
+    daily = daily_dir / "2026-07-01.md"
+    daily.write_text("test content", encoding="utf-8")
+    (fake_env.ROOT / "knowledge" / "index.md").write_text(
+        "# Index\n",
+        encoding="utf-8",
+    )
+    digest = fake_env.file_hash(daily)
+    generation = "a" * 64
     state_file = fake_env.STATE_ROOT / "run" / "state.json"
-    state_file.parent.mkdir(parents=True, exist_ok=True)
-    import hashlib
-
-    h = hashlib.sha256(b"test content").hexdigest()
     state_file.write_text(
-        json.dumps({"compiled_daily_hashes": {"2026-07-01.md": h}}),
+        json.dumps(
+            {
+                "compiled_daily_hashes": {daily.name: digest},
+                "compiled_daily_receipts": {
+                    daily.name: {
+                        "version": 1,
+                        "daily_sha256": digest,
+                        "generation_id": generation,
+                        "journal_ids": [],
+                        "effects": [],
+                        "targets": [],
+                        "index": {
+                            "generation_id": generation,
+                            "entries": [],
+                        },
+                    }
+                },
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -221,16 +245,13 @@ def test_has_pending_work_false_when_all_compiled(fake_env, monkeypatch):
 
 
 def test_has_pending_work_true_when_hash_differs(fake_env):
-    """Daily log changed since last compile → pending work."""
     daily_dir = fake_env.ROOT / "knowledge" / "daily"
     daily_dir.mkdir(parents=True)
-    p = daily_dir / "2026-07-01.md"
-    p.write_text("new content", encoding="utf-8")
-
+    daily = daily_dir / "2026-07-01.md"
+    daily.write_text("new content", encoding="utf-8")
     state_file = fake_env.STATE_ROOT / "run" / "state.json"
-    state_file.parent.mkdir(parents=True, exist_ok=True)
     state_file.write_text(
-        json.dumps({"compiled_daily_hashes": {"2026-07-01.md": "old-hash"}}),
+        json.dumps({"compiled_daily_hashes": {daily.name: "old-hash"}}),
         encoding="utf-8",
     )
 
@@ -238,12 +259,36 @@ def test_has_pending_work_true_when_hash_differs(fake_env):
 
 
 def test_has_pending_work_true_when_daily_not_in_state(fake_env):
-    """New daily log never compiled → pending."""
     daily_dir = fake_env.ROOT / "knowledge" / "daily"
     daily_dir.mkdir(parents=True)
     (daily_dir / "2026-07-01.md").write_text("x", encoding="utf-8")
     state_file = fake_env.STATE_ROOT / "run" / "state.json"
-    state_file.parent.mkdir(parents=True, exist_ok=True)
     state_file.write_text("{}", encoding="utf-8")
+
+    assert fake_env._has_pending_work() is True
+
+
+def test_has_pending_work_true_when_matching_hash_has_no_receipt(fake_env):
+    daily_dir = fake_env.ROOT / "knowledge" / "daily"
+    daily_dir.mkdir(parents=True)
+    daily = daily_dir / "2026-07-01.md"
+    daily.write_text("compiled bytes without receipt", encoding="utf-8")
+    state_file = fake_env.STATE_ROOT / "run" / "state.json"
+    state_file.write_text(
+        json.dumps(
+            {"compiled_daily_hashes": {daily.name: fake_env.file_hash(daily)}}
+        ),
+        encoding="utf-8",
+    )
+
+    assert fake_env._has_pending_work() is True
+
+
+def test_has_pending_work_true_when_only_index_rebuild_is_pending(fake_env):
+    state_file = fake_env.STATE_ROOT / "run" / "state.json"
+    state_file.write_text(
+        json.dumps({"compile_index_pending": {"batch_id": "batch-1"}}),
+        encoding="utf-8",
+    )
 
     assert fake_env._has_pending_work() is True

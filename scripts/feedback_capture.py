@@ -8,7 +8,7 @@ only when the user confirms — nothing is auto-promoted.
 Inspired by nvk/llm-wiki's feedback curator (v0.12.0).
 
 Detection patterns:
-- "no, " / "not " / "actually " / "instead " → correction
+- "no, " / "actually " / "that's not right" → correction
 - "remember that" / "don't forget" → explicit instruction
 - "I prefer" / "always use" / "never use" → preference
 - User rejecting an agent's suggestion → implicit correction
@@ -16,13 +16,14 @@ Detection patterns:
 Usage (called from flush_memory.py or plugin on session.idle):
     # OpenCode plugin: JSON on stdin (no args)
     echo '{"text":"...","session_id":"...","slug":"..."}' | uv run python scripts/feedback_capture.py
-    uv run python scripts/feedback_capture.py capture --transcript <path>
+    uv run python scripts/feedback_capture.py capture --text "No, use X instead"
     uv run python scripts/feedback_capture.py list
     uv run python scripts/feedback_capture.py promote <id>
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import re
@@ -31,18 +32,55 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT  # noqa: E402
+from memory_state import (  # noqa: E402
+    MAX_HOOK_STDIN_BYTES,
+    ROOT,
+    STATE_ROOT,
+    advisory_file_lock,
+    bounded_path_inventory,
+    read_json_object_bounded,
+    read_json_object_file_bounded,
+)
 from secret_redact import redact_secrets  # noqa: E402
 
 FEEDBACK_DIR = ROOT / "knowledge" / "feedback"
+MAX_FEEDBACK_BYTES = 64 * 1024
+MAX_FEEDBACK_FILES_SCANNED = 1_000
+MAX_FEEDBACK_JSON_DEPTH = 64
+
+
+@contextlib.contextmanager
+def feedback_writer_lock(
+    state_root: Path | None = None,
+    timeout: float = 30.0,
+    poll: float = 0.05,
+):
+    """Serialize every feedback mutation with repair transactions."""
+    root = state_root or STATE_ROOT
+    with advisory_file_lock(
+        root / "run" / "feedback.lock",
+        timeout=timeout,
+        poll=poll,
+        description="feedback writer lock",
+    ):
+        yield
 
 # Patterns that indicate a user correction or preference
 CORRECTION_PATTERNS = [
-    (re.compile(r"\b(no|not|actually|instead|wait|stop)\b", re.IGNORECASE), "correction"),
-    (re.compile(r"\b(remember|don'?t forget|keep in mind)\b", re.IGNORECASE), "instruction"),
+    (re.compile(r"^\s*(no\s*[,;:!]|actually\b|wait\s*[,;:!]|stop\s*[,;:!])", re.IGNORECASE), "correction"),
+    (re.compile(r"\b(remember that|don'?t forget|keep in mind)\b", re.IGNORECASE), "instruction"),
     (re.compile(r"\b(I prefer|always use|never use|we (always|never))\b", re.IGNORECASE), "preference"),
-    (re.compile(r"\b(wrong|incorrect|that'?s not|not right)\b", re.IGNORECASE), "rejection"),
-    (re.compile(r"\b(should (be|use)|need to|must)\b", re.IGNORECASE), "requirement"),
+    (
+        re.compile(
+            r"\b(?:"
+            r"that(?:'s| is)\s+(?:wrong|incorrect|not\s+(?:right|correct))|"
+            r"you(?:'re| are)\s+(?:wrong|incorrect)|"
+            r"your\s+[^.!?\n]{1,80}?\s+is\s+(?:wrong|incorrect)"
+            r")\b",
+            re.IGNORECASE,
+        ),
+        "rejection",
+    ),
 ]
 
 # Patterns to ignore (noise)
@@ -97,45 +135,79 @@ def capture_from_text(
     # the secret_redact pass that all capture hooks run).
     text = redact_secrets(text)
 
-    FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Create candidate record
-    candidate_id = hashlib.sha256(
-        f"{text}{datetime.now().isoformat()}".encode()
-    ).hexdigest()[:12]
-
-    candidate = {
-        "id": candidate_id,
-        "type": ftype,
-        "confidence": round(confidence, 2),
-        "text": text.strip()[:500],
-        "session_id": session_id,
-        "project": slug,
-        "trigger": trigger,
-        "captured_at": datetime.now().isoformat(timespec="seconds"),
-        "status": "candidate",
-    }
-
-    # Write to feedback dir
-    out = FEEDBACK_DIR / f"{candidate_id}.json"
-    out.write_text(
-        json.dumps(candidate, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    with feedback_writer_lock():
+        FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
+        now = datetime.now()
+        candidate_id = hashlib.sha256(f"{text}{now.isoformat()}".encode()).hexdigest()[:12]
+        candidate = {
+            "id": candidate_id,
+            "type": ftype,
+            "confidence": round(confidence, 2),
+            "text": text.strip()[:500],
+            "session_id": session_id,
+            "project": slug,
+            "trigger": trigger,
+            "captured_at": now.isoformat(timespec="seconds"),
+            "status": "candidate",
+        }
+        out = FEEDBACK_DIR / f"{candidate_id}.json"
+        out.write_text(
+            json.dumps(candidate, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
     return candidate_id
 
 
+def _read_feedback_candidate(path: Path) -> dict | None:
+    candidate = read_json_object_file_bounded(
+        path,
+        max_bytes=MAX_FEEDBACK_BYTES,
+        max_depth=MAX_FEEDBACK_JSON_DEPTH,
+    )
+    if candidate is None:
+        return None
+
+    string_fields = (
+        "id",
+        "type",
+        "text",
+        "session_id",
+        "project",
+        "trigger",
+        "captured_at",
+        "status",
+    )
+    if any(not isinstance(candidate.get(field), str) for field in string_fields):
+        return None
+    confidence = candidate.get("confidence")
+    if (
+        isinstance(confidence, bool)
+        or not isinstance(confidence, (int, float))
+        or not 0 <= confidence <= 1
+    ):
+        return None
+    return candidate
+
+
 def list_candidates(status: str = "candidate") -> list[dict]:
-    """List all feedback candidates."""
-    if not FEEDBACK_DIR.exists():
+    """List valid feedback candidates from a bounded directory snapshot."""
+    inventory = bounded_path_inventory(
+        FEEDBACK_DIR,
+        "*.json",
+        MAX_FEEDBACK_FILES_SCANNED,
+        recursive=False,
+        kind="file",
+    )
+    if inventory.incomplete:
         return []
+
     candidates = []
-    for p in sorted(FEEDBACK_DIR.glob("*.json")):
+    for p in inventory.paths:
         try:
-            c = json.loads(p.read_text(encoding="utf-8"))
-            if c.get("status") == status:
-                candidates.append(c)
-        except (json.JSONDecodeError, OSError):
+            candidate = _read_feedback_candidate(p)
+            if candidate is not None and candidate["status"] == status:
+                candidates.append(candidate)
+        except (OSError, RuntimeError):
             continue
     return candidates
 
@@ -157,7 +229,7 @@ _FEEDBACK_TYPE_MAP: dict[str, str] = {
 }
 
 
-def promote_candidate(candidate_id: str, category: str = "patterns") -> str | None:
+def _promote_candidate_unlocked(candidate_id: str, category: str = "patterns") -> str | None:
     """Promote a feedback candidate to a knowledge page.
 
     Creates knowledge/notes/<category>/feedback-<id>.md with the
@@ -240,22 +312,22 @@ def promote_candidate(candidate_id: str, category: str = "patterns") -> str | No
     return page_path.relative_to(ROOT).as_posix()
 
 
+def promote_candidate(candidate_id: str, category: str = "patterns") -> str | None:
+    """Promote one candidate while excluding capture and repair writers."""
+    with feedback_writer_lock():
+        return _promote_candidate_unlocked(candidate_id, category)
+
+
 def _capture_from_stdin() -> int:
     """OpenCode plugin contract: JSON on stdin, no CLI args.
 
     Payload: {"text": "...", "session_id": "...", "slug": "...", "trigger": "..."}
     """
-    try:
-        raw = sys.stdin.read()
-    except OSError:
-        return 0
-    if not raw.strip():
-        return 0
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        return 0
-    if not isinstance(payload, dict):
+    payload = read_json_object_bounded(
+        sys.stdin,
+        max_bytes=MAX_HOOK_STDIN_BYTES,
+    )
+    if payload is None:
         return 0
     text = str(payload.get("text") or "")
     if not text.strip():
@@ -286,9 +358,8 @@ def main() -> int:
     promote.add_argument("id", help="Candidate ID")
     promote.add_argument("--category", default="patterns", help="Knowledge page type for frontmatter (e.g. patterns, debugging, qa). Does not affect the path — all pages are flat under knowledge/notes/.")
 
-    capture = sub.add_parser("capture", help="Capture feedback from text or transcript")
+    capture = sub.add_parser("capture", help="Capture feedback from direct user text")
     capture.add_argument("--text", default="", help="Raw feedback text")
-    capture.add_argument("--transcript", default="", help="Path to transcript file")
     capture.add_argument("--session-id", default="unknown")
     capture.add_argument("--slug", default="unknown")
     capture.add_argument("--trigger", default="cli")
@@ -320,12 +391,6 @@ def main() -> int:
             return 1
     elif args.command == "capture":
         text = args.text or ""
-        if args.transcript:
-            try:
-                text = Path(args.transcript).read_text(encoding="utf-8", errors="ignore")
-            except OSError as e:
-                print(f"feedback_capture: cannot read transcript: {e}", file=sys.stderr)
-                return 1
         if not text.strip():
             print("feedback_capture: no text provided", file=sys.stderr)
             return 1

@@ -13,7 +13,8 @@ Responsibilities:
 3. For MAJOR/MINOR: append the structured summary to today's daily log
    with an `[HH:MM:SS] event | session_id` header block and a `Tier:`
    metadata line. For OK: do not append anything.
-4. Dedupe: skip if the same (session_id, event) was flushed in the last 60s.
+4. Dedupe: skip if the same project/session/event occurrence was flushed in
+   the last 60s.
 5. If local time >= MEMORY_COMPILE_AFTER_HOUR (default 18) AND tier is
    MAJOR AND today's daily log changed since last compile: spawn
    compile via `maybe_compile` (PID-locked). (MINOR no longer triggers
@@ -33,9 +34,15 @@ doesn't track runtime churn.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
+import re
+import stat
 import sys
+import tempfile
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -45,6 +52,7 @@ from memory_state import (  # noqa: E402
     ROOT,
     file_hash,
     load_state,
+    trusted_compiled_daily_hashes,
     update_state,
 )
 from secret_redact import redact_secrets  # noqa: E402
@@ -52,6 +60,13 @@ from secret_redact import redact_secrets  # noqa: E402
 DAILY_DIR = ROOT / "knowledge" / "daily"
 DEDUPE_WINDOW_SECONDS = 60
 MAX_TRANSCRIPT_CHARS = 60_000
+STAGED_TRANSCRIPT_PREFIX = "llm-wiki-precompact-"
+STAGED_TRANSCRIPT_SUFFIX = ".txt"
+MAX_PROVENANCE_CHARS = 500
+BODY_XML_TAG_RE = re.compile(r"</?(?:analysis|summary)>", re.IGNORECASE)
+BODY_HEADING_PREFIX_RE = re.compile(r"^##\s+\[")
+BODY_COMPACT_PREFIX_RE = re.compile(r"^\s*-\s*`\[")
+DAILY_RECORD_COMPLETION_MARKER = "<!-- llm-wiki-record-complete -->"
 
 # Tier sentinels — replace the legacy single FLUSH_OK. The classifier
 # is asked to emit exactly one of these as the FIRST line of its
@@ -61,6 +76,20 @@ TIERS = ("FLUSH_MAJOR", "FLUSH_MINOR", "FLUSH_OK")
 # Legacy sentinel still recognized for backward compat with any
 # pre-Phase-0.5 summaries that may already be in flight or persisted.
 LEGACY_SENTINELS = ("FLUSH_OK", "(no durable content)", "NO_DURABLE_CONTENT")
+
+
+@dataclass(frozen=True)
+class TranscriptReadResult:
+    text: str
+    successful: bool
+
+
+@dataclass(frozen=True)
+class FlushProcessStatus:
+    code: int
+    durable: bool
+    project_slug: str
+    project_root: str
 
 
 def _classify_response(raw: str) -> tuple[str, str]:
@@ -87,7 +116,8 @@ def _classify_response(raw: str) -> tuple[str, str]:
     if first_line in TIERS:
         # Body = everything after the first line, cleaned.
         body = stripped[len(first_line_raw) :].strip(" \n\t*`")
-        return first_line.lower().replace("flush_", ""), body
+        tier = first_line.lower().replace("flush_", "")
+        return tier, body
     # Legacy protocol: FLUSH_OK as a single-word line anywhere
     norm = stripped.strip(" .\n\t*`").upper()
     for sentinel in LEGACY_SENTINELS:
@@ -109,12 +139,154 @@ def _classify_response(raw: str) -> tuple[str, str]:
     return "minor", stripped
 
 
+def _occurred_datetime(value: str | None, fallback: datetime | None = None) -> datetime:
+    raw = str(value or "").strip()
+    if raw:
+        try:
+            return datetime.fromisoformat(
+                f"{raw[:-1]}+00:00" if raw.endswith(("Z", "z")) else raw
+            )
+        except (TypeError, ValueError):
+            pass
+    return fallback or datetime.now()
+
+
+def _resolve_project_identity(
+    project_slug: str | None,
+    project_root: str | None,
+) -> tuple[str, Path] | None:
+    explicit = str(project_slug or "").strip()
+    raw_root = str(project_root or "").strip()
+    try:
+        from session_start_project_state import (
+            _slug_identity_key,
+            confirm_project_identity,
+            resolve_project_root,
+        )
+
+        resolution = resolve_project_root(
+            {"project_root": raw_root} if raw_root else {},
+            env=os.environ,
+        )
+        resolved_root = resolution.root
+        if resolved_root is None or not resolved_root.is_dir():
+            return None
+
+        confirmed = confirm_project_identity(
+            resolved_root,
+            ROOT / "knowledge" / "projects",
+        )
+        if confirmed is None:
+            return None
+        slug = confirmed[0]
+        return (
+            (slug, resolved_root)
+            if not explicit or _slug_identity_key(explicit) == _slug_identity_key(slug)
+            else None
+        )
+    except Exception:  # noqa: BLE001 - persistence must fail closed
+        return None
+
+
+def _resolve_project_slug(
+    project_slug: str | None,
+    project_root: str | None,
+) -> str | None:
+    identity = _resolve_project_identity(project_slug, project_root)
+    return identity[0] if identity is not None else None
+
+
+def _sanitize_provenance(value: object, default: str = "unknown") -> str:
+    redacted = redact_secrets(str(value or default))
+    one_line = " ".join(redacted.split()).replace("`", "'")
+    return one_line[:MAX_PROVENANCE_CHARS] or default
+
+
+def _neutralize_daily_record_headers(body: str) -> str:
+    lines: list[str] = []
+    for line in body.splitlines():
+        normalized = BODY_XML_TAG_RE.sub("", line)
+        marker = "#" if BODY_HEADING_PREFIX_RE.match(normalized) else ""
+        if not marker and BODY_COMPACT_PREFIX_RE.match(normalized):
+            marker = "-"
+        if not marker and normalized == DAILY_RECORD_COMPLETION_MARKER:
+            marker = "<"
+        position = line.find(marker) if marker else -1
+        lines.append(
+            f"{line[:position]}\\{line[position:]}" if position >= 0 else line
+        )
+    return "\n".join(lines)
+
+
+def render_flush_block(
+    tier: str,
+    body: str,
+    *,
+    event: str,
+    session_id: str,
+    trigger: str,
+    project_slug: str,
+    project_root: str,
+    occurred_at: str,
+    deferred: bool = False,
+    idempotency_marker: str = "",
+) -> tuple[str, str]:
+    """Render and redact one classified daily block from source metadata."""
+    occurred = _occurred_datetime(_sanitize_provenance(occurred_at, ""))
+    event_name = _sanitize_provenance(event, "session-end")
+    if deferred:
+        event_name = _sanitize_provenance(f"deferred-{event_name}")
+    event_name = event_name.replace("|", "/")
+    source_session = _sanitize_provenance(session_id).replace("|", "/")
+    source_trigger = _sanitize_provenance(trigger)
+    raw_root = str(project_root or "").strip()
+    try:
+        source_root = (
+            str(Path(raw_root).resolve())
+            if Path(raw_root).is_absolute()
+            else _sanitize_provenance(raw_root)
+        )
+    except (OSError, RuntimeError, ValueError):
+        source_root = _sanitize_provenance(raw_root)
+    source_slug = _sanitize_provenance(project_slug)
+    source_tier = _sanitize_provenance(tier)
+    header = (
+        f"\n## [{occurred.strftime('%H:%M:%S')}] {event_name} | {source_session}\n"
+    )
+    meta = (
+        f"- Trigger: `{source_trigger}`\n"
+        f"- Project slug: `{source_slug}`\n"
+        f"- Project root JSON: {json.dumps(source_root, ensure_ascii=False)}\n"
+        f"- Tier: `{source_tier}`\n"
+        f"- Source session: `{source_session}`\n"
+    )
+    safe_body = _neutralize_daily_record_headers(redact_secrets(body.strip()))
+    safe_marker = _sanitize_provenance(idempotency_marker, "")
+    marker = f"{safe_marker}\n" if safe_marker else ""
+    block = (
+        header
+        + meta
+        + "\n"
+        + safe_body
+        + "\n"
+        + marker
+        + DAILY_RECORD_COMPLETION_MARKER
+        + "\n"
+    )
+    return occurred.strftime("%Y-%m-%d"), block
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--event", required=True, choices=["session-end", "pre-compact"])
     p.add_argument("--session-id", default="unknown")
     p.add_argument("--transcript", default="")
+    p.add_argument("--transcript-stdin", action="store_true")
+    p.add_argument("--delete-transcript", action="store_true")
     p.add_argument("--trigger", default="")
+    p.add_argument("--project-slug", default="")
+    p.add_argument("--project-root", default="")
+    p.add_argument("--occurred-at", default="")
     return p.parse_args()
 
 
@@ -167,35 +339,96 @@ def _transcript_path_allowed(path: Path) -> bool:
     return False
 
 
-def read_transcript_tail(path: Path, max_chars: int = MAX_TRANSCRIPT_CHARS) -> str:
-    if not path.exists():
+def read_stream_tail(stream, max_chars: int, chunk_size: int = 8_192) -> str:
+    """Read a bounded text tail without first allocating the whole input."""
+    if max_chars <= 0 or chunk_size <= 0:
         return ""
-    if not _transcript_path_allowed(path):
-        return ""
+    tail = ""
+    while True:
+        chunk = stream.read(chunk_size)
+        if not chunk:
+            return tail
+        tail = (tail + chunk)[-max_chars:]
+
+
+def _staged_transcript_allowed(path: Path) -> bool:
+    """Allow deletion only for regular files in our exact temp namespace."""
+    if (
+        not path.name.startswith(STAGED_TRANSCRIPT_PREFIX)
+        or not path.name.endswith(STAGED_TRANSCRIPT_SUFFIX)
+    ):
+        return False
     try:
-        data = path.read_text(encoding="utf-8", errors="ignore")
+        if path.parent.resolve() != Path(tempfile.gettempdir()).resolve():
+            return False
+        metadata = path.lstat()
     except OSError:
-        return ""
-    if len(data) > max_chars:
-        data = data[-max_chars:]
-    return data
+        return False
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    file_attributes = getattr(metadata, "st_file_attributes", 0)
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and not path.is_symlink()
+        and not (reparse_flag and file_attributes & reparse_flag)
+    )
 
 
-def summarize_with_llm(transcript_excerpt: str, event: str) -> str:
-    """Ask the LLM to classify + distill the transcript into a tier + body.
-
-    Uses the unified llm_client (auto-detected backend — no separate API
-    key required on this machine). Falls back gracefully if the LLM is
-    unavailable (returns "" → caller treats as FLUSH_OK).
-    """
-    if not transcript_excerpt.strip():
-        return ""
-    transcript_excerpt = redact_secrets(transcript_excerpt)
+def _read_transcript_tail_result(
+    path: Path,
+    max_chars: int = MAX_TRANSCRIPT_CHARS,
+    *,
+    staged: bool = False,
+) -> TranscriptReadResult:
     try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from llm_client import call_llm
-    except ImportError:
-        return ""
+        allowed = (
+            _staged_transcript_allowed(path)
+            if staged
+            else _transcript_path_allowed(path)
+        )
+        if not allowed:
+            return TranscriptReadResult("", False)
+        with path.open(encoding="utf-8", errors="ignore") as stream:
+            return TranscriptReadResult(
+                read_stream_tail(stream, max_chars),
+                True,
+            )
+    except OSError:
+        return TranscriptReadResult("", False)
+
+
+def read_transcript_tail(
+    path: Path,
+    max_chars: int = MAX_TRANSCRIPT_CHARS,
+    *,
+    delete_after: bool = False,
+) -> str:
+    result = _read_transcript_tail_result(
+        path,
+        max_chars,
+        staged=delete_after,
+    )
+    if delete_after and result.successful:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return result.text
+
+
+def _build_flush_queue_payload(
+    transcript_excerpt: str,
+    event: str,
+    *,
+    session_id: str = "unknown",
+    trigger: str = "",
+    project_slug: str = "",
+    project_root: str = "",
+    occurred_at: str = "",
+) -> dict[str, object] | None:
+    """Build one redacted immediate/deferred classification request."""
+    if not transcript_excerpt.strip():
+        return None
+    transcript_excerpt = redact_secrets(transcript_excerpt)
 
     prompt = f"""You are classifying + distilling a Claude Code session transcript.
 
@@ -266,26 +499,104 @@ non-blank line MUST be the tier token.
         "log. You only emit FLUSH_MAJOR when you can point to a concrete "
         "decision or lesson in the transcript. No preamble, no apologies."
     )
+    return {
+        "prompt": prompt,
+        "system_prompt": system_prompt,
+        "max_tokens": 1500,
+        "enqueued_by": "flush_memory",
+        "event": event,
+        "session_id": session_id,
+        "trigger": trigger,
+        "project_slug": project_slug,
+        "project_root": project_root,
+        "occurred_at": occurred_at,
+    }
+
+
+def _enqueue_flush_payload(payload: dict[str, object]) -> bool:
     try:
-        text = call_llm(prompt, system_prompt, max_tokens=1500)
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from memory_queue import enqueue
+
+        enqueue("flush", payload)
     except Exception:
+        return False
+    return True
+
+
+def _enqueue_transcript_fallback(
+    transcript_excerpt: str,
+    event: str,
+    *,
+    session_id: str,
+    trigger: str,
+    project_slug: str,
+    project_root: str,
+    occurred_at: str,
+) -> bool:
+    try:
+        payload = _build_flush_queue_payload(
+            transcript_excerpt,
+            event,
+            session_id=session_id,
+            trigger=trigger,
+            project_slug=project_slug,
+            project_root=project_root,
+            occurred_at=occurred_at,
+        )
+    except Exception:
+        return False
+    return payload is not None and _enqueue_flush_payload(payload)
+
+
+def summarize_with_llm(
+    transcript_excerpt: str,
+    event: str,
+    *,
+    session_id: str = "unknown",
+    trigger: str = "",
+    project_slug: str = "",
+    project_root: str = "",
+    occurred_at: str = "",
+    enqueue_on_unavailable: bool = True,
+) -> str:
+    """Ask the LLM to classify + distill the transcript into a tier + body."""
+    request = _build_flush_queue_payload(
+        transcript_excerpt,
+        event,
+        session_id=session_id,
+        trigger=trigger,
+        project_slug=project_slug,
+        project_root=project_root,
+        occurred_at=occurred_at,
+    )
+    if request is None:
+        return ""
+
+    def defer_unavailable() -> None:
+        if enqueue_on_unavailable and not _enqueue_flush_payload(request):
+            raise RuntimeError("durable flush enqueue failed")
+
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from llm_client import call_llm
+    except ImportError:
+        defer_unavailable()
+        return ""
+    try:
+        text = call_llm(
+            str(request["prompt"]),
+            str(request["system_prompt"]),
+            max_tokens=int(request["max_tokens"]),
+        )
+    except Exception:
+        defer_unavailable()
         return ""
     if not text:
         # No backend available (call_llm returned None) — enqueue for
         # deferred processing so the content isn't silently lost as
         # FLUSH_OK. Drained at the next active session via memory_queue.
-        try:
-            sys.path.insert(0, str(Path(__file__).resolve().parent))
-            from memory_queue import enqueue
-            enqueue("flush", {
-                "prompt": prompt,
-                "system_prompt": system_prompt,
-                "max_tokens": 1500,
-                "enqueued_by": "flush_memory",
-                "event": event,
-            })
-        except Exception:
-            pass  # best-effort — never crash the hook
+        defer_unavailable()
         return ""
     return text.strip()
 
@@ -298,20 +609,90 @@ def append_daily(day: str, block: str) -> Path:
     return out
 
 
-def dedupe_key(session_id: str, event: str) -> str:
-    return f"{session_id}::{event}"
+def append_daily_once(day: str, block: str, marker: str) -> Path:
+    from daily_log_append import locked_append_once
+
+    out = DAILY_DIR / f"{day}.md"
+    return locked_append_once(out, block, marker)
 
 
-def should_skip(state: dict, session_id: str, event: str) -> bool:
-    last = state.get("flush_dedupe", {}).get(dedupe_key(session_id, event))
+def dedupe_key(
+    session_id: str,
+    event: str,
+    occurred_at: str,
+    project_slug: str,
+    project_root: str,
+) -> str:
+    identity = json.dumps(
+        {
+            "event": str(event),
+            "occurred_at": str(occurred_at),
+            "project_root": str(project_root),
+            "project_slug": str(project_slug),
+            "session_id": str(session_id),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def direct_flush_marker(
+    session_id: str,
+    event: str,
+    occurred_at: str,
+    project_slug: str,
+    project_root: str,
+) -> str:
+    key = dedupe_key(
+        session_id,
+        event,
+        occurred_at,
+        project_slug,
+        project_root,
+    )
+    return f"<!-- llm-wiki-direct-flush: {key} -->"
+
+
+def should_skip(
+    state: dict,
+    session_id: str,
+    event: str,
+    occurred_at: str,
+    project_slug: str,
+    project_root: str,
+) -> bool:
+    key = dedupe_key(
+        session_id,
+        event,
+        occurred_at,
+        project_slug,
+        project_root,
+    )
+    last = state.get("flush_dedupe", {}).get(key)
     if not last:
         return False
     return (time.time() - float(last)) < DEDUPE_WINDOW_SECONDS
 
 
-def record_flush(state: dict, session_id: str, event: str) -> None:
+def record_flush(
+    state: dict,
+    session_id: str,
+    event: str,
+    occurred_at: str,
+    project_slug: str,
+    project_root: str,
+) -> None:
     dedupe = state.setdefault("flush_dedupe", {})
-    dedupe[dedupe_key(session_id, event)] = time.time()
+    key = dedupe_key(
+        session_id,
+        event,
+        occurred_at,
+        project_slug,
+        project_root,
+    )
+    dedupe[key] = time.time()
     # Prune stale entries so the dict doesn't grow unbounded.
     cutoff = time.time() - DEDUPE_WINDOW_SECONDS * 4
     stale = [k for k, ts in dedupe.items() if float(ts) < cutoff]
@@ -335,7 +716,7 @@ def maybe_trigger_compile(state: dict, daily_path: Path, tier: str) -> None:
     if datetime.now().hour < hour_cutoff:
         return
     current_hash = file_hash(daily_path)
-    compiled = state.get("compiled_daily_hashes", {}).get(daily_path.name)
+    compiled = trusted_compiled_daily_hashes(state, root=ROOT).get(daily_path.name)
     if compiled == current_hash:
         return
 
@@ -380,41 +761,117 @@ def maybe_trigger_compile(state: dict, daily_path: Path, tier: str) -> None:
     state["compile_triggers"] = state["compile_triggers"][-20:]
 
 
-def main() -> int:
-    args = parse_args()
+def _is_valid_flush_ok_response(raw: str) -> bool:
+    return str(raw or "").strip() == "FLUSH_OK"
+
+
+def _process_flush(
+    args: argparse.Namespace,
+    occurred_at: str,
+    staged_transcript: str | None,
+) -> FlushProcessStatus:
+    project_slug = str(getattr(args, "project_slug", ""))
+    project_root = str(getattr(args, "project_root", ""))
+
+    def result(code: int, durable: bool) -> FlushProcessStatus:
+        return FlushProcessStatus(code, durable, project_slug, project_root)
+
+    try:
+        identity = _resolve_project_identity(project_slug, project_root)
+    except Exception:
+        return result(2, False)
+    if identity is None:
+        return result(0, False)
+    project_slug, resolved_project_root = identity
+    project_root = str(resolved_project_root)
+
     # Read-only peek for the dedupe short-circuit; the real write happens
     # inside update_state() below so we don't race with compile_memory.
-    if should_skip(load_state(), args.session_id, args.event):
-        return 0
+    try:
+        if should_skip(
+            load_state(),
+            args.session_id,
+            args.event,
+            occurred_at,
+            project_slug,
+            project_root,
+        ):
+            return result(0, True)
+    except Exception:
+        return result(2, False)
 
-    transcript = read_transcript_tail(Path(args.transcript)) if args.transcript else ""
-    raw_summary = summarize_with_llm(transcript, args.event) if transcript else ""
+    if staged_transcript is not None:
+        transcript = staged_transcript
+    elif args.transcript_stdin:
+        transcript = read_stream_tail(sys.stdin, MAX_TRANSCRIPT_CHARS)
+    else:
+        transcript = (
+            read_transcript_tail(Path(args.transcript))
+            if args.transcript
+            else ""
+        )
+    try:
+        raw_summary = (
+            summarize_with_llm(
+                transcript,
+                args.event,
+                session_id=args.session_id,
+                trigger=args.trigger,
+                project_slug=project_slug,
+                project_root=project_root,
+                occurred_at=occurred_at,
+                enqueue_on_unavailable=staged_transcript is None,
+            )
+            if transcript
+            else ""
+        )
+    except Exception:
+        return result(2, False)
 
     # 3-tier classification (Phase 0.5). Replaces binary FLUSH_OK check.
     tier, body = _classify_response(raw_summary)
-
-    # 3b. Feedback capture — scan for correction/preference patterns.
-    # If the user corrected the agent during this session, save as a
-    # feedback candidate for later promotion. Non-blocking.
-    if tier in ("major", "minor") and body:
-        try:
-            sys.path.insert(0, str(Path(__file__).resolve().parent))
-            from feedback_capture import capture_from_text
-            capture_from_text(
-                body,
-                session_id=args.session_id,
-                slug="unknown",
-                trigger=args.event,
-            )
-        except Exception:
-            pass
+    if tier != "ok" and not body:
+        print(
+            f"flush_memory: FLUSH_{tier.upper()} response has no distilled body",
+            file=sys.stderr,
+        )
+        return result(2, False)
 
     # FLUSH_OK: nothing worth persisting. Still record dedupe so retries
     # don't hammer the SDK. Still consider auto-compile in case the day's
     # log already has prior MAJOR content worth compiling.
     if tier == "ok":
+        if not _is_valid_flush_ok_response(raw_summary):
+            # Immediate calls enqueue inside summarize_with_llm when no backend
+            # is available. An empty result is durable only on that exact path.
+            if not raw_summary and transcript.strip() and staged_transcript is None:
+                def _mutate_deferred(state: dict) -> None:
+                    record_flush(
+                        state,
+                        args.session_id,
+                        args.event,
+                        occurred_at,
+                        project_slug,
+                        project_root,
+                    )
+
+                try:
+                    update_state(_mutate_deferred)
+                except Exception:
+                    # The queue write is already durable; dedupe is secondary.
+                    pass
+                return result(0, True)
+            return result(2, False)
+
         def _mutate_noop(state: dict) -> None:
-            record_flush(state, args.session_id, args.event)
+            record_flush(
+                state,
+                args.session_id,
+                args.event,
+                occurred_at,
+                project_slug,
+                project_root,
+            )
             state.setdefault("flush_empty_count", 0)
             state["flush_empty_count"] = int(state.get("flush_empty_count", 0)) + 1
             state["last_flush_empty_at"] = datetime.now().isoformat(timespec="seconds")
@@ -422,45 +879,132 @@ def main() -> int:
             state.setdefault("flush_tier_counts", {})
             state["flush_tier_counts"]["ok"] = int(state["flush_tier_counts"].get("ok", 0)) + 1
 
-        update_state(_mutate_noop)
-        return 0
+        try:
+            update_state(_mutate_noop)
+        except Exception:
+            return result(2, False)
+        return result(0, True)
 
     # FLUSH_MAJOR or FLUSH_MINOR: append the structured body to today's
     # daily log with a Tier: marker so the compile pipeline and human
     # readers can see what kind of content this is.
-    now = datetime.now()
-    day = now.strftime("%Y-%m-%d")
-    header = f"\n## [{now.strftime('%H:%M:%S')}] {args.event} | {args.session_id}\n"
-    meta = (
-        f"- Trigger: `{args.trigger}`\n"
-        f"- Transcript: `{args.transcript}`\n"
-        f"- Tier: `{tier}`\n"
+    marker = direct_flush_marker(
+        args.session_id,
+        args.event,
+        occurred_at,
+        project_slug,
+        project_root,
     )
-    body_block = body + "\n" if body else "(tier flagged but no structured body — manual review needed)\n"
-    block = header + meta + "\n" + body_block
-    # Mandatory redaction boundary: strip secrets before the block lands
-    # in the durable daily log (mirrors post_tool_capture.py:66-72).
-    block = redact_secrets(block)
+    try:
+        day, block = render_flush_block(
+            tier,
+            body,
+            event=args.event,
+            session_id=args.session_id,
+            trigger=args.trigger,
+            project_slug=project_slug,
+            project_root=project_root,
+            occurred_at=occurred_at,
+            idempotency_marker=marker,
+        )
+    except Exception:
+        return result(2, False)
 
     deferred_compiles: list[tuple[Path, str]] = []
+    direct_durable = False
 
     def _mutate(state: dict) -> None:
-        if should_skip(state, args.session_id, args.event):
+        nonlocal direct_durable
+        if should_skip(
+            state,
+            args.session_id,
+            args.event,
+            occurred_at,
+            project_slug,
+            project_root,
+        ):
+            direct_durable = True
             return
-        daily_path = append_daily(day, block)
-        record_flush(state, args.session_id, args.event)
+        daily_path = append_daily_once(day, block, marker)
+        direct_durable = True
+        record_flush(
+            state,
+            args.session_id,
+            args.event,
+            occurred_at,
+            project_slug,
+            project_root,
+        )
         state.setdefault("flush_tier_counts", {})
         state["flush_tier_counts"][tier] = int(state["flush_tier_counts"].get(tier, 0)) + 1
         if tier == "major":
             deferred_compiles.append((daily_path, tier))
 
-    update_state(_mutate)
+    try:
+        update_state(_mutate)
+    except Exception:
+        return result(2, direct_durable)
+    if not direct_durable:
+        return result(2, False)
 
     for daily_path, flush_tier in deferred_compiles:
         def _trigger_and_persist(state: dict, _dp=daily_path, _ft=flush_tier) -> None:
             maybe_trigger_compile(state, _dp, _ft)
-        update_state(_trigger_and_persist)
-    return 0
+        try:
+            update_state(_trigger_and_persist)
+        except Exception:
+            return result(2, True)
+    return result(0, True)
+
+
+def _delete_staged_transcript(path: Path) -> bool:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        return False
+    return True
+
+
+def main() -> int:
+    args = parse_args()
+    source_now = datetime.now().astimezone()
+    occurred = _occurred_datetime(getattr(args, "occurred_at", ""), source_now)
+    occurred_at = occurred.isoformat(timespec="microseconds")
+    staged_transcript: str | None = None
+    staged_path: Path | None = None
+    if args.delete_transcript and args.transcript:
+        staged_path = Path(args.transcript)
+        read_result = _read_transcript_tail_result(
+            staged_path,
+            staged=True,
+        )
+        if not read_result.successful:
+            return 2
+        staged_transcript = read_result.text
+    try:
+        status = _process_flush(args, occurred_at, staged_transcript)
+    except Exception:
+        status = FlushProcessStatus(
+            2,
+            False,
+            str(getattr(args, "project_slug", "")),
+            str(getattr(args, "project_root", "")),
+        )
+    if staged_path is None:
+        return status.code if status.durable else status.code or 2
+    if status.durable:
+        return status.code if _delete_staged_transcript(staged_path) else 2
+    if _enqueue_transcript_fallback(
+        staged_transcript or "",
+        args.event,
+        session_id=args.session_id,
+        trigger=args.trigger,
+        project_slug=status.project_slug,
+        project_root=status.project_root,
+        occurred_at=occurred_at,
+    ):
+        return 0 if _delete_staged_transcript(staged_path) else 2
+    return status.code or 2
 
 
 if __name__ == "__main__":

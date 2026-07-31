@@ -20,34 +20,35 @@ import pytest
 
 @pytest.fixture
 def state_snapshot(tmp_path):
-    """Save / restore state.json around the test.
-
-    Log is redirected to tmp_path via monkeypatch in the test itself
-    so the real knowledge/log.md is never touched.
-    """
-    from memory_state import STATE_FILE
-
-    state_file = STATE_FILE
-
-    if not state_file.exists():
-        state_file.parent.mkdir(parents=True, exist_ok=True)
-        state_file.write_text("{}\n", encoding="utf-8")
-
-    state_before = state_file.read_text(encoding="utf-8")
+    """Create a hermetic vault and runtime state for the regression test."""
+    root = tmp_path / "vault"
+    daily_dir = root / "knowledge" / "daily"
+    daily_dir.mkdir(parents=True)
+    state_root = tmp_path / "runtime"
+    state_file = state_root / "run" / "state.json"
+    state_file.parent.mkdir(parents=True)
+    state_before = "{}\n"
+    state_file.write_text(state_before, encoding="utf-8")
 
     yield {
+        "root": root,
+        "daily_dir": daily_dir,
+        "state_root": state_root,
         "state_file": state_file,
         "state_before": state_before,
         "log_md": tmp_path / "test-log.md",
     }
 
-    state_file.write_text(state_before, encoding="utf-8")
-
 
 def test_failed_compile_does_not_mark_hash(state_snapshot, monkeypatch):
     import compile_memory  # noqa: WPS433
+    import memory_state  # noqa: WPS433
 
+    monkeypatch.setattr(compile_memory, "ROOT", state_snapshot["root"])
+    monkeypatch.setattr(compile_memory, "STATE_ROOT", state_snapshot["state_root"])
+    monkeypatch.setattr(compile_memory, "DAILY_DIR", state_snapshot["daily_dir"])
     monkeypatch.setattr(compile_memory, "LOG", state_snapshot["log_md"])
+    monkeypatch.setattr(memory_state, "STATE_FILE", state_snapshot["state_file"])
 
     # Patch run_compile to simulate a failure (no LLM response).
     # Phase 4+ refactor: run_compile is now sync (was async when it
@@ -57,12 +58,12 @@ def test_failed_compile_does_not_mark_hash(state_snapshot, monkeypatch):
 
     monkeypatch.setattr(compile_memory, "run_compile", fake_failure)
 
-    # On CI there are no daily logs (gitignored for privacy), so
-    # select_dailies returns [] and main() exits 0 before calling
-    # run_compile. Monkeypatch select_dailies to return a fake path
-    # INSIDE the vault root (compile_memory does relative_to(ROOT)
-    # on each daily path for display).
+    # Use a real bounded snapshot so preparation reaches the injected provider failure.
     fake_daily = compile_memory.DAILY_DIR / "__test_fake__.md"
+    fake_daily.write_text(
+        "# Daily\n\n## [12:00:00] session-end | session\nregression evidence\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(
         compile_memory,
         "select_dailies",

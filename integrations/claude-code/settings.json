@@ -35,17 +35,34 @@
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "startup|resume|clear|compact",
+        "matcher": "startup|resume|clear|compact|fork",
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/session_start_context.py",
-            "timeout": 15
+            "command": "uv",
+            "args": [
+              "run",
+              "--directory",
+              "$LLM_WIKI_ROOT",
+              "python",
+              "scripts/session_start_context.py",
+              "--omit-project-state"
+            ],
+            "timeout": 15,
+            "statusMessage": "[LLM Wiki] Loading memory context"
           },
           {
             "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/session_start_project_state.py",
-            "timeout": 10
+            "command": "uv",
+            "args": [
+              "run",
+              "--directory",
+              "$LLM_WIKI_ROOT",
+              "python",
+              "scripts/session_start_project_state.py"
+            ],
+            "timeout": 10,
+            "statusMessage": "[LLM Wiki] Loading project state"
           }
         ]
       }
@@ -56,8 +73,16 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/precompact_capture.py",
-            "timeout": 15
+            "command": "uv",
+            "args": [
+              "run",
+              "--directory",
+              "$LLM_WIKI_ROOT",
+              "python",
+              "scripts/precompact_capture.py"
+            ],
+            "timeout": 15,
+            "statusMessage": "[LLM Wiki] Preserving pre-compact memory"
           }
         ]
       }
@@ -68,13 +93,29 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/session_end_capture.py",
-            "timeout": 15
+            "command": "uv",
+            "args": [
+              "run",
+              "--directory",
+              "$LLM_WIKI_ROOT",
+              "python",
+              "scripts/session_end_capture.py"
+            ],
+            "timeout": 15,
+            "statusMessage": "[LLM Wiki] Preserving session memory"
           },
           {
             "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/session_end_project_tag.py",
-            "timeout": 10
+            "command": "uv",
+            "args": [
+              "run",
+              "--directory",
+              "$LLM_WIKI_ROOT",
+              "python",
+              "scripts/session_end_project_tag.py"
+            ],
+            "timeout": 10,
+            "statusMessage": "[LLM Wiki] Tagging project session"
           }
         ]
       }
@@ -85,8 +126,16 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/user_prompt_capture.py",
-            "timeout": 5
+            "command": "uv",
+            "args": [
+              "run",
+              "--directory",
+              "$LLM_WIKI_ROOT",
+              "python",
+              "scripts/user_prompt_capture.py"
+            ],
+            "timeout": 5,
+            "statusMessage": "[LLM Wiki] Capturing user prompt"
           }
         ]
       }
@@ -97,8 +146,16 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --directory \"$LLM_WIKI_ROOT\" python scripts/post_tool_capture.py",
-            "timeout": 5
+            "command": "uv",
+            "args": [
+              "run",
+              "--directory",
+              "$LLM_WIKI_ROOT",
+              "python",
+              "scripts/post_tool_capture.py"
+            ],
+            "timeout": 5,
+            "statusMessage": "[LLM Wiki] Capturing file mutation"
           }
         ]
       }

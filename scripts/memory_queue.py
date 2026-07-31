@@ -16,9 +16,10 @@ Each file is one task, atomic via tmp+rename. Queue is crash-safe.
 
 Task schema:
     {
-      "id": "<uuid>",
+      "id": "<YYYYMMDD-HHMMSS-8lowerhex>",
       "type": "compile" | "classify" | "lint_contradictions" | "query",
       "enqueued_at": "<iso8601>",
+      "enqueue_sequence": 1,
       "attempts": 0,
       "last_attempt_at": null,
       "payload": { ... type-specific fields ... }
@@ -26,30 +27,498 @@ Task schema:
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import math
 import os
+import re
+import stat
+import subprocess
 import sys
+import threading
 import uuid
 from collections.abc import Callable
-from datetime import datetime
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+MAX_ATTEMPTS = 5
+MAX_SDK_TOKENS = 100_000
+RETRY_BACKOFF_SECONDS = 60
+QUEUE_LOCK_TIMEOUT_SECONDS = 30.0
+MAX_PROVENANCE_CHARS = 500
+MAX_SDK_BRIDGE_STDIN_BYTES = 8 * 1024 * 1024
+MAX_QUEUE_ENTRIES = 10_000
+MAX_QUEUE_TASK_BYTES = 16 * 1024 * 1024
+MAX_QUEUE_SEQUENCE_BYTES = 128
+MAX_QUEUE_MIGRATION_BYTES = 4 * 1024 * 1024
+MAX_QUEUE_JSON_DEPTH = 64
+PROVENANCE_FIELDS = (
+    "event",
+    "session_id",
+    "trigger",
+    "project_slug",
+    "project_root",
+    "occurred_at",
+    "enqueued_by",
+)
+_TASK_ID_PATTERN = re.compile(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{8}")
 
-def _queue_dir() -> Path:
+_QUEUE_THREAD_LOCK = threading.Lock()
+
+
+class QueueIntegrityError(RuntimeError):
+    """The queue cannot be inspected completely and must not be mutated."""
+
+
+def _is_canonical_task_id(task_id: object) -> bool:
+    return (
+        isinstance(task_id, str)
+        and _TASK_ID_PATTERN.fullmatch(task_id) is not None
+    )
+
+
+@dataclass(frozen=True)
+class QueueInventory:
+    entries: tuple[Path, ...]
+    tasks: tuple[tuple[Path, dict[str, Any]], ...]
+
+
+def _state_root() -> Path:
+    env = os.environ.get("LLM_WIKI_STATE_ROOT")
+    if env:
+        if "\0" in env:
+            raise ValueError("LLM_WIKI_STATE_ROOT contains NUL")
+        return Path(env)
     try:
         from memory_state import STATE_ROOT
-        state_root = STATE_ROOT
+
+        return Path(STATE_ROOT)
     except Exception:  # noqa: BLE001
-        env = os.environ.get("LLM_WIKI_STATE_ROOT")
-        if env:
-            state_root = Path(env)
-        else:
-            vault = Path(os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent))
-            state_root = vault.resolve()
-    q = Path(state_root) / "run" / "queue"
+        vault = Path(
+            os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent)
+        )
+        return vault.resolve()
+
+
+def _queue_dir() -> Path:
+    q = _state_root() / "run" / "queue"
     q.mkdir(parents=True, exist_ok=True)
     return q
+
+
+def _daily_dir() -> Path:
+    from memory_state import ROOT
+
+    return ROOT / "knowledge" / "daily"
+
+
+def _sequence_file(queue_dir: Path) -> Path:
+    return queue_dir.parent / "queue-sequence"
+
+
+def _migration_file(queue_dir: Path) -> Path:
+    return queue_dir.parent / "queue-migration.json"
+
+
+@contextmanager
+def _queue_order_lock():
+    """Serialize queue ordering changes across threads and processes."""
+    from memory_state import advisory_file_lock
+
+    queue_dir = _queue_dir()
+    with _QUEUE_THREAD_LOCK:
+        with advisory_file_lock(
+            queue_dir.parent / "queue-order.lock",
+            timeout=QUEUE_LOCK_TIMEOUT_SECONDS,
+            description="memory queue ordering",
+        ):
+            yield queue_dir
+
+
+def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    from memory_state import atomic_write
+
+    atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+
+def _sanitize_queue_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    from secret_redact import redact_secrets
+
+    sanitized = dict(payload)
+    for field in PROVENANCE_FIELDS:
+        if field not in sanitized:
+            continue
+        redacted = redact_secrets(str(sanitized[field] or ""))
+        sanitized[field] = " ".join(redacted.split())[:MAX_PROVENANCE_CHARS]
+    return sanitized
+
+
+def _integrity_error(message: str, path: Path | None = None) -> QueueIntegrityError:
+    location = f": {path}" if path is not None else ""
+    return QueueIntegrityError(f"queue integrity unavailable: {message}{location}")
+
+
+def _is_reparse_point(metadata) -> bool:
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+
+def _read_bounded_regular_bytes(
+    path: Path,
+    *,
+    max_bytes: int,
+    label: str,
+    allow_missing: bool = False,
+) -> bytes | None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        if allow_missing:
+            return None
+        raise _integrity_error(f"{label} disappeared", path) from None
+    except OSError as exc:
+        raise _integrity_error(f"{label} metadata is unreadable", path) from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or _is_reparse_point(metadata)
+    ):
+        raise _integrity_error(f"{label} is not a regular file", path)
+    if metadata.st_size > max_bytes:
+        raise _integrity_error(
+            f"{label} exceeds the {max_bytes} byte limit",
+            path,
+        )
+    try:
+        with path.open("rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if (
+                not os.path.samestat(metadata, opened)
+                or not stat.S_ISREG(opened.st_mode)
+                or _is_reparse_point(opened)
+            ):
+                raise _integrity_error(f"{label} changed before it could be read", path)
+            raw = handle.read(max_bytes + 1)
+    except QueueIntegrityError:
+        raise
+    except OSError as exc:
+        raise _integrity_error(f"{label} is unreadable", path) from exc
+    if len(raw) > max_bytes:
+        raise _integrity_error(
+            f"{label} exceeds the {max_bytes} byte limit",
+            path,
+        )
+    return raw
+
+
+def _reject_json_constant(value: str):
+    raise ValueError(f"non-finite JSON number: {value}")
+
+
+def _validate_json_graph(data: dict[str, Any], *, label: str, path: Path) -> None:
+    pending: list[tuple[Any, int]] = [(data, 0)]
+    while pending:
+        value, depth = pending.pop()
+        if depth > MAX_QUEUE_JSON_DEPTH:
+            raise _integrity_error(
+                f"{label} exceeds the JSON depth limit of {MAX_QUEUE_JSON_DEPTH}",
+                path,
+            )
+        if isinstance(value, str):
+            if any(0xD800 <= ord(char) <= 0xDFFF for char in value):
+                raise _integrity_error(f"{label} contains a surrogate code point", path)
+        elif isinstance(value, dict):
+            pending.extend((key, depth + 1) for key in value)
+            pending.extend((item, depth + 1) for item in value.values())
+        elif isinstance(value, list):
+            pending.extend((item, depth + 1) for item in value)
+
+
+def _read_json_object(
+    path: Path,
+    *,
+    max_bytes: int,
+    label: str,
+    allow_missing: bool = False,
+) -> dict[str, Any] | None:
+    raw = _read_bounded_regular_bytes(
+        path,
+        max_bytes=max_bytes,
+        label=label,
+        allow_missing=allow_missing,
+    )
+    if raw is None:
+        return None
+    try:
+        text = raw.decode("utf-8", errors="strict")
+        data = json.loads(text, parse_constant=_reject_json_constant)
+    except (UnicodeError, ValueError, RecursionError) as exc:
+        raise _integrity_error(f"{label} is not valid UTF-8 JSON", path) from exc
+    if not isinstance(data, dict):
+        raise _integrity_error(f"{label} must contain a top-level object", path)
+    _validate_json_graph(data, label=label, path=path)
+    return data
+
+
+def _read_task_json(path: Path, *, allow_missing: bool = False) -> dict[str, Any] | None:
+    task = _read_json_object(
+        path,
+        max_bytes=MAX_QUEUE_TASK_BYTES,
+        label="queue task",
+        allow_missing=allow_missing,
+    )
+    if task is None:
+        return None
+    invalid = not (
+        isinstance(task.get("id"), str)
+        and bool(task["id"])
+        and isinstance(task.get("type"), str)
+        and bool(task["type"])
+        and isinstance(task.get("enqueued_at"), str)
+        and type(task.get("attempts")) is int
+        and task["attempts"] >= 0
+        and (
+            task.get("last_attempt_at") is None
+            or isinstance(task.get("last_attempt_at"), str)
+        )
+        and isinstance(task.get("payload"), dict)
+        and (
+            "enqueue_sequence" not in task
+            or (
+                type(task["enqueue_sequence"]) is int
+                and task["enqueue_sequence"] >= 1
+            )
+        )
+        and (
+            "_sdk_lease" not in task
+            or isinstance(task.get("_sdk_lease"), dict)
+        )
+    )
+    if not invalid:
+        try:
+            datetime.fromisoformat(task["enqueued_at"])
+            if task.get("last_attempt_at") is not None:
+                datetime.fromisoformat(task["last_attempt_at"])
+        except ValueError:
+            invalid = True
+    if invalid:
+        raise _integrity_error("queue task schema is invalid", path)
+    if not _is_canonical_task_id(task["id"]):
+        raise _integrity_error("queue task id is not canonical", path)
+    if path.name != f"{task['id']}{path.suffix}":
+        raise _integrity_error("queue task filename does not match its id", path)
+    return task
+
+
+def _inventory_queue_locked(queue_dir: Path) -> QueueInventory:
+    entries: list[Path] = []
+    tasks: list[tuple[Path, dict[str, Any]]] = []
+    try:
+        root_metadata = queue_dir.lstat()
+        if (
+            not stat.S_ISDIR(root_metadata.st_mode)
+            or stat.S_ISLNK(root_metadata.st_mode)
+            or _is_reparse_point(root_metadata)
+        ):
+            raise _integrity_error(
+                "queue directory is not a regular directory",
+                queue_dir,
+            )
+        with os.scandir(queue_dir) as scanned:
+            for count, entry in enumerate(scanned, start=1):
+                if count > MAX_QUEUE_ENTRIES:
+                    raise _integrity_error(
+                        f"queue entry limit of {MAX_QUEUE_ENTRIES} was exceeded",
+                        queue_dir,
+                    )
+                path = Path(entry.path)
+                entries.append(path)
+                suffix = path.suffix
+                normalized_suffix = suffix.casefold()
+                if (
+                    normalized_suffix in {".json", ".processing"}
+                    and suffix != normalized_suffix
+                ):
+                    raise _integrity_error(
+                        "queue task suffix is not canonical lowercase",
+                        path,
+                    )
+                if suffix not in {".json", ".processing"}:
+                    continue
+                task = _read_task_json(path)
+                if task is None:  # pragma: no cover - required files cannot be absent
+                    raise _integrity_error("queue task disappeared", path)
+                tasks.append((path, task))
+    except QueueIntegrityError:
+        raise
+    except OSError as exc:
+        raise _integrity_error("queue directory cannot be inventoried", queue_dir) from exc
+    return QueueInventory(tuple(entries), tuple(tasks))
+
+
+def _read_sequence(queue_dir: Path) -> int:
+    path = _sequence_file(queue_dir)
+    try:
+        raw = _read_bounded_regular_bytes(
+            path,
+            max_bytes=MAX_QUEUE_SEQUENCE_BYTES,
+            label="queue sequence counter",
+            allow_missing=True,
+        )
+        if raw is None:
+            return 0
+        value = int(raw.decode("utf-8", errors="strict").strip())
+    except QueueIntegrityError:
+        raise
+    except (UnicodeError, ValueError) as exc:
+        raise _integrity_error("queue sequence counter is invalid", path) from exc
+    except FileNotFoundError:
+        return 0
+    if value < 0:
+        raise _integrity_error("queue sequence counter is invalid", path)
+    return value
+
+
+def _write_sequence(queue_dir: Path, value: int) -> None:
+    from memory_state import atomic_write
+
+    atomic_write(_sequence_file(queue_dir), f"{value}\n")
+
+
+def _read_pending_files(queue_dir: Path) -> list[tuple[Path, dict[str, Any]]]:
+    inventory = _inventory_queue_locked(queue_dir)
+    return [(path, task) for path, task in inventory.tasks if path.suffix == ".json"]
+
+
+def _enqueue_evidence(path: Path, task: dict[str, Any]) -> tuple[float, int, str]:
+    try:
+        timestamp = datetime.fromisoformat(str(task["enqueued_at"])).timestamp()
+    except (KeyError, TypeError, ValueError, OSError):
+        timestamp = path.stat().st_mtime
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError:
+        mtime_ns = 0
+    return timestamp, mtime_ns, path.name
+
+
+def _read_migration(queue_dir: Path) -> list[tuple[str, int]]:
+    path = _migration_file(queue_dir)
+    try:
+        data = _read_json_object(
+            path,
+            max_bytes=MAX_QUEUE_MIGRATION_BYTES,
+            label="queue migration journal",
+            allow_missing=True,
+        )
+        if data is None:
+            return []
+        raw_assignments = data["assignments"]
+        assignments = [
+            (str(item["filename"]), int(item["sequence"]))
+            for item in raw_assignments
+        ]
+    except QueueIntegrityError:
+        raise
+    except (KeyError, TypeError, ValueError) as exc:
+        raise _integrity_error("queue migration journal is invalid", path) from exc
+    if any(
+        Path(filename).name != filename
+        or not filename.endswith(".json")
+        or not _is_canonical_task_id(filename.removesuffix(".json"))
+        or sequence < 1
+        for filename, sequence in assignments
+    ):
+        raise _integrity_error("queue migration journal is invalid", path)
+    return assignments
+
+
+def _apply_migration(
+    queue_dir: Path, assignments: list[tuple[str, int]]
+) -> list[tuple[Path, dict[str, Any]]]:
+    for filename, sequence in assignments:
+        path = queue_dir / filename
+        task = _read_task_json(path, allow_missing=True)
+        if task is None:
+            continue
+        if task.get("enqueue_sequence") != sequence:
+            task["enqueue_sequence"] = sequence
+            _atomic_write_json(path, task)
+
+    counter = max(_read_sequence(queue_dir), *(sequence for _, sequence in assignments))
+    _write_sequence(queue_dir, counter)
+    migration_file = _migration_file(queue_dir)
+    try:
+        migration_file.unlink()
+    except FileNotFoundError:
+        pass
+    else:
+        from memory_state import _sync_parent_directory
+
+        _sync_parent_directory(migration_file)
+    return _read_pending_files(queue_dir)
+
+
+def _migrate_legacy_tasks(
+    queue_dir: Path, tasks: list[tuple[Path, dict[str, Any]]]
+) -> list[tuple[Path, dict[str, Any]]]:
+    """Assign deterministic sequences to queues created before sequencing."""
+    assignments = _read_migration(queue_dir)
+    if assignments:
+        tasks = _apply_migration(queue_dir, assignments)
+
+    counter = _read_sequence(queue_dir)
+    if any("enqueue_sequence" not in task for _, task in tasks):
+        tasks.sort(key=lambda item: _enqueue_evidence(*item))
+        assignments = [
+            (path.name, sequence)
+            for sequence, (path, _) in enumerate(tasks, start=1)
+        ]
+        _atomic_write_json(
+            _migration_file(queue_dir),
+            {
+                "version": 1,
+                "assignments": [
+                    {"filename": filename, "sequence": sequence}
+                    for filename, sequence in assignments
+                ],
+            },
+        )
+        return _apply_migration(queue_dir, assignments)
+
+    max_pending_sequence = max(
+        (int(task["enqueue_sequence"]) for _, task in tasks), default=0
+    )
+    if max_pending_sequence > counter:
+        _write_sequence(queue_dir, max_pending_sequence)
+    return tasks
+
+
+def _enqueue_locked(
+    queue_dir: Path, task_type: str, payload: dict[str, Any]
+) -> str:
+    pending = _read_pending_files(queue_dir)
+    _migrate_legacy_tasks(queue_dir, pending)
+    sequence = _read_sequence(queue_dir) + 1
+    _write_sequence(queue_dir, sequence)
+
+    now = datetime.now()
+    task_id = f"{now.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    task = {
+        "id": task_id,
+        "type": task_type,
+        "enqueued_at": now.isoformat(timespec="microseconds"),
+        "enqueue_sequence": sequence,
+        "attempts": 0,
+        "last_attempt_at": None,
+        "payload": payload,
+    }
+    _atomic_write_json(queue_dir / f"{task_id}.json", task)
+    return task_id
 
 
 def enqueue(task_type: str, payload: dict[str, Any]) -> str:
@@ -57,20 +526,110 @@ def enqueue(task_type: str, payload: dict[str, Any]) -> str:
 
     Safe to call from any process — atomic file write via tmp+rename.
     """
-    task_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
-    task = {
-        "id": task_id,
-        "type": task_type,
-        "enqueued_at": datetime.now().isoformat(timespec="seconds"),
-        "attempts": 0,
-        "last_attempt_at": None,
-        "payload": payload,
-    }
-    target = _queue_dir() / f"{task_id}.json"
-    tmp = target.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(task, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(target)
-    return task_id
+    payload = _sanitize_queue_payload(payload)
+    with _queue_order_lock() as queue_dir:
+        return _enqueue_locked(queue_dir, task_type, payload)
+
+
+def _has_pending_compile_work() -> bool:
+    """Inspect atomically replaced state without taking the state lock.
+
+    Some flush paths acquire the state lock before entering the queue, so queue
+    settlement must not acquire that lock in the reverse order.
+    """
+    state_file = _queue_dir().parent / "state.json"
+    try:
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        state = {}
+    if state.get("compile_index_pending"):
+        return True
+
+    daily_dir = _daily_dir()
+    if not daily_dir.exists():
+        return False
+    from memory_state import trusted_compiled_daily_hashes
+
+    compiled_hashes = trusted_compiled_daily_hashes(
+        state,
+        root=daily_dir.parent.parent,
+    )
+    return any(
+        compiled_hashes.get(path.name)
+        != hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in daily_dir.glob("*.md")
+    )
+
+
+def ensure_compile_task() -> dict[str, Any]:
+    """Atomically reuse or create the sole durable compile control."""
+    with _queue_order_lock() as queue_dir:
+        inventory = _inventory_queue_locked(queue_dir)
+        pending = [
+            (path, task)
+            for path, task in inventory.tasks
+            if path.suffix == ".json"
+        ]
+        pending = _migrate_legacy_tasks(queue_dir, pending)
+        controls = [
+            (path, task)
+            for path, task in (
+                *pending,
+                *(
+                    (path, task)
+                    for path, task in inventory.tasks
+                    if path.suffix == ".processing"
+                ),
+            )
+            if task.get("type") == "compile"
+        ]
+        if controls:
+            path, task = min(
+                controls,
+                key=lambda item: (
+                    int(item[1].get("enqueue_sequence", sys.maxsize)),
+                    str(item[1].get("enqueued_at", "")),
+                    item[0].name,
+                ),
+            )
+            control = {
+                "pending": True,
+                "created": False,
+                "task_id": task.get("id"),
+            }
+            if path.suffix == ".processing":
+                control["state"] = "processing"
+                return control
+            if int(task.get("attempts", 0)) >= MAX_ATTEMPTS:
+                control["state"] = "terminal"
+                return control
+            retry = _retry_schedule(task)
+            if retry is not None:
+                delay, eligible_at = retry
+                control.update(
+                    {
+                        "state": "backoff",
+                        "retry_delay_seconds": delay,
+                        "eligible_at": eligible_at,
+                    }
+                )
+                return control
+            control["state"] = "pending_eligible"
+            return control
+        if not _has_pending_compile_work():
+            return {
+                "pending": False,
+                "created": False,
+                "task_id": None,
+                "state": "not_needed",
+            }
+        task_id = _enqueue_locked(queue_dir, "compile", {"force": False})
+        return {
+            "pending": True,
+            "created": True,
+            "task_id": task_id,
+            "state": "pending_eligible",
+        }
 
 
 def list_pending(max_age_days: int | None = None) -> list[dict[str, Any]]:
@@ -79,158 +638,703 @@ def list_pending(max_age_days: int | None = None) -> list[dict[str, Any]]:
     `max_age_days` filters out tasks older than N days (avoid infinite
     buildup of unservable tasks). None = no filter.
     """
-    out: list[dict[str, Any]] = []
     cutoff = None
     if max_age_days is not None:
         cutoff = datetime.now().timestamp() - (max_age_days * 86400)
-    for p in sorted(_queue_dir().glob("*.json")):
-        try:
-            task = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if cutoff is not None:
-            try:
-                enq = datetime.fromisoformat(task["enqueued_at"]).timestamp()
-                if enq < cutoff:
-                    continue
-            except (KeyError, ValueError):
-                pass
-        task["_path"] = str(p)
-        out.append(task)
+
+    out: list[dict[str, Any]] = []
+    with _queue_order_lock() as queue_dir:
+        pending = _migrate_legacy_tasks(queue_dir, _read_pending_files(queue_dir))
+        for path, task in pending:
+            if cutoff is not None:
+                try:
+                    enq = datetime.fromisoformat(task["enqueued_at"]).timestamp()
+                    if enq < cutoff:
+                        continue
+                except (KeyError, ValueError):
+                    pass
+            task["_path"] = str(path)
+            out.append(task)
+    out.sort(
+        key=lambda task: (
+            int(task["enqueue_sequence"]),
+            str(task.get("enqueued_at", "")),
+            task["_path"],
+        )
+    )
     return out
 
 
 def mark_attempt(task_id: str, success: bool) -> None:
     """Update task's attempt counter (failure) or delete (success)."""
-    qdir = _queue_dir()
-    # Find task by id (filename starts with the id).
-    candidates = list(qdir.glob(f"{task_id}*.json"))
-    if not candidates:
+    if not _is_canonical_task_id(task_id):
         return
-    path = candidates[0]
-    try:
-        task = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return
-    if success:
-        try:
-            path.unlink()
-        except OSError:
-            pass
-        return
-    # Failure: bump attempts, stamp last_attempt_at, re-write atomically.
-    task["attempts"] = int(task.get("attempts", 0)) + 1
-    task["last_attempt_at"] = datetime.now().isoformat(timespec="seconds")
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(task, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(path)
+    with _queue_order_lock() as qdir:
+        _inventory_queue_locked(qdir)
+        path = qdir / f"{task_id}.json"
+        task = _read_task_json(path, allow_missing=True)
+        if task is None:
+            return
+        if success:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            return
+        task["attempts"] = int(task.get("attempts", 0)) + 1
+        task["last_attempt_at"] = datetime.now().isoformat(timespec="seconds")
+        _atomic_write_json(path, task)
 
 
-def recover_stale_leases(max_age_seconds: int = 600) -> int:
-    """Recover .processing files older than max_age_seconds.
-
-    If a drainer crashes between renaming to .processing and completing,
-    the task is stuck forever. This function scans for stale leases and
-    renames them back to .json so they can be re-queued. Called at the
-    start of drain_with().
-    """
-    qdir = _queue_dir()
+def _recover_stale_leases_locked(qdir: Path, max_age_seconds: int) -> int:
     if not qdir.exists():
         return 0
+    inventory = _inventory_queue_locked(qdir)
     cutoff = datetime.now().timestamp() - max_age_seconds
     recovered = 0
-    for p in qdir.glob("*.processing"):
+    entry_names = {path.name for path in inventory.entries}
+    for marker in (
+        path for path in inventory.entries if path.name.endswith(".acquiring")
+    ):
         try:
-            if p.stat().st_mtime < cutoff:
+            if marker.lstat().st_mtime < cutoff:
+                marker.unlink()
+                recovered += 1
+        except OSError:
+            pass
+    for p, task in (
+        item for item in inventory.tasks if item[0].suffix == ".processing"
+    ):
+        try:
+            if p.with_suffix(".acquiring").name in entry_names:
+                continue
+            freshness = p.lstat().st_mtime
+            lease = task.get("_sdk_lease", {})
+            if not isinstance(lease, dict):
+                raise _integrity_error("processing task lease is invalid", p)
+            for field in ("leased_at", "renewed_at"):
+                value = lease.get(field)
+                if not value:
+                    continue
+                try:
+                    stamp = datetime.fromisoformat(str(value))
+                except (TypeError, ValueError) as exc:
+                    raise _integrity_error(
+                        f"processing task {field} is invalid",
+                        p,
+                    ) from exc
+                if stamp.tzinfo is None:
+                    stamp = stamp.astimezone()
+                freshness = max(freshness, stamp.timestamp())
+            if freshness < cutoff:
                 target = p.with_suffix(".json")
                 p.rename(target)
                 recovered += 1
+        except QueueIntegrityError:
+            raise
         except OSError:
             pass
     return recovered
 
 
+def recover_stale_leases(max_age_seconds: int = 600) -> int:
+    """Recover stale queue leases while excluding claim and settlement."""
+    with _queue_order_lock() as qdir:
+        return _recover_stale_leases_locked(qdir, max_age_seconds)
+
+
+def _task_digest(task: dict[str, Any]) -> str:
+    stable = {key: value for key, value in task.items() if key not in {"_path", "_sdk_lease"}}
+    encoded = json.dumps(
+        stable, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _retry_schedule(task: dict[str, Any]) -> tuple[int, str] | None:
+    last = task.get("last_attempt_at")
+    if not last:
+        return None
+    try:
+        attempted_at = datetime.fromisoformat(last)
+        eligible_at = attempted_at + timedelta(seconds=RETRY_BACKOFF_SECONDS)
+        now = datetime.now(eligible_at.tzinfo) if eligible_at.tzinfo else datetime.now()
+        remaining = (eligible_at - now).total_seconds()
+        if remaining <= 0:
+            return None
+        delay = min(RETRY_BACKOFF_SECONDS, max(1, math.ceil(remaining)))
+        return delay, eligible_at.isoformat(timespec="seconds")
+    except (ValueError, TypeError):
+        return None
+
+
+def _retry_eligible(task: dict[str, Any]) -> bool:
+    if int(task.get("attempts", 0)) >= MAX_ATTEMPTS:
+        return False
+    return _retry_schedule(task) is None
+
+
+def _legacy_result_type(task_type: str, payload: dict[str, Any]) -> str | None:
+    if task_type == "flush":
+        return "flush"
+    if task_type in {"query", "lint_contradictions"}:
+        return "query"
+    if task_type == "classify":
+        if payload.get("event") or payload.get("enqueued_by") == "flush_memory":
+            return "flush"
+        return "query"
+    return None
+
+
+def _claim_next_task() -> tuple[dict[str, Any], Path] | None:
+    """Atomically select and lease one eligible task under the order lock."""
+    with _queue_order_lock() as queue_dir:
+        pending = _migrate_legacy_tasks(
+            queue_dir, _read_pending_files(queue_dir)
+        )
+        pending.sort(
+            key=lambda item: (
+                item[1].get("type") == "compile",
+                int(item[1]["enqueue_sequence"]),
+                str(item[1].get("enqueued_at", "")),
+                item[0].name,
+            )
+        )
+        for path, _snapshot in pending:
+            task = _read_task_json(path, allow_missing=True)
+            if task is None:
+                continue
+            if not isinstance(task, dict) or not _retry_eligible(task):
+                continue
+            task_id = str(task.get("id") or "")
+            if path.name != f"{task_id}.json":
+                continue
+
+            payload = task.get("payload")
+            payload = payload if isinstance(payload, dict) else {}
+            result_type = _legacy_result_type(str(task.get("type") or ""), payload)
+            marker = path.with_suffix(".acquiring")
+            lease_path = path.with_suffix(".processing")
+            if lease_path.exists():
+                continue
+            lease_id = uuid.uuid4().hex
+            digest = _task_digest(task)
+            try:
+                fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except OSError:
+                continue
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as claim:
+                    json.dump(
+                        {
+                            "lease_id": lease_id,
+                            "claimed_at": datetime.now().isoformat(),
+                        },
+                        claim,
+                    )
+                path.rename(lease_path)
+                task["_sdk_lease"] = {
+                    "id": lease_id,
+                    "digest": digest,
+                    "leased_at": datetime.now().isoformat(timespec="seconds"),
+                    "result_type": result_type,
+                }
+                _atomic_write_json(lease_path, task)
+            except OSError:
+                if lease_path.exists() and not path.exists():
+                    try:
+                        lease_path.rename(path)
+                    except OSError:
+                        pass
+                continue
+            finally:
+                try:
+                    marker.unlink()
+                except OSError:
+                    pass
+            return task, lease_path
+    return None
+
+
+def prepare_sdk_task() -> dict[str, Any]:
+    """Lease and return one current or legacy queue task for SDK work."""
+    recover_stale_leases()
+    while True:
+        claimed = _claim_next_task()
+        if claimed is None:
+            return {"pending": False}
+        task, lease_path = claimed
+        payload = task.get("payload")
+        task_type = str(task.get("type", ""))
+        payload = payload if isinstance(payload, dict) else {}
+        lease = task["_sdk_lease"]
+        result_type = lease.get("result_type")
+        lease_id = str(lease["id"])
+        digest = str(lease["digest"])
+        if task_type == "compile":
+            return {
+                "pending": True,
+                "kind": "compile",
+                "task_id": task["id"],
+                "lease_id": lease_id,
+                "digest": digest,
+                "type": task_type,
+            }
+        prompt = str(payload.get("prompt", "")).strip()
+        if result_type is None or not prompt:
+            try:
+                reason = (
+                    f"unsupported legacy task type: {task_type}"
+                    if result_type is None
+                    else f"legacy {task_type} task is missing prompt"
+                )
+                _release_sdk_failure(task, lease_path, reason, terminal=True)
+            except OSError:
+                pass
+            continue
+        max_tokens = payload.get("max_tokens", 4000)
+        if (
+            type(max_tokens) is not int
+            or max_tokens < 1
+            or max_tokens > MAX_SDK_TOKENS
+        ):
+            try:
+                _release_sdk_failure(
+                    task,
+                    lease_path,
+                    f"invalid max_tokens: expected integer from 1 to {MAX_SDK_TOKENS}",
+                    terminal=True,
+                )
+            except OSError:
+                pass
+            continue
+        return {
+            "pending": True,
+            "kind": "sdk",
+            "task_id": task["id"],
+            "lease_id": lease_id,
+            "digest": digest,
+            "type": task_type,
+            "result_type": result_type,
+            "prompt": prompt,
+            "system_prompt": payload.get("system_prompt", ""),
+            "max_tokens": max_tokens,
+        }
+
+
+def _lease_matches(task: dict[str, Any], lease_id: str, digest: str) -> bool:
+    lease = task.get("_sdk_lease", {})
+    return (
+        lease.get("id") == lease_id
+        and hmac.compare_digest(digest, str(lease.get("digest", "")))
+        and hmac.compare_digest(digest, _task_digest(task))
+    )
+
+
+def renew_sdk_task(result: dict[str, Any]) -> tuple[bool, str]:
+    """Renew a live SDK lease after validating its immutable identity."""
+    if not isinstance(result, dict):
+        return False, "invalid SDK lease renewal"
+    task_id = str(result.get("task_id", ""))
+    if not _is_canonical_task_id(task_id):
+        return False, "stale or invalid SDK task id"
+    lease_id = str(result.get("lease_id") or "")
+    supplied_digest = str(result.get("digest", ""))
+    with _queue_order_lock() as queue_dir:
+        _inventory_queue_locked(queue_dir)
+        lease_path = queue_dir / f"{task_id}.processing"
+        task = _read_task_json(lease_path, allow_missing=True)
+        if task is None:
+            return False, "stale SDK task lease"
+        if not _lease_matches(task, lease_id, supplied_digest):
+            return False, "stale SDK task identity or digest"
+        task["_sdk_lease"]["renewed_at"] = datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        )
+        try:
+            _atomic_write_json(lease_path, task)
+        except OSError as exc:
+            return False, f"failed to renew SDK task: {exc}"
+    return True, "renewed"
+
+
+def _release_sdk_failure_locked(
+    task: dict[str, Any], lease_path: Path, error: str, *, terminal: bool = False
+) -> None:
+    pending_path = lease_path.with_suffix(".json")
+    if pending_path.exists():
+        raise FileExistsError(f"pending task already exists: {pending_path}")
+    task.pop("_sdk_lease", None)
+    task["attempts"] = (
+        MAX_ATTEMPTS if terminal else int(task.get("attempts", 0)) + 1
+    )
+    task["last_attempt_at"] = datetime.now().isoformat(timespec="seconds")
+    task["last_error"] = str(error or "SDK task failed")[:2000]
+    if terminal:
+        task["terminal_failure"] = True
+    _atomic_write_json(lease_path, task)
+    lease_path.rename(pending_path)
+
+
+def _release_sdk_failure(
+    task: dict[str, Any], lease_path: Path, error: str, *, terminal: bool = False
+) -> None:
+    lease = task.get("_sdk_lease", {})
+    lease_id = str(lease.get("id") or "")
+    digest = str(lease.get("digest") or "")
+    with _queue_order_lock() as queue_dir:
+        _inventory_queue_locked(queue_dir)
+        current_path = queue_dir / lease_path.name
+        current = _read_task_json(current_path, allow_missing=True)
+        if current is None:
+            raise OSError("stale SDK task lease")
+        if not _lease_matches(current, lease_id, digest):
+            raise OSError("stale SDK task identity or digest")
+        _release_sdk_failure_locked(
+            current, current_path, error, terminal=terminal
+        )
+
+
+def _defer_sdk_task_locked(task: dict[str, Any], lease_path: Path) -> None:
+    pending_path = lease_path.with_suffix(".json")
+    if pending_path.exists():
+        raise FileExistsError(f"pending task already exists: {pending_path}")
+    task.pop("_sdk_lease", None)
+    _atomic_write_json(lease_path, task)
+    lease_path.rename(pending_path)
+
+
+def _settle_compile_success_locked(
+    expected: dict[str, Any], lease_path: Path
+) -> tuple[bool, str]:
+    """Revalidate and settle a successful compile while the queue lock is held."""
+    lease = expected.get("_sdk_lease", {})
+    lease_id = str(lease.get("id") or "")
+    digest = str(lease.get("digest") or "")
+    current = _read_task_json(lease_path, allow_missing=True)
+    if current is None:
+        return False, "stale SDK task lease"
+    if current.get("type") != "compile" or not _lease_matches(
+        current, lease_id, digest
+    ):
+        return False, "stale SDK task identity or digest"
+
+    from daily_log_append import _daily_lock
+
+    # Daily writers release this lock before triggering queue work, so
+    # queue -> daily is the only nested lock order.
+    with _daily_lock(state_root=_state_root()):
+        if _has_pending_compile_work():
+            _defer_sdk_task_locked(current, lease_path)
+            return True, "compile_pending"
+        lease_path.unlink()
+    return True, "acknowledged"
+
+
+def _flush_task_marker(task_id: str) -> str:
+    digest = hashlib.sha256(task_id.encode("utf-8", errors="replace")).hexdigest()
+    return f"<!-- llm-wiki-queue-task: {digest} -->"
+
+
+def _declared_non_ok_flush_tier(response: str) -> str | None:
+    stripped = str(response or "").strip()
+    if not stripped:
+        return None
+    first_line = stripped.splitlines()[0].strip().upper().rstrip(".")
+    while first_line.startswith("`") and first_line.endswith("`") and len(first_line) > 1:
+        first_line = first_line[1:-1]
+    return first_line if first_line in {"FLUSH_MAJOR", "FLUSH_MINOR"} else None
+
+
+def apply_classified_flush_response(
+    task: dict[str, Any], response: str
+) -> Path | None:
+    """Apply one deferred flush response idempotently from durable task metadata."""
+    from daily_log_append import locked_append_once
+    from flush_memory import (
+        _classify_response,
+        _is_valid_flush_ok_response,
+        _resolve_project_slug,
+        render_flush_block,
+    )
+
+    tier, body = _classify_response(response)
+    if _declared_non_ok_flush_tier(response) and not body:
+        raise ValueError("flush result has no distilled body")
+    if tier == "ok":
+        if not _is_valid_flush_ok_response(response):
+            raise ValueError("flush result is not the exact FLUSH_OK token")
+        return None
+    if not body:
+        raise ValueError("flush result has no distilled body")
+
+    task_id = task.get("id")
+    if not _is_canonical_task_id(task_id):
+        raise ValueError("flush task id is not canonical")
+    payload = task.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    project_root = str(payload.get("project_root") or "")
+    if any(field in payload for field in PROVENANCE_FIELDS):
+        project_slug = _resolve_project_slug(
+            str(payload.get("project_slug") or ""),
+            project_root,
+        )
+        if project_slug is None:
+            raise ValueError("flush task project identity is unavailable")
+    else:
+        project_slug = "unknown"
+    marker = _flush_task_marker(task_id)
+    day, block = render_flush_block(
+        tier,
+        body,
+        event=str(payload.get("event") or "session-end"),
+        session_id=str(payload.get("session_id") or "unknown"),
+        trigger=str(payload.get("trigger") or "unknown"),
+        project_slug=project_slug,
+        project_root=project_root,
+        occurred_at=str(payload.get("occurred_at") or ""),
+        deferred=True,
+        idempotency_marker=marker,
+    )
+    daily_dir = _daily_dir()
+    daily_path = daily_dir / f"{day}.md"
+    return locked_append_once(daily_path, block, marker)
+
+
+def _apply_sdk_response(task: dict[str, Any], response: str) -> None:
+    payload = task.get("payload", {})
+    task_type = task.get("type")
+    result_type = task.get("_sdk_lease", {}).get("result_type")
+    if task_type == "compile":
+        if response != "COMPILE_COMPLETED":
+            raise ValueError("compile control result is not validated completion")
+        return
+    if result_type == "query":
+        results_dir = _queue_dir().parent / "queue-results"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        out_path = payload.get("output_path")
+        if out_path:
+            target = Path(out_path).resolve()
+            try:
+                target.relative_to(results_dir.resolve())
+            except ValueError as exc:
+                raise ValueError("query output_path escapes queue-results") from exc
+        else:
+            target = results_dir / f"{task['id']}.txt"
+        target.write_text(response, encoding="utf-8")
+        return
+    if result_type == "flush":
+        apply_classified_flush_response(task, response)
+        return
+    raise ValueError(f"unsupported SDK queue task type: {task.get('type')}")
+
+
+def apply_sdk_result(result: dict[str, Any]) -> tuple[bool, str]:
+    """Validate a leased SDK result, then acknowledge or durably fail it."""
+    if not isinstance(result, dict):
+        return False, "invalid SDK result"
+    task_id = str(result.get("task_id", ""))
+    if not _is_canonical_task_id(task_id):
+        return False, "stale or invalid SDK task id"
+    lease_id = str(result.get("lease_id") or "")
+    supplied_digest = str(result.get("digest", ""))
+    with _queue_order_lock() as queue_dir:
+        _inventory_queue_locked(queue_dir)
+        lease_path = queue_dir / f"{task_id}.processing"
+        task = _read_task_json(lease_path, allow_missing=True)
+        if task is None:
+            return False, "stale SDK task lease"
+        if not _lease_matches(task, lease_id, supplied_digest):
+            return False, "stale SDK task identity or digest"
+
+        schema_error = ""
+        if "defer" in result and type(result["defer"]) is not bool:
+            schema_error = "defer must be a bool"
+        elif "success" in result and type(result["success"]) is not bool:
+            schema_error = "success must be a bool"
+        elif result.get("defer") is True and task.get("type") != "compile":
+            schema_error = "only compile controls may be deferred"
+        elif result.get("defer") is not True and "success" not in result:
+            schema_error = "success must be a bool"
+        elif result.get("success") is True and not isinstance(result.get("response"), str):
+            schema_error = "response must be a string"
+        if schema_error:
+            try:
+                _release_sdk_failure_locked(
+                    task, lease_path, f"invalid SDK result: {schema_error}"
+                )
+            except OSError as exc:
+                return False, f"failed to persist SDK attempt: {exc}"
+            return True, "failure recorded"
+
+        if result.get("defer") is True:
+            try:
+                _defer_sdk_task_locked(task, lease_path)
+            except OSError as exc:
+                return False, f"failed to defer SDK task: {exc}"
+            return True, "deferred"
+
+        if not result.get("success"):
+            try:
+                _release_sdk_failure_locked(
+                    task, lease_path, str(result.get("error", ""))
+                )
+            except OSError as exc:
+                return False, f"failed to persist SDK attempt: {exc}"
+            return True, "failure recorded"
+        response = result["response"].strip()
+        if not response:
+            try:
+                _release_sdk_failure_locked(task, lease_path, "empty SDK response")
+            except OSError as exc:
+                return False, f"failed to persist SDK attempt: {exc}"
+            return True, "failure recorded"
+        try:
+            _apply_sdk_response(task, response)
+            if task.get("type") == "compile":
+                settled, status = _settle_compile_success_locked(task, lease_path)
+                if not settled:
+                    return False, status
+                return True, status
+            else:
+                lease_path.unlink()
+        except Exception as exc:  # noqa: BLE001
+            try:
+                _release_sdk_failure_locked(
+                    task,
+                    lease_path,
+                    f"apply failed: {type(exc).__name__}: {exc}",
+                )
+            except OSError as persist_exc:
+                return False, f"failed to persist SDK apply error: {persist_exc}"
+            return True, "failure recorded"
+        return True, "acknowledged"
+
+
+def _settle_manual_claim(
+    task: dict[str, Any], lease_path: Path, *, success: bool, error: str = ""
+) -> tuple[bool, str]:
+    lease = task.get("_sdk_lease", {})
+    lease_id = str(lease.get("id") or "")
+    digest = str(lease.get("digest") or "")
+    with _queue_order_lock() as queue_dir:
+        _inventory_queue_locked(queue_dir)
+        current_path = queue_dir / lease_path.name
+        if success and task.get("type") == "compile":
+            try:
+                return _settle_compile_success_locked(task, current_path)
+            except OSError:
+                return False, "failed to settle manual compile task"
+        current = _read_task_json(current_path, allow_missing=True)
+        if current is None:
+            return False, "stale manual task lease"
+        if not _lease_matches(current, lease_id, digest):
+            return False, "stale manual task identity or digest"
+        try:
+            if success:
+                current_path.unlink()
+            else:
+                _release_sdk_failure_locked(current, current_path, error)
+        except OSError:
+            return False, "failed to settle manual task"
+    return True, "acknowledged" if success else "failure recorded"
+
+
 def drain_with(processor: Callable[[dict], bool], max_tasks: int = 10) -> dict[str, int]:
     """Drain the queue using a caller-provided processor.
 
-    `processor(task)` must return True on success (task will be deleted),
-    False on failure (task will be re-queued with bumped attempt count).
+    `processor(task)` must return True on success, False on failure. Successful
+    noncompile tasks are deleted; compile controls are rechecked and may remain
+    pending. Failures are re-queued with a bumped attempt count.
 
     Stops after `max_tasks` (default 10) to bound work per drain session.
-    Returns counts: {"ok": N, "failed": M, "skipped": K}.
+    Returns counts: {"ok": N, "failed": M, "skipped": K, "pending": P}.
 
     Lease: each task file is renamed to ``.processing`` before the processor
     runs, so two concurrent drainers cannot pick up the same task. On
-    success the ``.processing`` file is deleted; on failure it is renamed
-    back to ``.json`` and the attempt counter is bumped.
+    success the ``.processing`` file is deleted or, for unfinished compile
+    work, renamed back to ``.json``; on failure it is requeued and the attempt
+    counter is bumped.
     """
-    counts = {"ok": 0, "failed": 0, "skipped": 0}
+    counts = {"ok": 0, "failed": 0, "skipped": 0, "pending": 0}
     recover_stale_leases()
-    pending = list_pending()
-    for task in pending[:max_tasks]:
-        # Skip tasks that have failed too many times — they need human attention.
-        if task.get("attempts", 0) >= 5:
-            counts["skipped"] += 1
-            continue
-        # Skip tasks that were attempted in the last 60s (backoff).
-        last = task.get("last_attempt_at")
-        if last:
-            try:
-                age = (datetime.now() - datetime.fromisoformat(last)).total_seconds()
-                if age < 60:
-                    counts["skipped"] += 1
-                    continue
-            except (ValueError, TypeError):
-                pass
-        # Acquire a lease: rename *.json → *.processing so concurrent
-        # drainers don't pick up the same task.
-        path_str = task.pop("_path", "")
-        path = Path(path_str) if path_str else None
-        lease_path = path.with_suffix(".processing") if path else None
-        if path is None or lease_path is None:
-            counts["skipped"] += 1
-            continue
-        try:
-            path.rename(lease_path)
-        except OSError:
-            # Another drainer already leased it, or the file vanished.
-            counts["skipped"] += 1
-            continue
+    counts["skipped"] = sum(
+        1 for task in list_pending() if not _retry_eligible(task)
+    )
+    claimed_count = 0
+    while claimed_count < max(0, max_tasks):
+        claimed = _claim_next_task()
+        if claimed is None:
+            break
+        task, lease_path = claimed
+        claimed_count += 1
         try:
             ok = bool(processor(task))
         except Exception as e:  # noqa: BLE001
             print(f"memory_queue: processor raised {type(e).__name__}: {e}", file=sys.stderr)
             ok = False
         if ok:
-            try:
-                lease_path.unlink()
-            except OSError:
-                pass
-            counts["ok"] += 1
+            settled, status = _settle_manual_claim(
+                task, lease_path, success=True
+            )
+            if not settled:
+                counts["failed"] += 1
+            elif status == "compile_pending":
+                counts["pending"] += 1
+                break
+            else:
+                counts["ok"] += 1
         else:
-            # Release the lease: rename back so mark_attempt can find it.
-            try:
-                lease_path.rename(path)
-            except OSError:
-                pass
-            mark_attempt(task["id"], False)
+            _settle_manual_claim(
+                task,
+                lease_path,
+                success=False,
+                error="manual queue processor failed",
+            )
             counts["failed"] += 1
     return counts
 
 
 def status() -> dict[str, Any]:
     """Snapshot of queue health — for the SessionStart metacognitive block."""
-    pending = list_pending()
+    with _queue_order_lock() as queue_dir:
+        inventory = _inventory_queue_locked(queue_dir)
+        pending_snapshot = [
+            (path, task)
+            for path, task in inventory.tasks
+            if path.suffix == ".json"
+        ]
+        pending_pairs = _migrate_legacy_tasks(
+            queue_dir, pending_snapshot
+        )
+        pending = [task for _, task in pending_pairs]
+        in_flight = [
+            task
+            for path, task in inventory.tasks
+            if path.suffix == ".processing"
+        ]
     by_type: dict[str, int] = {}
+    in_flight_by_type: dict[str, int] = {}
     failed_count = 0
+    failed_ids: list[str] = []
     for t in pending:
         by_type[t.get("type", "unknown")] = by_type.get(t.get("type", "unknown"), 0) + 1
-        if t.get("attempts", 0) >= 5:
+        if t.get("attempts", 0) >= MAX_ATTEMPTS:
             failed_count += 1
+            task_id = str(t.get("id", ""))
+            if _is_canonical_task_id(task_id):
+                failed_ids.append(task_id)
+    for task in in_flight:
+        task_type = str(task.get("type", "unknown"))
+        in_flight_by_type[task_type] = in_flight_by_type.get(task_type, 0) + 1
     return {
         "pending_total": len(pending),
         "by_type": by_type,
+        "in_flight": len(in_flight),
+        "in_flight_by_type": in_flight_by_type,
+        "outstanding_total": len(pending) + len(in_flight),
         "permanently_failed": failed_count,
+        "permanently_failed_ids": failed_ids,
         "queue_dir": str(_queue_dir()),
     }
 
@@ -244,8 +1348,60 @@ def _cli() -> int:
     import argparse
 
     p = argparse.ArgumentParser()
-    p.add_argument("command", choices=["list", "status", "drain", "clear-failed"])
+    p.add_argument(
+        "command", nargs="?", choices=["list", "status", "drain", "clear-failed"]
+    )
+    bridge = p.add_mutually_exclusive_group()
+    bridge.add_argument("--prepare-sdk-task", action="store_true")
+    bridge.add_argument("--apply-sdk-result", action="store_true")
+    bridge.add_argument("--renew-sdk-task", action="store_true")
+    bridge.add_argument("--ensure-compile-task", action="store_true")
     args = p.parse_args()
+
+    if args.prepare_sdk_task:
+        print(json.dumps(prepare_sdk_task(), ensure_ascii=False))
+        return 0
+
+    if args.apply_sdk_result:
+        from memory_state import read_json_object_bounded
+
+        result = read_json_object_bounded(
+            sys.stdin,
+            max_bytes=MAX_SDK_BRIDGE_STDIN_BYTES,
+        )
+        if result is None:
+            print("memory_queue: invalid SDK result", file=sys.stderr)
+            return 2
+        ok, message = apply_sdk_result(result)
+        if not ok:
+            print(f"memory_queue: {message}", file=sys.stderr)
+            return 2
+        print(json.dumps({"ok": True, "status": message}))
+        return 0
+
+    if args.renew_sdk_task:
+        from memory_state import read_json_object_bounded
+
+        result = read_json_object_bounded(
+            sys.stdin,
+            max_bytes=MAX_SDK_BRIDGE_STDIN_BYTES,
+        )
+        if result is None:
+            print("memory_queue: invalid SDK lease renewal", file=sys.stderr)
+            return 2
+        ok, message = renew_sdk_task(result)
+        if not ok:
+            print(f"memory_queue: {message}", file=sys.stderr)
+            return 2
+        print(json.dumps({"ok": True, "status": message}))
+        return 0
+
+    if args.ensure_compile_task:
+        print(json.dumps(ensure_compile_task(), ensure_ascii=False))
+        return 0
+
+    if args.command is None:
+        p.error("a command or SDK bridge option is required")
 
     if args.command == "list":
         for t in list_pending():
@@ -304,13 +1460,12 @@ def _cli() -> int:
                     return True
                 except OSError:
                     return False
-            if task_type == "flush":
+            if _legacy_result_type(str(task_type or ""), payload) == "flush":
                 # Deferred flush from flush_memory: call the LLM, classify
                 # the response, and apply the result to the daily log so
                 # the session content is not silently lost.
                 prompt = payload.get("prompt", "")
                 sys_prompt = payload.get("system_prompt", "")
-                event = payload.get("event", "session-end")
                 max_tokens = int(payload.get("max_tokens") or 1500)
                 if not prompt:
                     return False
@@ -318,29 +1473,25 @@ def _cli() -> int:
                 if not result:
                     return False
                 try:
-                    sys.path.insert(0, str(Path(__file__).resolve().parent))
-                    from daily_log_append import locked_append
-                    from flush_memory import _classify_response
-                    from secret_redact import redact_secrets
-                    tier, body = _classify_response(result)
-                    if tier != "ok" and body:
-                        body = redact_secrets(body)
-                        now = datetime.now()
-                        day = now.strftime("%Y-%m-%d")
-                        root = Path(os.environ.get("LLM_WIKI_ROOT", "."))
-                        daily_path = root / "knowledge" / "daily" / f"{day}.md"
-                        block = f"\n## [{now.strftime('%H:%M:%S')}] deferred-{event}\n\n{body}\n"
-                        locked_append(daily_path, block)
+                    apply_classified_flush_response(task, result)
                     return True
                 except Exception as e:  # noqa: BLE001
                     print(f"queue: flush apply failed: {type(e).__name__}: {e}", file=sys.stderr)
                     return False
             if task_type == "compile":
-                # Re-dispatch compile via maybe_compile (idle-safe).
                 try:
-                    from maybe_compile import spawn_compile_if_idle
-                    spawned, reason = spawn_compile_if_idle(force=bool(payload.get("force")))
-                    return spawned or "no pending" in reason
+                    command = [
+                        sys.executable,
+                        str(Path(__file__).resolve().parent / "compile_memory.py"),
+                        "--trigger",
+                        "manual",
+                    ]
+                    completed = subprocess.run(
+                        command,
+                        cwd=Path(__file__).resolve().parent.parent,
+                        check=False,
+                    )
+                    return completed.returncode == 0
                 except Exception as exc:  # noqa: BLE001
                     print(f"  compile drain failed: {exc}", file=sys.stderr)
                     return False
@@ -358,7 +1509,7 @@ def _cli() -> int:
     if args.command == "clear-failed":
         cleared = 0
         for t in list_pending():
-            if t.get("attempts", 0) >= 5:
+            if t.get("attempts", 0) >= MAX_ATTEMPTS:
                 try:
                     Path(t["_path"]).unlink()
                     cleared += 1

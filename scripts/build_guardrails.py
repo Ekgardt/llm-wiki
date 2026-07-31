@@ -36,24 +36,63 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT  # noqa: E402
+from memory_state import (  # noqa: E402
+    ROOT,
+    BoundedPathInventory,
+    bounded_path_inventory,
+    parse_frontmatter_scalar,
+    parse_project_scope,
+    read_json_object_file_bounded,
+)
 
 KNOWLEDGE = ROOT / "knowledge" / "notes"
 FEEDBACK_DIR = ROOT / "knowledge" / "feedback"
 GUARDRAILS_FILE = ROOT / "knowledge" / "guardrails.md"
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
-TYPE_RE = re.compile(r"^type:\s*(.+?)\s*$", re.MULTILINE)
-STATUS_RE = re.compile(r"^status:\s*(.+?)\s*$", re.MULTILINE)
-PROJECT_RE = re.compile(r"^project:\s*[\"']?([^\"'\n]+)[\"']?\s*$", re.MULTILINE)
 TIMESTAMP_RE = re.compile(r"^timestamp:\s*(.+?)\s*$", re.MULTILINE)
 H1_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
 SUMMARY_RE = re.compile(
     r"^One-sentence summary:\s*(.+?)\s*$", re.MULTILINE | re.IGNORECASE
 )
+MAX_NOTE_BYTES = 64 * 1024
+MAX_FEEDBACK_BYTES = 64 * 1024
+MAX_NOTE_FILES_SCANNED = 1_000
+MAX_FEEDBACK_FILES_SCANNED = 1_000
+MAX_FEEDBACK_JSON_DEPTH = 64
 
 
-def _collect_corrections(project: str | None = None) -> list[dict]:
+def _bounded_files(
+    directory: Path,
+    pattern: str,
+    limit: int,
+    *,
+    recursive: bool,
+) -> BoundedPathInventory:
+    return bounded_path_inventory(
+        directory,
+        pattern,
+        limit,
+        recursive=recursive,
+        kind="file",
+    )
+
+
+def _read_text_bounded(path: Path, max_bytes: int) -> str | None:
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(max_bytes + 1)
+    except OSError:
+        return None
+    if len(raw) > max_bytes:
+        return None
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _collect_corrections(project: str | None = None) -> list[dict] | None:
     """Collect all knowledge pages that are corrections/preferences/rules.
 
     Sources:
@@ -62,22 +101,38 @@ def _collect_corrections(project: str | None = None) -> list[dict]:
     3. Patterns with 'do not' / 'always' / 'never' in summary
     """
     corrections = []
+    note_inventory = _bounded_files(
+        KNOWLEDGE,
+        "*.md",
+        MAX_NOTE_FILES_SCANNED,
+        recursive=True,
+    )
+    feedback_inventory = _bounded_files(
+        FEEDBACK_DIR,
+        "*.json",
+        MAX_FEEDBACK_FILES_SCANNED,
+        recursive=False,
+    )
+    if note_inventory.incomplete or feedback_inventory.incomplete:
+        return None
 
     # Source 1: knowledge pages with correction-like types
-    if KNOWLEDGE.exists():
-        for md in KNOWLEDGE.rglob("*.md"):
-            try:
-                content = md.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
+    if note_inventory.paths:
+        for md in note_inventory.paths:
+            content = _read_text_bounded(md, MAX_NOTE_BYTES)
+            if content is None:
                 continue
             fm = FRONTMATTER_RE.match(content)
             if not fm:
                 continue
-            fm_text = fm.group(1)
-            status = _extract(fm_text, STATUS_RE)
-            if status and status.strip() in ("archived", "superseded"):
+            status = parse_frontmatter_scalar(content, "status")
+            if status.present and (
+                status.value is None
+                or status.value.casefold() in {"archived", "superseded"}
+            ):
                 continue
-            page_type = _extract(fm_text, TYPE_RE)
+            page_type_field = parse_frontmatter_scalar(content, "type")
+            page_type = page_type_field.value
             if page_type not in ("pattern", "decision", "qa", "debugging"):
                 continue
             summary = _extract(content, SUMMARY_RE) or ""
@@ -85,7 +140,10 @@ def _collect_corrections(project: str | None = None) -> list[dict]:
                 continue
 
             # Filter by project
-            proj = _extract(fm_text, PROJECT_RE)
+            scope = parse_project_scope(content)
+            if scope.present and scope.value is None:
+                continue
+            proj = scope.value
             if project and proj and proj.lower() != project.lower():
                 continue
 
@@ -100,24 +158,35 @@ def _collect_corrections(project: str | None = None) -> list[dict]:
             })
 
     # Source 2: promoted feedback candidates
-    if FEEDBACK_DIR.exists():
-        import json
-        for f in FEEDBACK_DIR.glob("*.json"):
-            try:
-                candidate = json.loads(f.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+    if feedback_inventory.paths:
+        for f in feedback_inventory.paths:
+            candidate = read_json_object_file_bounded(
+                f,
+                max_bytes=MAX_FEEDBACK_BYTES,
+                max_depth=MAX_FEEDBACK_JSON_DEPTH,
+            )
+            if candidate is None:
                 continue
-            if candidate.get("status") != "promoted":
+            status = candidate.get("status")
+            if not isinstance(status, str) or status != "promoted":
                 continue
-            proj = candidate.get("project", "")
+            fields = {
+                "project": candidate.get("project", ""),
+                "type": candidate.get("type", "feedback"),
+                "text": candidate.get("text", ""),
+                "promoted_to": candidate.get("promoted_to", ""),
+            }
+            if any(not isinstance(value, str) for value in fields.values()):
+                continue
+            proj = fields["project"]
             if project and proj.lower() != project.lower():
                 continue
             corrections.append({
-                "type": candidate.get("type", "feedback"),
-                "title": candidate.get("text", "")[:80],
-                "summary": candidate.get("text", "")[:150],
+                "type": fields["type"],
+                "title": fields["text"][:80],
+                "summary": fields["text"][:150],
                 "source": "feedback",
-                "path": candidate.get("promoted_to", ""),
+                "path": fields["promoted_to"],
             })
 
     return corrections
@@ -128,7 +197,7 @@ def _extract(text: str, pattern: re.Pattern) -> str | None:
     return m.group(1).strip() if m else None
 
 
-def build_guardrails(project: str | None = None, max_rules: int = 15) -> str:
+def build_guardrails(project: str | None = None, max_rules: int = 15) -> str | None:
     """Build the guard rails block for SessionStart injection.
 
     This is the "learned instincts" — rules the agent must follow
@@ -136,6 +205,8 @@ def build_guardrails(project: str | None = None, max_rules: int = 15) -> str:
     """
     corrections = _collect_corrections(project)
 
+    if corrections is None:
+        return None
     if not corrections:
         return ""
 
@@ -183,6 +254,9 @@ def main() -> int:
 
     guardrails = build_guardrails(args.project, args.max_rules)
 
+    if guardrails is None:
+        print("(guard rail inventory unavailable)")
+        return 0
     if not guardrails:
         print("(no guard rails — no corrections learned yet)")
         return 0

@@ -59,11 +59,11 @@ knowledge/
   inbox/      # unprocessed staging
   feedback/   # correction candidates
 
-# RUNTIME (inside the vault, gitignored — regenerated on demand)
+# RUNTIME (inside the vault, gitignored; mixed derived and durable state)
 # Override root via LLM_WIKI_STATE_ROOT (tests use a temp dir).
-cache/     # search / QMD / vector indexes (+ cache/cognee/ for optional graph)
-logs/      # lint reports, compile logs, SessionStart debug dumps
-run/       # state.json, compile.pid, queue/, locks
+cache/     # regenerable search / QMD / vector indexes
+logs/      # rotatable lint, compile, and SessionStart diagnostics
+run/       # durable state, queue, compile journals/manifests, repair transactions
 ```
 
 **Env contracts:**
@@ -72,8 +72,14 @@ run/       # state.json, compile.pid, queue/, locks
 - `$LLM_WIKI_STATE_ROOT` → runtime root. **Default: the vault itself** →
   `cache/` (incl. `cache/cognee/`), `logs/`, `run/` at vault root, all gitignored.
   Override for multi-disk setups or hermetic tests.
-- `$MEMORY_LLM_PROVIDER` → `fake` (tests), or one of
-  `opencode|codex|claude|openai|ollama` (runtime, auto-detected).
+- `$MEMORY_LLM_PROVIDER` → `fake` (tests), `opencode-sdk` (active OpenCode
+  service bridge), or one of `opencode|codex|claude|openai|ollama` (runtime,
+  auto-detected synchronous backends).
+- `$XDG_CONFIG_HOME` → OpenCode's effective user config root only when
+  absolute. Unset, empty, or relative values fall back to `~/.config`.
+  Windows installers also write the normalized `~/.config/opencode`
+  compatibility target when it differs; Unix installs only to the effective
+  XDG target.
 
 **Forbidden at vault root:** `wiki/`, `memory/`, `outputs/`, `state/`,
 `LLM-wiki-state/` (legacy sibling layout — removed). Runtime lives **inside**
@@ -235,12 +241,91 @@ The memory pipeline needs an LLM for classification, compilation,
 contradiction checks, and playbook crystallization. Backend is
 **auto-detected** via `scripts/llm_client.py` — no API keys required.
 
-Priority: OpenCode → Codex → Claude CLI → OpenAI → Ollama. If none available,
-the call is enqueued to a persistent queue (`run/queue/`) and processed at
-the next active session.
+Synchronous priority: OpenCode → Codex → Claude CLI → OpenAI → Ollama.
+`llm_client.call_llm()` returns `None` when no selected backend succeeds; it
+does not enqueue automatically. Only queue-capable callers, such as deferred
+flush handling, explicitly persist work through `memory_queue.enqueue()`.
+OpenCode SDK maintenance uses the queue bridge explicitly.
 
 Override via `MEMORY_LLM_PROVIDER` env var. `fake` returns a canned response
 for tests/e2e.
+
+**OpenCode SDK-only contract:** classification, compile, and deferred queue
+service prompts use exactly `openai/gpt-5.6-luna` through the active
+authenticated SDK. Each operation owns an ephemeral `memory-*` session and
+cleans it with `abort`, then `delete`, in `finally`. This path must not fall
+back to a CLI or lower model. Cleanup errors are logged; compile provider
+failures persist in compile state, and queue failures remain durable tasks.
+
+**Capture and daily-context contract:** OpenCode attributes projects from
+`worktree`, then `directory`, and continues to capture user prompts. Tool
+breadcrumbs are limited to direct file mutation tools; read, search, and shell
+activity creates none, while persisted targets and provenance are bounded and
+redacted. Daily context normalizes timestamp blocks and legacy heading/bullet
+summaries in memory, prioritizes project-matching durable summaries and user
+prompts, and never injects tool breadcrumbs.
+
+**Queue contract:** enqueue order is a durable monotonic sequence protected by
+a cross-process lock. SDK work leases the oldest eligible task as `.processing`; apply
+must match task ID, lease ID, and digest. A task is acknowledged only after its
+result applies successfully. Failure increments attempts, records the error,
+and returns the task to pending state with a 60-second retry delay; 5 attempts
+require human attention. Leases older than 10 minutes are recoverable. Queue
+maintenance uses bounded repeatable passes and continuations while eligible
+work remains. Durable task provenance applies once; legacy provenance is
+explicit rather than inferred.
+
+**Compile contract:** meaningful timestamp blocks are bounded by
+`MEMORY_COMPILE_PROMPT_CHAR_BUDGET` (default 120,000 characters). Generation
+manifests pin source and batch layout. A validated plan is journaled before
+mutation, and durable operation markers support crash reconciliation.
+Admission is deterministic before either step: citations must come from
+durable sections, lifecycle and word bounds must pass, and live-corpus plus
+same-plan duplicates are rejected. Provider counters cannot bypass admission;
+ambiguous pairs are report-only. A daily hash is published only after every
+pinned batch, the Markdown index rebuild, and a self-validating effect receipt
+succeed. A stale or missing receipt invalidates trust and triggers replay;
+`compile_index_pending` is real unfinished work. Bounded journals and manifests
+can reactivate from nondestructive retired stores and fail closed at truthful
+quotas.
+SDK completion updates canonical compile time and index health only in the
+atomic state transition after its final Markdown index rebuild succeeds.
+
+**Maintenance contract:** nightly and weekly return nonzero for failed or
+remaining queue/compile work and required lint/index failures. Weekly holds one
+maintenance lease across nightly work, mutations, and the final Markdown,
+FTS5, and graph rebuild. Exhausted queue tasks remain durable for human review;
+weekly reports only their count and canonical IDs and never clears them
+automatically. Never infer completion from a detached launcher alone. Windows
+Task Scheduler launches `pythonw`, and maintenance child processes are created
+without console windows.
+
+**Installed cleanup contract:** use `repair_installed_memory.py` in the order
+`audit` → `apply --backup-only` → reviewed `apply --manifest` → `verify
+--manifest`. Only backup-only may create a manifest; mutating apply requires the
+explicit reviewed manifest under `run/backups/<timestamp>/` and never creates
+one implicitly. Only verified empty daily records and generated false feedback
+are mutable. Ordinary feedback is preserved; duplicate notes
+and orphan service sessions are report-only. Never run cleanup apply or a live
+restart without explicit operator approval.
+
+**Project-state contract:** slug claims are serialized by the runtime
+`run/project-state-claim.lock` and publish complete `state.md` files atomically.
+New states record native-absolute `Project root JSON` ownership and persisted
+`Runtime slug JSON`. The confirmed-identity helper completes the direct-child
+inventory under that lock and fails closed on iteration or state-read errors;
+only then may it reuse an exact contained state path or allocate a new claim.
+All deterministic hash candidates are verified before bounded UUID fallback.
+Daily records are project-scoped by both confirmed alias and absolute root.
+Bootstrap output records and revalidates that alias, root, and exact state path;
+orphan output is never injected. Published bootstrap data is bounded, labeled
+untrusted, and placed after project identity and the saved handoff without
+entering the search index.
+
+**Claude hook compatibility contract:** installers detect the Claude Code
+version. Versions before 2.1.139, or unknown versions, receive absolute
+shell-command hooks with Bash or PowerShell literal quoting; 2.1.139 and newer
+receive direct `command` + `args` hooks. SessionStart covers forked sessions.
 
 **Zero-cost path:** no paid API beyond existing agent subscriptions. Cognee
 (optional, 300+ pages) is the only feature that requires Ollama.
@@ -250,7 +335,7 @@ for tests/e2e.
 ## 7. Quick command reference
 
 ```bash
-uv run pytest -q                              # run the test suite (281 tests collected in 0.26s)
+uv run pytest -q                              # 1903 collected; local Windows: 1868 passed, 35 skipped; skips vary by environment
 uv run ruff check scripts/ tests/             # Python static analysis
 uv run python scripts/lint_memory.py --scope all   # structural lint
 uv run python scripts/search_memory.py "query"     # hybrid search
@@ -258,5 +343,8 @@ uv run python scripts/compile_memory.py            # compile daily logs → note
 uv run python scripts/lookup_mode.py               # show retrieval tier
 ```
 
-Runtime state (under `cache/`, `logs/`, `run/`) is gitignored and
-regenerated on demand — never commit it.
+Runtime state under `cache/`, `logs/`, and `run/` is gitignored and must never
+be committed. `cache/` is regenerable and `logs/` may be rotated, but `run/`
+contains durable queue, compile recovery, and repair transaction state. Never
+delete `run/` wholesale; use queue `status`/`list`/`drain`, compile retry, and
+repair verify tooling for the owning subsystem.

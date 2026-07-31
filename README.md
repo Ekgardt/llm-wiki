@@ -1,6 +1,6 @@
 # LLM Wiki
 
-[![Tests](https://img.shields.io/badge/tests-281%20passing-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://img.shields.io/badge/tests-1903%20collected-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-3.4.0-blue.svg)](CHANGELOG.md)
@@ -53,19 +53,22 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 
 ### Capture pipeline
 - **5 Claude Code hooks**: SessionStart, PreCompact, SessionEnd, UserPromptSubmit, PostToolUse — full lifecycle coverage
-- **OpenCode plugin** (JS) — session.created, tool.execute.after, session.idle, experimental.session.compacting
-- **Codex wrapper** (PowerShell) — wraps `codex` CLI, captures on exit
+- **OpenCode plugin** (JS) — official lifecycle routing, `worktree`-then-`directory` project attribution, prompt capture, automatic context injection, native tools, and authenticated SDK compilation
+- **Codex native hooks** — `merge_codex_hooks.py` installs cross-platform lifecycle capture; the retained Windows wrapper is compatibility/exit-capture fallback only
 - **3-tier session classification**: FLUSH_MAJOR (decisions/lessons → triggers compile), FLUSH_MINOR (gotchas → save only), FLUSH_OK (chatter → skip)
-- **Non-LLM breadcrumbs** — prompt + tool-usage tagging at ms-latency, no API calls
+- **Non-LLM breadcrumbs** — prompts remain captured, while tool breadcrumbs are limited to direct file mutation tools; read, search, and shell activity creates none, and targets/provenance are bounded and redacted
 - **Secret redaction** — API keys, tokens, long base64 stripped before any write
 
 ### Compile pipeline
 - **JSON-protocol compile** — no agent tool-use required, works with any LLM backend
 - **VERIFY-BEFORE-WRITE** — Python-side deterministic citation verification; the LLM cannot fabricate evidence
+- **Deterministic admission** — before journaling or mutation, Python requires durable-section citations and lifecycle/word bounds, then rejects live-corpus or same-plan duplicates; provider counters cannot bypass admission, and ambiguous pairs are report-only
 - **Semantic dedup** — update preferred over create; auto-supersede on contradiction
 - **Incremental** — SHA-256 hashing; only changed daily logs are recompiled
-- **Concurrency-safe** — PID lock with stale detection; only one compile runs at a time
-- **Persistent task queue** — offline-tolerant; deferred LLM work drains on next session
+- **Concurrency-safe** — one OS-held fixed-file lock serializes compile on Windows and POSIX; process exit releases ownership
+- **Bounded, journaled recovery** — meaningful timestamp blocks are compiled within a configurable prompt budget; accepted plans and operation progress are durable before note mutation, and bounded journals/manifests can reactivate from nondestructive retired stores while truthful quotas fail closed
+- **Truthful completion** — a daily is marked compiled only after every pinned batch commits, the Markdown index rebuild succeeds, and a self-validating effect receipt is published; stale or missing receipts invalidate trust and trigger replay
+- **Persistent task queue** — monotonic FIFO order among eligible tasks, cross-process leases, bounded repeatable passes/continuations while eligible work remains, 10-minute stale-lease recovery, 60-second retry backoff, and a 5-attempt failure ceiling; durable task provenance applies once and legacy provenance stays explicit
 
 ### Search and retrieval
 - **Triple-fusion search**: BM25 (FTS5) + Vector (sentence-transformers) + Graph-neighbor (wikilink RRF)
@@ -79,11 +82,12 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 - **Guardrails** — auto-injects learned corrections at SessionStart (prevents repeating mistakes)
 - **Advisory** — surfaces open threads, last decision, lint alerts, cross-project insights
 - **Metacognitive context** — vault inventory, compile backlog, flush tier distribution
+- **Project-safe daily context** — timestamp blocks and legacy heading/bullet summaries are normalized in memory; project-matching durable summaries and user prompts win, and tool breadcrumbs are excluded
 - **Feedback capture** — detects corrections/preferences in transcripts, saves as promotion candidates
 
 ### Multi-project and multi-agent
 - **One vault, many projects** — 5-step collision-safe slug system, per-project `state.md`
-- **Project bootstrap** — auto-generates context from git history, README, tech stack
+- **Project bootstrap** — auto-generates context from git history, README, and tech stack, then exposes it on the next SessionStart
 - **Blackboard protocol** — parallel agents claim tasks, signal completion, detect conflicts
 - **Loop detector** — flags repeated edit cycles (fix → review → redo)
 - **Agent timeline** — attribution: which agent decided what and when
@@ -91,14 +95,18 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 ### Maintenance
 - **14 lint checks (13 structural + 1 LLM-judged contradiction)** — broken wikilinks, orphans, missing frontmatter, invalid supersede chains, temporal validity, gaps, sparse pages, missing sources, contradictions
 - **Type-aware archive** — debugging 60d, patterns 180d, decisions never
-- **Nightly + weekly schedules** — compile, lint, archive, OKF migration (Task Scheduler on Windows, cron on Unix)
+- **Truthful nightly status** — queue, compile, lint, and derived-index failures or remaining work produce a nonzero exit
+- **Single-lease weekly maintenance** — one maintenance lock spans nightly work, OKF migration, durable failed-queue reporting, archive, optional contradiction checks, and final Markdown/FTS/graph rebuilds
+- **Auditable installed repair** — separate audit, validated backup-only, explicit existing-manifest apply, and verify stages; only backup-only creates a manifest and no cleanup is implied until the operator reviews and runs them
 - **OKF v0.1 frontmatter** — `type`, `confidence`, `source_authority`, `supersede` fields; auto-migration from legacy pages
 
 ### Infrastructure
 - **5 LLM backends** (auto-detected): OpenCode → Codex → Claude CLI → OpenAI → Ollama
+- **Exact OpenCode service contract** — SDK-only classification, compile, and deferred queue prompts use `openai/gpt-5.6-luna`; each operation owns an ephemeral `memory-*` session that is aborted, then deleted in `finally`, with no CLI or lower-model fallback
 - **Cross-platform**: Windows, macOS, Linux, WSL2
+- **Windowless Windows maintenance** — Task Scheduler launches `pythonw`, and maintenance child processes are created without console windows
 - **Zero runtime dependencies** — base install is stdlib-only; sentence-transformers and Cognee are optional
-- **281 regression tests**, CI green on Ubuntu + Windows + macOS, Python 3.10 + 3.13
+- **1903 tests collected (platform-stable); local Windows verification: 1868 passed, 35 skipped**. Skip count varies with optional Bash, PowerShell, and symlink availability; CI targets Ubuntu + Windows + macOS on Python 3.10 + 3.13.
 - **Pre-commit hooks**: ruff (static analysis) + structural lint + gitleaks (secret scanning)
 
 ---
@@ -129,9 +137,9 @@ The installer:
 1. Checks prerequisites (Python 3.10+, git)
 2. Installs `uv` (fast Python package manager) if missing
 3. Syncs dependencies (`uv sync`)
-4. Runs the test suite (281 tests collected in 0.26s)
+4. Runs the test suite (1903 collected platform-wide; local Windows: 1868 passed, 35 skipped; skips vary with optional shell/symlink support)
 5. Sets `LLM_WIKI_ROOT` environment variable (user scope)
-6. Creates runtime dirs (`cache/`, `logs/`, `run/`, `cache/cognee/` — gitignored)
+6. Creates gitignored runtime dirs (`cache/` and logs are replaceable; `run/` holds durable automation/recovery state)
 7. Registers scheduled maintenance (cron on Unix, Task Scheduler on Windows)
 8. Detects your agents and wires them up
 9. Builds the FTS5 search index
@@ -142,7 +150,7 @@ The installer:
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync
-uv run pytest -q          # 281 tests collected in 0.26s should pass
+uv run pytest -q          # 1903 collected; local Windows: 1868 passed, 35 skipped; skips vary by environment
 ```
 
 ### Verify it works
@@ -160,14 +168,19 @@ LLM Wiki auto-detects installed agents during install. Here's what gets wired:
 
 | Agent | Integration | How |
 |-------|-------------|-----|
-| **OpenCode** | JS plugin | Copied to `~/.config/opencode/plugins/llm-wiki-memory.js` |
-| **Codex CLI** | PowerShell wrapper | Sourced into `$PROFILE` (Windows) |
+| **OpenCode** | JS plugin | Installed under the effective `$XDG_CONFIG_HOME/opencode/plugins/`; invalid/unset XDG falls back to `~/.config`, and Windows also receives that compatibility path when distinct |
+| **Codex** | Native lifecycle hooks | `merge_codex_hooks.py` merges cross-platform hooks into `~/.codex/hooks.json` with backup; review via `/hooks`. The Windows wrapper, where retained by the installer, is only a compatibility/exit-capture fallback. |
 | **Claude Code** | settings.json hooks | Merged into `~/.claude/settings.json` (5 hooks: SessionStart, PreCompact, SessionEnd, UserPromptSubmit, PostToolUse) |
 | **Cursor** | Rules file | Copy `integrations/cursor/rules/llm-wiki.mdc` manually |
 | **Antigravity** | AGENTS.md snippet | Copy `integrations/antigravity/AGENTS.md` manually |
 | **Obsidian** | Web Clipper template | Import `integrations/obsidian/Article-to-Inbox.json` |
 
 All agents share the same vault — a decision recorded by Cursor is visible to OpenCode in its next session.
+
+`XDG_CONFIG_HOME` owns the effective OpenCode configuration location only when it
+is an absolute path. Empty or relative values are ignored. Unix installs one
+effective destination; Windows installs both the effective destination and
+`~/.config/opencode` when their normalized paths differ.
 
 ### Optional: semantic search
 
@@ -199,7 +212,12 @@ RUNTIME       cache/  logs/  run/  cache/cognee/   (gitignored, inside vault)
 
 - **CODE** — tracked in git. The pipeline, tests, docs, skills, rules, integrations.
 - **KNOWLEDGE** — tracked in git (public examples). Full user data lives in the installed vault. Daily logs and personal pages are gitignored.
-- **RUNTIME** — gitignored, regenerated on demand. Search indexes, compile logs, state.json, task queue.
+- **RUNTIME** — gitignored inside the vault. `cache/` is regenerable and `logs/` may be rotated; `run/` is durable automation/recovery state containing queue tasks, compile journals/manifests, checkpoints, and repair transactions.
+
+Never delete `run/` wholesale to recover from an error. Inspect the queue with
+`memory_queue.py status|list`, retry compile through `compile_memory.py` or
+`maybe_compile.py`, and use `repair_installed_memory.py audit|apply|verify` for
+manifest-bound repair transactions.
 
 Full design rationale (7 axioms, system architecture diagram, memory taxonomy, search architecture) in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 

@@ -21,7 +21,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT, load_state  # noqa: E402
+from memory_state import (  # noqa: E402
+    ROOT,
+    load_state,
+    parse_frontmatter_scalar,
+    parse_project_scope,
+)
 
 DAILY_DIR = ROOT / "knowledge" / "daily"
 KNOWLEDGE = ROOT / "knowledge" / "notes"
@@ -161,13 +166,17 @@ def _extract_knowledge_timeline(project_slug: str | None, days: int) -> list[dic
         except (ValueError, IndexError):
             continue
 
-        # Filter by project
-        proj_match = re.search(r"^project:\s*(.+?)\s*$", fm, re.MULTILINE)
+        # Project scope is security-sensitive: malformed metadata is never global.
+        project = parse_project_scope(content)
+        if project.present and project.value is None:
+            continue
         if project_slug:
-            if not proj_match or proj_match.group(1).strip().lower() != project_slug.lower():
+            if project.value is None or project.value.casefold() != project_slug.casefold():
                 continue
 
-        type_match = re.search(r"^type:\s*(.+?)\s*$", fm, re.MULTILINE)
+        page_type = parse_frontmatter_scalar(content, "type")
+        if page_type.present and page_type.value is None:
+            continue
         h1_match = re.search(r"^#\s+(.+?)\s*$", content, re.MULTILINE)
         summary_match = re.search(r"^One-sentence summary:\s*(.+?)\s*$", content, re.MULTILINE | re.IGNORECASE)
 
@@ -175,7 +184,7 @@ def _extract_knowledge_timeline(project_slug: str | None, days: int) -> list[dic
             "date": ts_match.group(1)[:10],
             "time": ts_match.group(1)[11:19] if "T" in ts_match.group(1) else "",
             "agent": "compile",
-            "type": f"knowledge:{type_match.group(1)}" if type_match else "knowledge",
+            "type": f"knowledge:{page_type.value}" if page_type.value else "knowledge",
             "text": summary_match.group(1)[:120] if summary_match else (h1_match.group(1) if h1_match else md.stem),
             "path": md.relative_to(ROOT).as_posix(),
         })

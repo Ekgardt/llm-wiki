@@ -114,3 +114,20 @@ def test_build_link_graph_extracts_wikilinks(fake_graph):
         graph = fake_graph._build_link_graph()
         assert "page_a.md" in graph
         assert len(graph["page_a.md"]) == 2
+
+
+@pytest.mark.parametrize(
+    "frontmatter",
+    (
+        'status: "super\\x73eded"',
+        'status: "\\qactive"',
+        'project: "\\qbeta"\nstatus: active',
+    ),
+)
+def test_graph_fails_closed_with_shared_sensitive_frontmatter_parser(
+    fake_graph,
+    frontmatter,
+):
+    content = f"---\n{frontmatter}\n---\n\n# Hidden\n"
+
+    assert fake_graph._is_inactive(content) is True

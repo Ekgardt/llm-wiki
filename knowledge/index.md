@@ -19,6 +19,7 @@ This index catalogs durable memory distilled from AI agent sessions
 - [[knowledge/notes/hook-scripts-defense-in-depth]] — Two hardening decisions made 2026-04-19 to prevent silent failures in session hook scripts: a `_resolve_state_root()` fallback when `LLM_WIKI_STATE_ROOT` is unset, and an explicit guard mapping `.`, `..`, or empty slugs to `"root"`.
 - [[knowledge/notes/no-gitkeep-in-inbox-articles]] — Do not add `.gitkeep` to `knowledge/inbox/articles/` — the directory will be created on demand by scripts at first use.
 - [[knowledge/notes/state-md-exempt-from-lint]] — `state.md` files under `knowledge/projects/<slug>/` are added to `EDITORIAL_NAMES` in `lint_memory.py` and exempted from backlink-obligation and sparse-floor checks, for the same reason that `index.md` and `log.md` are exempt.
+- [[knowledge/notes/xdg-opencode-plugin-destination]] — OpenCode plugins install to the effective XDG config directory, with one distinct Windows compatibility destination and normalized path deduplication.
 
 ## Patterns
 - [[knowledge/notes/add-reciprocal-backlinks-at-creation]] — When creating a new synthesis, concept, or decision page that references existing pages, add all reciprocal backlinks to the related pages in the same editing pass — never defer them to a future cleanup round.

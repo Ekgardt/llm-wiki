@@ -6,11 +6,22 @@ the prior copy-paste duplication.
 """
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 import time
 
 import maybe_compile
 from memory_state import ROOT
+
+_WINDOWS = os.name == "nt"
+
+
+def write_console(message: str, *, error: bool = False) -> None:
+    """Write when a console stream exists; pythonw intentionally has none."""
+    stream = sys.stderr if error else sys.stdout
+    if stream is not None:
+        print(message, file=stream)
 
 
 def run_step(cmd: list[str], log_fn, label: str, timeout: int = 600) -> int:
@@ -21,9 +32,22 @@ def run_step(cmd: list[str], log_fn, label: str, timeout: int = 600) -> int:
     step proceeds — never aborts the scheduled run.
     """
     try:
+        run_kwargs = {}
+        if _WINDOWS:
+            run_kwargs["creationflags"] = getattr(
+                subprocess,
+                "CREATE_NO_WINDOW",
+                0x08000000,
+            )
         r = subprocess.run(
-            cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=timeout,
-            encoding="utf-8", errors="replace",
+            cmd,
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            encoding="utf-8",
+            errors="replace",
+            **run_kwargs,
         )
     except subprocess.TimeoutExpired:
         log_fn(f"  {label}: TIMEOUT after {timeout}s — skipping, continuing")

@@ -4,31 +4,39 @@ Small pytest-based suite covering the critical scenarios surfaced by four rounds
 
 ## Coverage
 
-The suite currently has **281 tests across 27 files**. Highlights:
+The suite has **1903 tests across 32 files on every platform**. Local Windows
+verification reports **1868 passed, 35 skipped**; skip count varies with optional
+Git Bash, PowerShell, and symlink availability. Highlights:
 
 | Test file | Guards against |
 |---|---|
-| `test_slug.py` | Slug collision resolution + strict `_slug_owns_dir` ownership (state.md without `- Project root:` must NOT be claimed). Base slug sanitization, Cyrillic preservation, git owner-repo fallback, hash-suffix last resort, idempotency. |
+| `test_bootstrap_project.py` | Per-project bootstrap exclusion, nested junction/reparse no-follow, minimum-access held Windows directory handles, directory and per-entry ABA identity checks, single collection under concurrency, complete atomic publication, and next-SessionStart visibility. |
+| `test_slug.py` | Native-absolute ownership, atomic claims and alias backfill, bounded exact-path legacy reuse, exhaustive collision fallback, caller consistency, daily isolation, one-pass state rendering, and idempotency. |
 | `test_compile_failure.py` | The `silent data loss` class bug where a failed LLM compile would still write `compiled_daily_hashes`. Monkey-patches `run_compile` to simulate failure, asserts hashes unchanged, exit=1, `last_compile_status=error`, `knowledge/log.md` untouched. |
-| `test_compile_audit.py` | `parse_compile_audit` extracts/tolerates/merges LLM audit lines; snapshot fed to the LLM includes `«title»: summary`. |
-| `test_audit_runtime_contracts.py` | Post-audit regression guards: module-level `import re` in compile_memory (contradiction path), `subprocess` import in query_memory, feedback stdin JSON contract, loop_detector breadcrumb regex matches the real writer format, flush_memory delegates to `maybe_compile.spawn_compile_if_idle` (PID lock). |
+| `test_compile_audit.py` | `parse_compile_audit` extracts/tolerates/merges LLM audit lines; snapshots use strict bounded UTF-8, unambiguous frontmatter status, and canonical body-only `«title»: summary`. |
+| `test_compile_bounded_batches.py` | Noisy backlog filtering, bounded prompts, deterministic pre-journal admission, live/in-plan duplicate rejection, pinned-batch/index/effect-receipt completion, retired-store reactivation, truthful quotas, partial failures, concurrent appends, and idempotent SDK retries. |
+| `test_audit_runtime_contracts.py` | Post-audit regression guards: module-level `import re` in compile_memory (contradiction path), `subprocess` import in query_memory, feedback stdin JSON contract, loop_detector breadcrumb regex matches the real writer format, flush_memory delegates to `maybe_compile.spawn_compile_if_idle` (OS-held compile lock). |
 | `test_audit_fixes.py` | e2e compile with `MEMORY_LLM_PROVIDER=fake` end-to-end against a tmp vault; pinned `LLM_WIKI_ROOT` in settings.json hooks; no title-case duplicate notes after three-zone rename. |
-| `test_context_noise.py` | Technical noise (`Trigger:`, `Transcript:`, `Project root:`, session-id UUIDs) stripped from SessionStart-injected context; useful signal preserved; ≤4KB cap. |
+| `test_context_noise.py` | In-memory normalization of timestamp blocks and legacy heading/bullet summaries, project-matching durable-summary/user-prompt priority, tool-breadcrumb exclusion, completed-record framing, bounded SessionStart input, saved-handoff priority, and technical-noise removal. |
 | `test_slugify.py` | Unicode-safe slugify for Cyrillic questions; punct-only / emoji-only inputs get deterministic hash suffix instead of colliding. |
 | `test_session_end_skip.py` | SessionEnd hook skips vault cwd (delegates to project-level hook) and skips $HOME (not a project); writes tagged entry for normal non-vault cwd. |
-| `test_capture_hooks.py` | Exit-0 invariants on capture hooks, MIN_PROMPT_CHARS / SIGNIFICANT_TOOLS filters, vault-internal skip, rate-limit window. |
-| `test_feedback_capture.py` | Correction/preference/instruction/rejection detection + candidate save/promote. |
-| `test_flush_classification.py` | FLUSH_MAJOR/MINOR/OK classification + tier gating of `maybe_trigger_compile`. |
+| `test_capture_hooks.py` | Exit-0 invariants, prompt retention, direct-file-mutation-only breadcrumbs, read/search/shell exclusion, bounded/redacted targets and provenance, vault-internal skip, and rate limiting. |
+| `test_feedback_capture.py` | Correction/preference/instruction/rejection detection, shared bounded hostile-candidate loading with list-specific schema checks, and candidate save/promote. |
+| `test_flush_classification.py` | FLUSH_MAJOR/MINOR/OK classification, exact durable completion, fallback truthfulness, and tier gating of `maybe_trigger_compile`. |
 | `test_graph_neighbors.py` | Triple-RRF fusion weights + graph-neighbor boost resolution. |
 | `test_guardrails.py` | Correction/preference collection, project filter, dedup, formatting. |
-| `test_maybe_compile.py` | PID liveness probe, lock write/read/clear, stale-lock steal, force-override, pending-work hash check. |
-| `test_memory_queue.py` | Enqueue/list/mark_attempt/drain/permanently-failed/backoff/max_tasks/status/corrupt-json/age-filter. |
-| `test_merge_claude_settings.py` | User hooks preserved + ours replaced, env set, permissions union, backup written. |
-| `test_plugin_helpers.py` | Empty/malformed stdin → exit 0; valid payload writes daily-log/state/breadcrumb. |
-| `test_readme_i18n.py` | All 3 READMEs exist, share live count (281), correct repo (`Ekgardt/llm-wiki`), mention `knowledge/`, mention `3.4.0`. |
+| `test_maybe_compile.py` | Fixed-file OS-lock probing, held-lock refusal, crash release, SDK deferral, and pending-work/index-state checks. |
+| `test_memory_queue.py` | Durable FIFO sequence, canonical task suffix integrity, exactly-once durable provenance with explicit legacy fallback, exact flush-result acknowledgement, migration journal, SDK lease identity/digest, stale recovery, retries/backoff, bounded drain, and failure status. |
+| `test_merge_claude_settings.py` | Direct `uv` argv materialization, idempotent owned-hook replacement, user-hook preservation, fail-closed malformed settings, env/permission merge, and backup writes. |
+| `test_plugin_helpers.py` | Bounded/fail-closed stdin exits without writes on rejection; valid payloads write daily-log/state/breadcrumb records with bounded, redacted metadata. |
+| `test_readme_i18n.py` | All 3 READMEs exist, share live count (1903), correct repo (`Ekgardt/llm-wiki`), mention `knowledge/`, mention `3.4.0`. |
+| `test_integration_injection.py` | OpenCode prompt capture, mutation-only tool filtering, bounded repeatable maintenance passes/continuations, project attribution, and SDK session cleanup. |
+| `test_quality_guards.py` | Documentation counts/parity, windowless `pythonw` Task Scheduler registration, and console-free Windows maintenance child processes. |
 | `test_search_ranking.py` | `_rrf_fuse_triple` weights verified; source_authority boost. |
 | `test_wikilinks_tracked.py` | `git ls-files knowledge` filtered, broken-link detector + untracked-target reporting. |
 | `test_archive_stale.py` | Type-aware archive thresholds (debugging=60d, decisions/concepts never). |
+| `test_repair_installed_memory.py` | Compact immutable audit, byte-exact retained daily content, explicit two-stage manifest apply, shared writer locks, audit-bound staged transactions, rollback recovery, reparse containment, reversible feedback quarantine, and linear verify. |
+| `test_scheduled_weekly.py` | One maintenance lease through final rebuild, truthful failures, and byte-exact preservation plus safe ID-only reporting of exhausted queue tasks. |
 
 ## Running
 
@@ -47,12 +55,14 @@ pytest tests/
   - `LLM_WIKI_ROOT` → the vault directory (so hook subprocesses operate)
   - `LLM_WIKI_STATE_ROOT` → `$TEMP/llm-wiki-test-state/` (stable temp dir
     OUTSIDE the vault for hermeticity — production runtime lives inside
-    the vault under gitignored `cache/logs/run/`, but tests must not
-    mutate those; never touches the operator's real runtime)
+    the vault under gitignored `cache/logs/run/`; `run/` contains durable
+    automation/recovery state, so tests must not mutate it)
   - `MEMORY_LLM_PROVIDER` → `fake` (no live LLM calls)
   - a skeleton `state.json` if it doesn't exist yet
 
-No pre-configuration required. Output: 281 passed in ~3s.
+No pre-configuration required. Collection is platform-stable at 1903. Local
+Windows output is 1868 passed, 35 skipped; optional Bash, PowerShell, and symlink
+availability can change the skip count elsewhere.
 
 All tests are self-contained and use `tmp_path` + state snapshots, so running them does not mutate the vault permanently. The compile-failure test briefly flips `state.json::last_compile_status` and restores it via fixture.
 
@@ -60,9 +70,9 @@ All tests are self-contained and use `tmp_path` + state snapshots, so running th
 
 `conftest.py` defaults to `$TEMP/llm-wiki-test-state/` (outside the vault)
 regardless of any pre-set env value, to guarantee isolation. Production
-runtime lives inside the vault under gitignored `cache/logs/run/`, but tests
-must not mutate those. To opt INTO using an external state root (e.g. your
-live runtime for a manual soak), set:
+runtime lives inside the vault under gitignored `cache/logs/run/`, and `run/`
+contains durable automation/recovery state. Tests must not mutate it. To opt
+INTO using an external state root (e.g. your live runtime for a manual soak), set:
 
 ```bash
 LLM_WIKI_TEST_USE_EXTERNAL_STATE=1 uv run pytest tests/

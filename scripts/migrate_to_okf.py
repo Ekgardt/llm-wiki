@@ -36,7 +36,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT  # noqa: E402
+from memory_state import ROOT, parse_frontmatter_scalar  # noqa: E402
 
 # Reserved OKF filenames — no frontmatter allowed at bundle level.
 RESERVED_NAMES = frozenset({"index.md", "log.md"})
@@ -95,7 +95,6 @@ SUMMARY_RE = re.compile(
     r"^One-sentence summary:\s*(.+?)\s*$", re.MULTILINE | re.IGNORECASE
 )
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
-TYPE_FIELD_RE = re.compile(r"^type:\s*(.+?)\s*$", re.MULTILINE)
 
 
 def parse_args() -> argparse.Namespace:
@@ -150,11 +149,7 @@ def extract_description(content: str) -> str:
 
 def has_okf_type(content: str) -> bool:
     """True if the file already has a non-empty `type:` in frontmatter."""
-    fm = FRONTMATTER_RE.match(content)
-    if not fm:
-        return False
-    type_match = TYPE_FIELD_RE.search(fm.group(1))
-    return bool(type_match and type_match.group(1).strip())
+    return parse_frontmatter_scalar(content, "type").present
 
 
 def build_frontmatter(

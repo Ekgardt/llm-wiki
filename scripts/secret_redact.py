@@ -9,6 +9,10 @@ from __future__ import annotations
 
 import math
 import re
+import sys
+
+MAX_STDIN_CHARS = 8_000
+_MAX_STDIN_BYTES = MAX_STDIN_CHARS * 4
 
 _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(?i)(authorization\s*:\s*bearer\s+)(\S+)"), r"\1[REDACTED]"),
@@ -26,7 +30,7 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 _HIGH_ENTROPY_RE = re.compile(
-    r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{40,}={0,2}(?![A-Za-z0-9+/=])"
+    r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{40,}={0,2}(?![A-Za-z0-9+/=])"
 )
 _PURE_HEX_RE = re.compile(r"^[0-9a-f]+$")
 _ENTROPY_THRESHOLD = 4.0
@@ -56,3 +60,25 @@ def redact_secrets(text: str) -> str:
         if _shannon_entropy(token) >= _ENTROPY_THRESHOLD:
             out = out.replace(token, "[REDACTED_TOKEN]")
     return out
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
+    if args != ["--stdin"]:
+        return 2
+    try:
+        raw = sys.stdin.buffer.read(_MAX_STDIN_BYTES + 1)
+        if len(raw) > _MAX_STDIN_BYTES:
+            return 1
+        text = raw.decode("utf-8")
+        if len(text) > MAX_STDIN_CHARS:
+            return 1
+        redacted = redact_secrets(text)
+        sys.stdout.buffer.write(redacted.encode("utf-8"))
+    except (OSError, UnicodeError):
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

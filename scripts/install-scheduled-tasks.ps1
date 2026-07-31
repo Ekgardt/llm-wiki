@@ -63,12 +63,16 @@ if ($Uninstall) {
 }
 
 # Resolve paths.
-# Prefer vault venv so scheduled tasks see project deps.
-$pythonExe = "$env:LLM_WIKI_ROOT\.venv\Scripts\python.exe"
-if (-not (Test-Path -LiteralPath $pythonExe)) {
-    $pythonExe = (Get-Command python -ErrorAction SilentlyContinue).Source
+# Use the windowed interpreter so Task Scheduler never creates a console.
+$pythonExe = "$env:LLM_WIKI_ROOT\.venv\Scripts\pythonw.exe"
+if (-not (Test-Path -LiteralPath $pythonExe -PathType Leaf)) {
+    $pythonCommand = Get-Command pythonw.exe -CommandType Application -ErrorAction SilentlyContinue
+    if (-not $pythonCommand) {
+        $pythonCommand = Get-Command pythonw -CommandType Application -ErrorAction SilentlyContinue
+    }
+    $pythonExe = if ($pythonCommand) { $pythonCommand.Source } else { $null }
 }
-if (-not $pythonExe) { throw "No Python found (install uv sync first)" }
+if (-not $pythonExe) { throw "No windowed Python found (install uv sync first)" }
 $nightlyScript = "$env:LLM_WIKI_ROOT\scripts\scheduled_nightly.py"
 $weeklyScript = "$env:LLM_WIKI_ROOT\scripts\scheduled_weekly.py"
 

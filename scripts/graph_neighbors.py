@@ -17,18 +17,29 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT  # noqa: E402
+from memory_state import (  # noqa: E402
+    ROOT,
+    parse_frontmatter_scalar,
+    parse_project_scope,
+)
 
 KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
 
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+?)(?:\|[^\]]+)?\]\]")
-STATUS_RE = re.compile(r"^status:\s*(.+?)\s*$", re.MULTILINE)
 
 
 def _is_inactive(content: str) -> bool:
-    """Return True if the page has status: superseded or status: archived."""
-    m = STATUS_RE.search(content)
-    return bool(m and m.group(1).strip().lower() in ("superseded", "archived"))
+    """Exclude inactive or ambiguously scoped pages from the active graph."""
+    status = parse_frontmatter_scalar(content, "status")
+    project = parse_project_scope(content)
+    return bool(
+        status.present
+        and status.value is None
+        or project.present
+        and project.value is None
+        or status.value is not None
+        and status.value.casefold() in {"superseded", "archived"}
+    )
 
 
 def _build_link_graph() -> dict[str, list[str]]:

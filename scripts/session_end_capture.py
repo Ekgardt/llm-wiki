@@ -8,29 +8,42 @@ Exits silently if `CLAUDE_INVOKED_BY` is already set (re-entry guard).
 """
 from __future__ import annotations
 
-import json
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT, spawn_detached  # noqa: E402
+from memory_state import (  # noqa: E402
+    MAX_HOOK_STDIN_BYTES,
+    ROOT,
+    read_json_object_bounded,
+    spawn_detached,
+)
+from session_start_project_state import resolve_project_root  # noqa: E402
 
 
 def main() -> int:
     if os.environ.get("CLAUDE_INVOKED_BY"):
         return 0
-    try:
-        payload = json.load(sys.stdin)
-    except (json.JSONDecodeError, ValueError):
-        payload = {}
-
-    if not isinstance(payload, dict):
+    payload = read_json_object_bounded(
+        sys.stdin,
+        max_bytes=MAX_HOOK_STDIN_BYTES,
+    )
+    if payload is None:
         return 0
 
     transcript_path = payload.get("transcript_path", "")
     session_id = payload.get("session_id", "unknown")
-    reason = payload.get("reason", "")
+    trigger = payload.get("trigger", payload.get("reason", ""))
+    project_slug = str(payload.get("project_slug") or "")
+    resolution = resolve_project_root(payload, env=os.environ)
+    if resolution.signal_present and resolution.root is None:
+        return 0
+    project_root = str(resolution.root or "")
+    occurred_at = str(payload.get("occurred_at") or "") or datetime.now().astimezone().isoformat(
+        timespec="microseconds"
+    )
 
     args = [
         sys.executable,
@@ -38,8 +51,13 @@ def main() -> int:
         "--event", "session-end",
         "--session-id", str(session_id),
         "--transcript", str(transcript_path),
-        "--trigger", str(reason),
+        "--trigger", str(trigger),
+        "--occurred-at", occurred_at,
     ]
+    if project_slug:
+        args.extend(["--project-slug", project_slug])
+    if project_root:
+        args.extend(["--project-root", project_root])
     spawn_detached(args)
     return 0
 

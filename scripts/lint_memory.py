@@ -39,7 +39,14 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import REPORTS_DIR, ROOT, file_hash, load_state  # noqa: E402
+from memory_state import (  # noqa: E402
+    REPORTS_DIR,
+    ROOT,
+    file_hash,
+    load_state,
+    parse_frontmatter_scalar,
+    trusted_compiled_daily_hashes,
+)
 from okf_types import CANONICAL_TYPES as VALID_TYPES  # noqa: E402
 from okf_types import TYPE_ALIASES  # noqa: E402
 from vault_editorial import (  # noqa: E402
@@ -223,9 +230,17 @@ def check_orphans_against_index(pages: list[Path], index: Path) -> list[str]:
         return []
     index_txt = index.read_text(encoding="utf-8", errors="ignore")
     out: list[str] = []
+    tracked = _git_tracked_paths()
     for md in pages:
         if md.name in EDITORIAL_NAMES:
             continue
+        if tracked is not None:
+            try:
+                rel_path = md.resolve().relative_to(ROOT.resolve()).as_posix()
+            except ValueError:
+                continue
+            if rel_path not in tracked:
+                continue
         # Accept either stem or full relative path as a reference.
         stem = md.stem
         rel = md.relative_to(ROOT).with_suffix("").as_posix()
@@ -235,7 +250,7 @@ def check_orphans_against_index(pages: list[Path], index: Path) -> list[str]:
 
 
 def check_orphan_daily_logs(state: dict) -> list[str]:
-    compiled = state.get("compiled_daily_hashes", {})
+    compiled = trusted_compiled_daily_hashes(state, root=ROOT)
     out: list[str] = []
     if not DAILY_DIR.exists():
         return out
@@ -246,7 +261,7 @@ def check_orphan_daily_logs(state: dict) -> list[str]:
 
 
 def check_stale_compiled(state: dict) -> list[str]:
-    compiled = state.get("compiled_daily_hashes", {})
+    compiled = trusted_compiled_daily_hashes(state, root=ROOT)
     out: list[str] = []
     if not DAILY_DIR.exists():
         return out
@@ -259,6 +274,13 @@ def check_stale_compiled(state: dict) -> list[str]:
 
 def check_missing_backlinks(pages: list[Path], search_roots: list[Path]) -> list[str]:
     """Within a set of pages, A->B must be matched by B->A."""
+    tracked = _git_tracked_paths()
+    if tracked is not None:
+        pages = [
+            md
+            for md in pages
+            if md.resolve().relative_to(ROOT.resolve()).as_posix() in tracked
+        ]
     page_set = set(pages)
     link_map: dict[Path, list[Path]] = {}
     for md in pages:
@@ -310,7 +332,6 @@ def check_sparse_pages(pages: list[Path], min_words: int) -> list[str]:
 
 
 FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
-TYPE_FIELD_RE = re.compile(r"^type:\s*(.+?)\s*$", re.MULTILINE)
 SUPERSEDED_BY_RE = re.compile(r"^superseded_by:\s*\[?\[?([^\]\n]+?)\]?\]?\s*$", re.MULTILINE)
 SOURCES_FIELD_RE = re.compile(r"^sources:", re.MULTILINE)
 SOURCE_SECTION_RE = re.compile(r"^##\s*(?:Source|Evidence|Provenance)", re.MULTILINE)
@@ -337,11 +358,8 @@ def _page_type(md: Path) -> str | None:
         content = md.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return None
-    fm = FRONTMATTER_RE.match(content)
-    if not fm:
-        return None
-    m = TYPE_FIELD_RE.search(fm.group(1))
-    return m.group(1).strip() if m else None
+    field = parse_frontmatter_scalar(content, "type")
+    return field.value if field.present else None
 
 
 def check_missing_frontmatter(pages: list[Path]) -> list[str]:
@@ -354,7 +372,8 @@ def check_missing_frontmatter(pages: list[Path]) -> list[str]:
             content = md.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        if not FRONTMATTER_RE.match(content):
+        field = parse_frontmatter_scalar(content, "type")
+        if not FRONTMATTER_RE.match(content) and not field.present:
             out.append(_rel(md))
     return out
 
@@ -369,11 +388,10 @@ def check_missing_required_type(pages: list[Path]) -> list[str]:
             content = md.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        fm = FRONTMATTER_RE.match(content)
-        if not fm:
+        field = parse_frontmatter_scalar(content, "type")
+        if not FRONTMATTER_RE.match(content) and not field.present:
             continue  # reported by check_missing_frontmatter; don't double-count
-        m = TYPE_FIELD_RE.search(fm.group(1))
-        if not m or not m.group(1).strip():
+        if not field.present:
             out.append(_rel(md))
     return out
 
@@ -388,13 +406,15 @@ def check_invalid_type_value(pages: list[Path]) -> list[str]:
             content = md.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        fm = FRONTMATTER_RE.match(content)
-        if not fm:
+        field = parse_frontmatter_scalar(content, "type")
+        if not FRONTMATTER_RE.match(content) and not field.present:
             continue
-        m = TYPE_FIELD_RE.search(fm.group(1))
-        if not m:
+        if not field.present:
             continue
-        type_val = m.group(1).strip().strip("\"'")
+        if field.value is None:
+            out.append(f"{_rel(md)} (type metadata is invalid)")
+            continue
+        type_val = field.value
         type_val = TYPE_ALIASES.get(type_val, type_val)
         if type_val and type_val not in VALID_TYPES:
             out.append(f"{_rel(md)} (type: {type_val!r} — not in canonical set)")
@@ -503,10 +523,10 @@ def check_temporal_validity(pages: list[Path]) -> list[str]:
             vt_date = valid_to[:10]  # take just the date part
             if vt_date < today:
                 # Check status — if still 'active', flag it
-                status_val = ""
-                sm = re.search(r"^status:\s*(.+?)\s*$", fm_text, re.MULTILINE)
-                if sm:
-                    status_val = sm.group(1).strip()
+                status = parse_frontmatter_scalar(content, "status")
+                if status.present and status.value is None:
+                    continue
+                status_val = status.value or ""
                 if status_val in ("", "active"):
                     out.append(
                         f"{_rel(md)} (valid_to={vt_date} < today={today}, "

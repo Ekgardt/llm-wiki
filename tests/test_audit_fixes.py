@@ -138,6 +138,47 @@ def test_select_dailies_rejects_outside_daily(tmp_path, monkeypatch):
         compile_memory.select_dailies(args, {})
 
 
+def test_archive_daily_does_not_move_matching_hash_without_receipt(
+    tmp_path,
+    monkeypatch,
+):
+    import argparse
+
+    import archive_daily
+
+    vault = tmp_path / "vault"
+    daily_dir = vault / "knowledge" / "daily"
+    daily_dir.mkdir(parents=True)
+    daily = daily_dir / "2000-01-01.md"
+    daily.write_text("compiled bytes without receipt", encoding="utf-8")
+    monkeypatch.setattr(archive_daily, "ROOT", vault)
+    monkeypatch.setattr(archive_daily, "DAILY_DIR", daily_dir)
+    monkeypatch.setattr(archive_daily, "ARCHIVE_DIR", daily_dir / "archive")
+    monkeypatch.setattr(
+        archive_daily,
+        "load_state",
+        lambda: {
+            "compiled_daily_hashes": {
+                daily.name: archive_daily.file_hash(daily),
+            }
+        },
+    )
+    monkeypatch.setattr(
+        archive_daily,
+        "parse_args",
+        lambda: argparse.Namespace(
+            commit=True,
+            threshold=1,
+            max_age=1,
+            force=True,
+        ),
+    )
+
+    assert archive_daily.main() == 0
+    assert daily.is_file()
+    assert not (daily_dir / "archive" / "2000-01" / daily.name).exists()
+
+
 def test_e2e_compile_with_fake_provider(tmp_path, monkeypatch):
     """Full compile path under MEMORY_LLM_PROVIDER=fake writes no pages when ops empty,
     marks daily compiled, and emits COMPILE_DONE."""
@@ -179,9 +220,7 @@ def test_e2e_compile_with_fake_provider(tmp_path, monkeypatch):
                     "rejected": 0,
                 },
             }
-        )
-        + "\nCOMPILE_AUDIT: verified 0 evidence citations; 0 dedup checks performed; "
-        "0 stubs skipped; 0 contradictions handled; 0 pages rejected as below-threshold",
+        ),
     )
 
     # Re-bind module paths that were cached at import time.
@@ -213,38 +252,42 @@ def test_e2e_compile_with_fake_provider(tmp_path, monkeypatch):
 
 
 def test_settings_hooks_use_llm_wiki_root():
-    """All Claude Code hook commands pin the vault via $LLM_WIKI_ROOT, the
+    """All Claude Code hook argv pin the vault via the materialized root, the
     referenced scripts exist on disk, every hook block has a numeric timeout,
     and the matcher set is the expected one. A rename of any hooked script
     would otherwise leave this green and break Claude Code at runtime.
     """
-    import re as _re
+    import merge_claude_settings
 
-    settings = Path(__file__).resolve().parent.parent / "integrations" / "claude-code" / "settings.json"
-    scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+    root = Path(__file__).resolve().parent.parent
+    settings = root / "integrations" / "claude-code" / "settings.json"
+    scripts_dir = root / "scripts"
     data = json.loads(settings.read_text(encoding="utf-8"))
-    cmds = []
+    data = merge_claude_settings.merge_settings({}, data, str(root), str(root))
+    hooks = []
     timeouts = []
     for event, blocks in data.get("hooks", {}).items():
         for block in blocks:
             assert "timeout" not in block, "timeout belongs on each hook, not the matcher block"
             for h in block.get("hooks", []):
-                cmd = h.get("command", "")
-                if cmd:
-                    cmds.append(cmd)
+                hooks.append(h)
                 t = h.get("timeout")
                 if t is not None:
                     timeouts.append(t)
-                # Script referenced in the command must exist.
-                m = _re.search(r"scripts/([A-Za-z_][A-Za-z0-9_-]*\.py)", cmd)
-                assert m, f"hook command has no scripts/*.py reference: {cmd!r}"
-                script_name = m.group(1)
+                assert h.get("command") == "uv"
+                args = h.get("args")
+                assert isinstance(args, list)
+                assert args[:4] == ["run", "--directory", str(root), "python"]
+                script_arg = next(
+                    (arg for arg in args if isinstance(arg, str) and arg.startswith("scripts/")),
+                    None,
+                )
+                assert script_arg, f"hook argv has no scripts/*.py reference: {args!r}"
+                script_name = Path(script_arg).name
                 assert (scripts_dir / script_name).is_file(), (
                     f"hook references missing script: scripts/{script_name}"
                 )
-    assert cmds, "settings.json wires no hooks"
-    assert all("$LLM_WIKI_ROOT" in c for c in cmds)
-    assert all("uv run --directory" in c for c in cmds)
+    assert hooks, "settings.json wires no hooks"
     assert timeouts and all(isinstance(t, int) and t > 0 for t in timeouts), (
         "every hook must declare a positive numeric timeout"
     )

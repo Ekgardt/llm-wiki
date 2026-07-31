@@ -98,13 +98,18 @@ def test_fake_llm_provider_returns_canned_json(monkeypatch):
     import llm_client
 
     monkeypatch.setenv("MEMORY_LLM_PROVIDER", "fake")
-    monkeypatch.setenv(
-        "MEMORY_LLM_FAKE_RESPONSE",
-        '{"operations": [], "audit": {}}\nCOMPILE_AUDIT: verified 0 evidence citations; 0 dedup checks performed; 0 stubs skipped; 0 contradictions handled; 0 pages rejected as below-threshold',
-    )
+    monkeypatch.delenv("MEMORY_LLM_FAKE_RESPONSE", raising=False)
     out = llm_client.call_llm("hello", system_prompt="sys")
-    assert "operations" in out
-    assert "COMPILE_AUDIT" in out
+    assert json.loads(out) == {
+        "operations": [],
+        "audit": {
+            "verified": 0,
+            "dedup": 0,
+            "stubs": 0,
+            "contradictions": 0,
+            "rejected": 0,
+        },
+    }
 
 
 def test_flush_memory_uses_maybe_compile(monkeypatch, tmp_path):

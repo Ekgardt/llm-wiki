@@ -30,7 +30,13 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from memory_state import ROOT, STATE_ROOT, atomic_write  # noqa: E402
+from memory_state import (  # noqa: E402
+    ROOT,
+    STATE_ROOT,
+    atomic_write,
+    parse_frontmatter_scalar,
+    parse_project_scope,
+)
 
 INDEX_DIR = STATE_ROOT / "cache"
 INDEX_FILE = INDEX_DIR / "index.sqlite"
@@ -55,6 +61,25 @@ SUMMARY_RE = re.compile(
 # Embedding model — lightweight, CPU-friendly, ~90MB download on first use
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 EMBEDDING_DIM = 384
+MAX_STDIN_QUERY_BYTES = 64 * 1024
+
+
+def _read_stdin_query_bounded(stream, *, max_bytes: int) -> str | None:
+    try:
+        binary_stream = getattr(stream, "buffer", None)
+        if binary_stream is not None:
+            raw = binary_stream.read(max_bytes + 1)
+            if len(raw) > max_bytes:
+                return None
+            return raw.decode("utf-8", errors="strict")
+        text = stream.read(max_bytes + 1)
+        if len(text) > max_bytes:
+            return None
+        if len(text.encode("utf-8", errors="strict")) > max_bytes:
+            return None
+        return text
+    except (OSError, UnicodeError, TypeError):
+        return None
 
 
 def _have_sentence_transformers() -> bool:
@@ -130,15 +155,12 @@ def _collect_pages(scope: str = "all") -> list[Path]:
                 continue
             if any(skip in md.relative_to(root).parts for skip in SKIP_DIRS):
                 continue
-            # Skip superseded/archived pages from active search results
             try:
                 content = md.read_text(encoding="utf-8", errors="ignore")
-                fm = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
-                if fm:
-                    status_m = re.search(r"^status:\s*(.+?)\s*$", fm.group(1), re.MULTILINE)
-                    if status_m and status_m.group(1).strip() in ("superseded", "archived"):
-                        continue
             except OSError:
+                continue
+            active, _project = _active_search_metadata(content)
+            if not active:
                 continue
             seen.add(md)
             pages.append(md)
@@ -153,13 +175,27 @@ def _extract_frontmatter_field(content: str, pattern: re.Pattern) -> str | None:
     return m.group(1).strip() if m else None
 
 
-# Patterns for metadata extraction
-PROJECT_FIELD_RE = re.compile(r"^project:\s*[\"']?([^\"'\n]+)[\"']?\s*$", re.MULTILINE)
+# Patterns for non-sensitive metadata extraction
 TIMESTAMP_FIELD_RE = re.compile(r"^timestamp:\s*(.+?)\s*$", re.MULTILINE)
 AUTHORITY_FIELD_RE = re.compile(
     r"^source_authority:\s*[\"']?([^\"'\n]+)[\"']?\s*$", re.MULTILINE
 )
 VALID_TO_FIELD_RE = re.compile(r"^valid_to:\s*(.+?)\s*$", re.MULTILINE)
+
+
+def _active_search_metadata(content: str) -> tuple[bool, str]:
+    status = parse_frontmatter_scalar(content, "status")
+    project = parse_project_scope(content)
+    if status.present and status.value is None:
+        return False, ""
+    if project.present and project.value is None:
+        return False, ""
+    if status.value is not None and status.value.casefold() in {
+        "superseded",
+        "archived",
+    }:
+        return False, ""
+    return True, project.value or ""
 
 # Higher weight = preferred in ranking (typed provenance).
 AUTHORITY_WEIGHTS = {
@@ -256,10 +292,12 @@ def _build_index(pages: list[Path]) -> None:
                 content = p.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 continue
+            active, project = _active_search_metadata(content)
+            if not active:
+                continue
             title, summary = _extract_title_and_summary(content, p.stem)
             body = _strip_frontmatter(content)
             rel_path = p.relative_to(ROOT).as_posix()
-            project = _extract_frontmatter_field(content, PROJECT_FIELD_RE) or ""
             timestamp = _extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or ""
             # Truncate timestamp to date only for filtering
             timestamp = timestamp[:10] if timestamp else ""
@@ -697,9 +735,11 @@ def _build_vectors(pages: list[Path]) -> dict | None:
             content = p.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
+        active, project = _active_search_metadata(content)
+        if not active:
+            continue
         title, summary = _extract_title_and_summary(content, p.stem)
         body = _strip_frontmatter(content)[:500]  # truncate for embedding
-        project = _extract_frontmatter_field(content, PROJECT_FIELD_RE) or ""
         timestamp = _extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or ""
         timestamp = timestamp[:10] if timestamp else ""
 
@@ -753,7 +793,14 @@ def main() -> int:
     args = p.parse_args()
 
     if args.stdin:
-        args.query = sys.stdin.read().strip()
+        query = _read_stdin_query_bounded(
+            sys.stdin,
+            max_bytes=MAX_STDIN_QUERY_BYTES,
+        )
+        if query is None:
+            print("search_memory: stdin query is oversized or invalid", file=sys.stderr)
+            return 2
+        args.query = query.strip()
 
     if args.status:
         pages = _collect_pages("all")

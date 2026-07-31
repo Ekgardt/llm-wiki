@@ -17,7 +17,7 @@ assignees: ''
 
 **Backends / tools affected**
 - [ ] OpenCode plugin
-- [ ] Codex wrapper
+- [ ] Codex native hooks / compatibility wrapper
 - [ ] Claude Code hooks
 - [ ] Standalone Python scripts
 - [ ] Lint
