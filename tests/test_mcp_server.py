@@ -915,10 +915,17 @@ class TestHelperFunctions:
         assert captured[0]["deadline_monotonic"] == deadline
         assert captured[0]["semantic"] is True
 
-    def test_get_context_batch(self):
-        from mcp_server import _get_context
-        result = _get_context(["nonexistent-1", "nonexistent-2"])
-        assert isinstance(result, dict)
+    def test_get_context_batch(self, tmp_path, monkeypatch):
+        import mcp_server
+        import memory_state
+
+        (tmp_path / "knowledge/notes").mkdir(parents=True)
+        monkeypatch.setattr(memory_state, "ROOT", tmp_path)
+
+        result = mcp_server._get_context(["nonexistent-1", "nonexistent-2"])
+
+        assert result["repo_map"] == []
+        assert result["missing_slugs"] == ["nonexistent-1", "nonexistent-2"]
 
     def test_get_context_returns_one_bounded_compiler_package(self, tmp_path, monkeypatch):
         import mcp_server
@@ -982,9 +989,14 @@ class TestHelperFunctions:
             "knowledge/notes/beta.md",
         ]
 
-    def test_get_context_direct_call_deduplicates_and_enforces_bounds(self, monkeypatch):
+    def test_get_context_direct_call_deduplicates_and_enforces_bounds(
+        self, tmp_path, monkeypatch
+    ):
         import mcp_server
+        import memory_state
 
+        (tmp_path / "knowledge/notes").mkdir(parents=True)
+        monkeypatch.setattr(memory_state, "ROOT", tmp_path)
         reads = []
         monkeypatch.setattr(
             mcp_server,
