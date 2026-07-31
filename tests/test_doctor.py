@@ -243,6 +243,8 @@ def test_report_schema_and_all_check_classes_are_json_safe(tmp_path):
         "scheduler",
         "mcp",
         "integrations",
+        "pyright",
+        "lsp",
         "run_deletion",
     }
     assert set(report["counts"]) == {"ok", "degraded", "error", "skipped"}
@@ -2053,3 +2055,127 @@ def test_installed_integration_requires_expected_marker(tmp_path, host, relative
 
     expected = "degraded" if host == "codex" else "ok"
     assert check["details"]["hosts"][host]["status"] == expected
+
+
+def _missing_pyright_identity():
+    import pyright_profile
+
+    return pyright_profile.PyrightIdentity(
+        status="missing",
+        source=None,
+        version=None,
+        node_executable=None,
+        node_version=None,
+        node_major=None,
+        server_executable=None,
+        executable_sha256=None,
+        package_sha256=None,
+        initialization_options_sha256="a" * 64,
+        configuration_sha256="b" * 64,
+        qualified=False,
+        degradation_codes=("pyright_missing",),
+    )
+
+
+def _mismatched_pyright_identity():
+    import pyright_profile
+
+    return pyright_profile.PyrightIdentity(
+        status="degraded",
+        source="system",
+        version="1.1.400",
+        node_executable=None,
+        node_version=None,
+        node_major=20,
+        server_executable=None,
+        executable_sha256=None,
+        package_sha256=None,
+        initialization_options_sha256=pyright_profile.PYRIGHT_INITIALIZATION_OPTIONS_SHA256,
+        configuration_sha256=pyright_profile.PYRIGHT_CONFIGURATION_SHA256,
+        qualified=False,
+        degradation_codes=("pyright_version_mismatch",),
+    )
+
+
+def test_doctor_reports_missing_pyright(tmp_path, monkeypatch) -> None:
+    import doctor
+
+    monkeypatch.setattr(
+        "pyright_profile.discover_pyright",
+        lambda *a, **k: _missing_pyright_identity(),
+    )
+    check = doctor._pyright_check(tmp_path, tmp_path, deadline=float("inf"))
+    assert check["status"] == "degraded"
+    assert "pyright_missing" in check["details"]["codes"]
+    assert "install_pyright" in check["details"]["recommended_action"]
+
+
+def test_doctor_reports_mismatched_pyright(tmp_path, monkeypatch) -> None:
+    import doctor
+
+    monkeypatch.setattr(
+        "pyright_profile.discover_pyright",
+        lambda *a, **k: _mismatched_pyright_identity(),
+    )
+    check = doctor._pyright_check(tmp_path, tmp_path, deadline=float("inf"))
+    assert check["status"] == "degraded"
+    assert "pyright_version_mismatch" in check["details"]["codes"]
+
+
+def test_doctor_lsp_check_reports_no_owners_when_absent(tmp_path) -> None:
+    import doctor
+
+    check = doctor._lsp_runtime_check(
+        tmp_path, datetime.now(timezone.utc), deadline=float("inf")
+    )
+    assert check["status"] == "ok"
+    assert check["details"]["owners"] == []
+
+
+def test_doctor_lsp_live_owner_and_failure_block_deletion(tmp_path, monkeypatch) -> None:
+    import doctor
+
+    lsp_root = tmp_path / "run" / "lsp"
+    lsp_root.mkdir(parents=True)
+    live_owner = lsp_root / ("a" * 32)
+    live_owner.mkdir()
+    (live_owner / "lease.json").write_text(
+        json.dumps({"owner_pid": 99999}), encoding="utf-8"
+    )
+    failure_owner = lsp_root / ("b" * 32)
+    failure_owner.mkdir()
+    (failure_owner / "failure.json").write_text(
+        json.dumps({"timestamp": time.time() - 86400}), encoding="utf-8"
+    )
+    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: True)
+    now = datetime.now(timezone.utc)
+    check = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))
+    deletion = doctor._run_deletion_check(
+        tmp_path, now, collected={"lsp": check}
+    )
+    blocker_codes = {item["code"] for item in deletion["blockers"]}
+    assert "lsp_owner_live" in blocker_codes
+    assert "lsp_failure_evidence_retained" in blocker_codes
+    assert deletion["allowed"] is False
+
+
+def test_doctor_lsp_expired_failure_does_not_block(tmp_path, monkeypatch) -> None:
+    import doctor
+
+    lsp_root = tmp_path / "run" / "lsp"
+    lsp_root.mkdir(parents=True)
+    owner = lsp_root / ("c" * 32)
+    owner.mkdir()
+    old_timestamp = time.time() - (8 * 86400)
+    (owner / "failure.json").write_text(
+        json.dumps({"timestamp": old_timestamp}), encoding="utf-8"
+    )
+    monkeypatch.setattr(doctor, "_pid_alive", lambda pid: False)
+    now = datetime.now(timezone.utc)
+    check = doctor._lsp_runtime_check(tmp_path, now, deadline=float("inf"))
+    deletion = doctor._run_deletion_check(
+        tmp_path, now, collected={"lsp": check}
+    )
+    assert "lsp_failure_evidence_retained" not in {
+        item["code"] for item in deletion["blockers"]
+    }

@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -1325,9 +1326,221 @@ def _run_deletion_check(
             _append_blocker(blockers, str(code))
         if details.get("read_error") and not details.get("deletion_codes"):
             _append_blocker(blockers, f"{check_id}_state_unreadable")
+    if "lsp" not in checks:
+        checks["lsp"] = _lsp_runtime_check(state_root, now, deadline=deadline)
+    lsp_check = checks["lsp"]
+    lsp_details = lsp_check.get("details", {})
+    for code in lsp_details.get("deletion_codes", []):
+        _append_blocker(blockers, str(code))
+    if lsp_details.get("read_error") and not lsp_details.get("deletion_codes"):
+        _append_blocker(blockers, "lsp_state_unreadable")
     if _deadline_reached(deadline):
         _append_blocker(blockers, "run_deletion_state_unknown")
     return {"allowed": not blockers, "blockers": blockers}
+
+
+LSP_FAILURE_RETENTION = timedelta(days=7)
+MAX_LSP_OWNER_ROWS = 128
+_LSP_OWNER_NONCE = re.compile(r"[0-9a-f]{32}\Z")
+
+
+def _pyright_check(
+    root: Path,
+    state_root: Path,
+    *,
+    deadline: float,
+) -> dict:
+    """Report pinned Pyright identity without network access or mutation."""
+    from pyright_profile import discover_pyright
+    from repository_scope import resolve_repository_scope
+
+    codes: list[str] = []
+    details: dict[str, Any] = {
+        "status": "qualified",
+        "source": None,
+        "version": None,
+        "node_major": None,
+        "node_version": None,
+        "package_sha256": None,
+        "executable_sha256": None,
+        "initialization_options_sha256": None,
+        "configuration_sha256": None,
+        "qualified": False,
+        "codes": codes,
+    }
+    try:
+        scope = resolve_repository_scope(root)
+        identity = discover_pyright(scope, state_root=state_root, deadline=deadline)
+    except Exception:  # noqa: BLE001
+        details["status"] = "missing"
+        codes.append("pyright_missing")
+        details["recommended_action"] = (
+            "uv run python scripts/install_pyright.py --state-root <state-root>"
+        )
+        return _result(
+            "pyright",
+            "degraded",
+            "Pyright is missing; run the explicit installer.",
+            details,
+        )
+    details.update(
+        {
+            "status": identity.status,
+            "source": identity.source,
+            "version": identity.version,
+            "node_major": identity.node_major,
+            "node_version": identity.node_version,
+            "package_sha256": identity.package_sha256,
+            "executable_sha256": identity.executable_sha256,
+            "initialization_options_sha256": identity.initialization_options_sha256,
+            "configuration_sha256": identity.configuration_sha256,
+            "qualified": identity.qualified,
+        }
+    )
+    details.pop("executable_sha256", None)
+    details["executable_sha256_present"] = identity.executable_sha256 is not None
+    if not identity.qualified:
+        details["status"] = "degraded"
+        if identity.status == "missing" and "pyright_missing" not in codes:
+            codes.append("pyright_missing")
+        for code in identity.degradation_codes:
+            if code not in codes:
+                codes.append(code)
+        if identity.version != "1.1.411" and "pyright_version_mismatch" not in codes:
+            codes.append("pyright_version_mismatch")
+        details["recommended_action"] = (
+            "uv run python scripts/install_pyright.py --state-root <state-root>"
+        )
+        return _result(
+            "pyright",
+            "degraded",
+            "Pyright identity is degraded or mismatched.",
+            details,
+        )
+    return _result("pyright", "ok", "Pyright identity is qualified.", details)
+
+
+def _navigation_optional_check(
+    state_root: Path,
+    check_id: str,
+    run_check: Callable[[], dict],
+) -> dict:
+    """Skip navigation diagnostics when the feature is not configured."""
+    lsp_root = state_root / "run" / "lsp"
+    managed = state_root / "cache" / "code-tools" / "pyright"
+    if not lsp_root.exists() and not managed.exists():
+        return _result(
+            check_id,
+            "skipped",
+            "Code navigation is not configured.",
+            {"configured": False},
+        )
+    return run_check()
+
+
+def _safe_lsp_owner_record(path: Path) -> dict[str, Any] | None:
+    try:
+        raw = read_stable_bytes(
+            path,
+            64 * 1024,
+            label="LSP owner record",
+        )
+        record = json.loads(raw.decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(record, dict):
+        return None
+    return record
+
+
+def _lsp_runtime_check(
+    state_root: Path,
+    now: datetime,
+    *,
+    deadline: float = float("inf"),
+) -> dict:
+    """Bound the live and retained LSP owner evidence under run/lsp."""
+    lsp_root = state_root / "run" / "lsp"
+    codes: list[str] = []
+    owners: list[dict[str, Any]] = []
+    unreadable = False
+    if not lsp_root.exists():
+        return _result(
+            "lsp",
+            "ok",
+            "No LSP runtime owners are present.",
+            {
+                "codes": codes,
+                "owners": owners,
+                "deletion_codes": [],
+                "read_error": False,
+            },
+        )
+    try:
+        entries = sorted(lsp_root.iterdir(), key=lambda item: item.name)
+    except OSError:
+        unreadable = True
+        codes.append("lsp_state_unreadable")
+        return _result(
+            "lsp",
+            "degraded",
+            "LSP runtime owner tree is unreadable.",
+            {"codes": codes, "owners": owners, "deletion_codes": list(codes), "read_error": True},
+        )
+    for entry in entries[:MAX_LSP_OWNER_ROWS]:
+        if _deadline_reached(deadline):
+            break
+        if not entry.is_dir() or _LSP_OWNER_NONCE.fullmatch(entry.name) is None:
+            continue
+        owner_record = {
+            "owner_nonce": entry.name,
+            "live": False,
+            "failure_evidence": False,
+            "failure_age_days": None,
+        }
+        lease_path = entry / "lease.json"
+        lease = _safe_lsp_owner_record(lease_path) if lease_path.exists() else None
+        live = False
+        if isinstance(lease, dict):
+            pid = lease.get("owner_pid")
+            if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+                try:
+                    if _pid_alive(pid):
+                        live = True
+                except Exception:  # noqa: BLE001
+                    unreadable = True
+        owner_record["live"] = live
+        if live:
+            codes.append("lsp_owner_live")
+        failure_path = entry / "failure.json"
+        if failure_path.exists():
+            failure = _safe_lsp_owner_record(failure_path)
+            age_days: float | None = None
+            if isinstance(failure, dict):
+                timestamp = failure.get("timestamp")
+                if isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool):
+                    age_days = (now.timestamp() - float(timestamp)) / 86400.0
+            owner_record["failure_evidence"] = True
+            owner_record["failure_age_days"] = age_days
+            if age_days is None or age_days < LSP_FAILURE_RETENTION.total_seconds() / 86400.0:
+                codes.append("lsp_failure_evidence_retained")
+        elif not live:
+            codes.append("lsp_failure_evidence_retained")
+        owners.append(owner_record)
+    if unreadable and "lsp_state_unreadable" not in codes:
+        codes.append("lsp_state_unreadable")
+    status = "ok" if not codes else "degraded"
+    return _result(
+        "lsp",
+        status,
+        "LSP runtime owners are bounded." if status == "ok" else "LSP runtime owners are live or retained.",
+        {
+            "codes": codes,
+            "owners": owners,
+            "deletion_codes": list(codes),
+            "read_error": unreadable,
+        },
+    )
 
 
 def _index_deferred(message: str, detail: str) -> dict:
@@ -3705,6 +3918,14 @@ def run_doctor(
             "integrations",
             lambda: _integration_check(root_path, home_path, deadline=deadline),
         ),
+        ("pyright", lambda: _navigation_optional_check(
+            state_path, "pyright",
+            lambda: _pyright_check(root_path, state_path, deadline=deadline),
+        )),
+        ("lsp", lambda: _navigation_optional_check(
+            state_path, "lsp",
+            lambda: _lsp_runtime_check(state_path, generated_at, deadline=deadline),
+        )),
     )
     for check_id, operation in remaining:
         if time.monotonic() >= deadline:
