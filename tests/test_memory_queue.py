@@ -1171,12 +1171,21 @@ def test_sdk_and_manual_flush_apply_use_shared_helper_with_equivalent_blocks(
         assert expected in sdk_text
 
 
-def test_legacy_flush_payload_without_provenance_applies_with_explicit_fallbacks(
+def test_flush_provenance_boundary_accepts_legacy_and_rejects_partial_current(
     clean_queue, tmp_path, monkeypatch
 ):
     daily_dir = tmp_path / "knowledge" / "daily"
     monkeypatch.setattr(clean_queue, "_daily_dir", lambda: daily_dir)
-    clean_queue.enqueue("flush", {"prompt": "classify"})
+    clean_queue.enqueue(
+        "flush",
+        {
+            "prompt": "classify",
+            "system_prompt": "classify a legacy transcript",
+            "max_tokens": 1500,
+            "enqueued_by": "flush_memory",
+            "event": "pre-compact",
+        },
+    )
     prepared = clean_queue.prepare_sdk_task()
 
     assert clean_queue.apply_sdk_result(
@@ -1188,12 +1197,38 @@ def test_legacy_flush_payload_without_provenance_applies_with_explicit_fallbacks
     ) == (True, "acknowledged")
     daily_files = list(daily_dir.glob("*.md"))
     assert len(daily_files) == 1
-    text = daily_files[0].read_text(encoding="utf-8")
-    assert "deferred-session-end | unknown" in text
+    daily_path = daily_files[0]
+    text = daily_path.read_text(encoding="utf-8")
+    assert "deferred-pre-compact | unknown" in text
     assert "- Trigger: `unknown`" in text
     assert "- Project slug: `unknown`" in text
     assert '- Project root JSON: "unknown"' in text
     assert "- Source session: `unknown`" in text
+
+    current_task_id = clean_queue.enqueue(
+        "flush",
+        {
+            "prompt": "classify",
+            "event": "pre-compact",
+            "enqueued_by": "flush_memory",
+            "session_id": "partial-current-provenance",
+        },
+    )
+    current = clean_queue.prepare_sdk_task()
+
+    assert current["task_id"] == current_task_id
+    assert clean_queue.apply_sdk_result(
+        {
+            **current,
+            "success": True,
+            "response": "FLUSH_MINOR\n\n**Open questions**\n- Must this fail closed?",
+        }
+    ) == (True, "failure recorded")
+    [pending] = clean_queue.list_pending()
+    assert pending["id"] == current_task_id
+    assert pending["attempts"] == 1
+    assert "project identity is unavailable" in pending["last_error"]
+    assert daily_path.read_text(encoding="utf-8") == text
 
 
 def test_reapplying_persisted_flush_task_is_idempotent_by_durable_task_id(

@@ -56,13 +56,16 @@ MAX_QUEUE_TASK_BYTES = 16 * 1024 * 1024
 MAX_QUEUE_SEQUENCE_BYTES = 128
 MAX_QUEUE_MIGRATION_BYTES = 4 * 1024 * 1024
 MAX_QUEUE_JSON_DEPTH = 64
-PROVENANCE_FIELDS = (
-    "event",
+SOURCE_PROVENANCE_FIELDS = (
     "session_id",
     "trigger",
     "project_slug",
     "project_root",
     "occurred_at",
+)
+PROVENANCE_FIELDS = (
+    "event",
+    *SOURCE_PROVENANCE_FIELDS,
     "enqueued_by",
 )
 _TASK_ID_PATTERN = re.compile(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{8}")
@@ -1074,7 +1077,7 @@ def apply_classified_flush_response(
     payload = task.get("payload")
     payload = payload if isinstance(payload, dict) else {}
     project_root = str(payload.get("project_root") or "")
-    if any(field in payload for field in PROVENANCE_FIELDS):
+    if any(field in payload for field in SOURCE_PROVENANCE_FIELDS):
         project_slug = _resolve_project_slug(
             str(payload.get("project_slug") or ""),
             project_root,
