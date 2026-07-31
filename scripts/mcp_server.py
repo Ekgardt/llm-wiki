@@ -62,6 +62,10 @@ MAX_MCP_INCLUDE_LENGTH = 64
 MAX_MCP_CONTEXT_TOKENS = 32_768
 MAX_MCP_ERROR_CHARS = 256
 MCP_OPERATION_SECONDS = 10.0
+MCP_LSP_STARTUP_SECONDS = 60.0
+PRECISE_ARCHITECTURE_MODES = frozenset(
+    {"definition", "references", "implementations", "type", "diagnostics"}
+)
 MCP_WORKER_SLOTS = 4
 _MCP_WORKERS: set[concurrent.futures.Future] = set()
 _MCP_WORKERS_LOCK = threading.Lock()
@@ -142,6 +146,17 @@ def _operation_deadline(deadline: float | None = None) -> float:
 def _check_deadline(deadline: float | None) -> None:
     if deadline is not None and time.monotonic() >= deadline:
         raise TimeoutError("MCP operation deadline reached")
+
+
+def _tool_operation_seconds(name: str, arguments: object) -> float:
+    if name == "get_architecture" and isinstance(arguments, dict):
+        mode = arguments.get("mode", "summary")
+        positioned_calls = mode in {"callers", "callees"} and all(
+            key in arguments for key in ("path", "line", "character")
+        )
+        if mode in PRECISE_ARCHITECTURE_MODES or positioned_calls:
+            return MCP_LSP_STARTUP_SECONDS
+    return MCP_OPERATION_SECONDS
 
 
 def _operation_cancelled():
@@ -439,6 +454,11 @@ TOOL_INPUT_SCHEMAS = {
                     "path",
                     "community",
                     "impact",
+                    "definition",
+                    "references",
+                    "implementations",
+                    "type",
+                    "diagnostics",
                 ],
                 "description": "Bounded architecture query mode",
             },
@@ -457,6 +477,11 @@ TOOL_INPUT_SCHEMAS = {
                 "default": False,
                 "description": "Bypass the active generation and run live extraction",
             },
+            "path": {"type": "string", "minLength": 1, "maxLength": 4096},
+            "line": {"type": "integer", "minimum": 1},
+            "character": {"type": "integer", "minimum": 0},
+            "offset": {"type": "integer", "minimum": 0, "default": 0},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 10},
         },
         "required": ["directory"],
     },
@@ -1463,11 +1488,34 @@ def _validate_tool_arguments(name: str, arguments) -> str | None:
         if mode in {"symbol", "callers", "callees", "dependencies"} and not arguments.get(
             "symbol"
         ):
-            return f"required argument is missing for {mode}: symbol"
+            if not (mode in {"callers", "callees"} and arguments.get("path")):
+                return f"required argument is missing for {mode}: symbol"
         if mode == "path" and (
             not arguments.get("symbol") or not arguments.get("target")
         ):
             return "required arguments are missing for path: symbol and target"
+        if mode in PRECISE_ARCHITECTURE_MODES:
+            for required in ("path", "line", "character"):
+                if required not in arguments:
+                    return f"required argument is missing for {mode}: {required}"
+            if "symbol" in arguments:
+                return f"argument 'symbol' is not valid for {mode}"
+        position_keys = ("path", "line", "character")
+        position_present = [key for key in position_keys if key in arguments]
+        if (
+            mode in {"callers", "callees"}
+            and position_present
+            and len(position_present) != 3
+        ):
+            return f"positioned {mode} require path, line, and character together"
+        if mode in PRECISE_ARCHITECTURE_MODES and "offset" in arguments:
+            offset = arguments["offset"]
+            if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+                return "argument 'offset' must be a non-negative integer"
+        if mode in PRECISE_ARCHITECTURE_MODES and "limit" in arguments:
+            limit = arguments["limit"]
+            if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+                return "argument 'limit' must be between 1 and 100"
     return None
 
 
@@ -2084,7 +2132,8 @@ def _execute_tool_call(name: str, arguments, operation_deadline: float) -> str:
 
 async def _handle_tool_call(name: str, arguments) -> str:
     """Handle a tool call without blocking unrelated MCP event-loop work."""
-    operation_deadline = time.monotonic() + MCP_OPERATION_SECONDS
+    operation_seconds = _tool_operation_seconds(name, arguments)
+    operation_deadline = time.monotonic() + operation_seconds
     try:
         return await _run_bounded(
             _execute_tool_call, name, arguments, operation_deadline, deadline=operation_deadline

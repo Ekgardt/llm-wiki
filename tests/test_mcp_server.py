@@ -229,7 +229,8 @@ class TestToolDefinitions:
         modes = mcp_server.TOOL_INPUT_SCHEMAS["get_architecture"]["properties"]["mode"]
         assert modes["enum"] == [
             "summary", "symbol", "callers", "callees", "dependencies",
-            "path", "community", "impact",
+            "path", "community", "impact", "definition", "references",
+            "implementations", "type", "diagnostics",
         ]
         tools = mcp_server._build_tool_definitions()
         if tools:
@@ -3451,3 +3452,120 @@ class TestRunServer:
         )
 
         assert result.stdout.strip() == "False False []"
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["definition", "references", "implementations", "type", "diagnostics"],
+)
+def test_precise_modes_require_exact_position_triple(mode: str) -> None:
+    import mcp_server
+
+    error = mcp_server._validate_tool_arguments(
+        "get_architecture",
+        {"directory": "C:/repo", "mode": mode, "path": "pkg/api.py"},
+    )
+    assert error is not None
+    assert "line" in error or "character" in error
+
+
+def test_precise_modes_reject_symbol_substitute() -> None:
+    import mcp_server
+
+    error = mcp_server._validate_tool_arguments(
+        "get_architecture",
+        {
+            "directory": "C:/repo",
+            "mode": "definition",
+            "path": "pkg/api.py",
+            "line": 1,
+            "character": 0,
+            "symbol": "MyClass",
+        },
+    )
+    assert error is not None
+    assert "symbol" in error
+
+
+def test_precise_modes_accept_complete_position() -> None:
+    import mcp_server
+
+    error = mcp_server._validate_tool_arguments(
+        "get_architecture",
+        {
+            "directory": "C:/repo",
+            "mode": "definition",
+            "path": "pkg/api.py",
+            "line": 1,
+            "character": 0,
+        },
+    )
+    assert error is None
+
+
+@pytest.mark.parametrize("mode", ["callers", "callees"])
+def test_positioned_calls_require_complete_triple(mode: str) -> None:
+    import mcp_server
+
+    error = mcp_server._validate_tool_arguments(
+        "get_architecture",
+        {"directory": "C:/repo", "mode": mode, "path": "pkg/api.py", "line": 1},
+    )
+    assert error is not None
+    assert "character" in error or "together" in error
+
+
+@pytest.mark.parametrize("mode", ["callers", "callees"])
+def test_structural_calls_keep_symbol_behavior(mode: str) -> None:
+    import mcp_server
+
+    error = mcp_server._validate_tool_arguments(
+        "get_architecture",
+        {"directory": "C:/repo", "mode": mode, "symbol": "f"},
+    )
+    assert error is None
+
+
+def test_navigation_deadline_is_60s_for_precise_modes() -> None:
+    import mcp_server
+
+    assert (
+        mcp_server._tool_operation_seconds(
+            "get_architecture",
+            {"mode": "definition", "path": "pkg/api.py", "line": 1, "character": 0},
+        )
+        == mcp_server.MCP_LSP_STARTUP_SECONDS
+    )
+    assert (
+        mcp_server._tool_operation_seconds(
+            "get_architecture",
+            {
+                "mode": "callers",
+                "path": "pkg/api.py",
+                "line": 1,
+                "character": 0,
+            },
+        )
+        == mcp_server.MCP_LSP_STARTUP_SECONDS
+    )
+
+
+def test_navigation_deadline_is_10s_for_existing_modes() -> None:
+    import mcp_server
+
+    assert (
+        mcp_server._tool_operation_seconds(
+            "get_architecture", {"mode": "summary"}
+        )
+        == mcp_server.MCP_OPERATION_SECONDS
+    )
+    assert (
+        mcp_server._tool_operation_seconds(
+            "get_architecture", {"mode": "callers", "symbol": "f"}
+        )
+        == mcp_server.MCP_OPERATION_SECONDS
+    )
+    assert (
+        mcp_server._tool_operation_seconds("recall", {"query": "x"})
+        == mcp_server.MCP_OPERATION_SECONDS
+    )
