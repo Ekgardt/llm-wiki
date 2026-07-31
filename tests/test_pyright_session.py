@@ -42,6 +42,10 @@ from pyright_session import (
     PyrightSession,
 )
 from repository_scope import RepositoryScope, resolve_repository_scope
+from workspace_revision import (
+    WorkspaceDelta,
+    compute_workspace_revision,
+)
 
 from tests.code_kernel_helpers import (
     SemanticPyrightFixture,
@@ -3583,5 +3587,284 @@ def test_supported_empty_locations_are_complete_only_after_query_readiness(
             anchor,
             deadline=time.monotonic() + 10,
         ) == ProviderLocations((), "provider_reported", True)
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def _client_messages(fixture: SemanticPyrightFixture, method: str) -> tuple[dict, ...]:
+    return tuple(
+        event["message"]
+        for event in fixture.events()
+        if event.get("kind") == "client-message" and event.get("method") == method
+    )
+
+
+def _wait_client_messages(
+    fixture: SemanticPyrightFixture, method: str, *, count: int = 1
+) -> tuple[dict, ...]:
+    deadline = time.monotonic() + 5
+    while True:
+        messages = _client_messages(fixture, method)
+        if len(messages) >= count or time.monotonic() >= deadline:
+            return messages
+        time.sleep(0.02)
+
+
+def test_first_synchronize_establishes_retained_workspace_revision(
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    try:
+        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        scope = resolve_repository_scope(repository)
+        revision = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        delta = session.synchronize(revision, deadline=time.monotonic() + 10)
+        assert delta == WorkspaceDelta((), (), (), (), False)
+        assert session._workspace_revision is revision
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_changed_open_document_sends_full_did_change_and_increments_version_once(
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    try:
+        document = session.open_document(
+            "pkg/service.py", deadline=time.monotonic() + 10
+        )
+        assert document.version == 1
+        scope = resolve_repository_scope(repository)
+        session.synchronize(
+            compute_workspace_revision(scope, deadline=time.monotonic() + 10),
+            deadline=time.monotonic() + 10,
+        )
+        (repository / "pkg/service.py").write_bytes(
+            b"class Updated:\n    pass\n"
+        )
+        delta = session.synchronize(
+            compute_workspace_revision(scope, deadline=time.monotonic() + 10),
+            deadline=time.monotonic() + 10,
+        )
+        assert delta.changed == ("pkg/service.py",)
+        changes = _wait_client_messages(semantic_pyright, "textDocument/didChange")
+        assert len(changes) == 1
+        body = changes[0]["params"]
+        assert body["textDocument"]["version"] == 2
+        assert body["contentChanges"] == [{"text": "class Updated:\n    pass\n"}]
+        assert session._documents[document.source.uri].version == 2
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_unchanged_content_sends_no_did_change_and_keeps_version(
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    try:
+        document = session.open_document(
+            "pkg/service.py", deadline=time.monotonic() + 10
+        )
+        scope = resolve_repository_scope(repository)
+        session.synchronize(
+            compute_workspace_revision(scope, deadline=time.monotonic() + 10),
+            deadline=time.monotonic() + 10,
+        )
+        delta = session.synchronize(
+            compute_workspace_revision(scope, deadline=time.monotonic() + 10),
+            deadline=time.monotonic() + 10,
+        )
+        assert delta.changed == ()
+        assert _client_messages(semantic_pyright, "textDocument/didChange") == ()
+        assert session._documents[document.source.uri].version == 1
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_created_and_deleted_files_produce_watched_file_events(
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    try:
+        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        scope = resolve_repository_scope(repository)
+        session.synchronize(
+            compute_workspace_revision(scope, deadline=time.monotonic() + 10),
+            deadline=time.monotonic() + 10,
+        )
+        (repository / "pkg/created.py").write_bytes(b"value = 1\n")
+        (repository / "pkg/base.py").unlink()
+        session.synchronize(
+            compute_workspace_revision(scope, deadline=time.monotonic() + 10),
+            deadline=time.monotonic() + 10,
+        )
+        watched = _wait_client_messages(
+            semantic_pyright, "workspace/didChangeWatchedFiles"
+        )
+        assert len(watched) == 1
+        types = sorted(
+            change["type"] for change in watched[0]["params"]["changes"]
+        )
+        assert types == [1, 3]
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_deleted_open_document_sends_did_close_and_clears_retention(
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    try:
+        document = session.open_document(
+            "pkg/service.py", deadline=time.monotonic() + 10
+        )
+        scope = resolve_repository_scope(repository)
+        session.synchronize(
+            compute_workspace_revision(scope, deadline=time.monotonic() + 10),
+            deadline=time.monotonic() + 10,
+        )
+        (repository / "pkg/service.py").unlink()
+        session.synchronize(
+            compute_workspace_revision(scope, deadline=time.monotonic() + 10),
+            deadline=time.monotonic() + 10,
+        )
+        closed = _wait_client_messages(semantic_pyright, "textDocument/didClose")
+        assert len(closed) == 1
+        assert closed[0]["params"]["textDocument"]["uri"] == document.source.uri
+        assert document.source.uri not in session._documents
+        assert document.source.uri not in session._diagnostics
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_rename_closes_old_open_uri_and_reports_watched_events(
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    try:
+        document = session.open_document(
+            "pkg/rename_target.py", deadline=time.monotonic() + 10
+        )
+        scope = resolve_repository_scope(repository)
+        session.synchronize(
+            compute_workspace_revision(scope, deadline=time.monotonic() + 10),
+            deadline=time.monotonic() + 10,
+        )
+        (repository / "pkg/rename_target.py").rename(
+            repository / "pkg/renamed.py"
+        )
+        delta = session.synchronize(
+            compute_workspace_revision(scope, deadline=time.monotonic() + 10),
+            deadline=time.monotonic() + 10,
+        )
+        assert delta.renamed == (("pkg/rename_target.py", "pkg/renamed.py"),)
+        closed = _wait_client_messages(semantic_pyright, "textDocument/didClose")
+        assert len(closed) == 1
+        assert closed[0]["params"]["textDocument"]["uri"] == document.source.uri
+        watched = _wait_client_messages(
+            semantic_pyright, "workspace/didChangeWatchedFiles"
+        )
+        assert len(watched) == 1
+        uris = {
+            (change["uri"].rsplit("/", 1)[-1], change["type"])
+            for change in watched[0]["params"]["changes"]
+        }
+        assert ("renamed.py", 1) in uris
+        assert ("rename_target.py", 3) in uris
+        assert document.source.uri not in session._documents
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_content_hash_mismatch_after_revision_fails_stale(
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    try:
+        document = session.open_document(
+            "pkg/service.py", deadline=time.monotonic() + 10
+        )
+        scope = resolve_repository_scope(repository)
+        session.synchronize(
+            compute_workspace_revision(scope, deadline=time.monotonic() + 10),
+            deadline=time.monotonic() + 10,
+        )
+        (repository / "pkg/service.py").write_bytes(
+            b"class First:\n    pass\n"
+        )
+        revision = compute_workspace_revision(
+            scope, deadline=time.monotonic() + 10
+        )
+        (repository / "pkg/service.py").write_bytes(
+            b"class Second:\n    pass\n"
+        )
+        with pytest.raises(RuntimeError, match="hash differs from the revision"):
+            session.synchronize(revision, deadline=time.monotonic() + 10)
+        assert _client_messages(semantic_pyright, "textDocument/didChange") == ()
+        assert session._documents[document.source.uri].version == 1
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_synchronize_rejects_foreign_checkout_revision(
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+    tmp_path: Path,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    try:
+        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        foreign = replace(
+            compute_workspace_revision(
+                resolve_repository_scope(repository),
+                deadline=time.monotonic() + 10,
+            ),
+            checkout_id="deadbeef",
+        )
+        with pytest.raises(ValueError, match="must describe this checkout"):
+            session.synchronize(foreign, deadline=time.monotonic() + 10)
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_synchronize_does_not_persist_semantic_results(
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    try:
+        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        scope = resolve_repository_scope(repository)
+        session.synchronize(
+            compute_workspace_revision(scope, deadline=time.monotonic() + 10),
+            deadline=time.monotonic() + 10,
+        )
+        cache_root = state_root / "cache"
+        semantic_files = (
+            list(cache_root.rglob("*.json")) if cache_root.exists() else []
+        )
+        lsp_owners = list((state_root / "run" / "lsp").iterdir()) if (
+            state_root / "run" / "lsp"
+        ).exists() else []
+        assert semantic_files == []
+        for owner in lsp_owners:
+            assert not (owner / "diagnostics.json").exists()
+            assert not (owner / "results.json").exists()
     finally:
         session.close(deadline=time.monotonic() + 5)

@@ -54,6 +54,11 @@ from pyright_profile import (
 )
 from reliable_memory import _known_network_path
 from repository_scope import RepositoryScope
+from workspace_revision import (
+    WorkspaceDelta,
+    WorkspaceRevision,
+    diff_workspace_revisions,
+)
 
 STARTUP_SECONDS = 60.0
 MAX_LSP_PROCESSES = 4
@@ -751,6 +756,7 @@ class PyrightSession:
         self._process: LspProcess | None = None
         self._documents: dict[str, OpenDocument] = {}
         self._document_bytes = 0
+        self._workspace_revision: WorkspaceRevision | None = None
         self._readiness_target_uri: str | None = None
         self._generation_nonce: str | None = None
         self._ready_uri_generations: dict[str, str] = {}
@@ -1620,6 +1626,7 @@ class PyrightSession:
                         self._capabilities = {}
                         self._generation_nonce = None
                         self._ready_uri_generations.clear()
+                        self._workspace_revision = None
                         self._diagnostics.clear()
                         self._diagnostic_bytes = 0
                         self._clear_wire_state()
@@ -1661,6 +1668,7 @@ class PyrightSession:
         self._capabilities = {}
         self._generation_nonce = None
         self._ready_uri_generations.clear()
+        self._workspace_revision = None
         self._diagnostics.clear()
         self._diagnostic_bytes = 0
         self._clear_wire_state()
@@ -2443,6 +2451,201 @@ class PyrightSession:
                         return ProviderDiagnostics((), None, True)
                     self._condition.wait(remaining)
 
+    def _watched_uri(self, relative_path: str) -> str:
+        absolute = Path(self._repository.checkout_root, relative_path)
+        return path_to_file_uri(absolute)
+
+    def synchronize(
+        self,
+        revision: WorkspaceRevision,
+        *,
+        deadline: float,
+    ) -> WorkspaceDelta:
+        deadline = _validated_deadline(deadline)
+        if not isinstance(revision, WorkspaceRevision):
+            raise TypeError("revision must be a WorkspaceRevision")
+        if (
+            revision.repository_id != self._repository.repository_id
+            or revision.checkout_id != self._repository.checkout_id
+        ):
+            raise ValueError("workspace revision must describe this checkout")
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Pyright synchronize deadline expired")
+        with self._operation(), self._document_lock:
+            self.start(deadline=deadline)
+            with self._lock:
+                process = self._process
+                prior = self._workspace_revision
+            if process is None:
+                raise RuntimeError("Pyright session is not protocol initialized")
+            if prior is None:
+                with self._lock:
+                    self._workspace_revision = revision
+                return WorkspaceDelta((), (), (), (), False)
+            delta = diff_workspace_revisions(prior, revision)
+            entries = {entry.path: entry for entry in revision.entries}
+            with self._lock:
+                open_by_path: dict[str, OpenDocument] = {
+                    document.source.relative_path: document
+                    for document in self._documents.values()
+                }
+                generation = self._generation_nonce
+            watched_changes: list[dict[str, object]] = []
+            for path in delta.created:
+                watched_changes.append({"uri": self._watched_uri(path), "type": 1})
+            changed_replacements: list[tuple[OpenDocument, bytes, str]] = []
+            for path in delta.changed:
+                document = open_by_path.get(path)
+                if document is None:
+                    watched_changes.append({"uri": self._watched_uri(path), "type": 2})
+                    continue
+                entry = entries.get(path)
+                content = read_stable_bytes(
+                    document.source.absolute_path,
+                    _MAX_DOCUMENT_BYTES,
+                    label="Pyright changed source document",
+                    deadline=deadline,
+                )
+                content.decode("utf-8", errors="strict")
+                digest = hashlib.sha256(content).hexdigest()
+                if entry is None or entry.sha256 != digest:
+                    raise RuntimeError(
+                        "Pyright changed source document hash differs from the revision"
+                    )
+                change_params: dict[str, object] = {
+                    "textDocument": {
+                        "uri": document.source.uri,
+                        "version": document.version + 1,
+                    },
+                    "contentChanges": [
+                        {"text": content.decode("utf-8", errors="strict")}
+                    ],
+                }
+                encode_frame(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "textDocument/didChange",
+                        "params": change_params,
+                    }
+                )
+                changed_replacements.append((document, content, digest, change_params))
+            closed_paths: list[str] = []
+            closed_uris: list[str] = []
+            for path in delta.deleted:
+                document = open_by_path.get(path)
+                if document is not None:
+                    closed_paths.append(path)
+                    closed_uris.append(document.source.uri)
+                watched_changes.append({"uri": self._watched_uri(path), "type": 3})
+            for old_path, new_path in delta.renamed:
+                document = open_by_path.get(old_path)
+                if document is not None:
+                    closed_paths.append(old_path)
+                    closed_uris.append(document.source.uri)
+                watched_changes.append(
+                    {"uri": self._watched_uri(old_path), "type": 3}
+                )
+                watched_changes.append(
+                    {"uri": self._watched_uri(new_path), "type": 1}
+                )
+            for uri in closed_uris:
+                try:
+                    encode_frame(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "textDocument/didClose",
+                            "params": {"textDocument": {"uri": uri}},
+                        }
+                    )
+                except ProtocolViolation:
+                    continue
+                if generation is not None:
+                    try:
+                        process.notify_generation(
+                            "textDocument/didClose",
+                            {"textDocument": {"uri": uri}},
+                            generation_nonce=generation,
+                            deadline=deadline,
+                        )
+                    except (ProtocolViolation, RuntimeError, TimeoutError):
+                        pass
+            for _document, _content, _digest, change_params in changed_replacements:
+                if generation is None:
+                    continue
+                try:
+                    process.notify_generation(
+                        "textDocument/didChange",
+                        change_params,
+                        generation_nonce=generation,
+                        deadline=deadline,
+                    )
+                except (ProtocolViolation, RuntimeError, TimeoutError):
+                    pass
+            with self._lock:
+                for path in closed_paths:
+                    document = open_by_path.get(path)
+                    if document is None:
+                        continue
+                    if self._documents.get(document.source.uri) is document:
+                        del self._documents[document.source.uri]
+                        self._document_bytes -= len(document.content)
+                    self._ready_uri_generations.pop(document.source.uri, None)
+                    snapshot = self._diagnostics.pop(document.source.uri, None)
+                    if snapshot is not None:
+                        self._diagnostic_bytes -= snapshot.retained_bytes
+                for document, content, digest, _change_params in changed_replacements:
+                    if self._documents.get(document.source.uri) is not document:
+                        continue
+                    replacement = OpenDocument(
+                        document.source,
+                        content,
+                        digest,
+                        document.version + 1,
+                    )
+                    self._document_bytes += len(content) - len(document.content)
+                    self._documents[document.source.uri] = replacement
+                    snapshot = self._diagnostics.get(document.source.uri)
+                    if (
+                        snapshot is not None
+                        and snapshot.document_version is not None
+                        and snapshot.document_version < replacement.version
+                    ):
+                        self._diagnostics.pop(document.source.uri, None)
+                        self._diagnostic_bytes -= snapshot.retained_bytes
+                    with self._wire_condition:
+                        if (
+                            generation is not None
+                            and self._wire_generation == generation
+                        ):
+                            self._wire_opened.add(
+                                (generation, document.source.uri, replacement.version)
+                            )
+                            self._wire_condition.notify_all()
+            if watched_changes:
+                params = {"changes": list(watched_changes)}
+                try:
+                    encode_frame(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "workspace/didChangeWatchedFiles",
+                            "params": params,
+                        }
+                    )
+                except ProtocolViolation:
+                    pass
+                else:
+                    try:
+                        process.notify(
+                            "workspace/didChangeWatchedFiles",
+                            params,
+                            deadline=deadline,
+                        )
+                    except (ProtocolViolation, RuntimeError, TimeoutError):
+                        pass
+            with self._lock:
+                self._workspace_revision = revision
+            return delta
+
     def close(self, *, deadline: float) -> None:
         deadline = _validated_deadline(deadline)
         with self._lock:
@@ -2488,6 +2691,7 @@ class PyrightSession:
             self._documents.clear()
             self._document_bytes = 0
             self._readiness_target_uri = None
+            self._workspace_revision = None
             self._generation_nonce = None
             self._ready_uri_generations.clear()
             self._diagnostics.clear()
