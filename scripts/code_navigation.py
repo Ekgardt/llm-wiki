@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
@@ -262,6 +262,58 @@ def _normalize_locations(
     return tuple(normalized), partial
 
 
+def _location_key(location: NavigationLocation) -> tuple[object, ...]:
+    return (
+        location.path,
+        location.range.byte_start,
+        location.range.byte_end,
+        location.resolution,
+        location.provenance[0].source if location.provenance else "",
+    )
+
+
+def _dedupe_locations(
+    locations: tuple[NavigationLocation, ...],
+) -> tuple[NavigationLocation, ...]:
+    seen: set[tuple[object, ...]] = set()
+    result: list[NavigationLocation] = []
+    for location in sorted(locations, key=_location_key):
+        key = _location_key(location)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(location)
+    return tuple(result)
+
+
+def _graph_only_candidates(
+    graph_locations: tuple[NavigationLocation, ...],
+    lsp_locations: tuple[NavigationLocation, ...],
+    graph_provenance: tuple[Provenance, ...],
+) -> tuple[NavigationLocation, ...]:
+    lsp_keys = {
+        (location.path, location.range.byte_start, location.range.byte_end)
+        for location in lsp_locations
+    }
+    appended: list[NavigationLocation] = []
+    for location in graph_locations:
+        if (location.path, location.range.byte_start, location.range.byte_end) in lsp_keys:
+            continue
+        appended.append(
+            NavigationLocation(
+                path=location.path,
+                range=location.range,
+                line=location.line,
+                character=location.character,
+                containing_symbol=location.containing_symbol,
+                signature=location.signature,
+                resolution=ResolutionLabel.GRAPH_CANDIDATE,
+                provenance=graph_provenance,
+            )
+        )
+    return tuple(appended)
+
+
 def _compute_revision(
     repository: RepositoryScope,
     *,
@@ -278,6 +330,9 @@ class CodeNavigation:
         repository: RepositoryScope,
         session: PyrightSession,
         identity: PyrightIdentity,
+        *,
+        structural_candidates: Callable[[NavigationRequest], tuple[NavigationLocation, ...]] | None = None,
+        symbol_resolver: Callable[[str, RepositoryScope], tuple[NavigationLocation, ...]] | None = None,
     ) -> None:
         if not isinstance(repository, RepositoryScope):
             raise TypeError("repository must be a RepositoryScope")
@@ -288,6 +343,8 @@ class CodeNavigation:
         self._repository = repository
         self._session = session
         self._identity = identity
+        self._structural_candidates = structural_candidates
+        self._symbol_resolver = symbol_resolver
         self._lock = threading.Lock()
 
     @property
@@ -507,7 +564,35 @@ class CodeNavigation:
         warnings: tuple[str, ...] = ()
         if partial_locations:
             warnings = (*warnings, "provider locations partially filtered")
-        status = NavigationStatus.OK if not partial_locations else NavigationStatus.PARTIAL
+        merged_locations = normalized_locations
+        resolution_label = ResolutionLabel.LSP_CONFIRMED if normalized_locations else ResolutionLabel.UNRESOLVED
+        if self._structural_candidates is not None:
+            try:
+                graph_locations = tuple(self._structural_candidates(request))
+            except BaseException:
+                graph_locations = ()
+            if graph_locations:
+                graph_provenance = (
+                    Provenance(
+                        source="graph",
+                        provider="evidence-graph",
+                        version="structural",
+                        observation="graph_candidate",
+                    ),
+                )
+                graph_only = _graph_only_candidates(
+                    graph_locations, normalized_locations, graph_provenance
+                )
+                if graph_only:
+                    merged_locations = (*normalized_locations, *graph_only)
+                    resolution_label = (
+                        ResolutionLabel.LSP_AND_GRAPH
+                        if normalized_locations
+                        else ResolutionLabel.GRAPH_CANDIDATE
+                    )
+                    warnings = (*warnings, "structural fallback appended")
+        merged_locations = _dedupe_locations(merged_locations)
+        status = NavigationStatus.OK if not warnings else NavigationStatus.PARTIAL
         return NavigationResult(
             status=status,
             requested_capability=request.capability,
@@ -522,17 +607,13 @@ class CodeNavigation:
             position_encoding=self._session.position_encoding,
             readiness=self._session.readiness,
             symbol=None,
-            total=len(normalized_locations),
+            total=len(merged_locations),
             offset=request.offset,
             limit=request.limit,
-            locations=normalized_locations,
+            locations=merged_locations,
             diagnostics=(),
             hover=hover,
-            resolution=(
-                ResolutionLabel.LSP_CONFIRMED
-                if normalized_locations
-                else ResolutionLabel.UNRESOLVED
-            ),
+            resolution=resolution_label,
             provenance=provenance,
             warnings=warnings,
         )
@@ -584,7 +665,107 @@ class CodeNavigation:
         repository: RepositoryScope,
         deadline: float | None = None,
     ) -> NavigationResult:
-        raise NotImplementedError("resolve_symbol requires structural evidence wiring")
+        if not isinstance(symbol, str) or not symbol:
+            raise ValueError("symbol must be a non-empty string")
+        if repository.checkout_id != self._repository.checkout_id:
+            raise ValueError("repository must match this navigation repository")
+        revision = ""
+        try:
+            revision_revision = compute_workspace_revision(
+                self._repository,
+                deadline=deadline,
+            )
+            revision = revision_revision.revision_sha256
+        except (OSError, ValueError, RuntimeError, TimeoutError):
+            pass
+        candidates: tuple[NavigationLocation, ...] = ()
+        if self._symbol_resolver is not None:
+            try:
+                candidates = tuple(self._symbol_resolver(symbol, repository))
+            except BaseException:
+                candidates = ()
+        provenance = (
+            Provenance(
+                source="graph",
+                provider="evidence-graph",
+                version="structural",
+                observation="name_resolution",
+            ),
+        )
+        if len(candidates) > 1:
+            return NavigationResult(
+                status=NavigationStatus.PARTIAL,
+                requested_capability=Capability.DEFINITIONS,
+                effective_capability=Capability.DEFINITIONS,
+                provider=None,
+                provider_version=None,
+                repository_id=self._repository.repository_id,
+                checkout_id=self._repository.checkout_id,
+                workspace_revision_before=revision,
+                workspace_revision_after=revision,
+                document_version=None,
+                position_encoding=None,
+                readiness="not_ready",
+                symbol=symbol,
+                total=len(candidates),
+                offset=0,
+                limit=100,
+                locations=candidates,
+                diagnostics=(),
+                hover=None,
+                resolution=ResolutionLabel.AMBIGUOUS,
+                provenance=provenance,
+                warnings=("multiple declarations require disambiguation",),
+            )
+        if len(candidates) == 1:
+            return NavigationResult(
+                status=NavigationStatus.OK,
+                requested_capability=Capability.DEFINITIONS,
+                effective_capability=Capability.DEFINITIONS,
+                provider=None,
+                provider_version=None,
+                repository_id=self._repository.repository_id,
+                checkout_id=self._repository.checkout_id,
+                workspace_revision_before=revision,
+                workspace_revision_after=revision,
+                document_version=None,
+                position_encoding=None,
+                readiness="not_ready",
+                symbol=symbol,
+                total=1,
+                offset=0,
+                limit=100,
+                locations=candidates,
+                diagnostics=(),
+                hover=None,
+                resolution=ResolutionLabel.GRAPH_CONFIRMED,
+                provenance=provenance,
+                warnings=(),
+            )
+        return NavigationResult(
+            status=NavigationStatus.PARTIAL,
+            requested_capability=Capability.DEFINITIONS,
+            effective_capability=None,
+            provider=None,
+            provider_version=None,
+            repository_id=self._repository.repository_id,
+            checkout_id=self._repository.checkout_id,
+            workspace_revision_before=revision,
+            workspace_revision_after=revision,
+            document_version=None,
+            position_encoding=None,
+            readiness="not_ready",
+            symbol=symbol,
+            total=0,
+            offset=0,
+            limit=100,
+            locations=(),
+            diagnostics=(),
+            hover=None,
+            resolution=ResolutionLabel.UNRESOLVED,
+            provenance=(),
+            warnings=("no structural candidates",),
+        )
 
     def verify_edge(
         self,
@@ -594,7 +775,49 @@ class CodeNavigation:
         repository: RepositoryScope,
         deadline: float,
     ) -> NavigationResult:
-        raise NotImplementedError("verify_edge requires structural evidence wiring")
+        if repository.checkout_id != self._repository.checkout_id:
+            raise ValueError("repository must match this navigation repository")
+        revision = ""
+        try:
+            revision_revision = compute_workspace_revision(
+                self._repository,
+                deadline=deadline,
+            )
+            revision = revision_revision.revision_sha256
+        except (OSError, ValueError, RuntimeError, TimeoutError):
+            pass
+        provenance = (
+            Provenance(
+                source="graph",
+                provider="evidence-graph",
+                version="structural",
+                observation="edge_verification",
+            ),
+        )
+        return NavigationResult(
+            status=NavigationStatus.PARTIAL,
+            requested_capability=Capability.CALLS,
+            effective_capability=Capability.CALLS,
+            provider=None,
+            provider_version=None,
+            repository_id=self._repository.repository_id,
+            checkout_id=self._repository.checkout_id,
+            workspace_revision_before=revision,
+            workspace_revision_after=revision,
+            document_version=None,
+            position_encoding=None,
+            readiness="not_ready",
+            symbol=None,
+            total=0,
+            offset=0,
+            limit=100,
+            locations=(),
+            diagnostics=(),
+            hover=None,
+            resolution=ResolutionLabel.UNRESOLVED,
+            provenance=provenance,
+            warnings=("structural edge verification not wired",),
+        )
 
     def close(self, *, deadline: float) -> None:
         self._session.close(deadline=deadline)
