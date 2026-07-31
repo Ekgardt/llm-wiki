@@ -10,6 +10,7 @@ import shutil
 import stat
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import FrozenInstanceError, fields, replace
 from pathlib import Path
 from types import MappingProxyType
@@ -40,6 +41,7 @@ from pyright_session import (
     ProviderHover,
     ProviderLocations,
     PyrightSession,
+    PyrightSessionManager,
 )
 from repository_scope import RepositoryScope, resolve_repository_scope
 from workspace_revision import (
@@ -49,6 +51,7 @@ from workspace_revision import (
 
 from tests.code_kernel_helpers import (
     SemanticPyrightFixture,
+    create_python_repository,
     create_semantic_pyright_fixture,
 )
 
@@ -3868,3 +3871,168 @@ def test_synchronize_does_not_persist_semantic_results(
             assert not (owner / "results.json").exists()
     finally:
         session.close(deadline=time.monotonic() + 5)
+
+
+def _patch_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+    identities: Mapping[str, object],
+) -> None:
+    import pyright_profile
+
+    def _fake_discover(repository, *, state_root, deadline=None, **kwargs):
+        return identities[repository.checkout_id]
+
+    monkeypatch.setattr(pyright_profile, "discover_pyright", _fake_discover)
+
+
+def _make_repo_fixture(tmp_path: Path, name: str) -> tuple[Path, SemanticPyrightFixture]:
+    repo = create_python_repository(tmp_path / name)
+    fixture = create_semantic_pyright_fixture(repo)
+    return repo, fixture
+
+
+def test_manager_reuses_matching_live_session(
+    tmp_path: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, fixture = _make_repo_fixture(tmp_path, "repo")
+    scope = resolve_repository_scope(repo)
+    _patch_discovery(monkeypatch, {scope.checkout_id: fixture.identity})
+    manager = PyrightSessionManager(state_root=state_root)
+    try:
+        first = manager.get(scope, deadline=time.monotonic() + 10)
+        second = manager.get(scope, deadline=time.monotonic() + 10)
+        assert first is second
+        assert len(manager._sessions) == 1
+    finally:
+        manager.close_all(deadline=time.monotonic() + 5)
+
+
+def test_manager_keys_by_checkout_and_profile_identity(
+    tmp_path: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_a, fixture_a = _make_repo_fixture(tmp_path, "a")
+    repo_b, fixture_b = _make_repo_fixture(tmp_path, "b")
+    scope_a = resolve_repository_scope(repo_a)
+    scope_b = resolve_repository_scope(repo_b)
+    _patch_discovery(
+        monkeypatch,
+        {
+            scope_a.checkout_id: fixture_a.identity,
+            scope_b.checkout_id: fixture_b.identity,
+        },
+    )
+    manager = PyrightSessionManager(state_root=state_root)
+    try:
+        session_a = manager.get(scope_a, deadline=time.monotonic() + 10)
+        session_b = manager.get(scope_b, deadline=time.monotonic() + 10)
+        assert session_a is not session_b
+        assert len(manager._sessions) == 2
+    finally:
+        manager.close_all(deadline=time.monotonic() + 5)
+
+
+def test_manager_evicts_lru_idle_and_never_exceeds_four(
+    tmp_path: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repos = []
+    identities: dict[str, object] = {}
+    scopes = []
+    for index in range(5):
+        repo, fixture = _make_repo_fixture(tmp_path, f"r{index}")
+        scope = resolve_repository_scope(repo)
+        scopes.append(scope)
+        identities[scope.checkout_id] = fixture.identity
+        repos.append(repo)
+    _patch_discovery(monkeypatch, identities)
+    manager = PyrightSessionManager(state_root=state_root)
+    try:
+        first = manager.get(scopes[0], deadline=time.monotonic() + 10)
+        for index in range(1, 5):
+            manager.get(scopes[index], deadline=time.monotonic() + 10)
+        assert len(manager._sessions) == 4
+        assert first._closed
+        fifth = manager.get(scopes[0], deadline=time.monotonic() + 10)
+        assert fifth is not first
+        assert len(manager._sessions) == 4
+    finally:
+        manager.close_all(deadline=time.monotonic() + 5)
+
+
+def test_manager_returns_not_ready_when_all_four_active(
+    tmp_path: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repos = []
+    identities: dict[str, object] = {}
+    scopes = []
+    for index in range(5):
+        repo, fixture = _make_repo_fixture(tmp_path, f"active{index}")
+        scope = resolve_repository_scope(repo)
+        scopes.append(scope)
+        identities[scope.checkout_id] = fixture.identity
+        repos.append(repo)
+    _patch_discovery(monkeypatch, identities)
+    manager = PyrightSessionManager(state_root=state_root)
+    sessions: list[PyrightSession] = []
+    try:
+        for index in range(4):
+            session = manager.get(scopes[index], deadline=time.monotonic() + 10)
+            sessions.append(session)
+            session._active_operations = 1
+        denied = manager.get(scopes[4], deadline=time.monotonic() + 10)
+        assert denied._capacity_locked is True
+        assert denied.start(deadline=time.monotonic() + 2) is None
+        assert denied.readiness == "not_ready"
+        assert "pyright_capacity_exhausted" in denied.degradation_codes
+        assert len(manager._sessions) == 4
+    finally:
+        manager.close_all(deadline=time.monotonic() + 5)
+
+
+def test_manager_close_all_closes_every_retained_session(
+    tmp_path: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repos = []
+    identities: dict[str, object] = {}
+    scopes = []
+    for index in range(2):
+        repo, fixture = _make_repo_fixture(tmp_path, f"close{index}")
+        scope = resolve_repository_scope(repo)
+        scopes.append(scope)
+        identities[scope.checkout_id] = fixture.identity
+        repos.append(repo)
+    _patch_discovery(monkeypatch, identities)
+    manager = PyrightSessionManager(state_root=state_root)
+    retained = [
+        manager.get(scopes[0], deadline=time.monotonic() + 10),
+        manager.get(scopes[1], deadline=time.monotonic() + 10),
+    ]
+    manager.close_all(deadline=time.monotonic() + 5)
+    assert all(session._closed for session in retained)
+    assert manager._sessions == {}
+
+
+def test_manager_registers_atexit_once(
+    tmp_path: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, fixture = _make_repo_fixture(tmp_path, "atexit")
+    scope = resolve_repository_scope(repo)
+    _patch_discovery(monkeypatch, {scope.checkout_id: fixture.identity})
+    manager = PyrightSessionManager(state_root=state_root)
+    assert manager._atexit_registered is False
+    manager.get(scope, deadline=time.monotonic() + 10)
+    assert manager._atexit_registered is True
+    manager.get(scope, deadline=time.monotonic() + 10)
+    assert manager._atexit_registered is True
+    manager.close_all(deadline=time.monotonic() + 5)

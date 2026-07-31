@@ -775,6 +775,7 @@ class PyrightSession:
         self._startup_atexit_registered = False
         self._closing = False
         self._closed = False
+        self._capacity_locked = False
 
     @property
     def readiness(self) -> str:
@@ -1420,6 +1421,20 @@ class PyrightSession:
             with self._lock:
                 if self._closed or self._closing:
                     raise RuntimeError("Pyright session is closed")
+                if self._capacity_locked:
+                    self._readiness = "not_ready"
+                    self._readiness_evidence = ()
+                    self._position_encoding = None
+                    self._capabilities = {}
+                    self._degradation_codes = tuple(
+                        sorted(
+                            {
+                                *self._degradation_codes,
+                                "pyright_capacity_exhausted",
+                            }
+                        )
+                    )
+                    return
                 if bootstrap_timeout_seconds <= 0:
                     self._readiness = "not_ready"
                     self._readiness_evidence = ()
@@ -2702,3 +2717,138 @@ class PyrightSession:
             self._closing = False
             self._closed = True
             self._condition.notify_all()
+
+
+class PyrightSessionManager:
+    """Bound live Pyright sessions to four processes per owning MCP process."""
+
+    def __init__(self, *, state_root: Path) -> None:
+        if not isinstance(state_root, Path):
+            raise TypeError("state_root must be a Path")
+        self._state_root = state_root
+        self._lock = threading.RLock()
+        self._sessions: dict[tuple[str, str, str], PyrightSession] = {}
+        self._key_locks: dict[tuple[str, str, str], threading.Lock] = {}
+        self._atexit_registered = False
+        self._closed = False
+
+    @staticmethod
+    def _profile_key(
+        repository: RepositoryScope,
+        identity: PyrightIdentity,
+    ) -> tuple[str, str, str]:
+        return (
+            repository.checkout_id,
+            identity.initialization_options_sha256,
+            identity.configuration_sha256,
+        )
+
+    def _register_atexit_locked(self) -> None:
+        if not self._atexit_registered:
+            atexit.register(self._atexit_close_all)
+            self._atexit_registered = True
+
+    def _atexit_close_all(self) -> None:
+        try:
+            self.close_all(deadline=time.monotonic() + _OWNER_CLEANUP_SECONDS)
+        except BaseException:
+            pass
+
+    def _live_sessions_locked(self) -> list[PyrightSession]:
+        return [session for session in self._sessions.values() if not session._closed]
+
+    def _evict_lru_idle_locked(self, deadline: float) -> bool:
+        live = self._live_sessions_locked()
+        if len(live) < MAX_LSP_PROCESSES:
+            return True
+        idle = sorted(
+            (session for session in live if session.active_operations == 0),
+            key=lambda session: session.last_used_monotonic,
+        )
+        if not idle:
+            return False
+        evicted = idle[0]
+        evicted_key = next(
+            key for key, session in self._sessions.items() if session is evicted
+        )
+        del self._sessions[evicted_key]
+        self._key_locks.pop(evicted_key, None)
+        try:
+            evicted.close(deadline=deadline)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            pass
+        return True
+
+    def get(
+        self,
+        repository: RepositoryScope,
+        *,
+        deadline: float,
+    ) -> PyrightSession:
+        deadline = _validated_deadline(deadline)
+        if not isinstance(repository, RepositoryScope):
+            raise TypeError("repository must be a RepositoryScope")
+        from pyright_profile import discover_pyright
+
+        identity = discover_pyright(
+            repository,
+            state_root=self._state_root,
+            deadline=deadline,
+        )
+        if not identity.qualified:
+            session = PyrightSession(repository, identity, state_root=self._state_root)
+            return session
+        key = self._profile_key(repository, identity)
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Pyright session manager is closed")
+            key_lock = self._key_locks.setdefault(key, threading.Lock())
+        with key_lock:
+            with self._lock:
+                existing = self._sessions.get(key)
+                if existing is not None and not existing._closed:
+                    return existing
+                if not self._evict_lru_idle_locked(deadline):
+                    denied = PyrightSession(
+                        repository,
+                        identity,
+                        state_root=self._state_root,
+                    )
+                    denied._capacity_locked = True
+                    return denied
+                session = PyrightSession(
+                    repository,
+                    identity,
+                    state_root=self._state_root,
+                )
+                self._sessions[key] = session
+                self._register_atexit_locked()
+                return session
+
+    def close_all(self, *, deadline: float) -> None:
+        deadline = _validated_deadline(deadline)
+        with self._lock:
+            sessions = tuple(self._sessions.values())
+            self._sessions.clear()
+            self._key_locks.clear()
+            self._closed = True
+        last_error: BaseException | None = None
+        for session in sessions:
+            if session._closed:
+                continue
+            try:
+                session.close(deadline=deadline)
+            except (KeyboardInterrupt, SystemExit):
+                try:
+                    session.close(
+                        deadline=min(deadline, time.monotonic() + _OWNER_CLEANUP_SECONDS)
+                    )
+                except BaseException:
+                    pass
+                raise
+            except BaseException as error:
+                last_error = error
+        if last_error is not None:
+            raise last_error
