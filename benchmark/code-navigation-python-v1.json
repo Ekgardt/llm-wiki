@@ -1,0 +1,17 @@
+{
+  "schema_version": "code-navigation-python/v1",
+  "fixture_seed": 411,
+  "fixture_lines": 100000,
+  "python_min": "3.10",
+  "pyright_version": "1.1.411",
+  "pyright_package_sha256": "bd5c488fc20fa237a944279bf32cae2f986cf10d5d5d9e8705819859daeb2f4a",
+  "node_major": 22,
+  "definition_queries": 200,
+  "reference_queries": 100,
+  "call_queries": 100,
+  "edit_rename_delete_cycles": 50,
+  "crash_cycles": 20,
+  "default_limit": 10,
+  "max_estimated_tokens": 1200,
+  "market_superiority_claimed": false
+}

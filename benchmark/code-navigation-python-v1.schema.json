@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "code-navigation-python-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "fixture_seed",
+    "fixture_lines",
+    "python_min",
+    "pyright_version",
+    "pyright_package_sha256",
+    "node_major",
+    "definition_queries",
+    "reference_queries",
+    "call_queries",
+    "edit_rename_delete_cycles",
+    "crash_cycles",
+    "default_limit",
+    "max_estimated_tokens",
+    "market_superiority_claimed"
+  ],
+  "properties": {
+    "schema_version": {"type": "string", "const": "code-navigation-python/v1"},
+    "fixture_seed": {"type": "integer", "minimum": 0},
+    "fixture_lines": {"type": "integer", "minimum": 0},
+    "python_min": {"type": "string"},
+    "pyright_version": {"type": "string"},
+    "pyright_package_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "node_major": {"type": "integer", "minimum": 0},
+    "definition_queries": {"type": "integer", "minimum": 0},
+    "reference_queries": {"type": "integer", "minimum": 0},
+    "call_queries": {"type": "integer", "minimum": 0},
+    "edit_rename_delete_cycles": {"type": "integer", "minimum": 0},
+    "crash_cycles": {"type": "integer", "minimum": 0},
+    "default_limit": {"type": "integer", "minimum": 1, "maximum": 100},
+    "max_estimated_tokens": {"type": "integer", "minimum": 1},
+    "market_superiority_claimed": {"type": "boolean"}
+  }
+}

@@ -82,3 +82,34 @@ uv run python benchmark/run_comparative.py --run `
 ```
 
 The public claim gate remains closed unless paired evidence is complete, the frozen confidence bounds pass strictly, GateF passes, and all three hard gates pass. Do not publish fixture output or partial real output as comparative evidence.
+
+## Python code navigation qualification
+
+A separate, deterministic qualification corpus lives at
+`benchmark/code-navigation-python-v1.json` with its closed schema
+`benchmark/code-navigation-python-v1.schema.json`. The generator
+`benchmark/generate_python_qualification.py` emits a deterministic 100,000-line
+Python repository seeded at `411` against pinned Pyright `1.1.411`. It never
+invokes Git, Pyright, package installation, or the network.
+
+Run the correctness-only fixture gate:
+
+```powershell
+uv run python benchmark/run_code_navigation.py --fixture --correctness-only --require-gates
+```
+
+The full qualification adds latency, token, and RSS gates on Linux:
+
+```powershell
+uv run python benchmark/run_code_navigation.py --fixture --qualification --require-gates
+```
+
+Acceptance requires: definitions at least 99%, reference F1 at least 95%, zero
+stale answers, zero orphan processes inside the platform-qualified ownership
+boundary, 100% bounded recovery, at most 10 default items and 1,200 estimated
+tokens, warm overhead at most 20 ms at p95, cold readiness at most 60 seconds,
+and client peak RSS below 100 MiB excluding the Pyright process tree.
+
+Market superiority remains unclaimed. Comparative measurements are recorded only
+against the named pinned releases, and the public result stays unclaimed until a
+separately approved paired benchmark passes the predefined gates.
