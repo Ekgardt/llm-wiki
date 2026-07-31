@@ -94,6 +94,7 @@ _MAX_QUEUED_WRITES = MAX_PENDING_REQUESTS * 4
 _MAX_ORDINARY_WRITES = _MAX_QUEUED_WRITES - MAX_PENDING_REQUESTS
 _INTERNAL_WRITE_SECONDS = 1.0
 _OWNER_JOIN_SECONDS = 1.0
+_MINIMUM_THREAD_START_SECONDS = 0.5
 
 
 class ProtocolViolation(RuntimeError):
@@ -542,10 +543,14 @@ class LspProtocol:
             daemon=True,
         )
         try:
+            thread_start_deadline = max(
+                startup_deadline,
+                time.monotonic() + _MINIMUM_THREAD_START_SECONDS,
+            )
             self.writer_thread.start()
             self.reader_thread.start()
-            self._wait_owner_started(self._writer_started, "writer", startup_deadline)
-            self._wait_owner_started(self._reader_started, "reader", startup_deadline)
+            self._wait_owner_started(self._writer_started, "writer", thread_start_deadline)
+            self._wait_owner_started(self._reader_started, "reader", thread_start_deadline)
             self._raise_owner_start_error()
         except BaseException as startup_error:
             self._io_stopped.set()
@@ -558,7 +563,10 @@ class LspProtocol:
                     self._cancel_owner_io(owner)
             self._interrupt_stream(self._reader)
             self._interrupt_stream(self._writer)
-            cleanup_deadline = startup_deadline
+            cleanup_deadline = max(
+                startup_deadline,
+                time.monotonic() + _MINIMUM_THREAD_START_SECONDS,
+            )
             cleanup_errors: list[BaseException] = []
             for owner in (self.reader_thread, self.writer_thread):
                 try:
