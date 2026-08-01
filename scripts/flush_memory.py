@@ -42,6 +42,7 @@ import stat
 import sys
 import tempfile
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -90,6 +91,7 @@ class FlushProcessStatus:
     durable: bool
     project_slug: str
     project_root: str
+    project_identity_confirmed: bool = False
 
 
 def _classify_response(raw: str) -> tuple[str, str]:
@@ -154,6 +156,8 @@ def _occurred_datetime(value: str | None, fallback: datetime | None = None) -> d
 def _resolve_project_identity(
     project_slug: str | None,
     project_root: str | None,
+    *,
+    env: Mapping[str, str] | None = None,
 ) -> tuple[str, Path] | None:
     explicit = str(project_slug or "").strip()
     raw_root = str(project_root or "").strip()
@@ -166,7 +170,7 @@ def _resolve_project_identity(
 
         resolution = resolve_project_root(
             {"project_root": raw_root} if raw_root else {},
-            env=os.environ,
+            env=os.environ if env is None else env,
         )
         resolved_root = resolution.root
         if resolved_root is None or not resolved_root.is_dir():
@@ -424,6 +428,7 @@ def _build_flush_queue_payload(
     project_slug: str = "",
     project_root: str = "",
     occurred_at: str = "",
+    project_identity_confirmed: bool = False,
 ) -> dict[str, object] | None:
     """Build one redacted immediate/deferred classification request."""
     if not transcript_excerpt.strip():
@@ -499,7 +504,7 @@ non-blank line MUST be the tier token.
         "log. You only emit FLUSH_MAJOR when you can point to a concrete "
         "decision or lesson in the transcript. No preamble, no apologies."
     )
-    return {
+    payload: dict[str, object] = {
         "prompt": prompt,
         "system_prompt": system_prompt,
         "max_tokens": 1500,
@@ -511,6 +516,48 @@ non-blank line MUST be the tier token.
         "project_root": project_root,
         "occurred_at": occurred_at,
     }
+    provenance_fields = (
+        "event",
+        "session_id",
+        "trigger",
+        "project_slug",
+        "project_root",
+        "occurred_at",
+        "enqueued_by",
+    )
+    provenance_values = tuple(payload[field] for field in provenance_fields)
+    complete = all(
+        isinstance(value, str)
+        and value == value.strip()
+        and 0 < len(value) <= MAX_PROVENANCE_CHARS
+        and not any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in value)
+        and value
+        == " ".join(redact_secrets(str(value or "")).split())[:MAX_PROVENANCE_CHARS]
+        for value in provenance_values
+    )
+    if not project_identity_confirmed or not complete:
+        return payload
+    if (
+        payload["event"] not in {"session-end", "pre-compact"}
+        or any(
+            str(payload[field]).casefold() == "unknown"
+            for field in ("session_id", "project_slug", "project_root")
+        )
+        or payload["enqueued_by"] != "flush_memory"
+    ):
+        return payload
+    raw_occurred_at = str(payload["occurred_at"])
+    normalized_occurred_at = (
+        f"{raw_occurred_at[:-1]}+00:00"
+        if raw_occurred_at.endswith(("Z", "z"))
+        else raw_occurred_at
+    )
+    try:
+        datetime.fromisoformat(normalized_occurred_at)
+    except ValueError:
+        return payload
+    payload["provenance_version"] = 1
+    return payload
 
 
 def _enqueue_flush_payload(payload: dict[str, object]) -> bool:
@@ -533,6 +580,7 @@ def _enqueue_transcript_fallback(
     project_slug: str,
     project_root: str,
     occurred_at: str,
+    project_identity_confirmed: bool = False,
 ) -> bool:
     try:
         payload = _build_flush_queue_payload(
@@ -543,6 +591,7 @@ def _enqueue_transcript_fallback(
             project_slug=project_slug,
             project_root=project_root,
             occurred_at=occurred_at,
+            project_identity_confirmed=project_identity_confirmed,
         )
     except Exception:
         return False
@@ -559,6 +608,7 @@ def summarize_with_llm(
     project_root: str = "",
     occurred_at: str = "",
     enqueue_on_unavailable: bool = True,
+    project_identity_confirmed: bool = False,
 ) -> str:
     """Ask the LLM to classify + distill the transcript into a tier + body."""
     request = _build_flush_queue_payload(
@@ -569,6 +619,7 @@ def summarize_with_llm(
         project_slug=project_slug,
         project_root=project_root,
         occurred_at=occurred_at,
+        project_identity_confirmed=project_identity_confirmed,
     )
     if request is None:
         return ""
@@ -772,9 +823,16 @@ def _process_flush(
 ) -> FlushProcessStatus:
     project_slug = str(getattr(args, "project_slug", ""))
     project_root = str(getattr(args, "project_root", ""))
+    project_identity_confirmed = False
 
     def result(code: int, durable: bool) -> FlushProcessStatus:
-        return FlushProcessStatus(code, durable, project_slug, project_root)
+        return FlushProcessStatus(
+            code,
+            durable,
+            project_slug,
+            project_root,
+            project_identity_confirmed,
+        )
 
     try:
         identity = _resolve_project_identity(project_slug, project_root)
@@ -784,6 +842,7 @@ def _process_flush(
         return result(0, False)
     project_slug, resolved_project_root = identity
     project_root = str(resolved_project_root)
+    project_identity_confirmed = True
 
     # Read-only peek for the dedupe short-circuit; the real write happens
     # inside update_state() below so we don't race with compile_memory.
@@ -821,6 +880,7 @@ def _process_flush(
                 project_root=project_root,
                 occurred_at=occurred_at,
                 enqueue_on_unavailable=staged_transcript is None,
+                project_identity_confirmed=project_identity_confirmed,
             )
             if transcript
             else ""
@@ -1002,6 +1062,7 @@ def main() -> int:
         project_slug=status.project_slug,
         project_root=status.project_root,
         occurred_at=occurred_at,
+        project_identity_confirmed=status.project_identity_confirmed,
     ):
         return 0 if _delete_staged_transcript(staged_path) else 2
     return status.code or 2

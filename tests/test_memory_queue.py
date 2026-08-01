@@ -792,6 +792,21 @@ def test_fifo_sequence_lock_does_not_deadlock_sdk_lease(clean_queue):
     assert result[0]["task_id"] == first_id
 
 
+def _transitional_flush_payload(**overrides):
+    payload = {
+        "prompt": "classify transitional work",
+        "event": "pre-compact",
+        "session_id": "source-session",
+        "trigger": "opencode-compacting",
+        "project_slug": "unknown",
+        "project_root": "",
+        "occurred_at": "2026-07-31T12:34:56+00:00",
+        "enqueued_by": "flush_memory",
+    }
+    payload.update(overrides)
+    return payload
+
+
 def _run_cli(memory_queue, monkeypatch, capsys, *args, stdin=""):
     monkeypatch.setattr(sys, "argv", ["memory_queue.py", *args])
     monkeypatch.setattr(sys, "stdin", io.StringIO(stdin))
@@ -858,6 +873,8 @@ def test_sdk_cli_prepares_and_applies_one_query(clean_queue, monkeypatch, capsys
     assert prepared["system_prompt"] == "rules"
     assert prepared["lease_id"]
     assert len(prepared["digest"]) == 64
+    assert "recover_project_root" not in prepared
+    assert "source_session_id" not in prepared
     assert len(list(clean_queue._queue_dir().glob("*.processing"))) == 1
 
     code, captured = _run_cli(
@@ -874,6 +891,520 @@ def test_sdk_cli_prepares_and_applies_one_query(clean_queue, monkeypatch, capsys
     assert [task["payload"]["prompt"] for task in clean_queue.list_pending()] == ["second"]
 
 
+def test_sdk_apply_rederives_result_type_from_digest_covered_task(
+    clean_queue,
+    tmp_path,
+    monkeypatch,
+):
+    daily_dir = tmp_path / "knowledge" / "daily"
+    monkeypatch.setattr(clean_queue, "_daily_dir", lambda: daily_dir)
+
+    query_id = clean_queue.enqueue("query", {"prompt": "answer the query"})
+    query_prepared = clean_queue.prepare_sdk_task()
+    query_lease_path = clean_queue._queue_dir() / f"{query_id}.processing"
+    query_lease = json.loads(query_lease_path.read_text(encoding="utf-8"))
+    query_lease["_sdk_lease"]["result_type"] = "flush"
+    assert clean_queue._task_digest(query_lease) == query_prepared["digest"]
+    clean_queue._atomic_write_json(query_lease_path, query_lease)
+    query_result = clean_queue.apply_sdk_result(
+        {**query_prepared, "success": True, "response": "query answer"}
+    )
+
+    flush_id = clean_queue.enqueue("flush", {"prompt": "classify legacy flush"})
+    flush_prepared = clean_queue.prepare_sdk_task()
+    flush_lease_path = clean_queue._queue_dir() / f"{flush_id}.processing"
+    flush_lease = json.loads(flush_lease_path.read_text(encoding="utf-8"))
+    flush_lease["_sdk_lease"]["result_type"] = "query"
+    assert clean_queue._task_digest(flush_lease) == flush_prepared["digest"]
+    clean_queue._atomic_write_json(flush_lease_path, flush_lease)
+    flush_result = clean_queue.apply_sdk_result(
+        {**flush_prepared, "success": True, "response": "FLUSH_OK"}
+    )
+
+    results_dir = clean_queue._queue_dir().parent / "queue-results"
+    query_output = results_dir / f"{query_id}.txt"
+    flush_output = results_dir / f"{flush_id}.txt"
+    assert query_result == (True, "acknowledged")
+    assert flush_result == (True, "acknowledged")
+    assert (
+        query_output.exists(),
+        flush_output.exists(),
+        daily_dir.exists(),
+    ) == (True, False, False)
+    assert query_output.read_text(encoding="utf-8") == "query answer"
+    assert clean_queue.list_pending() == []
+
+
+def test_prepare_exposes_recovery_only_for_unversioned_transitional_flush(clean_queue):
+    transitional_id = clean_queue.enqueue("flush", _transitional_flush_payload())
+
+    prepared = clean_queue.prepare_sdk_task()
+
+    assert prepared["task_id"] == transitional_id
+    assert prepared["recover_project_root"] is True
+    assert prepared["source_session_id"] == "source-session"
+    lease_path = clean_queue._queue_dir() / f"{transitional_id}.processing"
+    leased = json.loads(lease_path.read_text(encoding="utf-8"))
+    assert "recover_project_root" not in leased["payload"]
+    assert "source_session_id" not in leased["payload"]
+    assert "recover_project_root" not in leased["_sdk_lease"]
+    assert "source_session_id" not in leased["_sdk_lease"]
+    assert clean_queue.apply_sdk_result(
+        {**prepared, "success": False, "error": "lookup unavailable"}
+    ) == (True, "failure recorded")
+    [retained] = clean_queue.list_pending()
+    assert retained["id"] == transitional_id
+    assert retained["attempts"] == 1
+    assert retained["last_error"] == "lookup unavailable"
+
+    non_recovery_tasks = [
+        ("query", {"prompt": "normal query"}),
+        (
+            "flush",
+            {
+                "prompt": "legacy flush",
+                "event": "pre-compact",
+                "enqueued_by": "flush_memory",
+            },
+        ),
+        (
+            "flush",
+            {
+                "prompt": "persisted unversioned flush",
+                "project_slug": "alpha",
+                "project_root": "D:/projects/alpha",
+            },
+        ),
+        (
+            "flush",
+            {
+                "prompt": "persisted version one flush",
+                "provenance_version": 1,
+                "event": "session-end",
+                "session_id": "versioned-session",
+                "trigger": "stop",
+                "project_slug": "alpha",
+                "project_root": "D:/projects/alpha",
+                "occurred_at": "2026-07-31T12:34:56Z",
+                "enqueued_by": "flush_memory",
+            },
+        ),
+    ]
+    for task_type, payload in non_recovery_tasks:
+        task_id = clean_queue.enqueue(task_type, payload)
+        non_recovery = clean_queue.prepare_sdk_task()
+        assert non_recovery["task_id"] == task_id
+        assert "recover_project_root" not in non_recovery
+        assert "source_session_id" not in non_recovery
+        assert clean_queue.apply_sdk_result(
+            {**non_recovery, "success": False, "error": "test settlement"}
+        ) == (True, "failure recorded")
+
+
+def test_prepare_rejects_malformed_flush_provenance_before_provider_work(clean_queue):
+    malformed_payloads = [
+        {
+            "prompt": "unsupported version",
+            "provenance_version": 2,
+            "event": "pre-compact",
+            "session_id": "source-session",
+            "trigger": "opencode-compacting",
+            "project_slug": "alpha",
+            "project_root": "D:/projects/alpha",
+            "occurred_at": "2026-07-31T12:34:56+00:00",
+            "enqueued_by": "flush_memory",
+        },
+        {
+            "prompt": "version one missing identity",
+            "provenance_version": 1,
+            "event": "pre-compact",
+            "session_id": "source-session",
+            "trigger": "opencode-compacting",
+            "project_slug": "unknown",
+            "project_root": "",
+            "occurred_at": "2026-07-31T12:34:56+00:00",
+            "enqueued_by": "flush_memory",
+        },
+        {
+            "prompt": "conflicting identity",
+            "event": "pre-compact",
+            "session_id": "source-session",
+            "trigger": "opencode-compacting",
+            "project_slug": "alpha",
+            "project_root": "",
+            "occurred_at": "2026-07-31T12:34:56+00:00",
+            "enqueued_by": "flush_memory",
+        },
+        {
+            "prompt": "incomplete transitional provenance",
+            "session_id": "source-session",
+        },
+    ]
+    task_ids = [clean_queue.enqueue("flush", payload) for payload in malformed_payloads]
+
+    assert clean_queue.prepare_sdk_task() == {"pending": False}
+
+    pending = clean_queue.list_pending()
+    assert [task["id"] for task in pending] == task_ids
+    assert all(task["attempts"] == 1 for task in pending)
+    assert all("invalid flush provenance" in task["last_error"] for task in pending)
+    assert not list(clean_queue._queue_dir().glob("*.processing"))
+
+
+def test_recovered_flush_applies_confirmed_canonical_identity(
+    clean_queue,
+    tmp_path,
+    monkeypatch,
+):
+    import flush_memory
+
+    daily_dir = tmp_path / "knowledge" / "daily"
+    source_root = (tmp_path / "source-project").resolve()
+    canonical_root = (tmp_path / "canonical-project").resolve()
+    source_root.mkdir()
+    canonical_root.mkdir()
+    monkeypatch.setattr(clean_queue, "_daily_dir", lambda: daily_dir)
+    calls = []
+
+    def resolve(slug, root, *, env=None):
+        calls.append((slug, root, env))
+        return "canonical-source", canonical_root
+
+    monkeypatch.setattr(flush_memory, "_resolve_project_identity", resolve)
+    task_id = clean_queue.enqueue("flush", _transitional_flush_payload())
+    payload_before = clean_queue.list_pending()[0]["payload"].copy()
+    prepared = clean_queue.prepare_sdk_task()
+
+    assert clean_queue.apply_sdk_result(
+        {
+            **prepared,
+            "success": True,
+            "response": "FLUSH_MINOR\n\n**Gotchas / debugging**\n- Recover safely.",
+            "recovered_project_root": str(source_root),
+        }
+    ) == (True, "acknowledged")
+
+    assert calls == [(None, str(source_root), {})]
+    assert clean_queue.list_pending() == []
+    assert not (clean_queue._queue_dir() / f"{task_id}.processing").exists()
+    text = (daily_dir / "2026-07-31.md").read_text(encoding="utf-8")
+    assert "Project slug: `canonical-source`" in text
+    assert f"Project root JSON: {json.dumps(str(canonical_root))}" in text
+    assert json.dumps(str(source_root)) not in text
+    assert "Recover safely." in text
+    assert payload_before["project_slug"] == "unknown"
+    assert payload_before["project_root"] == ""
+    assert "recovered_project_root" not in payload_before
+
+    ok_task_id = clean_queue.enqueue("flush", _transitional_flush_payload())
+    ok_prepared = clean_queue.prepare_sdk_task()
+    assert ok_prepared["task_id"] == ok_task_id
+    assert clean_queue.apply_sdk_result(
+        {
+            **ok_prepared,
+            "success": True,
+            "response": "FLUSH_OK",
+            "recovered_project_root": str(source_root),
+        }
+    ) == (True, "acknowledged")
+    assert calls == [
+        (None, str(source_root), {}),
+        (None, str(source_root), {}),
+    ]
+    assert clean_queue.list_pending() == []
+    assert not (clean_queue._queue_dir() / f"{ok_task_id}.processing").exists()
+    assert (daily_dir / "2026-07-31.md").read_text(encoding="utf-8") == text
+
+    missing_root_id = clean_queue.enqueue("flush", _transitional_flush_payload())
+    missing_root = clean_queue.prepare_sdk_task()
+    assert missing_root["task_id"] == missing_root_id
+    calls_before_missing_root = calls.copy()
+    assert clean_queue.apply_sdk_result(
+        {
+            **missing_root,
+            "success": True,
+            "response": "FLUSH_OK",
+        }
+    ) == (True, "failure recorded")
+    assert calls == calls_before_missing_root
+    [retained] = clean_queue.list_pending()
+    assert retained["id"] == missing_root_id
+    assert retained["attempts"] == 1
+    assert retained["last_error"] == (
+        "invalid SDK result: recovered_project_root is required"
+    )
+    assert not list(clean_queue._queue_dir().glob("*.processing"))
+    assert (daily_dir / "2026-07-31.md").read_text(encoding="utf-8") == text
+
+
+def test_recovered_root_failures_retain_task_without_daily_write(
+    clean_queue,
+    tmp_path,
+    monkeypatch,
+):
+    import flush_memory
+
+    daily_dir = tmp_path / "knowledge" / "daily"
+    unconfirmed = (tmp_path / "unconfirmed").resolve()
+    nonexistent = (tmp_path / "missing").resolve()
+    short_root_path = (tmp_path / "short-source").resolve()
+    unconfirmed.mkdir()
+    short_root_path.mkdir()
+    monkeypatch.setattr(clean_queue, "_daily_dir", lambda: daily_dir)
+    resolver_calls = []
+    oversized_supplied_root = "C:/" + "x" * (
+        clean_queue.MAX_PROVENANCE_CHARS + 1 - len("C:/")
+    )
+    oversized_canonical_root = Path(
+        "C:/"
+        + "y" * (clean_queue.MAX_PROVENANCE_CHARS + 1 - len("C:/"))
+    )
+    short_root = str(short_root_path)
+    assert len(oversized_supplied_root) == clean_queue.MAX_PROVENANCE_CHARS + 1
+    assert len(str(oversized_canonical_root)) == clean_queue.MAX_PROVENANCE_CHARS + 1
+    assert len(short_root) <= clean_queue.MAX_PROVENANCE_CHARS
+
+    def unresolved(slug, root, *, env=None):
+        resolver_calls.append((slug, root, env))
+        if root == oversized_supplied_root:
+            return "canonical-source", unconfirmed
+        if root == short_root:
+            return "canonical-source", oversized_canonical_root
+        return None
+
+    monkeypatch.setattr(flush_memory, "_resolve_project_identity", unresolved)
+    cases = [
+        ("missing", {}),
+        ("none", {"recovered_project_root": None}),
+        ("integer", {"recovered_project_root": 7}),
+        ("blank", {"recovered_project_root": ""}),
+        ("padded", {"recovered_project_root": f" {unconfirmed}"}),
+        ("relative", {"recovered_project_root": "relative/project"}),
+        ("control", {"recovered_project_root": "C:/project\0bad"}),
+        (
+            "oversized",
+            {"recovered_project_root": oversized_supplied_root},
+        ),
+        ("nonexistent", {"recovered_project_root": str(nonexistent)}),
+        ("unconfirmed", {"recovered_project_root": str(unconfirmed)}),
+        ("oversized-canonical", {"recovered_project_root": short_root}),
+    ]
+
+    task_ids = []
+    for label, extra in cases:
+        task_id = clean_queue.enqueue(
+            "flush",
+            _transitional_flush_payload(prompt=f"classify {label}"),
+        )
+        task_ids.append(task_id)
+        prepared = clean_queue.prepare_sdk_task()
+        assert prepared["task_id"] == task_id
+        outcome = clean_queue.apply_sdk_result(
+            {
+                **prepared,
+                "success": True,
+                "response": "FLUSH_MINOR\n\n**Open questions**\n- Retry later.",
+                **extra,
+            }
+        )
+        assert outcome == (True, "failure recorded"), label
+
+    failed_root = str(unconfirmed)
+    failed_task_id = clean_queue.enqueue(
+        "flush",
+        _transitional_flush_payload(prompt="classify failed result with root"),
+    )
+    task_ids.append(failed_task_id)
+    cases.append(("failed-result", {"recovered_project_root": failed_root}))
+    failed_prepared = clean_queue.prepare_sdk_task()
+    assert failed_prepared["task_id"] == failed_task_id
+    assert clean_queue.apply_sdk_result(
+        {
+            **failed_prepared,
+            "success": False,
+            "error": "provider failed after lookup",
+            "recovered_project_root": failed_root,
+        }
+    ) == (True, "failure recorded")
+
+    pending = clean_queue.list_pending()
+    assert [task["id"] for task in pending] == task_ids
+    assert all(task["attempts"] == 1 for task in pending)
+    assert all("recovered_project_root" not in task for task in pending)
+    assert all("recovered_project_root" not in task["payload"] for task in pending)
+    assert all("_sdk_lease" not in task for task in pending)
+    for task, (_label, extra) in zip(pending, cases, strict=True):
+        candidate = extra.get("recovered_project_root")
+        if isinstance(candidate, str) and candidate:
+            assert candidate not in task["last_error"]
+    assert pending[-1]["last_error"] == (
+        "invalid SDK result: failed results cannot include recovered_project_root"
+    )
+    canonical_failure = next(
+        task
+        for task in pending
+        if task["payload"]["prompt"] == "classify oversized-canonical"
+    )
+    assert canonical_failure["last_error"] == (
+        "apply failed: ValueError: flush task project identity is unavailable"
+    )
+    assert str(oversized_canonical_root) not in canonical_failure["last_error"]
+    assert resolver_calls == [
+        (None, "relative/project", {}),
+        (None, str(nonexistent), {}),
+        (None, str(unconfirmed), {}),
+        (None, short_root, {}),
+    ]
+    assert not daily_dir.exists()
+    assert not list(clean_queue._queue_dir().glob("*.processing"))
+    assert not list(clean_queue._queue_dir().glob("*.acquiring"))
+
+
+def test_transient_root_is_forbidden_outside_recovery_shape(
+    clean_queue,
+    tmp_path,
+    monkeypatch,
+):
+    daily_dir = tmp_path / "knowledge" / "daily"
+    project_root = (tmp_path / "project").resolve()
+    project_root.mkdir()
+    root = str(project_root)
+    monkeypatch.setattr(clean_queue, "_daily_dir", lambda: daily_dir)
+    normal_shapes = [
+        ("query", {"prompt": "answer"}, "answer"),
+        ("compile", {"force": True}, "COMPILE_COMPLETED"),
+        ("flush", {"prompt": "legacy"}, "FLUSH_OK"),
+        (
+            "flush",
+            {
+                "prompt": "persisted",
+                "project_slug": "alpha",
+                "project_root": root,
+            },
+            "FLUSH_OK",
+        ),
+        (
+            "flush",
+            {
+                **_transitional_flush_payload(
+                    prompt="versioned",
+                    project_slug="alpha",
+                    project_root=root,
+                ),
+                "provenance_version": 1,
+            },
+            "FLUSH_OK",
+        ),
+    ]
+
+    task_ids = []
+    for task_type, payload, response in normal_shapes:
+        task_id = clean_queue.enqueue(task_type, payload)
+        task_ids.append(task_id)
+        prepared = clean_queue.prepare_sdk_task()
+        assert prepared["task_id"] == task_id
+        assert clean_queue.apply_sdk_result(
+            {
+                **prepared,
+                "success": True,
+                "response": response,
+                "recovered_project_root": root,
+            }
+        ) == (True, "failure recorded")
+
+    pending = clean_queue.list_pending()
+    assert [task["id"] for task in pending] == task_ids
+    assert all(task["attempts"] == 1 for task in pending)
+    assert all("recovered_project_root" not in task for task in pending)
+    assert all(root not in task["last_error"] for task in pending)
+    assert not list(clean_queue._queue_dir().glob("*.processing"))
+    assert not (clean_queue._queue_dir().parent / "queue-results").exists()
+    assert not daily_dir.exists()
+
+
+def test_recovered_flush_retry_is_idempotent_by_durable_task_id(
+    clean_queue,
+    tmp_path,
+    monkeypatch,
+):
+    import flush_memory
+
+    daily_dir = tmp_path / "knowledge" / "daily"
+    source_root = (tmp_path / "source-project").resolve()
+    source_root.mkdir()
+    monkeypatch.setattr(clean_queue, "_daily_dir", lambda: daily_dir)
+    monkeypatch.setattr(
+        flush_memory,
+        "_resolve_project_identity",
+        lambda slug, root, *, env=None: (
+            ("source", source_root)
+            if slug is None and root == str(source_root) and env == {}
+            else None
+        ),
+    )
+    clean_queue.enqueue("flush", _transitional_flush_payload())
+    prepared = clean_queue.prepare_sdk_task()
+    lease_path = clean_queue._queue_dir() / f"{prepared['task_id']}.processing"
+    leased = json.loads(lease_path.read_text(encoding="utf-8"))
+    response = "FLUSH_MINOR\n\n**Gotchas / debugging**\n- Append once."
+
+    clean_queue.apply_classified_flush_response(
+        leased,
+        response,
+        recovered_project_root=str(source_root),
+    )
+    assert clean_queue.apply_sdk_result(
+        {
+            **prepared,
+            "success": True,
+            "response": response,
+            "recovered_project_root": str(source_root),
+        }
+    ) == (True, "acknowledged")
+
+    text = (daily_dir / "2026-07-31.md").read_text(encoding="utf-8")
+    assert text.count("Append once.") == 1
+    assert text.count("<!-- llm-wiki-queue-task:") == 1
+    assert leased["payload"]["project_slug"] == "unknown"
+    assert leased["payload"]["project_root"] == ""
+    assert "recovered_project_root" not in leased["payload"]
+
+
+def test_malformed_versioned_flush_ok_is_not_acknowledged(
+    clean_queue,
+    tmp_path,
+    monkeypatch,
+):
+    daily_dir = tmp_path / "knowledge" / "daily"
+    monkeypatch.setattr(clean_queue, "_daily_dir", lambda: daily_dir)
+    task_id = clean_queue.enqueue(
+        "flush",
+        {
+            **_transitional_flush_payload(),
+            "provenance_version": 1,
+        },
+    )
+    task, _lease_path = clean_queue._claim_next_task()
+    lease = task["_sdk_lease"]
+
+    assert clean_queue.apply_sdk_result(
+        {
+            "task_id": task_id,
+            "lease_id": lease["id"],
+            "digest": lease["digest"],
+            "success": True,
+            "response": "FLUSH_OK",
+        }
+    ) == (True, "failure recorded")
+
+    [pending] = clean_queue.list_pending()
+    assert pending["id"] == task_id
+    assert pending["attempts"] == 1
+    assert "invalid flush provenance" in pending["last_error"]
+    assert not list(clean_queue._queue_dir().glob("*.processing"))
+    assert not daily_dir.exists()
+
+
 def test_sdk_cli_rejects_stale_lease_response_without_acknowledging(
     clean_queue, monkeypatch, capsys
 ):
@@ -884,6 +1415,8 @@ def test_sdk_cli_rejects_stale_lease_response_without_acknowledging(
     _, captured = _run_cli(clean_queue, monkeypatch, capsys, "--prepare-sdk-task")
     current = json.loads(captured.out)
     assert current["lease_id"] != stale["lease_id"]
+    lease_path = clean_queue._queue_dir() / f"{current['task_id']}.processing"
+    original_lease = lease_path.read_bytes()
 
     code, captured = _run_cli(
         clean_queue,
@@ -891,13 +1424,19 @@ def test_sdk_cli_rejects_stale_lease_response_without_acknowledging(
         capsys,
         "--apply-sdk-result",
         stdin=json.dumps(
-            {**stale, "success": True, "response": "stale"}
+            {
+                **stale,
+                "success": True,
+                "response": "stale",
+                "recovered_project_root": None,
+            }
         ),
     )
 
     assert code != 0
     assert "stale" in captured.err.lower()
     assert len(list(clean_queue._queue_dir().glob("*.processing"))) == 1
+    assert lease_path.read_bytes() == original_lease
     assert not (clean_queue._queue_dir().parent / "queue-results").exists()
 
 
@@ -905,6 +1444,8 @@ def test_sdk_cli_rejects_changed_task_digest(clean_queue, monkeypatch, capsys):
     clean_queue.enqueue("query", {"prompt": "preserve me"})
     _, captured = _run_cli(clean_queue, monkeypatch, capsys, "--prepare-sdk-task")
     prepared = json.loads(captured.out)
+    lease_path = clean_queue._queue_dir() / f"{prepared['task_id']}.processing"
+    original_lease = lease_path.read_bytes()
 
     code, captured = _run_cli(
         clean_queue,
@@ -912,13 +1453,21 @@ def test_sdk_cli_rejects_changed_task_digest(clean_queue, monkeypatch, capsys):
         capsys,
         "--apply-sdk-result",
         stdin=json.dumps(
-            {**prepared, "digest": "0" * 64, "success": True, "response": "changed"}
+            {
+                **prepared,
+                "digest": "0" * 64,
+                "success": True,
+                "response": "changed",
+                "recovered_project_root": None,
+            }
         ),
     )
 
     assert code != 0
     assert "digest" in captured.err.lower()
     assert len(list(clean_queue._queue_dir().glob("*.processing"))) == 1
+    assert lease_path.read_bytes() == original_lease
+    assert not (clean_queue._queue_dir().parent / "queue-results").exists()
 
 
 def test_sdk_cli_provider_failure_persists_attempt_and_releases_lease(
@@ -1113,8 +1662,12 @@ def test_sdk_and_manual_flush_apply_use_shared_helper_with_equivalent_blocks(
 
     monkeypatch.setattr(
         flush_memory,
-        "_resolve_project_slug",
-        lambda slug, root: "alpha" if slug == "alpha" and root else None,
+        "_resolve_project_identity",
+        lambda slug, root, *, env=None: (
+            ("alpha", Path(root).resolve())
+            if slug == "alpha" and root and env == {}
+            else None
+        ),
     )
     payload = {
         "prompt": "classify",
@@ -1171,7 +1724,7 @@ def test_sdk_and_manual_flush_apply_use_shared_helper_with_equivalent_blocks(
         assert expected in sdk_text
 
 
-def test_flush_provenance_boundary_accepts_legacy_and_rejects_partial_current(
+def test_flush_provenance_boundary_accepts_legacy_and_routes_complete_transitional_recovery(
     clean_queue, tmp_path, monkeypatch
 ):
     daily_dir = tmp_path / "knowledge" / "daily"
@@ -1207,16 +1760,16 @@ def test_flush_provenance_boundary_accepts_legacy_and_rejects_partial_current(
 
     current_task_id = clean_queue.enqueue(
         "flush",
-        {
-            "prompt": "classify",
-            "event": "pre-compact",
-            "enqueued_by": "flush_memory",
-            "session_id": "partial-current-provenance",
-        },
+        _transitional_flush_payload(
+            prompt="classify",
+            session_id="partial-current-provenance",
+        ),
     )
     current = clean_queue.prepare_sdk_task()
 
     assert current["task_id"] == current_task_id
+    assert current["recover_project_root"] is True
+    assert current["source_session_id"] == "partial-current-provenance"
     assert clean_queue.apply_sdk_result(
         {
             **current,
@@ -1227,7 +1780,7 @@ def test_flush_provenance_boundary_accepts_legacy_and_rejects_partial_current(
     [pending] = clean_queue.list_pending()
     assert pending["id"] == current_task_id
     assert pending["attempts"] == 1
-    assert "project identity is unavailable" in pending["last_error"]
+    assert "recovered_project_root is required" in pending["last_error"]
     assert daily_path.read_text(encoding="utf-8") == text
 
 
@@ -1240,8 +1793,12 @@ def test_reapplying_persisted_flush_task_is_idempotent_by_durable_task_id(
 
     monkeypatch.setattr(
         flush_memory,
-        "_resolve_project_slug",
-        lambda slug, root: "alpha" if slug == "alpha" and root else None,
+        "_resolve_project_identity",
+        lambda slug, root, *, env=None: (
+            ("alpha", Path(root).resolve())
+            if slug == "alpha" and root and env == {}
+            else None
+        ),
     )
     clean_queue.enqueue(
         "flush",
@@ -1549,7 +2106,15 @@ def test_unrelated_oversized_daily_does_not_block_queue_acknowledgement(
     (daily_dir / "2026-07-26.md").write_text("oversized", encoding="utf-8")
     monkeypatch.setattr(clean_queue, "_daily_dir", lambda: daily_dir)
     monkeypatch.setattr(daily_log_append, "MAX_DAILY_MARKER_SCAN_BYTES", 4, raising=False)
-    monkeypatch.setattr(flush_memory, "_resolve_project_slug", lambda *_args: "alpha")
+    monkeypatch.setattr(
+        flush_memory,
+        "_resolve_project_identity",
+        lambda slug, root, *, env=None: (
+            ("alpha", Path(root).resolve())
+            if slug == "alpha" and root and env == {}
+            else None
+        ),
+    )
     task_id = clean_queue.enqueue(
         "flush",
         {
@@ -1583,8 +2148,12 @@ def test_invalid_occurred_at_falls_back_inside_daily_dir_and_redacts_metadata(
 
     monkeypatch.setattr(
         flush_memory,
-        "_resolve_project_slug",
-        lambda slug, root: "alpha" if slug == "alpha" and root else None,
+        "_resolve_project_identity",
+        lambda slug, root, *, env=None: (
+            ("alpha", Path(root).resolve())
+            if slug == "alpha" and root and env == {}
+            else None
+        ),
     )
     secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
     project_root = str((tmp_path / "projects" / "alpha").resolve())

@@ -78,8 +78,8 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
   VERIFY-BEFORE-WRITE), `flush_memory.py` (3-tier classification),
   `maybe_compile.py` (OS-lock-aware spawn), `search_memory.py` (triple-RRF),
   `llm_client.py` (5 backends + fake).
-- `tests/` — 32 test files, 1903 collected on every platform; local Windows
-  verification: 1868 passed, 35 skipped. Skip count varies with optional Bash,
+- `tests/` — 32 test files, 1916 collected on every platform; local Windows
+  verification: 1881 passed, 35 skipped. Skip count varies with optional Bash,
   PowerShell, and symlink availability. Hermetic via `conftest.py` (pins
   `LLM_WIKI_ROOT` to checkout, redirects `LLM_WIKI_STATE_ROOT` to a temp
   dir, defaults `MEMORY_LLM_PROVIDER=fake`).

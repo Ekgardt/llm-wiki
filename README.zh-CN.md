@@ -1,6 +1,6 @@
 # LLM Wiki
 
-[![Tests](https://img.shields.io/badge/tests-1903%20collected-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://img.shields.io/badge/tests-1916%20collected-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-3.4.0-blue.svg)](CHANGELOG.md)
@@ -106,7 +106,7 @@ LLM Wiki 为你使用的每一个 AI 编码智能体——OpenCode、Codex、Cla
 - **跨平台**：Windows、macOS、Linux、WSL2
 - **无控制台窗口的 Windows 维护**——Task Scheduler 使用 `pythonw` 启动任务，维护子进程也不会创建控制台窗口
 - **零运行时依赖**——基础安装仅用标准库；sentence-transformers 和 Cognee 为可选
-- **各平台稳定收集 1903 个测试；本地 Windows 验证：1868 个通过，35 个跳过**。跳过数量取决于可选 Bash、PowerShell 和符号链接支持；CI 目标为 Ubuntu + Windows + macOS、Python 3.10 + 3.13。
+- **各平台稳定收集 1916 个测试；本地 Windows 验证：1881 个通过，35 个跳过**。跳过数量取决于可选 Bash、PowerShell 和符号链接支持；CI 目标为 Ubuntu + Windows + macOS、Python 3.10 + 3.13。
 - **Pre-commit 钩子**：ruff（静态分析）+ 结构 lint + gitleaks（密钥扫描）
 
 ---
@@ -137,7 +137,7 @@ irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 1. 检查前置条件（Python 3.10+、git）
 2. 如缺失则安装 `uv`（快速 Python 包管理器）
 3. 同步依赖（`uv sync`）
-4. 运行测试套件（各平台收集 1903 个；本地 Windows：1868 个通过，35 个跳过；跳过数量取决于 shell/符号链接支持）
+4. 运行测试套件（各平台收集 1916 个；本地 Windows：1881 个通过，35 个跳过；跳过数量取决于 shell/符号链接支持）
 5. 设置 `LLM_WIKI_ROOT` 环境变量（用户级）
 6. 创建 gitignored 运行时目录（`cache/` 和日志可替换；`run/` 保存持久自动化与恢复状态）
 7. 注册计划维护（Unix 上 cron，Windows 上 Task Scheduler）
@@ -150,7 +150,7 @@ irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync
-uv run pytest -q          # 收集 1903 个；本地 Windows：1868 个通过，35 个跳过；跳过数依环境而异
+uv run pytest -q          # 收集 1916 个；本地 Windows：1881 个通过，35 个跳过；跳过数依环境而异
 ```
 
 ### 验证可用

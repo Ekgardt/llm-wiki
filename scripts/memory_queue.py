@@ -50,6 +50,8 @@ MAX_SDK_TOKENS = 100_000
 RETRY_BACKOFF_SECONDS = 60
 QUEUE_LOCK_TIMEOUT_SECONDS = 30.0
 MAX_PROVENANCE_CHARS = 500
+CURRENT_FLUSH_PROVENANCE_VERSION = 1
+MAX_RECOVERED_PROJECT_ROOT_CHARS = MAX_PROVENANCE_CHARS
 MAX_SDK_BRIDGE_STDIN_BYTES = 8 * 1024 * 1024
 MAX_QUEUE_ENTRIES = 10_000
 MAX_QUEUE_TASK_BYTES = 16 * 1024 * 1024
@@ -789,6 +791,112 @@ def _legacy_result_type(task_type: str, payload: dict[str, Any]) -> str | None:
     return None
 
 
+def _task_result_type(task: dict[str, Any]) -> str | None:
+    payload = task.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    return _legacy_result_type(str(task.get("type") or ""), payload)
+
+
+@dataclass(frozen=True)
+class FlushProvenance:
+    kind: str
+    source_session_id: str | None = None
+    project_slug: str = ""
+    project_root: str = ""
+
+
+def _provenance_string(
+    payload: dict[str, Any],
+    field: str,
+    *,
+    required: bool = False,
+) -> str:
+    if field not in payload:
+        if required:
+            raise ValueError(f"missing {field}")
+        return ""
+    value = payload[field]
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    if value != value.strip() or len(value) > MAX_PROVENANCE_CHARS:
+        raise ValueError(f"{field} is malformed")
+    if any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in value):
+        raise ValueError(f"{field} is malformed")
+    if required and not value:
+        raise ValueError(f"missing {field}")
+    return value
+
+
+def _validate_occurrence(value: str) -> None:
+    try:
+        datetime.fromisoformat(
+            value[:-1] + "+00:00" if value.endswith(("Z", "z")) else value
+        )
+    except ValueError as exc:
+        raise ValueError("occurred_at is invalid") from exc
+
+
+def _classify_flush_provenance(payload: dict[str, Any]) -> FlushProvenance:
+    if "provenance_version" in payload:
+        version = payload["provenance_version"]
+        if type(version) is not int or version != CURRENT_FLUSH_PROVENANCE_VERSION:
+            raise ValueError("unsupported provenance_version")
+        values = {
+            field: _provenance_string(payload, field, required=True)
+            for field in PROVENANCE_FIELDS
+        }
+        if values["event"] not in {"session-end", "pre-compact"}:
+            raise ValueError("event is invalid")
+        if values["session_id"].casefold() == "unknown":
+            raise ValueError("session_id is unavailable")
+        if values["project_slug"].casefold() == "unknown":
+            raise ValueError("project_slug is unavailable")
+        if values["project_root"].casefold() == "unknown":
+            raise ValueError("project_root is unavailable")
+        if values["enqueued_by"] != "flush_memory":
+            raise ValueError("enqueued_by is invalid")
+        _validate_occurrence(values["occurred_at"])
+        return FlushProvenance(
+            "persisted",
+            values["session_id"],
+            values["project_slug"],
+            values["project_root"],
+        )
+
+    if not any(field in payload for field in SOURCE_PROVENANCE_FIELDS):
+        return FlushProvenance("legacy")
+
+    values = {
+        field: _provenance_string(payload, field)
+        for field in PROVENANCE_FIELDS
+        if field in payload
+    }
+    slug = values.get("project_slug", "")
+    root = values.get("project_root", "")
+    slug_missing = not slug or slug.casefold() == "unknown"
+    root_missing = not root or root.casefold() == "unknown"
+    if not slug_missing and not root_missing:
+        return FlushProvenance(
+            "persisted",
+            values.get("session_id") or None,
+            slug,
+            root,
+        )
+    if slug_missing != root_missing:
+        raise ValueError("project identity is partial")
+
+    for field in ("event", "session_id", "trigger", "occurred_at", "enqueued_by"):
+        values[field] = _provenance_string(payload, field, required=True)
+    if values["event"] not in {"session-end", "pre-compact"}:
+        raise ValueError("event is invalid")
+    if values["session_id"].casefold() == "unknown":
+        raise ValueError("session_id is unavailable")
+    if values["enqueued_by"] != "flush_memory":
+        raise ValueError("enqueued_by is invalid")
+    _validate_occurrence(values["occurred_at"])
+    return FlushProvenance("recovery", values["session_id"])
+
+
 def _claim_next_task() -> tuple[dict[str, Any], Path] | None:
     """Atomically select and lease one eligible task under the order lock."""
     with _queue_order_lock() as queue_dir:
@@ -911,7 +1019,22 @@ def prepare_sdk_task() -> dict[str, Any]:
             except OSError:
                 pass
             continue
-        return {
+        provenance = None
+        if result_type == "flush":
+            try:
+                provenance = _classify_flush_provenance(payload)
+            except ValueError as exc:
+                try:
+                    _release_sdk_failure(
+                        task,
+                        lease_path,
+                        f"invalid flush provenance: {exc}",
+                    )
+                except OSError:
+                    pass
+                continue
+
+        prepared = {
             "pending": True,
             "kind": "sdk",
             "task_id": task["id"],
@@ -923,6 +1046,10 @@ def prepare_sdk_task() -> dict[str, Any]:
             "system_prompt": payload.get("system_prompt", ""),
             "max_tokens": max_tokens,
         }
+        if provenance is not None and provenance.kind == "recovery":
+            prepared["recover_project_root"] = True
+            prepared["source_session_id"] = provenance.source_session_id
+        return prepared
 
 
 def _lease_matches(task: dict[str, Any], lease_id: str, digest: str) -> bool:
@@ -1049,15 +1176,58 @@ def _declared_non_ok_flush_tier(response: str) -> str | None:
     return first_line if first_line in {"FLUSH_MAJOR", "FLUSH_MINOR"} else None
 
 
+def _resolve_flush_identity(
+    provenance: FlushProvenance,
+    recovered_project_root: str | None,
+) -> tuple[str, str]:
+    from flush_memory import _resolve_project_identity
+
+    if provenance.kind == "legacy":
+        if recovered_project_root is not None:
+            raise ValueError("recovered project root is not allowed")
+        return "unknown", "unknown"
+    if provenance.kind == "persisted":
+        if recovered_project_root is not None:
+            raise ValueError(
+                "recovered project root cannot override persisted provenance"
+            )
+        identity = _resolve_project_identity(
+            provenance.project_slug,
+            provenance.project_root,
+            env={},
+        )
+    else:
+        if recovered_project_root is None:
+            raise ValueError("recovered project root is required")
+        identity = _resolve_project_identity(None, recovered_project_root, env={})
+    if identity is None:
+        raise ValueError("flush task project identity is unavailable")
+    slug, root = identity
+    canonical_root = "" if root is None else str(root)
+    if (
+        not canonical_root
+        or canonical_root != canonical_root.strip()
+        or len(canonical_root) > MAX_PROVENANCE_CHARS
+        or any(
+            ord(char) < 32 or 127 <= ord(char) <= 159
+            for char in canonical_root
+        )
+    ):
+        raise ValueError("flush task project identity is unavailable")
+    return slug, canonical_root
+
+
 def apply_classified_flush_response(
-    task: dict[str, Any], response: str
+    task: dict[str, Any],
+    response: str,
+    *,
+    recovered_project_root: str | None = None,
 ) -> Path | None:
     """Apply one deferred flush response idempotently from durable task metadata."""
     from daily_log_append import locked_append_once
     from flush_memory import (
         _classify_response,
         _is_valid_flush_ok_response,
-        _resolve_project_slug,
         render_flush_block,
     )
 
@@ -1067,8 +1237,7 @@ def apply_classified_flush_response(
     if tier == "ok":
         if not _is_valid_flush_ok_response(response):
             raise ValueError("flush result is not the exact FLUSH_OK token")
-        return None
-    if not body:
+    elif not body:
         raise ValueError("flush result has no distilled body")
 
     task_id = task.get("id")
@@ -1076,16 +1245,13 @@ def apply_classified_flush_response(
         raise ValueError("flush task id is not canonical")
     payload = task.get("payload")
     payload = payload if isinstance(payload, dict) else {}
-    project_root = str(payload.get("project_root") or "")
-    if any(field in payload for field in SOURCE_PROVENANCE_FIELDS):
-        project_slug = _resolve_project_slug(
-            str(payload.get("project_slug") or ""),
-            project_root,
-        )
-        if project_slug is None:
-            raise ValueError("flush task project identity is unavailable")
-    else:
-        project_slug = "unknown"
+    provenance = _classify_flush_provenance(payload)
+    project_slug, project_root = _resolve_flush_identity(
+        provenance,
+        recovered_project_root,
+    )
+    if tier == "ok":
+        return None
     marker = _flush_task_marker(task_id)
     day, block = render_flush_block(
         tier,
@@ -1104,10 +1270,15 @@ def apply_classified_flush_response(
     return locked_append_once(daily_path, block, marker)
 
 
-def _apply_sdk_response(task: dict[str, Any], response: str) -> None:
+def _apply_sdk_response(
+    task: dict[str, Any],
+    response: str,
+    *,
+    recovered_project_root: str | None = None,
+) -> None:
     payload = task.get("payload", {})
     task_type = task.get("type")
-    result_type = task.get("_sdk_lease", {}).get("result_type")
+    result_type = _task_result_type(task)
     if task_type == "compile":
         if response != "COMPILE_COMPLETED":
             raise ValueError("compile control result is not validated completion")
@@ -1127,7 +1298,14 @@ def _apply_sdk_response(task: dict[str, Any], response: str) -> None:
         target.write_text(response, encoding="utf-8")
         return
     if result_type == "flush":
-        apply_classified_flush_response(task, response)
+        if recovered_project_root is None:
+            apply_classified_flush_response(task, response)
+        else:
+            apply_classified_flush_response(
+                task,
+                response,
+                recovered_project_root=recovered_project_root,
+            )
         return
     raise ValueError(f"unsupported SDK queue task type: {task.get('type')}")
 
@@ -1161,6 +1339,48 @@ def apply_sdk_result(result: dict[str, Any]) -> tuple[bool, str]:
             schema_error = "success must be a bool"
         elif result.get("success") is True and not isinstance(result.get("response"), str):
             schema_error = "response must be a string"
+
+        recovered_root_present = "recovered_project_root" in result
+        recovered_root: str | None = None
+        result_type = _task_result_type(task)
+        provenance = None
+        if result_type == "flush":
+            try:
+                provenance = _classify_flush_provenance(task.get("payload", {}))
+            except ValueError as exc:
+                schema_error = f"invalid flush provenance: {exc}"
+
+        if not schema_error and recovered_root_present:
+            candidate = result["recovered_project_root"]
+            if not isinstance(candidate, str):
+                schema_error = "recovered_project_root must be a string"
+            elif (
+                not candidate
+                or candidate != candidate.strip()
+                or len(candidate) > MAX_RECOVERED_PROJECT_ROOT_CHARS
+                or any(
+                    ord(char) < 32 or 127 <= ord(char) <= 159
+                    for char in candidate
+                )
+            ):
+                schema_error = "recovered_project_root is malformed"
+            else:
+                recovered_root = candidate
+
+        if (
+            not schema_error
+            and result.get("success") is not True
+            and recovered_root_present
+        ):
+            schema_error = "failed results cannot include recovered_project_root"
+        if not schema_error and result.get("success") is True:
+            if provenance is not None and provenance.kind == "recovery":
+                if recovered_root is None:
+                    schema_error = "recovered_project_root is required"
+            elif recovered_root_present:
+                schema_error = "recovered_project_root is not allowed"
+        if not schema_error and result_type != "flush" and recovered_root_present:
+            schema_error = "recovered_project_root is not allowed"
         if schema_error:
             try:
                 _release_sdk_failure_locked(
@@ -1193,7 +1413,14 @@ def apply_sdk_result(result: dict[str, Any]) -> tuple[bool, str]:
                 return False, f"failed to persist SDK attempt: {exc}"
             return True, "failure recorded"
         try:
-            _apply_sdk_response(task, response)
+            if recovered_root is None:
+                _apply_sdk_response(task, response)
+            else:
+                _apply_sdk_response(
+                    task,
+                    response,
+                    recovered_project_root=recovered_root,
+                )
             if task.get("type") == "compile":
                 settled, status = _settle_compile_success_locked(task, lease_path)
                 if not settled:

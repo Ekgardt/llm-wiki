@@ -572,11 +572,13 @@ def test_deferred_flush_payload_retains_all_provenance(monkeypatch):
         project_slug="alpha",
         project_root="D:/projects/alpha",
         occurred_at="2026-07-27T12:34:56+00:00",
+        project_identity_confirmed=True,
     ) == ""
 
     assert len(queued) == 1
     task_type, payload = queued[0]
     assert task_type == "flush"
+    assert payload["provenance_version"] == 1
     assert {
         key: payload[key]
         for key in (
@@ -595,6 +597,97 @@ def test_deferred_flush_payload_retains_all_provenance(monkeypatch):
         "project_root": "D:/projects/alpha",
         "occurred_at": "2026-07-27T12:34:56+00:00",
     }
+
+
+def test_durable_queue_drops_version_when_provenance_is_sanitized(
+    monkeypatch,
+    tmp_path,
+):
+    import flush_memory
+    import memory_queue
+
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path))
+    secret = "sk-abcdefghijklmnopqrstuvwxyz012345"
+    cases = (
+        (
+            "whitespace-session",
+            "project_root",
+            "D:/projects/alpha  service",
+        ),
+        (
+            "secret-session",
+            "trigger",
+            f"token={secret}",
+        ),
+    )
+
+    for session_id, field, value in cases:
+        provenance = {
+            "session_id": session_id,
+            "trigger": "opencode-idle",
+            "project_slug": "alpha",
+            "project_root": "D:/projects/alpha",
+            field: value,
+        }
+        payload = flush_memory._build_flush_queue_payload(
+            "A transcript with durable provenance.",
+            "session-end",
+            **provenance,
+            occurred_at="2026-07-27T12:34:56+00:00",
+            project_identity_confirmed=True,
+        )
+        assert payload is not None
+        memory_queue.enqueue("flush", payload)
+
+    queue_files = list((tmp_path / "run" / "queue").glob("*.json"))
+    assert len(queue_files) == len(cases)
+    persisted = {
+        task["payload"]["session_id"]: task["payload"]
+        for task in (
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in queue_files
+        )
+    }
+
+    whitespace_payload = persisted["whitespace-session"]
+    assert whitespace_payload["project_root"] == "D:/projects/alpha service"
+    assert "provenance_version" not in whitespace_payload
+
+    secret_payload = persisted["secret-session"]
+    assert secret not in secret_payload["trigger"]
+    assert secret_payload["trigger"] != f"token={secret}"
+    assert "provenance_version" not in secret_payload
+
+
+def test_unconfirmed_or_incomplete_flush_payload_stays_unversioned():
+    import flush_memory
+
+    complete = {
+        "transcript_excerpt": "A transcript with durable provenance.",
+        "event": "session-end",
+        "session_id": "session-1",
+        "trigger": "opencode-idle",
+        "project_slug": "alpha",
+        "project_root": "D:/projects/alpha",
+        "occurred_at": "2026-07-27T12:34:56Z",
+    }
+
+    unconfirmed = flush_memory._build_flush_queue_payload(**complete)
+    assert unconfirmed is not None
+    assert "provenance_version" not in unconfirmed
+
+    for field, incomplete_value in (
+        ("trigger", "   "),
+        ("session_id", "UNKNOWN"),
+        ("project_slug", "unknown"),
+        ("project_root", "Unknown"),
+    ):
+        incomplete = flush_memory._build_flush_queue_payload(
+            **{**complete, field: incomplete_value},
+            project_identity_confirmed=True,
+        )
+        assert incomplete is not None
+        assert "provenance_version" not in incomplete
 
 
 def test_unavailable_classifier_fails_when_durable_enqueue_fails(monkeypatch):

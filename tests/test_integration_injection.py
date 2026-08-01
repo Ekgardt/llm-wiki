@@ -2402,6 +2402,391 @@ const fs=require("node:fs");
     assert state["applied"][0]["success"] is True
 
 
+def test_opencode_queue_recovery_resolves_before_provider_under_lease():
+    plugin_path = ROOT / "scripts" / "llm-wiki-memory-opencode.js"
+    node_script = r"""
+const fs=require("node:fs");
+(async()=>{
+  const source=fs.readFileSync(process.argv[1],"utf8");
+  const module=await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+  let taskAvailable=true,releaseLookup;
+  let resolveLookupStarted,resolvePeriodicRenewal,resolveApplyCalled,resolveCleanupDone;
+  const lookupStarted=new Promise(resolve=>{resolveLookupStarted=resolve});
+  const periodicRenewal=new Promise(resolve=>{resolvePeriodicRenewal=resolve});
+  const applyCalled=new Promise(resolve=>{resolveApplyCalled=resolve});
+  const cleanupDone=new Promise(resolve=>{resolveCleanupDone=resolve});
+  const expectedRoot=process.platform==="win32"
+    ? String.raw`\\server\share\source`
+    : "/srv/projects/source";
+  const timers=new Map();
+  const timeouts=new Map();
+  const state={
+    events:[],lookupIds:[],renewals:0,createCalls:0,promptCalls:0,
+    applied:[],cleanup:[],timersCreated:0,timersCleared:0,
+    timeoutsCreated:0,timeoutsCleared:0,
+  };
+  const task={
+    pending:true,kind:"sdk",type:"flush",task_id:"task",lease_id:"lease",
+    digest:"a".repeat(64),prompt:"classify",system_prompt:"",
+    recover_project_root:true,source_session_id:"source-session",
+  };
+  const taskBefore=JSON.stringify(task);
+  const runtime={
+    leaseRenewalIntervalMs:10,
+    setTimeout:(callback)=>{
+      const id=state.timeoutsCreated++;
+      timeouts.set(id,{callback});
+      return id;
+    },
+    clearTimeout:(id)=>{if(timeouts.delete(id))state.timeoutsCleared++;},
+    setInterval:(callback)=>{
+      const id=state.timersCreated++;
+      timers.set(id,{callback});
+      return id;
+    },
+    clearInterval:(id)=>{if(timers.delete(id))state.timersCleared++;},
+    runPython:async(script,args=[],stdin="")=>{
+      if(script==="memory_queue.py"&&args.includes("--ensure-compile-task"))
+        return JSON.stringify({pending:false,created:false,task_id:null,state:"not_needed"});
+      if(script==="memory_queue.py"&&args.includes("--prepare-sdk-task")){
+        if(!taskAvailable)return JSON.stringify({pending:false});
+        taskAvailable=false;return JSON.stringify(task);
+      }
+      if(script==="memory_queue.py"&&args.includes("--renew-sdk-task")){
+        const lease=JSON.parse(stdin);
+        if(lease.task_id!==task.task_id||lease.lease_id!==task.lease_id||lease.digest!==task.digest)
+          throw new Error("wrong lease identity");
+        state.events.push("renew");state.renewals++;
+        if(state.renewals===2)resolvePeriodicRenewal();
+        return JSON.stringify({ok:true,status:"renewed"});
+      }
+      if(script==="memory_queue.py"&&args.includes("--apply-sdk-result")){
+        state.events.push("apply");state.applied.push(JSON.parse(stdin));
+        resolveApplyCalled();
+        return JSON.stringify({ok:true,status:"acknowledged"});
+      }
+      return "{}";
+    },
+  };
+  const client={app:{log:async()=>{}},session:{
+    get:async({path})=>{
+      state.events.push("lookup");state.lookupIds.push(path.id);
+      resolveLookupStarted();
+      return new Promise(resolve=>{
+        releaseLookup=()=>resolve({data:{directory:expectedRoot}});
+      });
+    },
+    create:async()=>{state.events.push("create");state.createCalls++;return {data:{id:"queue-service"}};},
+    prompt:async()=>{state.events.push("prompt");state.promptCalls++;return {data:{parts:[{text:"FLUSH_OK"}]}};},
+    abort:async({path})=>state.cleanup.push(["abort",path.id]),
+    delete:async({path})=>{state.cleanup.push(["delete",path.id]);resolveCleanupDone();},
+  }};
+  const plugin=await module.LlmWikiMemoryPlugin({client,directory:"D:/maintenance",runtime});
+  await plugin.event({event:{type:"session.created",properties:{info:{id:"user",title:"user"}}}});
+  await lookupStarted;
+  for(const timer of [...timers.values()])timer.callback();
+  await periodicRenewal;
+  const beforeRelease={
+    events:[...state.events],createCalls:state.createCalls,promptCalls:state.promptCalls,
+  };
+  releaseLookup();
+  await applyCalled;
+  await cleanupDone;
+  process.stdout.write(JSON.stringify({
+    ...state,beforeRelease,activeTimers:timers.size,
+    activeTimeouts:timeouts.size,
+    expectedRoot,
+    taskUnchanged:JSON.stringify(task)===taskBefore,
+  }));
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+    result = subprocess.run(
+        ["node", "-e", node_script, str(plugin_path)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    state = json.loads(result.stdout)
+    assert state["lookupIds"] == ["source-session"]
+    assert state["events"][0:2] == ["renew", "lookup"]
+    assert state["beforeRelease"] == {
+        "events": ["renew", "lookup", "renew"],
+        "createCalls": 0,
+        "promptCalls": 0,
+    }
+    assert state["renewals"] == 7
+    assert state["createCalls"] == 1
+    assert state["promptCalls"] == 1
+    assert state["applied"] == [
+        {
+            "task_id": "task",
+            "lease_id": "lease",
+            "digest": "a" * 64,
+            "success": True,
+            "response": "FLUSH_OK",
+            "recovered_project_root": state["expectedRoot"],
+        }
+    ]
+    assert state["cleanup"] == [
+        ["abort", "queue-service"],
+        ["delete", "queue-service"],
+    ]
+    assert state["timersCreated"] == state["timersCleared"] == 3
+    assert state["activeTimers"] == 0
+    assert state["timeoutsCreated"] == state["timeoutsCleared"] == 1
+    assert state["activeTimeouts"] == 0
+    assert state["taskUnchanged"] is True
+
+
+def test_opencode_queue_recovery_failure_records_once_without_provider():
+    plugin_path = ROOT / "scripts" / "llm-wiki-memory-opencode.js"
+    node_script = r"""
+const fs=require("node:fs");
+(async()=>{
+  const source=fs.readFileSync(process.argv[1],"utf8");
+  const module=await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+  const invalidSourceIds={
+    "source-nonstring":7,
+    "source-blank":"",
+    "source-padded":" source-session",
+    "source-control":"source\u0085session",
+    "source-oversized":"s".repeat(501),
+  };
+  const scenarios=[
+    "throw","hang","sdk-error","null-response","nonobject-response","array-response",
+    "null-data","nonobject-data","array-data","missing-directory",
+    "nonstring-directory","blank-directory","padded-directory",
+    "relative-directory","drive-relative-directory","windows-root-relative-directory",
+    "native-root-relative-directory","foreign-absolute-directory",
+    "control-directory","oversized-directory",
+    ...Object.keys(invalidSourceIds),
+  ];
+  const lookupResponse=(scenario)=>{
+    if(scenario==="sdk-error")
+      return {error:{message:"missing"},data:{directory:"C:/must-not-win"}};
+    if(scenario==="null-response")return null;
+    if(scenario==="nonobject-response")return 7;
+    if(scenario==="array-response")return [];
+    if(scenario==="null-data")return {data:null,directory:"C:/must-not-fallback"};
+    if(scenario==="nonobject-data")return {data:7};
+    if(scenario==="array-data")return {data:[]};
+    if(scenario==="missing-directory")return {data:{}};
+    if(scenario==="nonstring-directory")return {data:{directory:7}};
+    if(scenario==="blank-directory")return {data:{directory:""}};
+    if(scenario==="padded-directory")return {data:{directory:" C:/project"}};
+    if(scenario==="relative-directory")return {data:{directory:"relative/project"}};
+    if(scenario==="drive-relative-directory")return {data:{directory:"C:relative/project"}};
+    if(scenario==="windows-root-relative-directory")return {data:{directory:"\\project"}};
+    if(scenario==="native-root-relative-directory")return {data:{directory:
+      process.platform==="win32"?"/project":"native/project"
+    }};
+    if(scenario==="foreign-absolute-directory")return {data:{directory:
+      process.platform==="win32"?"/srv/projects/foreign":String.raw`C:\projects\foreign`
+    }};
+    if(scenario==="control-directory")return {data:{directory:"C:/project\u0000bad"}};
+    return {data:{directory:"C:/"+"x".repeat(498)}};
+  };
+  const runScenario=async(scenario)=>{
+    let taskAvailable=true;
+    let resolveApplyCalled;
+    const applyCalled=new Promise(resolve=>{resolveApplyCalled=resolve});
+    const state={
+      prepares:0,lookups:0,lookupIds:[],lookupSignals:0,aborts:0,
+      creates:0,prompts:0,applied:[],cleanup:[],
+      timeoutsCreated:0,timeoutsCleared:0,activeTimeouts:0,
+      intervalsCreated:0,intervalsCleared:0,activeIntervals:0,
+    };
+    const task={
+      pending:true,kind:"sdk",type:"flush",task_id:"task",lease_id:"lease",
+      digest:"a".repeat(64),prompt:"classify",system_prompt:"",
+      recover_project_root:true,
+      source_session_id:Object.hasOwn(invalidSourceIds,scenario)
+        ? invalidSourceIds[scenario]
+        : "source-session",
+    };
+    const taskBefore=JSON.stringify(task);
+    const runtime={
+      sourceSessionLookupTimeoutMs:15,
+      setTimeout:(callback,delay)=>{
+        state.timeoutsCreated++;state.activeTimeouts++;
+        return setTimeout(callback,delay);
+      },
+      clearTimeout:(handle)=>{
+        clearTimeout(handle);state.timeoutsCleared++;state.activeTimeouts--;
+      },
+      setInterval:(callback,delay)=>{
+        state.intervalsCreated++;state.activeIntervals++;
+        return setInterval(callback,delay);
+      },
+      clearInterval:(handle)=>{
+        clearInterval(handle);state.intervalsCleared++;state.activeIntervals--;
+      },
+      runPython:async(script,args=[],stdin="")=>{
+        if(script==="memory_queue.py"&&args.includes("--ensure-compile-task"))
+          return JSON.stringify({pending:false,created:false,task_id:null,state:"not_needed"});
+        if(script==="memory_queue.py"&&args.includes("--prepare-sdk-task")){
+          state.prepares++;
+          if(!taskAvailable)return JSON.stringify({pending:false});
+          taskAvailable=false;return JSON.stringify(task);
+        }
+        if(script==="memory_queue.py"&&args.includes("--renew-sdk-task"))
+          return JSON.stringify({ok:true,status:"renewed"});
+        if(script==="memory_queue.py"&&args.includes("--apply-sdk-result")){
+          state.applied.push(JSON.parse(stdin));
+          resolveApplyCalled();
+          return JSON.stringify({ok:true,status:"failure recorded"});
+        }
+        return "{}";
+      },
+    };
+    const client={app:{log:async()=>{}},session:{
+      get:async({path,signal})=>{
+        state.lookups++;state.lookupIds.push(path.id);
+        if(signal instanceof AbortSignal){
+          state.lookupSignals++;
+          signal.addEventListener("abort",()=>{state.aborts++;},{once:true});
+        }
+        if(scenario==="throw")throw new Error("lookup unavailable");
+        if(scenario==="hang")return new Promise(()=>{});
+        return lookupResponse(scenario);
+      },
+      create:async()=>{state.creates++;return {data:{id:"queue-service"}};},
+      prompt:async()=>{state.prompts++;return {data:{parts:[{text:"FLUSH_OK"}]}};},
+      abort:async({path})=>state.cleanup.push(["abort",path.id]),
+      delete:async({path})=>state.cleanup.push(["delete",path.id]),
+    }};
+    const plugin=await module.LlmWikiMemoryPlugin({client,directory:"D:/maintenance",runtime});
+    await plugin.event({event:{type:"session.created",properties:{info:{id:"user",title:"user"}}}});
+    await applyCalled;
+    return {
+      scenario,expectedLookups:Object.hasOwn(invalidSourceIds,scenario)?0:1,
+      ...state,taskUnchanged:JSON.stringify(task)===taskBefore,
+    };
+  };
+  const results=[];
+  for(const scenario of scenarios)results.push(await runScenario(scenario));
+  process.stdout.write(JSON.stringify(results));
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+    result = subprocess.run(
+        ["node", "-e", node_script, str(plugin_path)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=3,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    for state in json.loads(result.stdout):
+        scenario = state["scenario"]
+        assert state["prepares"] == 1, scenario
+        assert state["lookups"] == state["expectedLookups"], scenario
+        assert state["lookupIds"] == (
+            ["source-session"] if state["expectedLookups"] else []
+        ), scenario
+        assert state["lookupSignals"] == state["expectedLookups"], scenario
+        assert state["aborts"] == (1 if scenario == "hang" else 0), scenario
+        assert state["timeoutsCreated"] == state["expectedLookups"], scenario
+        assert state["timeoutsCleared"] == state["expectedLookups"], scenario
+        assert state["activeTimeouts"] == 0, scenario
+        assert state["intervalsCreated"] == state["expectedLookups"], scenario
+        assert state["intervalsCleared"] == state["expectedLookups"], scenario
+        assert state["activeIntervals"] == 0, scenario
+        assert state["creates"] == 0, scenario
+        assert state["prompts"] == 0, scenario
+        assert state["cleanup"] == [], scenario
+        assert len(state["applied"]) == 1, scenario
+        applied = state["applied"][0]
+        assert applied["task_id"] == "task", scenario
+        assert applied["lease_id"] == "lease", scenario
+        assert applied["digest"] == "a" * 64, scenario
+        assert applied["success"] is False, scenario
+        assert "response" not in applied, scenario
+        assert "recovered_project_root" not in applied, scenario
+        assert state["taskUnchanged"] is True, scenario
+
+
+def test_opencode_normal_tasks_never_lookup_source_recovery():
+    plugin_path = ROOT / "scripts" / "llm-wiki-memory-opencode.js"
+    node_script = r"""
+const fs=require("node:fs");
+(async()=>{
+  const source=fs.readFileSync(process.argv[1],"utf8");
+  const module=await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+  let resolveAllApplied,resolveCleanupDone;
+  const allApplied=new Promise(resolve=>{resolveAllApplied=resolve});
+  const cleanupDone=new Promise(resolve=>{resolveCleanupDone=resolve});
+  const state={prepares:0,lookups:0,creates:0,prompts:0,applied:[],cleanup:[]};
+  const tasks=[
+    {pending:true,kind:"sdk",type:"query",task_id:"query",lease_id:"q",digest:"q".repeat(64),prompt:"query",system_prompt:""},
+    {pending:true,kind:"sdk",type:"flush",task_id:"flush",lease_id:"f",digest:"f".repeat(64),prompt:"flush",system_prompt:"",source_session_id:"must-not-activate"},
+    {pending:true,kind:"compile",type:"compile",task_id:"compile",lease_id:"c",digest:"c".repeat(64),recover_project_root:true,source_session_id:"must-not-activate-compile"},
+  ];
+  const runtime={runPython:async(script,args=[],stdin="")=>{
+    if(script==="memory_queue.py"&&args.includes("--ensure-compile-task"))
+      return JSON.stringify({pending:false,created:false,task_id:null,state:"not_needed"});
+    if(script==="memory_queue.py"&&args.includes("--prepare-sdk-task"))
+      return JSON.stringify(tasks[state.prepares++]||{pending:false});
+    if(script==="memory_queue.py"&&args.includes("--renew-sdk-task"))
+      return JSON.stringify({ok:true,status:"renewed"});
+    if(script==="memory_queue.py"&&args.includes("--apply-sdk-result")){
+      state.applied.push(JSON.parse(stdin));
+      if(state.applied.length===3)resolveAllApplied();
+      return JSON.stringify({ok:true,status:"acknowledged"});
+    }
+    if(script==="compile_memory.py"&&args.includes("--prepare-sdk-request"))
+      return JSON.stringify({pending:false});
+    return "{}";
+  }};
+  const client={app:{log:async()=>{}},session:{
+    get:async()=>{state.lookups++;throw new Error("unexpected source lookup");},
+    create:async()=>{state.creates++;return {data:{id:`queue-${state.creates}`}};},
+    prompt:async()=>{state.prompts++;return {data:{parts:[{text:"FLUSH_OK"}]}};},
+    abort:async({path})=>state.cleanup.push(["abort",path.id]),
+    delete:async({path})=>{
+      state.cleanup.push(["delete",path.id]);
+      if(state.cleanup.length===4)resolveCleanupDone();
+    },
+  }};
+  const plugin=await module.LlmWikiMemoryPlugin({client,directory:"D:/maintenance",runtime});
+  await plugin.event({event:{type:"session.created",properties:{info:{id:"user",title:"user"}}}});
+  await Promise.all([allApplied,cleanupDone]);
+  process.stdout.write(JSON.stringify(state));
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+    result = subprocess.run(
+        ["node", "-e", node_script, str(plugin_path)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    state = json.loads(result.stdout)
+    assert state["lookups"] == 0
+    assert state["creates"] == 2
+    assert state["prompts"] == 2
+    assert [result["task_id"] for result in state["applied"]] == [
+        "query",
+        "flush",
+        "compile",
+    ]
+    assert all("recovered_project_root" not in result for result in state["applied"])
+    assert state["cleanup"] == [
+        ["abort", "queue-1"],
+        ["delete", "queue-1"],
+        ["abort", "queue-2"],
+        ["delete", "queue-2"],
+    ]
+
+
 def test_opencode_transient_periodic_renewal_preserves_successful_result():
     plugin_path = ROOT / "scripts" / "llm-wiki-memory-opencode.js"
     node_script = r"""
@@ -3567,42 +3952,65 @@ const fs = require("node:fs");
     ]
 
 
-def test_opencode_rejected_queue_apply_persists_failure_and_stops_maintenance():
+def test_opencode_settled_queue_apply_failure_is_not_submitted_twice():
     plugin_path = ROOT / "scripts" / "llm-wiki-memory-opencode.js"
     node_script = r"""
 const fs = require("node:fs");
 (async()=>{
   const source=fs.readFileSync(process.argv[1],"utf8");
   const module=await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
-  const state={prepares:0,applies:[],compilePrepares:0,cleanup:[]};
-  const runtime={runPython:async(script,args=[],stdin="")=>{
-    if(script==="memory_queue.py"&&args.includes("--prepare-sdk-task")){
-      state.prepares++;
-      return JSON.stringify({pending:true,task_id:"task",lease_id:"lease",digest:"a".repeat(64),prompt:"work",system_prompt:""});
-    }
-    if(script==="memory_queue.py"&&args.includes("--renew-sdk-task"))
-      return JSON.stringify({ok:true,status:"renewed"});
-    if(script==="memory_queue.py"&&args.includes("--apply-sdk-result")){
-      const payload=JSON.parse(stdin); state.applies.push(payload);
-      return JSON.stringify(state.applies.length===1
-        ? {ok:true,status:"failure recorded"}
-        : {ok:true,status:"failure recorded"});
-    }
-    if(script==="compile_memory.py"&&args.includes("--prepare-sdk-request")){
-      state.compilePrepares++; return JSON.stringify({pending:false});
-    }
-    return "{}";
-  }};
-  const client={app:{log:async()=>{}},session:{
-    create:async()=>({data:{id:"queue-service"}}),
-    prompt:async()=>({data:{parts:[{text:"provider result"}]}}),
-    abort:async({path})=>state.cleanup.push(["abort",path.id]),
-    delete:async({path})=>state.cleanup.push(["delete",path.id]),
-  }};
-  const plugin=await module.LlmWikiMemoryPlugin({client,directory:"D:/project",runtime});
-  await plugin["experimental.chat.system.transform"]({sessionID:"user"},{system:[]});
-  await new Promise(resolve=>setTimeout(resolve,40));
-  process.stdout.write(JSON.stringify(state));
+  const output={};
+  for(const operation of ["queue","compile","defer"]){
+    let taskAvailable=true;
+    let resolveOperationComplete;
+    const operationComplete=new Promise(resolve=>{resolveOperationComplete=resolve});
+    const state={
+      prepares:0,applyCalls:0,applies:[],compilePrepares:0,
+      creates:0,prompts:0,cleanup:[],
+    };
+    const task={
+      pending:true,kind:operation==="queue"?"sdk":"compile",
+      type:operation==="queue"?"query":"compile",
+      task_id:"task",lease_id:"lease",digest:"a".repeat(64),
+      prompt:"work",system_prompt:"",
+    };
+    const runtime={runPython:async(script,args=[],stdin="")=>{
+      if(script==="memory_queue.py"&&args.includes("--prepare-sdk-task")){
+        state.prepares++;
+        if(!taskAvailable)return JSON.stringify({pending:false});
+        taskAvailable=false;return JSON.stringify(task);
+      }
+      if(script==="memory_queue.py"&&args.includes("--renew-sdk-task"))
+        return JSON.stringify({ok:true,status:"renewed"});
+      if(script==="memory_queue.py"&&args.includes("--apply-sdk-result")){
+        state.applyCalls++;
+        if(state.applyCalls>1)throw new Error("settled task was submitted twice");
+        state.applies.push(JSON.parse(stdin));
+        setImmediate(resolveOperationComplete);
+        return JSON.stringify({ok:true,status:"failure recorded"});
+      }
+      if(script==="compile_memory.py"&&args.includes("--prepare-sdk-request")){
+        state.compilePrepares++;
+        return JSON.stringify(operation==="defer"
+          ? {pending:true,batch_id:`batch-${state.compilePrepares}`,prompt:"compile",system_prompt:"",dailies:[]}
+          : {pending:false});
+      }
+      if(script==="compile_memory.py"&&args.includes("--apply-sdk-response"))
+        return JSON.stringify({ok:true,status:"applied",daily_complete:true});
+      return "{}";
+    }};
+    const client={app:{log:async()=>{}},session:{
+      create:async()=>{state.creates++;return {data:{id:"queue-service"}};},
+      prompt:async()=>{state.prompts++;return {data:{parts:[{text:"provider result"}]}};},
+      abort:async({path})=>state.cleanup.push(["abort",path.id]),
+      delete:async({path})=>state.cleanup.push(["delete",path.id]),
+    }};
+    const plugin=await module.LlmWikiMemoryPlugin({client,directory:"D:/project",runtime});
+    await plugin["experimental.chat.system.transform"]({sessionID:"user"},{system:[]});
+    await operationComplete;
+    output[operation]=state;
+  }
+  process.stdout.write(JSON.stringify(output));
 })().catch(error=>{console.error(error);process.exit(1)});
 """
     result = subprocess.run(
@@ -3610,12 +4018,43 @@ const fs = require("node:fs");
         capture_output=True, text=True, timeout=30, check=False,
     )
     assert result.returncode == 0, result.stderr
-    state = json.loads(result.stdout)
-    assert state["prepares"] == 1
-    assert state["compilePrepares"] == 0
-    assert [payload["success"] for payload in state["applies"]] == [True, False]
-    assert "rejected" in state["applies"][1]["error"].lower()
-    assert state["cleanup"] == [["abort", "queue-service"], ["delete", "queue-service"]]
+    output = json.loads(result.stdout)
+    queue = output["queue"]
+    assert queue["prepares"] == 1
+    assert queue["applyCalls"] == 1
+    assert queue["compilePrepares"] == 0
+    assert queue["creates"] == queue["prompts"] == 1
+    assert len(queue["applies"]) == 1
+    assert queue["applies"][0]["success"] is True
+    assert queue["applies"][0]["response"] == "provider result"
+    assert queue["cleanup"] == [
+        ["abort", "queue-service"],
+        ["delete", "queue-service"],
+    ]
+
+    compile_state = output["compile"]
+    assert compile_state["prepares"] == 1
+    assert compile_state["applyCalls"] == 1
+    assert compile_state["compilePrepares"] == 1
+    assert compile_state["creates"] == compile_state["prompts"] == 0
+    assert len(compile_state["applies"]) == 1
+    assert compile_state["applies"][0]["success"] is True
+    assert compile_state["applies"][0]["response"] == "COMPILE_COMPLETED"
+    assert compile_state["cleanup"] == []
+
+    deferred = output["defer"]
+    assert deferred["prepares"] == 1
+    assert deferred["applyCalls"] == 1
+    assert deferred["compilePrepares"] == 10
+    assert deferred["creates"] == deferred["prompts"] == 10
+    assert len(deferred["applies"]) == 1
+    assert deferred["applies"][0]["defer"] is True
+    assert "success" not in deferred["applies"][0]
+    assert deferred["cleanup"] == [
+        [action, "queue-service"]
+        for _ in range(10)
+        for action in ("abort", "delete")
+    ]
 
 
 def test_opencode_compile_queue_ack_follows_successful_validated_compile():

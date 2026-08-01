@@ -58,7 +58,7 @@ The installer detects your agents and wires them up automatically.
    git clone https://github.com/Ekgardt/llm-wiki.git
    cd llm-wiki
    uv sync
-   uv run pytest -q          # 1903 collected; local Windows: 1868 passed, 35 skipped; skips vary by environment
+   uv run pytest -q          # 1916 collected; local Windows: 1881 passed, 35 skipped; skips vary by environment
    ```
 
 2. **Set environment variables** (add to your shell profile):
@@ -360,10 +360,10 @@ journals/manifests and checkpoints, plus repair manifests/transactions. Use
 
 ### "Tests fail on fresh clone"
 - `uv sync` first (deps must be installed)
-- `uv run pytest -q` — collects 1903 on every platform; the local Windows
-  verification is 1868 passed, 35 skipped. Skip count varies with optional Bash,
+- `uv run pytest -q` — collects 1916 on every platform; the local Windows
+  verification is 1881 passed, 35 skipped. Skip count varies with optional Bash,
   PowerShell, and symlink availability.
-- If fewer than 1903 tests are collected, your checkout is stale; `git pull`
+- If fewer than 1916 tests are collected, your checkout is stale; `git pull`
 
 ---
 
@@ -372,7 +372,7 @@ journals/manifests and checkpoints, plus repair manifests/transactions. Use
 | Path | Zone | Purpose |
 |------|------|---------|
 | `scripts/` | CODE | Pipeline, hooks, maintenance, repair, and integration helpers |
-| `tests/` | CODE | Regression suite: 1903 collected platform-wide; local Windows 1868 passed, 35 skipped, with skips varying by optional shell/symlink support |
+| `tests/` | CODE | Regression suite: 1916 collected platform-wide; local Windows 1881 passed, 35 skipped, with skips varying by optional shell/symlink support |
 | `docs/` | CODE | This file + ARCHITECTURE + STRUCTURE + SETUP-COGNEE + EXPORTING |
 | `skills/` | CODE | 9 agent skills |
 | `rules/` | CODE | 3 file-handling policies |

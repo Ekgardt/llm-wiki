@@ -1,6 +1,6 @@
 # LLM Wiki
 
-[![Tests](https://img.shields.io/badge/tests-1903%20collected-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://img.shields.io/badge/tests-1916%20collected-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-3.4.0-blue.svg)](CHANGELOG.md)
@@ -106,7 +106,7 @@ LLM Wiki даёт каждому AI-агенту, которым вы польз
 - **Кросс-платформенность**: Windows, macOS, Linux, WSL2
 - **Фоновое обслуживание Windows без консоли** — Task Scheduler запускает `pythonw`, а дочерние процессы обслуживания создаются без консольных окон
 - **Ноль runtime-зависимостей** — базовая установка только stdlib; sentence-transformers и Cognee опциональны
-- **Сбор 1903 тестов стабилен между платформами; локальная проверка Windows: 1868 пройдено, 35 пропущено**. Число пропусков зависит от доступности опциональных Bash, PowerShell и symlink; CI нацелен на Ubuntu + Windows + macOS с Python 3.10 + 3.13.
+- **Сбор 1916 тестов стабилен между платформами; локальная проверка Windows: 1881 пройдено, 35 пропущено**. Число пропусков зависит от доступности опциональных Bash, PowerShell и symlink; CI нацелен на Ubuntu + Windows + macOS с Python 3.10 + 3.13.
 - **Pre-commit хуки**: ruff (статический анализ) + структурный lint + gitleaks (сканирование секретов)
 
 ---
@@ -137,7 +137,7 @@ irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 1. Проверяет требования (Python 3.10+, git)
 2. Устанавливает `uv` (быстрый Python-менеджер пакетов), если отсутствует
 3. Синхронизирует зависимости (`uv sync`)
-4. Запускает тестовый набор (1903 собирается на всех платформах; локально на Windows: 1868 пройдено, 35 пропущено; число пропусков зависит от shell/symlink)
+4. Запускает тестовый набор (1916 собирается на всех платформах; локально на Windows: 1881 пройдено, 35 пропущено; число пропусков зависит от shell/symlink)
 5. Устанавливает переменную окружения `LLM_WIKI_ROOT` (user scope)
 6. Создаёт gitignored runtime-директории (`cache/` и logs заменяемы; `run/` хранит устойчивое состояние автоматизации и восстановления)
 7. Регистрирует плановое обслуживание (cron на Unix, Task Scheduler на Windows)
@@ -150,7 +150,7 @@ irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync
-uv run pytest -q          # 1903 собрано; локально Windows: 1868 пройдено, 35 пропущено; skips зависят от среды
+uv run pytest -q          # 1916 собрано; локально Windows: 1881 пройдено, 35 пропущено; skips зависят от среды
 ```
 
 ### Проверка работы

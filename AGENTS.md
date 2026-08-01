@@ -274,6 +274,12 @@ require human attention. Leases older than 10 minutes are recoverable. Queue
 maintenance uses bounded repeatable passes and continuations while eligible
 work remains. Durable task provenance applies once; legacy provenance is
 explicit rather than inferred.
+Only confirmed flush tasks with complete provenance that remains unchanged by
+durable sanitization carry provenance version 1. Confirmed incomplete payloads
+remain unversioned. Unversioned transitional flush tasks may recover only
+through their exact authenticated OpenCode source session; the SDK directory is
+transient, and Python revalidates canonical project ownership before apply.
+Versioned or persisted identity cannot be overridden.
 
 **Compile contract:** meaningful timestamp blocks are bounded by
 `MEMORY_COMPILE_PROMPT_CHAR_BUDGET` (default 120,000 characters). Generation
@@ -335,7 +341,7 @@ receive direct `command` + `args` hooks. SessionStart covers forked sessions.
 ## 7. Quick command reference
 
 ```bash
-uv run pytest -q                              # 1903 collected; local Windows: 1868 passed, 35 skipped; skips vary by environment
+uv run pytest -q                              # 1916 collected; local Windows: 1881 passed, 35 skipped; skips vary by environment
 uv run ruff check scripts/ tests/             # Python static analysis
 uv run python scripts/lint_memory.py --scope all   # structural lint
 uv run python scripts/search_memory.py "query"     # hybrid search

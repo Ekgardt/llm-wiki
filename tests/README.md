@@ -4,8 +4,8 @@ Small pytest-based suite covering the critical scenarios surfaced by four rounds
 
 ## Coverage
 
-The suite has **1903 tests across 32 files on every platform**. Local Windows
-verification reports **1868 passed, 35 skipped**; skip count varies with optional
+The suite has **1916 tests across 32 files on every platform**. Local Windows
+verification reports **1881 passed, 35 skipped**; skip count varies with optional
 Git Bash, PowerShell, and symlink availability. Highlights:
 
 | Test file | Guards against |
@@ -22,15 +22,15 @@ Git Bash, PowerShell, and symlink availability. Highlights:
 | `test_session_end_skip.py` | SessionEnd hook skips vault cwd (delegates to project-level hook) and skips $HOME (not a project); writes tagged entry for normal non-vault cwd. |
 | `test_capture_hooks.py` | Exit-0 invariants, prompt retention, direct-file-mutation-only breadcrumbs, read/search/shell exclusion, bounded/redacted targets and provenance, vault-internal skip, and rate limiting. |
 | `test_feedback_capture.py` | Correction/preference/instruction/rejection detection, shared bounded hostile-candidate loading with list-specific schema checks, and candidate save/promote. |
-| `test_flush_classification.py` | FLUSH_MAJOR/MINOR/OK classification, exact durable completion, fallback truthfulness, and tier gating of `maybe_trigger_compile`. |
+| `test_flush_classification.py` | FLUSH_MAJOR/MINOR/OK classification, confirmed-producer provenance versioning, exact durable completion, fallback truthfulness, and tier gating of `maybe_trigger_compile`. |
 | `test_graph_neighbors.py` | Triple-RRF fusion weights + graph-neighbor boost resolution. |
 | `test_guardrails.py` | Correction/preference collection, project filter, dedup, formatting. |
 | `test_maybe_compile.py` | Fixed-file OS-lock probing, held-lock refusal, crash release, SDK deferral, and pending-work/index-state checks. |
-| `test_memory_queue.py` | Durable FIFO sequence, canonical task suffix integrity, exactly-once durable provenance with explicit legacy fallback, exact flush-result acknowledgement, migration journal, SDK lease identity/digest, stale recovery, retries/backoff, bounded drain, and failure status. |
+| `test_memory_queue.py` | Durable FIFO sequence, canonical task suffix integrity, exactly-once durable provenance with explicit legacy fallback, the provenance recovery/apply trust boundary, exact flush-result acknowledgement, migration journal, SDK lease identity/digest, stale recovery, retries/backoff, bounded drain, and failure status. |
 | `test_merge_claude_settings.py` | Direct `uv` argv materialization, idempotent owned-hook replacement, user-hook preservation, fail-closed malformed settings, env/permission merge, and backup writes. |
 | `test_plugin_helpers.py` | Bounded/fail-closed stdin exits without writes on rejection; valid payloads write daily-log/state/breadcrumb records with bounded, redacted metadata. |
-| `test_readme_i18n.py` | All 3 READMEs exist, share live count (1903), correct repo (`Ekgardt/llm-wiki`), mention `knowledge/`, mention `3.4.0`. |
-| `test_integration_injection.py` | OpenCode prompt capture, mutation-only tool filtering, bounded repeatable maintenance passes/continuations, project attribution, and SDK session cleanup. |
+| `test_readme_i18n.py` | All 3 READMEs exist, share live count (1916), correct repo (`Ekgardt/llm-wiki`), mention `knowledge/`, mention `3.4.0`. |
+| `test_integration_injection.py` | OpenCode prompt capture, mutation-only tool filtering, bounded repeatable maintenance passes/continuations, bounded/abortable authenticated source-session lookup before provider work, project attribution, and SDK session cleanup. |
 | `test_quality_guards.py` | Documentation counts/parity, windowless `pythonw` Task Scheduler registration, and console-free Windows maintenance child processes. |
 | `test_search_ranking.py` | `_rrf_fuse_triple` weights verified; source_authority boost. |
 | `test_wikilinks_tracked.py` | `git ls-files knowledge` filtered, broken-link detector + untracked-target reporting. |
@@ -60,8 +60,8 @@ pytest tests/
   - `MEMORY_LLM_PROVIDER` → `fake` (no live LLM calls)
   - a skeleton `state.json` if it doesn't exist yet
 
-No pre-configuration required. Collection is platform-stable at 1903. Local
-Windows output is 1868 passed, 35 skipped; optional Bash, PowerShell, and symlink
+No pre-configuration required. Collection is platform-stable at 1916. Local
+Windows output is 1881 passed, 35 skipped; optional Bash, PowerShell, and symlink
 availability can change the skip count elsewhere.
 
 All tests are self-contained and use `tmp_path` + state snapshots, so running them does not mutate the vault permanently. The compile-failure test briefly flips `state.json::last_compile_status` and restores it via fixture.

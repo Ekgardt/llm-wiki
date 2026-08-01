@@ -37,6 +37,8 @@ const MAX_CHILD_STDIN_BYTES = 8 * 1024 * 1024;
 const MAX_CHILD_STDOUT_BYTES = 8 * 1024 * 1024;
 const MAX_CHILD_STDERR_BYTES = 256 * 1024;
 const PYTHON_TIMEOUT_MS = 30_000;
+const SOURCE_SESSION_LOOKUP_TIMEOUT_MS = 30_000;
+const MAX_PROVENANCE_CHARS = 500;
 const MAX_QUEUE_TASKS = 5;
 const MAX_COMPILE_BATCHES = 10;
 const LEASE_RENEWAL_INTERVAL_MS = 60_000;
@@ -81,6 +83,12 @@ export const LlmWikiMemoryPlugin = async ({ client, directory, worktree, runtime
   const pythonTimeoutMs = Number.isFinite(configuredPythonTimeout) && configuredPythonTimeout > 0
     ? configuredPythonTimeout
     : PYTHON_TIMEOUT_MS;
+  const configuredSourceSessionLookupTimeout = Number(runtime?.sourceSessionLookupTimeoutMs);
+  const sourceSessionLookupTimeoutMs = (
+    Number.isFinite(configuredSourceSessionLookupTimeout) && configuredSourceSessionLookupTimeout > 0
+  )
+    ? configuredSourceSessionLookupTimeout
+    : SOURCE_SESSION_LOOKUP_TIMEOUT_MS;
   const isInsideVault = (candidate) => {
     if (!candidate || !process.env.LLM_WIKI_ROOT) return false;
     const normalizeCase = (value) => process.platform === "win32" ? value.toLowerCase() : value;
@@ -237,6 +245,68 @@ export const LlmWikiMemoryPlugin = async ({ client, directory, worktree, runtime
 
   function providerError(response) {
     return response?.error || response?.data?.info?.error || response?.info?.error;
+  }
+
+  function extractRecoveredProjectRoot(response) {
+    if (!response || typeof response !== "object" || Array.isArray(response)) {
+      throw new Error("OpenCode source session lookup returned an invalid response");
+    }
+    if (response.error !== undefined && response.error !== null) {
+      throw new Error("OpenCode source session lookup returned an error");
+    }
+    const session = Object.hasOwn(response, "data") ? response.data : response;
+    if (!session || typeof session !== "object" || Array.isArray(session)) {
+      throw new Error("OpenCode source session lookup returned invalid session data");
+    }
+    const directory = session.directory;
+    let nativeAbsolute = false;
+    if (typeof directory === "string") {
+      if (process.platform === "win32") {
+        const windowsRoot = path.win32.parse(directory).root;
+        nativeAbsolute = path.win32.isAbsolute(directory) &&
+          windowsRoot !== "\\" && windowsRoot !== "/";
+      } else {
+        nativeAbsolute = path.posix.isAbsolute(directory);
+      }
+    }
+    if (
+      typeof directory !== "string" ||
+      !directory ||
+      directory !== directory.trim() ||
+      directory.length > MAX_PROVENANCE_CHARS ||
+      /[\u0000-\u001f\u007f-\u009f]/.test(directory) ||
+      !nativeAbsolute
+    ) {
+      throw new Error("OpenCode source session returned an invalid directory");
+    }
+    return directory;
+  }
+
+  async function lookupSourceSession(sourceSessionId) {
+    const controller = new AbortController();
+    let timeoutHandle = null;
+    const lookup = Promise.resolve().then(() => client.session.get({
+      path: { id: sourceSessionId },
+      signal: controller.signal,
+    }));
+    try {
+      const timeout = new Promise((_, reject) => {
+        timeoutHandle = scheduleTimeout(() => {
+          const error = new Error(
+            `OpenCode source session lookup timed out after ${sourceSessionLookupTimeoutMs} ms`,
+          );
+          reject(error);
+          try { controller.abort(error); } catch {}
+        }, sourceSessionLookupTimeoutMs);
+      });
+      return await Promise.race([lookup, timeout]);
+    } finally {
+      if (timeoutHandle !== null) {
+        const handle = timeoutHandle;
+        timeoutHandle = null;
+        try { cancelTimeout(handle); } catch {}
+      }
+    }
   }
 
   async function renewQueueLease(task) {
@@ -501,10 +571,12 @@ export const LlmWikiMemoryPlugin = async ({ client, directory, worktree, runtime
       throw new Error("SDK queue apply returned invalid JSON");
     }
     const expectedStatuses = result.defer
-      ? ["deferred"]
-      : result.success && task.kind === "compile"
-        ? ["acknowledged", "compile_pending"]
-        : [result.success ? "acknowledged" : "failure recorded"];
+      ? ["deferred", "failure recorded"]
+      : result.success
+        ? task.kind === "compile"
+          ? ["acknowledged", "compile_pending", "failure recorded"]
+          : ["acknowledged", "failure recorded"]
+        : ["failure recorded"];
     if (applied?.ok !== true || !expectedStatuses.includes(applied?.status)) {
       throw new Error(`SDK queue apply rejected: ${applied?.status || "unknown error"}`);
     }
@@ -513,7 +585,8 @@ export const LlmWikiMemoryPlugin = async ({ client, directory, worktree, runtime
 
   async function deferCompileControl(task) {
     try {
-      await applyQueueResult(task, { defer: true });
+      const applied = await applyQueueResult(task, { defer: true });
+      if (applied.status === "failure recorded") return OUTCOME_FAILED;
       return OUTCOME_CAPPED;
     } catch (error) {
       await logError("Failed to defer capped compile control", error);
@@ -537,6 +610,7 @@ export const LlmWikiMemoryPlugin = async ({ client, directory, worktree, runtime
         const applied = await applyQueueResult(task, outcome === OUTCOME_COMPLETE
           ? { success: true, response: "COMPILE_COMPLETED" }
           : { success: false, error: "queued compile did not complete" });
+        if (applied.status === "failure recorded") return OUTCOME_FAILED;
         if (applied.status === "compile_pending") return OUTCOME_CAPPED;
         return outcome;
       } catch (error) {
@@ -552,9 +626,28 @@ export const LlmWikiMemoryPlugin = async ({ client, directory, worktree, runtime
         return OUTCOME_FAILED;
       }
     }
+    let recoveredProjectRoot;
     let ephemeralId = null;
     let providerResultReady = false;
     try {
+      if (task.recover_project_root === true) {
+        const sourceSessionId = task.source_session_id;
+        if (
+          typeof sourceSessionId !== "string" ||
+          !sourceSessionId ||
+          sourceSessionId !== sourceSessionId.trim() ||
+          sourceSessionId.length > MAX_PROVENANCE_CHARS ||
+          /[\u0000-\u001f\u007f-\u009f]/.test(sourceSessionId)
+        ) {
+          throw new Error("SDK queue recovery task has no valid source session id");
+        }
+        recoveredProjectRoot = await withQueueLeaseRenewal(
+          task,
+          async () => extractRecoveredProjectRoot(
+            await lookupSourceSession(sourceSessionId),
+          ),
+        );
+      }
       const session = await withQueueLeaseRenewal(
         task,
         () => client.session.create({ body: { title: "memory-queue-ephemeral" } }),
@@ -596,7 +689,12 @@ export const LlmWikiMemoryPlugin = async ({ client, directory, worktree, runtime
       const response = parts.map((part) => part?.text || "").join("").trim();
       if (!response) throw new Error("OpenCode returned an empty queue response");
       providerResultReady = true;
-      await applyQueueResult(task, { success: true, response });
+      const successfulResult = { success: true, response };
+      if (recoveredProjectRoot !== undefined) {
+        successfulResult.recovered_project_root = recoveredProjectRoot;
+      }
+      const applied = await applyQueueResult(task, successfulResult);
+      if (applied.status === "failure recorded") return OUTCOME_FAILED;
       return OUTCOME_COMPLETE;
     } catch (error) {
       await logError("OpenCode SDK queue task failed", error);

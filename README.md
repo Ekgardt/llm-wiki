@@ -1,6 +1,6 @@
 # LLM Wiki
 
-[![Tests](https://img.shields.io/badge/tests-1903%20collected-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://img.shields.io/badge/tests-1916%20collected-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-3.4.0-blue.svg)](CHANGELOG.md)
@@ -106,7 +106,7 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 - **Cross-platform**: Windows, macOS, Linux, WSL2
 - **Windowless Windows maintenance** — Task Scheduler launches `pythonw`, and maintenance child processes are created without console windows
 - **Zero runtime dependencies** — base install is stdlib-only; sentence-transformers and Cognee are optional
-- **1903 tests collected (platform-stable); local Windows verification: 1868 passed, 35 skipped**. Skip count varies with optional Bash, PowerShell, and symlink availability; CI targets Ubuntu + Windows + macOS on Python 3.10 + 3.13.
+- **1916 tests collected (platform-stable); local Windows verification: 1881 passed, 35 skipped**. Skip count varies with optional Bash, PowerShell, and symlink availability; CI targets Ubuntu + Windows + macOS on Python 3.10 + 3.13.
 - **Pre-commit hooks**: ruff (static analysis) + structural lint + gitleaks (secret scanning)
 
 ---
@@ -137,7 +137,7 @@ The installer:
 1. Checks prerequisites (Python 3.10+, git)
 2. Installs `uv` (fast Python package manager) if missing
 3. Syncs dependencies (`uv sync`)
-4. Runs the test suite (1903 collected platform-wide; local Windows: 1868 passed, 35 skipped; skips vary with optional shell/symlink support)
+4. Runs the test suite (1916 collected platform-wide; local Windows: 1881 passed, 35 skipped; skips vary with optional shell/symlink support)
 5. Sets `LLM_WIKI_ROOT` environment variable (user scope)
 6. Creates gitignored runtime dirs (`cache/` and logs are replaceable; `run/` holds durable automation/recovery state)
 7. Registers scheduled maintenance (cron on Unix, Task Scheduler on Windows)
@@ -150,7 +150,7 @@ The installer:
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync
-uv run pytest -q          # 1903 collected; local Windows: 1868 passed, 35 skipped; skips vary by environment
+uv run pytest -q          # 1916 collected; local Windows: 1881 passed, 35 skipped; skips vary by environment
 ```
 
 ### Verify it works
