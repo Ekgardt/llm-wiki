@@ -4303,7 +4303,7 @@ def _run_windows_owner_acl(
 ) -> _subprocess.CompletedProcess[bytes]:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        raise PermissionError("owner-only LSP ACL deadline expired")
+        raise TimeoutError("owner-only LSP ACL deadline expired")
     try:
         result = _subprocess.run(
             list(command),
@@ -4312,7 +4312,9 @@ def _run_windows_owner_acl(
             capture_output=True,
             timeout=remaining,
         )
-    except (OSError, _subprocess.TimeoutExpired) as exc:
+    except _subprocess.TimeoutExpired as exc:
+        raise TimeoutError("owner-only LSP ACL deadline expired") from exc
+    except OSError as exc:
         raise PermissionError("owner-only LSP ACL command failed") from exc
     if len(result.stdout or b"") + len(result.stderr or b"") > _MAX_ACL_OUTPUT_BYTES:
         raise PermissionError("owner-only LSP ACL output exceeded its byte bound")
