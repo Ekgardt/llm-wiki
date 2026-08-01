@@ -347,6 +347,15 @@ def _startup_code(error: BaseException) -> str:
             return current.code
         if isinstance(current, TimeoutError):
             return "pyright_startup_timeout"
+        if isinstance(current, PermissionError):
+            cause = current.__cause__
+            if (
+                cause is not None
+                and cause.__class__.__name__ == "TimeoutExpired"
+            ):
+                return "pyright_startup_timeout"
+            if "deadline expired" in str(current):
+                return "pyright_startup_timeout"
         current = current.__cause__
     return "pyright_startup_failed"
 
