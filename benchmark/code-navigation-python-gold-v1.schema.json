@@ -1,0 +1,89 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "code-navigation-python-gold-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "fixture_seed",
+    "fixture_lines",
+    "source_manifest_sha256",
+    "definition_queries",
+    "reference_queries",
+    "call_queries",
+    "queries"
+  ],
+  "properties": {
+    "schema_version": {"const": "code-navigation-python-gold/v1"},
+    "fixture_seed": {"const": 411},
+    "fixture_lines": {"const": 100000},
+    "source_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "definition_queries": {"const": 200},
+    "reference_queries": {"const": 100},
+    "call_queries": {"const": 100},
+    "queries": {
+      "type": "array",
+      "minItems": 400,
+      "maxItems": 400,
+      "items": {"$ref": "#/definitions/query"}
+    }
+  },
+  "definitions": {
+    "location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "line", "character", "byte_start", "byte_end", "source_sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "line": {"type": "integer", "minimum": 1},
+        "character": {"type": "integer", "minimum": 0},
+        "byte_start": {"type": "integer", "minimum": 0},
+        "byte_end": {"type": "integer", "minimum": 1},
+        "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "query": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "query_id",
+        "capability",
+        "path",
+        "line",
+        "character",
+        "codepoint_character",
+        "byte_offset",
+        "byte_end",
+        "source_sha256",
+        "symbol",
+        "direction",
+        "expected_locations"
+      ],
+      "properties": {
+        "query_id": {"type": "string", "pattern": "^(definition|references|calls)-[0-9]{3}$"},
+        "capability": {"enum": ["definition", "references", "calls"]},
+        "path": {"type": "string", "minLength": 1},
+        "line": {"type": "integer", "minimum": 1},
+        "character": {"type": "integer", "minimum": 0},
+        "codepoint_character": {"type": "integer", "minimum": 0},
+        "byte_offset": {"type": "integer", "minimum": 0},
+        "byte_end": {"type": "integer", "minimum": 1},
+        "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "symbol": {"type": "string", "minLength": 1},
+        "direction": {"type": ["string", "null"], "enum": ["outgoing", null]},
+        "expected_locations": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/definitions/location"}
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"capability": {"const": "calls"}}},
+          "then": {"properties": {"direction": {"const": "outgoing"}}},
+          "else": {"properties": {"direction": {"type": "null"}}}
+        }
+      ]
+    }
+  }
+}

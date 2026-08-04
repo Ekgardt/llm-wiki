@@ -72,7 +72,7 @@ The principles below summarize the non-negotiable invariants.
 - Concurrency-sensitive code (`maybe_compile.py`, `memory_queue.py`) needs explicit race-condition tests
 - Tests must be hermetic — no dependency on a real LLM, real network, or pre-existing state beyond what conftest.py bootstraps
 - **Minimum coverage**: all scripts with ranking/scoring/archival logic MUST have dedicated tests. This includes: `search_memory.py`, `graph_neighbors.py`, `feedback_capture.py`, `archive_stale.py`, `build_guardrails.py`
-- **5182 tests collected** — see `tests/` for patterns
+- The full regression suite is the release gate; see `tests/` for patterns.
 
 ## Test commands
 
@@ -90,6 +90,21 @@ uv run pytest tests/test_search_ranking.py -v
 uv run pytest --cov=scripts --cov-report=term-missing
 ```
 
+### real-Pyright CI
+
+The cross-platform navigation job explicitly installs pinned Pyright before running
+protocol, process-tree, security, session, facade, and benchmark checks. Tests and
+queries must never download it themselves:
+
+```bash
+uv run python scripts/install_pyright.py --state-root "$LLM_WIKI_STATE_ROOT"
+uv run python benchmark/run_code_navigation.py --fixture --correctness-only --require-gates
+```
+
+Linux Python 3.10 additionally runs the fixed 100 KLOC qualification gate with
+`--qualification --require-gates`. Navigation changes must keep Windows, Linux, and
+macOS process-ownership claims platform-qualified.
+
 ## Release checklist (mandatory — do not skip)
 
 Before tagging a release or updating public marketing numbers:
@@ -97,7 +112,7 @@ Before tagging a release or updating public marketing numbers:
 1. **English README first** — `README.md` is the source of truth.
 2. **Sync i18n the same day** — update `README.ru.md` and `README.zh-CN.md` so they match:
     - version string (e.g. v3.4.0)
-   - test count (must equal `pytest --collect-only` / live suite)
+   - full-regression-suite wording and current test commands
    - install URLs (`Ekgardt/llm-wiki`)
     - architecture (three-zone / `knowledge/`)
     - reliable operations commands and contracts

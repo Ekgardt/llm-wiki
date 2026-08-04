@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -132,15 +134,535 @@ def test_run_deletion_is_allowed_only_when_no_blocker_exists(tmp_path):
     ) == {"allowed": True, "blockers": []}
 
 
-def test_installers_and_doctor_never_remove_run_source_contract():
+def _python_direct_runtime_root_deletions(source: str) -> list[int]:
+    """Find direct runtime-root deletes in explicitly supported AST forms.
+
+    Paths resolve through string literals, Path constructors, ``/``, ``joinpath``,
+    ``os.path.join``, ``.parent``, and straight-line name aliases. This guard does
+    not infer function returns, containers, attributes, or arbitrary control flow.
+    """
+
+    class Visitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.modules: list[dict[str, str]] = [{}]
+            self.functions: list[dict[str, str]] = [{}]
+            self.paths: list[dict[str, tuple[str, ...]]] = [{}]
+            self.path_constructors: list[set[str]] = [{"Path", "PurePath"}]
+            self.lines: list[int] = []
+
+        def _push_scope(self) -> None:
+            self.modules.append(dict(self.modules[-1]))
+            self.functions.append(dict(self.functions[-1]))
+            self.paths.append(dict(self.paths[-1]))
+            self.path_constructors.append(set(self.path_constructors[-1]))
+
+        def _pop_scope(self) -> None:
+            self.modules.pop()
+            self.functions.pop()
+            self.paths.pop()
+            self.path_constructors.pop()
+
+        def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+            self._push_scope()
+            for statement in node.body:
+                self.visit(statement)
+            self._pop_scope()
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            self._visit_function(node)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            self._visit_function(node)
+
+        def visit_Import(self, node: ast.Import) -> None:
+            for name in node.names:
+                if name.name in {"os", "pathlib", "shutil"}:
+                    self.modules[-1][name.asname or name.name] = name.name
+
+        def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+            if node.module in {"os", "shutil"}:
+                for name in node.names:
+                    if name.name in {"remove", "rmdir", "rmtree", "unlink"}:
+                        alias = name.asname or name.name
+                        self.functions[-1][alias] = f"{node.module}.{name.name}"
+            if node.module == "pathlib":
+                for name in node.names:
+                    if name.name in {"Path", "PurePath"}:
+                        self.path_constructors[-1].add(name.asname or name.name)
+
+        def _is_path_type(self, node: ast.AST) -> bool:
+            return (
+                isinstance(node, ast.Name)
+                and node.id in self.path_constructors[-1]
+            ) or (
+                isinstance(node, ast.Attribute)
+                and node.attr in {"Path", "PurePath"}
+                and isinstance(node.value, ast.Name)
+                and self.modules[-1].get(node.value.id) == "pathlib"
+            )
+
+        def _delete_api(self, node: ast.AST) -> str | None:
+            if isinstance(node, ast.Name):
+                return self.functions[-1].get(node.id)
+            if not isinstance(node, ast.Attribute):
+                return None
+            if self._is_path_type(node.value) and node.attr in {"rmdir", "unlink"}:
+                return f"pathlib.{node.attr}"
+            if isinstance(node.value, ast.Name):
+                module = self.modules[-1].get(node.value.id)
+                if module == "os" and node.attr in {"remove", "rmdir", "unlink"}:
+                    return f"os.{node.attr}"
+                if module == "shutil" and node.attr == "rmtree":
+                    return "shutil.rmtree"
+            return None
+
+        def _path_parts(self, node: ast.AST) -> tuple[str, ...] | None:
+            if isinstance(node, ast.Name):
+                return self.paths[-1].get(node.id, (node.id.casefold(),))
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                return tuple(
+                    part.casefold()
+                    for part in node.value.replace("\\", "/").split("/")
+                    if part and part != "."
+                )
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+                left = self._path_parts(node.left)
+                right = self._path_parts(node.right)
+                return None if left is None or right is None else left + right
+            if isinstance(node, ast.Attribute) and node.attr == "parent":
+                value = self._path_parts(node.value)
+                return value[:-1] if value else None
+            if not isinstance(node, ast.Call):
+                return None
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "joinpath":
+                result = self._path_parts(node.func.value)
+                for argument in node.args:
+                    addition = self._path_parts(argument)
+                    if result is None or addition is None:
+                        return None
+                    result += addition
+                return result
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "join"
+                and isinstance(node.func.value, ast.Attribute)
+                and node.func.value.attr == "path"
+                and isinstance(node.func.value.value, ast.Name)
+                and self.modules[-1].get(node.func.value.value.id) == "os"
+            ):
+                result: tuple[str, ...] = ()
+                for argument in node.args:
+                    addition = self._path_parts(argument)
+                    if addition is None:
+                        return None
+                    result += addition
+                return result
+            if self._is_path_type(node.func) and node.args:
+                return self._path_parts(node.args[0])
+            return None
+
+        def _bind(self, target: ast.AST, value: ast.AST) -> None:
+            if not isinstance(target, ast.Name):
+                return
+            parts = self._path_parts(value)
+            if parts is None:
+                self.paths[-1].pop(target.id, None)
+            else:
+                self.paths[-1][target.id] = parts
+            api = self._delete_api(value)
+            if api is None:
+                self.functions[-1].pop(target.id, None)
+            else:
+                self.functions[-1][target.id] = api
+
+        def visit_Assign(self, node: ast.Assign) -> None:
+            self.visit(node.value)
+            for target in node.targets:
+                self._bind(target, node.value)
+
+        def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+            if node.value is not None:
+                self.visit(node.value)
+                self._bind(node.target, node.value)
+
+        @staticmethod
+        def _is_runtime_root(parts: tuple[str, ...] | None) -> bool:
+            if not parts:
+                return False
+            return parts[-1:] == ("run",) or parts[-2:] == ("run", "lsp")
+
+        def visit_Call(self, node: ast.Call) -> None:
+            target: ast.AST | None = None
+            api = self._delete_api(node.func)
+            if api is not None:
+                if node.args:
+                    target = node.args[0]
+                else:
+                    keyword_names = {"path", "self"} if api.startswith("pathlib.") else {"path"}
+                    target = next(
+                        (
+                            keyword.value
+                            for keyword in node.keywords
+                            if keyword.arg in keyword_names
+                        ),
+                        None,
+                    )
+            elif isinstance(node.func, ast.Attribute) and node.func.attr in {
+                "rmdir",
+                "unlink",
+            }:
+                target = node.func.value
+            if target is not None and self._is_runtime_root(self._path_parts(target)):
+                self.lines.append(node.lineno)
+            self.generic_visit(node)
+
+    visitor = Visitor()
+    visitor.visit(ast.parse(source))
+    return sorted(set(visitor.lines))
+
+
+def _installer_direct_runtime_root_deletions(source: str) -> list[int]:
+    """Find direct installer deletes in a deliberately small source subset.
+
+    The guard joins ``\\``/backtick continuations and resolves simple assignments
+    in source order. It does not evaluate scopes, branches, command substitutions,
+    quoting semantics, or arbitrary shell/PowerShell execution.
+    """
+    variable_reference = re.compile(
+        r"\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)\}|"
+        r"(?P<plain>[A-Za-z_][A-Za-z0-9_]*))"
+    )
+    shell_assignment = re.compile(
+        r"^\s*(?:export\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<value>.*?)\s*;?\s*$"
+    )
+    powershell_assignment = re.compile(
+        r"^\s*\$(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<value>.*?)\s*;?\s*$"
+    )
+    delete_command = re.compile(
+        r"^\s*(?:&\s*)?(?:(?:sudo|command)\s+)?"
+        r"(?P<command>remove-item|rm|rmdir|del)\b(?P<arguments>.*)$",
+        re.IGNORECASE,
+    )
+    variables: dict[str, str] = {}
+
+    def expand_variables(value: str) -> str:
+        def replace(match: re.Match[str]) -> str:
+            name = match.group("braced") or match.group("plain")
+            return variables.get(name.casefold(), match.group(0))
+
+        return variable_reference.sub(replace, value)
+
+    def normalize_expression(value: str) -> str:
+        expanded = expand_variables(value)
+        expanded = re.sub(r"\bjoin-path\b", " ", expanded, flags=re.IGNORECASE)
+        expanded = expanded.translate(
+            str.maketrans(
+                {"\\": "/", '"': " ", "'": " ", "(": " ", ")": " ", ",": " "}
+            )
+        )
+        pieces = [
+            piece.strip("/;")
+            for piece in expanded.split()
+            if piece and not piece.startswith("-")
+        ]
+        return re.sub(r"/+", "/", "/".join(piece for piece in pieces if piece))
+
+    def is_runtime_root(value: str) -> bool:
+        normalized = value.strip(" \t\"'();,").replace("\\", "/").rstrip("/")
+        parts = tuple(part.casefold() for part in normalized.split("/") if part)
+        return parts[-1:] == ("run",) or parts[-2:] == ("run", "lsp")
+
+    logical_lines: list[tuple[int, str]] = []
+    fragments: list[str] = []
+    start_line = 1
+    for line_number, physical_line in enumerate(source.splitlines(), start=1):
+        line = physical_line.rstrip()
+        if not fragments:
+            start_line = line_number
+        continued = line.endswith(("\\", "`"))
+        fragments.append((line[:-1] if continued else line).strip())
+        if continued:
+            continue
+        logical_lines.append((start_line, " ".join(fragments)))
+        fragments = []
+    if fragments:
+        logical_lines.append((start_line, " ".join(fragments)))
+
+    findings: list[int] = []
+    for line_number, line in logical_lines:
+        if not line or line.lstrip().startswith("#"):
+            continue
+        assignment = powershell_assignment.match(line) or shell_assignment.match(line)
+        if assignment is not None:
+            variables[assignment.group("name").casefold()] = normalize_expression(
+                assignment.group("value")
+            )
+            continue
+        command = delete_command.match(line)
+        if command is None:
+            continue
+        arguments = expand_variables(command.group("arguments"))
+        candidates = [arguments, normalize_expression(arguments), *arguments.split()]
+        if any(is_runtime_root(candidate) for candidate in candidates):
+            findings.append(line_number)
+    return findings
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        """
+import shutil as cleanup
+runtime = state_root.joinpath("run")
+cleanup.rmtree(runtime)
+""",
+        """
+from shutil import rmtree as wipe
+runtime = state_root / "run"
+lsp_runtime = runtime.joinpath("lsp")
+wipe(lsp_runtime)
+""",
+        """
+import os as platform_os
+platform_os.remove(state_root.joinpath("run"))
+""",
+        """
+from os import unlink as erase
+lsp_runtime = state_path / "run" / "lsp"
+erase(lsp_runtime)
+""",
+        """
+lsp_root = (state_root / "run").joinpath("lsp")
+lsp_root.unlink()
+""",
+    ],
+)
+def test_runtime_root_static_guard_recognizes_direct_python_deletion(source):
+    assert _python_direct_runtime_root_deletions(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            """
+import os as filesystem
+runtime = state_root / "run"
+target = runtime.joinpath("lsp")
+filesystem.rmdir(
+    target,
+)
+""",
+            id="os-rmdir-positional",
+        ),
+        pytest.param(
+            """
+from os import rmdir as remove_directory
+runtime = state_root.joinpath("run")
+target = runtime / "lsp"
+remove_directory(
+    path=target,
+)
+""",
+            id="os-rmdir-keyword",
+        ),
+        pytest.param(
+            """
+import os
+target = state_root / "run" / "lsp"
+os.remove(
+    target,
+)
+""",
+            id="os-remove-positional",
+        ),
+        pytest.param(
+            """
+import os as filesystem
+runtime = state_root.joinpath("run")
+target = runtime / "lsp"
+filesystem.remove(
+    path=target,
+)
+""",
+            id="os-remove-keyword",
+        ),
+        pytest.param(
+            """
+from os import unlink as erase
+runtime = state_root / "run"
+target = runtime.joinpath("lsp")
+erase(
+    target,
+)
+""",
+            id="os-unlink-positional",
+        ),
+        pytest.param(
+            """
+from os import unlink as erase
+runtime = state_root.joinpath("run")
+target = runtime / "lsp"
+erase(
+    path=target,
+)
+""",
+            id="os-unlink-keyword",
+        ),
+        pytest.param(
+            """
+from pathlib import Path as RuntimePath
+runtime = state_root / "run"
+target = runtime.joinpath("lsp")
+RuntimePath.unlink(
+    target,
+)
+""",
+            id="path-unlink-positional",
+        ),
+        pytest.param(
+            """
+from pathlib import Path as RuntimePath
+runtime = state_root.joinpath("run")
+target = runtime / "lsp"
+RuntimePath.unlink(
+    self=target,
+)
+""",
+            id="path-unlink-keyword",
+        ),
+        pytest.param(
+            """
+import pathlib as paths
+runtime = state_root / "run"
+target = runtime.joinpath("lsp")
+paths.Path.rmdir(
+    target,
+)
+""",
+            id="path-rmdir-positional",
+        ),
+        pytest.param(
+            """
+from pathlib import Path
+runtime = state_root.joinpath("run")
+target = runtime / "lsp"
+Path.rmdir(
+    self=target,
+)
+""",
+            id="path-rmdir-keyword",
+        ),
+        pytest.param(
+            """
+import shutil as cleanup
+runtime = state_root / "run"
+target = runtime.joinpath("lsp")
+cleanup.rmtree(
+    target,
+)
+""",
+            id="shutil-rmtree-positional",
+        ),
+        pytest.param(
+            """
+import shutil as cleanup
+runtime = state_root.joinpath("run")
+target = runtime / "lsp"
+cleanup.rmtree(
+    path=target,
+)
+""",
+            id="shutil-rmtree-keyword",
+        ),
+    ],
+)
+def test_runtime_root_static_guard_rejects_supported_bypass_forms(source):
+    assert _python_direct_runtime_root_deletions(source)
+
+
+def test_runtime_root_static_guard_allows_targeted_artifact_deletion():
+    source = """
+import shutil
+queue = state_root / "run" / "queue"
+lease = queue / "lease.json"
+lease.unlink()
+shutil.rmtree(state_root / "cache" / "staging")
+"""
+
+    assert _python_direct_runtime_root_deletions(source) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'rm -rf "$STATE_ROOT/run/lsp"',
+        'Remove-Item -Recurse (Join-Path $STATE_ROOT "run")',
+    ],
+)
+def test_runtime_root_static_guard_recognizes_direct_installer_deletion(source):
+    assert _installer_direct_runtime_root_deletions(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            """
+RUN_ROOT="$STATE_ROOT/run"
+LSP_ROOT="${RUN_ROOT}/lsp"
+rm \\
+    -rf \\
+    "$LSP_ROOT"
+""",
+            id="shell-rm-variable-multiline",
+        ),
+        pytest.param(
+            """
+RUN_ROOT="$STATE_ROOT/run"
+rmdir "$RUN_ROOT"
+""",
+            id="shell-rmdir-variable",
+        ),
+        pytest.param(
+            """
+$RunRoot = Join-Path `
+    $STATE_ROOT `
+    "run"
+$LspRoot = Join-Path $RunRoot "lsp"
+Remove-Item `
+    -Recurse `
+    -LiteralPath `
+    $LspRoot
+""",
+            id="powershell-remove-item-variable-multiline",
+        ),
+        pytest.param(
+            """
+$LspRoot = "$STATE_ROOT\\run\\lsp"
+del $LspRoot
+""",
+            id="powershell-del-variable",
+        ),
+    ],
+)
+def test_installer_guard_resolves_variables_and_line_continuations(source):
+    assert _installer_direct_runtime_root_deletions(source)
+
+
+def test_installers_and_doctor_have_no_direct_runtime_root_deletion_calls():
     root = Path(__file__).resolve().parent.parent
-    sources = [
+    doctor_source = (root / "scripts/doctor.py").read_text(encoding="utf-8")
+    installer_sources = [
         (root / "install.sh").read_text(encoding="utf-8"),
         (root / "install.ps1").read_text(encoding="utf-8"),
-        (root / "scripts/doctor.py").read_text(encoding="utf-8"),
     ]
-    forbidden = ("rm -rf $STATE_ROOT/run", "Remove-Item $STATE_ROOT\\run", "rmtree(state_root / \"run\")")
-    assert all(token not in source for source in sources for token in forbidden)
+
+    assert _python_direct_runtime_root_deletions(doctor_source) == []
+    assert all(
+        _installer_direct_runtime_root_deletions(source) == []
+        for source in installer_sources
+    )
 
 
 def test_deletion_blocks_every_legacy_and_retained_queue_artifact(tmp_path):
@@ -423,7 +945,12 @@ def test_policy_retention_blocks_deletion_without_degrading_health(tmp_path, mon
     import doctor
     import session_start_context
 
-    from tests.test_doctor import _build_root, _create_claim_index, _create_index
+    from tests.test_doctor import (
+        _build_root,
+        _create_claim_index,
+        _create_index,
+        _qualified_pyright_check,
+    )
 
     root, state_root, home = _build_root(tmp_path)
     now = datetime.now(timezone.utc)
@@ -442,6 +969,7 @@ def test_policy_retention_blocks_deletion_without_degrading_health(tmp_path, mon
     _create_index(index)
     _create_claim_index(root, state_root)
     os.utime(index, (now.timestamp(), now.timestamp()))
+    monkeypatch.setattr(doctor, "_pyright_check", _qualified_pyright_check)
 
     report = doctor.run_doctor(root=root, state_root=state_root, home=home, now=now)
     checks = {check["id"]: check for check in report["checks"]}

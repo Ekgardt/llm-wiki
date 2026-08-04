@@ -10,7 +10,7 @@ import select
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, BinaryIO
 
@@ -20,7 +20,6 @@ if os.name == "nt":
 
     _ERROR_NOT_FOUND = 1168
     _DUPLICATE_SAME_ACCESS = 0x00000002
-    _THREAD_ALL_ACCESS = 0x1F03FF
     _KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _KERNEL32.GetCurrentProcess.argtypes = ()
     _KERNEL32.GetCurrentProcess.restype = wintypes.HANDLE
@@ -36,8 +35,6 @@ if os.name == "nt":
         wintypes.DWORD,
     )
     _KERNEL32.DuplicateHandle.restype = wintypes.BOOL
-    _KERNEL32.OpenThread.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-    _KERNEL32.OpenThread.restype = wintypes.HANDLE
     _KERNEL32.CancelSynchronousIo.argtypes = (wintypes.HANDLE,)
     _KERNEL32.CancelSynchronousIo.restype = wintypes.BOOL
     _KERNEL32.CloseHandle.argtypes = (wintypes.HANDLE,)
@@ -94,7 +91,6 @@ _MAX_QUEUED_WRITES = MAX_PENDING_REQUESTS * 4
 _MAX_ORDINARY_WRITES = _MAX_QUEUED_WRITES - MAX_PENDING_REQUESTS
 _INTERNAL_WRITE_SECONDS = 1.0
 _OWNER_JOIN_SECONDS = 1.0
-_MINIMUM_THREAD_START_SECONDS = 0.5
 
 
 class ProtocolViolation(RuntimeError):
@@ -463,6 +459,102 @@ def encode_frame(message: object) -> bytes:
     return f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body
 
 
+def _interruption_in_chain(
+    error: BaseException,
+) -> KeyboardInterrupt | SystemExit | None:
+    pending: list[BaseException] = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, (KeyboardInterrupt, SystemExit)):
+            return current
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+    return None
+
+
+def _exception_reaches(error: BaseException | None, target: BaseException) -> bool:
+    pending = [error] if error is not None else []
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if current is target:
+            return True
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+    return False
+
+
+def _raise_collected_errors(errors: Sequence[BaseException]) -> None:
+    if not errors:
+        return
+    source: BaseException | None = None
+    interruption: KeyboardInterrupt | SystemExit | None = None
+    for error in errors:
+        interruption = _interruption_in_chain(error)
+        if interruption is not None:
+            source = error
+            break
+    if interruption is None:
+        raise errors[0]
+    secondary = next(
+        (
+            error
+            for error in errors
+            if error is not source and error is not interruption
+        ),
+        None,
+    )
+    if secondary is None and source is not interruption:
+        secondary = source
+    if secondary is not None:
+        pending = [secondary]
+        seen: set[int] = set()
+        while pending:
+            current = pending.pop()
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            cause = current.__cause__
+            if cause is interruption:
+                current.__cause__ = None
+            elif cause is not None:
+                pending.append(cause)
+            context = current.__context__
+            if context is interruption or context is current.__cause__:
+                current.__context__ = None
+            elif context is not None:
+                pending.append(context)
+        if _exception_reaches(secondary, interruption):
+            secondary = None
+    try:
+        if secondary is not None:
+            raise interruption.with_traceback(
+                interruption.__traceback__
+            ) from secondary
+        raise interruption.with_traceback(interruption.__traceback__)
+    except (KeyboardInterrupt, SystemExit) as raised:
+        if raised is not interruption:
+            raise
+        if _exception_reaches(interruption.__cause__, interruption):
+            interruption.__cause__ = None
+        if _exception_reaches(interruption.__context__, interruption):
+            interruption.__context__ = None
+        if interruption.__cause__ is not None:
+            interruption.__context__ = None
+        raise
+
+
 class LspProtocol:
     """Coordinate bounded concurrent requests over one LSP process generation."""
 
@@ -512,6 +604,8 @@ class LspProtocol:
         self._responded_keys: set[tuple[str, int]] = set()
         self._responded_order: deque[tuple[str, int]] = deque()
         self._next_request_id = 1
+        self._sent_request_sequence = 0
+        self._last_sent_request_method: str | None = None
         self._fatal_error: ProtocolViolation | None = None
         self._closed = False
         self._unknown_notification_warned = False
@@ -528,6 +622,7 @@ class LspProtocol:
         self._reader_os_handle: int | None = None
         self._writer_os_handle: int | None = None
         self._owner_start_errors: dict[str, BaseException] = {}
+        self._owner_registration_monotonic: dict[str, float] = {}
         self._owner_interrupt_errors: dict[str, BaseException] = {}
         self._owner_release_errors: dict[str, BaseException] = {}
         self.stdout_reader_owner: int | None = None
@@ -543,14 +638,16 @@ class LspProtocol:
             daemon=True,
         )
         try:
-            thread_start_deadline = max(
-                startup_deadline,
-                time.monotonic() + _MINIMUM_THREAD_START_SECONDS,
-            )
+            self._require_owner_start_budget(startup_deadline)
             self.writer_thread.start()
+            self._require_owner_start_budget(startup_deadline)
             self.reader_thread.start()
-            self._wait_owner_started(self._writer_started, "writer", thread_start_deadline)
-            self._wait_owner_started(self._reader_started, "reader", thread_start_deadline)
+            self._wait_owner_registration(
+                self._writer_started, "writer", startup_deadline
+            )
+            self._wait_owner_registration(
+                self._reader_started, "reader", startup_deadline
+            )
             self._raise_owner_start_error()
         except BaseException as startup_error:
             self._io_stopped.set()
@@ -563,21 +660,44 @@ class LspProtocol:
                     self._cancel_owner_io(owner)
             self._interrupt_stream(self._reader)
             self._interrupt_stream(self._writer)
-            cleanup_deadline = max(
-                startup_deadline,
-                time.monotonic() + _MINIMUM_THREAD_START_SECONDS,
-            )
             cleanup_errors: list[BaseException] = []
+            cleanup_interruption: KeyboardInterrupt | SystemExit | None = None
             for owner in (self.reader_thread, self.writer_thread):
                 try:
-                    self._join_partially_started_owner(owner, cleanup_deadline)
+                    self._join_partially_started_owner(owner, startup_deadline)
                 except BaseException as cleanup_error:
                     cleanup_errors.append(cleanup_error)
+                    if cleanup_interruption is None and isinstance(
+                        cleanup_error, (KeyboardInterrupt, SystemExit)
+                    ):
+                        cleanup_interruption = cleanup_error
             if cleanup_errors:
-                raise _ProtocolStartupCleanupError(
+                ownership_error = _ProtocolStartupCleanupError(
                     self, tuple(cleanup_errors)
-                ) from startup_error
-            raise
+                )
+                interruption_source: BaseException | None = None
+                if _interruption_in_chain(startup_error) is not None:
+                    interruption_source = startup_error
+                elif cleanup_interruption is not None:
+                    interruption_source = cleanup_interruption
+                else:
+                    interruption_source = next(
+                        (
+                            error
+                            for error in cleanup_errors
+                            if _interruption_in_chain(error) is not None
+                        ),
+                        None,
+                    )
+                if interruption_source is not None:
+                    try:
+                        raise ownership_error from startup_error
+                    except _ProtocolStartupCleanupError as retained_error:
+                        _raise_collected_errors(
+                            (interruption_source, retained_error)
+                        )
+                raise ownership_error from startup_error
+            _raise_collected_errors((startup_error,))
 
     @property
     def fatal(self) -> bool:
@@ -593,6 +713,11 @@ class LspProtocol:
     def pending_keys(self) -> tuple[tuple[str, int], ...]:
         with self._state_lock:
             return tuple(self._pending)
+
+    def _sent_request_evidence(self) -> tuple[int, str | None]:
+        """Return the monotonic dispatch sequence and most recent request method."""
+        with self._state_lock:
+            return self._sent_request_sequence, self._last_sent_request_method
 
     def expired_drain_keys(self, now: float) -> tuple[tuple[str, int], ...]:
         if isinstance(now, bool) or not isinstance(now, (int, float)):
@@ -857,6 +982,7 @@ class LspProtocol:
                 task = self._write_queue.get()
                 if task is None:
                     return
+                request_method: str | None = None
                 with self._state_lock:
                     if task.control:
                         self._control_queued -= 1
@@ -882,6 +1008,7 @@ class LspProtocol:
                     )
                     if pending is not None and not skip_request:
                         pending.write_phase = "sending"
+                        request_method = pending.method
                 if stopped:
                     self._complete_write(task, ProtocolViolation("LSP protocol stopped"))
                     return
@@ -905,6 +1032,10 @@ class LspProtocol:
                         self._become_fatal("failed to write LSP message", cause=exc)
                     self._complete_write(task, exc)
                     return
+                if request_method is not None:
+                    with self._state_lock:
+                        self._sent_request_sequence += 1
+                        self._last_sent_request_method = request_method
                 if time.monotonic() > task.deadline:
                     if task.best_effort:
                         self._complete_write(task, None)
@@ -1425,6 +1556,14 @@ class LspProtocol:
     def _join_owner(self, owner: threading.Thread, deadline: float) -> None:
         if owner is threading.current_thread():
             return
+        if owner.ident is None and owner not in threading.enumerate():
+            name = "reader" if owner is self.reader_thread else "writer"
+            self._release_owner(name)
+            with self._owner_handle_lock:
+                release_error = self._owner_release_errors.get(name)
+            if release_error is not None:
+                raise release_error
+            return
         remaining = deadline - time.monotonic()
         if remaining > 0:
             owner.join(remaining)
@@ -1445,14 +1584,18 @@ class LspProtocol:
             raise release_error
 
     def _join_owners(self, deadline: float) -> None:
-        first_error: BaseException | None = None
+        errors: list[BaseException] = []
         for owner in (self.reader_thread, self.writer_thread):
             try:
                 self._join_owner(owner, deadline)
             except BaseException as exc:
-                first_error = first_error or exc
-        if first_error is not None:
-            raise first_error
+                errors.append(exc)
+        _raise_collected_errors(errors)
+
+    @staticmethod
+    def _require_owner_start_budget(deadline: float) -> None:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("LSP owner thread-start deadline expired")
 
     @staticmethod
     def _wait_owner_started(
@@ -1461,6 +1604,20 @@ class LspProtocol:
         remaining = deadline - time.monotonic()
         if remaining <= 0 or not event.wait(remaining):
             raise TimeoutError(f"LSP {owner_name} owner did not start before deadline")
+
+    def _wait_owner_registration(
+        self,
+        event: threading.Event,
+        owner_name: str,
+        deadline: float,
+    ) -> None:
+        try:
+            self._wait_owner_started(event, owner_name, deadline)
+        except TimeoutError:
+            with self._owner_handle_lock:
+                registered_at = self._owner_registration_monotonic.get(owner_name)
+            if registered_at is None or registered_at > deadline:
+                raise
 
     def _join_partially_started_owner(
         self,
@@ -1499,42 +1656,75 @@ class LspProtocol:
             raise release_error
 
     def _register_owner(self, name: str, started: threading.Event) -> bool:
+        if os.name != "nt":
+            with self._owner_handle_lock:
+                self._owner_registration_monotonic[name] = time.monotonic()
+            started.set()
+            return True
+        try:
+            handle = _duplicate_current_thread_handle()
+        except BaseException as error:
+            with self._owner_handle_lock:
+                self._owner_start_errors[name] = error
+                self._owner_registration_monotonic[name] = time.monotonic()
+            started.set()
+            return False
+        with self._owner_handle_lock:
+            if name == "reader":
+                self._reader_os_handle = handle
+            else:
+                self._writer_os_handle = handle
+            self._owner_registration_monotonic[name] = time.monotonic()
         started.set()
         return True
 
     def _raise_owner_start_error(self) -> None:
         with self._owner_handle_lock:
             errors = tuple(self._owner_start_errors.values())
-        if errors:
-            raise errors[0]
+        _raise_collected_errors(errors)
 
     def _release_owner(self, name: str) -> None:
-        return
+        if os.name != "nt":
+            return
+        with self._owner_handle_lock:
+            handle = (
+                self._reader_os_handle
+                if name == "reader"
+                else self._writer_os_handle
+            )
+            if handle is None:
+                return
+            if not _KERNEL32.CloseHandle(handle):
+                self._owner_release_errors[name] = ctypes.WinError(
+                    ctypes.get_last_error()
+                )
+                return
+            self._owner_release_errors.pop(name, None)
+            if name == "reader":
+                self._reader_os_handle = None
+            else:
+                self._writer_os_handle = None
 
     def _cancel_owner_io(self, owner: threading.Thread) -> None:
         if os.name != "nt" or owner is threading.current_thread():
             return
         name = "reader" if owner is self.reader_thread else "writer"
-        tid = self.stdout_reader_owner if name == "reader" else self.stdin_writer_owner
-        if tid is None:
-            return
-        handle = _KERNEL32.OpenThread(_THREAD_ALL_ACCESS, False, tid)
-        if not handle:
-            return
-        try:
+        with self._owner_handle_lock:
+            handle = (
+                self._reader_os_handle
+                if name == "reader"
+                else self._writer_os_handle
+            )
+            if handle is None:
+                return
             if _KERNEL32.CancelSynchronousIo(handle):
-                with self._owner_handle_lock:
-                    self._owner_interrupt_errors.pop(name, None)
+                self._owner_interrupt_errors.pop(name, None)
                 return
             error_number = ctypes.get_last_error()
             if error_number == _ERROR_NOT_FOUND:
-                with self._owner_handle_lock:
-                    self._owner_interrupt_errors.pop(name, None)
+                self._owner_interrupt_errors.pop(name, None)
                 return
-            with self._owner_handle_lock:
-                self._owner_interrupt_errors[name] = ctypes.WinError(error_number)
-        finally:
-            _KERNEL32.CloseHandle(handle)
+            self._owner_interrupt_errors[name] = ctypes.WinError(error_number)
 
 
 if os.name == "nt":

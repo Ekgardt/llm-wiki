@@ -1169,8 +1169,61 @@ class GenerationCatalog:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._monotonic = monotonic or time.monotonic
         self._candidate_issuer = object()
+        self._read_only = False
         with closing(self._connect()) as database, database:
             self._ensure_schema(database)
+
+    @classmethod
+    def open_existing_read_only(
+        cls,
+        state_root: Path,
+        *,
+        catalog_path: Path | None = None,
+        clock: Callable[[], datetime | str] | None = None,
+        monotonic: Callable[[], float] | None = None,
+        max_catalog_bytes: int = MAX_CATALOG_BYTES,
+        deadline: float | None = None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> GenerationCatalog:
+        """Open an existing catalog without creating or repairing runtime state."""
+        if (
+            not isinstance(max_catalog_bytes, int)
+            or isinstance(max_catalog_bytes, bool)
+            or max_catalog_bytes < 1
+        ):
+            raise ValueError("max_catalog_bytes must be a positive integer")
+        catalog = cls.__new__(cls)
+        catalog._monotonic = monotonic or time.monotonic
+
+        def check_stop() -> None:
+            _check_cancelled(cancelled)
+            catalog._check_deadline(deadline)
+
+        check_stop()
+        catalog.state_root = Path(state_root)
+        check_stop()
+        resolved_state_root = catalog.state_root.resolve(strict=True)
+        check_stop()
+        catalog.max_catalog_bytes = max_catalog_bytes
+        default = catalog.state_root / "cache" / "evidence-graph" / "catalog.sqlite3"
+        catalog.catalog_path = Path(catalog_path) if catalog_path is not None else default
+        check_stop()
+        resolved_catalog_path = catalog.catalog_path.resolve(strict=True)
+        check_stop()
+        try:
+            resolved_catalog_path.relative_to(resolved_state_root)
+        except ValueError as exc:
+            raise ValueError("catalog_path must remain inside state_root") from exc
+        check_stop()
+        catalog.generations_path = catalog.catalog_path.parent / "generations"
+        catalog._clock = clock or (lambda: datetime.now(timezone.utc))
+        catalog._candidate_issuer = object()
+        catalog._read_only = True
+        check_stop()
+        with closing(catalog._readonly()):
+            check_stop()
+        check_stop()
+        return catalog
 
     def _connect(self, *, deadline: float | None = None) -> sqlite3.Connection:
         self._check_deadline(deadline)
@@ -1203,6 +1256,8 @@ class GenerationCatalog:
     @contextmanager
     def _write_transaction(self, deadline: float | None):
         self._check_deadline(deadline)
+        if self._read_only:
+            raise PermissionError("read-only generation catalog cannot write")
         with closing(self._connect(deadline=deadline)) as database:
             try:
                 if deadline is not None:
@@ -2035,6 +2090,18 @@ class GenerationCatalog:
             if selected_id == active:
                 _check_cancelled(cancelled)
                 self._check_deadline(deadline)
+                return selected
+            if self._read_only:
+                if selected_id is not None and (
+                    selected_seal is None
+                    or not self._deadline_seal_unchanged(
+                        self.generations_path / selected_id,
+                        selected_seal,
+                        deadline,
+                        cancelled=cancelled,
+                    )
+                ):
+                    raise ValueError("fallback generation changed after validation seal")
                 return selected
             selected_token: tuple[bytes, str] | None = None
             if selected_id is not None:

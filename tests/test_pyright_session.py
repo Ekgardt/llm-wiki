@@ -214,6 +214,20 @@ def test_public_contract_and_initial_state(
     }
 
 
+def test_session_exposes_immutable_qualified_identity(
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    try:
+        assert session.identity is semantic_pyright.identity
+        with pytest.raises(AttributeError):
+            session.identity = _missing_identity()  # type: ignore[misc]
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
 def test_unqualified_identity_never_spawns_or_creates_lsp_parent(
     monkeypatch: pytest.MonkeyPatch,
     repository: Path,
@@ -357,11 +371,14 @@ def test_posix_node_loader_preserves_main_module_and_original_paths(
         "}));\n",
         encoding="utf-8",
     )
+    owner = repository / "run" / "lsp" / ("a" * 32)
+    owner.mkdir(parents=True)
     descriptor = -1
     guard = pyright_session_module._LaunchServerGuard(
         server,
         hashlib.sha256(server.read_bytes()).hexdigest(),
         command=(str(node), str(server), str(output)),
+        owner_root=owner,
         deadline=time.monotonic() + 10,
     )
 
@@ -395,6 +412,160 @@ def test_posix_node_loader_preserves_main_module_and_original_paths(
         "modulePath": str(root / "node_modules"),
         "dependency": "dependency-loaded",
     }
+
+
+def test_posix_launch_snapshot_is_scoped_to_owner_and_removed_on_all_branches(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    owner = tmp_path / "run" / "lsp" / ("a" * 32)
+    owner.mkdir(parents=True)
+    server = tmp_path / "server.py"
+    server.write_bytes(b"print('server')\n")
+    snapshots: list[Path] = []
+    unlinked: list[Path] = []
+    real_mkstemp = pyright_session_module.tempfile.mkstemp
+
+    class PosixOsProxy:
+        name = "posix"
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(os, name)
+
+        @staticmethod
+        def unlink(path: object, *args: object, **kwargs: object) -> None:
+            assert args == () and kwargs == {}
+            unlinked.append(Path(path))
+
+    def record_mkstemp(*args: object, **kwargs: object) -> tuple[int, str]:
+        descriptor, name = real_mkstemp(*args, **kwargs)
+        snapshots.append(Path(name))
+        return descriptor, name
+
+    monkeypatch.setattr(pyright_session_module, "os", PosixOsProxy())
+    monkeypatch.setattr(pyright_session_module.tempfile, "mkstemp", record_mkstemp)
+    monkeypatch.setattr(
+        pyright_session_module._LaunchServerGuard,
+        "_posix_launch_command",
+        lambda _self, descriptor: ("server", str(descriptor)),
+    )
+
+    guard = pyright_session_module._LaunchServerGuard(
+        server,
+        hashlib.sha256(server.read_bytes()).hexdigest(),
+        command=("python", str(server)),
+        owner_root=owner,
+        deadline=time.monotonic() + 5,
+    )
+    with guard as launch:
+        assert isinstance(launch, lsp_process.GenerationLaunch)
+        assert snapshots[-1].parent == owner
+        assert unlinked[-1] == snapshots[-1]
+    snapshots[-1].unlink()
+    assert list(owner.iterdir()) == []
+
+    failing = pyright_session_module._LaunchServerGuard(
+        server,
+        hashlib.sha256(server.read_bytes()).hexdigest(),
+        command=("python", str(server)),
+        owner_root=owner,
+        deadline=time.monotonic() + 5,
+    )
+    monkeypatch.setattr(
+        failing,
+        "_copy_snapshot",
+        lambda _snapshot: (_ for _ in ()).throw(RuntimeError("copy failed")),
+    )
+    with pytest.raises(RuntimeError, match="copy failed"):
+        failing.__enter__()
+    assert snapshots[-1].parent == owner
+    assert unlinked[-1] == snapshots[-1]
+    snapshots[-1].unlink()
+    assert list(owner.iterdir()) == []
+
+
+def test_launch_guard_close_prioritizes_later_interruption(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    server = tmp_path / "server.py"
+    server.write_bytes(b"print('server')\n")
+    guard = pyright_session_module._LaunchServerGuard(
+        server,
+        hashlib.sha256(server.read_bytes()).hexdigest(),
+        command=("python", str(server)),
+        owner_root=tmp_path,
+        deadline=time.monotonic() + 1,
+    )
+    ordinary_error = RuntimeError("first ordinary launch guard close error")
+
+    class Snapshot:
+        @staticmethod
+        def close() -> None:
+            raise ordinary_error
+
+    def interrupt_unlink(_path: object) -> None:
+        raise KeyboardInterrupt("later launch guard close interruption")
+
+    guard._snapshot = Snapshot()  # type: ignore[assignment]
+    guard._snapshot_path = tmp_path / "snapshot.py"
+    monkeypatch.setattr(pyright_session_module.os, "unlink", interrupt_unlink)
+
+    with pytest.raises(
+        KeyboardInterrupt,
+        match="later launch guard close interruption",
+    ) as raised:
+        guard.close()
+
+    assert raised.value.__cause__ is ordinary_error
+
+
+def test_launch_guard_body_interruption_outranks_close_error(tmp_path: Path) -> None:
+    server = tmp_path / "server.py"
+    server.write_bytes(b"print('server')\n")
+
+    class EnteredGuard(pyright_session_module._LaunchServerGuard):
+        def __enter__(self) -> EnteredGuard:
+            return self
+
+    guard = EnteredGuard(
+        server,
+        hashlib.sha256(server.read_bytes()).hexdigest(),
+        command=("python", str(server)),
+        owner_root=tmp_path,
+        deadline=time.monotonic() + 1,
+    )
+    ordinary_error = RuntimeError("ordinary launch guard close error")
+
+    class Snapshot:
+        @staticmethod
+        def close() -> None:
+            raise ordinary_error
+
+    guard._snapshot = Snapshot()  # type: ignore[assignment]
+
+    def interrupt_guard_body() -> KeyboardInterrupt:
+        try:
+            raise KeyboardInterrupt("launch guard body interrupted")
+        except KeyboardInterrupt as error:
+            return error
+
+    interruption = interrupt_guard_body()
+    with pytest.raises(
+        KeyboardInterrupt,
+        match="launch guard body interrupted",
+    ) as raised:
+        with guard:
+            raise interruption.with_traceback(interruption.__traceback__)
+
+    assert raised.value is interruption
+    assert raised.value.__cause__ is ordinary_error
+    traceback_names: list[str] = []
+    current = raised.value.__traceback__
+    while current is not None:
+        traceback_names.append(current.tb_frame.f_code.co_name)
+        current = current.tb_next
+    assert "interrupt_guard_body" in traceback_names
 
 
 def test_server_identity_is_held_and_reverified_through_bootstrap(
@@ -634,9 +805,11 @@ def test_start_forwards_one_capped_deadline_without_shrinking_restart_budget(
             _expected_sha256: str,
             *,
             command: tuple[str, ...],
+            owner_root: Path,
             deadline: float,
         ) -> None:
             assert command[1] == str(semantic_pyright.identity.server_executable)
+            assert owner_root.parent == state_root / "run" / "lsp"
             captured["guard"] = deadline
 
         def __enter__(self) -> CapturedGuard:
@@ -776,9 +949,11 @@ def test_startup_cleanup_uses_effective_caller_deadline(
             _expected_sha256: str,
             *,
             command: tuple[str, ...],
+            owner_root: Path,
             deadline: float,
         ) -> None:
             assert command[1] == str(semantic_pyright.identity.server_executable)
+            assert owner_root.parent == state_root / "run" / "lsp"
             captured["effective"] = deadline
             self.deadline = deadline
 
@@ -873,6 +1048,127 @@ def test_close_retries_startup_cleanup_retained_by_session(
 
     assert len(cleanup_deadlines) == 2
     assert cleanup_deadlines[1] > time.monotonic()
+
+
+def test_close_unwraps_retained_cleanup_interruption_and_preserves_owner(
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    attempts = 0
+
+    def make_interruption() -> KeyboardInterrupt:
+        try:
+            raise KeyboardInterrupt("direct close cleanup interruption")
+        except KeyboardInterrupt as error:
+            return error
+
+    interruption = make_interruption()
+    wrapper = RuntimeError("direct close cleanup wrapper")
+    wrapper.__cause__ = interruption
+
+    class RetainedCleanupError(StartupCleanupError):
+        def retry_cleanup(self, _deadline: float) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise wrapper
+
+    retained = RetainedCleanupError("startup cleanup ownership retained")
+    with session._lock:
+        session._startup_cleanup_error = retained
+
+    try:
+        with pytest.raises(
+            KeyboardInterrupt,
+            match="direct close cleanup interruption",
+        ) as raised:
+            session.close(deadline=time.monotonic() + 5)
+
+        pending = [raised.value]
+        seen: set[int] = set()
+        reachable: list[BaseException] = []
+        while pending:
+            current = pending.pop()
+            assert id(current) not in seen
+            seen.add(id(current))
+            reachable.append(current)
+            if current.__cause__ is not None:
+                pending.append(current.__cause__)
+            if current.__context__ is not None:
+                pending.append(current.__context__)
+
+        assert raised.value is interruption
+        assert wrapper in reachable
+        assert wrapper.__cause__ is None
+        assert wrapper.__context__ is None
+        assert session._startup_cleanup_error is retained
+        assert session._closed is False
+        assert attempts == 1
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+    assert attempts == 2
+
+
+def test_close_unwraps_retained_process_interruption_and_preserves_owner(
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    attempts = 0
+    interruption = SystemExit(79)
+    wrapper: RuntimeError | None = None
+
+    class RetainedProcess:
+        state = ProcessState.PROTOCOL_INITIALIZED
+        generation_nonce = "direct-close-retained-generation"
+
+        @staticmethod
+        def close(_deadline: float) -> None:
+            nonlocal attempts, wrapper
+            attempts += 1
+            if attempts == 1:
+                try:
+                    raise interruption
+                except SystemExit:
+                    wrapper = RuntimeError("direct close process wrapper")
+                    raise wrapper
+
+    retained = RetainedProcess()
+    with session._lock:
+        session._startup_process = retained  # type: ignore[assignment]
+
+    try:
+        with pytest.raises(SystemExit) as raised:
+            session.close(deadline=time.monotonic() + 5)
+
+        pending = [raised.value]
+        seen: set[int] = set()
+        reachable: list[BaseException] = []
+        while pending:
+            current = pending.pop()
+            assert id(current) not in seen
+            seen.add(id(current))
+            reachable.append(current)
+            if current.__cause__ is not None:
+                pending.append(current.__cause__)
+            if current.__context__ is not None:
+                pending.append(current.__context__)
+
+        assert raised.value is interruption
+        assert wrapper is not None and wrapper in reachable
+        assert wrapper.__cause__ is None
+        assert wrapper.__context__ is None
+        assert session._startup_process is retained
+        assert session._closed is False
+        assert attempts == 1
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+    assert attempts == 2
 
 
 def test_start_retries_retained_cleanup_before_new_spawn(
@@ -1050,6 +1346,367 @@ def test_interrupt_during_retained_cleanup_is_rethrown_and_next_start_recovers(
     assert start_attempts == 2
     assert session._process is not None
     session.close(deadline=time.monotonic() + 5)
+
+
+def test_wrapped_interruption_during_retained_cleanup_is_rethrown_with_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    attempts = 0
+
+    def make_interruption() -> KeyboardInterrupt:
+        try:
+            raise KeyboardInterrupt("wrapped retained cleanup interruption")
+        except KeyboardInterrupt as error:
+            return error
+
+    interruption = make_interruption()
+    wrapper = RuntimeError("retained cleanup interruption wrapper")
+    wrapper.__cause__ = interruption
+
+    class RetainedCleanupError(StartupCleanupError):
+        def retry_cleanup(self, _deadline: float) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise wrapper
+
+    retained = RetainedCleanupError("startup cleanup ownership retained")
+    with session._lock:
+        session._startup_cleanup_error = retained
+        session._startup_attempted = True
+
+    def forbidden_spawn(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("wrapped cleanup interruption allowed a new spawn")
+
+    monkeypatch.setattr(LspProcess, "start_configured", forbidden_spawn)
+    try:
+        with pytest.raises(
+            KeyboardInterrupt,
+            match="wrapped retained cleanup interruption",
+        ) as raised:
+            session.start(deadline=time.monotonic() + 5)
+
+        pending = [raised.value]
+        seen: set[int] = set()
+        reachable: list[BaseException] = []
+        while pending:
+            current = pending.pop()
+            assert id(current) not in seen
+            seen.add(id(current))
+            reachable.append(current)
+            if current.__cause__ is not None:
+                pending.append(current.__cause__)
+            if current.__context__ is not None:
+                pending.append(current.__context__)
+
+        assert raised.value is interruption
+        assert wrapper in reachable
+        assert wrapper.__cause__ is None
+        assert wrapper.__context__ is None
+        assert session._startup_cleanup_error is retained
+        assert session._starting is False
+        assert attempts == 1
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_wrapped_interruption_during_retained_process_close_is_rethrown_with_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    attempts = 0
+    interruption = SystemExit(73)
+    wrapper: RuntimeError | None = None
+
+    class RetainedProcess:
+        state = ProcessState.PROTOCOL_INITIALIZED
+        generation_nonce = "retained-process-generation"
+
+        @staticmethod
+        def close(_deadline: float) -> None:
+            nonlocal attempts, wrapper
+            attempts += 1
+            if attempts == 1:
+                try:
+                    raise interruption
+                except SystemExit:
+                    wrapper = RuntimeError("retained process close interruption wrapper")
+                    raise wrapper
+
+    retained = RetainedProcess()
+    with session._lock:
+        session._startup_process = retained  # type: ignore[assignment]
+        session._startup_attempted = True
+
+    def forbidden_spawn(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("wrapped process interruption allowed a new spawn")
+
+    monkeypatch.setattr(LspProcess, "start_configured", forbidden_spawn)
+    try:
+        with pytest.raises(SystemExit) as raised:
+            session.start(deadline=time.monotonic() + 5)
+
+        pending = [raised.value]
+        seen: set[int] = set()
+        reachable: list[BaseException] = []
+        while pending:
+            current = pending.pop()
+            assert id(current) not in seen
+            seen.add(id(current))
+            reachable.append(current)
+            if current.__cause__ is not None:
+                pending.append(current.__cause__)
+            if current.__context__ is not None:
+                pending.append(current.__context__)
+
+        assert raised.value is interruption
+        assert wrapper is not None and wrapper in reachable
+        assert wrapper.__cause__ is None
+        assert wrapper.__context__ is None
+        assert session._startup_process is retained
+        assert session._starting is False
+        assert attempts == 1
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_startup_interruption_traverses_implicit_context() -> None:
+    interruption = SystemExit(23)
+    try:
+        try:
+            raise interruption
+        except SystemExit:
+            raise RuntimeError("startup wrapper")
+    except RuntimeError as wrapper:
+        assert pyright_session_module._startup_interruption(wrapper) is interruption
+
+
+def test_startup_rollback_rethrows_interruption_and_retains_process_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    close_calls = 0
+    sync_calls = 0
+
+    class CapturedProcess:
+        state = ProcessState.PROTOCOL_INITIALIZED
+        generation_nonce = "captured-generation"
+
+        @staticmethod
+        def close(_deadline: float) -> None:
+            nonlocal close_calls
+            close_calls += 1
+            if close_calls == 1:
+                raise KeyboardInterrupt("rollback interrupted")
+
+    process = CapturedProcess()
+
+    def fail_publication_once() -> None:
+        nonlocal sync_calls
+        sync_calls += 1
+        if sync_calls == 1:
+            raise RuntimeError("publication failed")
+
+    monkeypatch.setattr(
+        LspProcess,
+        "start_configured",
+        lambda *_args, **_kwargs: process,
+    )
+    monkeypatch.setattr(session, "_sync_startup_atexit_locked", fail_publication_once)
+
+    with pytest.raises(KeyboardInterrupt, match="rollback interrupted"):
+        session.start(deadline=time.monotonic() + 5)
+
+    assert session._process is None
+    assert session._startup_process is process
+    assert session._starting is False
+    session.close(deadline=time.monotonic() + 5)
+    assert close_calls == 2
+
+
+def test_startup_original_interruption_outranks_ordinary_rollback_error(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    close_calls = 0
+    sync_calls = 0
+
+    class CapturedProcess:
+        state = ProcessState.PROTOCOL_INITIALIZED
+        generation_nonce = "captured-generation"
+
+        @staticmethod
+        def close(_deadline: float) -> None:
+            nonlocal close_calls
+            close_calls += 1
+            if close_calls == 1:
+                raise RuntimeError("ordinary startup rollback error")
+
+    process = CapturedProcess()
+
+    def interrupt_publication_once() -> None:
+        nonlocal sync_calls
+        sync_calls += 1
+        if sync_calls == 1:
+            raise KeyboardInterrupt("startup publication interrupted")
+
+    monkeypatch.setattr(
+        LspProcess,
+        "start_configured",
+        lambda *_args, **_kwargs: process,
+    )
+    monkeypatch.setattr(
+        session,
+        "_sync_startup_atexit_locked",
+        interrupt_publication_once,
+    )
+
+    with pytest.raises(
+        KeyboardInterrupt,
+        match="startup publication interrupted",
+    ) as raised:
+        session.start(deadline=time.monotonic() + 5)
+
+    assert isinstance(raised.value.__cause__, RuntimeError)
+    assert str(raised.value.__cause__) == "ordinary startup rollback error"
+    assert session._process is None
+    assert session._startup_process is process
+    assert session._starting is False
+    session.close(deadline=time.monotonic() + 5)
+    assert close_calls == 2
+
+
+def test_startup_process_wrapper_is_reachable_without_exception_graph_revisit(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+
+    def make_interruption() -> KeyboardInterrupt:
+        try:
+            raise KeyboardInterrupt("wrapped session process interruption")
+        except KeyboardInterrupt as error:
+            return error
+
+    interruption = make_interruption()
+    wrapper = RuntimeError("session process startup wrapper")
+    wrapper.__cause__ = interruption
+
+    def interrupt_process_start(*_args: object, **_kwargs: object) -> LspProcess:
+        raise wrapper
+
+    monkeypatch.setattr(LspProcess, "start_configured", interrupt_process_start)
+
+    with pytest.raises(
+        KeyboardInterrupt,
+        match="wrapped session process interruption",
+    ) as raised:
+        session.start(deadline=time.monotonic() + 5)
+
+    pending = [raised.value]
+    seen: set[int] = set()
+    reachable: list[BaseException] = []
+    while pending:
+        current = pending.pop()
+        assert id(current) not in seen
+        seen.add(id(current))
+        reachable.append(current)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+
+    assert raised.value is interruption
+    assert wrapper in reachable
+    assert wrapper.__cause__ is None
+    assert wrapper.__context__ is None
+    assert session._process is None
+    assert session._startup_process is None
+    assert session._starting is False
+
+
+def test_startup_rollback_unwraps_interruption_without_exception_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    close_calls = 0
+    sync_calls = 0
+    cleanup_error = RuntimeError("ordinary wrapped startup rollback error")
+
+    class CapturedProcess:
+        state = ProcessState.PROTOCOL_INITIALIZED
+        generation_nonce = "captured-generation"
+
+        @staticmethod
+        def close(_deadline: float) -> None:
+            nonlocal close_calls
+            close_calls += 1
+            if close_calls == 1:
+                raise cleanup_error
+
+    process = CapturedProcess()
+
+    def make_interruption() -> KeyboardInterrupt:
+        try:
+            raise KeyboardInterrupt("wrapped startup publication interruption")
+        except KeyboardInterrupt as error:
+            return error
+
+    interruption = make_interruption()
+    wrapper = RuntimeError("startup publication wrapper")
+    wrapper.__cause__ = interruption
+
+    def interrupt_publication_once() -> None:
+        nonlocal sync_calls
+        sync_calls += 1
+        if sync_calls == 1:
+            raise wrapper
+
+    monkeypatch.setattr(
+        LspProcess,
+        "start_configured",
+        lambda *_args, **_kwargs: process,
+    )
+    monkeypatch.setattr(
+        session,
+        "_sync_startup_atexit_locked",
+        interrupt_publication_once,
+    )
+
+    with pytest.raises(
+        KeyboardInterrupt,
+        match="wrapped startup publication interruption",
+    ) as raised:
+        session.start(deadline=time.monotonic() + 5)
+
+    assert raised.value is interruption
+    assert raised.value.__cause__ is cleanup_error
+    assert raised.value.__context__ is None
+    assert cleanup_error.__context__ is None
+    assert wrapper.__cause__ is interruption
+    assert session._process is None
+    assert session._startup_process is process
+    assert session._starting is False
+    session.close(deadline=time.monotonic() + 5)
+    assert close_calls == 2
 
 
 def test_keyboard_interrupt_resets_starting_and_notifies_waiting_start(
@@ -1231,32 +1888,72 @@ def test_unsupported_server_position_encoding_fails_closed(
     assert not (owners[0] / "lease.json").exists()
 
 
-@pytest.mark.parametrize(
-    ("behavior", "seconds", "code"),
-    [
-        ("broken", 10.0, "pyright_startup_failed"),
-        ("timeout", 0.25, "pyright_startup_timeout"),
-    ],
-)
 def test_operational_startup_failure_returns_stable_not_ready_degradation(
     repository: Path,
     state_root: Path,
-    behavior: str,
-    seconds: float,
-    code: str,
 ) -> None:
     fixture = create_semantic_pyright_fixture(
         repository,
-        config={"initialize_behavior": behavior},
+        config={"initialize_behavior": "broken"},
     )
     session = _session(repository, state_root, fixture)
 
-    assert session.start(deadline=time.monotonic() + seconds) is None
+    assert session.start(deadline=time.monotonic() + 10) is None
     assert session.readiness == "not_ready"
     assert session.readiness_evidence == ()
-    assert session.degradation_codes == (code,)
+    assert session.degradation_codes == ("pyright_startup_failed",)
     owners = tuple((state_root / "run/lsp").iterdir())
     assert len(owners) == 1
+    assert not (owners[0] / "lease.json").exists()
+
+
+def test_operational_startup_timeout_after_owner_evidence_is_deterministic(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    request = pyright_session_module.LspProtocol.request
+    injected_owners: list[Path] = []
+
+    def timeout_initialize(
+        protocol: pyright_session_module.LspProtocol,
+        method: str,
+        params: object,
+        *,
+        deadline: float,
+        cancellation: object = None,
+    ) -> object:
+        if method == "initialize":
+            owners = tuple((state_root / "run/lsp").iterdir())
+            assert len(owners) == 1
+            assert (owners[0] / "owner.json").is_file()
+            assert (owners[0] / "lease.json").is_file()
+            assert time.monotonic() < deadline
+            injected_owners.extend(owners)
+            raise TimeoutError("injected initialize deadline expired")
+        return request(
+            protocol,
+            method,
+            params,
+            deadline=deadline,
+            cancellation=cancellation,  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr(
+        pyright_session_module.LspProtocol,
+        "request",
+        timeout_initialize,
+    )
+
+    assert session.start(deadline=time.monotonic() + 10) is None
+    assert len(injected_owners) == 1
+    assert session.readiness == "not_ready"
+    assert session.readiness_evidence == ()
+    assert session.degradation_codes == ("pyright_startup_timeout",)
+    owners = tuple((state_root / "run/lsp").iterdir())
+    assert owners == tuple(injected_owners)
     assert not (owners[0] / "lease.json").exists()
 
 
@@ -1808,6 +2505,205 @@ def test_open_document_propagates_deadline_to_stable_source_read(
         ]
         assert "textDocument/didOpen" not in methods
     finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def _hold_document_lock_for_contention(
+    session: PyrightSession,
+    held: threading.Event,
+    released: threading.Event,
+) -> None:
+    with session._document_lock:
+        held.set()
+        time.sleep(0.25)
+    released.set()
+
+
+def test_open_document_lock_contention_obeys_deadline_without_mutation(
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    held = threading.Event()
+    released = threading.Event()
+    holder = threading.Thread(
+        target=_hold_document_lock_for_contention,
+        args=(session, held, released),
+    )
+    holder.start()
+    assert held.wait(1)
+    before_state = (
+        session._readiness,
+        session._readiness_evidence,
+        session._degradation_codes,
+        session._active_operations,
+        session._last_used_monotonic,
+        session._process,
+        session._startup_attempted,
+        session._starting,
+        dict(session._documents),
+        session._document_bytes,
+        session._workspace_revision,
+        session._synchronize_epoch,
+        session._generation_nonce,
+    )
+    before_events = tuple(semantic_pyright.events())
+    started = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError, match="document lock"):
+            session.open_document(
+                "pkg/service.py",
+                deadline=started + 0.05,
+            )
+        assert time.monotonic() - started < 0.2
+        assert released.is_set() is False
+        assert (
+            session._readiness,
+            session._readiness_evidence,
+            session._degradation_codes,
+            session._active_operations,
+            session._last_used_monotonic,
+            session._process,
+            session._startup_attempted,
+            session._starting,
+            dict(session._documents),
+            session._document_bytes,
+            session._workspace_revision,
+            session._synchronize_epoch,
+            session._generation_nonce,
+        ) == before_state
+        assert tuple(semantic_pyright.events()) == before_events
+        assert not (state_root / "run/lsp").exists()
+    finally:
+        holder.join(1)
+        session.close(deadline=time.monotonic() + 1)
+    assert not holder.is_alive()
+
+
+def test_synchronize_lock_contention_obeys_deadline_without_mutation(
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    revision = compute_workspace_revision(
+        resolve_repository_scope(repository),
+        deadline=time.monotonic() + 5,
+    )
+    held = threading.Event()
+    released = threading.Event()
+    holder = threading.Thread(
+        target=_hold_document_lock_for_contention,
+        args=(session, held, released),
+    )
+    holder.start()
+    assert held.wait(1)
+    before_state = (
+        session._readiness,
+        session._readiness_evidence,
+        session._degradation_codes,
+        session._active_operations,
+        session._last_used_monotonic,
+        session._process,
+        session._startup_attempted,
+        session._starting,
+        dict(session._documents),
+        session._document_bytes,
+        session._workspace_revision,
+        session._synchronize_epoch,
+        session._generation_nonce,
+    )
+    before_events = tuple(semantic_pyright.events())
+    started = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError, match="document lock"):
+            session.synchronize(revision, deadline=started + 0.05)
+        assert time.monotonic() - started < 0.2
+        assert released.is_set() is False
+        assert (
+            session._readiness,
+            session._readiness_evidence,
+            session._degradation_codes,
+            session._active_operations,
+            session._last_used_monotonic,
+            session._process,
+            session._startup_attempted,
+            session._starting,
+            dict(session._documents),
+            session._document_bytes,
+            session._workspace_revision,
+            session._synchronize_epoch,
+            session._generation_nonce,
+        ) == before_state
+        assert tuple(semantic_pyright.events()) == before_events
+        assert not (state_root / "run/lsp").exists()
+    finally:
+        holder.join(1)
+        session.close(deadline=time.monotonic() + 1)
+    assert not holder.is_alive()
+
+
+def test_document_lock_post_acquire_interruption_releases_and_remains_usable(
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    underlying = session._document_lock
+
+    class InterruptAfterAcquire:
+        def __init__(self) -> None:
+            self.interrupt = True
+
+        def acquire(self, *, timeout: float) -> bool:
+            acquired = underlying.acquire(timeout=timeout)
+            if acquired and self.interrupt:
+                self.interrupt = False
+                raise KeyboardInterrupt("document lock interrupted after acquire")
+            return acquired
+
+        def release(self) -> None:
+            underlying.release()
+
+        def cleanup_failed_test(self) -> None:
+            try:
+                underlying.release()
+            except RuntimeError:
+                pass
+
+    interrupting_lock = InterruptAfterAcquire()
+    session._document_lock = interrupting_lock  # type: ignore[assignment]
+    try:
+        with pytest.raises(
+            KeyboardInterrupt,
+            match="document lock interrupted after acquire",
+        ):
+            session.open_document(
+                "pkg/service.py",
+                deadline=time.monotonic() + 5,
+            )
+
+        available = underlying.acquire(blocking=False)
+        if available:
+            underlying.release()
+        assert available
+
+        document = session.open_document(
+            "pkg/service.py",
+            deadline=time.monotonic() + 10,
+        )
+        revision = compute_workspace_revision(
+            resolve_repository_scope(repository),
+            deadline=time.monotonic() + 10,
+        )
+        assert session.synchronize(
+            revision,
+            deadline=time.monotonic() + 10,
+        ) == WorkspaceDelta((), (), (), (), False)
+        assert session._documents[document.source.uri] is document
+    finally:
+        interrupting_lock.cleanup_failed_test()
         session.close(deadline=time.monotonic() + 5)
 
 
@@ -2773,7 +3669,7 @@ def test_progress_retention_has_count_and_aggregate_byte_bounds(
     ) <= 1024 * 1024
 
 
-def test_transparent_restart_reinitializes_configures_reopens_and_reprobes(
+def test_transparent_restart_requires_fresh_query_after_reopen_and_reprobe(
     repository: Path,
     state_root: Path,
 ) -> None:
@@ -2803,8 +3699,13 @@ def test_transparent_restart_reinitializes_configures_reopens_and_reprobes(
             _anchor(repository, "pkg/service.py", 10, 20),
             deadline=time.monotonic() + 15,
         )
-        assert result.coverage == "provider_reported"
-        assert len(result.locations) == 1
+        assert result == ProviderLocations((), "not_ready", True)
+        fresh = session.definition(
+            _anchor(repository, "pkg/service.py", 10, 20),
+            deadline=time.monotonic() + 10,
+        )
+        assert fresh.coverage == "provider_reported"
+        assert len(fresh.locations) == 1
         assert session.readiness == "query_ready"
         assert session.readiness_evidence == (
             "initialize",
@@ -2837,7 +3738,7 @@ def test_transparent_restart_reinitializes_configures_reopens_and_reprobes(
             )
             assert opened["version"] == 1
             assert opened["text"] == content
-        assert sum(event["method"] == "textDocument/definition" for event in messages) == 2
+        assert sum(event["method"] == "textDocument/definition" for event in messages) == 3
         assert session.diagnostics(
             "pkg/service.py",
             deadline=time.monotonic() + 0.1,
@@ -2913,6 +3814,12 @@ def test_server_mutated_before_transparent_restart_never_spawns_replacement(
         coordinator = process._coordinator
         assert len(trees) == 1
         assert process.restart_count == 0
+        with coordinator.condition:
+            assert coordinator.condition.wait_for(
+                lambda: coordinator.phase
+                is lsp_process._LifecyclePhase.STOPPED_FAILURE,
+                timeout=5,
+            )
         assert process.state is ProcessState.FAILED
         assert coordinator.active is None
         assert coordinator.candidate is None
@@ -3015,6 +3922,12 @@ def test_server_mutated_during_replacement_bootstrap_never_commits_candidate(
         assert len(bootstrap_nonces) == 2
         assert bootstrap_nonces[1] != first_nonce
         assert len(trees) == 2
+        with coordinator.condition:
+            assert coordinator.condition.wait_for(
+                lambda: coordinator.phase
+                is lsp_process._LifecyclePhase.STOPPED_FAILURE,
+                timeout=5,
+            )
         assert all(tree.process.poll() is not None for tree in trees)
         assert mutation_errors if os.name == "nt" else mutation_errors == []
         assert process.generation_nonce == first_nonce
@@ -3252,6 +4165,556 @@ def test_active_operation_and_lru_state_are_released_after_blocking_request(
         assert session.active_operations == 0
     finally:
         thread.join(5)
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_definition_drops_response_after_same_generation_document_change(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    response_ready = threading.Event()
+    release_response = threading.Event()
+    results: list[ProviderLocations] = []
+    errors: list[BaseException] = []
+    worker: threading.Thread | None = None
+    try:
+        document = session.open_document(
+            "pkg/service.py",
+            deadline=time.monotonic() + 10,
+        )
+        process = session._process
+        generation = session._generation_nonce
+        assert process is not None and generation is not None
+        request = LspProcess.request
+
+        def block_completed_definition(
+            current: LspProcess,
+            method: str,
+            params: object,
+            *,
+            deadline: float,
+            cancellation: object = None,
+        ) -> object:
+            result = request(
+                current,
+                method,
+                params,
+                deadline=deadline,
+                cancellation=cancellation,  # type: ignore[arg-type]
+            )
+            if current is process and method == "textDocument/definition":
+                response_ready.set()
+                if not release_response.wait(max(0.0, deadline - time.monotonic())):
+                    raise TimeoutError("definition publication barrier expired")
+            return result
+
+        monkeypatch.setattr(LspProcess, "request", block_completed_definition)
+        anchor = _anchor(repository, "pkg/service.py", 10, 20)
+
+        def query() -> None:
+            try:
+                results.append(
+                    session.definition(anchor, deadline=time.monotonic() + 10)
+                )
+            except BaseException as error:
+                errors.append(error)
+
+        worker = threading.Thread(target=query)
+        worker.start()
+        assert response_ready.wait(5), errors
+
+        (repository / "pkg/service.py").write_bytes(
+            document.content + b"\nchanged = True\n"
+        )
+        revision = compute_workspace_revision(
+            resolve_repository_scope(repository),
+            deadline=time.monotonic() + 10,
+        )
+        delta = session.synchronize(revision, deadline=time.monotonic() + 10)
+        replacement = session._documents[document.source.uri]
+        assert delta.changed == ("pkg/service.py",)
+        assert replacement is not document
+        assert replacement.version == 2
+        assert session._generation_nonce == generation
+
+        release_response.set()
+        worker.join(5)
+
+        assert not worker.is_alive()
+        assert errors == []
+        assert results == [ProviderLocations((), "not_ready", True)]
+    finally:
+        release_response.set()
+        if worker is not None:
+            worker.join(5)
+        session.close(deadline=time.monotonic() + 5)
+
+
+_SYNCHRONIZE_FENCE_CASES = (
+    ("definition", "textDocument/definition"),
+    ("references", "textDocument/references"),
+    ("implementations", "textDocument/implementation"),
+    ("type_definition", "textDocument/typeDefinition"),
+    ("document_symbols", "textDocument/documentSymbol"),
+    ("hover", "textDocument/hover"),
+    ("incoming_calls", "textDocument/prepareCallHierarchy"),
+    ("workspace_symbols", "workspace/symbol"),
+)
+
+
+def _synchronize_fence_query(
+    session: PyrightSession,
+    repository: Path,
+    feature: str,
+    *,
+    deadline: float,
+) -> object:
+    if feature == "document_symbols":
+        return session.document_symbols("pkg/service.py", deadline=deadline)
+    if feature == "workspace_symbols":
+        return session.workspace_symbols("Service", deadline=deadline)
+    anchor = _anchor(repository, "pkg/service.py", 10, 20)
+    return getattr(session, feature)(anchor, deadline=deadline)
+
+
+def _synchronize_fence_not_ready(feature: str) -> object:
+    if feature == "hover":
+        return ProviderHover(None, None, True)
+    if feature == "incoming_calls":
+        return ProviderCalls("incoming", (), "not_ready", True)
+    return ProviderLocations((), "not_ready", True)
+
+
+@pytest.mark.parametrize(
+    ("feature", "request_method"),
+    _SYNCHRONIZE_FENCE_CASES,
+)
+def test_synchronize_fence_rejects_queries_started_before_and_during_wire_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    feature: str,
+    request_method: str,
+) -> None:
+    fixture = create_semantic_pyright_fixture(
+        repository,
+        config={
+            "capabilities": {
+                "callHierarchyProvider": True,
+                "definitionProvider": True,
+                "documentSymbolProvider": True,
+                "hoverProvider": True,
+                "implementationProvider": True,
+                "referencesProvider": True,
+                "textDocumentSync": 2,
+                "typeDefinitionProvider": True,
+                "workspaceSymbolProvider": True,
+            }
+        },
+    )
+    session = _session(repository, state_root, fixture)
+    first_response_ready = threading.Event()
+    release_first_response = threading.Event()
+    wire_delivered = threading.Event()
+    release_commit = threading.Event()
+    first_done = threading.Event()
+    during_done = threading.Event()
+    first_results: list[object] = []
+    during_results: list[object] = []
+    sync_results: list[WorkspaceDelta] = []
+    errors: list[BaseException] = []
+    semantic_requests = 0
+    first_worker: threading.Thread | None = None
+    during_worker: threading.Thread | None = None
+    sync_worker: threading.Thread | None = None
+    try:
+        document = session.open_document(
+            "pkg/service.py",
+            deadline=time.monotonic() + 10,
+        )
+        scope = resolve_repository_scope(repository)
+        prior = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        session.synchronize(prior, deadline=time.monotonic() + 10)
+        process = session._process
+        assert process is not None
+        request = LspProcess.request
+        notify_generation = LspProcess.notify_generation
+        start = PyrightSession.start
+
+        def reject_start_inside_active_fence(
+            current: PyrightSession,
+            *,
+            deadline: float,
+        ) -> None:
+            if current is session and threading.current_thread().name == (
+                f"during-synchronize-{feature}"
+            ):
+                raise AssertionError("semantic fence was checked after startup work")
+            start(current, deadline=deadline)
+
+        def block_first_completed_response(
+            current: LspProcess,
+            method: str,
+            params: object,
+            *,
+            deadline: float,
+            cancellation: object = None,
+        ) -> object:
+            nonlocal semantic_requests
+            result = request(
+                current,
+                method,
+                params,
+                deadline=deadline,
+                cancellation=cancellation,  # type: ignore[arg-type]
+            )
+            if current is process and method == request_method:
+                semantic_requests += 1
+                if semantic_requests == 1:
+                    first_response_ready.set()
+                    if not release_first_response.wait(
+                        max(0.0, deadline - time.monotonic())
+                    ):
+                        raise TimeoutError("semantic response release expired")
+            return result
+
+        def hold_after_delivered_change(
+            current: LspProcess,
+            method: str,
+            params: object,
+            *,
+            generation_nonce: str,
+            deadline: float,
+        ) -> bool:
+            delivered = notify_generation(
+                current,
+                method,
+                params,
+                generation_nonce=generation_nonce,
+                deadline=deadline,
+            )
+            if current is process and method == "textDocument/didChange":
+                assert delivered is True
+                wire_delivered.set()
+                if not release_commit.wait(max(0.0, deadline - time.monotonic())):
+                    raise TimeoutError("synchronize commit release expired")
+            return delivered
+
+        monkeypatch.setattr(LspProcess, "request", block_first_completed_response)
+        monkeypatch.setattr(LspProcess, "notify_generation", hold_after_delivered_change)
+        monkeypatch.setattr(PyrightSession, "start", reject_start_inside_active_fence)
+
+        def query(results: list[object], done: threading.Event) -> None:
+            try:
+                results.append(
+                    _synchronize_fence_query(
+                        session,
+                        repository,
+                        feature,
+                        deadline=time.monotonic() + 15,
+                    )
+                )
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                done.set()
+
+        first_worker = threading.Thread(
+            target=query,
+            args=(first_results, first_done),
+            name=f"pre-synchronize-{feature}",
+        )
+        first_worker.start()
+        assert first_response_ready.wait(5), errors
+
+        (repository / "pkg/service.py").write_bytes(
+            document.content + b"\nchanged = True\n"
+        )
+        revision = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+
+        def synchronize() -> None:
+            try:
+                sync_results.append(
+                    session.synchronize(revision, deadline=time.monotonic() + 15)
+                )
+            except BaseException as error:
+                errors.append(error)
+
+        sync_worker = threading.Thread(
+            target=synchronize,
+            name=f"synchronize-{feature}",
+        )
+        sync_worker.start()
+        assert wire_delivered.wait(5), errors
+        assert session._documents[document.source.uri] is document
+
+        during_worker = threading.Thread(
+            target=query,
+            args=(during_results, during_done),
+            name=f"during-synchronize-{feature}",
+        )
+        during_worker.start()
+        assert during_done.wait(1), "semantic query waited for synchronize commit"
+        assert errors == []
+        not_ready = _synchronize_fence_not_ready(feature)
+        assert during_results == [not_ready]
+        assert semantic_requests == 1
+
+        release_first_response.set()
+        assert first_done.wait(5), errors
+        assert first_results == [not_ready]
+        assert semantic_requests == 1
+
+        release_commit.set()
+        sync_worker.join(5)
+        assert not sync_worker.is_alive()
+        assert errors == []
+        assert len(sync_results) == 1
+        assert session._documents[document.source.uri] is not document
+
+        fresh = _synchronize_fence_query(
+            session,
+            repository,
+            feature,
+            deadline=time.monotonic() + 10,
+        )
+        assert fresh != not_ready
+        assert semantic_requests >= 2
+    finally:
+        release_first_response.set()
+        release_commit.set()
+        for worker in (first_worker, during_worker, sync_worker):
+            if worker is not None:
+                worker.join(5)
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_call_hierarchy_stops_after_prepare_when_document_version_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    prepare_ready = threading.Event()
+    release_prepare = threading.Event()
+    results: list[ProviderCalls] = []
+    errors: list[BaseException] = []
+    second_stage_calls = 0
+    worker: threading.Thread | None = None
+    try:
+        document = session.open_document(
+            "pkg/service.py",
+            deadline=time.monotonic() + 10,
+        )
+        process = session._process
+        assert process is not None
+        request = LspProcess.request
+
+        def block_completed_prepare(
+            current: LspProcess,
+            method: str,
+            params: object,
+            *,
+            deadline: float,
+            cancellation: object = None,
+        ) -> object:
+            nonlocal second_stage_calls
+            result = request(
+                current,
+                method,
+                params,
+                deadline=deadline,
+                cancellation=cancellation,  # type: ignore[arg-type]
+            )
+            if current is process and method == "textDocument/prepareCallHierarchy":
+                prepare_ready.set()
+                if not release_prepare.wait(max(0.0, deadline - time.monotonic())):
+                    raise TimeoutError("call prepare publication barrier expired")
+            elif current is process and method == "callHierarchy/incomingCalls":
+                second_stage_calls += 1
+            return result
+
+        monkeypatch.setattr(LspProcess, "request", block_completed_prepare)
+        anchor = _anchor(repository, "pkg/service.py", 10, 20)
+
+        def query() -> None:
+            try:
+                results.append(
+                    session.incoming_calls(anchor, deadline=time.monotonic() + 10)
+                )
+            except BaseException as error:
+                errors.append(error)
+
+        worker = threading.Thread(target=query)
+        worker.start()
+        assert prepare_ready.wait(5), errors
+
+        (repository / "pkg/service.py").write_bytes(
+            document.content + b"\nchanged = True\n"
+        )
+        revision = compute_workspace_revision(
+            resolve_repository_scope(repository),
+            deadline=time.monotonic() + 10,
+        )
+        session.synchronize(revision, deadline=time.monotonic() + 10)
+        release_prepare.set()
+        worker.join(5)
+
+        assert not worker.is_alive()
+        assert errors == []
+        assert results == [ProviderCalls("incoming", (), "not_ready", True)]
+        assert second_stage_calls == 0
+    finally:
+        release_prepare.set()
+        if worker is not None:
+            worker.join(5)
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_workspace_symbols_drop_response_after_generation_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    response_ready = threading.Event()
+    release_response = threading.Event()
+    results: list[ProviderLocations] = []
+    errors: list[BaseException] = []
+    worker: threading.Thread | None = None
+    try:
+        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        process = session._process
+        generation = session._generation_nonce
+        assert process is not None and generation is not None
+        assert session.readiness == "query_ready"
+        request = LspProcess.request
+
+        def block_completed_workspace_symbols(
+            current: LspProcess,
+            method: str,
+            params: object,
+            *,
+            deadline: float,
+            cancellation: object = None,
+        ) -> object:
+            result = request(
+                current,
+                method,
+                params,
+                deadline=deadline,
+                cancellation=cancellation,  # type: ignore[arg-type]
+            )
+            if current is process and method == "workspace/symbol":
+                response_ready.set()
+                if not release_response.wait(max(0.0, deadline - time.monotonic())):
+                    raise TimeoutError("workspace symbol publication barrier expired")
+            return result
+
+        monkeypatch.setattr(LspProcess, "request", block_completed_workspace_symbols)
+
+        def query() -> None:
+            try:
+                results.append(
+                    session.workspace_symbols("Service", deadline=time.monotonic() + 15)
+                )
+            except BaseException as error:
+                errors.append(error)
+
+        worker = threading.Thread(target=query)
+        worker.start()
+        assert response_ready.wait(5), errors
+
+        process.restart(time.monotonic() + 10)
+        assert session._process is process
+        assert session._generation_nonce == process.generation_nonce
+        assert session._generation_nonce != generation
+        assert session.readiness == "query_ready"
+
+        release_response.set()
+        worker.join(5)
+
+        assert not worker.is_alive()
+        assert errors == []
+        assert results == [ProviderLocations((), "not_ready", True)]
+    finally:
+        release_response.set()
+        if worker is not None:
+            worker.join(5)
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_diagnostics_wait_stops_when_exact_open_document_is_replaced(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+) -> None:
+    fixture = create_semantic_pyright_fixture(
+        repository,
+        config={"push_diagnostics": False},
+    )
+    session = _session(repository, state_root, fixture)
+    waiting = threading.Event()
+    done = threading.Event()
+    results: list[ProviderDiagnostics] = []
+    errors: list[BaseException] = []
+    worker: threading.Thread | None = None
+    real_wait = threading.Condition.wait
+
+    def observe_diagnostics_wait(
+        condition: threading.Condition,
+        timeout: float | None = None,
+    ) -> bool:
+        if condition is session._condition and threading.current_thread().name == (
+            "stale-diagnostics-wait"
+        ):
+            waiting.set()
+        return real_wait(condition, timeout)
+
+    monkeypatch.setattr(threading.Condition, "wait", observe_diagnostics_wait)
+    try:
+        document = session.open_document(
+            "pkg/service.py",
+            deadline=time.monotonic() + 10,
+        )
+
+        def query() -> None:
+            try:
+                results.append(
+                    session.diagnostics(
+                        "pkg/service.py",
+                        deadline=time.monotonic() + 1,
+                    )
+                )
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                done.set()
+
+        worker = threading.Thread(target=query, name="stale-diagnostics-wait")
+        worker.start()
+        assert waiting.wait(1), errors
+
+        (repository / "pkg/service.py").write_bytes(
+            document.content + b"\nchanged = True\n"
+        )
+        revision = compute_workspace_revision(
+            resolve_repository_scope(repository),
+            deadline=time.monotonic() + 10,
+        )
+        session.synchronize(revision, deadline=time.monotonic() + 10)
+
+        assert done.wait(0.25), "diagnostics wait retained a replaced document"
+        assert errors == []
+        assert results == [ProviderDiagnostics((), None, True)]
+    finally:
+        if worker is not None:
+            worker.join(2)
         session.close(deadline=time.monotonic() + 5)
 
 
@@ -3630,6 +5093,196 @@ def test_first_synchronize_establishes_retained_workspace_revision(
         session.close(deadline=time.monotonic() + 5)
 
 
+def test_first_synchronize_reverifies_unchanged_open_document_after_revision(
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    try:
+        document = session.open_document(
+            "pkg/service.py",
+            deadline=time.monotonic() + 10,
+        )
+        revision = compute_workspace_revision(
+            resolve_repository_scope(repository),
+            deadline=time.monotonic() + 10,
+        )
+        (repository / "pkg/service.py").write_bytes(b"mutated_after_revision = True\n")
+        before_events = tuple(semantic_pyright.events())
+
+        with pytest.raises(RuntimeError, match="hash differs from the revision"):
+            session.synchronize(revision, deadline=time.monotonic() + 10)
+
+        assert tuple(semantic_pyright.events()) == before_events
+        assert session._documents[document.source.uri] is document
+        assert session._workspace_revision is None
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_every_synchronize_reverifies_unchanged_retained_document_before_wire(
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    try:
+        document = session.open_document(
+            "pkg/service.py",
+            deadline=time.monotonic() + 10,
+        )
+        scope = resolve_repository_scope(repository)
+        prior = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        session.synchronize(prior, deadline=time.monotonic() + 10)
+        unchanged = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        before_events = tuple(semantic_pyright.events())
+        before_document_bytes = session._document_bytes
+        (repository / "pkg/service.py").write_bytes(b"mutated_after_snapshot = True\n")
+
+        with pytest.raises(RuntimeError, match="hash differs from the revision"):
+            session.synchronize(unchanged, deadline=time.monotonic() + 10)
+
+        assert tuple(semantic_pyright.events()) == before_events
+        assert session._documents[document.source.uri] is document
+        assert session._document_bytes == before_document_bytes
+        assert session._workspace_revision is prior
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_first_synchronize_reconciles_changed_and_absent_open_documents(
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    absent_path = repository / "pkg/absent.py"
+    absent_path.write_bytes(b"absent = True\n")
+    session = _session(repository, state_root, semantic_pyright)
+    try:
+        changed = session.open_document(
+            "pkg/service.py",
+            deadline=time.monotonic() + 10,
+        )
+        absent = session.open_document(
+            "pkg/absent.py",
+            deadline=time.monotonic() + 10,
+        )
+        (repository / "pkg/service.py").write_bytes(b"changed = True\n")
+        absent_path.unlink()
+        revision = compute_workspace_revision(
+            resolve_repository_scope(repository),
+            deadline=time.monotonic() + 10,
+        )
+
+        delta = session.synchronize(revision, deadline=time.monotonic() + 10)
+
+        assert delta.changed == ("pkg/service.py",)
+        assert delta.deleted == ("pkg/absent.py",)
+        changes = _wait_client_messages(semantic_pyright, "textDocument/didChange")
+        closes = _wait_client_messages(semantic_pyright, "textDocument/didClose")
+        assert len(changes) == 1
+        assert len(closes) == 1
+        assert session._documents[changed.source.uri].content == b"changed = True\n"
+        assert absent.source.uri not in session._documents
+        assert session._workspace_revision is revision
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_first_synchronize_rejects_stale_changed_document_revision(
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    try:
+        document = session.open_document(
+            "pkg/service.py",
+            deadline=time.monotonic() + 10,
+        )
+        (repository / "pkg/service.py").write_bytes(b"first = True\n")
+        revision = compute_workspace_revision(
+            resolve_repository_scope(repository),
+            deadline=time.monotonic() + 10,
+        )
+        (repository / "pkg/service.py").write_bytes(b"second = True\n")
+
+        with pytest.raises(RuntimeError, match="hash differs from the revision"):
+            session.synchronize(revision, deadline=time.monotonic() + 10)
+
+        assert session._documents[document.source.uri] is document
+        assert session._workspace_revision is None
+        assert _client_messages(semantic_pyright, "textDocument/didChange") == ()
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+@pytest.mark.parametrize("bound", ["document", "aggregate"])
+def test_synchronize_rejects_projected_source_bounds_before_reads_or_notifications(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+    bound: str,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    try:
+        document = session.open_document(
+            "pkg/service.py",
+            deadline=time.monotonic() + 10,
+        )
+        scope = resolve_repository_scope(repository)
+        prior = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        session.synchronize(prior, deadline=time.monotonic() + 10)
+        (repository / "pkg/service.py").write_bytes(b"projected = True\n")
+        revision = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        if bound == "document":
+            revision = replace(
+                revision,
+                entries=tuple(
+                    replace(
+                        entry,
+                        size=pyright_session_module._MAX_DOCUMENT_BYTES + 1,
+                    )
+                    if entry.path == "pkg/service.py"
+                    else entry
+                    for entry in revision.entries
+                ),
+            )
+            expected = "source document byte limit"
+        else:
+            entry = next(
+                item for item in revision.entries if item.path == "pkg/service.py"
+            )
+            monkeypatch.setattr(
+                pyright_session_module,
+                "_MAX_OPEN_DOCUMENT_BYTES",
+                entry.size - 1,
+            )
+            expected = "open document source bytes limit"
+
+        reads = 0
+
+        def reject_read(*_args: object, **_kwargs: object) -> bytes:
+            nonlocal reads
+            reads += 1
+            raise AssertionError("changed document was read before projected bounds")
+
+        monkeypatch.setattr(pyright_session_module, "read_stable_bytes", reject_read)
+        before_events = tuple(semantic_pyright.events())
+
+        with pytest.raises(RuntimeError, match=expected):
+            session.synchronize(revision, deadline=time.monotonic() + 10)
+
+        assert reads == 0
+        assert tuple(semantic_pyright.events()) == before_events
+        assert session._documents[document.source.uri] is document
+        assert session._workspace_revision is prior
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
 def test_changed_open_document_sends_full_did_change_and_increments_version_once(
     repository: Path,
     state_root: Path,
@@ -3660,6 +5313,793 @@ def test_changed_open_document_sends_full_did_change_and_increments_version_once
         assert body["textDocument"]["version"] == 2
         assert body["contentChanges"] == [{"text": "class Updated:\n    pass\n"}]
         assert session._documents[document.source.uri].version == 2
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_synchronize_proves_retained_document_open_before_did_change(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    sent_methods: list[str] = []
+    recoveries: list[tuple[LspProcess, str]] = []
+    try:
+        session.start(deadline=time.monotonic() + 10)
+        process = session._process
+        assert process is not None
+        notify_generation = LspProcess.notify_generation
+
+        def reject_did_open(
+            current: LspProcess,
+            method: str,
+            params: object,
+            *,
+            generation_nonce: str,
+            deadline: float,
+        ) -> bool:
+            if current is process:
+                sent_methods.append(method)
+                if method == "textDocument/didOpen":
+                    return False
+            return notify_generation(
+                current,
+                method,
+                params,
+                generation_nonce=generation_nonce,
+                deadline=deadline,
+            )
+
+        monkeypatch.setattr(LspProcess, "notify_generation", reject_did_open)
+        document = session.open_document(
+            "pkg/service.py",
+            deadline=time.monotonic() + 10,
+        )
+        generation = session._generation_nonce
+        assert generation is not None
+        assert not session._wire_document_opened(document, generation)
+        sent_methods.clear()
+
+        def record_recovery(
+            current: LspProcess,
+            failed_generation: str,
+            *,
+            deadline: float,
+        ) -> None:
+            assert current is process
+            assert failed_generation == generation
+            assert time.monotonic() < deadline
+            recoveries.append((current, failed_generation))
+
+        monkeypatch.setattr(
+            session,
+            "_recover_synchronize_snapshot",
+            record_recovery,
+        )
+        (repository / "pkg/service.py").write_bytes(b"changed = True\n")
+        revision = compute_workspace_revision(
+            resolve_repository_scope(repository),
+            deadline=time.monotonic() + 10,
+        )
+
+        with pytest.raises(RuntimeError, match="didOpen"):
+            session.synchronize(revision, deadline=time.monotonic() + 10)
+
+        assert sent_methods == ["textDocument/didOpen"]
+        assert recoveries == [(process, generation)]
+        assert session._documents[document.source.uri] is document
+        assert session._workspace_revision is None
+        assert not session._wire_document_opened(document, generation)
+        with session._lock:
+            assert not session._document_ready_locked(document.source.uri)
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_synchronize_commit_preserves_diagnostics_published_during_wire_calls(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+) -> None:
+    fixture = create_semantic_pyright_fixture(
+        repository,
+        config={"push_diagnostics": False},
+    )
+    session = _session(repository, state_root, fixture)
+    wire_entered = threading.Event()
+    release_wire = threading.Event()
+    sync_errors: list[BaseException] = []
+    sync_results: list[WorkspaceDelta] = []
+    worker: threading.Thread | None = None
+    base = {
+        "range": {
+            "start": {"line": 0, "character": 0},
+            "end": {"line": 0, "character": 1},
+        },
+    }
+    try:
+        service = session.open_document(
+            "pkg/service.py",
+            deadline=time.monotonic() + 10,
+        )
+        api = session.open_document(
+            "pkg/api.py",
+            deadline=time.monotonic() + 10,
+        )
+        scope = resolve_repository_scope(repository)
+        prior = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        session.synchronize(prior, deadline=time.monotonic() + 10)
+        session._publish_diagnostics(
+            {
+                "uri": api.source.uri,
+                "version": 1,
+                "diagnostics": [{**base, "message": "retained api diagnostic"}],
+            }
+        )
+        (repository / "pkg/service.py").write_bytes(b"changed = True\n")
+        revision = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        process = session._process
+        assert process is not None
+
+        notify_generation = LspProcess.notify_generation
+
+        def block_change_notification(
+            current: LspProcess,
+            method: str,
+            params: object,
+            *,
+            generation_nonce: str,
+            deadline: float,
+        ) -> bool:
+            if current is process and method == "textDocument/didChange":
+                assert generation_nonce == process.generation_nonce
+                assert time.monotonic() < deadline
+                wire_entered.set()
+                if not release_wire.wait(max(0.0, deadline - time.monotonic())):
+                    raise TimeoutError("interleaved diagnostics release expired")
+                return True
+            return notify_generation(
+                current,
+                method,
+                params,
+                generation_nonce=generation_nonce,
+                deadline=deadline,
+            )
+
+        monkeypatch.setattr(LspProcess, "notify_generation", block_change_notification)
+
+        def synchronize() -> None:
+            try:
+                sync_results.append(
+                    session.synchronize(revision, deadline=time.monotonic() + 10)
+                )
+            except BaseException as error:
+                sync_errors.append(error)
+
+        worker = threading.Thread(target=synchronize)
+        worker.start()
+        assert wire_entered.wait(5)
+        session._publish_diagnostics(
+            {
+                "uri": service.source.uri,
+                "version": 2,
+                "diagnostics": [
+                    {**base, "message": "published between snapshot and commit"}
+                ],
+            }
+        )
+        release_wire.set()
+        worker.join(5)
+
+        assert not worker.is_alive()
+        assert sync_errors == []
+        assert len(sync_results) == 1
+        assert set(session._diagnostics) == {service.source.uri, api.source.uri}
+        assert session._diagnostics[service.source.uri].document_version == 2
+        assert session._diagnostic_bytes == sum(
+            snapshot.retained_bytes for snapshot in session._diagnostics.values()
+        )
+        assert session._diagnostic_bytes <= pyright_session_module._MAX_DIAGNOSTIC_BYTES
+    finally:
+        release_wire.set()
+        if worker is not None:
+            worker.join(5)
+        session.close(deadline=time.monotonic() + 5)
+
+
+@pytest.mark.parametrize(
+    ("failed_method", "failure_mode"),
+    [
+        ("textDocument/didChange", "false"),
+        ("textDocument/didClose", "exception"),
+        ("workspace/didChangeWatchedFiles", "false"),
+    ],
+)
+def test_synchronize_notification_failure_replays_prior_snapshot_without_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+    failed_method: str,
+    failure_mode: str,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    try:
+        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        scope = resolve_repository_scope(repository)
+        prior = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        session.synchronize(prior, deadline=time.monotonic() + 10)
+        process = session._process
+        assert process is not None
+        before_documents = dict(session._documents)
+        before_document_bytes = session._document_bytes
+
+        if failed_method == "textDocument/didChange":
+            (repository / "pkg/service.py").write_bytes(b"changed = True\n")
+        elif failed_method == "textDocument/didClose":
+            (repository / "pkg/service.py").unlink()
+        else:
+            (repository / "pkg/watched.py").write_bytes(b"watched = True\n")
+        revision = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+
+        notify_generation = LspProcess.notify_generation
+        notify = LspProcess.notify
+
+        def fail_generation(
+            current: LspProcess,
+            method: str,
+            params: object,
+            *,
+            generation_nonce: str,
+            deadline: float,
+        ) -> bool:
+            delivered = notify_generation(
+                current,
+                method,
+                params,
+                generation_nonce=generation_nonce,
+                deadline=deadline,
+            )
+            if current is not process or method != failed_method:
+                return delivered
+            if failure_mode == "exception":
+                raise RuntimeError("injected notification failure")
+            return False
+
+        def fail_notify(
+            current: LspProcess,
+            method: str,
+            params: object,
+            *,
+            deadline: float,
+        ) -> object:
+            delivered = notify(current, method, params, deadline=deadline)
+            if current is not process or method != failed_method:
+                return delivered
+            if failure_mode == "exception":
+                raise RuntimeError("injected notification failure")
+            return False
+
+        monkeypatch.setattr(LspProcess, "notify_generation", fail_generation)
+        monkeypatch.setattr(LspProcess, "notify", fail_notify)
+
+        with pytest.raises(RuntimeError, match="notification"):
+            session.synchronize(revision, deadline=time.monotonic() + 10)
+
+        assert session._workspace_revision is prior
+        assert session._documents == before_documents
+        assert session._document_bytes == before_document_bytes
+        assert process.restart_count == 1
+        generation = session._generation_nonce
+        assert generation == process.generation_nonce
+        assert all(
+            session._wire_document_opened(document, generation)
+            for document in before_documents.values()
+        )
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_synchronize_recovery_preserves_already_replayed_replacement_state(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    try:
+        document = session.open_document(
+            "pkg/service.py",
+            deadline=time.monotonic() + 10,
+        )
+        process = session._process
+        failed_generation = session._generation_nonce
+        assert process is not None and failed_generation is not None
+
+        process.restart(time.monotonic() + 10)
+        replacement_generation = session._generation_nonce
+        assert replacement_generation == process.generation_nonce
+        assert replacement_generation != failed_generation
+        assert session.readiness == "query_ready"
+        session._publish_diagnostics(
+            {
+                "uri": document.source.uri,
+                "version": document.version,
+                "diagnostics": [],
+            }
+        )
+        with session._lock:
+            readiness = session._readiness
+            evidence = session._readiness_evidence
+            ready_uris = dict(session._ready_uri_generations)
+            diagnostics = dict(session._diagnostics)
+            diagnostic_bytes = session._diagnostic_bytes
+            assert session._synchronize_snapshot_replayed_locked(process)
+
+        def forbidden_restart(_process: LspProcess, _deadline: float) -> None:
+            pytest.fail("already replayed replacement generation restarted again")
+
+        monkeypatch.setattr(LspProcess, "restart", forbidden_restart)
+
+        session._recover_synchronize_snapshot(
+            process,
+            failed_generation,
+            deadline=time.monotonic() + 10,
+        )
+
+        with session._lock:
+            assert session._readiness == readiness == "query_ready"
+            assert session._readiness_evidence == evidence
+            assert session._ready_uri_generations == ready_uris
+            assert session._diagnostics == diagnostics
+            assert session._diagnostic_bytes == diagnostic_bytes
+            assert session._generation_nonce == replacement_generation
+            assert session._process is process
+            assert session._synchronize_snapshot_replayed_locked(process)
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_synchronize_deadline_recovery_quarantines_partially_mutated_process(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    partial_changes: list[str] = []
+    recovery_deadlines: list[float] = []
+    stale_fresh_calls: list[str] = []
+    failure_returned = False
+    try:
+        document = session.open_document(
+            "pkg/service.py",
+            deadline=time.monotonic() + 10,
+        )
+        scope = resolve_repository_scope(repository)
+        prior = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        session.synchronize(prior, deadline=time.monotonic() + 10)
+        process = session._process
+        generation = session._generation_nonce
+        assert process is not None and generation is not None
+        (repository / "pkg/service.py").write_bytes(b"changed = True\n")
+        (repository / "pkg/watched.py").write_bytes(b"watched = True\n")
+        revision = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        notify_generation = LspProcess.notify_generation
+        restart = LspProcess.restart
+
+        def fail_after_partial_change(
+            current: LspProcess,
+            method: str,
+            params: object,
+            *,
+            generation_nonce: str,
+            deadline: float,
+        ) -> bool:
+            if current is process and failure_returned:
+                stale_fresh_calls.append(method)
+                raise AssertionError("fresh work reached quarantined process")
+            if current is process and method == "textDocument/didChange":
+                delivered = notify_generation(
+                    current,
+                    method,
+                    params,
+                    generation_nonce=generation_nonce,
+                    deadline=deadline,
+                )
+                assert delivered is True
+                partial_changes.append(generation_nonce)
+                return True
+            if current is process and method == "workspace/didChangeWatchedFiles":
+                assert partial_changes == [generation]
+                return False
+            return notify_generation(
+                current,
+                method,
+                params,
+                generation_nonce=generation_nonce,
+                deadline=deadline,
+            )
+
+        def expire_recovery(current: LspProcess, deadline: float) -> None:
+            if current is process:
+                assert partial_changes == [generation]
+                recovery_deadlines.append(deadline)
+                raise TimeoutError("injected synchronization recovery deadline expired")
+            restart(current, deadline)
+
+        monkeypatch.setattr(
+            LspProcess,
+            "notify_generation",
+            fail_after_partial_change,
+        )
+        monkeypatch.setattr(LspProcess, "restart", expire_recovery)
+
+        with pytest.raises(RuntimeError, match="notification recovery failed"):
+            session.synchronize(revision, deadline=time.monotonic() + 10)
+        failure_returned = True
+
+        assert partial_changes == [generation]
+        assert len(recovery_deadlines) == 1
+        assert session._process is None
+        assert session._startup_process is process
+        assert session._generation_nonce is None
+        assert session.readiness == "not_ready"
+        assert session._workspace_revision is prior
+        assert session._documents[document.source.uri] is document
+
+        delta = session.synchronize(revision, deadline=time.monotonic() + 10)
+
+        assert delta.changed == ("pkg/service.py",)
+        assert session._process is not None and session._process is not process
+        assert session._startup_process is None
+        assert session._workspace_revision is revision
+        assert stale_fresh_calls == []
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_notification_interruption_outranks_later_recovery_interruption(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    try:
+        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        scope = resolve_repository_scope(repository)
+        prior = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        session.synchronize(prior, deadline=time.monotonic() + 10)
+        process = session._process
+        assert process is not None
+        (repository / "pkg/service.py").write_bytes(b"changed = True\n")
+        revision = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        notify_generation = LspProcess.notify_generation
+
+        def make_notification_interruption() -> KeyboardInterrupt:
+            try:
+                raise KeyboardInterrupt("original notification interruption")
+            except KeyboardInterrupt as error:
+                return error
+
+        notification_interruption = make_notification_interruption()
+        notification_wrapper = RuntimeError("notification interruption wrapper")
+        notification_wrapper.__cause__ = notification_interruption
+        recovery_interruption = SystemExit(61)
+
+        def interrupt_notification(
+            current: LspProcess,
+            method: str,
+            params: object,
+            *,
+            generation_nonce: str,
+            deadline: float,
+        ) -> bool:
+            if current is process and method == "textDocument/didChange":
+                raise notification_wrapper
+            return notify_generation(
+                current,
+                method,
+                params,
+                generation_nonce=generation_nonce,
+                deadline=deadline,
+            )
+
+        def interrupt_recovery(
+            _process: LspProcess,
+            _failed_generation: str,
+            *,
+            deadline: float,
+        ) -> None:
+            assert time.monotonic() < deadline
+            raise recovery_interruption
+
+        monkeypatch.setattr(LspProcess, "notify_generation", interrupt_notification)
+        monkeypatch.setattr(
+            session,
+            "_recover_synchronize_snapshot",
+            interrupt_recovery,
+        )
+
+        with pytest.raises(
+            KeyboardInterrupt,
+            match="original notification interruption",
+        ) as raised:
+            session.synchronize(revision, deadline=time.monotonic() + 10)
+
+        assert raised.value is notification_interruption
+        assert raised.value.__cause__ is recovery_interruption
+        assert recovery_interruption.__context__ is None
+        assert notification_wrapper.__cause__ is notification_interruption
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_wrapped_recovery_interruption_is_not_downgraded_to_runtime_error(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    try:
+        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        scope = resolve_repository_scope(repository)
+        prior = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        session.synchronize(prior, deadline=time.monotonic() + 10)
+        process = session._process
+        assert process is not None
+        (repository / "pkg/service.py").write_bytes(b"changed = True\n")
+        revision = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        notify_generation = LspProcess.notify_generation
+        notification_error = RuntimeError("ordinary notification failure")
+        recovery_interruption = SystemExit(67)
+        recovery_wrapper = RuntimeError("recovery interruption wrapper")
+        recovery_wrapper.__cause__ = recovery_interruption
+
+        def fail_notification(
+            current: LspProcess,
+            method: str,
+            params: object,
+            *,
+            generation_nonce: str,
+            deadline: float,
+        ) -> bool:
+            if current is process and method == "textDocument/didChange":
+                raise notification_error
+            return notify_generation(
+                current,
+                method,
+                params,
+                generation_nonce=generation_nonce,
+                deadline=deadline,
+            )
+
+        def wrap_recovery_interruption(
+            _process: LspProcess,
+            _failed_generation: str,
+            *,
+            deadline: float,
+        ) -> None:
+            assert time.monotonic() < deadline
+            raise recovery_wrapper
+
+        monkeypatch.setattr(LspProcess, "notify_generation", fail_notification)
+        monkeypatch.setattr(
+            session,
+            "_recover_synchronize_snapshot",
+            wrap_recovery_interruption,
+        )
+
+        with pytest.raises(SystemExit) as raised:
+            session.synchronize(revision, deadline=time.monotonic() + 10)
+
+        assert raised.value is recovery_interruption
+        assert raised.value.__cause__ is notification_error
+        assert raised.value.__context__ is None
+        assert recovery_wrapper.__cause__ is recovery_interruption
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_synchronize_commit_recovery_rethrows_interruption(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    try:
+        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        scope = resolve_repository_scope(repository)
+        prior = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        session.synchronize(prior, deadline=time.monotonic() + 10)
+        (repository / "pkg/service.py").write_bytes(b"changed = True\n")
+        revision = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        process = session._process
+        assert process is not None
+        notify_generation = LspProcess.notify_generation
+
+        def change_state_before_commit(
+            current: LspProcess,
+            method: str,
+            params: object,
+            *,
+            generation_nonce: str,
+            deadline: float,
+        ) -> bool:
+            delivered = notify_generation(
+                current,
+                method,
+                params,
+                generation_nonce=generation_nonce,
+                deadline=deadline,
+            )
+            if current is process and method == "textDocument/didChange":
+                with session._lock:
+                    session._workspace_revision = None
+            return delivered
+
+        def interrupt_commit_recovery(
+            _process: LspProcess,
+            _failed_generation: str,
+            *,
+            deadline: float,
+        ) -> None:
+            assert time.monotonic() < deadline
+            raise SystemExit(41)
+
+        monkeypatch.setattr(LspProcess, "notify_generation", change_state_before_commit)
+        monkeypatch.setattr(
+            session,
+            "_recover_synchronize_snapshot",
+            interrupt_commit_recovery,
+        )
+
+        with pytest.raises(SystemExit) as raised:
+            session.synchronize(revision, deadline=time.monotonic() + 10)
+
+        assert raised.value.code == 41
+        traceback_names: list[str] = []
+        current = raised.value.__traceback__
+        while current is not None:
+            traceback_names.append(current.tb_frame.f_code.co_name)
+            current = current.tb_next
+        assert "interrupt_commit_recovery" in traceback_names
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_synchronize_commit_recovery_unwraps_interruption_without_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    try:
+        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        scope = resolve_repository_scope(repository)
+        prior = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        session.synchronize(prior, deadline=time.monotonic() + 10)
+        (repository / "pkg/service.py").write_bytes(b"changed = True\n")
+        revision = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        process = session._process
+        assert process is not None
+        notify_generation = LspProcess.notify_generation
+        recovery_interruption = KeyboardInterrupt("wrapped commit recovery interruption")
+        recovery_wrapper = RuntimeError("commit recovery interruption wrapper")
+        recovery_wrapper.__cause__ = recovery_interruption
+
+        def change_state_before_commit(
+            current: LspProcess,
+            method: str,
+            params: object,
+            *,
+            generation_nonce: str,
+            deadline: float,
+        ) -> bool:
+            delivered = notify_generation(
+                current,
+                method,
+                params,
+                generation_nonce=generation_nonce,
+                deadline=deadline,
+            )
+            if current is process and method == "textDocument/didChange":
+                with session._lock:
+                    session._workspace_revision = None
+            return delivered
+
+        def wrap_commit_recovery_interruption(
+            _process: LspProcess,
+            _failed_generation: str,
+            *,
+            deadline: float,
+        ) -> None:
+            assert time.monotonic() < deadline
+            raise recovery_wrapper
+
+        monkeypatch.setattr(LspProcess, "notify_generation", change_state_before_commit)
+        monkeypatch.setattr(
+            session,
+            "_recover_synchronize_snapshot",
+            wrap_commit_recovery_interruption,
+        )
+
+        with pytest.raises(
+            KeyboardInterrupt,
+            match="wrapped commit recovery interruption",
+        ) as raised:
+            session.synchronize(revision, deadline=time.monotonic() + 10)
+
+        assert raised.value is recovery_interruption
+        assert isinstance(raised.value.__cause__, RuntimeError)
+        assert "state changed before commit" in str(raised.value.__cause__)
+        assert raised.value.__context__ is None
+        assert recovery_wrapper.__cause__ is recovery_interruption
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_synchronize_rejects_noop_recovery_as_unproven(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    try:
+        document = session.open_document(
+            "pkg/service.py",
+            deadline=time.monotonic() + 10,
+        )
+        scope = resolve_repository_scope(repository)
+        prior = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        session.synchronize(prior, deadline=time.monotonic() + 10)
+        process = session._process
+        generation = session._generation_nonce
+        assert process is not None and generation is not None
+        (repository / "pkg/service.py").write_bytes(b"changed = True\n")
+        revision = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        notify_generation = LspProcess.notify_generation
+
+        def partial_change(
+            current: LspProcess,
+            method: str,
+            params: object,
+            *,
+            generation_nonce: str,
+            deadline: float,
+        ) -> bool:
+            delivered = notify_generation(
+                current,
+                method,
+                params,
+                generation_nonce=generation_nonce,
+                deadline=deadline,
+            )
+            return False if current is process and method == "textDocument/didChange" else delivered
+
+        monkeypatch.setattr(LspProcess, "notify_generation", partial_change)
+        monkeypatch.setattr(
+            LspProcess,
+            "restart",
+            lambda _self, _deadline: None,
+        )
+
+        with pytest.raises(RuntimeError, match="notification recovery failed"):
+            session.synchronize(revision, deadline=time.monotonic() + 10)
+
+        assert session._workspace_revision is prior
+        assert session._documents[document.source.uri] is document
+        assert session._generation_nonce is None
+        assert session._process is None
+        assert session._startup_process is process
+        assert session.readiness == "not_ready"
     finally:
         session.close(deadline=time.monotonic() + 5)
 
@@ -3717,6 +6157,87 @@ def test_created_and_deleted_files_produce_watched_file_events(
             change["type"] for change in watched[0]["params"]["changes"]
         )
         assert types == [1, 3]
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+def test_watched_file_notification_stays_on_captured_generation(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    try:
+        session.open_document("pkg/service.py", deadline=time.monotonic() + 10)
+        scope = resolve_repository_scope(repository)
+        prior = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        session.synchronize(prior, deadline=time.monotonic() + 10)
+        process = session._process
+        generation = session._generation_nonce
+        assert process is not None and generation is not None
+        (repository / "pkg/watched.py").write_bytes(b"watched = True\n")
+        revision = compute_workspace_revision(scope, deadline=time.monotonic() + 10)
+        notify = LspProcess.notify
+        notify_generation = LspProcess.notify_generation
+        replaced = False
+
+        def replace_generation(deadline: float) -> None:
+            nonlocal replaced
+            if replaced:
+                return
+            replaced = True
+            process.restart(deadline)
+            assert process.generation_nonce != generation
+
+        def replace_before_notify(
+            current: LspProcess,
+            method: str,
+            params: object,
+            *,
+            deadline: float,
+        ) -> None:
+            if current is process and method == "workspace/didChangeWatchedFiles":
+                replace_generation(deadline)
+            notify(current, method, params, deadline=deadline)
+
+        def replace_before_generation_notify(
+            current: LspProcess,
+            method: str,
+            params: object,
+            *,
+            generation_nonce: str,
+            deadline: float,
+        ) -> bool:
+            if current is process and method == "workspace/didChangeWatchedFiles":
+                assert generation_nonce == generation
+                replace_generation(deadline)
+            return notify_generation(
+                current,
+                method,
+                params,
+                generation_nonce=generation_nonce,
+                deadline=deadline,
+            )
+
+        monkeypatch.setattr(LspProcess, "notify", replace_before_notify)
+        monkeypatch.setattr(
+            LspProcess,
+            "notify_generation",
+            replace_before_generation_notify,
+        )
+
+        with pytest.raises(RuntimeError, match="watched-files"):
+            session.synchronize(revision, deadline=time.monotonic() + 10)
+
+        assert replaced is True
+        assert process.restart_count == 1
+        assert process.generation_nonce != generation
+        assert _client_messages(
+            semantic_pyright,
+            "workspace/didChangeWatchedFiles",
+        ) == ()
+        assert session._workspace_revision is prior
     finally:
         session.close(deadline=time.monotonic() + 5)
 
@@ -3787,6 +6308,46 @@ def test_rename_closes_old_open_uri_and_reports_watched_events(
         assert ("renamed.py", 1) in uris
         assert ("rename_target.py", 3) in uris
         assert document.source.uri not in session._documents
+    finally:
+        session.close(deadline=time.monotonic() + 5)
+
+
+@pytest.mark.parametrize("operation", ["delete", "rename"])
+def test_synchronize_removing_readiness_target_revokes_query_ready(
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+    operation: str,
+) -> None:
+    session = _session(repository, state_root, semantic_pyright)
+    try:
+        document = session.open_document(
+            "pkg/service.py",
+            deadline=time.monotonic() + 10,
+        )
+        assert session.readiness == "query_ready"
+        scope = resolve_repository_scope(repository)
+        session.synchronize(
+            compute_workspace_revision(scope, deadline=time.monotonic() + 10),
+            deadline=time.monotonic() + 10,
+        )
+        if operation == "delete":
+            (repository / "pkg/service.py").unlink()
+        else:
+            (repository / "pkg/service.py").rename(repository / "pkg/moved.py")
+
+        session.synchronize(
+            compute_workspace_revision(scope, deadline=time.monotonic() + 10),
+            deadline=time.monotonic() + 10,
+        )
+
+        assert document.source.uri not in session._documents
+        assert session._readiness_target_uri is None
+        assert session.readiness == "protocol_initialized"
+        assert session.workspace_symbols(
+            "service",
+            deadline=time.monotonic() + 10,
+        ).coverage == "not_ready"
     finally:
         session.close(deadline=time.monotonic() + 5)
 
@@ -3935,6 +6496,197 @@ def test_manager_keys_by_checkout_and_profile_identity(
         manager.close_all(deadline=time.monotonic() + 5)
 
 
+def test_manager_key_includes_complete_qualified_identity(
+    tmp_path: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pyright_profile
+
+    repo, fixture = _make_repo_fixture(tmp_path, "full-identity")
+    scope = resolve_repository_scope(repo)
+    first_identity = fixture.identity
+    second_identity = replace(
+        fixture.identity,
+        executable_sha256="c" * 64,
+        package_sha256="d" * 64,
+    )
+    discovered = iter((first_identity, second_identity))
+    monkeypatch.setattr(
+        pyright_profile,
+        "discover_pyright",
+        lambda *_args, **_kwargs: next(discovered),
+    )
+    manager = PyrightSessionManager(state_root=state_root)
+    try:
+        first = manager.get(scope, deadline=time.monotonic() + 10)
+        second = manager.get(scope, deadline=time.monotonic() + 10)
+        assert first is not second
+        assert first._identity is first_identity
+        assert second._identity is second_identity
+        assert len(manager._sessions) == 2
+    finally:
+        manager.close_all(deadline=time.monotonic() + 5)
+
+
+def test_session_idle_close_reservation_blocks_new_operations(
+    repository: Path,
+    state_root: Path,
+) -> None:
+    session = PyrightSession(
+        resolve_repository_scope(repository),
+        _missing_identity(),
+        state_root=state_root,
+    )
+
+    with session._operation():
+        assert session._reserve_idle_close(time.monotonic() + 1) is False
+
+    assert session._reserve_idle_close(time.monotonic() + 1) is True
+    with pytest.raises(RuntimeError, match="closing"):
+        with session._operation():
+            pytest.fail("operation started after close reservation")
+    assert session.active_operations == 0
+    session.close(deadline=time.monotonic() + 1)
+    assert session._closed is True
+
+
+def test_session_close_reserves_before_waiting_for_active_operation(
+    repository: Path,
+    state_root: Path,
+) -> None:
+    session = PyrightSession(
+        resolve_repository_scope(repository),
+        _missing_identity(),
+        state_root=state_root,
+    )
+    active = threading.Event()
+    release = threading.Event()
+    close_errors: list[BaseException] = []
+
+    def hold_operation() -> None:
+        with session._operation():
+            active.set()
+            assert release.wait(2)
+
+    def close_session() -> None:
+        try:
+            session.close(deadline=time.monotonic() + 2)
+        except BaseException as error:
+            close_errors.append(error)
+
+    operation = threading.Thread(target=hold_operation)
+    closer = threading.Thread(target=close_session)
+    operation.start()
+    assert active.wait(1)
+    closer.start()
+    try:
+        deadline = time.monotonic() + 1
+        while not session._closing and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert session._closing is True
+        assert closer.is_alive()
+        with pytest.raises(RuntimeError, match="closing"):
+            with session._operation():
+                pytest.fail("operation started after close reservation")
+    finally:
+        release.set()
+        operation.join(2)
+        closer.join(2)
+
+    assert not operation.is_alive()
+    assert not closer.is_alive()
+    assert close_errors == []
+    assert session._closed is True
+
+
+def test_failed_real_session_close_keeps_reservation_until_close_all_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+    state_root: Path,
+    semantic_pyright: SemanticPyrightFixture,
+) -> None:
+    import pyright_profile
+
+    scope = resolve_repository_scope(repository)
+    monkeypatch.setattr(
+        pyright_profile,
+        "discover_pyright",
+        lambda *_args, **_kwargs: semantic_pyright.identity,
+    )
+    manager = PyrightSessionManager(state_root=state_root)
+    session = manager.get(scope, deadline=time.monotonic() + 10)
+    session.start(deadline=time.monotonic() + 10)
+    process = session._process
+    assert process is not None
+    generation = process._coordinator.active
+    assert generation is not None and generation.tree is not None
+    tree = generation.tree
+    terminate = lsp_process.ProcessTree.terminate
+    tree_fault = True
+
+    def fail_tree(current: object, *, deadline: float) -> None:
+        if current is tree and tree_fault:
+            raise OSError("retained session tree close failed")
+        terminate(current, deadline=deadline)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(lsp_process.ProcessTree, "terminate", fail_tree)
+    try:
+        assert session._reserve_idle_close(time.monotonic() + 1) is True
+        with pytest.raises(OSError, match="retained session tree close failed"):
+            session.close(deadline=time.monotonic() + 3)
+
+        assert session._closing is True
+        assert session._closed is False
+        with pytest.raises(RuntimeError, match="closing"):
+            with session._operation():
+                pytest.fail("operation started after retained close failure")
+
+        tree_fault = False
+        manager.close_all(deadline=time.monotonic() + 5)
+        assert session._closed is True
+        assert manager._sessions == {}
+    finally:
+        tree_fault = False
+        if manager._sessions:
+            manager.close_all(deadline=time.monotonic() + 5)
+
+
+def test_session_close_state_lock_wait_obeys_absolute_deadline(
+    repository: Path,
+    state_root: Path,
+) -> None:
+    session = PyrightSession(
+        resolve_repository_scope(repository),
+        _missing_identity(),
+        state_root=state_root,
+    )
+    held = threading.Event()
+
+    def hold_state_lock() -> None:
+        session._lock.acquire()
+        try:
+            held.set()
+            time.sleep(0.25)
+        finally:
+            session._lock.release()
+
+    holder = threading.Thread(target=hold_state_lock)
+    holder.start()
+    assert held.wait(1)
+    started = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError, match="state lock"):
+            session.close(deadline=started + 0.05)
+        assert time.monotonic() - started < 0.2
+        assert session._closed is False
+    finally:
+        holder.join(1)
+        session.close(deadline=time.monotonic() + 1)
+    assert not holder.is_alive()
+    assert session._closed is True
+
+
 def test_manager_evicts_lru_idle_and_never_exceeds_four(
     tmp_path: Path,
     state_root: Path,
@@ -3960,6 +6712,59 @@ def test_manager_evicts_lru_idle_and_never_exceeds_four(
         fifth = manager.get(scopes[0], deadline=time.monotonic() + 10)
         assert fifth is not first
         assert len(manager._sessions) == 4
+    finally:
+        manager.close_all(deadline=time.monotonic() + 5)
+
+
+def test_manager_failed_eviction_retains_slot_and_closes_outside_global_lock(
+    tmp_path: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scopes: list[RepositoryScope] = []
+    identities: dict[str, object] = {}
+    for index in range(5):
+        repo, fixture = _make_repo_fixture(tmp_path, f"eviction-{index}")
+        scope = resolve_repository_scope(repo)
+        scopes.append(scope)
+        identities[scope.checkout_id] = fixture.identity
+    _patch_discovery(monkeypatch, identities)
+    manager = PyrightSessionManager(state_root=state_root)
+    retained = [
+        manager.get(scope, deadline=time.monotonic() + 10)
+        for scope in scopes[:4]
+    ]
+    for index, session in enumerate(retained):
+        with session._lock:
+            session._last_used_monotonic = float(index)
+    lock_was_available = threading.Event()
+
+    def fail_close(*, deadline: float) -> None:
+        def probe_manager_lock() -> None:
+            remaining = deadline - time.monotonic()
+            if remaining > 0 and manager._lock.acquire(timeout=remaining):
+                lock_was_available.set()
+                manager._lock.release()
+
+        probe = threading.Thread(target=probe_manager_lock)
+        probe.start()
+        probe.join(max(0.0, deadline - time.monotonic()))
+        raise OSError("injected close failure")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(retained[0], "close", fail_close)
+            with pytest.raises(OSError, match="injected close failure"):
+                manager.get(scopes[4], deadline=time.monotonic() + 2)
+
+        assert lock_was_available.is_set()
+        assert len(manager._sessions) == 4
+        assert retained[0] in manager._sessions.values()
+        assert retained[0]._closed is False
+        assert all(
+            session._repository.checkout_id != scopes[4].checkout_id
+            for session in manager._sessions.values()
+        )
     finally:
         manager.close_all(deadline=time.monotonic() + 5)
 
@@ -3993,6 +6798,10 @@ def test_manager_returns_not_ready_when_all_four_active(
         assert "pyright_capacity_exhausted" in denied.degradation_codes
         assert len(manager._sessions) == 4
     finally:
+        for session in sessions:
+            with session._lock:
+                session._active_operations = 0
+                session._condition.notify_all()
         manager.close_all(deadline=time.monotonic() + 5)
 
 
@@ -4019,6 +6828,702 @@ def test_manager_close_all_closes_every_retained_session(
     manager.close_all(deadline=time.monotonic() + 5)
     assert all(session._closed for session in retained)
     assert manager._sessions == {}
+
+
+def test_manager_close_all_retains_failures_continues_and_rethrows_first_interrupt(
+    tmp_path: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scopes: list[RepositoryScope] = []
+    identities: dict[str, object] = {}
+    for index in range(4):
+        repo, fixture = _make_repo_fixture(tmp_path, f"interrupt-{index}")
+        scope = resolve_repository_scope(repo)
+        scopes.append(scope)
+        identities[scope.checkout_id] = fixture.identity
+    _patch_discovery(monkeypatch, identities)
+    manager = PyrightSessionManager(state_root=state_root)
+    sessions = [
+        manager.get(scope, deadline=time.monotonic() + 10)
+        for scope in scopes
+    ]
+    attempts: list[int] = []
+    real_close = [session.close for session in sessions]
+
+    def flaky_close(index: int, *, deadline: float) -> None:
+        attempts.append(index)
+        if attempts.count(index) == 1:
+            if index == 0:
+                raise OSError("first close failed")
+            if index == 1:
+                raise KeyboardInterrupt("first interruption")
+            if index == 2:
+                raise SystemExit(29)
+        real_close[index](deadline=deadline)
+
+    with monkeypatch.context() as patch:
+        for index, session in enumerate(sessions):
+            patch.setattr(
+                session,
+                "close",
+                lambda *, deadline, index=index: flaky_close(
+                    index,
+                    deadline=deadline,
+                ),
+            )
+
+        with pytest.raises(KeyboardInterrupt, match="first interruption"):
+            manager.close_all(deadline=time.monotonic() + 5)
+
+        assert attempts == [0, 1, 2, 3]
+        assert set(manager._sessions.values()) == set(sessions[:3])
+        assert sessions[3]._closed is True
+
+        manager.close_all(deadline=time.monotonic() + 5)
+
+    assert attempts == [0, 1, 2, 3, 0, 1, 2]
+    assert manager._sessions == {}
+    assert all(session._closed for session in sessions)
+
+
+def test_manager_close_all_unwraps_earliest_interruption_without_cycle(
+    tmp_path: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scopes: list[RepositoryScope] = []
+    identities: dict[str, object] = {}
+    for index in range(3):
+        repo, fixture = _make_repo_fixture(tmp_path, f"wrapped-interrupt-{index}")
+        scope = resolve_repository_scope(repo)
+        scopes.append(scope)
+        identities[scope.checkout_id] = fixture.identity
+    _patch_discovery(monkeypatch, identities)
+    manager = PyrightSessionManager(state_root=state_root)
+    sessions = [
+        manager.get(scope, deadline=time.monotonic() + 10)
+        for scope in scopes
+    ]
+    real_close = [session.close for session in sessions]
+    attempts: list[int] = []
+    ordinary_error = OSError("later ordinary manager close error")
+    interruption = SystemExit(53)
+    wrapper = RuntimeError("manager close interruption wrapper")
+    wrapper.__cause__ = interruption
+
+    def flaky_close(index: int, *, deadline: float) -> None:
+        attempts.append(index)
+        if attempts.count(index) == 1:
+            if index == 0:
+                raise wrapper
+            if index == 1:
+                raise ordinary_error
+        real_close[index](deadline=deadline)
+
+    with monkeypatch.context() as patch:
+        for index, session in enumerate(sessions):
+            patch.setattr(
+                session,
+                "close",
+                lambda *, deadline, index=index: flaky_close(
+                    index,
+                    deadline=deadline,
+                ),
+            )
+
+        with pytest.raises(SystemExit) as raised:
+            manager.close_all(deadline=time.monotonic() + 5)
+
+        assert raised.value is interruption
+        assert raised.value.__cause__ is ordinary_error
+        assert raised.value.__context__ is None
+        assert wrapper.__cause__ is interruption
+        assert attempts == [0, 1, 2]
+        assert set(manager._sessions.values()) == set(sessions[:2])
+
+        manager.close_all(deadline=time.monotonic() + 5)
+
+    assert attempts == [0, 1, 2, 0, 1]
+    assert manager._sessions == {}
+    assert all(session._closed for session in sessions)
+
+
+@pytest.mark.parametrize("operation", ["get", "close_all"])
+def test_manager_global_lock_wait_obeys_absolute_deadline(
+    tmp_path: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    repo, fixture = _make_repo_fixture(tmp_path, f"deadline-{operation}")
+    scope = resolve_repository_scope(repo)
+    _patch_discovery(monkeypatch, {scope.checkout_id: fixture.identity})
+    manager = PyrightSessionManager(state_root=state_root)
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold_manager_lock() -> None:
+        manager._lock.acquire()
+        try:
+            held.set()
+            assert release.wait(2)
+        finally:
+            manager._lock.release()
+
+    holder = threading.Thread(target=hold_manager_lock)
+    holder.start()
+    assert held.wait(1)
+    started = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError, match="manager lock"):
+            deadline = started + 0.05
+            if operation == "get":
+                manager.get(scope, deadline=deadline)
+            else:
+                manager.close_all(deadline=deadline)
+        assert time.monotonic() - started < 0.3
+    finally:
+        release.set()
+        holder.join(2)
+        manager.close_all(deadline=time.monotonic() + 2)
+    assert not holder.is_alive()
+
+
+def test_manager_get_rechecks_closed_after_per_key_wait(
+    tmp_path: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pyright_profile
+
+    repo, fixture = _make_repo_fixture(tmp_path, "key-wait-close")
+    scope = resolve_repository_scope(repo)
+    discovered = threading.Event()
+
+    def discover(*_args: object, **_kwargs: object) -> PyrightIdentity:
+        discovered.set()
+        return fixture.identity  # type: ignore[return-value]
+
+    monkeypatch.setattr(pyright_profile, "discover_pyright", discover)
+    manager = PyrightSessionManager(state_root=state_root)
+    key = manager._profile_key(scope, fixture.identity)  # type: ignore[arg-type]
+    with manager._lock:
+        key_lock_state = manager._retain_key_lock_locked(
+            key,
+            time.monotonic() + 1,
+        )
+    key_lock_state.lock.acquire()
+    errors: list[BaseException] = []
+    close_errors: list[BaseException] = []
+    close_done = threading.Event()
+
+    def get_waiting() -> None:
+        try:
+            manager.get(scope, deadline=time.monotonic() + 2)
+        except BaseException as error:
+            errors.append(error)
+
+    waiter = threading.Thread(target=get_waiting)
+    waiter.start()
+    assert discovered.wait(1)
+    try:
+        def close_manager() -> None:
+            try:
+                manager.close_all(deadline=time.monotonic() + 2)
+            except BaseException as error:
+                close_errors.append(error)
+            finally:
+                close_done.set()
+
+        closer = threading.Thread(target=close_manager)
+        closer.start()
+        closed_deadline = time.monotonic() + 1
+        while True:
+            with manager._lock:
+                if manager._closed:
+                    break
+            if time.monotonic() >= closed_deadline:
+                pytest.fail("close_all did not close manager before key waiter release")
+            time.sleep(0.01)
+        assert close_done.wait(0.05) is False
+    finally:
+        key_lock_state.lock.release()
+        manager._release_key_lock_reference(key, key_lock_state)
+        waiter.join(2)
+        if closer.ident is not None:
+            closer.join(2)
+
+    assert not waiter.is_alive()
+    assert not closer.is_alive()
+    assert close_errors == []
+    assert len(errors) == 1
+    assert isinstance(errors[0], RuntimeError)
+    assert "manager is closed" in str(errors[0])
+    assert manager._sessions == {}
+
+
+def test_manager_per_key_lock_wait_obeys_absolute_deadline(
+    tmp_path: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, fixture = _make_repo_fixture(tmp_path, "key-deadline")
+    scope = resolve_repository_scope(repo)
+    _patch_discovery(monkeypatch, {scope.checkout_id: fixture.identity})
+    manager = PyrightSessionManager(state_root=state_root)
+    key = manager._profile_key(scope, fixture.identity)  # type: ignore[arg-type]
+    with manager._lock:
+        key_lock_state = manager._retain_key_lock_locked(
+            key,
+            time.monotonic() + 1,
+        )
+    key_lock_state.lock.acquire()
+    started = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError, match="key lock"):
+            manager.get(scope, deadline=started + 0.05)
+        assert time.monotonic() - started < 0.3
+        assert manager._sessions == {}
+    finally:
+        key_lock_state.lock.release()
+        manager._release_key_lock_reference(key, key_lock_state)
+        manager.close_all(deadline=time.monotonic() + 2)
+
+
+def test_manager_close_all_waits_for_get_retained_before_per_key_lock(
+    tmp_path: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, fixture = _make_repo_fixture(tmp_path, "key-retained-before-lock")
+    scope = resolve_repository_scope(repo)
+    _patch_discovery(monkeypatch, {scope.checkout_id: fixture.identity})
+    manager = PyrightSessionManager(state_root=state_root)
+    acquire_key_lock = manager._acquire_key_lock
+    reference_retained = threading.Event()
+    release_get = threading.Event()
+    get_done = threading.Event()
+    close_done = threading.Event()
+    get_errors: list[BaseException] = []
+    close_errors: list[BaseException] = []
+
+    def pause_before_key_lock(lock: threading.Lock, deadline: float) -> None:
+        reference_retained.set()
+        if not release_get.wait(max(0.0, deadline - time.monotonic())):
+            raise TimeoutError("retained key reference release expired")
+        acquire_key_lock(lock, deadline)
+
+    def get_session() -> None:
+        try:
+            manager.get(scope, deadline=time.monotonic() + 5)
+        except BaseException as error:
+            get_errors.append(error)
+        finally:
+            get_done.set()
+
+    def close_manager() -> None:
+        try:
+            manager.close_all(deadline=time.monotonic() + 5)
+        except BaseException as error:
+            close_errors.append(error)
+        finally:
+            close_done.set()
+
+    monkeypatch.setattr(manager, "_acquire_key_lock", pause_before_key_lock)
+    getter = threading.Thread(target=get_session, name="retained-key-getter")
+    closer = threading.Thread(target=close_manager, name="retained-key-closer")
+    try:
+        getter.start()
+        assert reference_retained.wait(1)
+        with manager._lock:
+            assert len(manager._key_locks) == 1
+            assert next(iter(manager._key_locks.values())).references == 1
+
+        closer.start()
+        assert close_done.wait(0.2) is False
+        release_get.set()
+        assert get_done.wait(2)
+        assert close_done.wait(2)
+    finally:
+        release_get.set()
+        getter.join(3)
+        if closer.ident is not None:
+            closer.join(3)
+        with manager._lock:
+            manager._prune_key_locks_locked()
+
+    assert not getter.is_alive()
+    assert not closer.is_alive()
+    assert len(get_errors) == 1
+    assert isinstance(get_errors[0], RuntimeError)
+    assert "manager is closed" in str(get_errors[0])
+    assert close_errors == []
+    assert manager._sessions == {}
+    assert manager._key_locks == {}
+    assert manager._key_lock_releases.empty()
+
+
+def test_manager_close_all_deadline_retains_key_reference_for_retry(
+    tmp_path: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, fixture = _make_repo_fixture(tmp_path, "key-close-race")
+    scope = resolve_repository_scope(repo)
+    _patch_discovery(monkeypatch, {scope.checkout_id: fixture.identity})
+    manager = PyrightSessionManager(state_root=state_root)
+    acquire_key_lock = manager._acquire_key_lock
+    key_acquired = threading.Event()
+    release_get = threading.Event()
+    get_done = threading.Event()
+    close_done = threading.Event()
+    get_errors: list[BaseException] = []
+    close_errors: list[BaseException] = []
+
+    def pause_after_key_acquire(lock: threading.Lock, deadline: float) -> None:
+        acquire_key_lock(lock, deadline)
+        key_acquired.set()
+        if not release_get.wait(max(0.0, deadline - time.monotonic())):
+            raise TimeoutError("key close-race release expired")
+
+    def get_session() -> None:
+        try:
+            manager.get(scope, deadline=time.monotonic() + 5)
+        except BaseException as error:
+            get_errors.append(error)
+        finally:
+            get_done.set()
+
+    def close_manager() -> None:
+        try:
+            manager.close_all(deadline=time.monotonic() + 0.1)
+        except BaseException as error:
+            close_errors.append(error)
+        finally:
+            close_done.set()
+
+    monkeypatch.setattr(manager, "_acquire_key_lock", pause_after_key_acquire)
+    getter = threading.Thread(target=get_session)
+    closer = threading.Thread(target=close_manager)
+    reference_lock: threading.Lock | None = None
+    try:
+        getter.start()
+        assert key_acquired.wait(1)
+        with manager._lock:
+            assert len(manager._key_locks) == 1
+            state = next(iter(manager._key_locks.values()))
+        reference_lock = state.reference_lock
+        reference_lock.acquire()
+
+        closer.start()
+        assert close_done.wait(1)
+        assert len(close_errors) == 1
+        assert isinstance(close_errors[0], TimeoutError)
+        with manager._lock:
+            assert manager._key_locks
+            assert state.references == 1
+        release_get.set()
+
+        assert get_done.wait(0.2), "key reference release ignored its closed manager"
+        assert len(get_errors) == 1
+        assert isinstance(get_errors[0], RuntimeError)
+        assert "manager is closed" in str(get_errors[0])
+    finally:
+        release_get.set()
+        if reference_lock is not None and reference_lock.locked():
+            reference_lock.release()
+        getter.join(2)
+        if closer.ident is not None:
+            closer.join(2)
+        manager.close_all(deadline=time.monotonic() + 2)
+        with manager._lock:
+            manager._prune_key_locks_locked()
+
+    assert not getter.is_alive()
+    assert not closer.is_alive()
+    assert manager._key_locks == {}
+    assert manager._key_lock_releases.empty()
+
+
+def test_manager_reference_gate_deadline_stays_bounded_across_sequential_waiters(
+    tmp_path: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, fixture = _make_repo_fixture(tmp_path, "key-reference-deadline")
+    scope = resolve_repository_scope(repo)
+    _patch_discovery(monkeypatch, {scope.checkout_id: fixture.identity})
+    manager = PyrightSessionManager(state_root=state_root)
+    acquire_key_lock = manager._acquire_key_lock
+    keeper_entered = threading.Event()
+    release_keeper = threading.Event()
+    keeper_errors: list[BaseException] = []
+    keeper_results: list[PyrightSession] = []
+
+    def hold_keeper_before_key_acquire(
+        lock: threading.Lock,
+        deadline: float,
+    ) -> None:
+        if threading.current_thread().name == "key-reference-keeper":
+            keeper_entered.set()
+            if not release_keeper.wait(max(0.0, deadline - time.monotonic())):
+                raise TimeoutError("reference keeper release expired")
+        acquire_key_lock(lock, deadline)
+
+    def keep_reference() -> None:
+        try:
+            keeper_results.append(
+                manager.get(scope, deadline=time.monotonic() + 10)
+            )
+        except BaseException as error:
+            keeper_errors.append(error)
+
+    monkeypatch.setattr(manager, "_acquire_key_lock", hold_keeper_before_key_acquire)
+    keeper = threading.Thread(target=keep_reference, name="key-reference-keeper")
+    reference_lock: threading.Lock | None = None
+    try:
+        keeper.start()
+        assert keeper_entered.wait(1)
+        with manager._lock:
+            assert len(manager._key_locks) == 1
+            state = next(iter(manager._key_locks.values()))
+        reference_lock = state.reference_lock
+        reference_lock.acquire()
+
+        for index in range(100):
+            errors: list[BaseException] = []
+            done = threading.Event()
+
+            def contend() -> None:
+                try:
+                    manager.get(scope, deadline=time.monotonic() + 0.02)
+                except BaseException as error:
+                    errors.append(error)
+                finally:
+                    done.set()
+
+            contender = threading.Thread(
+                target=contend,
+                name=f"key-reference-contender-{index}",
+            )
+            contender.start()
+            assert done.wait(0.5), f"reference contender {index} exceeded its deadline"
+            contender.join(1)
+            assert not contender.is_alive()
+            assert len(errors) == 1
+            assert isinstance(errors[0], TimeoutError)
+            assert "reference" in str(errors[0])
+    finally:
+        if reference_lock is not None and reference_lock.locked():
+            reference_lock.release()
+        release_keeper.set()
+        keeper.join(3)
+        manager.close_all(deadline=time.monotonic() + 3)
+
+    assert not keeper.is_alive()
+    assert keeper_errors == []
+    assert len(keeper_results) == 1
+    assert manager._key_locks == {}
+
+
+def test_manager_key_lock_lives_through_waiters_and_releases_after_last_get(
+    tmp_path: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, fixture = _make_repo_fixture(tmp_path, "key-lifecycle")
+    scope = resolve_repository_scope(repo)
+    _patch_discovery(monkeypatch, {scope.checkout_id: fixture.identity})
+    manager = PyrightSessionManager(state_root=state_root)
+    acquire_key_lock = manager._acquire_key_lock
+    calls_lock = threading.Lock()
+    acquire_calls = 0
+    first_acquired = threading.Event()
+    release_first = threading.Event()
+    second_waiting = threading.Event()
+    second_acquired = threading.Event()
+    release_second = threading.Event()
+    third_waiting = threading.Event()
+    third_done = threading.Event()
+    results: list[PyrightSession] = []
+    errors: list[BaseException] = []
+
+    def controlled_acquire(lock: threading.Lock, deadline: float) -> None:
+        nonlocal acquire_calls
+        with calls_lock:
+            acquire_calls += 1
+            call = acquire_calls
+        if call == 2:
+            second_waiting.set()
+        elif call == 3:
+            third_waiting.set()
+        acquire_key_lock(lock, deadline)
+        if call == 1:
+            first_acquired.set()
+            assert release_first.wait(3)
+        elif call == 2:
+            second_acquired.set()
+            assert release_second.wait(3)
+
+    def get_session(*, third: bool = False) -> None:
+        try:
+            results.append(manager.get(scope, deadline=time.monotonic() + 5))
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            if third:
+                third_done.set()
+
+    monkeypatch.setattr(manager, "_acquire_key_lock", controlled_acquire)
+    first = threading.Thread(target=get_session)
+    second = threading.Thread(target=get_session)
+    third = threading.Thread(target=get_session, kwargs={"third": True})
+    try:
+        first.start()
+        assert first_acquired.wait(1)
+        second.start()
+        assert second_waiting.wait(1)
+        release_first.set()
+        first.join(2)
+        assert not first.is_alive()
+        assert second_acquired.wait(1)
+
+        third.start()
+        assert third_waiting.wait(1)
+        assert third_done.wait(0.05) is False
+        release_second.set()
+        second.join(2)
+        third.join(2)
+
+        assert not second.is_alive()
+        assert not third.is_alive()
+        assert errors == []
+        assert len(results) == 3
+        assert results[0] is results[1] is results[2]
+        assert manager._key_locks == {}
+    finally:
+        release_first.set()
+        release_second.set()
+        for worker in (first, second, third):
+            if worker.ident is not None:
+                worker.join(2)
+        manager.close_all(deadline=time.monotonic() + 2)
+
+    assert manager._key_locks == {}
+
+
+def test_manager_key_locks_do_not_accumulate_across_profile_evictions(
+    tmp_path: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pyright_profile
+
+    repo, fixture = _make_repo_fixture(tmp_path, "key-churn")
+    scope = resolve_repository_scope(repo)
+    identities = iter(
+        replace(fixture.identity, executable_sha256=f"{index:064x}")
+        for index in range(12)
+    )
+    monkeypatch.setattr(
+        pyright_profile,
+        "discover_pyright",
+        lambda *_args, **_kwargs: next(identities),
+    )
+    manager = PyrightSessionManager(state_root=state_root)
+    try:
+        for _index in range(12):
+            manager.get(scope, deadline=time.monotonic() + 5)
+            assert manager._key_locks == {}
+            assert len(manager._sessions) <= MAX_LSP_PROCESSES
+    finally:
+        manager.close_all(deadline=time.monotonic() + 2)
+
+    assert manager._key_locks == {}
+
+
+def test_manager_parallel_evictions_reserve_distinct_idle_sessions_with_capacity_four(
+    tmp_path: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scopes: list[RepositoryScope] = []
+    identities: dict[str, object] = {}
+    for index in range(6):
+        repo, fixture = _make_repo_fixture(tmp_path, f"parallel-{index}")
+        scope = resolve_repository_scope(repo)
+        scopes.append(scope)
+        identities[scope.checkout_id] = fixture.identity
+    _patch_discovery(monkeypatch, identities)
+    manager = PyrightSessionManager(state_root=state_root)
+    retained = [
+        manager.get(scope, deadline=time.monotonic() + 10)
+        for scope in scopes[:4]
+    ]
+    for index, session in enumerate(retained):
+        with session._lock:
+            session._last_used_monotonic = float(index)
+    close_entered = [threading.Event(), threading.Event()]
+    release_close = threading.Event()
+    real_close = [retained[index].close for index in range(2)]
+
+    def blocked_close(index: int, *, deadline: float) -> None:
+        close_entered[index].set()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not release_close.wait(remaining):
+            raise TimeoutError("parallel eviction release expired")
+        real_close[index](deadline=deadline)
+
+    results: list[PyrightSession] = []
+    errors: list[BaseException] = []
+
+    def get_new(scope: RepositoryScope) -> None:
+        try:
+            results.append(manager.get(scope, deadline=time.monotonic() + 5))
+        except BaseException as error:
+            errors.append(error)
+
+    try:
+        with monkeypatch.context() as patch:
+            for index in range(2):
+                patch.setattr(
+                    retained[index],
+                    "close",
+                    lambda *, deadline, index=index: blocked_close(
+                        index,
+                        deadline=deadline,
+                    ),
+                )
+            getters = [
+                threading.Thread(target=get_new, args=(scope,))
+                for scope in scopes[4:]
+            ]
+            for getter in getters:
+                getter.start()
+            assert all(event.wait(2) for event in close_entered)
+            with manager._lock:
+                assert len(manager._sessions) == MAX_LSP_PROCESSES
+            assert retained[0]._closing is True
+            assert retained[1]._closing is True
+            for session in retained[:2]:
+                with pytest.raises(RuntimeError, match="closing"):
+                    with session._operation():
+                        pytest.fail("operation started after eviction reservation")
+            release_close.set()
+            for getter in getters:
+                getter.join(5)
+                assert not getter.is_alive()
+
+        assert errors == []
+        assert len(results) == 2
+        assert len(manager._sessions) == MAX_LSP_PROCESSES
+        assert all(session in manager._sessions.values() for session in results)
+        assert retained[0]._closed is True
+        assert retained[1]._closed is True
+    finally:
+        release_close.set()
+        manager.close_all(deadline=time.monotonic() + 5)
 
 
 def test_manager_registers_atexit_once(

@@ -76,6 +76,33 @@ The slug system (5-step collision resolution) lets a single vault track unlimite
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
+## Read-only Python navigation
+
+The implemented Python slice keeps structural discovery in the existing Evidence
+Graph and adds an owned, Python 3.10-compatible LSP path through pinned Pyright
+1.1.411. The existing `get_architecture` tool routes precise modes through one lazy
+repository-scoped session. The facade validates input bytes, synchronizes documents,
+normalizes provider facts, merges explicit structural fallback, and proves the
+workspace revision again before publishing a result.
+
+The LSP runtime is derived and read-only at the product API boundary. There is no semantic result cache,
+no second graph, and no persistent daemon; query-time LSP observations are not written
+into an active generation. Small exact results use the
+deterministic navigation renderer; broad architecture and impact synthesis continue
+to use the Context Compiler.
+
+Pyright installation is an explicit operator action into
+`cache/code-tools/pyright/1.1.411/`. Process scratch is bounded under
+`run/lsp/<owner-nonce>/` and protected by the existing `run/` deletion contract.
+Windows owns the assigned server tree with a Job Object. POSIX owns the pinned server
+and descendants with a process group only while they remain in that group; hostile
+`setsid()` escape is unsupported. The runtime therefore supports trusted local
+repositories and does not claim to be an OS sandbox.
+
+The deterministic 100 KLOC fixture qualifies correctness, freshness, recovery,
+ownership, output bounds, latency, and client RSS without claiming market
+superiority. See [CODE-NAVIGATION.md](CODE-NAVIGATION.md).
+
 ## Approved superset direction
 
 The 2026-07-19 product decision extends this architecture from a memory and

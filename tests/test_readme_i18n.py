@@ -170,3 +170,54 @@ def test_docs_state_security_install_and_market_truth():
         "Market superiority remains unclaimed",
     ):
         assert value in text, f"CODE-NAVIGATION.md missing {value!r}"
+
+
+def test_all_readmes_share_python_navigation_operator_contract():
+    translated_trust_markers = {
+        "README.md": ("trusted local repositories", "not an OS sandbox"),
+        "README.ru.md": ("доверенных локальных репозиториях", "не является OS sandbox"),
+        "README.zh-CN.md": ("受信任的本地仓库", "不是 OS sandbox"),
+    }
+    shared = (
+        "Pyright 1.1.411",
+        'uv run python scripts/install_pyright.py --state-root "$LLM_WIKI_STATE_ROOT"',
+        "docs/CODE-NAVIGATION.md",
+        "`definition`",
+        "`references`",
+        "`diagnostics`",
+    )
+    for path, text in _readmes():
+        for marker in (*shared, *translated_trust_markers[path.name]):
+            assert marker in text, f"{path.name}: missing navigation marker {marker!r}"
+
+
+def test_navigation_is_current_in_operator_and_architecture_docs():
+    required = {
+        "USER-GUIDE.md": (
+            "## Read-only Python code navigation",
+            "Pyright 1.1.411",
+            "trusted local repositories",
+            "not an OS sandbox",
+            "mode=definition",
+        ),
+        "ARCHITECTURE.md": (
+            "## Read-only Python navigation",
+            "query-time LSP observations are not written",
+            "no semantic result cache",
+        ),
+        "operating-model.md": (
+            "## Read-only code-navigation boundary",
+            "explicit operator installation",
+            "Market superiority remains unclaimed",
+        ),
+        "CONTRIBUTING.md": (
+            "real-Pyright CI",
+            "scripts/install_pyright.py",
+            "benchmark/run_code_navigation.py",
+        ),
+    }
+    for name, markers in required.items():
+        parent = ROOT if name == "CONTRIBUTING.md" else ROOT / "docs"
+        text = (parent / name).read_text(encoding="utf-8")
+        for marker in markers:
+            assert marker in text, f"{name}: missing navigation marker {marker!r}"

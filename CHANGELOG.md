@@ -43,7 +43,7 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   transactions/tasks/results, the 30-day undo window, and live owners.
 - Recorded the local-filesystem requirement, current `synchronous=FULL`/no-WAL
   policy, bounded defaults and CLI overrides, cooperating-writer CAS boundary, and
-  explicit non-goals. The suite now collects **5182 tests**.
+  explicit non-goals. The full regression suite remains the release gate.
 - Added canonical `repository-scope/v1` binding for repositories, linked worktrees,
   checkout roots, Git common directories, and captured commits. Generation readers
   reject the wrong repository/worktree scope instead of returning cross-checkout
@@ -73,12 +73,18 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   remain owned until exact PID exit and successful handle closure are proven.
 - Added the repository-scoped Pyright provider-session core with exact initialization,
   capability/readiness evidence, bounded document opening, semantic locations, hover,
-  call hierarchy, push diagnostics, progress handling, and restart replay. Document
-  synchronization, session-manager capacity, the normalized navigation facade, and MCP
-  routing remain pending and are not advertised as complete.
+  call hierarchy, push diagnostics, progress handling, restart replay, document
+  synchronization, session-manager capacity, the normalized navigation facade,
+  deterministic rendering, and precise MCP routing.
 
 ### Fixed
 
+- Bound untrusted LSP runtime JSON nesting before decoding, independently of the
+  process-wide Python recursion limit changed by optional dependencies.
+- Reuse one bounded revision-keyed workspace inventory proof between immediate
+  pre/post navigation checks. Directory, file, Git-index, semantics, cancellation,
+  and race fences remain fail-closed, while unchanged 100 KLOC queries avoid a
+  duplicate tree enumeration.
 - Harden Pyright session ownership, generation-scoped `didOpen`, aggregate source and
   diagnostic bounds, interrupt cleanup, and lifecycle-owned readiness promotion. On
   POSIX, execute digest-verified server bytes from a held read-only descriptor through

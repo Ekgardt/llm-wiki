@@ -820,8 +820,31 @@ def index_directory(directory: Path, verbose: bool = True) -> dict:
     return stats
 
 
-def _generation_catalog(directory: Path):
+def _check_generation_stop(deadline: float | None, cancelled) -> None:
+    if deadline is not None and (
+        isinstance(deadline, bool)
+        or not isinstance(deadline, (int, float))
+        or not math.isfinite(deadline)
+    ):
+        raise ValueError("deadline must be an absolute monotonic timestamp or None")
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("generation catalog deadline reached")
+    if cancelled is not None and cancelled():
+        raise TimeoutError("generation catalog operation cancelled")
+
+
+def _generation_catalog(
+    directory: Path,
+    *,
+    read_only: bool = False,
+    deadline: float | None = None,
+    cancelled=None,
+):
     """Open the shared generation catalog only when it already exists."""
+    del directory
+    if not isinstance(read_only, bool):
+        raise TypeError("read_only must be a boolean")
+    _check_generation_stop(deadline, cancelled)
     try:
         from . import memory_state
         from .generation_catalog import GenerationCatalog
@@ -836,12 +859,36 @@ def _generation_catalog(directory: Path):
         else memory_state.STATE_ROOT
     )
     catalog_path = state_root / "cache" / "evidence-graph" / "catalog.sqlite3"
+    _check_generation_stop(deadline, cancelled)
     if not catalog_path.is_file():
         return None
-    return GenerationCatalog(state_root, catalog_path=catalog_path)
+    _check_generation_stop(deadline, cancelled)
+    if read_only:
+        if deadline is not None or cancelled is not None:
+            catalog = GenerationCatalog.open_existing_read_only(
+                state_root,
+                catalog_path=catalog_path,
+                deadline=deadline,
+                cancelled=cancelled,
+            )
+        else:
+            catalog = GenerationCatalog.open_existing_read_only(
+                state_root,
+                catalog_path=catalog_path,
+            )
+    else:
+        catalog = GenerationCatalog(state_root, catalog_path=catalog_path)
+    _check_generation_stop(deadline, cancelled)
+    return catalog
 
 
-def _active_evidence_graph(directory: Path):
+def _active_evidence_graph(
+    directory: Path,
+    *,
+    read_only: bool = False,
+    deadline: float | None = None,
+    cancelled=None,
+):
     try:
         from .evidence_graph import EvidenceGraph
         from .repository_scope import resolve_repository_scope
@@ -850,11 +897,37 @@ def _active_evidence_graph(directory: Path):
         from repository_scope import resolve_repository_scope
 
     try:
-        catalog = _generation_catalog(directory)
+        _check_generation_stop(deadline, cancelled)
+        if read_only or deadline is not None or cancelled is not None:
+            catalog = _generation_catalog(
+                directory,
+                read_only=read_only,
+                deadline=deadline,
+                cancelled=cancelled,
+            )
+        else:
+            catalog = _generation_catalog(directory)
         if catalog is None:
             return None
-        scope = resolve_repository_scope(directory)
+        if deadline is not None or cancelled is not None:
+            scope = resolve_repository_scope(
+                directory,
+                deadline=deadline,
+                cancelled=cancelled,
+            )
+        else:
+            scope = resolve_repository_scope(directory)
+        _check_generation_stop(deadline, cancelled)
+        if deadline is not None or cancelled is not None:
+            return EvidenceGraph.open_active_for_repository(
+                catalog,
+                scope,
+                deadline=deadline,
+                cancelled=cancelled,
+            )
         return EvidenceGraph.open_active_for_repository(catalog, scope)
+    except TimeoutError:
+        raise
     except (OSError, TypeError, ValueError, PermissionError, sqlite3.Error):
         return None
 

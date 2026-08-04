@@ -940,6 +940,116 @@ def _sanitized_cleanup_error(step: str, error: BaseException) -> _CleanupError:
     return _CleanupError(step, error_type, code)
 
 
+def _interruption_in_chain(
+    error: BaseException,
+) -> KeyboardInterrupt | SystemExit | None:
+    pending: list[BaseException] = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, (KeyboardInterrupt, SystemExit)):
+            return current
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+    return None
+
+
+def _exception_reaches(error: BaseException | None, target: BaseException) -> bool:
+    pending = [error] if error is not None else []
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if current is target:
+            return True
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+    return False
+
+
+def _raise_cleanup_failures(
+    errors: Sequence[BaseException],
+    *,
+    prior_error: BaseException | None = None,
+) -> None:
+    ordered = ((prior_error,) if prior_error is not None else ()) + tuple(errors)
+    source: BaseException | None = None
+    interruption: KeyboardInterrupt | SystemExit | None = None
+    for error in ordered:
+        interruption = _interruption_in_chain(error)
+        if interruption is not None:
+            source = error
+            break
+    if interruption is not None:
+        secondary = next(
+            (
+                error
+                for error in ordered
+                if error is not source and error is not interruption
+            ),
+            None,
+        )
+        if secondary is None and source is not interruption:
+            secondary = source
+        if secondary is not None:
+            if _exception_reaches(secondary.__cause__, interruption):
+                secondary.__cause__ = None
+            if _exception_reaches(secondary.__context__, interruption):
+                secondary.__context__ = None
+            if _exception_reaches(secondary, interruption):
+                secondary = None
+        try:
+            if secondary is not None:
+                raise interruption.with_traceback(
+                    interruption.__traceback__
+                ) from secondary
+            raise interruption.with_traceback(interruption.__traceback__)
+        except (KeyboardInterrupt, SystemExit) as raised:
+            if raised is not interruption:
+                raise
+            if _exception_reaches(interruption.__cause__, interruption):
+                interruption.__cause__ = None
+            if _exception_reaches(interruption.__context__, interruption):
+                interruption.__context__ = None
+            if interruption.__context__ is interruption.__cause__:
+                interruption.__context__ = None
+            raise
+    if errors:
+        if prior_error is not None:
+            raise errors[0] from prior_error
+        raise errors[0]
+    if prior_error is not None:
+        raise prior_error
+
+
+def _protocol_startup_cleanup_in_chain(
+    error: BaseException,
+) -> _ProtocolStartupCleanupError | None:
+    pending: list[BaseException] = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, _ProtocolStartupCleanupError):
+            return current
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+    return None
+
+
 @dataclass(slots=True)
 class _CleanupResult:
     tree_termination: str = "pending"
@@ -986,6 +1096,7 @@ class _LifecycleCoordinator:
     failure_evidence_identity: _FailureEvidenceIdentity | None = None
     mandatory_failure_intent: _FailureEvidenceIdentity | None = None
     background_cleanup_error: _CleanupError | None = field(default=None, repr=False)
+    background_restart_error: _CleanupError | None = field(default=None, repr=False)
     background_error_lock: threading.Lock = field(
         default_factory=threading.Lock, repr=False
     )
@@ -1063,7 +1174,7 @@ def _retry_startup_cleanup(
         coordinator_override=coordinator,
     )
     if errors:
-        raise errors[0]
+        _raise_cleanup_failures(errors)
     if _coordinator_has_ownership(coordinator):
         raise TimeoutError("LSP startup cleanup retains retryable ownership")
     _unregister_startup_cleanup(coordinator)
@@ -1545,8 +1656,10 @@ def _prepare_generation(
             _drain_wake=coordinator.recovery_wake,
             **handler_options,
         )  # type: ignore[arg-type]
-    except _ProtocolStartupCleanupError as error:
-        generation.protocol = error.protocol
+    except BaseException as error:
+        cleanup_owner = _protocol_startup_cleanup_in_chain(error)
+        if cleanup_owner is not None:
+            generation.protocol = cleanup_owner.protocol
         raise
     generation.protocol = protocol
     _require_startup_deadline(deadline, "protocol owner start")
@@ -1701,7 +1814,10 @@ def _generation_guard_context(
         yield launch
     except BaseException as error:
         # Guard cleanup cannot suppress a failed generation and permit a commit.
-        exit_(guard, type(error), error, error.__traceback__)
+        try:
+            exit_(guard, type(error), error, error.__traceback__)
+        except BaseException as cleanup_error:
+            _raise_cleanup_failures((cleanup_error,), prior_error=error)
         raise
     else:
         exit_(guard, None, None, None)
@@ -1786,7 +1902,7 @@ def _start_lsp_process_impl(
         startup_generation_nonce=generation_nonce,
     )
     _register_startup_cleanup(coordinator)
-    startup_deadline: float | None = configured_deadline
+    startup_deadline = configured_deadline
     instance: LspProcess | None = None
     driver_acquired = False
 
@@ -1864,14 +1980,28 @@ def _start_lsp_process_impl(
 
         _acquire_lifecycle(coordinator, startup_deadline)
         try:
-            if process.poll() is not None or protocol.fatal:
-                raise RuntimeError("LSP process exited during startup")
-            coordinator.active = generation
-            coordinator.candidate = None
-            coordinator.lease_generation = generation
-            coordinator.phase = _LifecyclePhase.RUNNING
-            coordinator.startup_complete = True
-            instance.state = generation_state
+            with generation.failure_lock:
+                with coordinator.terminal_state_lock:
+                    if (
+                        coordinator.terminal_outcome is not None
+                        or coordinator.mandatory_failure_intent is not None
+                        or coordinator.pending_failure_intents > 0
+                        or coordinator.success_committed
+                        or generation._exit_observed
+                        or generation.failure_queued
+                        or generation.expected_exit.is_set()
+                        or process.poll() is not None
+                        or protocol.fatal
+                    ):
+                        raise RuntimeError(
+                            "LSP terminal failure was recorded during startup"
+                        )
+                    coordinator.active = generation
+                    coordinator.candidate = None
+                    coordinator.lease_generation = generation
+                    coordinator.phase = _LifecyclePhase.RUNNING
+                    coordinator.startup_complete = True
+                    instance.state = generation_state
             _notify_lifecycle_locked(coordinator)
         finally:
             _release_lifecycle(coordinator)
@@ -1887,6 +2017,7 @@ def _start_lsp_process_impl(
         return instance
     except BaseException as startup_error:
         deadline = _fresh_cleanup_deadline()
+        cleanup_errors: list[BaseException] = []
         _remember_mandatory_terminal_failure(
             instance,
             coordinator,
@@ -1899,21 +2030,28 @@ def _start_lsp_process_impl(
                 _STARTUP_FAILED,
                 deadline,
             )
-        except BaseException:
-            pass
+        except BaseException as cleanup_error:
+            cleanup_errors.append(cleanup_error)
         try:
-            _drive_cleanup(
-                instance,
-                deadline,
-                terminal=True,
-                failure_code=_STARTUP_FAILED,
-                coordinator_override=coordinator,
+            cleanup_errors.extend(
+                _drive_cleanup(
+                    instance,
+                    deadline,
+                    terminal=True,
+                    failure_code=_STARTUP_FAILED,
+                    coordinator_override=coordinator,
+                )
             )
-        except BaseException:
-            pass
+        except BaseException as cleanup_error:
+            cleanup_errors.append(cleanup_error)
         pending = _coordinator_has_ownership(coordinator)
         if pending:
             _register_startup_cleanup(coordinator)
+        if _interruption_in_chain(startup_error) is not None or any(
+            _interruption_in_chain(error) is not None for error in cleanup_errors
+        ):
+            _raise_cleanup_failures(cleanup_errors, prior_error=startup_error)
+        if pending:
             evidence_failed = coordinator.cleanup_result.evidence == "failed"
             message = (
                 "LSP startup failed and retained evidence could not be written safely"
@@ -2287,7 +2425,8 @@ def _process_recovery_request(
 
         try:
             _restart_generation(instance, _fresh_bootstrap_deadline(coordinator))
-        except BaseException:
+        except BaseException as restart_error:
+            _remember_background_restart_error(coordinator, restart_error)
             _remember_mandatory_terminal_failure(
                 instance,
                 coordinator,
@@ -2401,7 +2540,8 @@ def _process_failure_intent(
         if restart:
             try:
                 _restart_generation(instance, _fresh_bootstrap_deadline(coordinator))
-            except BaseException:
+            except BaseException as restart_error:
+                _remember_background_restart_error(coordinator, restart_error)
                 _remember_mandatory_terminal_failure(
                     instance,
                     coordinator,
@@ -2512,6 +2652,30 @@ def _take_background_cleanup_error(
     return RuntimeError(f"LSP background cleanup failed ({error.error_type}{code})")
 
 
+def _remember_background_restart_error(
+    coordinator: _LifecycleCoordinator,
+    error: BaseException,
+) -> None:
+    with coordinator.background_error_lock:
+        if coordinator.background_restart_error is None:
+            coordinator.background_restart_error = _sanitized_cleanup_error(
+                "restart",
+                error,
+            )
+
+
+def _take_background_restart_error(
+    coordinator: _LifecycleCoordinator,
+) -> BaseException | None:
+    with coordinator.background_error_lock:
+        error = coordinator.background_restart_error
+        coordinator.background_restart_error = None
+    if error is None:
+        return None
+    code = f", code {error.error_code}" if error.error_code is not None else ""
+    return RuntimeError(f"LSP replacement startup cause ({error.error_type}{code})")
+
+
 def _request_generation(instance: LspProcess, deadline: float) -> _Generation:
     coordinator = instance._coordinator
     _acquire_lifecycle(coordinator, deadline)
@@ -2596,24 +2760,26 @@ def _wait_for_generation_change(
     instance: LspProcess,
     generation_nonce: str,
     deadline: float,
-) -> bool:
+) -> tuple[bool, str | None]:
     coordinator = instance._coordinator
     _acquire_lifecycle(coordinator, deadline)
     try:
         while True:
             active = coordinator.active
+            if coordinator.terminal_outcome is not None or coordinator.phase in {
+                _LifecyclePhase.STOPPING_SUCCESS,
+                _LifecyclePhase.STOPPING_FAILURE,
+                _LifecyclePhase.CLEANUP_PENDING,
+                _LifecyclePhase.STOPPED_FAILURE,
+                _LifecyclePhase.STOPPED_SUCCESS,
+            }:
+                return False, coordinator.terminal_code
             if (
                 coordinator.phase is _LifecyclePhase.RUNNING
                 and active is not None
                 and active.nonce != generation_nonce
             ):
-                return True
-            if coordinator.phase in {
-                _LifecyclePhase.CLEANUP_PENDING,
-                _LifecyclePhase.STOPPED_FAILURE,
-                _LifecyclePhase.STOPPED_SUCCESS,
-            }:
-                return False
+                return True, None
             remaining = deadline - time.monotonic()
             if remaining <= 0 or not coordinator.condition.wait(remaining):
                 raise TimeoutError("LSP recovery did not finish before deadline")
@@ -2632,6 +2798,15 @@ def _generation_changed(
         return coordinator.active is not generation
     finally:
         _release_lifecycle(coordinator)
+
+
+def _raise_replacement_startup_failure(
+    coordinator: _LifecycleCoordinator,
+) -> None:
+    cause = _take_background_restart_error(coordinator)
+    if cause is not None:
+        raise ProtocolViolation("LSP replacement startup failed") from cause
+    raise ProtocolViolation("LSP replacement startup failed") from None
 
 
 def _request_lsp_process(
@@ -2655,11 +2830,13 @@ def _request_lsp_process(
                 generation,
                 "expired drain" if expired else _PROCESS_EXITED,
             )
-            changed = _wait_for_generation_change(
+            changed, terminal_code = _wait_for_generation_change(
                 instance, generation.nonce, deadline
             )
             if attempt == 0 and changed:
                 continue
+            if terminal_code == "restart_failed":
+                _raise_replacement_startup_failure(instance._coordinator)
             raise ProtocolViolation("LSP generation is fatally unavailable")
         try:
             return protocol.request(
@@ -2678,11 +2855,13 @@ def _request_lsp_process(
             _queue_generation_failure(
                 instance._coordinator, generation, _PROCESS_EXITED
             )
-            changed = _wait_for_generation_change(
+            changed, terminal_code = _wait_for_generation_change(
                 instance, generation.nonce, deadline
             )
             if attempt == 0 and changed:
                 continue
+            if terminal_code == "restart_failed":
+                _raise_replacement_startup_failure(instance._coordinator)
             raise
     raise RuntimeError("LSP request retry invariant breached")
 
@@ -2909,7 +3088,7 @@ def _terminal_failure_lsp_process(
             failure_code=code,
         )
         if errors:
-            raise errors[0]
+            _raise_cleanup_failures(errors)
     finally:
         _release_driver(coordinator)
 
@@ -2992,9 +3171,10 @@ def _restart_generation(
             generation_state,
             deadline,
         )
-    except BaseException:
+    except BaseException as restart_error:
+        _remember_background_restart_error(coordinator, restart_error)
         if driver_acquired:
-            _fail_restart_generation(instance, _fresh_cleanup_deadline())
+            _fail_restart_generation(instance, deadline)
         raise
     finally:
         if driver_acquired:
@@ -3023,7 +3203,7 @@ def _prepare_restart_generation_owned(
     retirement_errors = _drive_cleanup(instance, deadline, terminal=False)
     if retirement_errors or any(not item.released for item in coordinator.retired):
         if retirement_errors:
-            raise retirement_errors[0]
+            _raise_cleanup_failures(retirement_errors)
         raise TimeoutError("LSP retired generation cleanup is incomplete")
 
     if instance._cwd is None or not instance._command:
@@ -3108,32 +3288,40 @@ def _commit_restart_generation_owned(
         _release_lifecycle(coordinator)
 
 
-def _fail_restart_generation(instance: LspProcess, deadline: float) -> None:
+def _fail_restart_generation(instance: LspProcess, failure_deadline: float) -> None:
     coordinator = instance._coordinator
-    _acquire_lifecycle(coordinator, deadline, allow_expired=True)
+    _acquire_lifecycle(coordinator, failure_deadline, allow_expired=True)
     try:
         success_committed = coordinator.success_committed
         recovery_owned = coordinator.recovery_thread is threading.current_thread()
     finally:
         _release_lifecycle(coordinator)
     if success_committed:
-        _drive_cleanup(instance, deadline, terminal=False)
+        _drive_cleanup(instance, failure_deadline, terminal=False)
         return
+    if recovery_owned:
+        failure_deadline = _fresh_cleanup_deadline()
     _remember_mandatory_terminal_failure(
         instance,
         coordinator,
         "restart_failed",
     )
     try:
-        _mark_terminal_failure(instance, coordinator, "restart_failed", deadline)
+        _mark_terminal_failure(
+            instance,
+            coordinator,
+            "restart_failed",
+            failure_deadline,
+        )
     except BaseException:
         pass
     try:
         _drive_cleanup(
             instance,
-            deadline,
+            failure_deadline,
             terminal=True,
             failure_code="restart_failed",
+            renew_deadline_after_evidence=recovery_owned,
         )
     finally:
         if recovery_owned and coordinator.cleanup_result.ownership_pending:
@@ -3198,8 +3386,9 @@ def _shutdown_lsp_process_owned(instance: LspProcess, deadline: float) -> None:
                 protocol.request("shutdown", {}, deadline=graceful_deadline)
                 protocol.notify("exit", {}, deadline=graceful_deadline)
                 _wait_for_lsp_exit(instance, graceful_deadline)
-        except (OSError, RuntimeError, TimeoutError):
-            pass
+        except (OSError, RuntimeError, TimeoutError) as error:
+            if _interruption_in_chain(error) is not None:
+                graceful_error = error
         except BaseException as error:
             graceful_error = error
 
@@ -3209,12 +3398,8 @@ def _shutdown_lsp_process_owned(instance: LspProcess, deadline: float) -> None:
         terminal=True,
         failure_code=coordinator.terminal_code,
     )
-    if errors:
-        if graceful_error is not None:
-            raise errors[0] from graceful_error
-        raise errors[0]
-    if graceful_error is not None:
-        raise graceful_error
+    if errors or graceful_error is not None:
+        _raise_cleanup_failures(errors, prior_error=graceful_error)
     background_error = _take_background_cleanup_error(coordinator)
     if background_error is not None:
         raise background_error
@@ -3559,6 +3744,7 @@ def _drive_cleanup(
     terminal: bool,
     failure_code: str | None = None,
     coordinator_override: _LifecycleCoordinator | None = None,
+    renew_deadline_after_evidence: bool = False,
 ) -> list[BaseException]:
     coordinator = (
         instance._coordinator if instance is not None else coordinator_override
@@ -3575,6 +3761,7 @@ def _drive_cleanup(
             terminal=terminal,
             failure_code=failure_code,
             coordinator=coordinator,
+            renew_deadline_after_evidence=renew_deadline_after_evidence,
         )
     finally:
         _release_driver(coordinator)
@@ -3587,6 +3774,7 @@ def _drive_cleanup_owned(
     terminal: bool,
     failure_code: str | None,
     coordinator: _LifecycleCoordinator,
+    renew_deadline_after_evidence: bool,
 ) -> list[BaseException]:
     result = coordinator.cleanup_result
     current_errors: list[BaseException] = []
@@ -3639,6 +3827,9 @@ def _drive_cleanup_owned(
             _record_cleanup_error(result, current_errors, "evidence", error)
     elif terminal:
         result.succeeded("evidence", "not_applicable")
+
+    if renew_deadline_after_evidence:
+        deadline = _fresh_cleanup_deadline()
 
     tree_termination_ok = True
     protocol_stop_ok = True

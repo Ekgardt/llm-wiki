@@ -276,6 +276,18 @@ uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contra
 
 本地 stdio MCP 服务器提供 **12 个 task-shaped 工具**，包括 `doctor`，并统一使用 response envelope 和 health/context resources。`find_dead_code(directory)` 返回保守候选项，`get_architecture(directory)` 返回入口点、路由、基于 canonical symbol ID 的热点和社区。文件系统分析要求显式提供存在的非根目录，且绝不回退到进程 CWD。
 
+精确 Python 模式 `definition`、`references`、`implementations`、`type`、
+`diagnostics` 以及带位置的 `callers`/`callees` 使用固定的
+**Pyright 1.1.411**。请显式安装；查询期间不会下载或更新：
+
+```bash
+uv run python scripts/install_pyright.py --state-root "$LLM_WIKI_STATE_ROOT"
+```
+
+该路径仅支持**受信任的本地仓库**，且**不是 OS sandbox**。位置、deadline、
+freshness、containment 和 qualification 限制见
+[docs/CODE-NAVIGATION.md](docs/CODE-NAVIGATION.md)。
+
 ---
 
 ## 对比

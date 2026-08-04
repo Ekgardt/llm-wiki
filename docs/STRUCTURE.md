@@ -27,7 +27,13 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── lsp_protocol.py               strict bounded single-writer LSP transport
 │   ├── lsp_process_tree.py           POSIX group / Windows Job ownership
 │   ├── lsp_process.py                leased LSP lifecycle + one restart
-│   ├── pyright_session.py            Pyright readiness + semantic provider core
+│   ├── lsp_security.py               contained repository/config/source reads
+│   ├── pyright_profile.py            pinned identity discovery and qualification
+│   ├── install_pyright.py            explicit managed-package installer
+│   ├── pyright_session.py            Pyright readiness, sync, and semantic provider
+│   ├── workspace_revision.py         bounded pre/post freshness proofs
+│   ├── code_navigation.py            normalized precise-navigation facade
+│   ├── code_navigation_renderer.py   deterministic compact result windows
 │   ├── windows_workspace.py          Windows handle-relative filesystem boundary
 │   ├── schemas/                      transaction/queue/compile/archive/claim schemas
 │   ├── lance_store.py               v4.0: LanceDB embedded vector backend (HNSW)
@@ -44,7 +50,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── impact_analysis.py           v4.0: LINK layer (code→wiki impact)
 │   ├── build_tiers.py               v4.0: L0/L1/L2 progressive disclosure
 │   └── queries/                     v4.0: 12 tree-sitter .scm language queries
-├── tests/                         CODE — regression suite (pytest, 5087 tests)
+├── tests/                         CODE — full regression suite (pytest)
 ├── docs/                          CODE — architecture + user guide
 ├── skills/                        CODE — 9 agent skills (SKILL.md)
 ├── rules/                         CODE — file-handling policies
@@ -167,38 +173,35 @@ success. This checkpoint does not document a native code-index kernel, multi-rep
 portfolio generation, temporal/control-plane services, or an operator console as
 implemented.
 
-## Approved code-navigation target
+## Implemented Python code navigation
 
-This section records an approved target; its runtime paths are reserved and path helpers are implemented.
-The Pyright provider session core is implemented, but
-normalized navigation is not implemented. The current checkpoint remains `corpus-generation/v2`
-with `evidence-graph/v2`. Foundation Tasks 1-5 of the 2026-07-21 Plan A remain
-implemented, including explicit Graph v3 selection contracts and bounded
-sealed-workspace utilities, but its one-shot consent/SCIP/publication Tasks 6-16 are
-superseded.
+This section records the implemented Python/Pyright slice. The runtime path helpers are implemented,
+while the authoritative corpus checkpoint remains
+`corpus-generation/v2` with `evidence-graph/v2`. Foundation Tasks 1-5 of the
+2026-07-21 Plan A remain implemented, including explicit Graph v3 selection contracts
+and bounded sealed-workspace utilities, but its one-shot consent/SCIP/publication
+Tasks 6-16 are superseded.
 
-Tasks 1-8 and Task 9's core/readiness/semantic subset of the replacement
-Python/Pyright plan now implement path derivation, position and URI conversion,
-bounded protocol transport, process startup evidence, platform-qualified process
-lifecycle ownership, repository containment, safe diagnostic log redaction, pinned
-profile discovery/installation, and a capability-honest Pyright provider session.
-Document synchronization, session-manager capacity, the normalized navigation facade,
-and MCP routing remain unimplemented, so this is not a navigation-complete checkpoint.
+The replacement plan implements path derivation, position and URI conversion,
+bounded protocol transport, process startup evidence, platform-qualified lifecycle
+ownership, repository containment, safe diagnostic redaction, pinned profile
+discovery and installation, capability-honest provider requests, document
+synchronization, session-manager capacity, the normalized navigation facade,
+deterministic rendering, MCP routing, doctor diagnostics, and qualification gates.
 
-The approved target keeps the existing structural Evidence Graph and adds a small,
-Python 3.10-compatible, read-only LSP runtime owned by LLM Wiki. It starts with a
-production-quality Python/Pyright slice and serves precise live navigation through
-new modes of the existing 12 task-shaped MCP tools. It adds no Serena runtime
-dependency, Rust rewrite, second graph, catalog, active pointer, runtime root, or
-persistent daemon. Query-time LSP observations are not written into an active
-generation.
+The implemented Python/Pyright slice keeps the existing structural Evidence Graph
+and adds a Python 3.10-compatible, read-only LSP runtime owned by LLM Wiki. It serves
+precise live navigation through modes of the existing 12 task-shaped MCP tools. It
+adds no Serena runtime dependency, Rust rewrite, second graph, catalog, active
+pointer, runtime root, persistent daemon, semantic result cache, or MCP tool.
+Query-time LSP observations are not written into an active generation.
 
-The runtime starts language servers lazily within the owning MCP process, exposes
-only allowlisted read operations, reports readiness and capability limitations, and
-falls back to the existing structural graph when unavailable. Exact small results
-use a deterministic compact renderer; the Context Compiler remains responsible for
-broad multi-source synthesis. Language-server installation is a separate explicit
-operator action. See
+The runtime starts Pyright lazily within the owning MCP process, exposes only
+allowlisted read operations, reports readiness and capability limitations, and falls
+back to existing structural evidence when unavailable. Exact small results use a
+deterministic compact renderer; the Context Compiler remains responsible for broad
+multi-source synthesis. Pyright installation is a separate explicit operator action.
+See
 `knowledge/notes/read-only-lsp-navigation-engine-decision.md` and
 `docs/superpowers/specs/2026-07-22-read-only-lsp-navigation-design.md`.
 
@@ -274,7 +277,7 @@ or nonzero active state remains fail-closed.
   `maybe_compile.py` (PID-locked spawn), `search_memory.py` (triple-RRF),
   `llm_client.py` (5 backends + fake), `integration_adapter.py` (thin host
   lifecycle boundary), `mcp_server.py` (12 task-shaped tools), and `doctor.py`.
-- `tests/` — 5087 tests collected. Hermetic via `conftest.py` (pins
+- `tests/` — full regression suite. Hermetic via `conftest.py` (pins
   `LLM_WIKI_ROOT` to checkout, redirects `LLM_WIKI_STATE_ROOT` to a temp
   dir, defaults `MEMORY_LLM_PROVIDER=fake`).
 - `docs/` — `ARCHITECTURE.md`, `USER-GUIDE.md`, `AGENTS.md` (knowledge
@@ -335,9 +338,9 @@ or nonzero active state remains fail-closed.
 - `cache/` — `index.sqlite` (FTS5), `vectors.npy` (binary numpy, mmap),
   `vectors_meta.json` (metadata),
   `code_tools.json` (fresh code-tool detection and active semantic capabilities).
-  `cache/code-tools/pyright/1.1.411/` is the reserved managed Pyright artifact
-  root; `scripts/lsp_paths.py` derives it without installation or directory
-  creation.
+  `cache/code-tools/pyright/1.1.411/` is the managed Pyright artifact root;
+  `scripts/install_pyright.py` is the only supported download/publish path and
+  `scripts/lsp_paths.py` derives it without directory creation.
   v4.0: `lancedb/` (LanceDB vector store, optional), `models/` (ML model cache),
   legacy bounded read-only `access_log.jsonl`, `cache/compile/` (validated compile-plan
   action cache), and `cache/claims.sqlite3` (derived claim index).
@@ -410,8 +413,8 @@ graph-dependent code tools use bounded live extraction and label it incomplete.
 - `logs/` — `lint-YYYY-MM-DD.md`, `compile-last.log`, `session-start-last.txt`.
 - `run/` — `state.json`, `compile.pid`, `run/markdown-transactions.sqlite3`,
   `run/transactions/`, `run/queue.sqlite3`, `run/queue-results/`, receipts, and
-  locks. `run/lsp/<owner-nonce>/` is reserved for bounded process scratch and is
-  derived without directory creation. Its `lease.json` is a bounded mutable live
+  locks. `run/lsp/<owner-nonce>/` holds bounded live process scratch created by the
+  owning LSP lifecycle. Its `lease.json` is a bounded mutable live
   lease with a 10 seconds heartbeat and 30 seconds expiry, separate from immutable
   `owner.json` and `failure.json`. Existing `run/queue/*.json` is one-time
   migration input only.

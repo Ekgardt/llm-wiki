@@ -2468,9 +2468,38 @@ class EvidenceGraph:
 
     def occurrences(self, node_id: str, *, max_rows: int = 100, deadline: float | None = None):
         rows = self._execute(
-            "SELECT o.*, s.relative_path FROM occurrence o JOIN source s USING(source_id) "
+            "SELECT o.*, s.relative_path, s.sha256 AS source_sha256 "
+            "FROM occurrence o JOIN source s USING(source_id) "
             "WHERE o.node_id = ? ORDER BY s.relative_path, o.byte_start, o.occurrence_id LIMIT ?",
             (_text(node_id, "node_id", maximum=512),),
+            max_rows=max_rows,
+            deadline=deadline,
+        )
+        return [dict(row) for row in rows]
+
+    def evidence_spans(
+        self,
+        *,
+        assertion_id: str | None = None,
+        observation_id: str | None = None,
+        max_rows: int = 100,
+        deadline: float | None = None,
+    ):
+        """Return bounded evidence offsets and hashes without loading source blobs."""
+        if (assertion_id is None) == (observation_id is None):
+            raise ValueError("select exactly one assertion_id or observation_id")
+        column, value = (
+            ("assertion_id", assertion_id)
+            if assertion_id is not None
+            else ("observation_id", observation_id)
+        )
+        rows = self._execute(
+            "SELECT e.evidence_id, e.assertion_id, e.observation_id, e.source_id, "
+            "e.byte_start, e.byte_end, e.span_sha256, s.relative_path, "
+            "s.sha256 AS source_sha256 FROM evidence e JOIN source s USING(source_id) "
+            f"WHERE e.{column}=? "
+            "ORDER BY s.relative_path, e.byte_start, e.evidence_id LIMIT ?",
+            (_text(value, column, maximum=512),),
             max_rows=max_rows,
             deadline=deadline,
         )

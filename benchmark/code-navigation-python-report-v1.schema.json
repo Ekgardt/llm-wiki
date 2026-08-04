@@ -1,0 +1,292 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "code-navigation-python-report-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "mode",
+    "identity",
+    "environment",
+    "workload",
+    "evidence",
+    "correctness",
+    "tokens",
+    "reliability",
+    "performance",
+    "resources",
+    "operator_corpus",
+    "errors",
+    "market_superiority_claimed"
+  ],
+  "properties": {
+    "schema_version": {"const": "code-navigation-python-report/v1"},
+    "mode": {"enum": ["correctness-only", "qualification"]},
+    "identity": {"$ref": "#/definitions/identity"},
+    "environment": {"$ref": "#/definitions/environment"},
+    "workload": {"$ref": "#/definitions/workload"},
+    "evidence": {"$ref": "#/definitions/evidence"},
+    "correctness": {"$ref": "#/definitions/correctness"},
+    "tokens": {"$ref": "#/definitions/tokens"},
+    "reliability": {"$ref": "#/definitions/reliability"},
+    "performance": {"$ref": "#/definitions/performance"},
+    "resources": {"$ref": "#/definitions/resources"},
+    "operator_corpus": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/definitions/operator_corpus"}
+      ]
+    },
+    "errors": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/error"}
+    },
+    "market_superiority_claimed": {"const": false}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"mode": {"const": "qualification"}}},
+      "then": {},
+      "else": {
+        "properties": {
+          "performance": {
+            "properties": {
+              "available": {"const": false},
+              "cold_readiness_seconds": {"type": "null"},
+              "warm_facade_p50_ms": {"type": "null"},
+              "warm_facade_p95_ms": {"type": "null"},
+              "direct_pyright_p95_ms": {"type": "null"},
+              "warm_overhead_p95_ms": {"type": "null"},
+              "sample_count": {"const": 0}
+            }
+          },
+          "resources": {
+            "properties": {
+              "available": {"const": false},
+              "client_peak_rss_mib": {"type": "null"},
+              "method": {"const": "not_measured_in_correctness_only"}
+            }
+          }
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "ratio": {"type": "number", "minimum": 0, "maximum": 1},
+    "optional_number": {"type": ["number", "null"]},
+    "optional_nonnegative_number": {"type": ["number", "null"], "minimum": 0},
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_manifest_sha256", "gold_sha256", "git_commit", "python_version", "pyright_version", "pyright_package_sha256", "node_version", "node_major"],
+      "properties": {
+        "source_manifest_sha256": {"$ref": "#/definitions/sha256"},
+        "gold_sha256": {"$ref": "#/definitions/sha256"},
+        "git_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "python_version": {"type": "string", "minLength": 1},
+        "pyright_version": {"const": "1.1.411"},
+        "pyright_package_sha256": {"const": "bd5c488fc20fa237a944279bf32cae2f986cf10d5d5d9e8705819859daeb2f4a"},
+        "node_version": {"type": "string", "minLength": 1},
+        "node_major": {"const": 22}
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os", "os_version", "architecture", "cpu_model", "cpu_core_count", "ram_class"],
+      "properties": {
+        "os": {"type": "string", "minLength": 1},
+        "os_version": {"type": "string", "minLength": 1},
+        "architecture": {"type": "string", "minLength": 1},
+        "cpu_model": {"type": "string", "minLength": 1},
+        "cpu_core_count": {"type": "integer", "minimum": 1},
+        "ram_class": {"type": "string", "minLength": 1}
+      }
+    },
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fixture_seed", "fixture_lines", "definition_queries", "reference_queries", "call_queries", "edit_rename_delete_cycles", "crash_cycles", "default_limit", "max_estimated_tokens", "freshness_checks", "ownership_checks", "ownership_scenarios"],
+      "properties": {
+        "fixture_seed": {"const": 411},
+        "fixture_lines": {"const": 100000},
+        "definition_queries": {"const": 200},
+        "reference_queries": {"const": 100},
+        "call_queries": {"const": 100},
+        "edit_rename_delete_cycles": {"const": 50},
+        "crash_cycles": {"const": 20},
+        "default_limit": {"const": 10},
+        "max_estimated_tokens": {"const": 1200},
+        "freshness_checks": {"const": 250},
+        "ownership_checks": {"const": 4},
+        "ownership_scenarios": {"const": ["normal_shutdown", "crash", "timeout", "cancellation"]}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["measured", "runner", "source_hash_verified", "gold_hash_verified", "git_commit_verified", "identity_verified", "query_attempts", "mutation_cycles", "crash_attempts", "ownership_checks"],
+      "properties": {
+        "measured": {"const": true},
+        "runner": {"const": "code-navigation-real/v1"},
+        "source_hash_verified": {"const": true},
+        "gold_hash_verified": {"const": true},
+        "git_commit_verified": {"const": true},
+        "identity_verified": {"const": true},
+        "query_attempts": {"type": "integer", "minimum": 0, "maximum": 400},
+        "mutation_cycles": {"type": "integer", "minimum": 0, "maximum": 50},
+        "crash_attempts": {"type": "integer", "minimum": 0, "maximum": 20},
+        "ownership_checks": {"type": "integer", "minimum": 0, "maximum": 4}
+      }
+    },
+    "definition_metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attempted", "exact", "accuracy"],
+      "properties": {
+        "attempted": {"type": "integer", "minimum": 0, "maximum": 200},
+        "exact": {"type": "integer", "minimum": 0, "maximum": 200},
+        "accuracy": {"$ref": "#/definitions/ratio"}
+      }
+    },
+    "set_metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attempted", "true_positive", "false_positive", "false_negative", "precision", "recall", "f1"],
+      "properties": {
+        "attempted": {"type": "integer", "minimum": 0, "maximum": 100},
+        "true_positive": {"type": "integer", "minimum": 0},
+        "false_positive": {"type": "integer", "minimum": 0},
+        "false_negative": {"type": "integer", "minimum": 0},
+        "precision": {"$ref": "#/definitions/ratio"},
+        "recall": {"$ref": "#/definitions/ratio"},
+        "f1": {"$ref": "#/definitions/ratio"}
+      }
+    },
+    "correctness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["definitions", "references", "calls", "task_success_rate", "citation_locations_attempted", "citation_locations_correct", "citation_correctness_rate"],
+      "properties": {
+        "definitions": {"$ref": "#/definitions/definition_metric"},
+        "references": {"$ref": "#/definitions/set_metric"},
+        "calls": {"$ref": "#/definitions/set_metric"},
+        "task_success_rate": {"$ref": "#/definitions/ratio"},
+        "citation_locations_attempted": {"type": "integer", "minimum": 0},
+        "citation_locations_correct": {"type": "integer", "minimum": 0},
+        "citation_correctness_rate": {"$ref": "#/definitions/ratio"}
+      }
+    },
+    "token_task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["query_id", "uncached_input_tokens", "cache_read_tokens", "raw_tool_tokens", "output_tokens"],
+      "properties": {
+        "query_id": {"type": "string", "pattern": "^(?:definition-(?:0[0-9]{2}|1[0-9]{2})|references-0[0-9]{2}|calls-0[0-9]{2})$"},
+        "uncached_input_tokens": {"type": "integer", "minimum": 0},
+        "cache_read_tokens": {"const": 0},
+        "raw_tool_tokens": {"type": "integer", "minimum": 0},
+        "output_tokens": {"type": "integer", "minimum": 0}
+      }
+    },
+    "tokens": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cache_read_label", "tasks", "default_items", "max_default_estimated_tokens"],
+      "properties": {
+        "cache_read_label": {"const": "not_applicable_no_result_cache"},
+        "tasks": {"type": "array", "maxItems": 400, "uniqueItems": true, "items": {"$ref": "#/definitions/token_task"}},
+        "default_items": {"type": "integer", "minimum": 0},
+        "max_default_estimated_tokens": {"type": "integer", "minimum": 0}
+      }
+    },
+    "ownership_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["available", "orphan_count"],
+      "properties": {
+        "available": {"type": "boolean"},
+        "orphan_count": {"type": ["integer", "null"], "minimum": 0, "maximum": 1}
+      }
+    },
+    "ownership": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["normal_shutdown", "crash", "timeout", "cancellation"],
+      "properties": {
+        "normal_shutdown": {"$ref": "#/definitions/ownership_result"},
+        "crash": {"$ref": "#/definitions/ownership_result"},
+        "timeout": {"$ref": "#/definitions/ownership_result"},
+        "cancellation": {"$ref": "#/definitions/ownership_result"}
+      }
+    },
+    "reliability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stale_answer_count", "freshness_checks_attempted", "freshness_checks_measured", "stale_result_rate", "mutation_cycles_measured", "edit_to_fresh_p50_ms", "edit_to_fresh_p95_ms", "crash_recoveries", "crash_attempts", "recovery_rate", "orphan_process_count", "orphan_checks_attempted", "orphan_checks_measured", "orphan_process_rate", "ownership"],
+      "properties": {
+        "stale_answer_count": {"type": "integer", "minimum": 0},
+        "freshness_checks_attempted": {"const": 250},
+        "freshness_checks_measured": {"type": "integer", "minimum": 0, "maximum": 250},
+        "stale_result_rate": {"$ref": "#/definitions/ratio"},
+        "mutation_cycles_measured": {"type": "integer", "minimum": 0, "maximum": 50},
+        "edit_to_fresh_p50_ms": {"$ref": "#/definitions/optional_nonnegative_number"},
+        "edit_to_fresh_p95_ms": {"$ref": "#/definitions/optional_nonnegative_number"},
+        "crash_recoveries": {"type": "integer", "minimum": 0, "maximum": 20},
+        "crash_attempts": {"type": "integer", "minimum": 0, "maximum": 20},
+        "recovery_rate": {"$ref": "#/definitions/ratio"},
+        "orphan_process_count": {"type": ["integer", "null"], "minimum": 0, "maximum": 4},
+        "orphan_checks_attempted": {"const": 4},
+        "orphan_checks_measured": {"type": "integer", "minimum": 0, "maximum": 4},
+        "orphan_process_rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "ownership": {"$ref": "#/definitions/ownership"}
+      }
+    },
+    "performance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["available", "cold_readiness_seconds", "warm_facade_p50_ms", "warm_facade_p95_ms", "direct_pyright_p95_ms", "warm_overhead_p95_ms", "sample_count"],
+      "properties": {
+        "available": {"type": "boolean"},
+        "cold_readiness_seconds": {"$ref": "#/definitions/optional_nonnegative_number"},
+        "warm_facade_p50_ms": {"$ref": "#/definitions/optional_nonnegative_number"},
+        "warm_facade_p95_ms": {"$ref": "#/definitions/optional_nonnegative_number"},
+        "direct_pyright_p95_ms": {"$ref": "#/definitions/optional_nonnegative_number"},
+        "warm_overhead_p95_ms": {"$ref": "#/definitions/optional_number"},
+        "sample_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["available", "client_peak_rss_mib", "method"],
+      "properties": {
+        "available": {"type": "boolean"},
+        "client_peak_rss_mib": {"$ref": "#/definitions/optional_nonnegative_number"},
+        "method": {"type": "string", "minLength": 1}
+      }
+    },
+    "operator_corpus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["available", "python_files", "queries_attempted", "queries_succeeded", "errors"],
+      "properties": {
+        "available": {"type": "boolean"},
+        "python_files": {"type": "integer", "minimum": 0},
+        "queries_attempted": {"type": "integer", "minimum": 0},
+        "queries_succeeded": {"type": "integer", "minimum": 0},
+        "errors": {"type": "integer", "minimum": 0}
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "code"],
+      "properties": {
+        "phase": {"type": "string", "minLength": 1},
+        "code": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

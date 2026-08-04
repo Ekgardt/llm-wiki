@@ -278,8 +278,9 @@ def test_changelog_latest_version_matches_pyproject():
 def test_changelog_test_count_matches_live():
     """The latest CHANGELOG section's 'N tests' claim must match the live count.
 
-    If an [Unreleased] section exists with a test count, that takes priority
-    (development in progress). Otherwise the latest version section is checked.
+    If an [Unreleased] section exists, validate its count when present and leave
+    immutable release-history counts alone. Without [Unreleased], check the latest
+    version section.
     """
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
@@ -302,7 +303,7 @@ def test_changelog_test_count_matches_live():
                 f"CHANGELOG [Unreleased] claims {claimed} tests but live "
                 f"suite collects {live}; update CHANGELOG"
             )
-            return
+        return
 
     # Fall through to version-numbered sections.
     headers = list(
@@ -363,7 +364,8 @@ def test_architecture_no_recall_at_2():
     assert "legacy vectors.json" not in search_source
 
     contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
-    assert "5182 tests collected" in contributing
+    assert "full regression suite is the release gate" in contributing.casefold()
+    assert re.search(r"\b\d+\s+tests collected\b", contributing) is None
 
     integrations = (ROOT / "integrations" / "README.md").read_text(encoding="utf-8")
     assert "installer baseline" in integrations.casefold()

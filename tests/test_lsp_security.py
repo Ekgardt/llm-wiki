@@ -70,6 +70,35 @@ def test_security_public_api_has_exact_types_and_signatures() -> None:
         "return": RepositorySource,
     }
 
+    validator = getattr(lsp_security, "validate_repository_relative_path", None)
+    assert callable(validator)
+    validate_signature = inspect.signature(validator)
+    assert tuple(validate_signature.parameters) == ("value",)
+    assert get_type_hints(validator) == {
+        "value": str,
+        "return": str,
+    }
+
+    reader = getattr(lsp_security, "read_repository_source_bytes", None)
+    assert callable(reader)
+    read_signature = inspect.signature(reader)
+    assert tuple(read_signature.parameters) == (
+        "repository",
+        "relative_path",
+        "max_bytes",
+        "deadline",
+    )
+    assert read_signature.parameters["max_bytes"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert read_signature.parameters["deadline"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert read_signature.parameters["deadline"].default is None
+    assert get_type_hints(reader) == {
+        "repository": RepositoryScope,
+        "relative_path": str,
+        "max_bytes": int,
+        "deadline": float | None,
+        "return": bytes,
+    }
+
     normalize_signature = inspect.signature(normalize_provider_uri)
     assert tuple(normalize_signature.parameters) == ("repository", "uri")
     assert get_type_hints(normalize_provider_uri) == {
@@ -87,6 +116,33 @@ def test_security_public_api_has_exact_types_and_signatures() -> None:
         "repository": RepositoryScope | None,
         "return": str,
     }
+
+
+def test_public_relative_path_validator_is_lexical_and_reuses_canonical_rules() -> None:
+    validator = getattr(lsp_security, "validate_repository_relative_path", None)
+    assert callable(validator)
+    assert validator("pkg/é.py") == "pkg/é.py"
+    for invalid in (
+        "pkg/CON.py",
+        "pkg/api.py:stream",
+        "pkg/trailing.",
+        "pkg/trailing ",
+        "pkg/e\u0301.py",
+        "a" * 256 + "/api.py",
+        "😀" * 64 + "/api.py",
+        "a/" * 256 + "api.py",
+    ):
+        with pytest.raises(PathContainmentError):
+            validator(invalid)
+
+
+def test_public_relative_path_validator_is_available_to_star_imports() -> None:
+    namespace: dict[str, object] = {}
+    exec("from lsp_security import *", namespace)
+
+    assert namespace["validate_repository_relative_path"] is (
+        lsp_security.validate_repository_relative_path
+    )
 
 
 def test_repository_source_is_frozen_slotted_and_carries_canonical_identity(
@@ -117,6 +173,93 @@ def test_resolve_accepts_normalized_nfc_unicode_file(
     assert source.relative_path == "pkg/é.py"
     assert source.absolute_path == target.resolve(strict=True)
     assert source.uri.endswith("pkg/%C3%A9.py")
+
+
+def test_read_repository_source_bytes_reads_one_bounded_contained_file(
+    scope: RepositoryScope,
+) -> None:
+    reader = getattr(lsp_security, "read_repository_source_bytes", None)
+    expected = (Path(scope.checkout_root) / "pkg/api.py").read_bytes()
+
+    assert reader(
+        scope,
+        "pkg/api.py",
+        max_bytes=1024,
+        deadline=time.monotonic() + 5,
+    ) == expected
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor traversal")
+def test_posix_repository_read_uses_retained_handle_across_swap_and_restore(
+    repository: Path,
+    scope: RepositoryScope,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = repository / "pkg" / "api.py"
+    expected = target.read_bytes()
+    saved = repository / "pkg" / "api-original.py"
+    replacement = repository / "pkg" / "api-replacement.py"
+    replacement.write_bytes(b"secret = True\n")
+    real_read = os.read
+    swapped = False
+
+    def swap_during_read(descriptor: int, size: int) -> bytes:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            target.rename(saved)
+            replacement.rename(target)
+            try:
+                return real_read(descriptor, size)
+            finally:
+                target.rename(replacement)
+                saved.rename(target)
+        return real_read(descriptor, size)
+
+    monkeypatch.setattr(lsp_security.os, "read", swap_during_read)
+    reader = getattr(lsp_security, "read_repository_source_bytes", None)
+
+    assert reader(scope, "pkg/api.py", max_bytes=1024) == expected
+    assert swapped is True
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle traversal")
+def test_windows_repository_read_uses_retained_handle_across_swap_and_restore(
+    repository: Path,
+    scope: RepositoryScope,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supported, reason = windows_workspace.capability()
+    if not supported:
+        pytest.skip(reason or "Windows handle-relative APIs unavailable")
+    target = repository / "pkg" / "api.py"
+    expected = target.read_bytes()
+    saved = repository / "pkg" / "api-original.py"
+    replacement = repository / "pkg" / "api-replacement.py"
+    replacement.write_bytes(b"secret = True\n")
+    real_read_chunks = windows_workspace.read_chunks
+    swapped = False
+
+    def swap_during_read(handle: int, *, chunk_bytes: int, max_bytes: int):
+        nonlocal swapped
+        swapped = True
+        target.rename(saved)
+        replacement.rename(target)
+        try:
+            yield from real_read_chunks(
+                handle,
+                chunk_bytes=chunk_bytes,
+                max_bytes=max_bytes,
+            )
+        finally:
+            target.rename(replacement)
+            saved.rename(target)
+
+    monkeypatch.setattr(windows_workspace, "read_chunks", swap_during_read)
+    reader = getattr(lsp_security, "read_repository_source_bytes", None)
+
+    assert reader(scope, "pkg/api.py", max_bytes=1024) == expected
+    assert swapped is True
 
 
 @pytest.mark.parametrize(

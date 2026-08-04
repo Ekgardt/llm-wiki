@@ -4,6 +4,7 @@ import atexit
 import hashlib
 import math
 import os
+import queue
 import re
 import secrets
 import stat
@@ -64,6 +65,7 @@ STARTUP_SECONDS = 60.0
 MAX_LSP_PROCESSES = 4
 
 _OWNER_CLEANUP_SECONDS = 2.0
+_LOCK_POLL_SECONDS = 0.01
 _MAX_DOCUMENT_BYTES = MAX_FRAME_BYTES - 1
 _MAX_OPEN_DOCUMENTS = 256
 _MAX_OPEN_DOCUMENT_BYTES = 64 * 1024 * 1024
@@ -363,14 +365,92 @@ def _startup_code(error: BaseException) -> str:
 def _startup_interruption(
     error: BaseException,
 ) -> KeyboardInterrupt | SystemExit | None:
-    current: BaseException | None = error
+    pending: list[BaseException] = [error]
     seen: set[int] = set()
-    while current is not None and id(current) not in seen:
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
         seen.add(id(current))
         if isinstance(current, (KeyboardInterrupt, SystemExit)):
             return current
-        current = current.__cause__
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
     return None
+
+
+def _exception_reaches(error: BaseException | None, target: BaseException) -> bool:
+    pending = [error] if error is not None else []
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if current is target:
+            return True
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+    return False
+
+
+def _raise_collected_errors(
+    errors: tuple[BaseException, ...] | list[BaseException],
+    *,
+    prior_error: BaseException | None = None,
+) -> None:
+    ordered = ((prior_error,) if prior_error is not None else ()) + tuple(errors)
+    source: BaseException | None = None
+    interruption: KeyboardInterrupt | SystemExit | None = None
+    for error in ordered:
+        interruption = _startup_interruption(error)
+        if interruption is not None:
+            source = error
+            break
+    if interruption is not None:
+        secondary = next(
+            (
+                error
+                for error in ordered
+                if error is not source and error is not interruption
+            ),
+            None,
+        )
+        if secondary is None and source is not interruption:
+            secondary = source
+        if secondary is not None:
+            if _exception_reaches(secondary.__cause__, interruption):
+                secondary.__cause__ = None
+            if _exception_reaches(secondary.__context__, interruption):
+                secondary.__context__ = None
+            if _exception_reaches(secondary, interruption):
+                secondary = None
+        try:
+            if secondary is not None:
+                raise interruption.with_traceback(
+                    interruption.__traceback__
+                ) from secondary
+            raise interruption.with_traceback(interruption.__traceback__)
+        except (KeyboardInterrupt, SystemExit) as raised:
+            if raised is not interruption:
+                raise
+            if _exception_reaches(interruption.__cause__, interruption):
+                interruption.__cause__ = None
+            if _exception_reaches(interruption.__context__, interruption):
+                interruption.__context__ = None
+            if interruption.__context__ is interruption.__cause__:
+                interruption.__context__ = None
+            raise
+    if errors:
+        if prior_error is not None:
+            raise errors[0] from prior_error
+        raise errors[0]
+    if prior_error is not None:
+        raise prior_error
 
 
 def _lsp_coordinate(value: object) -> int | None:
@@ -507,11 +587,15 @@ class _LaunchServerGuard:
         expected_sha256: str,
         *,
         command: tuple[str, ...],
+        owner_root: Path,
         deadline: float,
     ) -> None:
+        if not isinstance(owner_root, Path):
+            raise TypeError("owner_root must be a Path")
         self._path = path
         self._expected_sha256 = expected_sha256
         self._command = command
+        self._owner_root = owner_root
         self._deadline = deadline
         self._descriptor: int | None = None
         self._snapshot: BinaryIO | None = None
@@ -551,7 +635,11 @@ class _LaunchServerGuard:
                 raise _BootstrapDegradation("pyright_executable_digest_mismatch")
             self._state = state
             if os.name == "posix":
-                snapshot_descriptor, snapshot_name = tempfile.mkstemp()
+                snapshot_descriptor, snapshot_name = tempfile.mkstemp(
+                    prefix=".launch-",
+                    suffix=".tmp",
+                    dir=self._owner_root,
+                )
                 self._snapshot_path = Path(snapshot_name)
                 try:
                     snapshot = os.fdopen(snapshot_descriptor, "w+b")
@@ -695,41 +783,52 @@ class _LaunchServerGuard:
         self._launch_descriptor = None
         descriptor = self._descriptor
         self._descriptor = None
-        first_error: BaseException | None = None
+        errors: list[BaseException] = []
         if snapshot is not None:
             try:
                 snapshot.close()
             except BaseException as error:
-                first_error = error
+                errors.append(error)
         if snapshot_path is not None:
             try:
                 os.unlink(snapshot_path)
             except FileNotFoundError:
                 pass
             except BaseException as error:
-                if first_error is None:
-                    first_error = error
+                errors.append(error)
         if launch_descriptor is not None:
             try:
                 os.close(launch_descriptor)
             except BaseException as error:
-                if first_error is None:
-                    first_error = error
+                errors.append(error)
         if descriptor is not None:
             try:
                 os.close(descriptor)
             except BaseException as error:
-                if first_error is None:
-                    first_error = error
-        if first_error is not None:
-            raise first_error
+                errors.append(error)
+        _raise_collected_errors(errors)
 
-    def __exit__(self, error_type: object, *_error: object) -> None:
-        try:
-            if error_type is None:
+    def __exit__(self, error_type: object, *error_info: object) -> None:
+        operation_error = next(
+            (item for item in error_info if isinstance(item, BaseException)),
+            None,
+        )
+        if error_type is None:
+            try:
                 self.verify()
-        finally:
+            except BaseException as error:
+                operation_error = error
+        try:
             self.close()
+        except BaseException as cleanup_error:
+            if operation_error is not None:
+                _raise_collected_errors(
+                    [cleanup_error],
+                    prior_error=operation_error,
+                )
+            raise
+        if error_type is None and operation_error is not None:
+            raise operation_error.with_traceback(operation_error.__traceback__)
 
 
 class PyrightSession:
@@ -752,8 +851,9 @@ class PyrightSession:
         self._identity = identity
         self._state_root = state_root
         self._lock = threading.RLock()
+        self._close_lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
-        self._document_lock = threading.Lock()
+        self._document_lock = threading.RLock()
         self._wire_condition = threading.Condition(threading.Lock())
         self._readiness = "not_ready"
         self._readiness_evidence: tuple[str, ...] = ()
@@ -766,6 +866,7 @@ class PyrightSession:
         self._documents: dict[str, OpenDocument] = {}
         self._document_bytes = 0
         self._workspace_revision: WorkspaceRevision | None = None
+        self._synchronize_epoch = 0
         self._readiness_target_uri: str | None = None
         self._generation_nonce: str | None = None
         self._ready_uri_generations: dict[str, str] = {}
@@ -781,10 +882,16 @@ class PyrightSession:
         self._startup_attempted = False
         self._startup_cleanup_error: StartupCleanupError | None = None
         self._startup_process: LspProcess | None = None
+        self._bootstrap_owner_nonce: str | None = None
+        self._bootstrap_generation_owners: dict[str, str] = {}
         self._startup_atexit_registered = False
         self._closing = False
         self._closed = False
         self._capacity_locked = False
+
+    @property
+    def identity(self) -> PyrightIdentity:
+        return self._identity
 
     @property
     def readiness(self) -> str:
@@ -853,10 +960,30 @@ class PyrightSession:
         except BaseException:
             pass
 
+    def _acquire_state_lock(self, deadline: float, message: str) -> None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not self._lock.acquire(timeout=remaining):
+            raise TimeoutError(message)
+
+    @contextmanager
+    def _document_operation_lock(self, deadline: float) -> Iterator[None]:
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not self._document_lock.acquire(timeout=remaining):
+                raise TimeoutError("Pyright document lock deadline expired")
+            yield
+        finally:
+            try:
+                self._document_lock.release()
+            except RuntimeError:
+                pass
+
     @contextmanager
     def _operation(self) -> Iterator[None]:
         now = time.monotonic()
         with self._lock:
+            if self._closed or self._closing:
+                raise RuntimeError("Pyright session is closing")
             self._active_operations += 1
             self._last_used_monotonic = now
         try:
@@ -866,6 +993,42 @@ class PyrightSession:
                 self._active_operations -= 1
                 self._last_used_monotonic = time.monotonic()
                 self._condition.notify_all()
+
+    @contextmanager
+    def _synchronize_semantic_fence(self) -> Iterator[None]:
+        with self._lock:
+            if self._synchronize_epoch % 2 != 0:
+                raise RuntimeError("Pyright synchronization fence is already active")
+            self._synchronize_epoch += 1
+            active_epoch = self._synchronize_epoch
+        try:
+            yield
+        finally:
+            with self._lock:
+                if self._synchronize_epoch != active_epoch:
+                    raise RuntimeError("Pyright synchronization fence changed unexpectedly")
+                self._synchronize_epoch += 1
+                self._condition.notify_all()
+
+    def _reserve_idle_close(self, deadline: float) -> bool:
+        deadline = _validated_deadline(deadline)
+        self._acquire_state_lock(
+            deadline,
+            "Pyright session reservation state lock deadline expired",
+        )
+        try:
+            if (
+                self._closed
+                or self._closing
+                or self._starting
+                or self._active_operations != 0
+            ):
+                return False
+            self._closing = True
+            self._condition.notify_all()
+            return True
+        finally:
+            self._lock.release()
 
     def _configuration(self, params: object) -> object:
         settings = thaw_pyright_profile_value(PYRIGHT_CONFIGURATION)
@@ -1288,6 +1451,30 @@ class PyrightSession:
             self._diagnostic_bytes = aggregate_bytes
             self._condition.notify_all()
 
+    def _bootstrap_owned_generation(
+        self,
+        owner_nonce: str,
+        protocol: LspProtocol,
+        process_id: int,
+        generation_nonce: str,
+        deadline: float,
+    ) -> ProcessState:
+        with self._lock:
+            if self._bootstrap_owner_nonce != owner_nonce:
+                raise RuntimeError("Pyright process owner is no longer accepted")
+            self._bootstrap_generation_owners[generation_nonce] = owner_nonce
+        try:
+            return self._bootstrap_generation(
+                protocol,
+                process_id,
+                generation_nonce,
+                deadline,
+            )
+        finally:
+            with self._lock:
+                if self._bootstrap_generation_owners.get(generation_nonce) == owner_nonce:
+                    self._bootstrap_generation_owners.pop(generation_nonce, None)
+
     def _bootstrap_generation(
         self,
         protocol: LspProtocol,
@@ -1295,6 +1482,10 @@ class PyrightSession:
         _generation_nonce: str,
         deadline: float,
     ) -> ProcessState:
+        with self._lock:
+            owner_nonce = self._bootstrap_generation_owners.get(_generation_nonce)
+            if owner_nonce is None or self._bootstrap_owner_nonce != owner_nonce:
+                raise RuntimeError("Pyright process owner is no longer accepted")
         root = Path(self._repository.checkout_root)
         root_uri = path_to_file_uri(root)
         result = protocol.request(
@@ -1320,8 +1511,13 @@ class PyrightSession:
         )
         documents: tuple[OpenDocument, ...] = ()
         try:
+            with self._lock:
+                if self._bootstrap_owner_nonce != owner_nonce:
+                    raise RuntimeError("Pyright process owner is no longer accepted")
             self._begin_wire_generation(_generation_nonce)
             with self._lock:
+                if self._bootstrap_owner_nonce != owner_nonce:
+                    raise RuntimeError("Pyright process owner is no longer accepted")
                 documents = tuple(self._documents.values())
                 self._generation_nonce = _generation_nonce
                 self._ready_uri_generations.clear()
@@ -1336,6 +1532,9 @@ class PyrightSession:
                 )
                 self._readiness = "protocol_initialized"
             for document in documents:
+                with self._lock:
+                    if self._bootstrap_owner_nonce != owner_nonce:
+                        raise RuntimeError("Pyright process owner is no longer accepted")
                 if not self._send_protocol_did_open(
                     document,
                     protocol,
@@ -1480,14 +1679,20 @@ class PyrightSession:
                     self._startup_attempted = True
 
             process: LspProcess | None = None
+            bootstrap_owner_nonce: str | None = None
             try:
                 if retained_cleanup is not None:
                     try:
                         retained_cleanup.retry_cleanup(startup_deadline)
-                    except (KeyboardInterrupt, SystemExit):
+                    except BaseException as error:
+                        interruption = _startup_interruption(error)
+                        if interruption is not None:
+                            if interruption is error:
+                                raise
+                            _raise_collected_errors([], prior_error=error)
+                        if isinstance(error, (OSError, RuntimeError, TimeoutError)):
+                            return
                         raise
-                    except (OSError, RuntimeError, TimeoutError):
-                        return
                     with self._lock:
                         if self._startup_cleanup_error is retained_cleanup:
                             self._startup_cleanup_error = None
@@ -1496,10 +1701,15 @@ class PyrightSession:
                 if retained_process is not None:
                     try:
                         retained_process.close(startup_deadline)
-                    except (KeyboardInterrupt, SystemExit):
+                    except BaseException as error:
+                        interruption = _startup_interruption(error)
+                        if interruption is not None:
+                            if interruption is error:
+                                raise
+                            _raise_collected_errors([], prior_error=error)
+                        if isinstance(error, (OSError, RuntimeError, TimeoutError)):
+                            return
                         raise
-                    except (OSError, RuntimeError, TimeoutError):
-                        return
                     with self._lock:
                         if self._startup_process is retained_process:
                             self._startup_process = None
@@ -1514,6 +1724,9 @@ class PyrightSession:
                     )
                     _ensure_lsp_parent(self._state_root, deadline=startup_deadline)
                     owner = lsp_owner_root(self._state_root, secrets.token_hex(16))
+                    bootstrap_owner_nonce = owner.name
+                    with self._lock:
+                        self._bootstrap_owner_nonce = bootstrap_owner_nonce
                     process = LspProcess.start_configured(
                         (
                             str(node),
@@ -1545,7 +1758,18 @@ class PyrightSession:
                             ),
                             "textDocument/publishDiagnostics": self._publish_diagnostics,
                         },
-                        generation_bootstrap=self._bootstrap_generation,
+                        generation_bootstrap=(
+                            lambda protocol,
+                            process_id,
+                            generation_nonce,
+                            generation_deadline: self._bootstrap_owned_generation(
+                                owner.name,
+                                protocol,
+                                process_id,
+                                generation_nonce,
+                                generation_deadline,
+                            )
+                        ),
                         bootstrap_timeout_seconds=bootstrap_timeout_seconds,
                         generation_guard=(
                             lambda _generation_nonce, generation_deadline: (
@@ -1558,12 +1782,16 @@ class PyrightSession:
                                         "--stdio",
                                         f"--cancellationReceive=file:{owner / 'cancellation'}",
                                     ),
+                                    owner_root=owner,
                                     deadline=generation_deadline,
                                 )
                             )
                         ),
                     )
                 except BaseException as error:
+                    with self._lock:
+                        if self._bootstrap_owner_nonce == bootstrap_owner_nonce:
+                            self._bootstrap_owner_nonce = None
                     interruption = _startup_interruption(error)
                     retained_error: StartupCleanupError | None = None
                     if isinstance(error, StartupCleanupError):
@@ -1589,9 +1817,7 @@ class PyrightSession:
                                 self._sync_startup_atexit_locked()
                         if interruption is error:
                             raise
-                        raise interruption.with_traceback(
-                            interruption.__traceback__
-                        ) from error
+                        _raise_collected_errors([], prior_error=error)
                     if isinstance(error, (TypeError, ValueError)):
                         with self._lock:
                             self._startup_attempted = False
@@ -1629,6 +1855,7 @@ class PyrightSession:
                     self._startup_process = None
                     self._sync_startup_atexit_locked()
             except BaseException as error:
+                cleanup_error: BaseException | None = None
                 if process is not None:
                     cleanup_deadline = min(
                         startup_deadline,
@@ -1637,11 +1864,14 @@ class PyrightSession:
                     retained_process_owner: LspProcess | None = None
                     try:
                         process.close(cleanup_deadline)
-                    except BaseException:
+                    except BaseException as close_error:
                         retained_process_owner = process
+                        cleanup_error = close_error
                     with self._lock:
                         if self._process is process:
                             self._process = None
+                        if self._bootstrap_owner_nonce == bootstrap_owner_nonce:
+                            self._bootstrap_owner_nonce = None
                         self._startup_process = retained_process_owner
                         self._sync_startup_atexit_locked()
                         self._readiness = "not_ready"
@@ -1654,9 +1884,24 @@ class PyrightSession:
                         self._diagnostics.clear()
                         self._diagnostic_bytes = 0
                         self._clear_wire_state()
-                if _startup_interruption(error) is not None:
+                original_interruption = _startup_interruption(error)
+                cleanup_interruption = (
+                    _startup_interruption(cleanup_error)
+                    if cleanup_error is not None
+                    else None
+                )
+                interruption = original_interruption or cleanup_interruption
+                if interruption is not None:
                     with self._lock:
                         self._startup_attempted = False
+                    if cleanup_error is not None:
+                        _raise_collected_errors(
+                            [cleanup_error],
+                            prior_error=error,
+                        )
+                    if interruption is error:
+                        raise
+                    _raise_collected_errors([], prior_error=error)
                 raise
             finally:
                 with self._lock:
@@ -1671,6 +1916,29 @@ class PyrightSession:
             and document is not None
             and self._ready_uri_generations.get(uri) == generation
             and self._wire_document_opened(document, generation)
+        )
+
+    def _semantic_query_epoch_locked(self) -> int | None:
+        epoch = self._synchronize_epoch
+        return epoch if epoch % 2 == 0 else None
+
+    def _semantic_query_epoch_current_locked(self, epoch: int) -> bool:
+        return epoch % 2 == 0 and self._synchronize_epoch == epoch
+
+    def _document_query_current_locked(
+        self,
+        process: LspProcess,
+        generation: str,
+        document: OpenDocument,
+        synchronize_epoch: int,
+    ) -> bool:
+        uri = document.source.uri
+        return (
+            self._semantic_query_epoch_current_locked(synchronize_epoch)
+            and self._process is process
+            and self._generation_nonce == generation
+            and self._documents.get(uri) is document
+            and self._document_ready_locked(uri)
         )
 
     def _reconcile_process_state_locked(self) -> None:
@@ -1801,7 +2069,7 @@ class PyrightSession:
         deadline = _validated_deadline(deadline)
         if time.monotonic() >= deadline:
             raise TimeoutError("Pyright document deadline expired")
-        with self._operation(), self._document_lock:
+        with self._document_operation_lock(deadline), self._operation():
             self.start(deadline=deadline)
             source = resolve_repository_source(self._repository, path)
             content = read_stable_bytes(
@@ -1945,21 +2213,41 @@ class PyrightSession:
         if time.monotonic() >= deadline:
             raise TimeoutError("Pyright semantic request deadline expired")
         with self._operation():
+            with self._lock:
+                synchronize_epoch = self._semantic_query_epoch_locked()
+            if synchronize_epoch is None:
+                return ProviderLocations((), "not_ready", True)
             self.start(deadline=deadline)
             with self._lock:
                 process = self._process
                 encoding = self._position_encoding
                 supported = self._capabilities.get(capability, False)
-                if process is None or encoding is None:
+                if (
+                    process is None
+                    or encoding is None
+                    or not self._semantic_query_epoch_current_locked(
+                        synchronize_epoch
+                    )
+                ):
                     return ProviderLocations((), "not_ready", True)
             if not supported:
                 return ProviderLocations((), "unsupported", True)
             document = self.open_document(anchor.path, deadline=deadline)
             with self._lock:
-                ready = self._document_ready_locked(document.source.uri)
                 encoding = self._position_encoding
                 process = self._process
-            if not ready or encoding is None or process is None:
+                generation = self._generation_nonce
+                ready = (
+                    process is not None
+                    and generation is not None
+                    and self._document_query_current_locked(
+                        process,
+                        generation,
+                        document,
+                        synchronize_epoch,
+                    )
+                )
+            if not ready or encoding is None or process is None or generation is None:
                 return ProviderLocations((), "not_ready", True)
             source_document = SourceDocument.from_bytes(
                 document.source.relative_path,
@@ -1975,16 +2263,30 @@ class PyrightSession:
             }
             if references:
                 params["context"] = {"includeDeclaration": True}
-            result = process.request(method, params, deadline=deadline)
             with self._lock:
-                if not self._document_ready_locked(document.source.uri):
+                if not self._document_query_current_locked(
+                    process,
+                    generation,
+                    document,
+                    synchronize_epoch,
+                ):
                     return ProviderLocations((), "not_ready", True)
+            result = process.request(method, params, deadline=deadline)
             locations, filtered = self._normalize_locations(result)
-            return ProviderLocations(
+            response = ProviderLocations(
                 locations,
                 "provider_reported",
                 True if references else filtered,
             )
+            with self._lock:
+                if not self._document_query_current_locked(
+                    process,
+                    generation,
+                    document,
+                    synchronize_epoch,
+                ):
+                    return ProviderLocations((), "not_ready", True)
+                return response
 
     def definition(
         self,
@@ -2138,34 +2440,60 @@ class PyrightSession:
     def document_symbols(self, path: str, *, deadline: float) -> ProviderLocations:
         deadline = _validated_deadline(deadline)
         with self._operation():
+            with self._lock:
+                synchronize_epoch = self._semantic_query_epoch_locked()
+            if synchronize_epoch is None:
+                return ProviderLocations((), "not_ready", True)
             self.start(deadline=deadline)
             with self._lock:
                 process = self._process
                 initialized = self._position_encoding is not None
                 supported = self._capabilities.get("document_symbols", False)
-                if process is None or not initialized:
+                if (
+                    process is None
+                    or not initialized
+                    or not self._semantic_query_epoch_current_locked(
+                        synchronize_epoch
+                    )
+                ):
                     return ProviderLocations((), "not_ready", True)
             if not supported:
                 return ProviderLocations((), "unsupported", True)
             document = self.open_document(path, deadline=deadline)
             with self._lock:
-                ready = self._document_ready_locked(document.source.uri)
                 process = self._process
-            if not ready or process is None:
+                generation = self._generation_nonce
+                ready = (
+                    process is not None
+                    and generation is not None
+                    and self._document_query_current_locked(
+                        process,
+                        generation,
+                        document,
+                        synchronize_epoch,
+                    )
+                )
+            if not ready or process is None or generation is None:
                 return ProviderLocations((), "not_ready", True)
             result = process.request(
                 "textDocument/documentSymbol",
                 {"textDocument": {"uri": document.source.uri}},
                 deadline=deadline,
             )
-            with self._lock:
-                if not self._document_ready_locked(document.source.uri):
-                    return ProviderLocations((), "not_ready", True)
             locations, partial = self._normalize_document_symbols(
                 result,
                 document.source.uri,
             )
-            return ProviderLocations(locations, "provider_reported", partial)
+            response = ProviderLocations(locations, "provider_reported", partial)
+            with self._lock:
+                if not self._document_query_current_locked(
+                    process,
+                    generation,
+                    document,
+                    synchronize_epoch,
+                ):
+                    return ProviderLocations((), "not_ready", True)
+                return response
 
     def workspace_symbols(
         self,
@@ -2179,13 +2507,24 @@ class PyrightSession:
             raise ValueError("query exceeds 4096 bytes")
         deadline = _validated_deadline(deadline)
         with self._operation():
+            with self._lock:
+                synchronize_epoch = self._semantic_query_epoch_locked()
+            if synchronize_epoch is None:
+                return ProviderLocations((), "not_ready", True)
             self.start(deadline=deadline)
             with self._lock:
                 supported = self._capabilities.get("workspace_symbols", False)
                 readiness = self._readiness
                 process = self._process
+                generation = self._generation_nonce
                 initialized = self._position_encoding is not None
-            if process is None or not initialized:
+                current = self._semantic_query_epoch_current_locked(synchronize_epoch)
+            if (
+                process is None
+                or generation is None
+                or not initialized
+                or not current
+            ):
                 return ProviderLocations((), "not_ready", True)
             if not supported:
                 return ProviderLocations((), "unsupported", True)
@@ -2197,49 +2536,89 @@ class PyrightSession:
                 deadline=deadline,
             )
             if result is None:
-                return ProviderLocations((), "provider_reported", False)
-            if not isinstance(result, list):
-                return ProviderLocations((), "provider_reported", True)
-            values: list[object] = []
-            partial = len(result) > MAX_LOCATIONS
-            for symbol in result[:MAX_LOCATIONS]:
-                if not isinstance(symbol, dict) or "location" not in symbol:
-                    partial = True
-                    continue
-                values.append(symbol["location"])
-            locations, filtered = self._normalize_locations(values)
-            return ProviderLocations(
-                locations,
-                "provider_reported",
-                partial or filtered,
-            )
+                response = ProviderLocations((), "provider_reported", False)
+            elif not isinstance(result, list):
+                response = ProviderLocations((), "provider_reported", True)
+            else:
+                values: list[object] = []
+                partial = len(result) > MAX_LOCATIONS
+                for symbol in result[:MAX_LOCATIONS]:
+                    if not isinstance(symbol, dict) or "location" not in symbol:
+                        partial = True
+                        continue
+                    values.append(symbol["location"])
+                locations, filtered = self._normalize_locations(values)
+                response = ProviderLocations(
+                    locations,
+                    "provider_reported",
+                    partial or filtered,
+                )
+            with self._lock:
+                if (
+                    self._process is not process
+                    or self._generation_nonce != generation
+                    or self._readiness != readiness
+                    or not self._semantic_query_epoch_current_locked(
+                        synchronize_epoch
+                    )
+                ):
+                    return ProviderLocations((), "not_ready", True)
+                return response
 
     def hover(self, anchor: SourceAnchor, *, deadline: float) -> ProviderHover:
         if not isinstance(anchor, SourceAnchor):
             raise TypeError("anchor must be a SourceAnchor")
         deadline = _validated_deadline(deadline)
         with self._operation():
+            with self._lock:
+                synchronize_epoch = self._semantic_query_epoch_locked()
+            if synchronize_epoch is None:
+                return ProviderHover(None, None, True)
             self.start(deadline=deadline)
             with self._lock:
                 process = self._process
                 encoding = self._position_encoding
                 supported = self._capabilities.get("hover", False)
-                if process is None or encoding is None:
+                if (
+                    process is None
+                    or encoding is None
+                    or not self._semantic_query_epoch_current_locked(
+                        synchronize_epoch
+                    )
+                ):
                     return ProviderHover(None, None, True)
             if not supported:
                 return ProviderHover(None, None, True)
             document = self.open_document(anchor.path, deadline=deadline)
             with self._lock:
-                ready = self._document_ready_locked(document.source.uri)
                 encoding = self._position_encoding
                 process = self._process
-            if not ready or encoding is None or process is None:
+                generation = self._generation_nonce
+                ready = (
+                    process is not None
+                    and generation is not None
+                    and self._document_query_current_locked(
+                        process,
+                        generation,
+                        document,
+                        synchronize_epoch,
+                    )
+                )
+            if not ready or encoding is None or process is None or generation is None:
                 return ProviderHover(None, None, True)
             source_document = SourceDocument.from_bytes(
                 document.source.relative_path,
                 document.content,
             )
             position = source_document.to_lsp(anchor, encoding)
+            with self._lock:
+                if not self._document_query_current_locked(
+                    process,
+                    generation,
+                    document,
+                    synchronize_epoch,
+                ):
+                    return ProviderHover(None, None, True)
             result = process.request(
                 "textDocument/hover",
                 {
@@ -2251,20 +2630,27 @@ class PyrightSession:
                 },
                 deadline=deadline,
             )
-            with self._lock:
-                if not self._document_ready_locked(document.source.uri):
-                    return ProviderHover(None, None, True)
             if result is None:
-                return ProviderHover(None, None, False)
-            if not isinstance(result, dict) or "contents" not in result:
-                return ProviderHover(None, None, True)
-            contents, partial = _hover_contents(result["contents"])
-            range_ = None
-            if "range" in result:
-                range_ = _lsp_range(result["range"])
-                if range_ is None:
-                    partial = True
-            return ProviderHover(contents, range_, partial)
+                response = ProviderHover(None, None, False)
+            elif not isinstance(result, dict) or "contents" not in result:
+                response = ProviderHover(None, None, True)
+            else:
+                contents, partial = _hover_contents(result["contents"])
+                range_ = None
+                if "range" in result:
+                    range_ = _lsp_range(result["range"])
+                    if range_ is None:
+                        partial = True
+                response = ProviderHover(contents, range_, partial)
+            with self._lock:
+                if not self._document_query_current_locked(
+                    process,
+                    generation,
+                    document,
+                    synchronize_epoch,
+                ):
+                    return ProviderHover(None, None, True)
+                return response
 
     def _sanitize_call_item(self, value: object) -> dict[str, object] | None:
         if not isinstance(value, dict):
@@ -2343,27 +2729,55 @@ class PyrightSession:
             raise TypeError("anchor must be a SourceAnchor")
         deadline = _validated_deadline(deadline)
         with self._operation():
+            with self._lock:
+                synchronize_epoch = self._semantic_query_epoch_locked()
+            if synchronize_epoch is None:
+                return ProviderCalls(direction, (), "not_ready", True)
             self.start(deadline=deadline)
             with self._lock:
                 process = self._process
                 encoding = self._position_encoding
                 supported = self._capabilities.get("calls", False)
-                if process is None or encoding is None:
+                if (
+                    process is None
+                    or encoding is None
+                    or not self._semantic_query_epoch_current_locked(
+                        synchronize_epoch
+                    )
+                ):
                     return ProviderCalls(direction, (), "not_ready", True)
             if not supported:
                 return ProviderCalls(direction, (), "unsupported", True)
             document = self.open_document(anchor.path, deadline=deadline)
             with self._lock:
-                ready = self._document_ready_locked(document.source.uri)
                 encoding = self._position_encoding
                 process = self._process
-            if not ready or encoding is None or process is None:
+                generation = self._generation_nonce
+                ready = (
+                    process is not None
+                    and generation is not None
+                    and self._document_query_current_locked(
+                        process,
+                        generation,
+                        document,
+                        synchronize_epoch,
+                    )
+                )
+            if not ready or encoding is None or process is None or generation is None:
                 return ProviderCalls(direction, (), "not_ready", True)
             source_document = SourceDocument.from_bytes(
                 document.source.relative_path,
                 document.content,
             )
             position = source_document.to_lsp(anchor, encoding)
+            with self._lock:
+                if not self._document_query_current_locked(
+                    process,
+                    generation,
+                    document,
+                    synchronize_epoch,
+                ):
+                    return ProviderCalls(direction, (), "not_ready", True)
             prepared = process.request(
                 "textDocument/prepareCallHierarchy",
                 {
@@ -2376,12 +2790,15 @@ class PyrightSession:
                 deadline=deadline,
             )
             with self._lock:
-                if not self._document_ready_locked(document.source.uri):
+                if not self._document_query_current_locked(
+                    process,
+                    generation,
+                    document,
+                    synchronize_epoch,
+                ):
                     return ProviderCalls(direction, (), "not_ready", True)
-            if prepared is None:
-                return ProviderCalls(direction, (), "provider_reported", True)
-            if not isinstance(prepared, list):
-                return ProviderCalls(direction, (), "provider_reported", True)
+                if prepared is None or not isinstance(prepared, list):
+                    return ProviderCalls(direction, (), "provider_reported", True)
             items = [
                 item
                 for value in prepared[:_MAX_PREPARED_CALL_ITEMS]
@@ -2396,11 +2813,27 @@ class PyrightSession:
             locations: list[LspLocation] = []
             seen: set[tuple[object, ...]] = set()
             for item in items:
+                with self._lock:
+                    if not self._document_query_current_locked(
+                        process,
+                        generation,
+                        document,
+                        synchronize_epoch,
+                    ):
+                        return ProviderCalls(direction, (), "not_ready", True)
                 result = process.request(
                     method,
                     {"item": item},
                     deadline=deadline,
                 )
+                with self._lock:
+                    if not self._document_query_current_locked(
+                        process,
+                        generation,
+                        document,
+                        synchronize_epoch,
+                    ):
+                        return ProviderCalls(direction, (), "not_ready", True)
                 if not isinstance(result, list):
                     continue
                 for call in result[:MAX_LOCATIONS]:
@@ -2414,14 +2847,19 @@ class PyrightSession:
                         seen.add(key)
                         locations.append(location)
             with self._lock:
-                if not self._document_ready_locked(document.source.uri):
+                if not self._document_query_current_locked(
+                    process,
+                    generation,
+                    document,
+                    synchronize_epoch,
+                ):
                     return ProviderCalls(direction, (), "not_ready", True)
-            return ProviderCalls(
-                direction,
-                tuple(locations),
-                "provider_reported",
-                True,
-            )
+                return ProviderCalls(
+                    direction,
+                    tuple(locations),
+                    "provider_reported",
+                    True,
+                )
 
     def incoming_calls(
         self,
@@ -2442,17 +2880,38 @@ class PyrightSession:
     def diagnostics(self, path: str, *, deadline: float) -> ProviderDiagnostics:
         deadline = _validated_deadline(deadline)
         with self._operation():
+            with self._lock:
+                synchronize_epoch = self._semantic_query_epoch_locked()
+            if synchronize_epoch is None:
+                return ProviderDiagnostics((), None, True)
             self.start(deadline=deadline)
             with self._lock:
                 initialized = self._process is not None and self._position_encoding is not None
-            if not initialized:
+                current = self._semantic_query_epoch_current_locked(synchronize_epoch)
+            if not initialized or not current:
                 return ProviderDiagnostics((), None, True)
             document = self.open_document(path, deadline=deadline)
             with self._lock:
-                if not self._document_ready_locked(document.source.uri):
+                process = self._process
+                generation = self._generation_nonce
+                if (
+                    process is None
+                    or generation is None
+                    or not self._document_query_current_locked(
+                        process,
+                        generation,
+                        document,
+                        synchronize_epoch,
+                    )
+                ):
                     return ProviderDiagnostics((), None, True)
                 while True:
-                    if not self._document_ready_locked(document.source.uri):
+                    if not self._document_query_current_locked(
+                        process,
+                        generation,
+                        document,
+                        synchronize_epoch,
+                    ):
                         return ProviderDiagnostics((), None, True)
                     snapshot = self._diagnostics.get(document.source.uri)
                     if (
@@ -2479,6 +2938,102 @@ class PyrightSession:
         absolute = Path(self._repository.checkout_root, relative_path)
         return path_to_file_uri(absolute)
 
+    def _synchronize_snapshot_replayed_locked(self, process: LspProcess) -> bool:
+        generation = self._generation_nonce
+        return (
+            self._process is process
+            and process.state not in {ProcessState.DEGRADED, ProcessState.FAILED}
+            and generation is not None
+            and generation == process.generation_nonce
+            and self._position_encoding is not None
+            and all(
+                self._wire_document_opened(document, generation)
+                for document in self._documents.values()
+            )
+        )
+
+    def _recover_synchronize_snapshot(
+        self,
+        process: LspProcess,
+        failed_generation: str,
+        *,
+        deadline: float,
+    ) -> None:
+        recovery_serialized = False
+        bootstrap_owner_nonce: str | None = None
+        with self._lock:
+            already_replayed = (
+                self._generation_nonce != failed_generation
+                and self._synchronize_snapshot_replayed_locked(process)
+            )
+            if already_replayed:
+                return
+            self._readiness = "not_ready"
+            self._readiness_evidence = ()
+            self._ready_uri_generations.clear()
+            self._diagnostics.clear()
+            self._diagnostic_bytes = 0
+            if self._process is not process:
+                raise RuntimeError(
+                    "Pyright synchronization process changed before recovery"
+                )
+            if (
+                self._startup_process is not None
+                and self._startup_process is not process
+            ):
+                raise RuntimeError(
+                    "Pyright synchronization cleanup owner is unavailable"
+                )
+            bootstrap_owner_nonce = self._bootstrap_owner_nonce
+            self._process = None
+            self._startup_process = process
+            self._starting = True
+            recovery_serialized = True
+            self._position_encoding = None
+            self._capabilities = {}
+            self._generation_nonce = None
+            self._clear_wire_state()
+            self._sync_startup_atexit_locked()
+            self._condition.notify_all()
+        try:
+            process.restart(deadline)
+            with self._lock:
+                if self._startup_process is process and self._process is None:
+                    self._process = process
+                    if self._synchronize_snapshot_replayed_locked(process):
+                        self._startup_process = None
+                        self._sync_startup_atexit_locked()
+                        return
+                    self._process = None
+            raise RuntimeError(
+                "Pyright synchronization recovery could not prove the prior snapshot"
+            )
+        except BaseException:
+            with self._lock:
+                if self._process is process:
+                    self._process = None
+                if self._startup_process is None:
+                    self._startup_process = process
+                if self._bootstrap_owner_nonce == bootstrap_owner_nonce:
+                    self._bootstrap_owner_nonce = None
+                self._readiness = "not_ready"
+                self._readiness_evidence = ()
+                self._position_encoding = None
+                self._capabilities = {}
+                self._generation_nonce = None
+                self._ready_uri_generations.clear()
+                self._diagnostics.clear()
+                self._diagnostic_bytes = 0
+                self._clear_wire_state()
+                self._sync_startup_atexit_locked()
+                self._condition.notify_all()
+            raise
+        finally:
+            if recovery_serialized:
+                with self._lock:
+                    self._starting = False
+                    self._condition.notify_all()
+
     def synchronize(
         self,
         revision: WorkspaceRevision,
@@ -2495,55 +3050,134 @@ class PyrightSession:
             raise ValueError("workspace revision must describe this checkout")
         if time.monotonic() >= deadline:
             raise TimeoutError("Pyright synchronize deadline expired")
-        with self._operation(), self._document_lock:
+        with (
+            self._document_operation_lock(deadline),
+            self._operation(),
+            self._synchronize_semantic_fence(),
+        ):
             self.start(deadline=deadline)
             with self._lock:
                 process = self._process
                 prior = self._workspace_revision
-            if process is None:
-                raise RuntimeError("Pyright session is not protocol initialized")
-            if prior is None:
-                with self._lock:
-                    self._workspace_revision = revision
-                return WorkspaceDelta((), (), (), (), False)
-            delta = diff_workspace_revisions(prior, revision)
-            entries = {entry.path: entry for entry in revision.entries}
-            with self._lock:
+                documents_snapshot = dict(self._documents)
                 open_by_path: dict[str, OpenDocument] = {
                     document.source.relative_path: document
-                    for document in self._documents.values()
+                    for document in documents_snapshot.values()
                 }
                 generation = self._generation_nonce
+            if process is None or generation is None:
+                raise RuntimeError("Pyright session is not protocol initialized")
+            entries = {entry.path: entry for entry in revision.entries}
+            if prior is None:
+                changed = tuple(
+                    sorted(
+                        path
+                        for path, document in open_by_path.items()
+                        if (entry := entries.get(path)) is not None
+                        and entry.sha256 is not None
+                        and entry.sha256 != document.source_sha256
+                    )
+                )
+                deleted = tuple(
+                    sorted(
+                        path
+                        for path in open_by_path
+                        if (entry := entries.get(path)) is None
+                        or entry.sha256 is None
+                    )
+                )
+                delta = WorkspaceDelta((), changed, (), deleted, False)
+            else:
+                delta = diff_workspace_revisions(prior, revision)
+            closing_paths = set(delta.deleted)
+            closing_paths.update(old_path for old_path, _new_path in delta.renamed)
+            projected_document_bytes = 0
+            for path, document in open_by_path.items():
+                if path in closing_paths:
+                    continue
+                entry = entries.get(path)
+                if entry is None or entry.sha256 is None:
+                    raise RuntimeError(
+                        "Pyright open document is absent from the workspace revision"
+                    )
+                if (
+                    isinstance(entry.size, bool)
+                    or not isinstance(entry.size, int)
+                    or entry.size < 0
+                    or entry.size > _MAX_DOCUMENT_BYTES
+                ):
+                    raise RuntimeError("Pyright source document byte limit exceeded")
+                if (
+                    entry.sha256 == document.source_sha256
+                    and entry.size != len(document.content)
+                ):
+                    raise RuntimeError(
+                        "Pyright source document size differs from the revision"
+                    )
+                projected_document_bytes += entry.size
+                if projected_document_bytes > _MAX_OPEN_DOCUMENT_BYTES:
+                    raise RuntimeError(
+                        "Pyright open document source bytes limit exceeded"
+                    )
+            verified_first_contents: dict[str, bytes] = {}
+            for path, document in open_by_path.items():
+                if path in closing_paths:
+                    continue
+                entry = entries[path]
+                content = read_stable_bytes(
+                    document.source.absolute_path,
+                    _MAX_DOCUMENT_BYTES,
+                    label="Pyright retained source document",
+                    deadline=deadline,
+                )
+                digest = hashlib.sha256(content).hexdigest()
+                if entry.sha256 != digest or entry.size != len(content):
+                    raise RuntimeError(
+                        "Pyright retained source document hash differs from the revision"
+                    )
+                verified_first_contents[path] = content
             watched_changes: list[dict[str, object]] = []
             for path in delta.created:
                 watched_changes.append({"uri": self._watched_uri(path), "type": 1})
-            changed_replacements: list[tuple[OpenDocument, bytes, str]] = []
+            changed_replacements: list[
+                tuple[OpenDocument, OpenDocument, dict[str, object]]
+            ] = []
             for path in delta.changed:
                 document = open_by_path.get(path)
                 if document is None:
                     watched_changes.append({"uri": self._watched_uri(path), "type": 2})
                     continue
                 entry = entries.get(path)
-                content = read_stable_bytes(
-                    document.source.absolute_path,
-                    _MAX_DOCUMENT_BYTES,
-                    label="Pyright changed source document",
-                    deadline=deadline,
-                )
-                content.decode("utf-8", errors="strict")
+                content = verified_first_contents.get(path)
+                if content is None:
+                    content = read_stable_bytes(
+                        document.source.absolute_path,
+                        _MAX_DOCUMENT_BYTES,
+                        label="Pyright changed source document",
+                        deadline=deadline,
+                    )
+                text = content.decode("utf-8", errors="strict")
                 digest = hashlib.sha256(content).hexdigest()
-                if entry is None or entry.sha256 != digest:
+                if (
+                    entry is None
+                    or entry.sha256 != digest
+                    or entry.size != len(content)
+                ):
                     raise RuntimeError(
                         "Pyright changed source document hash differs from the revision"
                     )
+                replacement = OpenDocument(
+                    document.source,
+                    content,
+                    digest,
+                    document.version + 1,
+                )
                 change_params: dict[str, object] = {
                     "textDocument": {
                         "uri": document.source.uri,
-                        "version": document.version + 1,
+                        "version": replacement.version,
                     },
-                    "contentChanges": [
-                        {"text": content.decode("utf-8", errors="strict")}
-                    ],
+                    "contentChanges": [{"text": text}],
                 }
                 encode_frame(
                     {
@@ -2552,142 +3186,290 @@ class PyrightSession:
                         "params": change_params,
                     }
                 )
-                changed_replacements.append((document, content, digest, change_params))
-            closed_paths: list[str] = []
-            closed_uris: list[str] = []
+                changed_replacements.append(
+                    (document, replacement, change_params)
+                )
+            closed_documents: list[OpenDocument] = []
+            closed_uris: set[str] = set()
             for path in delta.deleted:
                 document = open_by_path.get(path)
-                if document is not None:
-                    closed_paths.append(path)
-                    closed_uris.append(document.source.uri)
+                if document is not None and document.source.uri not in closed_uris:
+                    closed_documents.append(document)
+                    closed_uris.add(document.source.uri)
                 watched_changes.append({"uri": self._watched_uri(path), "type": 3})
             for old_path, new_path in delta.renamed:
                 document = open_by_path.get(old_path)
-                if document is not None:
-                    closed_paths.append(old_path)
-                    closed_uris.append(document.source.uri)
+                if document is not None and document.source.uri not in closed_uris:
+                    closed_documents.append(document)
+                    closed_uris.add(document.source.uri)
                 watched_changes.append(
                     {"uri": self._watched_uri(old_path), "type": 3}
                 )
                 watched_changes.append(
                     {"uri": self._watched_uri(new_path), "type": 1}
                 )
-            for uri in closed_uris:
-                try:
-                    encode_frame(
-                        {
-                            "jsonrpc": "2.0",
-                            "method": "textDocument/didClose",
-                            "params": {"textDocument": {"uri": uri}},
-                        }
-                    )
-                except ProtocolViolation:
-                    continue
-                if generation is not None:
-                    try:
-                        process.notify_generation(
-                            "textDocument/didClose",
-                            {"textDocument": {"uri": uri}},
-                            generation_nonce=generation,
-                            deadline=deadline,
-                        )
-                    except (ProtocolViolation, RuntimeError, TimeoutError):
-                        pass
-            for _document, _content, _digest, change_params in changed_replacements:
-                if generation is None:
-                    continue
-                try:
-                    process.notify_generation(
-                        "textDocument/didChange",
-                        change_params,
+            close_notifications = [
+                (
+                    document,
+                    {"textDocument": {"uri": document.source.uri}},
+                )
+                for document in closed_documents
+            ]
+            for _document, params in close_notifications:
+                encode_frame(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "textDocument/didClose",
+                        "params": params,
+                    }
+                )
+
+            watched_params: dict[str, object] | None = None
+            if watched_changes:
+                watched_params = {"changes": list(watched_changes)}
+                encode_frame(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "workspace/didChangeWatchedFiles",
+                        "params": watched_params,
+                    }
+                )
+
+            next_documents = dict(documents_snapshot)
+            for document in closed_documents:
+                next_documents.pop(document.source.uri, None)
+            for document, replacement, _params in changed_replacements:
+                next_documents[document.source.uri] = replacement
+
+            wire_attempted = False
+            try:
+                for _document, params in close_notifications:
+                    wire_attempted = True
+                    delivered = process.notify_generation(
+                        "textDocument/didClose",
+                        params,
                         generation_nonce=generation,
                         deadline=deadline,
                     )
-                except (ProtocolViolation, RuntimeError, TimeoutError):
-                    pass
-            with self._lock:
-                for path in closed_paths:
-                    document = open_by_path.get(path)
-                    if document is None:
-                        continue
-                    if self._documents.get(document.source.uri) is document:
-                        del self._documents[document.source.uri]
-                        self._document_bytes -= len(document.content)
-                    self._ready_uri_generations.pop(document.source.uri, None)
-                    snapshot = self._diagnostics.pop(document.source.uri, None)
-                    if snapshot is not None:
-                        self._diagnostic_bytes -= snapshot.retained_bytes
-                for document, content, digest, _change_params in changed_replacements:
-                    if self._documents.get(document.source.uri) is not document:
-                        continue
-                    replacement = OpenDocument(
-                        document.source,
-                        content,
-                        digest,
-                        document.version + 1,
+                    if delivered is False:
+                        raise RuntimeError(
+                            "Pyright didClose notification was not delivered"
+                        )
+                for document, _replacement, params in changed_replacements:
+                    wire_attempted = True
+                    opened = self._send_did_open_once(
+                        document,
+                        generation,
+                        deadline=deadline,
+                        notify=lambda document=document: process.notify_generation(
+                            "textDocument/didOpen",
+                            self._did_open_params(document),
+                            generation_nonce=generation,
+                            deadline=deadline,
+                        ),
                     )
-                    self._document_bytes += len(content) - len(document.content)
-                    self._documents[document.source.uri] = replacement
-                    snapshot = self._diagnostics.get(document.source.uri)
-                    if (
-                        snapshot is not None
-                        and snapshot.document_version is not None
-                        and snapshot.document_version < replacement.version
-                    ):
-                        self._diagnostics.pop(document.source.uri, None)
-                        self._diagnostic_bytes -= snapshot.retained_bytes
-                    with self._wire_condition:
-                        if (
-                            generation is not None
-                            and self._wire_generation == generation
-                        ):
-                            self._wire_opened.add(
-                                (generation, document.source.uri, replacement.version)
-                            )
-                            self._wire_condition.notify_all()
-            if watched_changes:
-                params = {"changes": list(watched_changes)}
-                try:
-                    encode_frame(
-                        {
-                            "jsonrpc": "2.0",
-                            "method": "workspace/didChangeWatchedFiles",
-                            "params": params,
-                        }
+                    if not opened:
+                        raise RuntimeError(
+                            "Pyright didOpen notification was not delivered"
+                        )
+                    delivered = process.notify_generation(
+                        "textDocument/didChange",
+                        params,
+                        generation_nonce=generation,
+                        deadline=deadline,
                     )
-                except ProtocolViolation:
-                    pass
-                else:
+                    if delivered is False:
+                        raise RuntimeError(
+                            "Pyright didChange notification was not delivered"
+                        )
+                if watched_params is not None:
+                    wire_attempted = True
+                    delivered = process.notify_generation(
+                        "workspace/didChangeWatchedFiles",
+                        watched_params,
+                        generation_nonce=generation,
+                        deadline=deadline,
+                    )
+                    if delivered is False:
+                        raise RuntimeError(
+                            "Pyright watched-files notification was not delivered"
+                        )
+            except BaseException as notification_error:
+                if wire_attempted:
                     try:
-                        process.notify(
-                            "workspace/didChangeWatchedFiles",
-                            params,
+                        self._recover_synchronize_snapshot(
+                            process,
+                            generation,
                             deadline=deadline,
                         )
-                    except (ProtocolViolation, RuntimeError, TimeoutError):
-                        pass
+                    except BaseException as recovery_error:
+                        if (
+                            _startup_interruption(notification_error) is not None
+                            or _startup_interruption(recovery_error) is not None
+                        ):
+                            _raise_collected_errors(
+                                [recovery_error],
+                                prior_error=notification_error,
+                            )
+                        raise RuntimeError(
+                            "Pyright synchronization notification recovery failed"
+                        ) from recovery_error
+                raise
+
+            commit_error: RuntimeError | None = None
             with self._lock:
-                self._workspace_revision = revision
+                unchanged_documents = (
+                    len(self._documents) == len(documents_snapshot)
+                    and all(
+                        self._documents.get(uri) is document
+                        for uri, document in documents_snapshot.items()
+                    )
+                )
+                if (
+                    self._closed
+                    or self._closing
+                    or self._process is not process
+                    or self._workspace_revision is not prior
+                    or self._generation_nonce != generation
+                    or process.generation_nonce != generation
+                    or not unchanged_documents
+                ):
+                    commit_error = RuntimeError(
+                        "Pyright synchronization state changed before commit"
+                    )
+                else:
+                    with self._wire_condition:
+                        if self._wire_generation != generation:
+                            commit_error = RuntimeError(
+                                "Pyright synchronization generation changed before commit"
+                            )
+                        else:
+                            next_diagnostics = dict(self._diagnostics)
+                            next_ready = dict(self._ready_uri_generations)
+                            next_target = self._readiness_target_uri
+                            for document in closed_documents:
+                                next_ready.pop(document.source.uri, None)
+                                next_diagnostics.pop(document.source.uri, None)
+                                if next_target == document.source.uri:
+                                    next_target = None
+                            for document, replacement, _params in changed_replacements:
+                                snapshot = next_diagnostics.get(document.source.uri)
+                                if (
+                                    snapshot is not None
+                                    and snapshot.document_version is not None
+                                    and snapshot.document_version < replacement.version
+                                ):
+                                    next_diagnostics.pop(document.source.uri, None)
+                            next_diagnostic_bytes = sum(
+                                snapshot.retained_bytes
+                                for snapshot in next_diagnostics.values()
+                            )
+                            next_wire_opened = set(self._wire_opened)
+                            next_wire_failed = set(self._wire_failed)
+                            for document in closed_documents:
+                                next_wire_opened = {
+                                    key
+                                    for key in next_wire_opened
+                                    if not (
+                                        key[0] == generation
+                                        and key[1] == document.source.uri
+                                    )
+                                }
+                                next_wire_failed = {
+                                    key
+                                    for key in next_wire_failed
+                                    if not (
+                                        key[0] == generation
+                                        and key[1] == document.source.uri
+                                    )
+                                }
+                            for document, replacement, _params in changed_replacements:
+                                next_wire_opened.discard(
+                                    (generation, document.source.uri, document.version)
+                                )
+                                next_wire_opened.add(
+                                    (
+                                        generation,
+                                        replacement.source.uri,
+                                        replacement.version,
+                                    )
+                                )
+                            self._wire_opened = next_wire_opened
+                            self._wire_failed = next_wire_failed
+                            self._wire_condition.notify_all()
+                            self._documents = next_documents
+                            self._document_bytes = projected_document_bytes
+                            self._ready_uri_generations = next_ready
+                            self._diagnostics = next_diagnostics
+                            self._diagnostic_bytes = next_diagnostic_bytes
+                            self._readiness_target_uri = next_target
+                            if next_target is None and self._readiness == "query_ready":
+                                self._readiness = "protocol_initialized"
+                                self._readiness_evidence = (
+                                    "initialize",
+                                    "initialized",
+                                    "configuration",
+                                    *(("didOpen",) if next_documents else ()),
+                                )
+                            self._workspace_revision = revision
+                            self._condition.notify_all()
+            if commit_error is not None:
+                try:
+                    self._recover_synchronize_snapshot(
+                        process,
+                        generation,
+                        deadline=deadline,
+                    )
+                except BaseException as recovery_error:
+                    if _startup_interruption(recovery_error) is not None:
+                        _raise_collected_errors(
+                            [recovery_error],
+                            prior_error=commit_error,
+                        )
+                    raise RuntimeError(
+                        "Pyright synchronization commit recovery failed"
+                    ) from recovery_error
+                raise commit_error
             return delta
 
     def close(self, *, deadline: float) -> None:
         deadline = _validated_deadline(deadline)
-        with self._lock:
-            while self._starting:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0 or not self._condition.wait(remaining):
-                    raise TimeoutError("Pyright startup did not finish before close")
-            cleanup_error = self._startup_cleanup_error
-            startup_process = self._startup_process
-            if (
-                self._closed
-                and self._process is None
-                and cleanup_error is None
-                and startup_process is None
-            ):
-                return
-            process = self._process
-            self._closing = True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not self._close_lock.acquire(timeout=remaining):
+            raise TimeoutError("Pyright close serialization deadline expired")
+        try:
+            self._close_owned(deadline)
+        finally:
+            self._close_lock.release()
+
+    def _close_owned(self, deadline: float) -> None:
+        while True:
+            self._acquire_state_lock(
+                deadline,
+                "Pyright close state lock deadline expired",
+            )
+            try:
+                cleanup_error = self._startup_cleanup_error
+                startup_process = self._startup_process
+                if (
+                    self._closed
+                    and self._process is None
+                    and cleanup_error is None
+                    and startup_process is None
+                ):
+                    return
+                if not self._closing:
+                    self._closing = True
+                    self._condition.notify_all()
+                if not self._starting and self._active_operations == 0:
+                    process = self._process
+                    break
+            finally:
+                self._lock.release()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Pyright operations did not finish before close")
+            time.sleep(min(_LOCK_POLL_SECONDS, remaining))
         try:
             if cleanup_error is not None:
                 cleanup_error.retry_cleanup(deadline)
@@ -2695,12 +3477,13 @@ class PyrightSession:
                 startup_process.close(deadline)
             if process is not None:
                 process.close(deadline)
-        except BaseException:
-            with self._lock:
-                self._closing = False
-                self._condition.notify_all()
-            raise
-        with self._lock:
+        except BaseException as error:
+            _raise_collected_errors([], prior_error=error)
+        self._acquire_state_lock(
+            deadline,
+            "Pyright close final state lock deadline expired",
+        )
+        try:
             if self._startup_cleanup_error is cleanup_error:
                 self._startup_cleanup_error = None
             if self._startup_process is startup_process:
@@ -2708,6 +3491,7 @@ class PyrightSession:
             self._sync_startup_atexit_locked()
             if self._process is process:
                 self._process = None
+            self._bootstrap_owner_nonce = None
             self._readiness = "not_ready"
             self._readiness_evidence = ()
             self._position_encoding = None
@@ -2726,6 +3510,17 @@ class PyrightSession:
             self._closing = False
             self._closed = True
             self._condition.notify_all()
+        finally:
+            self._lock.release()
+
+
+class _KeyLockState:
+    __slots__ = ("lock", "reference_lock", "references")
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.reference_lock = threading.Lock()
+        self.references = 0
 
 
 class PyrightSessionManager:
@@ -2736,8 +3531,11 @@ class PyrightSessionManager:
             raise TypeError("state_root must be a Path")
         self._state_root = state_root
         self._lock = threading.RLock()
-        self._sessions: dict[tuple[str, str, str], PyrightSession] = {}
-        self._key_locks: dict[tuple[str, str, str], threading.Lock] = {}
+        self._sessions: dict[tuple[str, PyrightIdentity], PyrightSession] = {}
+        self._key_locks: dict[tuple[str, PyrightIdentity], _KeyLockState] = {}
+        self._key_lock_releases: queue.SimpleQueue[
+            tuple[tuple[str, PyrightIdentity], _KeyLockState]
+        ] = queue.SimpleQueue()
         self._atexit_registered = False
         self._closed = False
 
@@ -2745,12 +3543,8 @@ class PyrightSessionManager:
     def _profile_key(
         repository: RepositoryScope,
         identity: PyrightIdentity,
-    ) -> tuple[str, str, str]:
-        return (
-            repository.checkout_id,
-            identity.initialization_options_sha256,
-            identity.configuration_sha256,
-        )
+    ) -> tuple[str, PyrightIdentity]:
+        return repository.checkout_id, identity
 
     def _register_atexit_locked(self) -> None:
         if not self._atexit_registered:
@@ -2763,32 +3557,173 @@ class PyrightSessionManager:
         except BaseException:
             pass
 
-    def _live_sessions_locked(self) -> list[PyrightSession]:
-        return [session for session in self._sessions.values() if not session._closed]
+    def _acquire_manager(self, deadline: float) -> None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not self._lock.acquire(timeout=remaining):
+            raise TimeoutError("Pyright session manager lock deadline expired")
 
-    def _evict_lru_idle_locked(self, deadline: float) -> bool:
-        live = self._live_sessions_locked()
-        if len(live) < MAX_LSP_PROCESSES:
-            return True
-        idle = sorted(
-            (session for session in live if session.active_operations == 0),
-            key=lambda session: session.last_used_monotonic,
-        )
-        if not idle:
-            return False
-        evicted = idle[0]
-        evicted_key = next(
-            key for key, session in self._sessions.items() if session is evicted
-        )
-        del self._sessions[evicted_key]
-        self._key_locks.pop(evicted_key, None)
+    @staticmethod
+    def _acquire_key_lock(lock: threading.Lock, deadline: float) -> None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not lock.acquire(timeout=remaining):
+            raise TimeoutError("Pyright session key lock deadline expired")
+
+    def _drain_key_lock_releases_locked(self) -> None:
+        deferred: list[
+            tuple[tuple[str, PyrightIdentity], _KeyLockState]
+        ] = []
+        while True:
+            try:
+                key, state = self._key_lock_releases.get_nowait()
+            except queue.Empty:
+                break
+            if not state.reference_lock.acquire(blocking=False):
+                deferred.append((key, state))
+                continue
+            try:
+                state.references -= 1
+                if state.references < 0:
+                    raise RuntimeError(
+                        "Pyright session key lock reference underflow"
+                    )
+                if state.references == 0 and self._key_locks.get(key) is state:
+                    self._key_locks.pop(key, None)
+            finally:
+                state.reference_lock.release()
+        for release in deferred:
+            self._key_lock_releases.put(release)
+
+    def _prune_key_locks_locked(self) -> None:
+        self._drain_key_lock_releases_locked()
+        for key, state in tuple(self._key_locks.items()):
+            if not state.reference_lock.acquire(blocking=False):
+                continue
+            try:
+                if state.references == 0 and self._key_locks.get(key) is state:
+                    self._key_locks.pop(key, None)
+            finally:
+                state.reference_lock.release()
+
+    def _retain_key_lock_locked(
+        self,
+        key: tuple[str, PyrightIdentity],
+        deadline: float,
+    ) -> _KeyLockState:
+        self._prune_key_locks_locked()
+        state = self._key_locks.get(key)
+        if state is None:
+            state = _KeyLockState()
+            self._key_locks[key] = state
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not state.reference_lock.acquire(timeout=remaining):
+            if state.references == 0 and self._key_locks.get(key) is state:
+                self._key_locks.pop(key, None)
+            raise TimeoutError(
+                "Pyright session key lock reference deadline expired"
+            )
         try:
-            evicted.close(deadline=deadline)
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except BaseException:
-            pass
-        return True
+            state.references += 1
+        finally:
+            state.reference_lock.release()
+        return state
+
+    def _release_key_lock_reference(
+        self,
+        key: tuple[str, PyrightIdentity],
+        state: _KeyLockState,
+    ) -> None:
+        self._key_lock_releases.put((key, state))
+        if not self._lock.acquire(blocking=False):
+            return
+        try:
+            self._prune_key_locks_locked()
+        finally:
+            self._lock.release()
+
+    def _wait_for_key_lock_releases(self, deadline: float) -> None:
+        while True:
+            self._acquire_manager(deadline)
+            try:
+                self._prune_key_locks_locked()
+                if not self._key_locks and self._key_lock_releases.empty():
+                    return
+            finally:
+                self._lock.release()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    "Pyright session key references did not release before deadline"
+                )
+            time.sleep(min(_LOCK_POLL_SECONDS, remaining))
+
+    @staticmethod
+    def _session_state(
+        session: PyrightSession,
+        deadline: float,
+    ) -> tuple[bool, bool, bool, int, float]:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not session._lock.acquire(timeout=remaining):
+            raise TimeoutError("Pyright session state lock deadline expired")
+        try:
+            return (
+                session._closed,
+                session._closing,
+                session._starting,
+                session._active_operations,
+                session._last_used_monotonic,
+            )
+        finally:
+            session._lock.release()
+
+    def _live_entries_locked(
+        self,
+        deadline: float,
+    ) -> list[tuple[tuple[str, PyrightIdentity], PyrightSession]]:
+        live: list[tuple[tuple[str, PyrightIdentity], PyrightSession]] = []
+        for key, session in tuple(self._sessions.items()):
+            closed, _closing, _starting, _active, _last_used = self._session_state(
+                session,
+                deadline,
+            )
+            if closed:
+                if self._sessions.get(key) is session:
+                    self._sessions.pop(key, None)
+                continue
+            live.append((key, session))
+        return live
+
+    def _reserve_lru_idle_locked(
+        self,
+        live: list[tuple[tuple[str, PyrightIdentity], PyrightSession]],
+        deadline: float,
+    ) -> tuple[tuple[str, PyrightIdentity], PyrightSession] | None:
+        idle: list[
+            tuple[float, tuple[str, PyrightIdentity], PyrightSession]
+        ] = []
+        for key, session in live:
+            closed, closing, starting, active, last_used = self._session_state(
+                session,
+                deadline,
+            )
+            if not closed and not closing and not starting and active == 0:
+                idle.append((last_used, key, session))
+        for _last_used, key, session in sorted(idle, key=lambda item: item[0]):
+            if session._reserve_idle_close(deadline):
+                return key, session
+        return None
+
+    @staticmethod
+    def _wait_for_session_close(session: PyrightSession, deadline: float) -> None:
+        while True:
+            closed, closing, _starting, _active, _last_used = (
+                PyrightSessionManager._session_state(session, deadline)
+            )
+            if closed or not closing:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Pyright session close wait deadline expired")
+            time.sleep(min(_LOCK_POLL_SECONDS, remaining))
 
     def get(
         self,
@@ -2806,58 +3741,145 @@ class PyrightSessionManager:
             state_root=self._state_root,
             deadline=deadline,
         )
-        if not identity.qualified:
-            session = PyrightSession(repository, identity, state_root=self._state_root)
-            return session
-        key = self._profile_key(repository, identity)
-        with self._lock:
+        self._acquire_manager(deadline)
+        try:
             if self._closed:
                 raise RuntimeError("Pyright session manager is closed")
-            key_lock = self._key_locks.setdefault(key, threading.Lock())
-        with key_lock:
-            with self._lock:
-                existing = self._sessions.get(key)
-                if existing is not None and not existing._closed:
-                    return existing
-                if not self._evict_lru_idle_locked(deadline):
-                    denied = PyrightSession(
-                        repository,
-                        identity,
-                        state_root=self._state_root,
-                    )
-                    denied._capacity_locked = True
-                    return denied
-                session = PyrightSession(
+            if not identity.qualified:
+                return PyrightSession(
                     repository,
                     identity,
                     state_root=self._state_root,
                 )
-                self._sessions[key] = session
-                self._register_atexit_locked()
-                return session
+            key = self._profile_key(repository, identity)
+            key_lock_state = self._retain_key_lock_locked(key, deadline)
+        finally:
+            self._lock.release()
+
+        key_lock_acquired = False
+        try:
+            self._acquire_key_lock(key_lock_state.lock, deadline)
+            key_lock_acquired = True
+            while True:
+                wait_for: PyrightSession | None = None
+                reserved: tuple[
+                    tuple[str, PyrightIdentity], PyrightSession
+                ] | None = None
+                self._acquire_manager(deadline)
+                try:
+                    if self._closed:
+                        raise RuntimeError("Pyright session manager is closed")
+                    existing = self._sessions.get(key)
+                    if existing is not None:
+                        closed, closing, _starting, _active, _last_used = (
+                            self._session_state(existing, deadline)
+                        )
+                        if closed:
+                            if self._sessions.get(key) is existing:
+                                self._sessions.pop(key, None)
+                        elif closing:
+                            wait_for = existing
+                        else:
+                            return existing
+                    if wait_for is None:
+                        live = self._live_entries_locked(deadline)
+                        if len(live) < MAX_LSP_PROCESSES:
+                            session = PyrightSession(
+                                repository,
+                                identity,
+                                state_root=self._state_root,
+                            )
+                            self._sessions[key] = session
+                            self._register_atexit_locked()
+                            return session
+                        reserved = self._reserve_lru_idle_locked(live, deadline)
+                        if reserved is None:
+                            denied = PyrightSession(
+                                repository,
+                                identity,
+                                state_root=self._state_root,
+                            )
+                            denied._capacity_locked = True
+                            return denied
+                finally:
+                    self._lock.release()
+
+                if wait_for is not None:
+                    self._wait_for_session_close(wait_for, deadline)
+                    continue
+
+                assert reserved is not None
+                evicted_key, evicted = reserved
+                evicted.close(deadline=deadline)
+
+                self._acquire_manager(deadline)
+                try:
+                    closed, _closing, _starting, _active, _last_used = (
+                        self._session_state(evicted, deadline)
+                    )
+                    if not closed:
+                        raise RuntimeError(
+                            "Pyright eviction close did not release the session"
+                        )
+                    if self._sessions.get(evicted_key) is evicted:
+                        self._sessions.pop(evicted_key, None)
+                    if self._closed:
+                        raise RuntimeError("Pyright session manager is closed")
+                    live = self._live_entries_locked(deadline)
+                    if len(live) >= MAX_LSP_PROCESSES:
+                        continue
+                    session = PyrightSession(
+                        repository,
+                        identity,
+                        state_root=self._state_root,
+                    )
+                    self._sessions[key] = session
+                    self._register_atexit_locked()
+                    return session
+                finally:
+                    self._lock.release()
+        finally:
+            if key_lock_acquired:
+                key_lock_state.lock.release()
+            self._release_key_lock_reference(key, key_lock_state)
 
     def close_all(self, *, deadline: float) -> None:
         deadline = _validated_deadline(deadline)
-        with self._lock:
-            sessions = tuple(self._sessions.values())
-            self._sessions.clear()
-            self._key_locks.clear()
+        self._acquire_manager(deadline)
+        try:
             self._closed = True
-        last_error: BaseException | None = None
-        for session in sessions:
-            if session._closed:
-                continue
+            self._prune_key_locks_locked()
+            sessions = tuple(self._sessions.items())
+        finally:
+            self._lock.release()
+
+        errors: list[BaseException] = []
+        for key, session in sessions:
             try:
                 session.close(deadline=deadline)
-            except (KeyboardInterrupt, SystemExit):
-                try:
-                    session.close(
-                        deadline=min(deadline, time.monotonic() + _OWNER_CLEANUP_SECONDS)
-                    )
-                except BaseException:
-                    pass
-                raise
             except BaseException as error:
-                last_error = error
-        if last_error is not None:
-            raise last_error
+                errors.append(error)
+                continue
+
+            try:
+                self._acquire_manager(deadline)
+                try:
+                    closed, _closing, _starting, _active, _last_used = (
+                        self._session_state(session, deadline)
+                    )
+                    if not closed:
+                        raise RuntimeError(
+                            "Pyright close_all close did not release the session"
+                        )
+                    if self._sessions.get(key) is session:
+                        self._sessions.pop(key, None)
+                finally:
+                    self._lock.release()
+            except BaseException as error:
+                errors.append(error)
+
+        try:
+            self._wait_for_key_lock_releases(deadline)
+        except BaseException as error:
+            errors.append(error)
+        _raise_collected_errors(errors)

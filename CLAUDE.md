@@ -137,23 +137,19 @@ Legacy `cache/index.sqlite`, `cache/vectors.npy`, `cache/vectors_meta.json`, and
 caches, not members of a generation. They must not be removed until installed-vault
 migration evidence makes that safe.
 
-**Approved code-navigation target (provider session implemented; normalized navigation
-not implemented):** Runtime paths are reserved, pure derivation helpers are implemented,
-and the Pyright provider session core is implemented. The current checkpoint remains
-`corpus-generation/v2` with `evidence-graph/v2`. Foundation Tasks 1-5 of the
-2026-07-21 Plan A remain implemented, but its one-shot
-consent/SCIP/publication Tasks 6-16 are superseded. The approved target keeps the
-existing structural Evidence Graph and adds an owned, Python 3.10-compatible,
-read-only LSP runtime, starting with a production-quality Python/Pyright slice.
-Tasks 1-8 and Task 9's core/readiness/semantic subset of the replacement plan now
-implement paths, positions, bounded protocol, startup evidence, leased
-platform-qualified process lifecycle ownership, repository containment, safe log
-redaction, pinned profile discovery/installation, and the capability-honest provider
-session. Document synchronization, session-manager capacity, normalized navigation,
-and MCP routing remain unimplemented. A Windows Job Object owns the
-assigned server tree. On POSIX, the process group covers pinned Pyright descendants
-only while they remain in-group; hostile `setsid()` escape is unsupported, so this
-path remains limited to trusted repositories.
+**Implemented code-navigation slice:** The current authoritative corpus checkpoint
+remains `corpus-generation/v2` with `evidence-graph/v2`. Foundation Tasks 1-5 of the
+2026-07-21 Plan A remain implemented, but its one-shot consent/SCIP/publication Tasks
+6-16 are superseded. The replacement plan implements the production-quality,
+Python 3.10-compatible read-only LSP path through pinned Pyright 1.1.411: paths,
+positions, bounded protocol, startup evidence, leased platform-qualified lifecycle
+ownership, repository containment, safe log redaction, explicit profile installation,
+document synchronization, session-manager capacity, the normalized navigation facade,
+deterministic rendering, precise `get_architecture` modes, doctor diagnostics, and
+qualification gates. A Windows Job Object owns the assigned server tree. On POSIX,
+the process group covers pinned Pyright descendants only while they remain in-group;
+hostile `setsid()` escape is unsupported, so this path remains limited to trusted
+local repositories and is not an OS sandbox.
 It adds no Serena runtime dependency, Rust rewrite, second graph, catalog, active
 pointer, runtime root, persistent daemon, or MCP tool. Query-time LSP observations
 are not written into active generations. Language servers start lazily inside the
@@ -355,7 +351,7 @@ for tests/e2e.
 ## 7. Quick command reference
 
 ```bash
-uv run pytest -q                              # run the test suite (5087 tests collected)
+uv run pytest -q                              # run the full regression suite
 uv run ruff check scripts/ tests/             # Python static analysis
 uv run python scripts/lint_memory.py --scope all   # structural lint
 uv run python scripts/search_memory.py "query"     # hybrid search

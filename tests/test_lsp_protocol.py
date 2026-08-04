@@ -470,6 +470,97 @@ def test_cancellation_sends_cancel_and_drops_late_response(fake_server: FakeLspS
     timer.join()
 
 
+def test_sent_request_evidence_only_advances_after_full_dispatch() -> None:
+    reader = _BlockingReader()
+    writer = _BlockingWriter()
+    protocol = _protocol_with_streams(reader, writer)
+    source = CancellationSource()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(
+            protocol.request,
+            "slow",
+            {},
+            deadline=time.monotonic() + 2,
+            cancellation=source.token,
+        )
+        deadline = time.monotonic() + 1
+        while protocol.pending_count == 0 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert protocol.pending_count == 1
+        assert protocol._sent_request_evidence() == (0, None)
+
+        writer.released.set()
+        while protocol._sent_request_evidence()[0] == 0 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert protocol._sent_request_evidence() == (1, "slow")
+
+        source.cancel()
+        with pytest.raises(RequestCancelled):
+            future.result(timeout=1)
+
+    protocol.close()
+
+
+def test_immediate_responses_preserve_monotonic_dispatch_evidence(
+    fake_server: FakeLspServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_count = 100
+    real_write_frame = LspProtocol._write_frame
+    real_complete_write = LspProtocol._complete_write
+    completed_writes = 0
+    completed_condition = threading.Condition()
+
+    def force_response_before_post_write_state(
+        protocol: LspProtocol,
+        task: object,
+    ) -> None:
+        real_write_frame(protocol, task)
+        if task.request_key is None:
+            return
+        deadline = time.monotonic() + 1
+        while protocol.pending_count and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert protocol.pending_count == 0
+
+    def track_completed_write(
+        protocol: LspProtocol,
+        task: object,
+        error: BaseException | None,
+    ) -> None:
+        nonlocal completed_writes
+        real_complete_write(protocol, task, error)
+        if task.request_key is not None and error is None:
+            with completed_condition:
+                completed_writes += 1
+                completed_condition.notify_all()
+
+    monkeypatch.setattr(LspProtocol, "_write_frame", force_response_before_post_write_state)
+    monkeypatch.setattr(LspProtocol, "_complete_write", track_completed_write)
+
+    def handler(peer: FakeLspPeer) -> None:
+        for _index in range(request_count):
+            request = peer.read()
+            peer.send({"jsonrpc": "2.0", "id": request["id"], "result": None})
+
+    protocol = fake_server.start(handler)
+    for index in range(1, request_count + 1):
+        assert protocol.request(
+            "immediate",
+            {},
+            deadline=time.monotonic() + 2,
+        ) is None
+        with completed_condition:
+            assert completed_condition.wait_for(
+                lambda: completed_writes >= index,
+                timeout=1,
+            )
+        assert protocol.pending_count == 0
+    assert completed_writes == request_count
+    assert protocol._sent_request_evidence() == (request_count, "immediate")
+
+
 def test_timeout_keeps_sent_drain_without_waiting_past_original_deadline(
     fake_server: FakeLspServer,
 ) -> None:
@@ -907,6 +998,578 @@ def test_constructor_owner_waits_and_rollback_share_startup_deadline(
 
     assert wait_deadlines == [startup_deadline, startup_deadline]
     assert rollback_deadlines == [startup_deadline, startup_deadline]
+
+
+def test_constructor_accepts_registration_recorded_before_delayed_event_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_register = LspProtocol._register_owner
+    registrations = {
+        "reader": threading.Event(),
+        "writer": threading.Event(),
+    }
+
+    def register_before_publication(
+        protocol: LspProtocol,
+        name: str,
+        started: threading.Event,
+    ) -> bool:
+        real_set = started.set
+        started.set = lambda: None
+        try:
+            registered = real_register(protocol, name, started)
+        finally:
+            started.set = real_set
+        registrations[name].set()
+        return registered
+
+    def observe_delayed_publication(
+        event: threading.Event,
+        owner_name: str,
+        _deadline: float,
+    ) -> None:
+        assert registrations[owner_name].wait(1)
+        assert event.is_set() is False
+        raise TimeoutError(f"LSP {owner_name} owner did not start before deadline")
+
+    monkeypatch.setattr(LspProtocol, "_register_owner", register_before_publication)
+    monkeypatch.setattr(
+        LspProtocol,
+        "_wait_owner_started",
+        staticmethod(observe_delayed_publication),
+    )
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=100)
+
+    protocol = LspProtocol(
+        reader,
+        writer,
+        "owner-registration-before-publication",
+        fatal_callback=lambda _reason: None,
+        _startup_deadline=time.monotonic() + 1,
+    )
+    try:
+        assert protocol.stdout_reader_owner == protocol.reader_thread.ident
+        assert protocol.stdin_writer_owner == protocol.writer_thread.ident
+    finally:
+        protocol.close(time.monotonic() + 1)
+
+
+def test_constructor_rollback_rethrows_real_join_interruption_with_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_join = threading.Thread.join
+    real_register = LspProtocol._register_owner
+    interrupted = False
+    raised_error: BaseException | None = None
+
+    def fail_reader_registration(
+        protocol: LspProtocol,
+        name: str,
+        started: threading.Event,
+    ) -> bool:
+        if name != "reader":
+            return real_register(protocol, name, started)
+        with protocol._owner_handle_lock:
+            protocol._owner_start_errors[name] = RuntimeError(
+                "reader registration failed"
+            )
+        started.set()
+        return False
+
+    def interrupt_writer_join(
+        thread: threading.Thread,
+        timeout: float | None = None,
+    ) -> None:
+        nonlocal interrupted
+        if thread.name.startswith("lsp-stdin-") and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt("owner join interrupted")
+        real_join(thread, timeout)
+
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=100)
+    with monkeypatch.context() as patch:
+        patch.setattr(LspProtocol, "_register_owner", fail_reader_registration)
+        patch.setattr(threading.Thread, "join", interrupt_writer_join)
+        try:
+            LspProtocol(
+                reader,
+                writer,
+                "real-join-interruption",
+                fatal_callback=lambda _reason: None,
+                _startup_deadline=time.monotonic() + 1,
+            )
+        except BaseException as error:
+            raised_error = error
+
+    assert raised_error is not None
+    retained = (
+        raised_error
+        if isinstance(raised_error, lsp_protocol._ProtocolStartupCleanupError)
+        else raised_error.__cause__
+    )
+    assert isinstance(retained, lsp_protocol._ProtocolStartupCleanupError)
+    retained.protocol.close(time.monotonic() + 1)
+
+    assert isinstance(raised_error, KeyboardInterrupt)
+    assert str(raised_error) == "owner join interrupted"
+    traceback_names: list[str] = []
+    current = raised_error.__traceback__
+    while current is not None:
+        traceback_names.append(current.tb_frame.f_code.co_name)
+        current = current.tb_next
+    assert "interrupt_writer_join" in traceback_names
+    assert raised_error.__cause__ is retained
+    assert isinstance(retained.__cause__, RuntimeError)
+    assert str(retained.__cause__) == "reader registration failed"
+
+
+def test_constructor_startup_interruption_outranks_ordinary_rollback_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_start = threading.Thread.start
+    real_join = threading.Thread.join
+    raised_error: BaseException | None = None
+
+    def interrupt_reader_start(thread: threading.Thread) -> None:
+        if thread.name.startswith("lsp-stdout-"):
+            raise KeyboardInterrupt("reader startup interrupted")
+        real_start(thread)
+
+    def fail_writer_join(
+        thread: threading.Thread,
+        timeout: float | None = None,
+    ) -> None:
+        if thread.name.startswith("lsp-stdin-"):
+            raise TimeoutError("ordinary writer rollback timeout")
+        real_join(thread, timeout)
+
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=100)
+    with monkeypatch.context() as patch:
+        patch.setattr(threading.Thread, "start", interrupt_reader_start)
+        patch.setattr(threading.Thread, "join", fail_writer_join)
+        try:
+            LspProtocol(
+                reader,
+                writer,
+                "startup-interruption-priority",
+                fatal_callback=lambda _reason: None,
+                _startup_deadline=time.monotonic() + 1,
+            )
+        except BaseException as error:
+            raised_error = error
+
+    assert raised_error is not None
+    retained = (
+        raised_error
+        if isinstance(raised_error, lsp_protocol._ProtocolStartupCleanupError)
+        else raised_error.__cause__
+    )
+    assert isinstance(retained, lsp_protocol._ProtocolStartupCleanupError)
+    retained.protocol.close(time.monotonic() + 1)
+
+    assert isinstance(raised_error, KeyboardInterrupt)
+    assert str(raised_error) == "reader startup interrupted"
+    traceback_names: list[str] = []
+    current = raised_error.__traceback__
+    while current is not None:
+        traceback_names.append(current.tb_frame.f_code.co_name)
+        current = current.tb_next
+    assert "interrupt_reader_start" in traceback_names
+    assert raised_error.__cause__ is retained
+    assert any(isinstance(error, TimeoutError) for error in retained.errors)
+
+
+def test_constructor_unwraps_startup_interruption_without_exception_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_start = threading.Thread.start
+
+    def make_interruption() -> KeyboardInterrupt:
+        try:
+            raise KeyboardInterrupt("wrapped protocol startup interruption")
+        except KeyboardInterrupt as error:
+            return error
+
+    interruption = make_interruption()
+    wrapper = RuntimeError("protocol startup interruption wrapper")
+    wrapper.__cause__ = interruption
+
+    def wrapped_writer_start(thread: threading.Thread) -> None:
+        if thread.name.startswith("lsp-stdin-"):
+            raise wrapper
+        real_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", wrapped_writer_start)
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=100)
+
+    with pytest.raises(
+        KeyboardInterrupt,
+        match="wrapped protocol startup interruption",
+    ) as raised:
+        LspProtocol(
+            reader,
+            writer,
+            "wrapped-constructor-startup-interruption",
+            fatal_callback=lambda _reason: None,
+            _startup_deadline=time.monotonic() + 1,
+        )
+
+    assert raised.value is interruption
+    assert raised.value.__cause__ is wrapper
+    assert wrapper.__cause__ is None
+    assert wrapper.__context__ is None
+    assert reader.closed is True
+    assert writer.closed is True
+
+
+def test_constructor_partial_owner_retains_cleanup_behind_acyclic_interruption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_start = threading.Thread.start
+    real_partial_join = LspProtocol._join_partially_started_owner
+
+    def make_interruption() -> KeyboardInterrupt:
+        try:
+            raise KeyboardInterrupt("partial-owner startup interruption")
+        except KeyboardInterrupt as error:
+            return error
+
+    interruption = make_interruption()
+    wrapper = RuntimeError("partial-owner startup wrapper")
+    wrapper.__cause__ = interruption
+    join_error = TimeoutError("partial writer owner retained")
+
+    def start_writer_then_interrupt(thread: threading.Thread) -> None:
+        real_start(thread)
+        if thread.name.startswith("lsp-stdin-"):
+            raise wrapper
+
+    def retain_writer_owner(
+        self: LspProtocol,
+        owner: threading.Thread,
+        deadline: float,
+    ) -> None:
+        if owner is self.writer_thread:
+            raise join_error
+        real_partial_join(self, owner, deadline)
+
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=100)
+    raised_error: BaseException | None = None
+    with monkeypatch.context() as patch:
+        patch.setattr(threading.Thread, "start", start_writer_then_interrupt)
+        patch.setattr(
+            LspProtocol,
+            "_join_partially_started_owner",
+            retain_writer_owner,
+        )
+        try:
+            LspProtocol(
+                reader,
+                writer,
+                "partial-owner-nested-interruption",
+                fatal_callback=lambda _reason: None,
+                _startup_deadline=time.monotonic() + 1,
+            )
+        except BaseException as error:
+            raised_error = error
+
+    assert raised_error is not None
+    reachable: list[BaseException] = []
+    pending = [raised_error]
+    discovered: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in discovered:
+            continue
+        discovered.add(id(current))
+        reachable.append(current)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+    retained = next(
+        (
+            error
+            for error in reachable
+            if isinstance(error, lsp_protocol._ProtocolStartupCleanupError)
+        ),
+        None,
+    )
+    assert retained is not None
+    try:
+        pending = [raised_error]
+        visited: set[int] = set()
+        while pending:
+            current = pending.pop()
+            assert id(current) not in visited
+            visited.add(id(current))
+            if current.__cause__ is not None:
+                pending.append(current.__cause__)
+            if current.__context__ is not None:
+                pending.append(current.__context__)
+
+        assert raised_error is interruption
+        assert retained in reachable
+        assert wrapper in reachable
+        assert retained.errors == (join_error,)
+        assert wrapper.__cause__ is None
+        assert wrapper.__context__ is None
+    finally:
+        retained.protocol.close(time.monotonic() + 1)
+
+    assert not retained.protocol.reader_thread.is_alive()
+    assert not retained.protocol.writer_thread.is_alive()
+
+
+def test_join_owners_later_interruption_outranks_first_ordinary_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    protocol = _protocol_with_streams(
+        _BlockingReader(),
+        _BlockingWriter(block_after=100),
+        generation_nonce="join-owner-interruption-priority",
+    )
+    real_join = threading.Thread.join
+    raised_error: BaseException | None = None
+
+    def ordered_join_failures(
+        thread: threading.Thread,
+        timeout: float | None = None,
+    ) -> None:
+        if thread.name.startswith("lsp-stdout-"):
+            raise TimeoutError("first ordinary owner join error")
+        if thread.name.startswith("lsp-stdin-"):
+            raise SystemExit(37)
+        real_join(thread, timeout)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(threading.Thread, "join", ordered_join_failures)
+        try:
+            protocol.close(time.monotonic() + 1)
+        except BaseException as error:
+            raised_error = error
+
+    protocol.close(time.monotonic() + 1)
+    assert isinstance(raised_error, SystemExit)
+    assert raised_error.code == 37
+    traceback_names: list[str] = []
+    current = raised_error.__traceback__
+    while current is not None:
+        traceback_names.append(current.tb_frame.f_code.co_name)
+        current = current.tb_next
+    assert "ordered_join_failures" in traceback_names
+    assert isinstance(raised_error.__cause__, TimeoutError)
+    assert str(raised_error.__cause__) == "first ordinary owner join error"
+
+
+def test_join_owners_unwraps_earliest_interruption_without_exception_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    protocol = _protocol_with_streams(
+        _BlockingReader(),
+        _BlockingWriter(block_after=100),
+        generation_nonce="join-owner-wrapped-interruption",
+    )
+    real_join = threading.Thread.join
+    ordinary_error = TimeoutError("later ordinary owner join error")
+
+    def make_interruption() -> KeyboardInterrupt:
+        try:
+            raise KeyboardInterrupt("wrapped owner join interruption")
+        except KeyboardInterrupt as error:
+            return error
+
+    interruption = make_interruption()
+    wrapper = RuntimeError("owner join wrapper")
+    wrapper.__cause__ = interruption
+    raised_error: BaseException | None = None
+
+    def wrapped_join_failures(
+        thread: threading.Thread,
+        timeout: float | None = None,
+    ) -> None:
+        if thread.name.startswith("lsp-stdout-"):
+            raise wrapper
+        if thread.name.startswith("lsp-stdin-"):
+            raise ordinary_error
+        real_join(thread, timeout)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(threading.Thread, "join", wrapped_join_failures)
+        try:
+            protocol.close(time.monotonic() + 1)
+        except BaseException as error:
+            raised_error = error
+
+    protocol.close(time.monotonic() + 1)
+    assert raised_error is interruption
+    assert raised_error.__cause__ is ordinary_error
+    assert raised_error.__context__ is None
+    assert wrapper.__cause__ is interruption
+
+
+def test_owner_start_errors_prioritize_later_interruption() -> None:
+    protocol = _protocol_with_streams(
+        _BlockingReader(),
+        _BlockingWriter(block_after=100),
+        generation_nonce="owner-start-interruption-priority",
+    )
+    ordinary_error = RuntimeError("first ordinary owner start error")
+
+    def make_interruption() -> KeyboardInterrupt:
+        try:
+            raise KeyboardInterrupt("later owner start interruption")
+        except KeyboardInterrupt as error:
+            return error
+
+    interruption = make_interruption()
+    try:
+        with protocol._owner_handle_lock:
+            protocol._owner_start_errors = {
+                "reader": ordinary_error,
+                "writer": interruption,
+            }
+
+        with pytest.raises(
+            KeyboardInterrupt,
+            match="later owner start interruption",
+        ) as raised:
+            protocol._raise_owner_start_error()
+
+        assert raised.value is interruption
+        assert raised.value.__cause__ is ordinary_error
+        traceback_names: list[str] = []
+        current = raised.value.__traceback__
+        while current is not None:
+            traceback_names.append(current.tb_frame.f_code.co_name)
+            current = current.tb_next
+        assert "make_interruption" in traceback_names
+    finally:
+        with protocol._owner_handle_lock:
+            protocol._owner_start_errors.clear()
+        protocol.close(time.monotonic() + 1)
+
+
+def test_constructor_rejects_expired_deadline_before_starting_owner_threads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    starts: list[str] = []
+
+    def reject_start(thread: threading.Thread) -> None:
+        starts.append(thread.name)
+        raise AssertionError("owner thread started after the caller deadline")
+
+    monkeypatch.setattr(threading.Thread, "start", reject_start)
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=100)
+
+    with pytest.raises(TimeoutError, match="thread-start deadline"):
+        LspProtocol(
+            reader,
+            writer,
+            "expired-thread-start-deadline",
+            fatal_callback=lambda _reason: None,
+            _startup_deadline=time.monotonic() - 1,
+        )
+
+    assert starts == []
+    assert reader.closed is True
+    assert writer.closed is True
+
+
+def test_constructor_accepts_live_sub_half_second_owner_start_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_monotonic = time.monotonic
+    now = real_monotonic()
+    startup_deadline = now + 0.4
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=100)
+    protocol: LspProtocol | None = None
+
+    with monkeypatch.context() as patch:
+        patch.setattr(lsp_protocol.time, "monotonic", lambda: now)
+        protocol = LspProtocol(
+            reader,
+            writer,
+            "live-sub-half-second-start-deadline",
+            fatal_callback=lambda _reason: None,
+            _startup_deadline=startup_deadline,
+        )
+        with protocol._owner_handle_lock:
+            registrations = dict(protocol._owner_registration_monotonic)
+
+    try:
+        assert set(registrations) == {"reader", "writer"}
+        assert all(registered <= startup_deadline for registered in registrations.values())
+        assert protocol.stdout_reader_owner == protocol.reader_thread.ident
+        assert protocol.stdin_writer_owner == protocol.writer_thread.ident
+    finally:
+        if protocol is not None:
+            protocol.close(real_monotonic() + 1)
+
+
+def test_constructor_rechecks_budget_before_each_owner_thread_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_start = threading.Thread.start
+    starts: list[str] = []
+    startup_deadline = time.monotonic() + 0.05
+    raised_error: BaseException | None = None
+
+    def delay_writer_start(thread: threading.Thread) -> None:
+        starts.append(thread.name)
+        if thread.name.startswith("lsp-stdin-"):
+            remaining = startup_deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(remaining + 0.01)
+        real_start(thread)
+
+    reader = _BlockingReader()
+    writer = _BlockingWriter(block_after=100)
+    with monkeypatch.context() as patch:
+        patch.setattr(threading.Thread, "start", delay_writer_start)
+        try:
+            LspProtocol(
+                reader,
+                writer,
+                "per-owner-start-budget",
+                fatal_callback=lambda _reason: None,
+                _startup_deadline=startup_deadline,
+            )
+        except BaseException as error:
+            raised_error = error
+
+    assert raised_error is not None
+    pending: list[BaseException] = [raised_error]
+    seen: set[int] = set()
+    retained: lsp_protocol._ProtocolStartupCleanupError | None = None
+    errors: list[BaseException] = []
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        errors.append(current)
+        if isinstance(current, lsp_protocol._ProtocolStartupCleanupError):
+            retained = current
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+    if retained is not None:
+        retained.protocol.close(time.monotonic() + 1)
+
+    assert starts == ["lsp-stdin-per-owner-start-budget"]
+    assert any(
+        isinstance(error, TimeoutError) and "thread-start deadline" in str(error)
+        for error in errors
+    )
 
 
 def test_constructor_failure_retains_blocked_owner_for_cleanup_retry(
@@ -2052,23 +2715,48 @@ def test_process_cleanup_stop_wakes_pending_before_blocked_owners_release() -> N
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows synchronous I/O interruption")
-def test_windows_cleanup_never_reopens_an_owner_by_recyclable_native_id(
+def test_windows_owner_handles_are_retained_cancelled_and_closed_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import ctypes
+    duplicated = iter((101, 202))
+    cancelled: list[int] = []
+    closed: list[int] = []
+
+    class FakeKernel32:
+        @staticmethod
+        def OpenThread(*_args: object) -> int:
+            raise AssertionError("cleanup reopened a thread by native ID")
+
+        @staticmethod
+        def CancelSynchronousIo(handle: int) -> bool:
+            cancelled.append(handle)
+            return True
+
+        @staticmethod
+        def CloseHandle(handle: int) -> bool:
+            closed.append(handle)
+            return True
 
     reader = _BlockingReader()
+    monkeypatch.setattr(
+        lsp_protocol,
+        "_duplicate_current_thread_handle",
+        lambda: next(duplicated),
+    )
+    monkeypatch.setattr(lsp_protocol, "_KERNEL32", FakeKernel32())
     protocol = _protocol_with_streams(reader, _BlockingWriter(block_after=100))
     assert reader.started.wait(1)
 
-    monkeypatch.setattr(
-        ctypes,
-        "WinDLL",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("cleanup reopened a thread by native ID")
-        ),
-    )
+    assert {
+        protocol._reader_os_handle,
+        protocol._writer_os_handle,
+    } == {101, 202}
 
     protocol.close(time.monotonic() + 1)
+
+    assert sorted(cancelled) == [101, 202]
+    assert sorted(closed) == [101, 202]
+    assert protocol._reader_os_handle is None
+    assert protocol._writer_os_handle is None
     assert not protocol.reader_thread.is_alive()
     assert not protocol.writer_thread.is_alive()

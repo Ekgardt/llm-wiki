@@ -13,5 +13,7 @@
   "crash_cycles": 20,
   "default_limit": 10,
   "max_estimated_tokens": 1200,
+  "expected_source_manifest_sha256": "30f0b042afc971426f9e0c8e6fa8f1c9446976de82a427acda3d1ec9eb0e31e8",
+  "expected_gold_sha256": "da2ddb5b6ef245a388b7fa4142770aa25e0580319df16af6ac7475a3c0455a5f",
   "market_superiority_claimed": false
 }

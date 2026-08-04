@@ -66,6 +66,24 @@ One-sentence summary: Session memory captures what Claude Code and the human lea
 - There is no automatic Git operation, persistent daemon, cloud service, remote
   queue/cache, SQLite knowledge source, gzip archive tier, or automatic purge.
 
+## Read-only code-navigation boundary
+
+- Python navigation is a derived, query-time view through pinned Pyright 1.1.411.
+  It requires explicit operator installation and never downloads during a query.
+- The API exposes only allowlisted read operations. Pyright still has the current
+  user's OS permissions, so this is limited to trusted local repositories and is not
+  an OS sandbox.
+- Every accepted result binds an unchanged pre/post workspace revision and current
+  source citations. A stale attempt is retried once; no semantic result cache or
+  closed-world negative claim is introduced.
+- Query-time LSP observations never become authoritative Markdown or active-generation
+  records. Structural Evidence Graph data remains the discovery and fallback layer.
+- `run/lsp/<owner-nonce>/` is protected operational state while an owner is live or
+  failure evidence is retained. Windows Job Object and POSIX process-group ownership
+  remain platform-qualified; hostile `setsid()` escape is unsupported.
+- The 100 KLOC public fixture gates correctness, freshness, ownership, recovery,
+  bounded output, latency, and RSS. Market superiority remains unclaimed.
+
 ## Rules
 - Not every chat detail deserves permanence.
 - Save durable decisions, lessons, repeatable commands, architectural constraints, and gotchas.

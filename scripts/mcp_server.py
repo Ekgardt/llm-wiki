@@ -37,6 +37,7 @@ import asyncio
 import concurrent.futures
 import contextvars
 import datetime as dt
+import hashlib
 import inspect
 import itertools
 import re
@@ -63,6 +64,9 @@ MAX_MCP_CONTEXT_TOKENS = 32_768
 MAX_MCP_ERROR_CHARS = 256
 MCP_OPERATION_SECONDS = 10.0
 MCP_LSP_STARTUP_SECONDS = 60.0
+MAX_NAVIGATION_SOURCE_BYTES = 16 * 1024 * 1024
+MAX_NAVIGATION_GRAPH_FACTS = 10_000
+MAX_NAVIGATION_SOURCE_CACHE_BYTES = 64 * 1024 * 1024
 PRECISE_ARCHITECTURE_MODES = frozenset(
     {"definition", "references", "implementations", "type", "diagnostics"}
 )
@@ -261,6 +265,63 @@ def _timeout_envelope_text() -> str:
         "warnings": [error],
         "components": {},
         "data": {"error": error},
+    }
+    return json.dumps(envelope, indent=2, ensure_ascii=False, allow_nan=False)
+
+
+def _navigation_failure_from_arguments(
+    arguments: object,
+    *,
+    status: str,
+    warning: str,
+) -> dict | None:
+    if not isinstance(arguments, dict) or not _is_precise_architecture_request(
+        arguments
+    ):
+        return None
+    mode = arguments.get("mode")
+    if not isinstance(mode, str):
+        return None
+    directory = arguments.get("directory")
+    return _normalized_navigation_failure(
+        directory=directory if isinstance(directory, str) else None,
+        mode=mode,
+        status=status,
+        warning=warning,
+        offset=arguments.get("offset", 0),
+        limit=arguments.get("limit", 10),
+    )
+
+
+def _tool_timeout_envelope_text(name: str, arguments: object) -> str:
+    import json
+
+    data = (
+        _navigation_failure_from_arguments(
+            arguments,
+            status="timeout",
+            warning="navigation_timeout",
+        )
+        if name == "get_architecture"
+        else None
+    )
+    if data is None:
+        return _timeout_envelope_text()
+    data["directory"] = None
+    warning = "navigation_timeout"
+    envelope = {
+        "schema_version": "1.0",
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "index_timestamp": None,
+        "source_commit": None,
+        "freshness": "unknown",
+        "coverage": 0.0,
+        "confidence": 0.2,
+        "fallback": False,
+        "partial": True,
+        "warnings": [warning],
+        "components": {},
+        "data": data,
     }
     return json.dumps(envelope, indent=2, ensure_ascii=False, allow_nan=False)
 
@@ -1132,6 +1193,8 @@ def _analyze_impact(
 
 
 _NAVIGATION_MANAGER: object | None = None
+_NAVIGATION_MANAGER_CLOSING: object | None = None
+_NAVIGATION_MANAGER_EPOCH = 0
 _NAVIGATION_MANAGER_LOCK = threading.Lock()
 
 _PRECISE_MODE_CAPABILITY = {
@@ -1143,16 +1206,86 @@ _PRECISE_MODE_CAPABILITY = {
 }
 
 
-def _navigation_session_manager():
-    global _NAVIGATION_MANAGER
-    if _NAVIGATION_MANAGER is None:
-        with _NAVIGATION_MANAGER_LOCK:
-            if _NAVIGATION_MANAGER is None:
-                from memory_state import STATE_ROOT
-                from pyright_session import PyrightSessionManager
+def _acquire_navigation_manager_lock(deadline: float) -> None:
+    _check_deadline(deadline)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0 or not _NAVIGATION_MANAGER_LOCK.acquire(timeout=remaining):
+        raise TimeoutError("navigation session manager lock deadline expired")
+    try:
+        _check_deadline(deadline)
+    except BaseException:
+        _NAVIGATION_MANAGER_LOCK.release()
+        raise
 
-                _NAVIGATION_MANAGER = PyrightSessionManager(state_root=STATE_ROOT)
-    return _NAVIGATION_MANAGER
+
+def _check_navigation_manager_stop(deadline: float, cancelled) -> None:
+    _check_deadline(deadline)
+    if cancelled():
+        raise TimeoutError("navigation operation cancelled")
+    _check_deadline(deadline)
+
+
+def _navigation_session_manager(
+    deadline: float,
+    expected_epoch: int,
+    cancelled,
+):
+    global _NAVIGATION_MANAGER
+    _check_navigation_manager_stop(deadline, cancelled)
+    _acquire_navigation_manager_lock(deadline)
+    try:
+        _check_navigation_manager_stop(deadline, cancelled)
+        if expected_epoch != _NAVIGATION_MANAGER_EPOCH:
+            raise TimeoutError("navigation session manager lifecycle changed")
+        if _NAVIGATION_MANAGER_CLOSING is not None:
+            raise TimeoutError("navigation session manager is closing")
+        if _NAVIGATION_MANAGER is None:
+            from memory_state import STATE_ROOT
+            from pyright_session import PyrightSessionManager
+
+            _check_navigation_manager_stop(deadline, cancelled)
+            manager = PyrightSessionManager(state_root=STATE_ROOT)
+            _check_navigation_manager_stop(deadline, cancelled)
+            _NAVIGATION_MANAGER = manager
+        _check_navigation_manager_stop(deadline, cancelled)
+        return _NAVIGATION_MANAGER
+    finally:
+        _NAVIGATION_MANAGER_LOCK.release()
+
+
+def _close_navigation_session_manager(deadline: float) -> None:
+    global _NAVIGATION_MANAGER, _NAVIGATION_MANAGER_CLOSING, _NAVIGATION_MANAGER_EPOCH
+    _acquire_navigation_manager_lock(deadline)
+    try:
+        _NAVIGATION_MANAGER_EPOCH += 1
+        manager = _NAVIGATION_MANAGER_CLOSING
+        if manager is None:
+            manager = _NAVIGATION_MANAGER
+            if manager is not None:
+                _NAVIGATION_MANAGER = None
+                _NAVIGATION_MANAGER_CLOSING = manager
+    finally:
+        _NAVIGATION_MANAGER_LOCK.release()
+    if manager is None:
+        return
+    _check_deadline(deadline)
+    manager.close_all(deadline=deadline)
+    deadline_error = None
+    try:
+        _check_deadline(deadline)
+    except TimeoutError as error:
+        deadline_error = error
+    if deadline_error is None:
+        _acquire_navigation_manager_lock(deadline)
+    elif not _NAVIGATION_MANAGER_LOCK.acquire(blocking=False):
+        raise deadline_error
+    try:
+        if _NAVIGATION_MANAGER_CLOSING is manager:
+            _NAVIGATION_MANAGER_CLOSING = None
+    finally:
+        _NAVIGATION_MANAGER_LOCK.release()
+    if deadline_error is not None:
+        raise deadline_error
 
 
 def _is_precise_architecture_request(arguments: dict) -> bool:
@@ -1164,6 +1297,650 @@ def _is_precise_architecture_request(arguments: dict) -> bool:
     ):
         return True
     return False
+
+
+def _same_filesystem_path(
+    left: Path,
+    right: Path,
+    *,
+    deadline: float | None = None,
+) -> bool:
+    _check_deadline(deadline)
+    try:
+        same = Path(left).samefile(Path(right))
+    except OSError:
+        same = False
+    _check_deadline(deadline)
+    return same
+
+
+def _navigation_capability(mode: str):
+    from code_intelligence import Capability
+
+    if mode in _PRECISE_MODE_CAPABILITY:
+        return Capability[_PRECISE_MODE_CAPABILITY[mode]]
+    if mode in {"callers", "callees"}:
+        return Capability.CALLS
+    raise ValueError("mode is not a precise navigation mode")
+
+
+def _normalized_navigation_failure(
+    *,
+    directory: str | None,
+    mode: str,
+    status: str,
+    warning: str,
+    offset: int,
+    limit: int,
+    scope=None,
+    provider: str | None = None,
+    provider_version: str | None = None,
+    readiness: str = "not_ready",
+) -> dict:
+    capability = _navigation_capability(mode)
+    return {
+        "directory": directory,
+        "mode": mode,
+        "status": status,
+        "freshness": {
+            "workspace_revision_before": "",
+            "workspace_revision_after": "",
+            "current": "",
+        },
+        "provider": {"name": provider, "version": provider_version},
+        "symbol": None,
+        "total": 0,
+        "requested_capability": capability.value,
+        "effective_capability": None,
+        "position_encoding": None,
+        "readiness": readiness,
+        "repository": {
+            "repository_id": None if scope is None else scope.repository_id,
+            "checkout_id": None if scope is None else scope.checkout_id,
+        },
+        "document_version": None,
+        "offset": offset,
+        "limit": limit,
+        "truncated": False,
+        "omitted": 0,
+        "next_offset": None,
+        "resolution": "unresolved",
+        "groups": [],
+        "diagnostics": [],
+        "hover": None,
+        "provenance": [],
+        "warnings": (warning,),
+    }
+
+
+def _check_navigation_stop(deadline: float | None) -> None:
+    _check_deadline(deadline)
+    if _operation_cancelled()():
+        raise TimeoutError("navigation operation cancelled")
+    _check_deadline(deadline)
+
+
+def _open_navigation_graph(scope, deadline: float | None):
+    import code_graph
+
+    _check_navigation_stop(deadline)
+    graph = code_graph._active_evidence_graph(
+        Path(scope.checkout_root),
+        read_only=True,
+        deadline=deadline,
+        cancelled=_operation_cancelled(),
+    )
+    _check_navigation_stop(deadline)
+    if graph is None:
+        return None
+    graph_scope = getattr(graph, "repository_scope", None)
+    if (
+        graph_scope is None
+        or graph_scope.repository_id != scope.repository_id
+        or graph_scope.checkout_id != scope.checkout_id
+    ):
+        graph.close()
+        _check_navigation_stop(deadline)
+        return None
+    return graph
+
+
+def _navigation_relative_path(
+    scope,
+    span: dict,
+    *,
+    deadline: float | None,
+) -> str:
+    from lsp_security import validate_repository_relative_path
+
+    _check_navigation_stop(deadline)
+    relative = span.get("relative_path")
+    if not isinstance(relative, str):
+        file_value = span.get("file")
+        if not isinstance(file_value, str):
+            raise ValueError("graph span has no source path")
+        file_path = Path(file_value)
+        if file_path.is_absolute():
+            root = Path(scope.checkout_root).resolve(strict=True)
+            _check_navigation_stop(deadline)
+            source = file_path.resolve(strict=True)
+            _check_navigation_stop(deadline)
+            relative = source.relative_to(root).as_posix()
+        else:
+            relative = file_value
+    normalized = validate_repository_relative_path(relative)
+    _check_navigation_stop(deadline)
+    return normalized
+
+
+def _navigation_source_bytes(
+    scope,
+    relative_path: str,
+    *,
+    deadline: float | None,
+) -> bytes:
+    from lsp_security import read_repository_source_bytes
+
+    _check_navigation_stop(deadline)
+    content = read_repository_source_bytes(
+        scope,
+        relative_path,
+        max_bytes=MAX_NAVIGATION_SOURCE_BYTES,
+        deadline=deadline,
+    )
+    _check_navigation_stop(deadline)
+    content.decode("utf-8", errors="strict")
+    _check_navigation_stop(deadline)
+    return content
+
+
+class _NavigationSourceCache:
+    __slots__ = ("_bytes", "_values")
+
+    def __init__(self) -> None:
+        self._values: dict[tuple[str, str, str], tuple[bytes, str] | None] = {}
+        self._bytes = 0
+
+    def read(self, scope, relative_path: str, *, deadline: float | None):
+        key = (scope.repository_id, scope.checkout_id, relative_path)
+        if key in self._values:
+            return self._values[key]
+        if len(self._values) >= MAX_NAVIGATION_GRAPH_FACTS:
+            return None
+        content = _navigation_source_bytes(scope, relative_path, deadline=deadline)
+        if self._bytes + len(content) > MAX_NAVIGATION_SOURCE_CACHE_BYTES:
+            self._values[key] = None
+            return None
+        cached = (content, hashlib.sha256(content).hexdigest())
+        self._values[key] = cached
+        self._bytes += len(content)
+        return cached
+
+
+def _navigation_digest(value: object) -> str | None:
+    if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value):
+        return value
+    return None
+
+
+def _navigation_location_from_span(
+    scope,
+    span: dict,
+    *,
+    source_kind: str,
+    require_span_hash: bool,
+    metadata: dict | None,
+    graph_version: str,
+    deadline: float | None,
+    source_cache: _NavigationSourceCache | None = None,
+):
+    from code_intelligence import PositionRange
+    from code_navigation import NavigationLocation, Provenance, ResolutionLabel
+    from lsp_positions import SourceDocument
+
+    try:
+        relative_path = _navigation_relative_path(
+            scope,
+            span,
+            deadline=deadline,
+        )
+        expected_source_sha256 = _navigation_digest(span.get("source_sha256"))
+        if expected_source_sha256 is None:
+            return None
+        if source_cache is None:
+            source_cache = _NavigationSourceCache()
+        cached = source_cache.read(scope, relative_path, deadline=deadline)
+        if cached is None:
+            return None
+        content, source_sha256 = cached
+        if source_sha256 != expected_source_sha256:
+            return None
+        byte_start = span.get("byte_start")
+        byte_end = span.get("byte_end")
+        if (
+            isinstance(byte_start, bool)
+            or not isinstance(byte_start, int)
+            or isinstance(byte_end, bool)
+            or not isinstance(byte_end, int)
+            or byte_start < 0
+            or byte_end <= byte_start
+            or byte_end > len(content)
+        ):
+            return None
+        if source_kind not in {"evidence", "occurrence"}:
+            return None
+        if require_span_hash != (source_kind == "evidence"):
+            return None
+        if require_span_hash:
+            expected_span_sha256 = span.get("span_sha256")
+            if (
+                _navigation_digest(expected_span_sha256) is None
+                or hashlib.sha256(content[byte_start:byte_end]).hexdigest()
+                != expected_span_sha256
+            ):
+                return None
+        _check_navigation_stop(deadline)
+        document = SourceDocument.from_bytes(relative_path, content)
+        _check_navigation_stop(deadline)
+        line = None
+        character = None
+        for line_number, (line_start, line_end) in enumerate(
+            document.line_spans,
+            1,
+        ):
+            _check_navigation_stop(deadline)
+            if line_start <= byte_start <= line_end:
+                content[line_start:byte_start].decode("utf-8", errors="strict")
+                line = line_number
+                character = byte_start - line_start
+                break
+        if line is None or character is None:
+            return None
+        reported_line = span.get("line_start")
+        if (
+            reported_line is not None
+            and (
+                isinstance(reported_line, bool)
+                or not isinstance(reported_line, int)
+                or reported_line != line
+            )
+        ):
+            return None
+        owner = None if metadata is None else metadata.get("owner")
+        containing_symbol = owner if isinstance(owner, str) and owner else None
+        signature = None
+        if span.get("role") in {"definition", "declaration"}:
+            signature = content[byte_start:byte_end].decode("utf-8", errors="strict")
+        _check_navigation_stop(deadline)
+        return NavigationLocation(
+            relative_path,
+            PositionRange(byte_start, byte_end),
+            line,
+            character,
+            containing_symbol,
+            signature,
+            ResolutionLabel.GRAPH_CANDIDATE,
+            (
+                Provenance(
+                    "graph",
+                    "evidence-graph",
+                    graph_version,
+                    "graph_candidate",
+                ),
+            ),
+        )
+    except TimeoutError:
+        raise
+    except (OSError, TypeError, UnicodeError, ValueError):
+        return None
+
+
+def _bounded_navigation_locations(locations, deadline: float | None):
+    unique = {}
+    for location in locations:
+        _check_navigation_stop(deadline)
+        if location is None:
+            continue
+        key = (
+            location.path,
+            location.range.byte_start,
+            location.range.byte_end,
+            location.line,
+            location.character,
+        )
+        unique.setdefault(key, location)
+        if len(unique) >= MAX_NAVIGATION_GRAPH_FACTS:
+            break
+    _check_navigation_stop(deadline)
+    return tuple(unique[key] for key in sorted(unique))
+
+
+def _graph_nodes_for_symbol(graph, symbol: str, deadline: float | None):
+    _check_navigation_stop(deadline)
+    nodes = graph.find_nodes(
+        kinds=("class", "function", "method"),
+        name=symbol,
+        max_rows=MAX_NAVIGATION_GRAPH_FACTS,
+        deadline=deadline,
+    )
+    _check_navigation_stop(deadline)
+    return tuple(nodes[:MAX_NAVIGATION_GRAPH_FACTS])
+
+
+def _graph_declaration_locations(
+    symbol: str,
+    scope,
+    deadline: float | None,
+    source_cache: _NavigationSourceCache | None = None,
+):
+    graph = _open_navigation_graph(scope, deadline)
+    if graph is None:
+        return ()
+    try:
+        version = str(getattr(graph, "generation_id", None) or "structural")
+        if source_cache is None:
+            source_cache = _NavigationSourceCache()
+        locations = []
+        remaining_work = MAX_NAVIGATION_GRAPH_FACTS
+        for node in _graph_nodes_for_symbol(graph, symbol, deadline):
+            _check_navigation_stop(deadline)
+            if remaining_work <= 0:
+                break
+            occurrences = graph.occurrences(
+                node["node_id"],
+                max_rows=remaining_work,
+                deadline=deadline,
+            )
+            _check_navigation_stop(deadline)
+            metadata = node.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = None
+            for occurrence in occurrences[:remaining_work]:
+                _check_navigation_stop(deadline)
+                remaining_work -= 1
+                if occurrence.get("role") not in {"definition", "declaration"}:
+                    continue
+                locations.append(
+                    _navigation_location_from_span(
+                        scope,
+                        occurrence,
+                        source_kind="occurrence",
+                        require_span_hash=False,
+                        metadata=metadata,
+                        graph_version=version,
+                        deadline=deadline,
+                        source_cache=source_cache,
+                    )
+                )
+        return _bounded_navigation_locations(locations, deadline)
+    finally:
+        graph.close()
+        _check_navigation_stop(deadline)
+
+
+def _graph_call_locations(
+    symbol: str,
+    scope,
+    *,
+    direction: str,
+    deadline: float | None,
+    source_cache: _NavigationSourceCache | None = None,
+):
+    graph = _open_navigation_graph(scope, deadline)
+    if graph is None:
+        return ()
+    try:
+        nodes = _graph_nodes_for_symbol(graph, symbol, deadline)
+        node_ids = {node["node_id"] for node in nodes}
+        _check_navigation_stop(deadline)
+        edges = graph.edges(
+            edge_types=("CALLS",),
+            max_rows=MAX_NAVIGATION_GRAPH_FACTS,
+            deadline=deadline,
+        )
+        _check_navigation_stop(deadline)
+        source_key = (
+            "target_node_id"
+            if direction == "incoming"
+            else "source_node_id"
+        )
+        version = str(getattr(graph, "generation_id", None) or "structural")
+        if source_cache is None:
+            source_cache = _NavigationSourceCache()
+        locations = []
+        remaining_work = MAX_NAVIGATION_GRAPH_FACTS
+        for edge in edges:
+            _check_navigation_stop(deadline)
+            if edge.get(source_key) not in node_ids:
+                continue
+            if remaining_work <= 0:
+                break
+            evidence = graph.evidence_spans(
+                assertion_id=edge["assertion_id"],
+                max_rows=remaining_work,
+                deadline=deadline,
+            )
+            _check_navigation_stop(deadline)
+            for span in evidence[:remaining_work]:
+                _check_navigation_stop(deadline)
+                remaining_work -= 1
+                locations.append(
+                    _navigation_location_from_span(
+                        scope,
+                        span,
+                        source_kind="evidence",
+                        require_span_hash=True,
+                        metadata=None,
+                        graph_version=version,
+                        deadline=deadline,
+                        source_cache=source_cache,
+                    )
+                )
+        return _bounded_navigation_locations(locations, deadline)
+    finally:
+        graph.close()
+        _check_navigation_stop(deadline)
+
+
+def _navigation_anchor_symbol(
+    scope,
+    path: str,
+    line: int,
+    character: int,
+    *,
+    byte_offset: int | None = None,
+    deadline: float | None,
+    source_cache: _NavigationSourceCache | None = None,
+) -> str | None:
+    from lsp_positions import SourceDocument
+
+    try:
+        if source_cache is None:
+            source_cache = _NavigationSourceCache()
+        cached = source_cache.read(scope, path, deadline=deadline)
+        if cached is None:
+            return None
+        content, _source_sha256 = cached
+        _check_navigation_stop(deadline)
+        document = SourceDocument.from_bytes(path, content)
+        _check_navigation_stop(deadline)
+        anchor = document.validate_anchor(line=line, character=character)
+        if byte_offset is not None and anchor.byte_offset != byte_offset:
+            return None
+        line_start, line_end = document.line_spans[line - 1]
+        line_bytes = content[line_start:line_end]
+        for match in re.finditer(rb"[A-Za-z_][A-Za-z0-9_]*", line_bytes):
+            _check_navigation_stop(deadline)
+            if match.start() <= character <= match.end():
+                return match.group().decode("ascii")
+        return None
+    except TimeoutError:
+        raise
+    except (OSError, TypeError, UnicodeError, ValueError):
+        return None
+
+
+def _navigation_structural_candidates(request, deadline: float):
+    from code_intelligence import Capability
+
+    _check_navigation_stop(deadline)
+    source_cache = _NavigationSourceCache()
+    symbol = _navigation_anchor_symbol(
+        request.repository,
+        request.path,
+        request.line,
+        request.character,
+        deadline=deadline,
+        source_cache=source_cache,
+    )
+    if symbol is None:
+        return ()
+    if request.capability is Capability.DEFINITIONS:
+        return _graph_declaration_locations(
+            symbol,
+            request.repository,
+            deadline,
+            source_cache,
+        )
+    if request.capability is Capability.REFERENCES:
+        return _graph_call_locations(
+            symbol,
+            request.repository,
+            direction="incoming",
+            deadline=deadline,
+            source_cache=source_cache,
+        )
+    if request.capability is Capability.CALLS:
+        if request.direction not in {"incoming", "outgoing"}:
+            return ()
+        return _graph_call_locations(
+            symbol,
+            request.repository,
+            direction=request.direction,
+            deadline=deadline,
+            source_cache=source_cache,
+        )
+    return ()
+
+
+def _navigation_symbol_resolver(symbol, scope, deadline):
+    if not isinstance(symbol, str) or not symbol:
+        return ()
+    return _graph_declaration_locations(
+        symbol,
+        scope,
+        deadline,
+        _NavigationSourceCache(),
+    )
+
+
+def _graph_node_ids_at_anchor(
+    graph,
+    symbol,
+    anchor,
+    scope,
+    deadline,
+    source_cache: _NavigationSourceCache | None = None,
+):
+    identifiers = set()
+    if source_cache is None:
+        source_cache = _NavigationSourceCache()
+    version = str(getattr(graph, "generation_id", None) or "structural")
+    remaining = MAX_NAVIGATION_GRAPH_FACTS
+    for node in _graph_nodes_for_symbol(graph, symbol, deadline):
+        _check_navigation_stop(deadline)
+        if remaining <= 0:
+            break
+        occurrences = graph.occurrences(
+            node["node_id"],
+            max_rows=remaining,
+            deadline=deadline,
+        )
+        _check_navigation_stop(deadline)
+        for occurrence in occurrences[:remaining]:
+            _check_navigation_stop(deadline)
+            remaining -= 1
+            if occurrence.get("role") not in {"definition", "declaration"}:
+                continue
+            location = _navigation_location_from_span(
+                scope,
+                occurrence,
+                source_kind="occurrence",
+                require_span_hash=False,
+                metadata=None,
+                graph_version=version,
+                deadline=deadline,
+                source_cache=source_cache,
+            )
+            if (
+                location is not None
+                and location.path == anchor.path
+                and location.range.byte_start <= anchor.byte_offset < location.range.byte_end
+            ):
+                identifiers.add(node["node_id"])
+    return identifiers
+
+
+def _navigation_edge_verifier(source, target, scope, deadline):
+    source_cache = _NavigationSourceCache()
+    source_symbol = _navigation_anchor_symbol(
+        scope,
+        source.path,
+        source.line,
+        source.utf8_character,
+        byte_offset=source.byte_offset,
+        deadline=deadline,
+        source_cache=source_cache,
+    )
+    target_symbol = _navigation_anchor_symbol(
+        scope,
+        target.path,
+        target.line,
+        target.utf8_character,
+        byte_offset=target.byte_offset,
+        deadline=deadline,
+        source_cache=source_cache,
+    )
+    if source_symbol is None or target_symbol is None:
+        return False
+    graph = _open_navigation_graph(scope, deadline)
+    if graph is None:
+        return False
+    try:
+        source_ids = _graph_node_ids_at_anchor(
+            graph,
+            source_symbol,
+            source,
+            scope,
+            deadline,
+            source_cache,
+        )
+        target_ids = _graph_node_ids_at_anchor(
+            graph,
+            target_symbol,
+            target,
+            scope,
+            deadline,
+            source_cache,
+        )
+        _check_navigation_stop(deadline)
+        edges = graph.edges(
+            edge_types=("CALLS",),
+            max_rows=MAX_NAVIGATION_GRAPH_FACTS,
+            deadline=deadline,
+        )
+        _check_navigation_stop(deadline)
+        for edge in edges:
+            _check_navigation_stop(deadline)
+            if (
+                edge.get("source_node_id") in source_ids
+                and edge.get("target_node_id") in target_ids
+            ):
+                return True
+        return False
+    finally:
+        graph.close()
+        _check_navigation_stop(deadline)
 
 
 def _get_precise_architecture(
@@ -1178,57 +1955,154 @@ def _get_precise_architecture(
     deadline: float | None = None,
 ) -> dict:
     """Route precise modes through the owned CodeNavigation facade."""
-    from code_intelligence import Capability
     from code_navigation import CodeNavigation, NavigationRequest
     from code_navigation_renderer import render_navigation
+    from lsp_security import (
+        resolve_repository_source,
+        validate_repository_relative_path,
+    )
     from repository_scope import resolve_repository_scope
 
-    resolved, error = _validated_code_directory(directory, deadline=deadline)
-    if error:
-        return {"error": error}
-    scope = resolve_repository_scope(resolved)
-    if str(resolved) != str(scope.checkout_root):
-        return {"error": "directory must equal the resolved checkout root"}
-    if path != str(Path(path).as_posix()) or "\\" in path or path.startswith("/"):
-        return {"error": "path must be repository-relative"}
-    manager = _navigation_session_manager()
-    effective_deadline = deadline if deadline is not None else time.monotonic() + MCP_LSP_STARTUP_SECONDS
-    session = manager.get(scope, deadline=effective_deadline)
-    identity = session._identity
-    navigation = CodeNavigation(scope, session, identity)
-    if mode in _PRECISE_MODE_CAPABILITY:
-        capability = Capability[_PRECISE_MODE_CAPABILITY[mode]]
+    effective_deadline = (
+        deadline
+        if deadline is not None
+        else time.monotonic() + MCP_LSP_STARTUP_SECONDS
+    )
+    scope = None
+    resolved: Path | None = None
+    stage = "directory"
+    try:
+        cancelled = _operation_cancelled()
+        _check_navigation_manager_stop(effective_deadline, cancelled)
+        _acquire_navigation_manager_lock(effective_deadline)
+        try:
+            _check_navigation_manager_stop(effective_deadline, cancelled)
+            manager_epoch = _NAVIGATION_MANAGER_EPOCH
+        finally:
+            _NAVIGATION_MANAGER_LOCK.release()
+        _check_navigation_manager_stop(effective_deadline, cancelled)
+        resolved, error = _validated_code_directory(
+            directory,
+            deadline=effective_deadline,
+        )
+        _check_deadline(effective_deadline)
+        if error or resolved is None:
+            return _normalized_navigation_failure(
+                directory=None,
+                mode=mode,
+                status="error",
+                warning="navigation_directory_invalid",
+                offset=offset,
+                limit=limit,
+            )
+        stage = "scope"
+        _check_deadline(effective_deadline)
+        scope = resolve_repository_scope(
+            resolved,
+            deadline=effective_deadline,
+            cancelled=cancelled,
+        )
+        _check_deadline(effective_deadline)
+        if not _same_filesystem_path(
+            resolved,
+            Path(scope.checkout_root),
+            deadline=effective_deadline,
+        ):
+            return _normalized_navigation_failure(
+                directory=str(resolved),
+                mode=mode,
+                status="error",
+                warning="navigation_directory_not_checkout_root",
+                offset=offset,
+                limit=limit,
+                scope=scope,
+            )
+        stage = "source"
+        _check_deadline(effective_deadline)
+        normalized_path = validate_repository_relative_path(path)
+        _check_deadline(effective_deadline)
+        resolve_repository_source(scope, normalized_path, must_exist=True)
+        _check_deadline(effective_deadline)
+        stage = "manager"
+        manager = _navigation_session_manager(
+            effective_deadline,
+            manager_epoch,
+            cancelled,
+        )
+        _check_deadline(effective_deadline)
+        session = manager.get(scope, deadline=effective_deadline)
+        _check_deadline(effective_deadline)
+        identity = session.identity
+        stage = "facade"
+        navigation = CodeNavigation(
+            scope,
+            session,
+            identity,
+            structural_candidates=_navigation_structural_candidates,
+            symbol_resolver=_navigation_symbol_resolver,
+            edge_verifier=_navigation_edge_verifier,
+        )
+        _check_deadline(effective_deadline)
+        capability = _navigation_capability(mode)
+        direction = None
+        if mode == "callers":
+            direction = "incoming"
+        elif mode == "callees":
+            direction = "outgoing"
         request = NavigationRequest(
             scope,
             capability,
-            path,
-            line,
-            character,
-            offset=offset,
-            limit=limit,
-        )
-    else:
-        direction = "incoming" if mode == "callers" else "outgoing"
-        request = NavigationRequest(
-            scope,
-            Capability.CALLS,
-            path,
+            normalized_path,
             line,
             character,
             offset=offset,
             limit=limit,
             direction=direction,
         )
-    result = navigation.query(request, deadline=effective_deadline)
-    rendered = render_navigation(result, offset=offset, limit=limit)
-    non_ok = result.status.value != "ok"
-    data = {
-        "directory": str(resolved),
-        "mode": mode,
-        **rendered,
-    }
-    data["_navigation_partial"] = non_ok
-    return data
+        _check_deadline(effective_deadline)
+        result = navigation.query(request, deadline=effective_deadline)
+        _check_deadline(effective_deadline)
+        stage = "renderer"
+        rendered = render_navigation(result)
+        _check_deadline(effective_deadline)
+        data = {
+            "directory": str(resolved),
+            "mode": mode,
+            **rendered,
+        }
+        _check_deadline(effective_deadline)
+        data = _sanitize_navigation_data(data)
+        _check_deadline(effective_deadline)
+        return data
+    except TimeoutError:
+        return _normalized_navigation_failure(
+            directory=None if resolved is None else str(resolved),
+            mode=mode,
+            status="timeout",
+            warning="navigation_timeout",
+            offset=offset,
+            limit=limit,
+            scope=scope,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return _normalized_navigation_failure(
+            directory=None if resolved is None else str(resolved),
+            mode=mode,
+            status="not_ready" if stage == "manager" else "error",
+            warning=(
+                "navigation_provider_not_ready"
+                if stage == "manager"
+                else "navigation_render_failed"
+                if stage == "renderer"
+                else "navigation_source_unavailable"
+                if stage == "source"
+                else "navigation_setup_failed"
+            ),
+            offset=offset,
+            limit=limit,
+            scope=scope,
+            provider="pyright" if stage in {"manager", "facade", "renderer"} else None,
+        )
 
 
 def _operator_result(
@@ -1460,15 +2334,20 @@ def _validated_code_directory(
         return None, "directory is required"
     _check_deadline(deadline)
     candidate = Path(directory).expanduser()
+    _check_deadline(deadline)
     if not candidate.is_absolute():
         return None, "directory must be an absolute local path"
     resolved = candidate.resolve()
+    _check_deadline(deadline)
     if not resolved.exists():
         return None, f"directory does not exist: {resolved}"
+    _check_deadline(deadline)
     if not resolved.is_dir():
         return None, f"directory is not a directory: {resolved}"
+    _check_deadline(deadline)
     if resolved == Path(resolved.anchor):
         return None, "directory must not be a filesystem root"
+    _check_deadline(deadline)
     return resolved, None
 
 
@@ -1578,44 +2457,80 @@ def _validate_tool_arguments(name: str, arguments) -> str | None:
         if sum(error is None for error in errors) == 1:
             return None
         return "arguments do not match exactly one allowed action"
-    error = _validate_object_schema(schema, arguments, reject_unknown=False)
+    error = _validate_object_schema(
+        schema,
+        arguments,
+        reject_unknown=name == "get_architecture",
+    )
     if error is not None:
         return error
     if name == "recall" and "profile" in arguments and arguments.get("grounded") is not True:
         return "argument 'profile' requires grounded=true"
     if name == "get_architecture":
-        mode = arguments.get("mode", "summary")
-        if mode in {"symbol", "callers", "callees", "dependencies"} and not arguments.get(
-            "symbol"
-        ):
-            if not (mode in {"callers", "callees"} and arguments.get("path")):
-                return f"required argument is missing for {mode}: symbol"
-        if mode == "path" and (
-            not arguments.get("symbol") or not arguments.get("target")
-        ):
-            return "required arguments are missing for path: symbol and target"
-        if mode in PRECISE_ARCHITECTURE_MODES:
-            for required in ("path", "line", "character"):
-                if required not in arguments:
-                    return f"required argument is missing for {mode}: {required}"
-            if "symbol" in arguments:
-                return f"argument 'symbol' is not valid for {mode}"
-        position_keys = ("path", "line", "character")
-        position_present = [key for key in position_keys if key in arguments]
-        if (
-            mode in {"callers", "callees"}
-            and position_present
-            and len(position_present) != 3
-        ):
-            return f"positioned {mode} require path, line, and character together"
-        if mode in PRECISE_ARCHITECTURE_MODES and "offset" in arguments:
-            offset = arguments["offset"]
-            if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
-                return "argument 'offset' must be a non-negative integer"
-        if mode in PRECISE_ARCHITECTURE_MODES and "limit" in arguments:
-            limit = arguments["limit"]
-            if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
-                return "argument 'limit' must be between 1 and 100"
+        return _validate_architecture_arguments(arguments)
+    return None
+
+
+def _validate_architecture_arguments(arguments: dict) -> str | None:
+    mode = arguments.get("mode", "summary")
+    position = {"path", "line", "character"}
+    positioned = mode in {"callers", "callees"} and any(
+        key in arguments for key in (*position, "offset", "limit")
+    )
+    if mode in PRECISE_ARCHITECTURE_MODES or positioned:
+        required = {"directory", "mode", *position}
+        allowed = {*required, "offset", "limit"}
+    else:
+        contracts = {
+            "summary": ({"directory"}, {"directory", "mode", "live"}),
+            "symbol": (
+                {"directory", "mode", "symbol"},
+                {"directory", "mode", "symbol", "live"},
+            ),
+            "callers": (
+                {"directory", "mode", "symbol"},
+                {"directory", "mode", "symbol", "live"},
+            ),
+            "callees": (
+                {"directory", "mode", "symbol"},
+                {"directory", "mode", "symbol", "live"},
+            ),
+            "dependencies": (
+                {"directory", "mode", "symbol"},
+                {"directory", "mode", "symbol", "reverse", "live"},
+            ),
+            "path": (
+                {"directory", "mode", "symbol", "target"},
+                {"directory", "mode", "symbol", "target", "live"},
+            ),
+            "community": (
+                {"directory", "mode"},
+                {"directory", "mode", "live"},
+            ),
+            "impact": (
+                {"directory", "mode"},
+                {"directory", "mode", "comparison", "base", "target", "branch"},
+            ),
+        }
+        required, allowed = contracts[mode]
+    missing = sorted(required.difference(arguments))
+    if missing:
+        if positioned:
+            return (
+                f"positioned {mode} require path, line, and character together; "
+                f"missing: {', '.join(missing)}"
+            )
+        return f"required arguments are missing for {mode}: {', '.join(missing)}"
+    forbidden = sorted(set(arguments).difference(allowed))
+    if forbidden:
+        return f"arguments are not valid for {mode}: {', '.join(forbidden)}"
+    if mode in PRECISE_ARCHITECTURE_MODES or positioned:
+        try:
+            from lsp_security import validate_repository_relative_path
+
+            validate_repository_relative_path(arguments["path"])
+        except (TypeError, ValueError):
+            return "argument 'path' must be a canonical repository-relative path"
     return None
 
 
@@ -1726,6 +2641,9 @@ def _safe_evidence_error(error: BaseException) -> str:
 _ABSOLUTE_PATH = re.compile(
     r"(?<![\w])(?:[A-Za-z]:[\\/](?:[^\\/\s]+[\\/])*[^\\/\s]+|/(?:[^/\s]+/)+[^/\s]+)"
 )
+_NAVIGATION_REDACTION_MARKER = re.compile(
+    r"\[(?:PATH|REDACTED(?:_[A-Z_]+)?)\]"
+)
 
 
 def _sanitize_diagnostic(value):
@@ -1751,6 +2669,102 @@ def _sanitize_error_fields(value):
             for key, item in value.items()
         }
     return value
+
+
+def _sanitize_navigation_text(value: str) -> str:
+    sanitized = redact_secrets(value)
+    sanitized = _ABSOLUTE_PATH.sub("[PATH]", sanitized)
+    original_bytes = len(value.encode("utf-8", errors="strict"))
+    if len(sanitized.encode("utf-8", errors="strict")) <= original_bytes:
+        return sanitized
+    fitted = []
+    used = 0
+    index = 0
+    while index < len(sanitized):
+        marker = _NAVIGATION_REDACTION_MARKER.match(sanitized, index)
+        token = marker.group() if marker is not None else sanitized[index]
+        size = len(token.encode("utf-8", errors="strict"))
+        if used + size > original_bytes:
+            break
+        fitted.append(token)
+        used += size
+        index += len(token)
+    return "".join(fitted)
+
+
+def _sanitize_navigation_location(value):
+    if not isinstance(value, dict):
+        return value
+    sanitized = dict(value)
+    signature = sanitized.get("signature")
+    if isinstance(signature, str):
+        sanitized["signature"] = _sanitize_navigation_text(signature)
+    return sanitized
+
+
+def _sanitize_navigation_data(data: dict) -> dict:
+    sanitized = dict(data)
+    warnings = sanitized.get("warnings")
+    if isinstance(warnings, (list, tuple)):
+        values = tuple(
+            _sanitize_navigation_text(item) if isinstance(item, str) else item
+            for item in warnings
+        )
+        sanitized["warnings"] = values if isinstance(warnings, tuple) else list(values)
+    hover = sanitized.get("hover")
+    if isinstance(hover, str):
+        sanitized["hover"] = _sanitize_navigation_text(hover)
+    groups = sanitized.get("groups")
+    if isinstance(groups, list):
+        sanitized_groups = []
+        for group in groups:
+            if not isinstance(group, dict):
+                sanitized_groups.append(group)
+                continue
+            sanitized_group = dict(group)
+            locations = group.get("locations")
+            if isinstance(locations, list):
+                sanitized_group["locations"] = [
+                    _sanitize_navigation_location(location)
+                    for location in locations
+                ]
+            sanitized_groups.append(sanitized_group)
+        sanitized["groups"] = sanitized_groups
+    diagnostics = sanitized.get("diagnostics")
+    if isinstance(diagnostics, list):
+        sanitized_diagnostics = []
+        for diagnostic in diagnostics:
+            if not isinstance(diagnostic, dict):
+                sanitized_diagnostics.append(diagnostic)
+                continue
+            sanitized_diagnostic = dict(diagnostic)
+            message = diagnostic.get("message")
+            if isinstance(message, str):
+                sanitized_diagnostic["message"] = _sanitize_navigation_text(message)
+            code = diagnostic.get("code")
+            if isinstance(code, str):
+                sanitized_diagnostic["code"] = _sanitize_navigation_text(code)
+            related = diagnostic.get("related")
+            if isinstance(related, list):
+                sanitized_diagnostic["related"] = [
+                    _sanitize_navigation_location(location)
+                    for location in related
+                ]
+            sanitized_diagnostics.append(sanitized_diagnostic)
+        sanitized["diagnostics"] = sanitized_diagnostics
+    return sanitized
+
+
+def _is_rendered_navigation_data(name: str, data) -> bool:
+    return (
+        name == "get_architecture"
+        and isinstance(data, dict)
+        and isinstance(data.get("status"), str)
+        and "requested_capability" in data
+        and "repository" in data
+        and "groups" in data
+        and "diagnostics" in data
+    )
 
 
 def _quality_for(
@@ -1901,17 +2915,16 @@ def _quality_for(
             "partial": True,
             "warnings": list(data.get("warnings", [])) or ["Impact analysis is unresolved."],
         }
+    if _is_rendered_navigation_data(name, data):
+        partial = data["status"] != "ok"
+        return {
+            "coverage": 0.9 if not partial else 0.5,
+            "confidence": 0.85 if not partial else 0.4,
+            "fallback": False,
+            "partial": partial,
+            "warnings": list(data.get("warnings", ())),
+        }
     if name in {"find_dead_code", "get_architecture"}:
-        if isinstance(data, dict) and "_navigation_partial" in data:
-            partial = bool(data.get("_navigation_partial"))
-            data.pop("_navigation_partial", None)
-            return {
-                "coverage": 0.9 if not partial else 0.5,
-                "confidence": 0.85 if not partial else 0.4,
-                "fallback": False,
-                "partial": partial,
-                "warnings": list(data.get("warnings", ())),
-            }
         if isinstance(data, dict) and data.get("fallback") is False:
             unresolved = data.get("unresolved_count")
             if data.get("graph_complete") is True and unresolved == 0:
@@ -2069,6 +3082,38 @@ def _components_for(name: str, data) -> dict[str, dict[str, object]]:
                 "freshness": "fresh",
             }
         }
+    if _is_rendered_navigation_data(name, data):
+        status = data.get("status")
+        freshness = (
+            "stale"
+            if status == "stale"
+            else "unknown"
+            if status in {"timeout", "error", "not_ready"}
+            else "fresh"
+        )
+        components = {}
+        provider = data.get("provider")
+        if isinstance(provider, dict) and isinstance(provider.get("name"), str):
+            components["provider"] = {
+                "generation": provider.get("version"),
+                "freshness": freshness,
+            }
+        provenance = data.get("provenance")
+        if isinstance(provenance, list):
+            graph = next(
+                (
+                    item
+                    for item in provenance
+                    if isinstance(item, dict) and item.get("source") == "graph"
+                ),
+                None,
+            )
+            if graph is not None:
+                components["graph"] = {
+                    "generation": graph.get("version"),
+                    "freshness": freshness,
+                }
+        return components
     if (
         name in {"get_architecture", "find_dead_code"}
         and isinstance(data, dict)
@@ -2093,160 +3138,201 @@ def _execute_tool_call(name: str, arguments, operation_deadline: float) -> str:
     deadline_token = _OPERATION_DEADLINE.set(operation_deadline)
     limit_clamped = False
     try:
+        _check_deadline(operation_deadline)
         if name not in TOOL_INPUT_SCHEMAS:
             data = {"error": f"Unknown tool: {name}"}
-        elif validation_error := _validate_tool_arguments(name, arguments):
-            data = {"error": validation_error}
         else:
-            try:
-                _check_deadline(operation_deadline)
-                if name == "recall":
-                    if arguments.get("grounded", False):
-                        from memory_state import ROOT
-                        from query_memory import grounded_qa
+            _check_deadline(operation_deadline)
+            validation_error = _validate_tool_arguments(name, arguments)
+            _check_deadline(operation_deadline)
+            if validation_error is not None:
+                data = {"error": validation_error}
+            else:
+                try:
+                    _check_deadline(operation_deadline)
+                    if name == "recall":
+                        if arguments.get("grounded", False):
+                            from memory_state import ROOT
+                            from query_memory import grounded_qa
 
-                        data = grounded_qa(
-                            arguments["query"],
-                            vault=ROOT,
-                            profile=arguments.get("profile"),
-                            deadline=operation_deadline,
+                            data = grounded_qa(
+                                arguments["query"],
+                                vault=ROOT,
+                                profile=arguments.get("profile"),
+                                deadline=operation_deadline,
+                            )
+                        else:
+                            effective_limit, limit_clamped = _clamped_limit(
+                                arguments.get("limit", 8)
+                            )
+                            results = _call_with_deadline(
+                                _search_vault,
+                                arguments["query"],
+                                limit=effective_limit,
+                                deadline=operation_deadline,
+                            )
+                            data = {
+                                "results": results,
+                                "retrieval_trace": _retrieval_trace(arguments["query"], results),
+                                "_meta": _call_with_deadline(
+                                    _meta, deadline=operation_deadline
+                                ),
+                            }
+                    elif name == "read_page":
+                        data = _call_with_deadline(
+                            _read_page, arguments["slug"], deadline=operation_deadline
                         )
-                    else:
+                    elif name == "wiki_overview":
+                        data = _call_with_deadline(
+                            _wiki_overview, deadline=operation_deadline
+                        )
+                        data["_meta"] = _call_with_deadline(
+                            _meta, deadline=operation_deadline
+                        )
+                    elif name == "vault_status":
+                        data = _call_with_deadline(
+                            _vault_status, deadline=operation_deadline
+                        )
+                    elif name == "get_decisions":
                         effective_limit, limit_clamped = _clamped_limit(
-                            arguments.get("limit", 8)
+                            arguments.get("limit", 10)
                         )
-                        results = _call_with_deadline(
-                            _search_vault,
-                            arguments["query"],
+                        data = _call_with_deadline(
+                            _get_decisions,
+                            arguments.get("query"),
                             limit=effective_limit,
                             deadline=operation_deadline,
                         )
-                        data = {
-                            "results": results,
-                            "retrieval_trace": _retrieval_trace(arguments["query"], results),
-                            "_meta": _call_with_deadline(
-                                _meta, deadline=operation_deadline
-                            ),
-                        }
-                elif name == "read_page":
-                    data = _call_with_deadline(
-                        _read_page, arguments["slug"], deadline=operation_deadline
-                    )
-                elif name == "wiki_overview":
-                    data = _call_with_deadline(
-                        _wiki_overview, deadline=operation_deadline
-                    )
-                    data["_meta"] = _call_with_deadline(
-                        _meta, deadline=operation_deadline
-                    )
-                elif name == "vault_status":
-                    data = _call_with_deadline(
-                        _vault_status, deadline=operation_deadline
-                    )
-                elif name == "get_decisions":
-                    effective_limit, limit_clamped = _clamped_limit(
-                        arguments.get("limit", 10)
-                    )
-                    data = _call_with_deadline(
-                        _get_decisions,
-                        arguments.get("query"),
-                        limit=effective_limit,
-                        deadline=operation_deadline,
-                    )
-                elif name == "get_context":
-                    context_options = (
-                        {"token_budget": arguments["token_budget"]}
-                        if "token_budget" in arguments
-                        else {}
-                    )
-                    data = _call_with_deadline(
-                        _get_context,
-                        arguments["slugs"],
-                        arguments.get("include"),
-                        **context_options,
-                        deadline=operation_deadline,
-                    )
-                elif name == "check_contradiction":
-                    data = _call_with_deadline(
-                        _check_contradiction,
-                        arguments["claim"],
-                        deadline=operation_deadline,
-                    )
-                elif name == "log_decision":
-                    data = _call_with_deadline(
-                        _log_decision,
-                        arguments["summary"],
-                        arguments.get("rationale", ""),
-                        deadline=operation_deadline,
-                    )
-                elif name == "compile":
-                    data = _call_with_deadline(
-                        _trigger_compile, deadline=operation_deadline
-                    )
-                elif name == "find_dead_code":
-                    data = _call_with_deadline(
-                        _find_dead_code,
-                        arguments["directory"],
-                        live=arguments.get("live", False),
-                        deadline=operation_deadline,
-                    )
-                elif name == "get_architecture":
-                    if _is_precise_architecture_request(arguments):
-                        data = _get_precise_architecture(
-                            arguments["directory"],
-                            mode=arguments.get("mode"),
-                            path=arguments["path"],
-                            line=arguments["line"],
-                            character=arguments["character"],
-                            offset=arguments.get("offset", 0),
-                            limit=arguments.get("limit", 10),
-                            deadline=operation_deadline,
+                    elif name == "get_context":
+                        context_options = (
+                            {"token_budget": arguments["token_budget"]}
+                            if "token_budget" in arguments
+                            else {}
                         )
-                    elif arguments.get("mode", "summary") == "impact":
-                        data = _analyze_impact(
-                            directory=arguments["directory"],
-                            comparison=arguments.get("comparison", "dirty"),
-                            base=arguments.get("base"),
-                            target=arguments.get("target"),
-                            branch=arguments.get("branch"),
-                            deadline=operation_deadline,
-                        )
-                    elif arguments.get("mode", "summary") == "summary":
                         data = _call_with_deadline(
-                            _get_architecture,
+                            _get_context,
+                            arguments["slugs"],
+                            arguments.get("include"),
+                            **context_options,
+                            deadline=operation_deadline,
+                        )
+                    elif name == "check_contradiction":
+                        data = _call_with_deadline(
+                            _check_contradiction,
+                            arguments["claim"],
+                            deadline=operation_deadline,
+                        )
+                    elif name == "log_decision":
+                        data = _call_with_deadline(
+                            _log_decision,
+                            arguments["summary"],
+                            arguments.get("rationale", ""),
+                            deadline=operation_deadline,
+                        )
+                    elif name == "compile":
+                        data = _call_with_deadline(
+                            _trigger_compile, deadline=operation_deadline
+                        )
+                    elif name == "find_dead_code":
+                        data = _call_with_deadline(
+                            _find_dead_code,
                             arguments["directory"],
                             live=arguments.get("live", False),
                             deadline=operation_deadline,
                         )
+                    elif name == "get_architecture":
+                        if _is_precise_architecture_request(arguments):
+                            data = _get_precise_architecture(
+                                arguments["directory"],
+                                mode=arguments.get("mode"),
+                                path=arguments["path"],
+                                line=arguments["line"],
+                                character=arguments["character"],
+                                offset=arguments.get("offset", 0),
+                                limit=arguments.get("limit", 10),
+                                deadline=operation_deadline,
+                            )
+                        elif arguments.get("mode", "summary") == "impact":
+                            data = _analyze_impact(
+                                directory=arguments["directory"],
+                                comparison=arguments.get("comparison", "dirty"),
+                                base=arguments.get("base"),
+                                target=arguments.get("target"),
+                                branch=arguments.get("branch"),
+                                deadline=operation_deadline,
+                            )
+                        elif arguments.get("mode", "summary") == "summary":
+                            data = _call_with_deadline(
+                                _get_architecture,
+                                arguments["directory"],
+                                live=arguments.get("live", False),
+                                deadline=operation_deadline,
+                            )
+                        else:
+                            data = _get_architecture_mode(
+                                arguments["directory"],
+                                mode=arguments["mode"],
+                                symbol=arguments.get("symbol"),
+                                target=arguments.get("target"),
+                                reverse=arguments.get("reverse", False),
+                                live=arguments.get("live", False),
+                                deadline=operation_deadline,
+                            )
                     else:
-                        data = _get_architecture_mode(
-                            arguments["directory"],
-                            mode=arguments["mode"],
-                            symbol=arguments.get("symbol"),
-                            target=arguments.get("target"),
-                            reverse=arguments.get("reverse", False),
-                            live=arguments.get("live", False),
-                            deadline=operation_deadline,
+                        data = _call_with_deadline(
+                            _doctor, **arguments, deadline=operation_deadline
                         )
-                else:
-                    data = _call_with_deadline(
-                        _doctor, **arguments, deadline=operation_deadline
+                except Exception as error:
+                    navigation_failure = (
+                        _navigation_failure_from_arguments(
+                            arguments,
+                            status=(
+                                "timeout"
+                                if isinstance(error, TimeoutError)
+                                else "error"
+                            ),
+                            warning=(
+                                "navigation_timeout"
+                                if isinstance(error, TimeoutError)
+                                else "navigation_failed"
+                            ),
+                        )
+                        if name == "get_architecture"
+                        else None
                     )
-            except Exception as error:
-                data = {"error": _safe_exception_text(error)}
+                    data = (
+                        navigation_failure
+                        if navigation_failure is not None
+                        else {"error": _safe_exception_text(error)}
+                    )
 
+        _check_deadline(operation_deadline)
+        if _is_rendered_navigation_data(name, data):
+            data = _sanitize_navigation_data(data)
+        _check_deadline(operation_deadline)
         quality = _quality_for(
             name,
             data,
             arguments if isinstance(arguments, dict) else None,
             limit_clamped=limit_clamped,
         )
+        _check_deadline(operation_deadline)
+        components = _components_for(name, data)
+        _check_deadline(operation_deadline)
         envelope = _build_operation_envelope(
             data,
             quality,
-            components=_components_for(name, data),
+            components=components,
         )
-        return json.dumps(envelope, indent=2, ensure_ascii=False, allow_nan=False)
+        _check_deadline(operation_deadline)
+        rendered_envelope = json.dumps(
+            envelope,
+            indent=2,
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        _check_deadline(operation_deadline)
+        return rendered_envelope
     finally:
         _OPERATION_DEADLINE.reset(deadline_token)
 
@@ -2260,7 +3346,7 @@ async def _handle_tool_call(name: str, arguments) -> str:
             _execute_tool_call, name, arguments, operation_deadline, deadline=operation_deadline
         )
     except TimeoutError:
-        return _timeout_envelope_text()
+        return _tool_timeout_envelope_text(name, arguments)
 
 
 def _build_resource_definitions() -> list:
@@ -2367,10 +3453,16 @@ def _format_tool_result(result: str):
                 for check in data.get("checks", [])
             )
         )
+        navigation_result = _is_rendered_navigation_data("get_architecture", data)
         is_error = isinstance(data, dict) and (
-            "error" in data
-            or data.get("overall_status") == "error"
-            or repair_failed
+            data.get("status") in {"error", "timeout"}
+            if navigation_result
+            else (
+                "error" in data
+                or data.get("status") == "error"
+                or data.get("overall_status") == "error"
+                or repair_failed
+            )
         )
         return CallToolResult(
             content=text_content,
@@ -2413,7 +3505,10 @@ def _register_tools(server, tools):
 
     @decorator
     async def call_tool(name: str, arguments):
-        operation_deadline = time.monotonic() + MCP_OPERATION_SECONDS
+        operation_deadline = time.monotonic() + _tool_operation_seconds(
+            name,
+            arguments,
+        )
         try:
             return await _run_bounded(
                 _execute_formatted_tool_call,
@@ -2423,6 +3518,13 @@ def _register_tools(server, tools):
                 deadline=operation_deadline,
             )
         except TimeoutError:
+            if name == "get_architecture" and isinstance(
+                arguments,
+                dict,
+            ) and _is_precise_architecture_request(arguments):
+                return _format_tool_result(
+                    _tool_timeout_envelope_text(name, arguments)
+                )
             return timeout_result
 
     return call_tool
@@ -2446,8 +3548,21 @@ def run_server() -> int:
         async with stdio_server() as (read_stream, write_stream):
             await server.run(read_stream, write_stream, server.create_initialization_options())
 
-    asyncio.run(main())
-    return 0
+    exit_code = 0
+    try:
+        asyncio.run(main())
+    finally:
+        try:
+            _close_navigation_session_manager(
+                time.monotonic() + MCP_OPERATION_SECONDS
+            )
+        except BaseException as error:
+            print(
+                f"navigation session manager close failed: {type(error).__name__}",
+                file=sys.stderr,
+            )
+            exit_code = 1
+    return exit_code
 
 
 if __name__ == "__main__":

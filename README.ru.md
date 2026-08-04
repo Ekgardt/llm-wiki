@@ -276,6 +276,19 @@ uv run python benchmark/run_contradiction_benchmark.py --corpus benchmark/contra
 
 Локальный stdio MCP-сервер предоставляет **12 task-shaped инструментов**, включая `doctor`, единый response envelope и health/context resources. `find_dead_code(directory)` возвращает консервативные кандидаты, а `get_architecture(directory)` — entry points, routes, hotspots по canonical symbol ID и communities. Анализ файловой системы требует явно заданную существующую директорию, не принимает корень диска и не использует CWD как fallback.
 
+Точные Python-режимы `definition`, `references`, `implementations`, `type`,
+`diagnostics` и позиционные `callers`/`callees` используют закреплённый
+**Pyright 1.1.411**. Установите его явно; запросы ничего не скачивают и не
+обновляют:
+
+```bash
+uv run python scripts/install_pyright.py --state-root "$LLM_WIKI_STATE_ROOT"
+```
+
+Этот путь поддерживается только в **доверенных локальных репозиториях** и
+**не является OS sandbox**. Позиции, deadlines, freshness, containment и
+qualification limits описаны в [docs/CODE-NAVIGATION.md](docs/CODE-NAVIGATION.md).
+
 ---
 
 ## Сравнение

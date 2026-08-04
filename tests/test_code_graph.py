@@ -333,6 +333,192 @@ def test_community_cache_is_bounded_and_scoped_to_pinned_generation(
         graph.close()
 
 
+def test_generation_catalog_can_open_existing_catalog_read_only(tmp_path, monkeypatch):
+    import code_graph
+    import generation_catalog
+
+    catalog = _activate_graph(tmp_path)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(catalog.state_root))
+    captured = {}
+    deadline = time.monotonic() + 5
+
+    def cancelled():
+        return False
+
+    original_open = generation_catalog.GenerationCatalog.open_existing_read_only
+
+    def capture_open(_cls, state_root, **options):
+        captured.update(options)
+        return original_open(state_root, **options)
+
+    monkeypatch.setattr(
+        generation_catalog.GenerationCatalog,
+        "open_existing_read_only",
+        classmethod(capture_open),
+    )
+
+    reader = code_graph._generation_catalog(
+        tmp_path,
+        read_only=True,
+        deadline=deadline,
+        cancelled=cancelled,
+    )
+
+    assert reader is not None
+    assert reader._read_only is True
+    assert reader.get_active()["generation_id"] == "active"
+    assert captured == {
+        "catalog_path": catalog.catalog_path,
+        "deadline": deadline,
+        "cancelled": cancelled,
+    }
+
+
+def test_active_evidence_graph_forwards_read_only_deadline_and_cancellation(
+    tmp_path, monkeypatch
+):
+    import code_graph
+    import evidence_graph
+    import repository_scope
+
+    captured = {}
+    catalog = object()
+    graph = object()
+
+    def cancelled():
+        return False
+
+    deadline = time.monotonic() + 5
+    original_resolve = repository_scope.resolve_repository_scope
+
+    def open_catalog(directory, **options):
+        captured["catalog"] = (directory, options)
+        return catalog
+
+    def open_graph(received_catalog, scope, **options):
+        captured["graph"] = (received_catalog, scope, options)
+        return graph
+
+    def resolve_scope(directory, **options):
+        captured["scope"] = (directory, options)
+        return original_resolve(directory, **options)
+
+    monkeypatch.setattr(code_graph, "_generation_catalog", open_catalog)
+    monkeypatch.setattr(
+        evidence_graph.EvidenceGraph,
+        "open_active_for_repository",
+        open_graph,
+    )
+    monkeypatch.setattr(repository_scope, "resolve_repository_scope", resolve_scope)
+
+    assert code_graph._active_evidence_graph(
+        tmp_path,
+        read_only=True,
+        deadline=deadline,
+        cancelled=cancelled,
+    ) is graph
+    assert captured["catalog"] == (
+        tmp_path,
+        {"read_only": True, "deadline": deadline, "cancelled": cancelled},
+    )
+    assert captured["scope"][0] == tmp_path
+    assert captured["scope"][1] == {"deadline": deadline, "cancelled": cancelled}
+    assert captured["graph"][0] is catalog
+    assert captured["graph"][2] == {"deadline": deadline, "cancelled": cancelled}
+
+
+def test_active_evidence_graph_preserves_legacy_no_keyword_path(tmp_path, monkeypatch):
+    import code_graph
+    import evidence_graph
+    import repository_scope
+
+    catalog = object()
+    graph = object()
+    calls = []
+
+    def open_catalog(directory):
+        calls.append(("catalog", directory))
+        return catalog
+
+    def resolve_scope(directory):
+        calls.append(("scope", directory))
+        return object()
+
+    def open_graph(received_catalog, _scope):
+        calls.append(("graph", received_catalog))
+        return graph
+
+    monkeypatch.setattr(code_graph, "_generation_catalog", open_catalog)
+    monkeypatch.setattr(repository_scope, "resolve_repository_scope", resolve_scope)
+    monkeypatch.setattr(
+        evidence_graph.EvidenceGraph,
+        "open_active_for_repository",
+        open_graph,
+    )
+
+    assert code_graph._active_evidence_graph(tmp_path) is graph
+    assert calls == [
+        ("catalog", tmp_path),
+        ("scope", tmp_path),
+        ("graph", catalog),
+    ]
+
+
+def test_active_evidence_graph_propagates_delayed_scope_deadline(
+    tmp_path, monkeypatch
+):
+    import code_graph
+    import repository_scope
+
+    captured = {}
+    deadline = time.monotonic() + 5
+
+    def cancelled():
+        return False
+
+    monkeypatch.setattr(
+        code_graph,
+        "_generation_catalog",
+        lambda _directory, **_options: object(),
+    )
+
+    def delayed_scope(directory, **options):
+        captured.update(directory=directory, options=options)
+        raise TimeoutError("repository scope deadline reached")
+
+    monkeypatch.setattr(repository_scope, "resolve_repository_scope", delayed_scope)
+
+    with pytest.raises(TimeoutError, match="scope deadline"):
+        code_graph._active_evidence_graph(
+            tmp_path,
+            read_only=True,
+            deadline=deadline,
+            cancelled=cancelled,
+        )
+
+    assert captured == {
+        "directory": tmp_path,
+        "options": {"deadline": deadline, "cancelled": cancelled},
+    }
+
+
+def test_active_evidence_graph_propagates_timeout(tmp_path, monkeypatch):
+    import code_graph
+
+    def timed_out(_directory, **_options):
+        raise TimeoutError("catalog deadline reached")
+
+    monkeypatch.setattr(code_graph, "_generation_catalog", timed_out)
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        code_graph._active_evidence_graph(
+            tmp_path,
+            read_only=True,
+            deadline=time.monotonic() + 5,
+            cancelled=lambda: False,
+        )
+
+
 def test_store_facades_switch_only_after_generation_activation(tmp_path, monkeypatch):
     import code_graph
     from evidence_graph import EvidenceGraph

@@ -7,11 +7,13 @@ the repository and configured Pyright process remain trusted.
 
 from __future__ import annotations
 
+import math
 import ntpath
 import os
 import posixpath
 import re
 import stat
+import time
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -30,6 +32,7 @@ _MAX_PROVIDER_URI = 16 * 1024
 _MAX_DIRECTORY_ENTRIES = 100_000
 _MAX_REDACTION_RAW_BYTES = 256 * 1024
 _MAX_REDACTION_PATH_TOKEN = 128 * 1024
+_SOURCE_READ_CHUNK_BYTES = 64 * 1024
 _OVERSIZED_REDACTION_MARKER = "<redacted: oversized LSP log>"
 _MALFORMED_PERCENT = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _ENCODED_SEPARATOR = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
@@ -178,6 +181,12 @@ def _validate_relative_path(value: object) -> tuple[str, tuple[str, ...]]:
     return value, parts
 
 
+def validate_repository_relative_path(value: str) -> str:
+    """Validate and return one canonical repository-relative path lexically."""
+    normalized, _parts = _validate_relative_path(value)
+    return normalized
+
+
 def _require_repository(value: object) -> RepositoryScope:
     if not isinstance(value, RepositoryScope):
         raise TypeError("repository must be RepositoryScope")
@@ -268,13 +277,14 @@ def _revalidate_posix(
             current = opened
 
 
-def _resolve_posix(
+def _access_posix(
     repository: RepositoryScope,
     relative_path: str,
     parts: tuple[str, ...],
     *,
     must_exist: bool,
-) -> RepositorySource:
+    reader: Callable[[int], bytes] | None,
+) -> tuple[RepositorySource, bytes | None]:
     root = Path(repository.checkout_root)
     if not root.is_absolute():
         raise PathContainmentError("repository checkout root is not local and absolute")
@@ -292,6 +302,7 @@ def _resolve_posix(
         current = root_descriptor
         steps: list[_TraversalStep] = []
         missing: tuple[str, ...] = ()
+        final_descriptor: int | None = None
         for index, component in enumerate(parts):
             final = index == len(parts) - 1
             if final:
@@ -310,6 +321,7 @@ def _resolve_posix(
                 if not stat.S_ISREG(info.st_mode) or identity != _posix_identity(named):
                     raise PathContainmentError("repository source changed before open")
                 steps.append(_TraversalStep(component, identity, False))
+                final_descriptor = opened
                 continue
 
             try:
@@ -337,14 +349,39 @@ def _resolve_posix(
             else:
                 raise PathContainmentError("repository source appeared during traversal")
         absolute_path = root.joinpath(*parts)
+        content = None
+        if reader is not None:
+            if final_descriptor is None or missing:
+                raise PathContainmentError("repository source does not exist")
+            content = reader(final_descriptor)
+            if _posix_identity(os.fstat(final_descriptor)) != steps[-1].identity:
+                raise PathContainmentError("repository source changed during read")
+            _revalidate_posix(filesystem_root_identity, root_steps, step_tuple)
 
-        return RepositorySource(
+        source = RepositorySource(
             repository.repository_id,
             repository.checkout_id,
             relative_path,
             absolute_path,
             path_to_file_uri(absolute_path),
         )
+        return source, content
+
+
+def _resolve_posix(
+    repository: RepositoryScope,
+    relative_path: str,
+    parts: tuple[str, ...],
+    *,
+    must_exist: bool,
+) -> RepositorySource:
+    return _access_posix(
+        repository,
+        relative_path,
+        parts,
+        must_exist=must_exist,
+        reader=None,
+    )[0]
 
 
 def _windows_entries(handle: int) -> dict[str, windows_workspace.WindowsEntry]:
@@ -467,13 +504,14 @@ def _revalidate_windows(
         current = opened
 
 
-def _resolve_windows(
+def _access_windows(
     repository: RepositoryScope,
     relative_path: str,
     parts: tuple[str, ...],
     *,
     must_exist: bool,
-) -> RepositorySource:
+    reader: Callable[[int], bytes] | None,
+) -> tuple[RepositorySource, bytes | None]:
     root = Path(repository.checkout_root)
     pure_root = PureWindowsPath(repository.checkout_root)
     if not pure_root.drive or not pure_root.root or pure_root.drive.startswith("\\"):
@@ -559,13 +597,39 @@ def _resolve_windows(
             ):
                 raise PathContainmentError("repository source changed")
 
-        return RepositorySource(
+        content = None
+        if reader is not None:
+            if final_handle is None or missing:
+                raise PathContainmentError("repository source does not exist")
+            content = reader(final_handle)
+            if _windows_identity(final_handle, directory=False) != steps[-1].identity:
+                raise PathContainmentError("repository source changed during read")
+            _revalidate_windows(canonical_root, root_identity, step_tuple, owned)
+
+        source = RepositorySource(
             repository.repository_id,
             repository.checkout_id,
             relative_path,
             absolute_path,
             path_to_file_uri(absolute_path),
         )
+        return source, content
+
+
+def _resolve_windows(
+    repository: RepositoryScope,
+    relative_path: str,
+    parts: tuple[str, ...],
+    *,
+    must_exist: bool,
+) -> RepositorySource:
+    return _access_windows(
+        repository,
+        relative_path,
+        parts,
+        must_exist=must_exist,
+        reader=None,
+    )[0]
 
 
 def resolve_repository_source(
@@ -593,6 +657,143 @@ def resolve_repository_source(
         raise
     except (OSError, RuntimeError, UnicodeError, ValueError) as exc:
         raise PathContainmentError("repository source containment failed") from exc
+
+
+def _validated_source_read_deadline(deadline: float | None) -> float | None:
+    if deadline is None:
+        return None
+    if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
+        raise TypeError("deadline must be a monotonic timestamp or None")
+    if not math.isfinite(deadline):
+        raise ValueError("deadline must be finite")
+    return float(deadline)
+
+
+def _check_source_read_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("repository source read deadline expired")
+
+
+def _read_posix_source_handle(
+    descriptor: int,
+    *,
+    max_bytes: int,
+    deadline: float | None,
+) -> bytes:
+    _check_source_read_deadline(deadline)
+    before = os.fstat(descriptor)
+    if not stat.S_ISREG(before.st_mode):
+        raise PathContainmentError("repository source is not a regular file")
+    if before.st_size > max_bytes:
+        raise PathContainmentError("repository source exceeds its byte ceiling")
+    identity = (_posix_identity(before), before.st_size, before.st_mtime_ns)
+    chunks: list[bytes] = []
+    total = 0
+    while total <= max_bytes:
+        _check_source_read_deadline(deadline)
+        chunk = os.read(
+            descriptor,
+            min(_SOURCE_READ_CHUNK_BYTES, max_bytes + 1 - total),
+        )
+        _check_source_read_deadline(deadline)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    content = b"".join(chunks)
+    if len(content) > max_bytes:
+        raise PathContainmentError("repository source exceeds its byte ceiling")
+    after = os.fstat(descriptor)
+    if identity != (_posix_identity(after), after.st_size, after.st_mtime_ns):
+        raise PathContainmentError("repository source changed during read")
+    return content
+
+
+def _read_windows_source_handle(
+    handle: int,
+    *,
+    max_bytes: int,
+    deadline: float | None,
+) -> bytes:
+    _check_source_read_deadline(deadline)
+    identity = _windows_identity(handle, directory=False)
+    size = windows_workspace.file_size(handle)
+    modified = windows_workspace.file_modified_time_ns(handle)
+    if size > max_bytes:
+        raise PathContainmentError("repository source exceeds its byte ceiling")
+    windows_workspace.seek_start(handle)
+    chunks = []
+    for chunk in windows_workspace.read_chunks(
+        handle,
+        chunk_bytes=_SOURCE_READ_CHUNK_BYTES,
+        max_bytes=max_bytes,
+    ):
+        _check_source_read_deadline(deadline)
+        chunks.append(chunk)
+    _check_source_read_deadline(deadline)
+    content = b"".join(chunks)
+    if len(content) > max_bytes:
+        raise PathContainmentError("repository source exceeds its byte ceiling")
+    if (
+        _windows_identity(handle, directory=False) != identity
+        or windows_workspace.file_size(handle) != size
+        or windows_workspace.file_modified_time_ns(handle) != modified
+    ):
+        raise PathContainmentError("repository source changed during read")
+    return content
+
+
+def read_repository_source_bytes(
+    repository: RepositoryScope,
+    relative_path: str,
+    *,
+    max_bytes: int,
+    deadline: float | None = None,
+) -> bytes:
+    """Read one bounded source through the final retained containment handle."""
+    repository = _require_repository(repository)
+    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes < 0:
+        raise ValueError("max_bytes must be a non-negative integer")
+    deadline = _validated_source_read_deadline(deadline)
+    normalized, parts = _validate_relative_path(relative_path)
+    _check_source_read_deadline(deadline)
+    try:
+        if os.name == "posix":
+            _source, content = _access_posix(
+                repository,
+                normalized,
+                parts,
+                must_exist=True,
+                reader=lambda descriptor: _read_posix_source_handle(
+                    descriptor,
+                    max_bytes=max_bytes,
+                    deadline=deadline,
+                ),
+            )
+        elif os.name == "nt":
+            _source, content = _access_windows(
+                repository,
+                normalized,
+                parts,
+                must_exist=True,
+                reader=lambda handle: _read_windows_source_handle(
+                    handle,
+                    max_bytes=max_bytes,
+                    deadline=deadline,
+                ),
+            )
+        else:
+            raise PathContainmentError("no-follow repository traversal is unavailable")
+    except TimeoutError:
+        raise
+    except PathContainmentError:
+        raise
+    except (OSError, RuntimeError, UnicodeError, ValueError) as exc:
+        raise PathContainmentError("repository source containment failed") from exc
+    _check_source_read_deadline(deadline)
+    if content is None:
+        raise PathContainmentError("repository source read did not complete")
+    return content
 
 
 def _decoded_provider_uri(uri: object) -> tuple[str, str] | None:
@@ -2003,4 +2204,5 @@ __all__ = [
     "normalize_provider_uri",
     "redact_lsp_text",
     "resolve_repository_source",
+    "validate_repository_relative_path",
 ]

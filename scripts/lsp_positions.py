@@ -176,12 +176,12 @@ class SourceDocument:
         if not isinstance(content, bytes):
             raise TypeError("content must be bytes")
         content.decode("utf-8", errors="strict")
-        return cls(
-            path,
-            content,
-            hashlib.sha256(content).hexdigest(),
-            cls._scan_line_spans(content),
-        )
+        document = object.__new__(cls)
+        object.__setattr__(document, "path", path)
+        object.__setattr__(document, "content", content)
+        object.__setattr__(document, "source_sha256", hashlib.sha256(content).hexdigest())
+        object.__setattr__(document, "line_spans", cls._scan_line_spans(content))
+        return document
 
     @staticmethod
     def _scan_line_spans(content: bytes) -> tuple[tuple[int, int], ...]:

@@ -25,7 +25,7 @@ The suite is the **full regression suite**. Highlights:
 | `test_memory_queue.py` | Enqueue/list/mark_attempt/drain/permanently-failed/backoff/max_tasks/status/corrupt-json/age-filter. |
 | `test_merge_claude_settings.py` | User hooks preserved + ours replaced, env set, permissions union, backup written. |
 | `test_plugin_helpers.py` | Empty/malformed stdin → exit 0; valid payload writes daily-log/state/breadcrumb. |
-| `test_readme_i18n.py` | All 3 READMEs exist, share the live test count, correct repo (`Ekgardt/llm-wiki`), mention `knowledge/`, mention the current version. |
+| `test_readme_i18n.py` | All 3 READMEs exist and synchronize release, repository, install, reliable-memory, and Python-navigation contracts without brittle suite counts. |
 | `test_search_ranking.py` | `_rrf_fuse_triple` weights verified; source_authority boost. |
 | `test_benchmark.py` | Versioned legacy-60 corpus, Recall@5 miss reporting, and current/legacy regression floors. |
 | `test_wikilinks_tracked.py` | `git ls-files knowledge` filtered, broken-link detector + untracked-target reporting. |
@@ -46,6 +46,9 @@ The suite is the **full regression suite**. Highlights:
 | `test_scheduled_nightly.py` | Nightly catchup lease completion/failure state and retry release. |
 | `test_impact_analysis.py` | LINK Layer: symbol extraction, stale wiki page finding, confidence levels, advisory formatting. |
 | `test_pyright_session.py` | Repository-scoped Pyright startup/readiness, exact read-only capabilities, document probes, semantic normalization, call hierarchy, diagnostics/progress, restart replay, and bounded lifecycle state. |
+| `test_workspace_revision.py` | Bounded content revisions, Git/private-index equivalence, race fences, cancellation, and bounded pre/post inventory-proof reuse. |
+| `test_code_navigation.py` | Freshness-proven normalized facade, structural fallback, exact source citations, deterministic statuses, and bounded parsed-source caching. |
+| `test_code_navigation_benchmark.py` | Deterministic meaningful 100 KLOC fixture, closed schemas/gates, correctness, freshness, ownership, recovery, latency, and RSS evidence. |
 
 ## Running
 

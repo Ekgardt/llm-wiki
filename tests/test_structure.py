@@ -181,12 +181,12 @@ def test_superset_contract_is_canonical() -> None:
         assert unimplemented_path not in implemented_checkpoint
 
 
-def test_code_navigation_target_is_approved_but_not_reported_as_current() -> None:
+def test_code_navigation_python_slice_is_reported_as_current() -> None:
     structure = (ROOT / "docs/STRUCTURE.md").read_text(encoding="utf-8")
     current = structure.split("## Implemented corpus-generation checkpoint", 1)[
         1
     ].split("\n## ", 1)[0]
-    target = structure.split("## Approved code-navigation target", 1)[1].split(
+    navigation = structure.split("## Implemented Python code navigation", 1)[1].split(
         "\n## ", 1
     )[0]
     old_decision_path = (
@@ -222,25 +222,34 @@ def test_code_navigation_target_is_approved_but_not_reported_as_current() -> Non
     )
     assert "evidence-graph/v2" in current
     assert "evidence-graph/v3" not in current
-    target_words = " ".join(target.split())
+    navigation_words = " ".join(navigation.split())
     for value in (
         "existing structural Evidence Graph",
         "read-only LSP runtime owned by LLM Wiki",
-        "production-quality Python/Pyright slice",
+        "implemented Python/Pyright slice",
+        "document synchronization",
+        "session-manager capacity",
+        "normalized navigation facade",
         "existing 12 task-shaped MCP tools",
         "no Serena runtime dependency",
         "not written into an active generation",
         "cache/code-tools/pyright/1.1.411/",
         "run/lsp/<owner-nonce>/",
         "Python 3.10",
-        "approved target",
     ):
-        assert value in target_words
+        assert value in navigation_words
     for text in (agents, claude, decision):
         normalized = " ".join(text.split())
         assert "read-only LSP" in normalized
         assert "Serena runtime dependency" in normalized
         assert "persistent daemon" in normalized
+    for stale in (
+        "normalized navigation is not implemented",
+        "normalized navigation facade, and MCP routing remain unimplemented",
+    ):
+        assert stale not in structure
+        assert stale not in agents
+        assert stale not in claude
     assert "Tasks 6-16 are superseded" in " ".join(decision.split())
     assert (ROOT / "AGENTS.md").read_bytes() == (ROOT / "CLAUDE.md").read_bytes()
 
@@ -471,22 +480,19 @@ def test_imported_memory_state_uses_the_hermetic_test_root():
     assert early_memory_state.STATE_ROOT == Path(os.environ["LLM_WIKI_STATE_ROOT"]).resolve()
 
 
-def test_lsp_runtime_paths_are_canonical_but_navigation_is_not_current() -> None:
+def test_lsp_runtime_paths_and_navigation_are_canonical() -> None:
     state_root = Path(os.environ["LLM_WIKI_STATE_ROOT"]).resolve()
     structure = (ROOT / "docs/STRUCTURE.md").read_text(encoding="utf-8")
-    current = structure.split("## Implemented corpus-generation checkpoint", 1)[
-        1
-    ].split("\n## Approved code-navigation target", 1)[0]
-    target = structure.split("## Approved code-navigation target", 1)[1].split(
+    navigation = structure.split("## Implemented Python code navigation", 1)[1].split(
         "\n## ", 1
     )[0]
 
     assert early_memory_state.CODE_TOOLS_DIR == state_root / "cache/code-tools"
     assert early_memory_state.LSP_RUN_DIR == state_root / "run/lsp"
     assert "scripts/lsp_paths.py" in structure
-    assert "path helpers are implemented" in target
-    assert "navigation is not implemented" in target
-    assert "Pyright navigation" not in current
+    assert "path helpers are implemented" in navigation
+    assert "normalized navigation facade" in navigation
+    assert "precise live navigation" in navigation
 
 
 # ---------------------------------------------------------------------------

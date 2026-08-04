@@ -852,6 +852,7 @@ def test_logical_nodes_are_separate_from_occurrences_and_metadata_is_canonical(t
             "node_id": "caller",
             "source_id": "src-code",
             "relative_path": "src/app.py",
+            "source_sha256": _records()["sources"][0]["sha256"],
             "role": "definition",
             "byte_start": 0,
             "byte_end": 13,
@@ -1083,6 +1084,39 @@ def test_bounded_queries_cover_both_directions_paths_dependencies_and_evidence(t
     assert [row["node_id"] for row in graph.code_to_doc("caller")] == ["decision"]
     assert [row["node_id"] for row in graph.doc_to_code("decision")] == ["caller"]
     assert graph.evidence(assertion_id="call")[0]["span_sha256"] == _sha(b"callee()")
+    graph.close()
+
+
+def test_evidence_spans_return_hash_bindings_without_selecting_source_content(
+    tmp_path, monkeypatch
+):
+    graph = _create(tmp_path)
+    statements = []
+    execute = graph._execute
+
+    def tracked(sql, *args, **kwargs):
+        statements.append(sql)
+        return execute(sql, *args, **kwargs)
+
+    monkeypatch.setattr(graph, "_execute", tracked)
+
+    spans = graph.evidence_spans(assertion_id="call")
+
+    assert spans == [
+        {
+            "evidence_id": "ev-call",
+            "assertion_id": "call",
+            "observation_id": None,
+            "source_id": "src-code",
+            "byte_start": 18,
+            "byte_end": 26,
+            "span_sha256": _sha(b"callee()"),
+            "relative_path": "src/app.py",
+            "source_sha256": _records()["sources"][0]["sha256"],
+        }
+    ]
+    assert statements
+    assert all("content" not in statement.casefold() for statement in statements)
     graph.close()
 
 

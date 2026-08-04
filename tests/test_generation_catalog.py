@@ -2045,6 +2045,170 @@ def test_get_active_falls_back_and_repairs_pointer_after_active_corruption(tmp_p
     assert pointer == "gen-1"
 
 
+def test_open_existing_read_only_avoids_catalog_setup_writes(tmp_path, monkeypatch):
+    import generation_catalog
+
+    catalog = _catalog(tmp_path)
+    _publish(catalog, "gen-1")
+    catalog.register("gen-1")
+    assert catalog.activate("gen-1", expected_active=None)
+    before = catalog.catalog_path.read_bytes()
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("read-only catalog performed setup writes")
+
+    monkeypatch.setattr(Path, "mkdir", forbidden)
+    monkeypatch.setattr(generation_catalog, "fsync_directory", forbidden)
+    monkeypatch.setattr(generation_catalog, "open_operational_db", forbidden)
+    monkeypatch.setattr(generation_catalog.GenerationCatalog, "_ensure_schema", forbidden)
+
+    reader = generation_catalog.GenerationCatalog.open_existing_read_only(
+        catalog.state_root,
+        catalog_path=catalog.catalog_path,
+    )
+
+    assert reader.get_active()["generation_id"] == "gen-1"
+    assert catalog.catalog_path.read_bytes() == before
+
+
+def test_open_existing_read_only_checks_cancellation_before_path_resolution(
+    tmp_path, monkeypatch
+):
+    import generation_catalog
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("cancelled open resolved a path")
+
+    monkeypatch.setattr(Path, "resolve", forbidden)
+
+    with pytest.raises(TimeoutError, match="cancelled"):
+        generation_catalog.GenerationCatalog.open_existing_read_only(
+            tmp_path,
+            cancelled=lambda: True,
+        )
+
+
+@pytest.mark.parametrize("cancel_after_resolves", [1, 2])
+def test_open_existing_read_only_checks_cancellation_after_each_path_resolution(
+    tmp_path, monkeypatch, cancel_after_resolves
+):
+    import generation_catalog
+
+    catalog = _catalog(tmp_path)
+    original_resolve = Path.resolve
+    state = {"cancelled": False, "resolves": 0}
+
+    def tracked_resolve(path, *args, **kwargs):
+        resolved = original_resolve(path, *args, **kwargs)
+        state["resolves"] += 1
+        if state["resolves"] == cancel_after_resolves:
+            state["cancelled"] = True
+        return resolved
+
+    def forbidden_open(_catalog):
+        raise AssertionError("cancelled open reached SQLite")
+
+    monkeypatch.setattr(Path, "resolve", tracked_resolve)
+    monkeypatch.setattr(
+        generation_catalog.GenerationCatalog,
+        "_readonly",
+        forbidden_open,
+    )
+
+    with pytest.raises(TimeoutError, match="cancelled"):
+        generation_catalog.GenerationCatalog.open_existing_read_only(
+            catalog.state_root,
+            catalog_path=catalog.catalog_path,
+            cancelled=lambda: state["cancelled"],
+        )
+
+    assert state["resolves"] == cancel_after_resolves
+
+
+def test_open_existing_read_only_rechecks_deadline_after_sqlite_open(
+    tmp_path, monkeypatch
+):
+    import generation_catalog
+
+    catalog = _catalog(tmp_path)
+    state = {"closed": False, "opened": False}
+
+    class Handle:
+        def close(self):
+            state["closed"] = True
+
+    def delayed_open(_catalog):
+        state["opened"] = True
+        return Handle()
+
+    monkeypatch.setattr(
+        generation_catalog.GenerationCatalog,
+        "_readonly",
+        delayed_open,
+    )
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        generation_catalog.GenerationCatalog.open_existing_read_only(
+            catalog.state_root,
+            catalog_path=catalog.catalog_path,
+            deadline=1.0,
+            monotonic=lambda: 2.0 if state["opened"] else 0.0,
+        )
+
+    assert state == {"closed": True, "opened": True}
+
+
+def test_read_only_catalog_fallback_does_not_repair_active_pointer(tmp_path):
+    import generation_catalog
+
+    catalog = _catalog(tmp_path)
+    _publish(catalog, "gen-1")
+    _publish(catalog, "gen-2", parent="gen-1")
+    for generation_id in ("gen-1", "gen-2"):
+        catalog.register(generation_id)
+    assert catalog.activate("gen-1", expected_active=None)
+    assert catalog.activate("gen-2", expected_active="gen-1")
+    (catalog.generations_path / "gen-2/search.sqlite3").write_bytes(b"corrupt")
+    with closing(sqlite3.connect(catalog.catalog_path)) as database:
+        before = (
+            database.execute(
+                "SELECT active_generation_id FROM catalog_state WHERE singleton = 1"
+            ).fetchone()[0],
+            database.execute("SELECT COUNT(*) FROM activation_history").fetchone()[0],
+        )
+
+    reader = generation_catalog.GenerationCatalog.open_existing_read_only(
+        catalog.state_root,
+        catalog_path=catalog.catalog_path,
+    )
+    selected = reader.get_active()
+
+    assert selected is not None
+    assert selected["generation_id"] == "gen-1"
+    with closing(sqlite3.connect(catalog.catalog_path)) as database:
+        after = (
+            database.execute(
+                "SELECT active_generation_id FROM catalog_state WHERE singleton = 1"
+            ).fetchone()[0],
+            database.execute("SELECT COUNT(*) FROM activation_history").fetchone()[0],
+        )
+    assert after == before == ("gen-2", 2)
+
+
+def test_read_only_catalog_rejects_write_transactions(tmp_path):
+    import generation_catalog
+
+    catalog = _catalog(tmp_path)
+    reader = generation_catalog.GenerationCatalog.open_existing_read_only(
+        catalog.state_root,
+        catalog_path=catalog.catalog_path,
+    )
+
+    with pytest.raises(PermissionError, match="read-only"):
+        with reader._write_transaction(None):
+            raise AssertionError("read-only transaction body must not run")
+
+
 @pytest.mark.parametrize("active_binding", ["foreign", "unbound"])
 def test_get_active_for_repository_rejects_ineligible_active_without_mutation(
     tmp_path, active_binding

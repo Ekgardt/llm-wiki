@@ -50,6 +50,37 @@ def test_source_document_has_exact_contract_fields() -> None:
     )
 
 
+def test_source_document_factory_scans_validated_content_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_scan = SourceDocument._scan_line_spans
+    calls = 0
+
+    def recording_scan(content: bytes) -> tuple[tuple[int, int], ...]:
+        nonlocal calls
+        calls += 1
+        return real_scan(content)
+
+    monkeypatch.setattr(SourceDocument, "_scan_line_spans", staticmethod(recording_scan))
+
+    document = SourceDocument.from_bytes("pkg/example.py", b"first\nsecond\n")
+
+    assert document.line_spans == ((0, 5), (6, 12), (13, 13))
+    assert calls == 1
+
+
+def test_source_document_direct_constructor_still_rejects_invalid_derived_fields() -> None:
+    with pytest.raises(ValueError, match="source_sha256"):
+        SourceDocument("example.py", b"value\n", "0" * 64, ((0, 5), (6, 6)))
+    with pytest.raises(ValueError, match="line_spans"):
+        SourceDocument(
+            "example.py",
+            b"value\n",
+            lsp_positions.hashlib.sha256(b"value\n").hexdigest(),
+            ((0, 6),),
+        )
+
+
 def test_utf8_anchor_converts_to_each_negotiated_encoding() -> None:
     document = SourceDocument.from_bytes("pkg/unicode_api.py", "a😀β\r\n".encode())
     anchor = document.validate_anchor(line=1, character=len("a😀".encode()))

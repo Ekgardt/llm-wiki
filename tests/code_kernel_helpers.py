@@ -113,7 +113,7 @@ def create_semantic_pyright_fixture(
 
     server = Path(__file__).with_name("fake_lsp_server.py").resolve()
     node = Path(sys.executable).resolve()
-    event_log = repository / ".fake-lsp-events.jsonl"
+    event_log = repository / ".git" / "fake-lsp-events.jsonl"
     config_path = repository / ".fake-lsp-server.json"
     value = dict(config or {})
     value["event_log"] = str(event_log)

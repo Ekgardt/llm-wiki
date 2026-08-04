@@ -276,6 +276,18 @@ Reproduce the old gate: `uv run python benchmark/run_benchmark.py --legacy-only`
 
 The local stdio MCP server exposes **12 task-shaped tools**, including `doctor`, with one response envelope and health/context resources. `find_dead_code(directory)` returns conservative candidates, while `get_architecture(directory)` reports entry points, routes, canonical-symbol hotspots, and communities. Filesystem analysis requires an explicit existing non-root directory and never falls back to the process CWD.
 
+Precise Python modes `definition`, `references`, `implementations`, `type`,
+`diagnostics`, and positioned `callers`/`callees` use pinned **Pyright 1.1.411**.
+Install it explicitly; queries never download or update it:
+
+```bash
+uv run python scripts/install_pyright.py --state-root "$LLM_WIKI_STATE_ROOT"
+```
+
+This path supports **trusted local repositories** only and is **not an OS sandbox**.
+See [docs/CODE-NAVIGATION.md](docs/CODE-NAVIGATION.md) for positions, deadlines,
+freshness, containment, and qualification limits.
+
 ---
 
 ## Comparison

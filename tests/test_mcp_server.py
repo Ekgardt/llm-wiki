@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import sqlite3
@@ -3277,6 +3278,46 @@ class TestCallbackCompatibility:
 
         assert result.isError is False
 
+    @pytest.mark.parametrize(
+        ("status", "expected_error"),
+        [
+            ("error", True),
+            ("timeout", True),
+            ("unsupported", False),
+            ("not_ready", False),
+            ("partial", False),
+            ("stale", False),
+            ("ok", False),
+        ],
+    )
+    def test_call_tool_result_uses_precise_navigation_failure_semantics(
+        self,
+        monkeypatch,
+        status,
+        expected_error,
+    ):
+        import mcp_server
+
+        class Model:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+
+        monkeypatch.setattr(mcp_server, "TextContent", Model)
+        monkeypatch.setattr(mcp_server, "CallToolResult", Model)
+        monkeypatch.setattr(mcp_server, "MCP_CALL_TOOL_RESULT_AVAILABLE", True)
+        data = mcp_server._normalized_navigation_failure(
+            directory=None,
+            mode="definition",
+            status=status,
+            warning="navigation_warning",
+            offset=0,
+            limit=10,
+        )
+
+        result = mcp_server._format_tool_result(json.dumps({"data": data}))
+
+        assert result.isError is expected_error
+
     def test_modern_callback_returns_text_and_structured_envelope(self, monkeypatch):
         import mcp_server
 
@@ -3606,7 +3647,9 @@ def test_precise_architecture_rejects_non_checkout_directory(
         character=0,
         deadline=None,
     )
-    assert "error" in data
+    assert data["status"] == "error"
+    assert data["warnings"] == ("navigation_directory_invalid",)
+    assert "error" not in data
 
 
 def test_structural_callers_not_routed_as_precise(monkeypatch) -> None:
@@ -3622,3 +3665,1850 @@ def test_structural_callers_not_routed_as_precise(monkeypatch) -> None:
         resolved, mode="callers", symbol="f", deadline=time.monotonic() + 5
     )
     assert data.get("mode", "callers") == "callers" or "callers" in data
+
+
+@pytest.mark.parametrize(
+    ("arguments", "invalid_field"),
+    [
+        ({"directory": "C:/repo", "deadline": 1}, "deadline"),
+        ({"directory": "C:/repo", "mode": "summary", "symbol": "f"}, "symbol"),
+        (
+            {"directory": "C:/repo", "mode": "callers", "symbol": "f", "line": 1},
+            "line",
+        ),
+        (
+            {
+                "directory": "C:/repo",
+                "mode": "definition",
+                "path": "pkg/api.py",
+                "line": 1,
+                "character": 0,
+                "live": True,
+            },
+            "live",
+        ),
+        (
+            {
+                "directory": "C:/repo",
+                "mode": "dependencies",
+                "symbol": "f",
+                "target": "g",
+            },
+            "target",
+        ),
+        (
+            {"directory": "C:/repo", "mode": "impact", "live": True},
+            "live",
+        ),
+    ],
+)
+def test_architecture_validation_rejects_unknown_and_cross_mode_fields(
+    arguments: dict[str, object],
+    invalid_field: str,
+) -> None:
+    import mcp_server
+
+    error = mcp_server._validate_tool_arguments("get_architecture", arguments)
+
+    assert error is not None
+    assert invalid_field in error
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["definition", "references", "implementations", "type", "diagnostics"],
+)
+def test_exact_modes_list_every_missing_position_field(mode: str) -> None:
+    import mcp_server
+
+    error = mcp_server._validate_tool_arguments(
+        "get_architecture",
+        {"directory": "C:/repo", "mode": mode},
+    )
+
+    assert error is not None
+    assert all(field in error for field in ("path", "line", "character"))
+
+
+@pytest.mark.parametrize("mode", ["callers", "callees"])
+def test_positioned_calls_reject_symbol_even_with_complete_position(mode: str) -> None:
+    import mcp_server
+
+    error = mcp_server._validate_tool_arguments(
+        "get_architecture",
+        {
+            "directory": "C:/repo",
+            "mode": mode,
+            "symbol": "f",
+            "path": "pkg/api.py",
+            "line": 1,
+            "character": 0,
+        },
+    )
+
+    assert error is not None
+    assert "symbol" in error
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"directory": "C:/repo"},
+        {"directory": "C:/repo", "mode": "summary", "live": True},
+        {"directory": "C:/repo", "mode": "symbol", "symbol": "f", "live": True},
+        {"directory": "C:/repo", "mode": "callers", "symbol": "f"},
+        {"directory": "C:/repo", "mode": "callees", "symbol": "f", "live": True},
+        {
+            "directory": "C:/repo",
+            "mode": "dependencies",
+            "symbol": "f",
+            "reverse": True,
+            "live": True,
+        },
+        {
+            "directory": "C:/repo",
+            "mode": "path",
+            "symbol": "f",
+            "target": "g",
+            "live": True,
+        },
+        {"directory": "C:/repo", "mode": "community", "live": True},
+        {
+            "directory": "C:/repo",
+            "mode": "impact",
+            "comparison": "two-commits",
+            "base": "a",
+            "target": "b",
+            "branch": "main",
+        },
+    ],
+)
+def test_architecture_validation_preserves_every_structural_shape(
+    arguments: dict[str, object],
+) -> None:
+    import mcp_server
+
+    assert mcp_server._validate_tool_arguments("get_architecture", arguments) is None
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {
+            "directory": "C:/repo",
+            "mode": "definition",
+            "path": "../outside.py",
+            "line": 1,
+            "character": 0,
+        },
+        {
+            "directory": "C:/repo",
+            "mode": "definition",
+            "path": "pkg/api.py",
+            "line": True,
+            "character": 0,
+        },
+        {
+            "directory": "C:/repo",
+            "mode": "references",
+            "path": "pkg/api.py",
+            "line": 1,
+            "character": 0,
+            "offset": True,
+        },
+        {
+            "directory": "C:/repo",
+            "mode": "diagnostics",
+            "path": "pkg/api.py",
+            "line": 1,
+            "character": 0,
+            "limit": 101,
+        },
+    ],
+)
+def test_precise_architecture_rejects_unsafe_paths_bool_ints_and_bounds(
+    arguments: dict[str, object],
+) -> None:
+    import mcp_server
+
+    assert mcp_server._validate_tool_arguments("get_architecture", arguments)
+
+
+def test_registered_precise_callback_uses_single_sixty_second_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import mcp_server
+
+    captured: list[tuple[float, float]] = []
+
+    class Clock:
+        @staticmethod
+        def monotonic() -> float:
+            return 100.0
+
+    class FakeServer:
+        callback = None
+
+        def list_tools(self):
+            return lambda callback: callback
+
+        def call_tool(self, **_kwargs):
+            def register(callback):
+                self.callback = callback
+                return callback
+
+            return register
+
+    async def bounded(_function, *_args, deadline: float):
+        captured.append((_args[-1], deadline))
+        return "bounded-result"
+
+    server = FakeServer()
+    monkeypatch.setattr(mcp_server, "time", Clock)
+    monkeypatch.setattr(mcp_server, "_run_bounded", bounded)
+    monkeypatch.setattr(mcp_server, "MCP_CALL_TOOL_RESULT_AVAILABLE", False)
+    monkeypatch.setattr(mcp_server, "MCP_STRUCTURED_OUTPUT_AVAILABLE", False)
+    monkeypatch.setattr(
+        mcp_server,
+        "TextContent",
+        lambda **kwargs: type("Text", (), kwargs)(),
+    )
+    mcp_server._register_tools(server, [])
+
+    result = asyncio.run(
+        server.callback(
+            "get_architecture",
+            {
+                "directory": "C:/repo",
+                "mode": "definition",
+                "path": "pkg/api.py",
+                "line": 1,
+                "character": 0,
+            },
+        )
+    )
+
+    assert result == "bounded-result"
+    assert captured == [(160.0, 160.0)]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows path identity semantics")
+def test_precise_root_identity_accepts_windows_case_and_separator_variants(
+    tmp_path: Path,
+) -> None:
+    import mcp_server
+
+    variant = Path(str(tmp_path).swapcase().replace("\\", "/"))
+
+    assert mcp_server._same_filesystem_path(tmp_path, variant) is True
+
+
+def test_precise_scope_receives_same_deadline_and_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import lsp_security
+    import mcp_server
+    import repository_scope
+
+    source = tmp_path / "api.py"
+    source.write_text("def api():\n    pass\n", encoding="utf-8")
+    scope = repository_scope.resolve_repository_scope(tmp_path)
+
+    def cancelled() -> bool:
+        return False
+
+    captured: list[tuple[float | None, object]] = []
+
+    def resolve_scope(directory, *, deadline=None, cancelled=None):
+        assert directory == tmp_path.resolve()
+        captured.append((deadline, cancelled))
+        return scope
+
+    monkeypatch.setattr(repository_scope, "resolve_repository_scope", resolve_scope)
+    monkeypatch.setattr(mcp_server, "_operation_cancelled", lambda: cancelled)
+    monkeypatch.setattr(
+        lsp_security,
+        "resolve_repository_source",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(FileNotFoundError()),
+    )
+    monkeypatch.setattr(
+        mcp_server,
+        "_navigation_session_manager",
+        lambda *_args, **_kwargs: pytest.fail("manager must follow source containment"),
+    )
+    deadline = time.monotonic() + 5
+
+    data = mcp_server._get_precise_architecture(
+        str(tmp_path),
+        mode="definition",
+        path="api.py",
+        line=1,
+        character=0,
+        deadline=deadline,
+    )
+
+    assert captured == [(deadline, cancelled)]
+    assert data["status"] == "error"
+    assert data["repository"] == {
+        "repository_id": scope.repository_id,
+        "checkout_id": scope.checkout_id,
+    }
+
+
+@pytest.mark.parametrize("path", ["missing.py", "../outside.py"])
+def test_precise_source_containment_finishes_before_manager_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    import mcp_server
+
+    manager_calls = 0
+
+    def manager(*_args, **_kwargs):
+        nonlocal manager_calls
+        manager_calls += 1
+        raise AssertionError("unsafe source must not create a manager")
+
+    monkeypatch.setattr(mcp_server, "_navigation_session_manager", manager)
+
+    data = mcp_server._get_precise_architecture(
+        str(tmp_path),
+        mode="definition",
+        path=path,
+        line=1,
+        character=0,
+        deadline=time.monotonic() + 5,
+    )
+
+    assert manager_calls == 0
+    assert data["status"] == "error"
+    assert "error" not in data
+
+
+def test_navigation_manager_singleton_lock_honors_remaining_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+
+    import mcp_server
+
+    lock = threading.Lock()
+    lock.acquire()
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER", None)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_CLOSING", None, raising=False)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_EPOCH", 7, raising=False)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_LOCK", lock)
+    started = time.monotonic()
+
+    with pytest.raises(TimeoutError, match="manager lock"):
+        mcp_server._navigation_session_manager(
+            started + 0.02,
+            7,
+            lambda: False,
+        )
+
+    assert time.monotonic() - started < 0.2
+    lock.release()
+
+
+def test_navigation_manager_existing_lookup_still_honors_lock_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+
+    import mcp_server
+
+    lock = threading.Lock()
+    lock.acquire()
+    manager = object()
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER", manager)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_CLOSING", None, raising=False)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_EPOCH", 7, raising=False)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_LOCK", lock)
+    started = time.monotonic()
+
+    with pytest.raises(TimeoutError, match="manager lock"):
+        mcp_server._navigation_session_manager(
+            started + 0.02,
+            7,
+            lambda: False,
+        )
+
+    assert time.monotonic() - started < 0.2
+    lock.release()
+
+
+def test_close_navigation_manager_resets_only_after_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import mcp_server
+
+    closed: list[float] = []
+
+    class Manager:
+        def close_all(self, *, deadline: float) -> None:
+            closed.append(deadline)
+
+    manager = Manager()
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER", manager)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_CLOSING", None, raising=False)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_EPOCH", 11, raising=False)
+    deadline = time.monotonic() + 5
+
+    mcp_server._close_navigation_session_manager(deadline)
+
+    assert closed == [deadline]
+    assert mcp_server._NAVIGATION_MANAGER is None
+    assert mcp_server._NAVIGATION_MANAGER_CLOSING is None
+    assert mcp_server._NAVIGATION_MANAGER_EPOCH == 12
+
+
+def test_close_navigation_manager_advances_epoch_without_manager(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+
+    import mcp_server
+
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER", None)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_CLOSING", None, raising=False)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_EPOCH", 23, raising=False)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_LOCK", threading.Lock())
+
+    mcp_server._close_navigation_session_manager(time.monotonic() + 5)
+
+    assert mcp_server._NAVIGATION_MANAGER_EPOCH == 24
+    assert mcp_server._NAVIGATION_MANAGER is None
+    assert mcp_server._NAVIGATION_MANAGER_CLOSING is None
+
+
+def test_navigation_manager_rejects_cancelled_and_stale_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+
+    import mcp_server
+    import pyright_session
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("rejected request constructed a manager")
+
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER", None)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_CLOSING", None, raising=False)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_EPOCH", 5, raising=False)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_LOCK", threading.Lock())
+    monkeypatch.setattr(pyright_session, "PyrightSessionManager", forbidden)
+    deadline = time.monotonic() + 5
+
+    with pytest.raises(TimeoutError, match="cancelled"):
+        mcp_server._navigation_session_manager(deadline, 5, lambda: True)
+    with pytest.raises(TimeoutError, match="lifecycle"):
+        mcp_server._navigation_session_manager(deadline, 4, lambda: False)
+
+    assert mcp_server._NAVIGATION_MANAGER is None
+
+
+def test_close_navigation_manager_retains_failed_owner_for_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import mcp_server
+
+    attempts = 0
+
+    class Manager:
+        def close_all(self, *, deadline: float) -> None:
+            nonlocal attempts
+            del deadline
+            attempts += 1
+            if attempts == 1:
+                raise TimeoutError("close failed")
+
+    manager = Manager()
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER", manager)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_CLOSING", None, raising=False)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_EPOCH", 31, raising=False)
+
+    with pytest.raises(TimeoutError, match="close failed"):
+        mcp_server._close_navigation_session_manager(time.monotonic() + 5)
+
+    assert mcp_server._NAVIGATION_MANAGER is None
+    assert mcp_server._NAVIGATION_MANAGER_CLOSING is manager
+    with pytest.raises(TimeoutError, match="closing"):
+        mcp_server._navigation_session_manager(
+            time.monotonic() + 0.02,
+            mcp_server._NAVIGATION_MANAGER_EPOCH,
+            lambda: False,
+        )
+
+    mcp_server._close_navigation_session_manager(time.monotonic() + 5)
+
+    assert attempts == 2
+    assert mcp_server._NAVIGATION_MANAGER is None
+    assert mcp_server._NAVIGATION_MANAGER_CLOSING is None
+
+
+def test_navigation_manager_constructor_crossing_deadline_is_not_published(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+
+    import mcp_server
+    import pyright_session
+
+    now = [100.0]
+
+    class Clock:
+        @staticmethod
+        def monotonic() -> float:
+            return now[0]
+
+    class Manager:
+        def __init__(self, *, state_root: Path) -> None:
+            del state_root
+            now[0] = 101.0
+
+    monkeypatch.setattr(mcp_server, "time", Clock)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER", None)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_CLOSING", None, raising=False)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_EPOCH", 2, raising=False)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_LOCK", threading.Lock())
+    monkeypatch.setattr(pyright_session, "PyrightSessionManager", Manager)
+
+    with pytest.raises(TimeoutError):
+        mcp_server._navigation_session_manager(100.5, 2, lambda: False)
+
+    assert mcp_server._NAVIGATION_MANAGER is None
+
+
+def test_successful_close_crossing_deadline_still_resets_singleton(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+
+    import mcp_server
+
+    now = [100.0]
+
+    class Clock:
+        @staticmethod
+        def monotonic() -> float:
+            return now[0]
+
+    class Manager:
+        def close_all(self, *, deadline: float) -> None:
+            assert deadline == 100.5
+            now[0] = 101.0
+
+    manager = Manager()
+    monkeypatch.setattr(mcp_server, "time", Clock)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER", manager)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_CLOSING", None, raising=False)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_EPOCH", 41, raising=False)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_LOCK", threading.Lock())
+
+    with pytest.raises(TimeoutError):
+        mcp_server._close_navigation_session_manager(100.5)
+
+    assert mcp_server._NAVIGATION_MANAGER is None
+    assert mcp_server._NAVIGATION_MANAGER_CLOSING is None
+    assert mcp_server._NAVIGATION_MANAGER_EPOCH == 42
+
+
+def test_timed_out_worker_cannot_recreate_manager_after_final_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+
+    import code_navigation
+    import code_navigation_renderer
+    import lsp_security
+    import mcp_server
+    import pyright_session
+    import repository_scope
+
+    source = tmp_path / "api.py"
+    source.write_text("def api():\n    return 1\n", encoding="utf-8")
+    scope = repository_scope.resolve_repository_scope(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    completed = threading.Event()
+    stale_results = []
+    constructed = []
+
+    class Session:
+        identity = object()
+
+    class Manager:
+        def __init__(self, *, state_root: Path) -> None:
+            del state_root
+            constructed.append(self)
+
+        def get(self, _scope, *, deadline: float):
+            assert deadline > time.monotonic()
+            return Session()
+
+        def close_all(self, *, deadline: float) -> None:
+            assert deadline > time.monotonic()
+
+    class Navigation:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def query(self, *_args, **_kwargs):
+            return object()
+
+    def delayed_directory(_directory, *, deadline=None):
+        del deadline
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(2)
+        return tmp_path, None
+
+    def request():
+        try:
+            stale_results.append(
+                mcp_server._get_precise_architecture(
+                    str(tmp_path),
+                    mode="definition",
+                    path="api.py",
+                    line=1,
+                    character=4,
+                    deadline=time.monotonic() + 5,
+                )
+            )
+        finally:
+            completed.set()
+
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER", None)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_CLOSING", None, raising=False)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_EPOCH", 101, raising=False)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_LOCK", threading.Lock())
+    monkeypatch.setattr(mcp_server, "_MCP_WORKERS", set())
+    monkeypatch.setattr(mcp_server, "_MCP_WORKERS_LOCK", threading.Lock())
+    monkeypatch.setattr(mcp_server, "_validated_code_directory", delayed_directory)
+    monkeypatch.setattr(mcp_server, "_operation_cancelled", lambda: lambda: False)
+    monkeypatch.setattr(mcp_server, "_same_filesystem_path", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        repository_scope,
+        "resolve_repository_scope",
+        lambda *_args, **_kwargs: scope,
+    )
+    monkeypatch.setattr(
+        lsp_security,
+        "resolve_repository_source",
+        lambda *_args, **_kwargs: source,
+    )
+    monkeypatch.setattr(pyright_session, "PyrightSessionManager", Manager)
+    monkeypatch.setattr(code_navigation, "CodeNavigation", Navigation)
+    monkeypatch.setattr(
+        code_navigation_renderer,
+        "render_navigation",
+        lambda _result: {"status": "ok", "warnings": (), "provenance": []},
+    )
+
+    async def time_out_request():
+        with pytest.raises(TimeoutError, match="deadline"):
+            await mcp_server._run_bounded(
+                request,
+                deadline=time.monotonic() + 0.05,
+            )
+
+    try:
+        asyncio.run(time_out_request())
+        assert entered.is_set()
+        mcp_server._close_navigation_session_manager(time.monotonic() + 5)
+        assert mcp_server._NAVIGATION_MANAGER_EPOCH == 102
+        release.set()
+        assert completed.wait(2)
+        assert stale_results[0]["status"] == "timeout"
+        assert constructed == []
+        assert mcp_server._NAVIGATION_MANAGER is None
+
+        fresh = mcp_server._get_precise_architecture(
+            str(tmp_path),
+            mode="definition",
+            path="api.py",
+            line=1,
+            character=4,
+            deadline=time.monotonic() + 5,
+        )
+
+        assert fresh["status"] == "ok"
+        assert len(constructed) == 1
+        assert mcp_server._NAVIGATION_MANAGER is constructed[0]
+    finally:
+        release.set()
+        completed.wait(2)
+        if mcp_server._NAVIGATION_MANAGER is not None:
+            mcp_server._close_navigation_session_manager(time.monotonic() + 5)
+
+
+def test_run_server_closes_navigation_manager_in_finally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import mcp_server
+
+    closed: list[float] = []
+
+    class FakeServer:
+        def __init__(self, _name: str) -> None:
+            pass
+
+        def create_initialization_options(self):
+            return {}
+
+        async def run(self, *_args) -> None:
+            return None
+
+    class Stdio:
+        async def __aenter__(self):
+            return object(), object()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(mcp_server, "MCP_AVAILABLE", True)
+    monkeypatch.setattr(mcp_server, "Server", FakeServer)
+    monkeypatch.setattr(mcp_server, "stdio_server", Stdio)
+    monkeypatch.setattr(mcp_server, "_build_tool_definitions", lambda: [])
+    monkeypatch.setattr(mcp_server, "_register_resources", lambda *_args: False)
+    monkeypatch.setattr(mcp_server, "_register_tools", lambda *_args: None)
+    monkeypatch.setattr(
+        mcp_server,
+        "_close_navigation_session_manager",
+        lambda deadline: closed.append(deadline),
+    )
+
+    assert mcp_server.run_server() == 0
+    assert len(closed) == 1
+    assert closed[0] > time.monotonic()
+
+
+@pytest.mark.parametrize(
+    ("mode", "capability_name", "direction"),
+    [
+        ("definition", "DEFINITIONS", None),
+        ("references", "REFERENCES", None),
+        ("implementations", "IMPLEMENTATIONS", None),
+        ("type", "TYPES", None),
+        ("diagnostics", "DIAGNOSTICS", None),
+        ("callers", "CALLS", "incoming"),
+        ("callees", "CALLS", "outgoing"),
+    ],
+)
+def test_every_precise_route_builds_one_request_and_one_renderer_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    capability_name: str,
+    direction: str | None,
+) -> None:
+    import code_navigation
+    import code_navigation_renderer
+    import mcp_server
+
+    source = tmp_path / "api.py"
+    source.write_text("def api():\n    return 1\n", encoding="utf-8")
+    identity = object()
+    query_result = object()
+    captures: dict[str, object] = {"requests": [], "renders": []}
+
+    class Session:
+        @property
+        def identity(self):
+            return identity
+
+    class Manager:
+        def get(self, scope, *, deadline):
+            captures["manager"] = (scope, deadline)
+            return Session()
+
+    class Navigation:
+        def __init__(self, scope, session, received_identity, **callbacks):
+            captures["constructor"] = (
+                scope,
+                session,
+                received_identity,
+                callbacks,
+            )
+
+        def query(self, request, *, deadline):
+            captures["requests"].append((request, deadline))
+            return query_result
+
+    def render(result):
+        captures["renders"].append(result)
+        return {"status": "ok", "warnings": (), "provenance": []}
+
+    manager = Manager()
+    manager_requests: list[tuple[float, int, object]] = []
+
+    def manager_factory(deadline, expected_epoch, cancelled):
+        manager_requests.append((deadline, expected_epoch, cancelled))
+        return manager
+
+    monkeypatch.setattr(code_navigation, "CodeNavigation", Navigation)
+    monkeypatch.setattr(code_navigation_renderer, "render_navigation", render)
+    monkeypatch.setattr(mcp_server, "_navigation_session_manager", manager_factory)
+    monkeypatch.setattr(mcp_server, "_NAVIGATION_MANAGER_EPOCH", 73, raising=False)
+    deadline = time.monotonic() + 5
+
+    data = mcp_server._get_precise_architecture(
+        str(tmp_path),
+        mode=mode,
+        path="api.py",
+        line=1,
+        character=4,
+        offset=7,
+        limit=8,
+        deadline=deadline,
+    )
+
+    request, query_deadline = captures["requests"][0]
+    constructor = captures["constructor"]
+    assert request.capability.name == capability_name
+    assert request.direction == direction
+    assert (request.offset, request.limit) == (7, 8)
+    assert query_deadline == deadline
+    assert len(manager_requests) == 1
+    assert manager_requests[0][:2] == (deadline, 73)
+    assert callable(manager_requests[0][2])
+    assert manager_requests[0][2]() is False
+    assert captures["manager"][1] == deadline
+    assert constructor[2] is identity
+    assert set(constructor[3]) == {
+        "structural_candidates",
+        "symbol_resolver",
+        "edge_verifier",
+    }
+    assert all(callable(callback) for callback in constructor[3].values())
+    assert captures["renders"] == [query_result]
+    assert len(captures["requests"]) == 1
+    assert len(captures["renders"]) == 1
+    assert data["mode"] == mode
+    assert data["status"] == "ok"
+
+
+def test_real_navigation_adapters_return_only_contained_exact_graph_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import code_graph
+    import lsp_security
+    import mcp_server
+    from code_intelligence import Capability
+    from code_navigation import NavigationRequest
+    from lsp_positions import SourceAnchor
+    from repository_scope import resolve_repository_scope
+
+    source = tmp_path / "src" / "app.py"
+    source.parent.mkdir()
+    content = (
+        b"def caller():\n"
+        b"    callee()\n"
+        b"\n"
+        b"def callee():\n"
+        b"    pass\n"
+    )
+    source.write_bytes(content)
+    scope = resolve_repository_scope(tmp_path)
+    caller_start = content.index(b"caller")
+    call_start = content.index(b"callee")
+    declaration_start = content.rindex(b"callee")
+    source_hash = hashlib.sha256(content).hexdigest()
+    reads: list[tuple[str, int, float | None]] = []
+    original_read = lsp_security.read_repository_source_bytes
+
+    class Graph:
+        repository_scope = scope
+        generation_id = "generation-17"
+
+        def find_nodes(self, *, name, max_rows, deadline, **_options):
+            assert max_rows == 10_000
+            node_id = {"caller": "caller-node", "callee": "callee-node"}.get(name)
+            return [] if node_id is None else [
+                {
+                    "node_id": node_id,
+                    "kind": "function",
+                    "identity_key": name,
+                    "metadata": {"name": name},
+                }
+            ]
+
+        def occurrences(self, node_id, *, max_rows, deadline):
+            assert max_rows <= 10_000
+            starts = {
+                "caller-node": (caller_start, caller_start + len(b"caller"), 1),
+                "callee-node": (
+                    declaration_start,
+                    declaration_start + len(b"callee"),
+                    4,
+                ),
+            }
+            if node_id not in starts:
+                return []
+            start, end, line = starts[node_id]
+            return [
+                {
+                    "file": str(source),
+                    "role": "definition",
+                        "byte_start": start,
+                        "byte_end": end,
+                        "line_start": line,
+                        "source_sha256": source_hash,
+                    }
+                ]
+
+        def edges(self, *, edge_types, max_rows, deadline):
+            assert edge_types == ("CALLS",)
+            assert max_rows == 10_000
+            return [
+                {
+                    "assertion_id": "call-edge",
+                    "source_node_id": "caller-node",
+                    "target_node_id": "callee-node",
+                }
+            ]
+
+        def evidence_spans(self, *, assertion_id, max_rows, deadline):
+            assert assertion_id == "call-edge"
+            return [
+                {
+                    "relative_path": "src/app.py",
+                    "byte_start": call_start,
+                    "byte_end": call_start + len(b"callee"),
+                    "line_start": 2,
+                    "source_sha256": source_hash,
+                    "span_sha256": hashlib.sha256(b"callee").hexdigest(),
+                }
+            ][:max_rows]
+
+        def close(self):
+            return None
+
+    def stable_read(repository, relative_path, *, max_bytes, deadline=None):
+        reads.append((relative_path, max_bytes, deadline))
+        return original_read(
+            repository,
+            relative_path,
+            max_bytes=max_bytes,
+            deadline=deadline,
+        )
+
+    monkeypatch.setattr(
+        code_graph, "_active_evidence_graph", lambda _root, **_options: Graph()
+    )
+    monkeypatch.setattr(lsp_security, "read_repository_source_bytes", stable_read)
+    monkeypatch.setattr(
+        code_graph,
+        "index_directory",
+        lambda *_args, **_kwargs: pytest.fail("adapter must never index"),
+    )
+    monkeypatch.setattr(
+        code_graph,
+        "detect_code_tools",
+        lambda *_args, **_kwargs: pytest.fail("adapter must never write tool cache"),
+    )
+    deadline = time.monotonic() + 5
+    definition_request = NavigationRequest(
+        scope,
+        Capability.DEFINITIONS,
+        "src/app.py",
+        2,
+        6,
+    )
+    calls_request = NavigationRequest(
+        scope,
+        Capability.CALLS,
+        "src/app.py",
+        1,
+        5,
+        direction="outgoing",
+    )
+
+    definitions = mcp_server._navigation_structural_candidates(
+        definition_request,
+        deadline,
+    )
+    calls = mcp_server._navigation_structural_candidates(calls_request, deadline)
+    resolved = mcp_server._navigation_symbol_resolver("callee", scope, deadline)
+    verified = mcp_server._navigation_edge_verifier(
+        SourceAnchor("src/app.py", 1, 4, caller_start),
+        SourceAnchor("src/app.py", 4, 4, declaration_start),
+        scope,
+        deadline,
+    )
+
+    assert [(item.path, item.range.byte_start, item.range.byte_end) for item in definitions] == [
+        ("src/app.py", declaration_start, declaration_start + len(b"callee"))
+    ]
+    assert [(item.path, item.range.byte_start, item.range.byte_end) for item in calls] == [
+        ("src/app.py", call_start, call_start + len(b"callee"))
+    ]
+    assert resolved == definitions
+    assert verified is True
+    assert all(not Path(item.path).is_absolute() for item in (*definitions, *calls))
+    assert all(item.provenance[0].source == "graph" for item in (*definitions, *calls))
+    assert reads
+    assert all(max_bytes == 16 * 1024 * 1024 for _path, max_bytes, _deadline in reads)
+    assert all(read_deadline == deadline for _path, _max, read_deadline in reads)
+
+
+def test_navigation_source_bytes_uses_retained_containment_reader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import lsp_security
+    import mcp_server
+    from repository_scope import resolve_repository_scope
+
+    scope = resolve_repository_scope(tmp_path)
+    captured = {}
+    deadline = time.monotonic() + 5
+
+    def read_source(repository, relative_path, *, max_bytes, deadline):
+        captured.update(
+            repository=repository,
+            relative_path=relative_path,
+            max_bytes=max_bytes,
+            deadline=deadline,
+        )
+        return b"value = 1\n"
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("navigation source reopened a pathname")
+
+    monkeypatch.setattr(lsp_security, "read_repository_source_bytes", read_source)
+    monkeypatch.setattr(lsp_security, "resolve_repository_source", forbidden)
+    monkeypatch.setattr(mcp_server, "read_stable_bytes", forbidden)
+
+    assert mcp_server._navigation_source_bytes(
+        scope,
+        "source.py",
+        deadline=deadline,
+    ) == b"value = 1\n"
+    assert captured == {
+        "repository": scope,
+        "relative_path": "source.py",
+        "max_bytes": mcp_server.MAX_NAVIGATION_SOURCE_BYTES,
+        "deadline": deadline,
+    }
+
+
+def test_navigation_location_requires_matching_source_and_evidence_hashes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import mcp_server
+    from repository_scope import resolve_repository_scope
+
+    content = b"def api():\n    return 1\n"
+    scope = resolve_repository_scope(tmp_path)
+    source_hash = hashlib.sha256(content).hexdigest()
+    start = content.index(b"api")
+    span = {
+        "relative_path": "api.py",
+        "role": "definition",
+        "byte_start": start,
+        "byte_end": start + len(b"api"),
+        "source_sha256": source_hash,
+        "span_sha256": hashlib.sha256(b"api").hexdigest(),
+    }
+    monkeypatch.setattr(
+        mcp_server,
+        "_navigation_source_bytes",
+        lambda *_args, **_kwargs: content,
+    )
+
+    assert mcp_server._navigation_location_from_span(
+        scope,
+        span,
+        source_kind="evidence",
+        require_span_hash=True,
+        metadata=None,
+        graph_version="generation-1",
+        deadline=time.monotonic() + 5,
+    ) is not None
+    assert mcp_server._navigation_location_from_span(
+        scope,
+        {**span, "source_sha256": "0" * 64},
+        source_kind="evidence",
+        require_span_hash=True,
+        metadata=None,
+        graph_version="generation-1",
+        deadline=time.monotonic() + 5,
+    ) is None
+    assert mcp_server._navigation_location_from_span(
+        scope,
+        {**span, "span_sha256": "0" * 64},
+        source_kind="evidence",
+        require_span_hash=True,
+        metadata=None,
+        graph_version="generation-1",
+        deadline=time.monotonic() + 5,
+    ) is None
+    assert mcp_server._navigation_location_from_span(
+        scope,
+        {**span, "span_sha256": "A" * 64},
+        source_kind="evidence",
+        require_span_hash=True,
+        metadata=None,
+        graph_version="generation-1",
+        deadline=time.monotonic() + 5,
+    ) is None
+    assert mcp_server._navigation_location_from_span(
+        scope,
+        {key: value for key, value in span.items() if key != "span_sha256"},
+        source_kind="evidence",
+        require_span_hash=True,
+        metadata=None,
+        graph_version="generation-1",
+        deadline=time.monotonic() + 5,
+    ) is None
+    assert mcp_server._navigation_location_from_span(
+        scope,
+        {key: value for key, value in span.items() if key != "span_sha256"},
+        source_kind="occurrence",
+        require_span_hash=False,
+        metadata=None,
+        graph_version="generation-1",
+        deadline=time.monotonic() + 5,
+    ) is not None
+
+
+def test_navigation_graph_callback_reads_each_hash_bound_source_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import code_graph
+    import mcp_server
+    from repository_scope import resolve_repository_scope
+
+    content = b"def alpha(): pass\ndef beta(): pass\n"
+    source_hash = hashlib.sha256(content).hexdigest()
+    scope = resolve_repository_scope(tmp_path)
+    reads = 0
+
+    class Graph:
+        repository_scope = scope
+        generation_id = "generation-1"
+
+        def find_nodes(self, **_kwargs):
+            return [{"node_id": "node", "metadata": {"name": "alpha"}}]
+
+        def occurrences(self, *_args, **_kwargs):
+            return [
+                {
+                    "relative_path": "api.py",
+                    "role": "definition",
+                    "byte_start": content.index(name),
+                    "byte_end": content.index(name) + len(name),
+                    "source_sha256": source_hash,
+                }
+                for name in (b"alpha", b"beta")
+            ]
+
+        def close(self):
+            return None
+
+    def read_source(*_args, **_kwargs):
+        nonlocal reads
+        reads += 1
+        return content
+
+    monkeypatch.setattr(
+        code_graph,
+        "_active_evidence_graph",
+        lambda _root, **_options: Graph(),
+    )
+    monkeypatch.setattr(mcp_server, "_navigation_source_bytes", read_source)
+
+    locations = mcp_server._graph_declaration_locations(
+        "alpha",
+        scope,
+        time.monotonic() + 5,
+    )
+
+    assert len(locations) == 2
+    assert reads == 1
+    assert mcp_server.MAX_NAVIGATION_GRAPH_FACTS == 10_000
+    assert mcp_server.MAX_NAVIGATION_SOURCE_CACHE_BYTES == 64 * 1024 * 1024
+
+
+def test_structural_callback_reuses_anchor_source_for_graph_spans(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import code_graph
+    import mcp_server
+    from code_intelligence import Capability
+    from code_navigation import NavigationRequest
+    from repository_scope import resolve_repository_scope
+
+    content = b"def alpha(): pass\n"
+    scope = resolve_repository_scope(tmp_path)
+    source_hash = hashlib.sha256(content).hexdigest()
+    reads = 0
+
+    class Graph:
+        repository_scope = scope
+        generation_id = "generation-1"
+
+        def find_nodes(self, **_kwargs):
+            return [{"node_id": "alpha", "metadata": {"name": "alpha"}}]
+
+        def occurrences(self, *_args, **_kwargs):
+            return [
+                {
+                    "relative_path": "api.py",
+                    "role": "definition",
+                    "byte_start": 4,
+                    "byte_end": 9,
+                    "line_start": 1,
+                    "source_sha256": source_hash,
+                }
+            ]
+
+        def close(self):
+            return None
+
+    def read_source(*_args, **_kwargs):
+        nonlocal reads
+        reads += 1
+        return content
+
+    monkeypatch.setattr(
+        code_graph,
+        "_active_evidence_graph",
+        lambda _root, **_options: Graph(),
+    )
+    monkeypatch.setattr(mcp_server, "_navigation_source_bytes", read_source)
+    request = NavigationRequest(
+        scope,
+        Capability.DEFINITIONS,
+        "api.py",
+        1,
+        4,
+    )
+
+    assert len(
+        mcp_server._navigation_structural_candidates(
+            request,
+            time.monotonic() + 5,
+        )
+    ) == 1
+    assert reads == 1
+
+
+def test_navigation_source_cache_remembers_byte_cap_rejections(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import mcp_server
+    from repository_scope import resolve_repository_scope
+
+    scope = resolve_repository_scope(tmp_path)
+    reads = 0
+
+    def read_source(*_args, **_kwargs):
+        nonlocal reads
+        reads += 1
+        return b"12345"
+
+    monkeypatch.setattr(mcp_server, "MAX_NAVIGATION_SOURCE_CACHE_BYTES", 4)
+    monkeypatch.setattr(mcp_server, "_navigation_source_bytes", read_source)
+    cache = mcp_server._NavigationSourceCache()
+
+    assert cache.read(scope, "large.py", deadline=time.monotonic() + 5) is None
+    assert cache.read(scope, "large.py", deadline=time.monotonic() + 5) is None
+    assert reads == 1
+    assert cache._bytes == 0
+    assert len(cache._values) == 1
+
+
+def test_navigation_calls_use_lightweight_evidence_spans(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import code_graph
+    import mcp_server
+    from repository_scope import resolve_repository_scope
+
+    content = b"callee()\n"
+    scope = resolve_repository_scope(tmp_path)
+    span_calls = 0
+    include_span_hash = True
+
+    class Graph:
+        repository_scope = scope
+        generation_id = "generation-1"
+
+        def find_nodes(self, **_kwargs):
+            return [{"node_id": "callee", "metadata": {"name": "callee"}}]
+
+        def edges(self, **_kwargs):
+            return [
+                {
+                    "assertion_id": "call",
+                    "source_node_id": "caller",
+                    "target_node_id": "callee",
+                }
+            ]
+
+        def evidence_spans(self, **_kwargs):
+            nonlocal span_calls, include_span_hash
+            span_calls += 1
+            span = {
+                "relative_path": "api.py",
+                "byte_start": 0,
+                "byte_end": len(b"callee"),
+                "source_sha256": hashlib.sha256(content).hexdigest(),
+            }
+            if include_span_hash:
+                span["span_sha256"] = hashlib.sha256(b"callee").hexdigest()
+            return [span]
+
+        def evidence(self, **_kwargs):
+            raise AssertionError("navigation loaded source blobs from the graph")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        code_graph,
+        "_active_evidence_graph",
+        lambda _root, **_options: Graph(),
+    )
+    monkeypatch.setattr(
+        mcp_server,
+        "_navigation_source_bytes",
+        lambda *_args, **_kwargs: content,
+    )
+
+    locations = mcp_server._graph_call_locations(
+        "callee",
+        scope,
+        direction="incoming",
+        deadline=time.monotonic() + 5,
+    )
+    include_span_hash = False
+    missing_hash_locations = mcp_server._graph_call_locations(
+        "callee",
+        scope,
+        direction="incoming",
+        deadline=time.monotonic() + 5,
+    )
+
+    assert len(locations) == 1
+    assert missing_hash_locations == ()
+    assert span_calls == 2
+
+
+def test_navigation_graph_open_is_read_only_and_deadline_aware(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import code_graph
+    import mcp_server
+    from repository_scope import resolve_repository_scope
+
+    scope = resolve_repository_scope(tmp_path)
+    captured = {}
+
+    class Graph:
+        repository_scope = scope
+
+    graph = Graph()
+
+    def open_graph(root, **options):
+        captured.update(root=root, options=options)
+        return graph
+
+    monkeypatch.setattr(code_graph, "_active_evidence_graph", open_graph)
+    deadline = time.monotonic() + 5
+
+    assert mcp_server._open_navigation_graph(scope, deadline) is graph
+    assert captured["root"] == Path(scope.checkout_root)
+    assert captured["options"]["read_only"] is True
+    assert captured["options"]["deadline"] == deadline
+    assert callable(captured["options"]["cancelled"])
+
+
+def test_navigation_adapter_returns_empty_when_exact_graph_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import code_graph
+    import mcp_server
+    from code_intelligence import Capability
+    from code_navigation import NavigationRequest
+    from repository_scope import resolve_repository_scope
+
+    source = tmp_path / "api.py"
+    source.write_text("def api():\n    pass\n", encoding="utf-8")
+    scope = resolve_repository_scope(tmp_path)
+    monkeypatch.setattr(
+        code_graph, "_active_evidence_graph", lambda _root, **_options: None
+    )
+    request = NavigationRequest(
+        scope,
+        Capability.IMPLEMENTATIONS,
+        "api.py",
+        1,
+        4,
+    )
+
+    assert mcp_server._navigation_structural_candidates(
+        request,
+        time.monotonic() + 5,
+    ) == ()
+
+
+def test_navigation_adapter_checks_deadline_after_graph_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import code_graph
+    import mcp_server
+    from repository_scope import resolve_repository_scope
+
+    scope = resolve_repository_scope(tmp_path)
+    now = [100.0]
+
+    class Clock:
+        @staticmethod
+        def monotonic():
+            return now[0]
+
+    class Graph:
+        repository_scope = scope
+        generation_id = "generation-17"
+
+        def find_nodes(self, **_kwargs):
+            now[0] = 101.0
+            return []
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(mcp_server, "time", Clock)
+    monkeypatch.setattr(
+        code_graph, "_active_evidence_graph", lambda _root, **_options: Graph()
+    )
+
+    with pytest.raises(TimeoutError):
+        mcp_server._navigation_symbol_resolver("api", scope, 100.5)
+
+
+def test_navigation_graph_evidence_work_is_globally_bounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import mcp_server
+    from lsp_positions import SourceAnchor
+    from repository_scope import resolve_repository_scope
+
+    scope = resolve_repository_scope(tmp_path)
+    span_attempts = 0
+
+    class Graph:
+        generation_id = "generation-17"
+
+        def find_nodes(self, **_kwargs):
+            return [
+                {"node_id": f"source-{index}", "metadata": {"name": "source"}}
+                for index in range(3)
+            ]
+
+        def occurrences(self, *_args, **_kwargs):
+            return [
+                {"role": "definition", "invalid": index}
+                for index in range(3)
+            ]
+
+    def location(*_args, **_kwargs):
+        nonlocal span_attempts
+        span_attempts += 1
+        return None
+
+    monkeypatch.setattr(mcp_server, "MAX_NAVIGATION_GRAPH_FACTS", 3)
+    monkeypatch.setattr(mcp_server, "_navigation_location_from_span", location)
+
+    assert mcp_server._graph_node_ids_at_anchor(
+        Graph(),
+        "source",
+        SourceAnchor("source.py", 1, 0, 0),
+        scope,
+        time.monotonic() + 5,
+    ) == set()
+    assert span_attempts <= 3
+
+
+def test_precise_dispatch_exception_returns_normalized_redacted_data(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import mcp_server
+
+    sensitive = (
+        r"api_key=sk-abcdefghijklmnopqrstuvwxyz "
+        r"C:\Users\operator\outside\secret.py"
+    )
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError(sensitive)
+
+    monkeypatch.setattr(mcp_server, "_get_precise_architecture", fail)
+    text = asyncio.run(
+        mcp_server._handle_tool_call(
+            "get_architecture",
+            {
+                "directory": str(tmp_path),
+                "mode": "definition",
+                "path": "api.py",
+                "line": 1,
+                "character": 0,
+            },
+        )
+    )
+    envelope = json.loads(text)
+
+    assert envelope["data"]["status"] == "error"
+    assert envelope["data"]["mode"] == "definition"
+    assert "error" not in envelope["data"]
+    assert set(envelope["data"]) >= {
+        "freshness",
+        "provider",
+        "repository",
+        "groups",
+        "diagnostics",
+        "warnings",
+    }
+    assert sensitive not in text
+    assert "sk-abcdefghijklmnopqrstuvwxyz" not in text
+
+
+def test_renderer_value_error_maps_to_normalized_navigation_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import code_navigation
+    import code_navigation_renderer
+    import mcp_server
+
+    source = tmp_path / "api.py"
+    source.write_text("def api():\n    pass\n", encoding="utf-8")
+
+    class Session:
+        identity = object()
+
+    class Manager:
+        def get(self, *_args, **_kwargs):
+            return Session()
+
+    class Navigation:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def query(self, *_args, **_kwargs):
+            return object()
+
+    monkeypatch.setattr(code_navigation, "CodeNavigation", Navigation)
+    monkeypatch.setattr(
+        code_navigation_renderer,
+        "render_navigation",
+        lambda _result: (_ for _ in ()).throw(ValueError("sensitive renderer detail")),
+    )
+    monkeypatch.setattr(
+        mcp_server,
+        "_navigation_session_manager",
+        lambda _deadline, _expected_epoch, _cancelled: Manager(),
+    )
+
+    data = mcp_server._get_precise_architecture(
+        str(tmp_path),
+        mode="definition",
+        path="api.py",
+        line=1,
+        character=4,
+        deadline=time.monotonic() + 5,
+    )
+
+    assert data["status"] == "error"
+    assert data["warnings"] == ("navigation_render_failed",)
+    assert "error" not in data
+
+
+def test_hard_precise_timeout_returns_normalized_timeout_shape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+
+    import mcp_server
+
+    release = threading.Event()
+
+    def blocked(*_args, **_kwargs):
+        release.wait(1)
+        return {"status": "ok"}
+
+    monkeypatch.setattr(mcp_server, "MCP_LSP_STARTUP_SECONDS", 0.05)
+    monkeypatch.setattr(mcp_server, "_MCP_WORKERS", set())
+    monkeypatch.setattr(mcp_server, "_MCP_WORKERS_LOCK", threading.Lock())
+    monkeypatch.setattr(mcp_server, "_get_precise_architecture", blocked)
+    try:
+        text = asyncio.run(
+            mcp_server._handle_tool_call(
+                "get_architecture",
+                {
+                    "directory": str(tmp_path),
+                    "mode": "references",
+                    "path": "api.py",
+                    "line": 1,
+                    "character": 0,
+                },
+            )
+        )
+    finally:
+        release.set()
+    data = json.loads(text)["data"]
+
+    assert data["status"] == "timeout"
+    assert data["mode"] == "references"
+    assert data["requested_capability"] == "references"
+    assert data["warnings"] == ["navigation_timeout"]
+    assert "error" not in data
+
+
+def test_precise_timeout_envelope_is_static_and_probe_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import mcp_server
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("timeout formatting invoked a normal response probe")
+
+    monkeypatch.setattr(mcp_server, "_build_operation_envelope", forbidden)
+    monkeypatch.setattr(mcp_server, "_quality_for", forbidden)
+    monkeypatch.setattr(mcp_server, "_components_for", forbidden)
+    monkeypatch.setattr(mcp_server, "_sanitize_navigation_data", forbidden)
+
+    envelope = json.loads(
+        mcp_server._tool_timeout_envelope_text(
+            "get_architecture",
+            {
+                "directory": r"C:\private\repository",
+                "mode": "definition",
+                "path": "api.py",
+                "line": 1,
+                "character": 0,
+            },
+        )
+    )
+
+    assert set(envelope) == ENVELOPE_FIELDS
+    assert envelope["source_commit"] is None
+    assert envelope["index_timestamp"] is None
+    assert envelope["components"] == {}
+    assert envelope["partial"] is True
+    assert envelope["warnings"] == ["navigation_timeout"]
+    assert envelope["data"]["status"] == "timeout"
+    assert envelope["data"]["directory"] is None
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_partial"),
+    [
+        ("ok", False),
+        ("partial", True),
+        ("unsupported", True),
+        ("not_ready", True),
+        ("stale", True),
+        ("timeout", True),
+        ("error", True),
+    ],
+)
+def test_precise_quality_uses_rendered_status_without_mutating_data(
+    status: str,
+    expected_partial: bool,
+) -> None:
+    import mcp_server
+
+    data = mcp_server._normalized_navigation_failure(
+        directory="C:/repo",
+        mode="definition",
+        status=status,
+        warning="navigation_warning" if expected_partial else "",
+        offset=0,
+        limit=10,
+    )
+    if not expected_partial:
+        data["warnings"] = ()
+    before = dict(data)
+
+    quality = mcp_server._quality_for(
+        "get_architecture",
+        data,
+        {"mode": "definition"},
+    )
+
+    assert quality["partial"] is expected_partial
+    assert quality["warnings"] == list(data["warnings"])
+    assert data == before
+    assert "_navigation_partial" not in data
+
+
+def test_rendered_partial_status_drives_outer_envelope_without_sentinel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import mcp_server
+
+    data = mcp_server._normalized_navigation_failure(
+        directory=str(tmp_path),
+        mode="definition",
+        status="partial",
+        warning="output_token_bound",
+        offset=0,
+        limit=10,
+    )
+    monkeypatch.setattr(mcp_server, "_get_precise_architecture", lambda *_a, **_k: data)
+
+    envelope = json.loads(
+        asyncio.run(
+            mcp_server._handle_tool_call(
+                "get_architecture",
+                {
+                    "directory": str(tmp_path),
+                    "mode": "definition",
+                    "path": "api.py",
+                    "line": 1,
+                    "character": 0,
+                },
+            )
+        )
+    )
+
+    assert envelope["partial"] is True
+    assert envelope["data"]["status"] == "partial"
+    assert "_navigation_partial" not in envelope["data"]
+    assert "output_token_bound" in envelope["warnings"]
+
+
+def test_navigation_text_fields_are_secret_and_external_path_redacted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import mcp_server
+
+    sensitive = (
+        r"api_key=sk-abcdefghijklmnopqrstuvwxyz "
+        r"C:\Users\operator\outside\secret.py"
+    )
+    data = mcp_server._normalized_navigation_failure(
+        directory=str(tmp_path),
+        mode="diagnostics",
+        status="partial",
+        warning=sensitive,
+        offset=0,
+        limit=10,
+    )
+    data["hover"] = sensitive
+    data["groups"] = [
+        {
+            "path": "api.py",
+            "containing_symbol": None,
+            "locations": [
+                {
+                    "path": "api.py",
+                    "line": 1,
+                    "character": 0,
+                    "range": {"byte_start": 0, "byte_end": 3},
+                    "containing_symbol": None,
+                    "signature": sensitive,
+                    "resolution": "lsp_confirmed",
+                }
+            ],
+        }
+    ]
+    data["diagnostics"] = [
+        {
+            "path": "api.py",
+            "range": {"byte_start": 0, "byte_end": 3},
+            "severity": "error",
+            "code": sensitive,
+            "message": sensitive,
+            "related": [data["groups"][0]["locations"][0]],
+        }
+    ]
+    monkeypatch.setattr(mcp_server, "_get_precise_architecture", lambda *_a, **_k: data)
+
+    text = asyncio.run(
+        mcp_server._handle_tool_call(
+            "get_architecture",
+            {
+                "directory": str(tmp_path),
+                "mode": "diagnostics",
+                "path": "api.py",
+                "line": 1,
+                "character": 0,
+            },
+        )
+    )
+    rendered = json.loads(text)["data"]
+
+    assert "sk-abcdefghijklmnopqrstuvwxyz" not in text
+    assert r"C:\Users\operator\outside\secret.py" not in text
+    assert rendered["groups"][0]["locations"][0]["signature"]
+    assert rendered["diagnostics"][0]["message"]
+    assert rendered["diagnostics"][0]["code"]
+    assert "sk-abcdefghijklmnopqrstuvwxyz" not in rendered["diagnostics"][0]["code"]
+    assert r"C:\Users\operator\outside\secret.py" not in rendered["diagnostics"][0]["code"]
+    assert rendered["diagnostics"][0]["related"][0]["signature"]
+    assert rendered["hover"]
+    assert rendered["groups"][0]["path"] == "api.py"
+
+
+def test_navigation_text_sanitizer_never_slices_a_redaction_marker() -> None:
+    import mcp_server
+
+    value = "x /a/b"
+    sanitized = mcp_server._sanitize_navigation_text(value)
+
+    assert sanitized == "x "
+    assert len(sanitized.encode("utf-8")) <= len(value.encode("utf-8"))
+    assert "[PAT" not in sanitized
+
+
+def test_precise_components_report_provider_and_graph_without_private_state() -> None:
+    import mcp_server
+
+    data = mcp_server._normalized_navigation_failure(
+        directory="C:/repo",
+        mode="definition",
+        status="ok",
+        warning="",
+        offset=0,
+        limit=10,
+        provider="pyright",
+        provider_version="1.1.411",
+        readiness="query_ready",
+    )
+    data["warnings"] = ()
+    data["provenance"] = [
+        {
+            "source": "graph",
+            "provider": "evidence-graph",
+            "version": "generation-17",
+            "observation": "graph_candidate",
+        }
+    ]
+
+    assert mcp_server._components_for("get_architecture", data) == {
+        "provider": {"generation": "1.1.411", "freshness": "fresh"},
+        "graph": {"generation": "generation-17", "freshness": "fresh"},
+    }

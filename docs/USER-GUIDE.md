@@ -48,7 +48,7 @@ The installer detects your agents and wires them up automatically.
    git clone https://github.com/Ekgardt/llm-wiki.git
    cd llm-wiki
    uv sync --locked --extra mcp-server
-   uv run pytest -q          # verify: 5087 tests collected should pass
+   uv run pytest -q          # verify the full regression suite
    ```
 
 2. **Set environment variables** (add to your shell profile):
@@ -99,7 +99,7 @@ integrated Tasks 1-29 branch, not the broader Task 17 target:
 | `log_decision` | Appends through the locked daily-log writer; it does not directly publish a durable decision page. |
 | `compile` | Requests the existing non-blocking, single-lock background compile. |
 | `find_dead_code` | Queries the active Evidence Graph first and reports source generation, graph completeness, unresolved count, and fallback. `live=true` explicitly bypasses the store. |
-| `get_architecture` | Uses the active Evidence Graph first for `summary`; `mode=impact` runs bounded diff-to-graph analysis. Only `summary` and `impact` are currently exposed; the broader planned mode set is **evidence pending**. |
+| `get_architecture` | Keeps structural `summary`, `symbol`, `callers`, `callees`, `dependencies`, `path`, `community`, and `impact`; precise Python `definition`, `references`, `implementations`, `type`, `diagnostics`, and positioned call modes use the owned Pyright session. |
 | `doctor` | Exposes nine closed actions: `status`, queue inspect/cancel/redrive/dead-list, transaction recover/undo, archive status, and claim status. Mutation actions require `repair=true`. |
 
 All responses retain JSON text compatibility and the common envelope. Structured MCP
@@ -107,6 +107,34 @@ output is used when the installed SDK supports it. The envelope still derives it
 top-level index timestamp from legacy `cache/index.sqlite`; per-component generation
 freshness in that envelope is **evidence pending**. Treat row-level generation and
 fallback fields as the current retrieval truth.
+
+## Read-only Python code navigation
+
+Precise Python navigation uses pinned **Pyright 1.1.411** through the existing
+`get_architecture` MCP tool. Install the managed package explicitly:
+
+```bash
+uv run python scripts/install_pyright.py --state-root "$LLM_WIKI_STATE_ROOT"
+```
+
+No query, doctor check, or profile discovery path downloads or updates Pyright.
+The precise modes are `mode=definition`, `mode=references`,
+`mode=implementations`, `mode=type`, and `mode=diagnostics`; positioned
+`callers` and `callees` also use Pyright. Input lines are one-based and character
+values are zero-based UTF-8 byte offsets. Structural modes retain their existing
+10-second deadline; precise modes use one absolute 60-second deadline.
+
+This feature supports **trusted local repositories** only. It is not an OS sandbox.
+Pyright runs with the current user's permissions and may read configured
+interpreters, external stubs, and libraries. Windows uses a Job Object for the
+assigned process tree. POSIX uses a process group while descendants remain in that
+group; hostile `setsid()` escape is unsupported.
+
+Every result binds pre/post workspace revisions and current source citations. One
+stale attempt is retried once. There is no semantic result cache, no query-time graph
+publication, and no complete-negative promise. See
+[CODE-NAVIGATION.md](CODE-NAVIGATION.md) for status semantics, exact bounds, doctor
+codes, and qualification evidence.
 
 ### Register scheduled maintenance
 
@@ -339,7 +367,8 @@ backfill remain disabled.
 `cache/` and `logs/` are disposable. Do not delete `run/` until `doctor` reports no
 nonterminal, conflicted, quarantined, or source failure transaction; no transaction
 inside the 30-day undo window; no retained queue task/result or legacy queue artifact;
-and no live project lease, writer, queue worker, or maintenance owner. Deleting an
+   and no live project lease, writer, queue worker, maintenance owner, or LSP owner;
+   retained LSP failure evidence also blocks deletion. Deleting an
 otherwise eligible `run/` loses undo history. Installers and repair commands never
 remove it automatically. The system also performs no automatic Git operation and
 provides no persistent daemon, cloud service, remote queue/cache, or SQLite knowledge
@@ -412,8 +441,8 @@ setup steps.
 
 ### "Tests fail on fresh clone"
 - Run `uv sync --locked --extra mcp-server` first (the installed baseline includes MCP)
-- `uv run pytest -q` — should report 5087 tests collected
-- If `< 5087`, your checkout is stale; `git pull`
+- `uv run pytest -q` — the full regression suite should pass
+- If collection or imports fail, update the checkout and rerun `uv sync --locked --dev`
 
 ---
 
@@ -422,8 +451,8 @@ setup steps.
 | Path | Zone | Purpose |
 |------|------|---------|
 | `scripts/` | CODE | Pipeline + hooks + helpers |
-| `tests/` | CODE | 5087 tests collected |
-| `docs/` | CODE | This file + ARCHITECTURE + STRUCTURE + SETUP-COGNEE + EXPORTING |
+| `tests/` | CODE | Full hermetic regression suite |
+| `docs/` | CODE | This file + ARCHITECTURE + STRUCTURE + CODE-NAVIGATION + SETUP-COGNEE + EXPORTING |
 | `skills/` | CODE | 9 agent skills |
 | `rules/` | CODE | 3 file-handling policies |
 | `integrations/` | CODE | Thin claude-code, cursor, and antigravity host wiring |

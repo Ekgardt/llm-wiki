@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import importlib.util
 import json
@@ -1342,6 +1343,103 @@ def _run_deletion_check(
 LSP_FAILURE_RETENTION = timedelta(days=7)
 MAX_LSP_OWNER_ROWS = 128
 _LSP_OWNER_NONCE = re.compile(r"[0-9a-f]{32}\Z")
+_LSP_TIMESTAMP = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{6})?Z\Z"
+)
+_LSP_OWNER_FIELDS = {
+    "command_basename",
+    "generation_nonce",
+    "owner_nonce",
+    "owner_pid",
+    "started_at",
+    "state",
+}
+_LSP_LEASE_FIELDS = {
+    "expires_at",
+    "generation_nonce",
+    "heartbeat_at",
+    "manager_pid",
+    "owner_nonce",
+    "schema_version",
+    "server_pid",
+    "state",
+}
+_LSP_FAILURE_FIELDS = {"code", "generation_nonce", "owner_nonce", "timestamp"}
+_LSP_OWNER_ENTRY_NAMES = {"cancellation", "failure.json", "lease.json", "owner.json"}
+_LSP_RECORD_NAMES = {"failure.json", "lease.json", "owner.json"}
+
+
+def _lsp_positive_pid(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _parse_lsp_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or _LSP_TIMESTAMP.fullmatch(value) is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError:
+        return None
+    if (
+        parsed.tzinfo != timezone.utc
+        or parsed.isoformat().replace("+00:00", "Z") != value
+    ):
+        return None
+    return parsed
+
+
+def _valid_lsp_owner(record: dict[str, Any], owner_nonce: str) -> bool:
+    command = record.get("command_basename")
+    return (
+        set(record) == _LSP_OWNER_FIELDS
+        and isinstance(command, str)
+        and 0 < len(command) <= 255
+        and not any(character in command for character in "/\\\x00\r\n")
+        and record.get("owner_nonce") == owner_nonce
+        and isinstance(record.get("generation_nonce"), str)
+        and _LSP_OWNER_NONCE.fullmatch(record["generation_nonce"]) is not None
+        and _lsp_positive_pid(record.get("owner_pid"))
+        and _parse_lsp_timestamp(record.get("started_at")) is not None
+        and record.get("state") == "process_running"
+    )
+
+
+def _valid_lsp_lease(record: dict[str, Any], owner_nonce: str) -> bool:
+    heartbeat = _parse_lsp_timestamp(record.get("heartbeat_at"))
+    expires = _parse_lsp_timestamp(record.get("expires_at"))
+    return (
+        set(record) == _LSP_LEASE_FIELDS
+        and isinstance(record.get("schema_version"), int)
+        and not isinstance(record.get("schema_version"), bool)
+        and record.get("schema_version") == 1
+        and record.get("owner_nonce") == owner_nonce
+        and isinstance(record.get("generation_nonce"), str)
+        and _LSP_OWNER_NONCE.fullmatch(record["generation_nonce"]) is not None
+        and _lsp_positive_pid(record.get("manager_pid"))
+        and _lsp_positive_pid(record.get("server_pid"))
+        and record.get("state") == "live"
+        and heartbeat is not None
+        and expires is not None
+        and heartbeat < expires
+    )
+
+
+def _valid_lsp_failure(record: dict[str, Any], owner_nonce: str) -> bool:
+    fields = set(record)
+    code = record.get("code")
+    return (
+        fields in (_LSP_FAILURE_FIELDS, _LSP_FAILURE_FIELDS | {"server_pid"})
+        and isinstance(code, str)
+        and re.fullmatch(r"[a-z0-9_]{1,64}", code) is not None
+        and record.get("owner_nonce") == owner_nonce
+        and isinstance(record.get("generation_nonce"), str)
+        and _LSP_OWNER_NONCE.fullmatch(record["generation_nonce"]) is not None
+        and _parse_lsp_timestamp(record.get("timestamp")) is not None
+        and (
+            "server_pid" not in record
+            or _lsp_positive_pid(record.get("server_pid"))
+        )
+    )
 
 
 def _pyright_check(
@@ -1368,19 +1466,30 @@ def _pyright_check(
         "qualified": False,
         "codes": codes,
     }
+    api_deadline = None if math.isinf(deadline) else deadline
     try:
-        scope = resolve_repository_scope(root)
-        identity = discover_pyright(scope, state_root=state_root, deadline=deadline)
-    except Exception:  # noqa: BLE001
-        details["status"] = "missing"
-        codes.append("pyright_missing")
-        details["recommended_action"] = (
-            "uv run python scripts/install_pyright.py --state-root <state-root>"
+        scope = resolve_repository_scope(root, deadline=api_deadline)
+        identity = discover_pyright(
+            scope,
+            state_root=state_root,
+            deadline=api_deadline,
         )
+    except TimeoutError:
+        details["status"] = "timeout"
+        codes.append("pyright_timeout")
         return _result(
             "pyright",
             "degraded",
-            "Pyright is missing; run the explicit installer.",
+            "Pyright discovery did not complete before the deadline.",
+            details,
+        )
+    except Exception:  # noqa: BLE001
+        details["status"] = "unsafe"
+        codes.append("pyright_unsafe")
+        return _result(
+            "pyright",
+            "degraded",
+            "Pyright discovery could not safely inspect the repository.",
             details,
         )
     details.update(
@@ -1397,17 +1506,17 @@ def _pyright_check(
             "qualified": identity.qualified,
         }
     )
-    details.pop("executable_sha256", None)
     details["executable_sha256_present"] = identity.executable_sha256 is not None
     if not identity.qualified:
-        details["status"] = "degraded"
-        if identity.status == "missing" and "pyright_missing" not in codes:
+        if identity.status == "missing":
             codes.append("pyright_missing")
-        for code in identity.degradation_codes:
-            if code not in codes:
-                codes.append(code)
-        if identity.version != "1.1.411" and "pyright_version_mismatch" not in codes:
-            codes.append("pyright_version_mismatch")
+        else:
+            details["status"] = "degraded"
+            for code in identity.degradation_codes:
+                if code not in codes:
+                    codes.append(code)
+            if identity.version != "1.1.411" and "pyright_version_mismatch" not in codes:
+                codes.append("pyright_version_mismatch")
         details["recommended_action"] = (
             "uv run python scripts/install_pyright.py --state-root <state-root>"
         )
@@ -1438,19 +1547,516 @@ def _navigation_optional_check(
     return run_check()
 
 
-def _safe_lsp_owner_record(path: Path) -> dict[str, Any] | None:
-    try:
-        raw = read_stable_bytes(
-            path,
-            64 * 1024,
-            label="LSP owner record",
-        )
-        record = json.loads(raw.decode("utf-8"))
-    except Exception:  # noqa: BLE001
-        return None
-    if not isinstance(record, dict):
-        return None
+_LSP_RECORD_BYTES = 64 * 1024
+_LSP_READ_CHUNK_BYTES = 4096
+_LSP_JSON_MAX_DEPTH = 32
+_LspOwnerSnapshot = tuple[
+    str,
+    frozenset[str],
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+]
+
+
+def _require_lsp_deadline(deadline: float) -> None:
+    if _deadline_reached(deadline):
+        raise TimeoutError("LSP runtime scan deadline reached")
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    record: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in record:
+            raise ValueError(f"duplicate JSON key: {key}")
+        record[key] = value
     return record
+
+
+def _require_lsp_json_depth(text: str) -> None:
+    depth = 0
+    in_string = False
+    escaped = False
+    for character in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character in "[{":
+            depth += 1
+            if depth > _LSP_JSON_MAX_DEPTH:
+                raise ValueError("LSP runtime record is too deeply nested")
+        elif character in "]}":
+            depth -= 1
+
+
+def _decode_lsp_record(payload: bytes) -> dict[str, Any]:
+    text = payload.decode("utf-8", errors="strict")
+    _require_lsp_json_depth(text)
+    try:
+        record = json.loads(
+            text,
+            object_pairs_hook=_unique_json_object,
+        )
+    except RecursionError as exc:
+        raise ValueError("LSP runtime record is too deeply nested") from exc
+    if not isinstance(record, dict):
+        raise ValueError("LSP runtime record must be a JSON object")
+    return record
+
+
+def _lsp_posix_directory_flags() -> int:
+    if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+        raise OSError("POSIX no-follow directory handles are unavailable")
+    return (
+        os.O_RDONLY
+        | os.O_DIRECTORY
+        | os.O_NOFOLLOW
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+
+
+def _open_posix_lsp_root(state_root: Path, deadline: float) -> int:
+    state_root = Path(os.path.abspath(state_root))
+    anchor = Path(state_root.anchor)
+    if not state_root.is_absolute() or not anchor.anchor:
+        raise ValueError("LSP state root must be an absolute local path")
+    components = (*state_root.relative_to(anchor).parts, "run", "lsp")
+    flags = _lsp_posix_directory_flags()
+    current: int | None = None
+    try:
+        _require_lsp_deadline(deadline)
+        current = os.open(anchor, flags)
+        _require_lsp_deadline(deadline)
+        if not stat.S_ISDIR(os.fstat(current).st_mode):
+            raise PermissionError("LSP path anchor is not a directory")
+        _require_lsp_deadline(deadline)
+        for component in components:
+            _require_lsp_deadline(deadline)
+            opened = os.open(component, flags, dir_fd=current)
+            try:
+                _require_lsp_deadline(deadline)
+                if not stat.S_ISDIR(os.fstat(opened).st_mode):
+                    raise PermissionError("LSP path component is not a directory")
+                _require_lsp_deadline(deadline)
+            except BaseException:
+                os.close(opened)
+                raise
+            previous = current
+            current = opened
+            os.close(previous)
+        if current is None:
+            raise OSError("LSP root descriptor was not retained")
+        return current
+    except BaseException:
+        if current is not None:
+            os.close(current)
+        raise
+
+
+def _list_posix_lsp_names(
+    directory_fd: int,
+    *,
+    observed_limit: int,
+    deadline: float,
+) -> tuple[list[str], bool]:
+    names: list[str] = []
+    _require_lsp_deadline(deadline)
+    iterator = os.scandir(directory_fd)
+    _require_lsp_deadline(deadline)
+    with iterator:
+        while len(names) < observed_limit:
+            _require_lsp_deadline(deadline)
+            try:
+                entry = next(iterator)
+            except StopIteration:
+                _require_lsp_deadline(deadline)
+                return names, False
+            _require_lsp_deadline(deadline)
+            names.append(entry.name)
+    return names, len(names) == observed_limit
+
+
+def _open_posix_lsp_directory(
+    parent_fd: int,
+    name: str,
+    deadline: float,
+) -> int:
+    _require_lsp_deadline(deadline)
+    expected = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    _require_lsp_deadline(deadline)
+    if stat.S_ISLNK(expected.st_mode) or not stat.S_ISDIR(expected.st_mode):
+        raise PermissionError("LSP runtime member is not a real directory")
+    opened = os.open(
+        name,
+        _lsp_posix_directory_flags(),
+        dir_fd=parent_fd,
+    )
+    try:
+        _require_lsp_deadline(deadline)
+        current = os.fstat(opened)
+        _require_lsp_deadline(deadline)
+        if not stat.S_ISDIR(current.st_mode) or not os.path.samestat(expected, current):
+            raise PermissionError("LSP runtime directory changed before open")
+        return opened
+    except BaseException:
+        os.close(opened)
+        raise
+
+
+def _read_posix_lsp_record(
+    owner_fd: int,
+    name: str,
+    deadline: float,
+) -> dict[str, Any]:
+    _require_lsp_deadline(deadline)
+    expected = os.stat(name, dir_fd=owner_fd, follow_symlinks=False)
+    _require_lsp_deadline(deadline)
+    if (
+        stat.S_ISLNK(expected.st_mode)
+        or not stat.S_ISREG(expected.st_mode)
+        or expected.st_size > _LSP_RECORD_BYTES
+    ):
+        raise PermissionError("LSP runtime record is unsafe or oversized")
+    descriptor = os.open(
+        name,
+        os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        dir_fd=owner_fd,
+    )
+    try:
+        _require_lsp_deadline(deadline)
+        opened = os.fstat(descriptor)
+        _require_lsp_deadline(deadline)
+        if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(expected, opened):
+            raise PermissionError("LSP runtime record changed before open")
+        identity = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+        chunks: list[bytes] = []
+        total = 0
+        while total <= _LSP_RECORD_BYTES:
+            _require_lsp_deadline(deadline)
+            chunk = os.read(
+                descriptor,
+                min(_LSP_READ_CHUNK_BYTES, _LSP_RECORD_BYTES + 1 - total),
+            )
+            _require_lsp_deadline(deadline)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        if total > _LSP_RECORD_BYTES:
+            raise ValueError("LSP runtime record exceeds its byte bound")
+        _require_lsp_deadline(deadline)
+        after = os.fstat(descriptor)
+        _require_lsp_deadline(deadline)
+        if (
+            total != opened.st_size
+            or identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        ):
+            raise PermissionError("LSP runtime record changed during read")
+        return _decode_lsp_record(b"".join(chunks))
+    finally:
+        os.close(descriptor)
+
+
+def _snapshot_posix_lsp(
+    state_root: Path,
+    deadline: float,
+) -> tuple[list[_LspOwnerSnapshot], bool, bool]:
+    try:
+        lsp_fd = _open_posix_lsp_root(state_root, deadline)
+    except FileNotFoundError:
+        if _deadline_reached(deadline):
+            return [], True, False
+        return [], False, True
+    except (OSError, ValueError, TimeoutError):
+        return [], True, False
+    snapshots: list[_LspOwnerSnapshot] = []
+    unreadable = False
+    try:
+        try:
+            owner_names, truncated = _list_posix_lsp_names(
+                lsp_fd,
+                observed_limit=MAX_LSP_OWNER_ROWS + 1,
+                deadline=deadline,
+            )
+        except (OSError, ValueError, TimeoutError):
+            return [], True, False
+        unreadable |= truncated
+        for owner_name in sorted(owner_names[:MAX_LSP_OWNER_ROWS]):
+            if _LSP_OWNER_NONCE.fullmatch(owner_name) is None:
+                unreadable = True
+                continue
+            owner_fd: int | None = None
+            present: frozenset[str] = frozenset()
+            records: dict[str, dict[str, Any] | None] = {
+                name: None for name in _LSP_RECORD_NAMES
+            }
+            try:
+                owner_fd = _open_posix_lsp_directory(lsp_fd, owner_name, deadline)
+                child_names, child_truncated = _list_posix_lsp_names(
+                    owner_fd,
+                    observed_limit=len(_LSP_OWNER_ENTRY_NAMES) + 1,
+                    deadline=deadline,
+                )
+                unreadable |= child_truncated
+                bounded_names = child_names[: len(_LSP_OWNER_ENTRY_NAMES)]
+                present = frozenset(bounded_names)
+                if "cancellation" not in present:
+                    unreadable = True
+                for child_name in bounded_names:
+                    if child_name not in _LSP_OWNER_ENTRY_NAMES:
+                        unreadable = True
+                        continue
+                    if child_name == "cancellation":
+                        cancellation_fd = _open_posix_lsp_directory(
+                            owner_fd, child_name, deadline
+                        )
+                        os.close(cancellation_fd)
+                        continue
+                    try:
+                        records[child_name] = _read_posix_lsp_record(
+                            owner_fd, child_name, deadline
+                        )
+                    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+                        unreadable = True
+            except TimeoutError:
+                unreadable = True
+                snapshots.append(
+                    (
+                        owner_name,
+                        present,
+                        records["owner.json"],
+                        records["lease.json"],
+                        records["failure.json"],
+                    )
+                )
+                break
+            except (OSError, ValueError):
+                unreadable = True
+            finally:
+                if owner_fd is not None:
+                    os.close(owner_fd)
+            snapshots.append(
+                (
+                    owner_name,
+                    present,
+                    records["owner.json"],
+                    records["lease.json"],
+                    records["failure.json"],
+                )
+            )
+        _require_lsp_deadline(deadline)
+        return snapshots, unreadable, False
+    except TimeoutError:
+        return snapshots, True, False
+    finally:
+        os.close(lsp_fd)
+
+
+def _windows_lsp_identity(workspace, handle: int, *, directory: bool) -> bytes:
+    _volume, file_id, _kind = workspace.identity(handle, directory=directory)
+    if not isinstance(file_id, bytes) or not any(file_id):
+        raise OSError("Windows LSP identity is unavailable")
+    return file_id
+
+
+def _read_windows_lsp_record(
+    workspace,
+    owner_handle: int,
+    entry,
+    deadline: float,
+) -> dict[str, Any]:
+    if entry.kind != "file" or entry.size > _LSP_RECORD_BYTES:
+        raise PermissionError("Windows LSP record is unsafe or oversized")
+    _require_lsp_deadline(deadline)
+    handle = workspace.open_file(owner_handle, entry.name)
+    try:
+        _require_lsp_deadline(deadline)
+        if _windows_lsp_identity(workspace, handle, directory=False) != entry.file_id:
+            raise PermissionError("Windows LSP record changed before open")
+        _require_lsp_deadline(deadline)
+        size = workspace.file_size(handle)
+        _require_lsp_deadline(deadline)
+        if size != entry.size or size > _LSP_RECORD_BYTES:
+            raise PermissionError("Windows LSP record size changed before read")
+        chunks: list[bytes] = []
+        total = 0
+        iterator = iter(
+            workspace.read_chunks(
+                handle,
+                chunk_bytes=_LSP_READ_CHUNK_BYTES,
+                max_bytes=_LSP_RECORD_BYTES,
+            )
+        )
+        while True:
+            _require_lsp_deadline(deadline)
+            try:
+                chunk = next(iterator)
+            except StopIteration:
+                _require_lsp_deadline(deadline)
+                break
+            _require_lsp_deadline(deadline)
+            chunks.append(chunk)
+            total += len(chunk)
+        _require_lsp_deadline(deadline)
+        after_size = workspace.file_size(handle)
+        _require_lsp_deadline(deadline)
+        if total != size or after_size != size:
+            raise PermissionError("Windows LSP record changed during read")
+        return _decode_lsp_record(b"".join(chunks))
+    finally:
+        workspace.close_handle(handle)
+
+
+def _snapshot_windows_lsp(
+    state_root: Path,
+    deadline: float,
+) -> tuple[list[_LspOwnerSnapshot], bool, bool]:
+    import windows_workspace as workspace
+
+    lsp_root = Path(os.path.abspath(state_root)) / "run" / "lsp"
+    snapshots: list[_LspOwnerSnapshot] = []
+    unreadable = False
+    try:
+        _require_lsp_deadline(deadline)
+        lsp_handle = workspace.open_directory_path(lsp_root)
+    except FileNotFoundError:
+        if _deadline_reached(deadline):
+            return [], True, False
+        return [], False, True
+    except (OSError, ValueError, RuntimeError, TimeoutError):
+        return [], True, False
+    try:
+        try:
+            _require_lsp_deadline(deadline)
+            owner_entries = workspace.list_directory(
+                lsp_handle,
+                max_entries=MAX_LSP_OWNER_ROWS,
+            )
+            _require_lsp_deadline(deadline)
+        except (OSError, ValueError, RuntimeError, TimeoutError):
+            return [], True, False
+        for owner_entry in owner_entries:
+            if (
+                owner_entry.kind != "directory"
+                or _LSP_OWNER_NONCE.fullmatch(owner_entry.name) is None
+            ):
+                unreadable = True
+                continue
+            owner_handle: int | None = None
+            present: frozenset[str] = frozenset()
+            records: dict[str, dict[str, Any] | None] = {
+                name: None for name in _LSP_RECORD_NAMES
+            }
+            try:
+                _require_lsp_deadline(deadline)
+                owner_handle = workspace.open_directory(lsp_handle, owner_entry.name)
+                _require_lsp_deadline(deadline)
+                if (
+                    _windows_lsp_identity(workspace, owner_handle, directory=True)
+                    != owner_entry.file_id
+                ):
+                    raise PermissionError("Windows LSP owner changed before open")
+                _require_lsp_deadline(deadline)
+                child_entries = workspace.list_directory(
+                    owner_handle,
+                    max_entries=len(_LSP_OWNER_ENTRY_NAMES),
+                )
+                _require_lsp_deadline(deadline)
+                present = frozenset(entry.name for entry in child_entries)
+                if "cancellation" not in present:
+                    unreadable = True
+                for child_entry in child_entries:
+                    if child_entry.name not in _LSP_OWNER_ENTRY_NAMES:
+                        unreadable = True
+                        continue
+                    if child_entry.name == "cancellation":
+                        if child_entry.kind != "directory":
+                            unreadable = True
+                            continue
+                        _require_lsp_deadline(deadline)
+                        cancellation = workspace.open_directory(
+                            owner_handle, child_entry.name
+                        )
+                        try:
+                            _require_lsp_deadline(deadline)
+                            if (
+                                _windows_lsp_identity(
+                                    workspace, cancellation, directory=True
+                                )
+                                != child_entry.file_id
+                            ):
+                                raise PermissionError(
+                                    "Windows LSP cancellation directory changed"
+                                )
+                            _require_lsp_deadline(deadline)
+                        finally:
+                            workspace.close_handle(cancellation)
+                        continue
+                    try:
+                        records[child_entry.name] = _read_windows_lsp_record(
+                            workspace,
+                            owner_handle,
+                            child_entry,
+                            deadline,
+                        )
+                    except (
+                        OSError,
+                        UnicodeError,
+                        ValueError,
+                        json.JSONDecodeError,
+                        RuntimeError,
+                    ):
+                        unreadable = True
+            except TimeoutError:
+                unreadable = True
+                snapshots.append(
+                    (
+                        owner_entry.name,
+                        present,
+                        records["owner.json"],
+                        records["lease.json"],
+                        records["failure.json"],
+                    )
+                )
+                break
+            except (OSError, ValueError, RuntimeError):
+                unreadable = True
+            finally:
+                if owner_handle is not None:
+                    workspace.close_handle(owner_handle)
+            snapshots.append(
+                (
+                    owner_entry.name,
+                    present,
+                    records["owner.json"],
+                    records["lease.json"],
+                    records["failure.json"],
+                )
+            )
+        _require_lsp_deadline(deadline)
+        return snapshots, unreadable, False
+    except TimeoutError:
+        return snapshots, True, False
+    finally:
+        workspace.close_handle(lsp_handle)
+
+
+def _snapshot_lsp_runtime(
+    state_root: Path,
+    deadline: float,
+) -> tuple[list[_LspOwnerSnapshot], bool, bool]:
+    if os.name == "posix":
+        return _snapshot_posix_lsp(state_root, deadline)
+    if os.name == "nt":
+        return _snapshot_windows_lsp(state_root, deadline)
+    return [], True, False
 
 
 def _lsp_runtime_check(
@@ -1460,11 +2066,13 @@ def _lsp_runtime_check(
     deadline: float = float("inf"),
 ) -> dict:
     """Bound the live and retained LSP owner evidence under run/lsp."""
-    lsp_root = state_root / "run" / "lsp"
     codes: list[str] = []
     owners: list[dict[str, Any]] = []
-    unreadable = False
-    if not lsp_root.exists():
+    snapshots, unreadable, absent = _snapshot_lsp_runtime(state_root, deadline)
+    if _deadline_reached(deadline):
+        unreadable = True
+        absent = False
+    if absent:
         return _result(
             "lsp",
             "ok",
@@ -1476,57 +2084,131 @@ def _lsp_runtime_check(
                 "read_error": False,
             },
         )
-    try:
-        entries = sorted(lsp_root.iterdir(), key=lambda item: item.name)
-    except OSError:
-        unreadable = True
-        codes.append("lsp_state_unreadable")
-        return _result(
-            "lsp",
-            "degraded",
-            "LSP runtime owner tree is unreadable.",
-            {"codes": codes, "owners": owners, "deletion_codes": list(codes), "read_error": True},
-        )
-    for entry in entries[:MAX_LSP_OWNER_ROWS]:
+    for entry_name, child_names, owner, lease, failure in snapshots:
         if _deadline_reached(deadline):
+            unreadable = True
             break
-        if not entry.is_dir() or _LSP_OWNER_NONCE.fullmatch(entry.name) is None:
-            continue
+        semantic_codes: list[str] = []
         owner_record = {
-            "owner_nonce": entry.name,
+            "owner_nonce": entry_name,
             "live": False,
             "failure_evidence": False,
             "failure_age_days": None,
         }
-        lease_path = entry / "lease.json"
-        lease = _safe_lsp_owner_record(lease_path) if lease_path.exists() else None
+        if (
+            "owner.json" not in child_names
+            or owner is None
+            or "lease.json" in child_names
+            and lease is None
+        ):
+            unreadable = True
+        if owner is not None and not _valid_lsp_owner(owner, entry_name):
+            unreadable = True
+            owner = None
+        if owner is not None:
+            owner_started_at = _parse_lsp_timestamp(owner.get("started_at"))
+            if owner_started_at is not None and owner_started_at > now:
+                unreadable = True
+        if lease is not None and not _valid_lsp_lease(lease, entry_name):
+            unreadable = True
+            lease = None
         live = False
-        if isinstance(lease, dict):
-            pid = lease.get("owner_pid")
-            if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+        heartbeat_at: datetime | None = None
+        if isinstance(owner, dict) and isinstance(lease, dict):
+            owner_pid = owner.get("owner_pid")
+            manager_pid = lease.get("manager_pid")
+            server_pid = lease.get("server_pid")
+            expires_at = _parse_lsp_timestamp(lease.get("expires_at"))
+            heartbeat_at = _parse_lsp_timestamp(lease.get("heartbeat_at"))
+            started_at = _parse_lsp_timestamp(owner.get("started_at"))
+            matching = (
+                owner.get("owner_nonce") == entry_name
+                and lease.get("owner_nonce") == entry_name
+                and owner.get("generation_nonce") == lease.get("generation_nonce")
+                and owner_pid == server_pid
+                and started_at is not None
+                and heartbeat_at is not None
+                and started_at <= heartbeat_at <= now
+            )
+            if not matching:
+                unreadable = True
+            pids = (manager_pid, server_pid)
+            if (
+                matching
+                and expires_at is not None
+                and expires_at > now
+                and all(
+                    isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
+                    for pid in pids
+                )
+            ):
+                pid_states: list[str] = []
                 try:
-                    if _pid_alive(pid):
-                        live = True
+                    for pid in pids:
+                        _require_lsp_deadline(deadline)
+                        try:
+                            pid_state = _lsp_pid_state(pid)
+                        finally:
+                            _require_lsp_deadline(deadline)
+                        pid_states.append(pid_state)
+                    if "unknown" in pid_states:
+                        unreadable = True
+                    live = all(state == "alive" for state in pid_states)
+                except TimeoutError:
+                    unreadable = True
+                    if _deadline_reached(deadline):
+                        break
                 except Exception:  # noqa: BLE001
                     unreadable = True
         owner_record["live"] = live
         if live:
-            codes.append("lsp_owner_live")
-        failure_path = entry / "failure.json"
-        if failure_path.exists():
-            failure = _safe_lsp_owner_record(failure_path)
+            semantic_codes.append("lsp_owner_live")
+        if "failure.json" in child_names:
+            if failure is None:
+                unreadable = True
+            elif not _valid_lsp_failure(failure, entry_name):
+                unreadable = True
+                failure = None
+            if isinstance(owner, dict) and isinstance(failure, dict):
+                owner_started_at = _parse_lsp_timestamp(owner.get("started_at"))
+                failed_at = _parse_lsp_timestamp(failure.get("timestamp"))
+                if (
+                    failure.get("generation_nonce") != owner.get("generation_nonce")
+                    or (
+                        "server_pid" in failure
+                        and failure.get("server_pid") != owner.get("owner_pid")
+                    )
+                    or owner_started_at is None
+                    or failed_at is None
+                    or not owner_started_at <= failed_at <= now
+                ):
+                    unreadable = True
             age_days: float | None = None
             if isinstance(failure, dict):
-                timestamp = failure.get("timestamp")
-                if isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool):
-                    age_days = (now.timestamp() - float(timestamp)) / 86400.0
+                failed_at = _parse_lsp_timestamp(failure.get("timestamp"))
+                if failed_at is not None:
+                    age_days = (now - failed_at).total_seconds() / 86400.0
             owner_record["failure_evidence"] = True
             owner_record["failure_age_days"] = age_days
             if age_days is None or age_days < LSP_FAILURE_RETENTION.total_seconds() / 86400.0:
-                codes.append("lsp_failure_evidence_retained")
+                semantic_codes.append("lsp_failure_evidence_retained")
         elif not live:
-            codes.append("lsp_failure_evidence_retained")
+            crash_at = heartbeat_at
+            if crash_at is None and isinstance(owner, dict):
+                crash_at = _parse_lsp_timestamp(owner.get("started_at"))
+            if crash_at is not None:
+                owner_record["failure_evidence"] = True
+                owner_record["failure_age_days"] = (
+                    now - crash_at
+                ).total_seconds() / 86400.0
+            crash_age = owner_record["failure_age_days"]
+            if crash_age is None or crash_age < 7:
+                semantic_codes.append("lsp_failure_evidence_retained")
+        if _deadline_reached(deadline):
+            unreadable = True
+            break
         owners.append(owner_record)
+        codes.extend(semantic_codes)
     if unreadable and "lsp_state_unreadable" not in codes:
         codes.append("lsp_state_unreadable")
     status = "ok" if not codes else "degraded"
@@ -2500,6 +3182,49 @@ def _repair_runtime(state_root: Path, repaired: list[dict]) -> None:
         if kind == "missing":
             path.mkdir(parents=True, exist_ok=True)
             repaired.append({"action": "create_runtime_directory", "directory": relative})
+
+
+def _lsp_pid_state(pid: int) -> str:
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return "unknown"
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            open_process = kernel32.OpenProcess
+            open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            open_process.restype = wintypes.HANDLE
+            get_exit_code = kernel32.GetExitCodeProcess
+            get_exit_code.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+            get_exit_code.restype = wintypes.BOOL
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = [wintypes.HANDLE]
+            close_handle.restype = wintypes.BOOL
+            handle = open_process(0x1000, False, pid)
+            if not handle:
+                return "dead" if ctypes.get_last_error() in {87, 1168} else "unknown"
+            try:
+                exit_code = wintypes.DWORD()
+                if not get_exit_code(handle, ctypes.byref(exit_code)):
+                    return "unknown"
+                return "alive" if exit_code.value == 259 else "dead"
+            finally:
+                close_handle(handle)
+        except (AttributeError, OSError, OverflowError, ValueError):
+            return "unknown"
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return "dead"
+    except PermissionError:
+        return "unknown"
+    except OSError as exc:
+        return "dead" if exc.errno == errno.ESRCH else "unknown"
+    except (OverflowError, ValueError):
+        return "unknown"
+    return "alive"
 
 
 def _pid_alive(pid: int) -> bool:
@@ -3918,17 +4643,17 @@ def run_doctor(
             "integrations",
             lambda: _integration_check(root_path, home_path, deadline=deadline),
         ),
-        ("pyright", lambda: _navigation_optional_check(
-            state_path, "pyright",
+        (
+            "pyright",
             lambda: _pyright_check(root_path, state_path, deadline=deadline),
-        )),
-        ("lsp", lambda: _navigation_optional_check(
-            state_path, "lsp",
+        ),
+        (
+            "lsp",
             lambda: _lsp_runtime_check(state_path, generated_at, deadline=deadline),
-        )),
+        ),
     )
     for check_id, operation in remaining:
-        if time.monotonic() >= deadline:
+        if check_id != "lsp" and time.monotonic() >= deadline:
             checks.append(
                 _result(
                     check_id,

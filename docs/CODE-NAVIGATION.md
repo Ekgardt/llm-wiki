@@ -22,7 +22,7 @@ uv run python scripts/install_pyright.py --state-root "$LLM_WIKI_STATE_ROOT"
 
 The installer verifies the pinned SHA-256 and npm integrity before publishing.
 No query, MCP call, doctor check, or profile discovery path downloads or updates
-Pyright.
+Pyright. The qualified runtime uses Node 22; CI pins Node 22.23.1.
 
 ## Process ownership boundaries
 
@@ -66,6 +66,18 @@ Input positions are **one-based lines** and **zero-based UTF-8 byte offsets**.
 - Structural fallback is explicit, provenance-bearing, and appended after LSP
   results. Graph top-K is never used as an LSP filter.
 
+## Synchronization and freshness
+
+- Create, edit, rename, and delete changes are synchronized against one captured
+  workspace revision before a provider request.
+- The facade verifies the same revision after the request. A mismatch discards the
+  attempt and retries once from a fresh revision; a second mismatch returns `stale`.
+- Source-document parsing has a bounded revision-keyed LRU. Semantic/provider results
+  are never cached.
+- Query-time LSP facts are not published into Evidence Graph or any active generation.
+- Empty provider results do not prove repository-wide absence. Complete negative
+  answers remain unsupported.
+
 ## Bounds
 
 - Default limit 10, maximum 100.
@@ -88,4 +100,8 @@ never removes `run/lsp`.
 ## Qualification
 
 The deterministic 100 KLOC qualification corpus and gates live under
-`benchmark/`. **Market superiority remains unclaimed.**
+`benchmark/`. It executes 200 definition, 100 reference, 100 call, 50 mutation,
+20 recovery, and four ownership scenarios. Linux Python 3.10 additionally gates
+warm facade overhead at 20 ms p95, cold readiness at 60 seconds, and client RSS below
+100 MiB. Correctness-only real-Pyright checks run on Windows, Linux, and macOS.
+**Market superiority remains unclaimed.**
