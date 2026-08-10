@@ -116,6 +116,7 @@ LLM Wiki 为你使用的每一个 AI 编码智能体——OpenCode、Codex、Cla
 
 - Python 3.10+
 - git
+- [uv](https://docs.astral.sh/uv/)
 - 一个你已在使用的 AI 智能体（OpenCode、Codex、Claude Code、Cursor 或 Antigravity）
 
 ### 从源码手动安装

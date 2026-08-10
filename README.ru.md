@@ -116,6 +116,7 @@ LLM Wiki даёт каждому AI-агенту, которым вы польз
 
 - Python 3.10+
 - git
+- [uv](https://docs.astral.sh/uv/)
 - AI-агент, которым вы уже пользуетесь (OpenCode, Codex, Claude Code, Cursor или Antigravity)
 
 ### Ручная установка из исходников

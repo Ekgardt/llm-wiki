@@ -93,8 +93,18 @@ configure_codex_mcp() {
 
 # ─── 1. Resolve vault root ──────────────────────────────────────────
 
+if [[ -z "${BASH_SOURCE[0]:-}" || ! -f "${BASH_SOURCE[0]}" ]]; then
+  fail "Remote bootstrap is not published. Run this installer from an inspected checkout."
+fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VAULT_ROOT="${LLM_WIKI_ROOT:-$SCRIPT_DIR}"
+VAULT_ROOT="$SCRIPT_DIR"
+if [[ -n "${LLM_WIKI_ROOT:-}" ]]; then
+  REQUESTED_ROOT="$(cd "$LLM_WIKI_ROOT" 2>/dev/null && pwd)" || \
+    fail "LLM_WIKI_ROOT does not identify an accessible checkout."
+  if [[ "$REQUESTED_ROOT" != "$SCRIPT_DIR" ]]; then
+    fail "LLM_WIKI_ROOT points to a different checkout than this installer."
+  fi
+fi
 
 # Remote bootstrap stays fail-closed until immutable commit verification ships.
 if [[ ! -f "$VAULT_ROOT/pyproject.toml" ]]; then
@@ -130,16 +140,11 @@ if ! command -v git &>/dev/null; then
 fi
 ok "git $(git --version)"
 
-# uv (install if missing)
+# uv
 if ! command -v uv &>/dev/null; then
-  info "Installing uv (fast Python package manager)..."
-  curl -LsSf https://astral.sh/uv/install.sh | sh
-  export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
-  if ! command -v uv &>/dev/null; then
-    fail "uv installation failed. Install manually: https://docs.astral.sh/uv/"
-  fi
+  fail "uv is required. Install it from https://docs.astral.sh/uv/ and rerun the installer."
 fi
-ok "uv $(uv --version 2>/dev/null || echo 'installed')"
+ok "uv $(uv --version)"
 
 # ─── 3. Install dependencies ───────────────────────────────────────
 
@@ -243,8 +248,10 @@ else
 fi
 trap - EXIT HUP INT TERM
 if [ "$testExit" -ne 0 ]; then
-  warn "Some tests failed - core features will still work, but please report issues"
+  TEST_WARNING=1
+  warn "Test suite failed; installation continues in degraded state"
 else
+  TEST_WARNING=0
   ok "Test suite passed"
 fi
 
@@ -449,7 +456,7 @@ info "  uv sync --extra reranker     # cross-encoder reranker (ONNX)"
 
 echo ""
 echo "=============================================="
-if [ "$SYNC_WARNING" -eq 1 ]; then
+if [ "$SYNC_WARNING" -eq 1 ] || [ "$TEST_WARNING" -eq 1 ]; then
   echo -e "${YELLOW}  LLM-Wiki installed with warnings${NC}"
 else
   echo -e "${GREEN}  LLM-Wiki installed successfully!${NC}"

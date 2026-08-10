@@ -31,6 +31,9 @@ the Cognee graph layer at 300+ pages).
 
 ### Option A: Local installer from an inspected checkout (recommended)
 
+Install `uv` from https://docs.astral.sh/uv/ first. The installer does not execute a
+mutable remote dependency bootstrap.
+
 ```bash
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
@@ -448,7 +451,7 @@ setup steps.
 
 ### "Tests fail on fresh clone"
 - Run `uv sync --locked --extra mcp-server` first (the installed baseline includes MCP)
-- `uv run pytest -q` — the full regression suite should pass
+- `uv run pytest -q` — inspect the current full regression status and reported failures
 - If collection or imports fail, update the checkout and rerun `uv sync --locked --dev`
 
 ---

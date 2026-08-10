@@ -2130,7 +2130,7 @@ def _find_working_bash() -> str | None:
 @pytest.mark.parametrize(
     ("fake_exit", "fake_output", "expected_marker"),
     [
-        (1, "3081 passed", "[WARN] Some tests failed"),
+        (1, "3081 passed", "[WARN] Test suite failed; installation continues in degraded state"),
         (0, "1 failed", "[OK] Test suite passed"),
     ],
     ids=["pytest_exit_1_success_output", "pytest_exit_0_failure_output"],
@@ -2715,7 +2715,7 @@ def test_unix_installer_cleanup_targets_group_with_term_then_kill(tmp_path):
 @pytest.mark.parametrize(
     ("fake_exit", "fake_output", "expected_marker"),
     [
-        (1, "3081 passed", "[WARN] Some tests failed"),
+        (1, "3081 passed", "[WARN] Test suite failed; installation continues in degraded state"),
         (0, "1 failed", "[OK] Test suite passed"),
     ],
     ids=["pytest_exit_1_success_output", "pytest_exit_0_failure_output"],

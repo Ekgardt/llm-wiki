@@ -101,7 +101,26 @@ args = ["run", "--directory", "$tomlVault", "python", "scripts/mcp_server.py"]
 
 # --- 1. Resolve vault root -----------------------------------------
 
-$VAULT_ROOT = if ($env:LLM_WIKI_ROOT) { $env:LLM_WIKI_ROOT } else { $PSScriptRoot }
+if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+    Fail "Remote bootstrap is not published. Run this installer from an inspected checkout."
+}
+$VAULT_ROOT = $PSScriptRoot
+$resolvedScriptRoot = (Resolve-Path -LiteralPath $PSScriptRoot).Path
+if (-not [string]::IsNullOrWhiteSpace($env:LLM_WIKI_ROOT)) {
+    try {
+        $requestedRoot = (Resolve-Path -LiteralPath $env:LLM_WIKI_ROOT).Path
+    } catch {
+        Fail "LLM_WIKI_ROOT does not identify an accessible checkout."
+    }
+    if (-not [string]::Equals(
+        $requestedRoot,
+        $resolvedScriptRoot,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        Fail "LLM_WIKI_ROOT points to a different checkout than this installer."
+    }
+}
+$VAULT_ROOT = $resolvedScriptRoot
 if (-not (Test-Path "$VAULT_ROOT\pyproject.toml")) {
     Fail "Remote bootstrap is not published. Clone the repository, inspect it, and run this installer from that checkout."
 }
@@ -129,14 +148,9 @@ Ok "Python $pyVersion"
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Fail "git is required" }
 Ok "git installed"
 
-# uv (install if missing)
+# uv
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
-    Info "Installing uv..."
-    irm https://astral.sh/uv/install.ps1 | iex
-    $env:PATH = "$env:USERPROFILE\.local\bin;$env:PATH"
-    if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
-        Fail "uv installation failed. Install manually: https://docs.astral.sh/uv/"
-    }
+    Fail "uv is required. Install it from https://docs.astral.sh/uv/ and rerun the installer."
 }
 Ok "uv installed"
 
@@ -150,6 +164,7 @@ Ok "Dependencies installed (MCP server baseline included)"
 
 Info "Running test suite..."
 $testProcess = $null
+$testWarning = $false
 try {
     $testProcess = Start-Process `
         -FilePath "uv" `
@@ -161,7 +176,8 @@ try {
     $testProcess.WaitForExit()
     $testExit = $testProcess.ExitCode
     if ($testExit -ne 0) {
-        Warn "Some tests failed - core features will still work, but please report issues"
+        $testWarning = $true
+        Warn "Test suite failed; installation continues in degraded state"
     } else {
         Ok "Test suite passed"
     }
@@ -397,7 +413,7 @@ switch ($syncExit) {
 
 Write-Host ""
 Write-Host "==============================================" -ForegroundColor Green
-if ($syncWarning) {
+if ($syncWarning -or $testWarning) {
     Write-Host "  LLM-Wiki installed with warnings" -ForegroundColor Yellow
 } else {
     Write-Host "  LLM-Wiki installed successfully!" -ForegroundColor Green

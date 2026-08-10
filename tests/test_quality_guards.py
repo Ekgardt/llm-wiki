@@ -548,6 +548,7 @@ def test_unpublished_remote_bootstrap_is_fail_closed():
         "raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.",
         "/v4.0.0/install.",
         "git clone --branch v4.0.0",
+        "astral.sh/uv/install.",
     )
     for name, source in sources.items():
         for value in forbidden:
@@ -555,6 +556,27 @@ def test_unpublished_remote_bootstrap_is_fail_closed():
 
     assert "Remote bootstrap is not published" in sources["install.sh"]
     assert "Remote bootstrap is not published" in sources["install.ps1"]
+    assert "uv is required" in sources["install.sh"]
+    assert "uv is required" in sources["install.ps1"]
+    assert 'VAULT_ROOT="$SCRIPT_DIR"' in sources["install.sh"]
+    assert 'VAULT_ROOT="${LLM_WIKI_ROOT:-$SCRIPT_DIR}"' not in sources["install.sh"]
+    assert '${BASH_SOURCE[0]:-}' in sources["install.sh"]
+    assert "$VAULT_ROOT = $PSScriptRoot" in sources["install.ps1"]
+    assert "if ($env:LLM_WIKI_ROOT)" not in sources["install.ps1"]
+    assert "IsNullOrWhiteSpace($PSScriptRoot)" in sources["install.ps1"]
+    assert "core features will still work" not in sources["install.sh"]
+    assert "core features will still work" not in sources["install.ps1"]
+
+
+def test_unix_installer_is_executable_in_git():
+    result = subprocess.run(
+        ["git", "ls-files", "--stage", "install.sh"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.split(maxsplit=1)[0] == "100755"
 
 
 # ─── 12. All daily-log writers use shared lock ──────────────────────

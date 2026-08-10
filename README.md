@@ -116,6 +116,7 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 
 - Python 3.10+
 - git
+- [uv](https://docs.astral.sh/uv/)
 - An AI agent you already use (OpenCode, Codex, Claude Code, Cursor, or Antigravity)
 
 ### Manual source install
