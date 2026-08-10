@@ -2454,12 +2454,16 @@ def _load_transformer_embedding(
         if _sha256_file(resolved_asset) != BGE_M3_SPARSE_LINEAR_SHA256:
             raise ValueError("BGE-M3 sparse_linear.pt SHA256 mismatch")
         state = torch.load(resolved_asset, map_location="cpu", weights_only=True)
-        if not isinstance(state, dict) or set(state) != {"weight"}:
+        if not isinstance(state, dict) or set(state) != {"weight", "bias"}:
             raise ValueError("BGE-M3 sparse_linear.pt has an invalid state dictionary")
         weight = state["weight"]
-        if tuple(weight.shape) != (1, selection.variant["dimensions"]):
+        bias = state["bias"]
+        if (
+            tuple(weight.shape) != (1, selection.variant["dimensions"])
+            or tuple(bias.shape) != (1,)
+        ):
             raise ValueError("BGE-M3 sparse_linear.pt has an invalid shape")
-        sparse_linear = torch.nn.Linear(selection.variant["dimensions"], 1, bias=False)
+        sparse_linear = torch.nn.Linear(selection.variant["dimensions"], 1, bias=True)
         sparse_linear.load_state_dict(state, strict=True)
         sparse_linear.eval()
 

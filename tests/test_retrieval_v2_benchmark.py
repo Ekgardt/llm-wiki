@@ -2096,6 +2096,93 @@ def test_embeddinggemma_loader_uses_pinned_native_sentence_transformer(tmp_path,
     assert len(encoded[0]) == 768
 
 
+def test_bge_m3_loader_requires_complete_sparse_linear_state_without_torch(
+    tmp_path, monkeypatch
+):
+    runner = _runner_module()
+    selection = runner.load_model_selection(
+        BENCHMARK / "model-matrix-v1.json",
+        CORPUS,
+        model_id="BAAI/bge-m3",
+        variant_id="float32-1024d",
+    )
+    asset = tmp_path / "sparse_linear.pt"
+    asset.write_bytes(b"pinned sparse state")
+    monkeypatch.setattr(runner, "BGE_M3_SPARSE_LINEAR_SHA256", runner._sha256_file(asset))
+    calls = []
+
+    class Tensor:
+        def __init__(self, shape):
+            self.shape = shape
+
+    state = {"weight": Tensor((1, 1024)), "bias": Tensor((1,))}
+
+    class SparseLinear:
+        def __init__(self, in_features, out_features, *, bias):
+            calls.append(("linear", in_features, out_features, bias))
+
+        def load_state_dict(self, loaded_state, *, strict):
+            calls.append(("state", loaded_state, strict))
+
+        def eval(self):
+            calls.append(("sparse-eval",))
+            return self
+
+    class Torch:
+        float32 = "float32"
+        nn = type("NN", (), {"Linear": SparseLinear})
+
+        @staticmethod
+        def load(path, *, map_location, weights_only):
+            calls.append(("load", path, map_location, weights_only))
+            return state
+
+    class Tokenizer:
+        padding_side = "right"
+        truncation_side = "right"
+
+    class Model:
+        def eval(self):
+            calls.append(("model-eval",))
+            return self
+
+    class AutoTokenizer:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            calls.append(("tokenizer", args, kwargs))
+            return Tokenizer()
+
+    class AutoModel:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            calls.append(("model", args, kwargs))
+            return Model()
+
+    monkeypatch.setitem(sys.modules, "torch", Torch())
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        type("Transformers", (), {"AutoModel": AutoModel, "AutoTokenizer": AutoTokenizer}),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        type("Hub", (), {"hf_hub_download": staticmethod(lambda **_options: str(asset))}),
+    )
+
+    encoder = runner._load_transformer_embedding(
+        selection,
+        cache_root=tmp_path,
+        local_files_only=True,
+        trust_remote_code=False,
+    )
+
+    assert callable(encoder)
+    assert ("load", asset.resolve(), "cpu", True) in calls
+    assert ("linear", 1024, 1, True) in calls
+    assert ("state", state, True) in calls
+
+
 def test_bge_m3_loader_uses_pinned_native_sparse_linear_asset(tmp_path, monkeypatch):
     torch = pytest.importorskip("torch")
     runner = _runner_module()
@@ -2108,7 +2195,8 @@ def test_bge_m3_loader_uses_pinned_native_sparse_linear_asset(tmp_path, monkeypa
     asset = tmp_path / "sparse_linear.pt"
     weight = torch.zeros((1, 1024), dtype=torch.float32)
     weight[0, 0] = 1.0
-    torch.save({"weight": weight}, asset)
+    bias = torch.tensor([0.1], dtype=torch.float32)
+    torch.save({"weight": weight, "bias": bias}, asset)
     monkeypatch.setattr(runner, "BGE_M3_SPARSE_LINEAR_SHA256", runner._sha256_file(asset))
     calls = []
 
@@ -2186,8 +2274,8 @@ def test_bge_m3_loader_uses_pinned_native_sparse_linear_asset(tmp_path, monkeypa
 
     assert encoded["dense_vecs"].shape == (2, 1024)
     assert encoded["lexical_weights"] == [
-        {"42": 0.5, "7": 0.25},
-        {"42": 0.5, "8": 0.25},
+        {"42": pytest.approx(0.6), "7": pytest.approx(0.35)},
+        {"42": pytest.approx(0.6), "8": pytest.approx(0.35)},
     ]
     asset_call = next(options for marker, options in calls if marker == "asset")
     assert asset_call == {
