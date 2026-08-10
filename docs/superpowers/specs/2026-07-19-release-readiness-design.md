@@ -8,7 +8,7 @@ Produce a clean release-candidate branch that is ready for a public GitHub revie
 
 The release candidate is `one-day/integration`. Markdown, Git, and project journals remain authoritative. Model caches, benchmark outputs, graph generations, logs, and coordination databases remain runtime or external evidence and are not committed.
 
-Real model execution is a release gate. Every pinned embedding and reranker candidate must be acquired into `D:\projects\llm-wiki-benchmark-cache`, then exercised offline against the frozen EN/RU/ZH corpus. Acquisition receipts are not quality evidence. Only offline reports with exact model revisions, complete provenance, and no semantic fallback qualify as model evidence.
+Real model execution is a release gate. Every pinned embedding and reranker candidate must be acquired into an operator-selected cache outside the repository, then exercised offline against the frozen EN/RU/ZH corpus. Acquisition receipts are not quality evidence. Only offline reports with exact model revisions, complete provenance, and no semantic fallback qualify as model evidence.
 
 Real Graphify comparison remains a research claim gate, not a runtime release gate. The public documentation must continue to say `evidence pending` unless the pinned comparison protocol completes. The product must not depend on Graphify or gated model availability at runtime.
 
@@ -30,7 +30,7 @@ Only code proven unused by tracked callers, tests, installers, documentation, an
 
 ### Evidence And Publication
 
-Raw model and scale reports are written outside the repository under `D:\caches\temp\opencode`. Public documentation reports only verified results. Missing candidates, unavailable platform checks, or incomplete comparative evidence remain explicit and cannot be converted into success claims.
+Raw model and scale reports are written to an operator-selected temporary directory outside the repository. Public documentation reports only verified results. Missing candidates, unavailable platform checks, or incomplete comparative evidence remain explicit and cannot be converted into success claims.
 
 ## Error Handling
 
