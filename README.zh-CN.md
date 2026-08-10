@@ -127,9 +127,22 @@ LLM Wiki 为你使用的每一个 AI 编码智能体——OpenCode、Codex、Cla
 ```bash
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
-uv sync --locked --extra mcp-server
-uv run pytest -q          # 收集完整回归套件
 ```
+
+检查完成后，从该 checkout 运行本地安装程序：
+
+**macOS / Linux / WSL2:**
+```bash
+./install.sh
+```
+
+**Windows:**
+```powershell
+.\install.ps1
+```
+
+本地安装程序会同步锁定的 MCP 基线依赖，并运行完整回归套件作为门禁；仅在检查成功后，
+才会创建 runtime 目录并接入受支持的智能体。
 
 ### 验证可用
 

@@ -127,9 +127,23 @@ not-yet-implemented bootstrap target will require `LLM_WIKI_COMMIT` to be a full
 ```bash
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
-uv sync --locked --extra mcp-server
-uv run pytest -q          # collects the full regression suite
 ```
+
+After inspection, run the installer from that checkout:
+
+**macOS / Linux / WSL2:**
+```bash
+./install.sh
+```
+
+**Windows:**
+```powershell
+.\install.ps1
+```
+
+The local installer syncs locked MCP baseline dependencies, runs the full regression suite
+as a gate, creates runtime directories, and wires supported agents only after
+those checks succeed.
 
 ### Verify it works
 

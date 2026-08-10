@@ -127,9 +127,23 @@ commit OID в hex-формате. До его выпуска клонируйт�
 ```bash
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
-uv sync --locked --extra mcp-server
-uv run pytest -q          # собирает полный регрессионный набор
 ```
+
+После проверки запустите установщик из этого checkout:
+
+**macOS / Linux / WSL2:**
+```bash
+./install.sh
+```
+
+**Windows:**
+```powershell
+.\install.ps1
+```
+
+Локальный установщик синхронизирует locked-зависимости базового MCP, запускает полный регрессионный набор
+как обязательную проверку, создаёт runtime-директории и подключает
+поддерживаемых агентов только после успешного завершения проверок.
 
 ### Проверка работы
 

@@ -44,15 +44,14 @@ def test_all_readmes_exist():
         assert p.is_file(), f"missing {p.name}"
 
 
-def test_all_readmes_use_dynamic_ci_badge_and_full_suite_wording():
-    """Every README links status to CI and avoids a brittle test count."""
+def test_all_readmes_use_dynamic_ci_badge_and_local_installers():
+    """Every README links status to CI and documents local installer execution."""
     for p, text in _readmes():
         assert "actions/workflows/tests.yml/badge.svg" in text, (
             f"{p.name}: test badge must report the live workflow status"
         )
-        assert "uv sync --locked --extra mcp-server" in text, (
-            f"{p.name}: manual install must include the MCP baseline"
-        )
+        for command in ("./install.sh", ".\\install.ps1"):
+            assert command in text, f"{p.name}: missing local installer {command!r}"
 
 
 def test_all_readmes_use_correct_github_repo():
