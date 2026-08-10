@@ -28,4 +28,4 @@ condition = "AND"
 targetRules = ["jwt"]
 regexTarget = "line"
 paths = ['''^tests/test_security_invariants\.py$''']
-regexes = ['''^\s+jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIn0\.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUPCTHLak8"''']
+regexes = ['''^\s+jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIn0\.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUPCTHLak8"$''']

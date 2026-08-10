@@ -1,6 +1,6 @@
 # LLM Wiki
 
-[![Tests](https://img.shields.io/badge/tests-full%20regression%20suite-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml/badge.svg)](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-4.0.0-blue.svg)](CHANGELOG.md)
@@ -105,7 +105,7 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 - **5 LLM backends** (auto-detected): OpenCode → Codex → Claude CLI → OpenAI → Ollama
 - **Cross-platform**: Windows, macOS, Linux, WSL2
 - **Local and zero-daemon** — the installed baseline includes the MCP package; vector search and Cognee remain optional
-- **Full regression suite**, CI green on Ubuntu + Windows + macOS, Python 3.10 + 3.13
+- **Cross-platform CI matrix**: Ubuntu + Windows + macOS, Python 3.10 + 3.13
 - **Pre-commit hooks**: ruff (static analysis) + structural lint + gitleaks (secret scanning)
 
 ---
@@ -118,34 +118,11 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 - git
 - An AI agent you already use (OpenCode, Codex, Claude Code, Cursor, or Antigravity)
 
-### Install (one command)
+### Manual source install
 
-**macOS / Linux / WSL2:**
-```bash
-curl -fsSL https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.sh | bash
-```
-
-**Windows:**
-```powershell
-irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
-```
-
-> **Production note:** The `main` branch URLs above are mutable. For production or audited deployments, pin to a specific release tag URL instead:
-> - **macOS / Linux / WSL2:** `https://raw.githubusercontent.com/Ekgardt/llm-wiki/v4.0.0/install.sh`
-> - **Windows:** `https://raw.githubusercontent.com/Ekgardt/llm-wiki/v4.0.0/install.ps1`
-
-The installer:
-1. Checks prerequisites (Python 3.10+, git)
-2. Installs `uv` (fast Python package manager) if missing
-3. Syncs locked baseline dependencies (`uv sync --locked --extra mcp-server`)
-4. Runs the test suite (full regression suite)
-5. Sets `LLM_WIKI_ROOT` environment variable (user scope)
-6. Creates runtime dirs (`cache/`, `logs/`, `run/`, `cache/cognee/` — gitignored)
-7. Registers scheduled maintenance (cron on Unix, Task Scheduler on Windows)
-8. Detects your agents and wires them up
-9. Builds the FTS5 search index
-
-### Manual install
+No production remote bootstrap is currently published. The approved but
+not-yet-implemented bootstrap target will require `LLM_WIKI_COMMIT` to be a full
+40-hex commit OID. Until that ships, clone and inspect the source before installing:
 
 ```bash
 git clone https://github.com/Ekgardt/llm-wiki.git

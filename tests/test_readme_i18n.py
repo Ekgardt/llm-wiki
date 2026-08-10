@@ -44,15 +44,12 @@ def test_all_readmes_exist():
         assert p.is_file(), f"missing {p.name}"
 
 
-def test_all_readmes_share_full_regression_suite_wording():
-    """Every language README must use full-regression-suite wording, not a brittle count."""
+def test_all_readmes_use_dynamic_ci_badge_and_full_suite_wording():
+    """Every README links status to CI and avoids a brittle test count."""
     for p, text in _readmes():
-        assert "tests-full%20regression%20suite-" in text, (
-            f"{p.name}: badge must describe the full regression suite, not a brittle count"
+        assert "actions/workflows/tests.yml/badge.svg" in text, (
+            f"{p.name}: test badge must report the live workflow status"
         )
-        assert "tests-" not in text.replace(
-            "tests-full%20regression%20suite-", ""
-        ) or "collected" not in text.split("tests-")[1].split("-")[0] if "tests-" in text else True
         assert "uv sync --locked --extra mcp-server" in text, (
             f"{p.name}: manual install must include the MCP baseline"
         )
@@ -63,6 +60,22 @@ def test_all_readmes_use_correct_github_repo():
         text = p.read_text(encoding="utf-8")
         assert "Ekgardt/llm-wiki" in text, f"{p.name}: missing Ekgardt/llm-wiki"
         assert "llm-knowledge/notes" not in text, f"{p.name}: stale llm-knowledge URL"
+
+
+def test_readmes_do_not_advertise_unimplemented_remote_bootstrap():
+    for path, text in _readmes():
+        assert "raw.githubusercontent.com/Ekgardt/llm-wiki/main/install." not in text, (
+            f"{path.name}: mutable main bootstrap must not be advertised"
+        )
+        assert "/v4.0.0/install." not in text, (
+            f"{path.name}: unpublished release bootstrap must not be advertised"
+        )
+        assert "brightgreen.svg" not in text, f"{path.name}: static green badge is unverified"
+        assert "CI green" not in text, f"{path.name}: CI status claim is unverified"
+        assert "LLM_WIKI_COMMIT" in text, (
+            f"{path.name}: approved full-OID bootstrap target must be explicit"
+        )
+        assert "40" in text, f"{path.name}: full commit OID length must be explicit"
 
 
 def test_all_readmes_mention_knowledge_layout():

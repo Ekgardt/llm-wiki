@@ -1,6 +1,6 @@
 # LLM Wiki
 
-[![Tests](https://img.shields.io/badge/tests-full%20regression%20suite-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml/badge.svg)](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-4.0.0-blue.svg)](CHANGELOG.md)
@@ -105,7 +105,7 @@ LLM Wiki 为你使用的每一个 AI 编码智能体——OpenCode、Codex、Cla
 - **5 个 LLM 后端**（自动检测）：OpenCode → Codex → Claude CLI → OpenAI → Ollama
 - **跨平台**：Windows、macOS、Linux、WSL2
 - **本地且零 daemon**——安装基线包含 MCP 包；vector search 和 Cognee 仍为可选项
-- **完整回归套件**，CI 在 Ubuntu + Windows + macOS 上通过，Python 3.10 + 3.13
+- **跨平台 CI 矩阵**：Ubuntu + Windows + macOS，Python 3.10 + 3.13
 - **Pre-commit 钩子**：ruff（静态分析）+ 结构 lint + gitleaks（密钥扫描）
 
 ---
@@ -118,34 +118,11 @@ LLM Wiki 为你使用的每一个 AI 编码智能体——OpenCode、Codex、Cla
 - git
 - 一个你已在使用的 AI 智能体（OpenCode、Codex、Claude Code、Cursor 或 Antigravity）
 
-### 安装（一条命令）
+### 从源码手动安装
 
-**macOS / Linux / WSL2:**
-```bash
-curl -fsSL https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.sh | bash
-```
-
-**Windows:**
-```powershell
-irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
-```
-
-> **生产环境提示：** 上方的 `main` 分支 URL 可能会变化。对于生产或审计部署，请改用特定 release 标签的 URL，例如：
-> - **macOS / Linux / WSL2:** `https://raw.githubusercontent.com/Ekgardt/llm-wiki/v4.0.0/install.sh`
-> - **Windows:** `https://raw.githubusercontent.com/Ekgardt/llm-wiki/v4.0.0/install.ps1`
-
-安装程序会：
-1. 检查前置条件（Python 3.10+、git）
-2. 如缺失则安装 `uv`（快速 Python 包管理器）
-3. 同步 locked 基线依赖（`uv sync --locked --extra mcp-server`）
-4. 运行测试套件（完整回归套件）
-5. 设置 `LLM_WIKI_ROOT` 环境变量（用户级）
-6. 创建运行时目录（`cache/`、`logs/`、`run/`、`cache/cognee/`——gitignored）
-7. 注册计划维护（Unix 上 cron，Windows 上 Task Scheduler）
-8. 检测你的智能体并完成接入
-9. 构建 FTS5 搜索索引
-
-### 手动安装
+目前尚未发布生产用远程 bootstrap URL。已批准但尚未实现的 bootstrap 目标将要求
+`LLM_WIKI_COMMIT` 为完整的 40 位十六进制 commit OID。在该功能发布前，请先克隆并
+检查源码，再进行安装：
 
 ```bash
 git clone https://github.com/Ekgardt/llm-wiki.git

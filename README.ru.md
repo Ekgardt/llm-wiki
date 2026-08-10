@@ -1,6 +1,6 @@
 # LLM Wiki
 
-[![Tests](https://img.shields.io/badge/tests-full%20regression%20suite-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml/badge.svg)](https://github.com/Ekgardt/llm-wiki/actions/workflows/tests.yml)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-4.0.0-blue.svg)](CHANGELOG.md)
@@ -105,7 +105,7 @@ LLM Wiki даёт каждому AI-агенту, которым вы польз
 - **5 LLM-бэкендов** (авто-детекция): OpenCode → Codex → Claude CLI → OpenAI → Ollama
 - **Кросс-платформенность**: Windows, macOS, Linux, WSL2
 - **Локально и без daemon-процессов** — установленный baseline включает MCP-пакет; vector search и Cognee остаются опциональными
-- **Полный регрессионный набор**, CI green на Ubuntu + Windows + macOS, Python 3.10 + 3.13
+- **Кросс-платформенная CI-матрица**: Ubuntu + Windows + macOS, Python 3.10 + 3.13
 - **Pre-commit хуки**: ruff (статический анализ) + структурный lint + gitleaks (сканирование секретов)
 
 ---
@@ -118,34 +118,11 @@ LLM Wiki даёт каждому AI-агенту, которым вы польз
 - git
 - AI-агент, которым вы уже пользуетесь (OpenCode, Codex, Claude Code, Cursor или Antigravity)
 
-### Установка (одна команда)
+### Ручная установка из исходников
 
-**macOS / Linux / WSL2:**
-```bash
-curl -fsSL https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.sh | bash
-```
-
-**Windows:**
-```powershell
-irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
-```
-
-> **Примечание для production:** Указанные выше URL ветки `main` могут изменяться. Для production- или аудируемых развёртываний используйте URL конкретного release-тега, например:
-> - **macOS / Linux / WSL2:** `https://raw.githubusercontent.com/Ekgardt/llm-wiki/v4.0.0/install.sh`
-> - **Windows:** `https://raw.githubusercontent.com/Ekgardt/llm-wiki/v4.0.0/install.ps1`
-
-Установщик:
-1. Проверяет требования (Python 3.10+, git)
-2. Устанавливает `uv` (быстрый Python-менеджер пакетов), если отсутствует
-3. Синхронизирует locked baseline-зависимости (`uv sync --locked --extra mcp-server`)
-4. Запускает тестовый набор (полный регрессионный набор)
-5. Устанавливает переменную окружения `LLM_WIKI_ROOT` (user scope)
-6. Создаёт runtime-директории (`cache/`, `logs/`, `run/`, `cache/cognee/` — gitignored)
-7. Регистрирует плановое обслуживание (cron на Unix, Task Scheduler на Windows)
-8. Детектирует ваших агентов и подключает их
-9. Строит FTS5 search-индекс
-
-### Ручная установка
+Production URL для удалённого bootstrap пока не опубликован. Утверждённый, но ещё
+не реализованный bootstrap потребует, чтобы `LLM_WIKI_COMMIT` был полным 40-значным
+commit OID в hex-формате. До его выпуска клонируйте и проверьте исходники перед установкой:
 
 ```bash
 git clone https://github.com/Ekgardt/llm-wiki.git
