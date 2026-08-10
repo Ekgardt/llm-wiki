@@ -133,16 +133,17 @@ cd llm-wiki
 
 **macOS / Linux / WSL2:**
 ```bash
-./install.sh
+LLM_WIKI_ROOT="$(pwd)" bash ./install.sh
 ```
 
 **Windows:**
 ```powershell
+$env:LLM_WIKI_ROOT = (Get-Location).Path
 .\install.ps1
 ```
 
-本地安装程序会同步锁定的 MCP 基线依赖，并运行完整回归套件作为门禁；仅在检查成功后，
-才会创建 runtime 目录并接入受支持的智能体。
+本地安装程序会同步锁定的 MCP 基线依赖，运行完整回归套件进行诊断，创建 runtime 目录，
+并接入受支持的智能体。在实现基于完整 commit OID 的不可变验证前，远程 bootstrap 保持禁用。
 
 ### 验证可用
 

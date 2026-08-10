@@ -29,17 +29,24 @@ the Cognee graph layer at 300+ pages).
 
 ## One-time setup
 
-### Option A: One-command installer (recommended)
+### Option A: Local installer from an inspected checkout (recommended)
 
 ```bash
-# macOS / Linux / WSL2
-curl -fsSL https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.sh | bash
-
-# Windows
-irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
+git clone https://github.com/Ekgardt/llm-wiki.git
+cd llm-wiki
+LLM_WIKI_ROOT="$(pwd)" bash ./install.sh
 ```
 
-The installer detects your agents and wires them up automatically.
+```powershell
+git clone https://github.com/Ekgardt/llm-wiki.git
+Set-Location llm-wiki
+$env:LLM_WIKI_ROOT = (Get-Location).Path
+.\install.ps1
+```
+
+Remote bootstrap is not published. The approved replacement will require a full
+40-hex `LLM_WIKI_COMMIT` before fetching or executing installer code. The local
+installer detects your agents and wires them up automatically.
 
 ### Option B: Manual setup
 
@@ -48,7 +55,7 @@ The installer detects your agents and wires them up automatically.
    git clone https://github.com/Ekgardt/llm-wiki.git
    cd llm-wiki
    uv sync --locked --extra mcp-server
-   uv run pytest -q          # verify the full regression suite
+   uv run pytest -q          # inspect the current full regression status
    ```
 
 2. **Set environment variables** (add to your shell profile):

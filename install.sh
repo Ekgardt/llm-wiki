@@ -1,15 +1,13 @@
 #!/usr/bin/env bash
 # LLM-Wiki one-command installer for macOS, Linux, and WSL2.
 #
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.sh | bash
+# Usage from an inspected checkout:
+#   git clone https://github.com/Ekgardt/llm-wiki.git
+#   cd llm-wiki
+#   LLM_WIKI_ROOT="$(pwd)" bash ./install.sh
 #
-# Or clone first:
-#   git clone git@github.com:Ekgardt/llm-wiki.git && cd llm-wiki && ./install.sh
-#
-# NOTE: For reproducible installs, pin to a version tag:
-#   curl ... https://raw.githubusercontent.com/Ekgardt/llm-wiki/v4.0.0/install.sh | bash
-# The main branch URL is for development convenience only.
+# Remote bootstrap is not published. The approved replacement will require a
+# full commit OID before fetching or executing installer code.
 #
 # What this does:
 #   1. Checks prerequisites (Python 3.10+, uv, git)
@@ -98,13 +96,9 @@ configure_codex_mcp() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VAULT_ROOT="${LLM_WIKI_ROOT:-$SCRIPT_DIR}"
 
-# If running from curl pipe, we need to clone first
+# Remote bootstrap stays fail-closed until immutable commit verification ships.
 if [[ ! -f "$VAULT_ROOT/pyproject.toml" ]]; then
-  info "Cloning LLM-Wiki repository..."
-  INSTALL_DIR="${HOME}/LLM-wiki"
-  git clone --branch v4.0.0 --depth 1 https://github.com/Ekgardt/llm-wiki.git "$INSTALL_DIR"
-  VAULT_ROOT="$INSTALL_DIR"
-  cd "$VAULT_ROOT"
+  fail "Remote bootstrap is not published. Clone the repository, inspect it, and run this installer from that checkout."
 fi
 
 cd "$VAULT_ROOT"

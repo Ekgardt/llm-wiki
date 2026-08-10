@@ -539,6 +539,24 @@ def test_installer_version_matches_pyproject():
                 )
 
 
+def test_unpublished_remote_bootstrap_is_fail_closed():
+    sources = {
+        name: (ROOT / name).read_text(encoding="utf-8")
+        for name in ("install.sh", "install.ps1", "docs/USER-GUIDE.md")
+    }
+    forbidden = (
+        "raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.",
+        "/v4.0.0/install.",
+        "git clone --branch v4.0.0",
+    )
+    for name, source in sources.items():
+        for value in forbidden:
+            assert value not in source, f"{name}: advertises unpublished bootstrap {value!r}"
+
+    assert "Remote bootstrap is not published" in sources["install.sh"]
+    assert "Remote bootstrap is not published" in sources["install.ps1"]
+
+
 # ─── 12. All daily-log writers use shared lock ──────────────────────
 
 def test_all_daily_writers_use_lock():

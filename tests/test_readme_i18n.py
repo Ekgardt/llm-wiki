@@ -50,7 +50,11 @@ def test_all_readmes_use_dynamic_ci_badge_and_local_installers():
         assert "actions/workflows/tests.yml/badge.svg" in text, (
             f"{p.name}: test badge must report the live workflow status"
         )
-        for command in ("./install.sh", ".\\install.ps1"):
+        for command in (
+            'LLM_WIKI_ROOT="$(pwd)" bash ./install.sh',
+            "$env:LLM_WIKI_ROOT = (Get-Location).Path",
+            ".\\install.ps1",
+        ):
             assert command in text, f"{p.name}: missing local installer {command!r}"
 
 

@@ -133,17 +133,18 @@ After inspection, run the installer from that checkout:
 
 **macOS / Linux / WSL2:**
 ```bash
-./install.sh
+LLM_WIKI_ROOT="$(pwd)" bash ./install.sh
 ```
 
 **Windows:**
 ```powershell
+$env:LLM_WIKI_ROOT = (Get-Location).Path
 .\install.ps1
 ```
 
 The local installer syncs locked MCP baseline dependencies, runs the full regression suite
-as a gate, creates runtime directories, and wires supported agents only after
-those checks succeed.
+for diagnostics, creates runtime directories, and wires supported agents. Remote bootstrap
+remains disabled until immutable full-OID verification is implemented.
 
 ### Verify it works
 

@@ -1,14 +1,13 @@
 # install.ps1 - One-command installer for Windows.
 #
-# Usage:
-#   irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
+# Usage from an inspected checkout:
+#   git clone https://github.com/Ekgardt/llm-wiki.git
+#   cd llm-wiki
+#   $env:LLM_WIKI_ROOT = (Get-Location).Path
+#   .\install.ps1
 #
-# Or clone first:
-#   git clone https://github.com/Ekgardt/llm-wiki.git; cd llm-wiki; .\install.ps1
-#
-# NOTE: For reproducible installs, pin to a version tag:
-#   irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/v4.0.0/install.ps1 | iex
-# The main branch URL is for development convenience only.
+# Remote bootstrap is not published. The approved replacement will require a
+# full commit OID before fetching or executing installer code.
 #
 # What this does:
 #   1. Checks prerequisites (Python 3.10+, uv, git)
@@ -104,11 +103,7 @@ args = ["run", "--directory", "$tomlVault", "python", "scripts/mcp_server.py"]
 
 $VAULT_ROOT = if ($env:LLM_WIKI_ROOT) { $env:LLM_WIKI_ROOT } else { $PSScriptRoot }
 if (-not (Test-Path "$VAULT_ROOT\pyproject.toml")) {
-    $VAULT_ROOT = "$env:USERPROFILE\LLM-wiki"
-    if (-not (Test-Path "$VAULT_ROOT\pyproject.toml")) {
-        Info "Cloning LLM-Wiki..."
-        git clone --branch v4.0.0 --depth 1 https://github.com/Ekgardt/llm-wiki.git $VAULT_ROOT
-    }
+    Fail "Remote bootstrap is not published. Clone the repository, inspect it, and run this installer from that checkout."
 }
 
 Set-Location $VAULT_ROOT
