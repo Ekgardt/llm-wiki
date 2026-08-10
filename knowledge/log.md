@@ -25,6 +25,8 @@
 - 2026-07-22 — Superseded the one-shot consent/SCIP/publication direction after completed foundation Tasks 1-5. Approved an owned read-only LSP navigation engine, starting with production-quality Python/Pyright while retaining the existing structural Evidence Graph and 12-tool MCP boundary.
 - 2026-07-23 — Recorded the bounded mutable LSP live-lease contract: `lease.json` heartbeats every 10 seconds, expires after 30 seconds, remains separate from immutable owner/failure evidence, and is removed after controlled lifecycle cleanup.
 - 2026-07-24 — Qualified LSP process containment by platform: Windows Job Objects own assigned trees, POSIX process groups cover pinned Pyright descendants only while they remain in-group, and hostile `setsid()` escape remains unsupported.
+- 2026-08-05 — Recorded the proposed exact V4 reliability contract after approval of its direction and implementation base; production implementation remains blocked on final architecture sign-off.
+- 2026-08-05 — Activated the reviewed V4 reliability contract after the user delegated exact architecture decisions based on current-source research; implementation may proceed through TDD gates.
 
 ## Editorial note
 This log is vault metadata — an append-only editorial changelog of compile passes and hygiene actions over `knowledge/`, not content derived from `knowledge/raw/` or `knowledge/inbox/`. New entries are appended at the bottom by compile passes and by hand; entries are never rewritten or removed.

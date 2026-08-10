@@ -46,6 +46,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   ├── event_envelope.py            v4.x: shared lifecycle event contract
 │   ├── mcp_contract.py              v4.x: uniform MCP response envelope/resources
 │   ├── doctor.py                    v4.x: degraded-only health + safe repair
+│   ├── repair_installed_memory.py   proposed target: explicit check/apply migration
 │   ├── code_graph.py                v4.0: tree-sitter code intelligence
 │   ├── impact_analysis.py           v4.0: LINK layer (code→wiki impact)
 │   ├── build_tiers.py               v4.0: L0/L1/L2 progressive disclosure
@@ -59,7 +60,7 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │
 ├── knowledge/                     KNOWLEDGE — content (gitignored: personal)
 │   ├── daily/                       append-only session logs
-│   │   ├── receipts/                authoritative immutable compile receipts
+│   │   ├── receipts/                v2 current; immutable v3 proposed target
 │   │   └── archive/YYYY-MM/bag-…/   immutable uncompressed BagIt packages
 │   ├── notes/                       durable OKF pages (flat slugs)
 │   ├── projects/<slug>/             state.md projection + append-only journal.md
@@ -92,10 +93,21 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 │   └── index.sqlite                 FTS5 search index
 ├── logs/                         RUNTIME — gitignored (lint/compile/hook logs)
 ├── run/                          RUNTIME — gitignored operational state
-│   ├── markdown-transactions.sqlite3 transaction/lease coordinator
-│   ├── transactions/<id>/           before/after images + prepared plans
-│   ├── queue.sqlite3                 rollback-journal priority queue
-│   ├── queue-results/                fenced result receipts
+│   ├── markdown-transactions.sqlite3 current DB; proposed legacy tombstone
+│   ├── markdown-transactions-v3.sqlite3 proposed active transaction/owner DB
+│   ├── markdown-transactions-v2-retired.sqlite3 proposed upgrade evidence
+│   ├── transactions/<id>/           before/after images, plans, proposed abort receipt
+│   ├── queue.sqlite3                 current DB; proposed legacy tombstone
+│   ├── queue-v3.sqlite3              proposed active queue + owner DB
+│   ├── queue-v2-retired.sqlite3      proposed upgrade evidence
+│   ├── queue-results/                fenced results + proposed decisions/dispositions
+│   ├── queue-quarantine/             malformed legacy/current queue evidence
+│   │   └── capture-<sha256>/         proposed resumable raw + intent + manifest
+│   ├── capture-intents/              proposed target: unprocessed capture intents
+│   │   ├── pending/<00-ff>/<id>.json file-first/index reconciliation boundary
+│   │   └── ready/<00-ff>/<id>.json   indexed intents awaiting terminal outcome
+│   ├── reliability-v3-migration.json proposed resumable cutover manifest
+│   ├── reliability-v3-adopted.json   proposed complete cutover evidence
 │   ├── queue/                        legacy migration input only
 │   ├── queue-migrated-v2             migration completion marker
 │   ├── state.json                    automation + compile receipts
@@ -131,6 +143,56 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 | `$LLM_WIKI_ROOT` | Resolved from `scripts/` location (worktree-aware via `git rev-parse --git-common-dir`) | Vault root — code + knowledge + runtime |
 | `$LLM_WIKI_STATE_ROOT` | **The vault root itself** | Runtime root → `cache/`, `logs/`, `run/` at vault root. Override for multi-disk or hermetic tests. |
 | `$MEMORY_LLM_PROVIDER` | Auto-detected (`opencode` → `codex` → `claude` → `openai` → `ollama`) | LLM backend for compile/flush/query. `fake` for tests. |
+
+## Approved Reliability v3 target (not implemented)
+
+The user approved the repair direction and delegated the exact architecture decisions
+on 2026-08-05. This target keeps the three root zones and existing runtime environment variables.
+Remote installer bootstrap adds mandatory full-OID input `LLM_WIKI_COMMIT`. The only
+new runtime directory is `run/capture-intents/`. New create-only
+`capture-intent/v1` records remain there until an immutable terminal record under
+existing `run/queue-results/` proves committed Markdown, validated no-durable-content,
+or explicit operator discard. Queue enqueue alone never permits intent deletion.
+Provider-derived `capture-decision/v1` records are published in `queue-results/`
+before side effects and reused after crashes.
+Legacy `cache/transient-transcripts/` files are recovery input only; new capture work
+is not written to disposable cache.
+
+Compile authority is `compile-receipt/v3`. V3 receipt filenames are
+`knowledge/daily/receipts/v3-<source-identity-sha256>.md`; source identity hashes
+canonical logical path plus content digest. Every receipt binds a sorted batch
+manifest and one validated disposition to each source. Historical v2 digest-only
+receipts remain readable as evidence but cannot authorize automatic skip or archive
+under the path-bound v3 contract.
+
+`queue-task/v3` describes production serialization. `input_hash` is SHA-256 over
+the exact canonical stored payload. It is recomputed before every insertion, lease,
+execution, terminal, operator, migration, or deletion transition. A dedupe key aliases
+only the exact same kind, handler version, and payload hash.
+
+Capture, project/Markdown writers, queue workers, compilers, Doctor, nightly, weekly,
+and LSP use `maintenance_owners` in `markdown-transactions-v3.sqlite3` as the
+canonical admission registry. Queue workers project the same token and epoch into
+`queue_ownership` in `queue-v3.sqlite3`; the active database count remains two.
+Expiry permits takeover only with positive process-death proof; unknown liveness
+blocks.
+Legacy `compile.pid` and `maintenance.lock` remain compatibility evidence and
+deletion blockers until a separately approved installed-vault migration removes
+them. Explicit offline repair retains the exact v2 database bytes, publishes two v3
+replacements, and puts immutable JSON tombstones at the legacy active paths. Partial
+adoption disables v3 mutation and requires the vault to remain offline. After complete
+adoption, known v2 queue and transaction clients cannot open active v3 state. Doctor
+reports a protected quiescent snapshot only after complete adoption; before that it
+reports an unconditional legacy-protocol blocker. The snapshot is not a durable deletion permit;
+`run/` deletion remains an offline operator action.
+
+Operational migrations execute individual statements under explicit transactions,
+verify their complete invariant on every startup, and remain restartable after any
+statement. Operational databases remain rollback-journal, `synchronous=FULL`, local
+filesystem only, and no WAL. This section remains target state until implementation
+and verification pass. See
+`knowledge/notes/v4-reliability-contracts-decision.md` and
+`docs/superpowers/specs/2026-08-05-v4-reliability-repair-design.md`.
 
 ## Implemented corpus-generation checkpoint
 
@@ -309,8 +371,10 @@ or nonzero active state remains fail-closed.
 - `knowledge/daily/` — append-only `YYYY-MM-DD.md`. Private (gitignored).
   Public synthetic fixtures (`2026-04-13.md`, `2026-04-19.md`) are
   un-ignored to restore Evidence links.
-- `knowledge/daily/receipts/` — authoritative immutable Markdown compile receipts,
-  keyed by the exact source snapshot digest and committed with compile output.
+- `knowledge/daily/receipts/` — authoritative immutable Markdown compile receipts.
+  Current v2 is keyed by source digest. The proposed v3 target above adds logical
+  path identity and commits one source receipt with compile output; v2 then remains
+  historical evidence only.
 - `knowledge/notes/` — durable OKF pages, flat `<slug>.md`. Public examples
   tracked via allowlist; personal pages gitignored.
 - `knowledge/projects/<slug>/` — generated `state.md`, append-only
@@ -413,7 +477,11 @@ graph-dependent code tools use bounded live extraction and label it incomplete.
 - `logs/` — `lint-YYYY-MM-DD.md`, `compile-last.log`, `session-start-last.txt`.
 - `run/` — `state.json`, `compile.pid`, `run/markdown-transactions.sqlite3`,
   `run/transactions/`, `run/queue.sqlite3`, `run/queue-results/`, receipts, and
-  locks. `run/lsp/<owner-nonce>/` holds bounded live process scratch created by the
+  locks. The proposed target adds `run/capture-intents/`, two active `*-v3.sqlite3`
+  files, retained `*-v2-retired.sqlite3` upgrade evidence, legacy-path JSON
+  tombstones, migration/adoption evidence, and explicit compatibility treatment for
+  `maintenance.lock`. `run/lsp/<owner-nonce>/`
+  holds bounded live process scratch created by the
   owning LSP lifecycle. Its `lease.json` is a bounded mutable live
   lease with a 10 seconds heartbeat and 30 seconds expiry, separate from immutable
   `owner.json` and `failure.json`. Existing `run/queue/*.json` is one-time
@@ -421,13 +489,24 @@ graph-dependent code tools use bounded live extraction and label it incomplete.
 - `cache/cognee/` — optional semantic graph data (only if Cognee installed).
 
 **Runtime deletion contract.** `cache/` and `logs/` are regenerated on demand.
-`run/` contains recoverable but operationally significant transactions and queued
-work. Delete it only after `doctor` reports no nonterminal, conflicted, or
+The current `run/` contains recoverable but operationally significant transactions
+and queued work. Delete it only after `doctor` reports no nonterminal, conflicted, or
 quarantined transaction, no transaction inside the 30-day undo window, and no
 retained queue task or result, and no live project lease, writer, queue worker, or
 maintenance or LSP owner, and no retained LSP failure evidence. Deleting eligible
 committed artifacts loses undo history.
 Installers and repair commands never remove it silently.
+
+The proposed Reliability v3 target additionally treats every unresolved capture
+intent, compiler, compatibility marker, retired database, missing or mismatched
+tombstone/migration/adoption evidence, and expired owner without positive death proof
+as a blocker. A complete validated
+tombstone/adoption set does not independently block otherwise eligible whole-`run/`
+deletion. Validated capture terminal records survive ordinary purge but cease to be
+independent blockers after 30 days; deleting the whole eligible runtime deliberately
+forfeits their replay suppression. Proposed Doctor acquires an admission gate while
+checking but reports only a quiescent snapshot; it does not authorize a later
+concurrent deletion. Deletion remains an offline operator action.
 
 ## Forbidden at vault root
 
