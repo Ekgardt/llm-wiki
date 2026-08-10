@@ -2108,7 +2108,8 @@ def test_bge_m3_loader_uses_pinned_native_sparse_linear_asset(tmp_path, monkeypa
     asset = tmp_path / "sparse_linear.pt"
     weight = torch.zeros((1, 1024), dtype=torch.float32)
     weight[0, 0] = 1.0
-    torch.save({"weight": weight}, asset)
+    bias = torch.tensor([0.1], dtype=torch.float32)
+    torch.save({"weight": weight, "bias": bias}, asset)
     monkeypatch.setattr(runner, "BGE_M3_SPARSE_LINEAR_SHA256", runner._sha256_file(asset))
     calls = []
 
@@ -2186,8 +2187,8 @@ def test_bge_m3_loader_uses_pinned_native_sparse_linear_asset(tmp_path, monkeypa
 
     assert encoded["dense_vecs"].shape == (2, 1024)
     assert encoded["lexical_weights"] == [
-        {"42": 0.5, "7": 0.25},
-        {"42": 0.5, "8": 0.25},
+        {"42": pytest.approx(0.6), "7": pytest.approx(0.35)},
+        {"42": pytest.approx(0.6), "8": pytest.approx(0.35)},
     ]
     asset_call = next(options for marker, options in calls if marker == "asset")
     assert asset_call == {
