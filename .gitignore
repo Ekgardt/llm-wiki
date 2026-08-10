@@ -61,6 +61,7 @@ knowledge/notes/*
 !knowledge/notes/read-only-lsp-navigation-engine-decision.md
 !knowledge/notes/solo-operator-superset-product-decision.md
 !knowledge/notes/reliable-memory-stage-2.md
+!knowledge/notes/v4-reliability-contracts-decision.md
 !knowledge/notes/docs-portability-absolute-paths.md
 !knowledge/notes/edit-multiple-matches.md
 !knowledge/notes/editorial-disclaimer-over-history-rewrite.md

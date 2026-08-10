@@ -118,6 +118,24 @@ source failure, any 30-day undo artifact, retained work/result, or live owner. T
 is no automatic Git operation, persistent daemon, cloud service, remote queue/cache,
 exactly-once promise, or gzip archive tier.
 
+**Approved Reliability v3 target (not implemented):** New
+unprocessed lifecycle evidence would be create-only under `run/capture-intents/`
+until an immutable terminal record proves committed Markdown, validated
+no-durable-content, or operator discard; queue enqueue alone would not permit
+deletion. Compile receipts would bind logical path plus digest and a validated
+per-source disposition; digest-only v2 receipts would remain historical evidence
+only. Queue payload hashes would be checked at every transition, and dedupe would
+alias only identical kind, handler version, and payload. All operational actors would
+use one canonical fenced admission registry, including capture, project/Markdown
+writers, queue, and LSP. Explicit offline adoption would publish versioned v3
+databases and replace legacy active paths with JSON tombstones, blocking normal
+v2 queue/transaction clients after cutover. Live, expired-but-not-proven-dead, or
+unknown owners, unresolved intents, and partial adoption would block `run/` deletion.
+Doctor would
+report a quiescent snapshot only after complete adoption, and never a durable deletion
+permit.
+See `knowledge/notes/v4-reliability-contracts-decision.md`.
+
 **Derived evidence generations:** Markdown, Git, and project journals are
 authoritative. All graph, FTS, vector, tier, and telemetry generation state is
 disposable and derived. `cache/evidence-graph/` is the new target generation layout.
