@@ -172,6 +172,13 @@ def test_ci_qualifies_real_pyright_on_all_supported_os_families():
     ]
     assert job["strategy"]["matrix"]["python"] == ["3.10"]
     assert job["strategy"]["matrix"]["node"] == ["22.23.1"]
+    assert "runner.temp" not in str(job.get("env", {}))
+    state_step = next(
+        step for step in job["steps"] if step["name"] == "Configure isolated state root"
+    )
+    assert state_step["shell"] == "bash"
+    assert "LLM_WIKI_STATE_ROOT=$RUNNER_TEMP/llm-wiki-state" in state_step["run"]
+    assert "LLM_WIKI_TEST_USE_EXTERNAL_STATE=1" in state_step["run"]
 
 
 def test_docs_state_security_install_and_market_truth():
