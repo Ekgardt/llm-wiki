@@ -10,13 +10,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
+import bootstrap_project
 import memory_state
 import pytest
 import session_end_project_tag
@@ -29,6 +31,12 @@ from session_start_project_state import (
     _path_hash_suffix,
     _render_new_state,
     _slug_owns_dir,
+)
+
+_UNICODE_NONCHARACTERS = tuple(chr(codepoint) for codepoint in range(0xFDD0, 0xFDF0)) + tuple(
+    chr((plane << 16) | suffix)
+    for plane in range(17)
+    for suffix in (0xFFFE, 0xFFFF)
 )
 
 
@@ -164,7 +172,7 @@ def test_legacy_noncanonical_slug_ownership_uses_safe_runtime_identity(tmp_path:
     assert session_end_project_tag._lookup_existing_slug(project, projects) == "active"
 
 
-def test_owned_legacy_state_is_reused_by_every_production_consumer(
+def test_owned_legacy_state_is_reused_for_identity_but_not_bootstrap_context(
     monkeypatch,
     tmp_path: Path,
 ):
@@ -240,7 +248,7 @@ def test_owned_legacy_state_is_reused_by_every_production_consumer(
     monkeypatch.setattr(bootstrap_project, "ROOT", vault)
     monkeypatch.setattr(bootstrap_project, "PROJECTS_DIR", projects)
     monkeypatch.setattr(bootstrap_project, "STATE_DIR", runtime / "run")
-    monkeypatch.setattr(bootstrap_project, "_extract_git_timeline", lambda _cwd: [])
+    monkeypatch.setattr(bootstrap_project, "_extract_git_timeline", lambda _cwd, **_kwargs: [])
     monkeypatch.setattr(
         bootstrap_project,
         "_extract_readme_summary",
@@ -248,10 +256,11 @@ def test_owned_legacy_state_is_reused_by_every_production_consumer(
     )
     monkeypatch.setattr(bootstrap_project, "_extract_tech_stack", lambda _cwd: [])
     monkeypatch.setattr(bootstrap_project, "_extract_docs_structure", lambda _cwd: [])
-    monkeypatch.setattr(bootstrap_project, "_run_git", lambda _cwd, *_args: "")
-    bootstrap_project.bootstrap(str(project), apply=True)
+    monkeypatch.setattr(bootstrap_project, "_run_git", lambda _cwd, *_args, **_kwargs: "")
+    result = bootstrap_project.bootstrap(str(project), apply=True)
 
-    assert (legacy_state.parent / "bootstrap.md").is_file()
+    assert result.startswith("Skipped:")
+    assert not (legacy_state.parent / "bootstrap.md").exists()
     assert not (projects / expected_slug).exists()
     owned_states = [
         path.resolve()
@@ -312,7 +321,7 @@ def test_legacy_ownership_scan_is_complete_and_keeps_reads_bounded(
             yielded += 1
             yield entry
 
-    real_open = Path.open
+    real_fdopen = os.fdopen
     read_sizes: list[int] = []
 
     class TrackingFile:
@@ -332,15 +341,11 @@ def test_legacy_ownership_scan_is_complete_and_keeps_reads_bounded(
             read_sizes.append(size)
             return self.handle.read(size)
 
-    def tracking_open(path, *args, **kwargs):
-        handle = real_open(path, *args, **kwargs)
-        mode = args[0] if args else kwargs.get("mode", "r")
-        if path.name == "state.md" and "r" in mode:
-            return TrackingFile(handle)
-        return handle
+    def tracking_fdopen(*args, **kwargs):
+        return TrackingFile(real_fdopen(*args, **kwargs))
 
     monkeypatch.setattr(Path, "iterdir", guarded_iterdir)
-    monkeypatch.setattr(Path, "open", tracking_open)
+    monkeypatch.setattr(os, "fdopen", tracking_fdopen)
 
     slug, state_path = session_start_project_state.resolve_project_state(
         project,
@@ -353,6 +358,43 @@ def test_legacy_ownership_scan_is_complete_and_keeps_reads_bounded(
     assert yielded == len(entries)
     assert read_sizes
     assert all(0 <= size <= 65_537 for size in read_sizes)
+
+
+def test_state_inventory_lstats_entries_before_any_resolution(
+    monkeypatch,
+    tmp_path: Path,
+):
+    projects = tmp_path / "projects"
+    project = tmp_path / "project"
+    project.mkdir()
+    state_path = projects / "active" / "state.md"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        f"- Project root JSON: {json.dumps(str(project.resolve()))}\n"
+        '- Runtime slug JSON: "active"\n',
+        encoding="utf-8",
+    )
+    seen_lstat: set[Path] = set()
+    real_lstat = Path.lstat
+    real_resolve = Path.resolve
+
+    def tracking_lstat(path: Path, *args, **kwargs):
+        seen_lstat.add(Path(os.path.abspath(path)))
+        return real_lstat(path, *args, **kwargs)
+
+    def guarded_resolve(path: Path, *args, **kwargs):
+        absolute = Path(os.path.abspath(path))
+        if absolute in {state_path, state_path.parent} and absolute not in seen_lstat:
+            raise AssertionError("state inventory resolved an entry before lstat")
+        return real_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", tracking_lstat)
+    monkeypatch.setattr(Path, "resolve", guarded_resolve)
+
+    [entry] = session_start_project_state._scan_project_states(projects)
+
+    assert entry.state_path == state_path
+    assert state_path in seen_lstat
 
 
 def test_unowned_resolution_uses_one_complete_project_scan(monkeypatch, tmp_path: Path):
@@ -423,7 +465,6 @@ def test_confirm_project_identity_returns_only_owned_or_atomically_claimed_state
             "- Project root JSON: <absolute path JSON>\n"
             "- Project root JSON: <absolute path JSON>\n"
         ),
-        "# <Project Name>\n- Project root JSON malformed-prefix\n",
         '# <Project Name>\n- Project root JSON: "D:/different-project"\n',
     ),
 )
@@ -444,6 +485,25 @@ def test_malformed_rendered_template_never_publishes_project_claim(
     assert not list(
         path for path in projects.glob("*/state.md") if path.parent.name != "_template"
     )
+
+
+def test_nonmetadata_template_key_prefix_prose_is_preserved_and_claimed(
+    monkeypatch,
+    tmp_path: Path,
+):
+    projects = tmp_path / "projects"
+    template = projects / "_template" / "state.md"
+    template.parent.mkdir(parents=True)
+    prose = "- Project root JSON migration notes remain ordinary project content."
+    template.write_text(f"# <Project Name>\n{prose}\n", encoding="utf-8")
+    project = tmp_path / "workspace" / "service"
+    (project / ".git").mkdir(parents=True)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "runtime"))
+
+    claimed = session_start_project_state.confirm_project_identity(project, projects)
+
+    assert claimed is not None
+    assert prose in claimed[1].read_text(encoding="utf-8")
 
 
 def test_complete_registry_reserves_alias_beyond_entry_512(monkeypatch, tmp_path: Path):
@@ -835,6 +895,7 @@ def test_runtime_alias_is_independent_of_another_projects_physical_folder(
         "---\n"
         "type: pattern\n"
         "project: service\n"
+        f"project_root: {json.dumps(str(first.resolve()))}\n"
         "---\n"
         "# Service history\n"
         "One-sentence summary: LEGACY_FRONTMATTER_SCOPE\n",
@@ -1105,7 +1166,7 @@ def test_slug_owns_strict_rejects_missing_source(tmp_path: Path):
     assert _slug_owns_dir("ambiguous", tmp_path / "someproj", projects) is False
 
 
-def test_slug_owns_rejects_conflicting_json_and_legacy_roots(tmp_path: Path):
+def test_slug_owns_uses_canonical_json_over_conflicting_legacy_roots(tmp_path: Path):
     projects = tmp_path / "projects"
     state_path = projects / "mine" / "state.md"
     state_path.parent.mkdir(parents=True)
@@ -1120,7 +1181,7 @@ def test_slug_owns_rejects_conflicting_json_and_legacy_roots(tmp_path: Path):
         encoding="utf-8",
     )
 
-    assert _slug_owns_dir("mine", project, projects) is False
+    assert _slug_owns_dir("mine", project, projects) is True
 
 
 def test_slug_owns_fails_closed_when_json_root_is_malformed(tmp_path: Path):
@@ -1173,6 +1234,81 @@ def test_project_root_requires_a_bounded_native_absolute_path(
     )
 
 
+@pytest.mark.parametrize(
+    "forbidden",
+    (
+        "\x00",
+        "\x1f",
+        "\x7f",
+        "\x85",
+        "\x9f",
+        "\u2028",
+        "\u2029",
+        "\ud800",
+        "\udfff",
+        *_UNICODE_NONCHARACTERS,
+    ),
+    ids=lambda value: f"U+{ord(value):04X}",
+)
+@pytest.mark.parametrize(
+    ("platform", "root"),
+    (("win32", "C:/workspace/project"), ("linux", "/workspace/project")),
+)
+def test_project_root_rejects_unsafe_identity_characters(
+    platform: str,
+    root: str,
+    forbidden: str,
+):
+    assert not session_start_project_state._is_native_absolute_root(
+        f"{root}{forbidden}forged",
+        platform,
+    )
+
+
+@pytest.mark.parametrize(
+    "noncharacter",
+    _UNICODE_NONCHARACTERS,
+    ids=lambda value: f"U+{ord(value):04X}",
+)
+def test_unicode_noncharacters_are_rejected_from_every_project_identity_form(
+    tmp_path: Path,
+    noncharacter: str,
+):
+    root = f"{tmp_path.resolve()}{noncharacter}forged"
+    slug = f"alpha{noncharacter}beta"
+    raw_frontmatter = (
+        "---\n"
+        f"project_root: {json.dumps(root, ensure_ascii=False)}\n"
+        "---\n"
+    )
+    codepoint = ord(noncharacter)
+    escaped = f"\\U{codepoint:08X}"
+    escaped_frontmatter = (
+        "---\n"
+        f'project_root: "{tmp_path.resolve()}{escaped}forged"\n'
+        "---\n"
+    )
+
+    assert not session_start_project_state.is_canonical_project_slug(slug)
+    assert session_start_context._normalize_project_slug(slug) is None
+    assert not session_start_project_state._is_native_absolute_root(root)
+    assert session_start_context._normalize_project_root(
+        json.dumps(root, ensure_ascii=False),
+        json_encoded=True,
+    ) is None
+    assert memory_state.parse_frontmatter_scalar(
+        raw_frontmatter,
+        "project_root",
+    ) == memory_state.FrontmatterScalar(True, None)
+    assert memory_state.parse_frontmatter_scalar(
+        escaped_frontmatter,
+        "project_root",
+    ) == memory_state.FrontmatterScalar(True, None)
+    assert session_start_project_state._recorded_project_root(
+        f"- Project root JSON: {json.dumps(root, ensure_ascii=False)}\n"
+    ) is None
+
+
 @pytest.mark.parametrize("metadata", ("json", "legacy"))
 def test_relative_ownership_never_resolves_against_process_cwd(
     monkeypatch,
@@ -1222,7 +1358,83 @@ def test_multiple_or_contradictory_legacy_roots_fail_ownership(tmp_path: Path):
     ) is None
 
 
-def test_render_new_state_adds_json_root_to_legacy_template(tmp_path: Path):
+@pytest.mark.parametrize(
+    "example_wrapper",
+    (
+        "```markdown\n{metadata}\n```",
+        "<!--\n{metadata}\n-->",
+    ),
+)
+def test_state_inventory_ignores_fenced_and_commented_ownership_decoys(
+    tmp_path: Path,
+    example_wrapper: str,
+):
+    projects = tmp_path / "projects"
+    project = tmp_path / "project"
+    other = tmp_path / "other"
+    project.mkdir()
+    other.mkdir()
+    state_path = projects / "active" / "state.md"
+    state_path.parent.mkdir(parents=True)
+    decoy = example_wrapper.format(
+        metadata=(
+            f"- Project root JSON: {json.dumps(str(other.resolve()))}\n"
+            '- Runtime slug JSON: "decoy"'
+        )
+    )
+    state_path.write_text(
+        f"- Project root JSON: {json.dumps(str(project.resolve()))}\n"
+        '- Runtime slug JSON: "active"\n'
+        f"{decoy}\n",
+        encoding="utf-8",
+    )
+
+    [entry] = session_start_project_state._scan_project_states(projects)
+
+    assert entry.project_root == project.resolve()
+    assert entry.runtime_slug == "active"
+
+
+@pytest.mark.parametrize(
+    "example_wrapper",
+    (
+        "```markdown\n{metadata}\n```",
+        "<!--\n{metadata}\n-->",
+    ),
+)
+def test_state_inventory_never_claims_from_fenced_or_commented_examples(
+    tmp_path: Path,
+    example_wrapper: str,
+):
+    projects = tmp_path / "projects"
+    project = tmp_path / "project"
+    project.mkdir()
+    state_path = projects / "example-only" / "state.md"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        example_wrapper.format(
+            metadata=(
+                f"- Project root JSON: {json.dumps(str(project.resolve()))}\n"
+                '- Runtime slug JSON: "example-only"'
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    [entry] = session_start_project_state._scan_project_states(projects)
+
+    assert entry.project_root is None
+    assert entry.runtime_slug is None
+    assert session_start_project_state.resolve_project_alias(
+        "example-only",
+        projects,
+    ) is None
+
+
+def test_render_new_state_preserves_invalid_legacy_value_with_canonical_json(
+    tmp_path: Path,
+):
     template = tmp_path / "state-template.md"
     template.write_text(
         "# <Project Name>\n- Project root: `<absolute path>`\n",
@@ -1237,6 +1449,71 @@ def test_render_new_state_adds_json_root_to_legacy_template(tmp_path: Path):
     ]
     assert json.loads(json_line.split(":", 1)[1].strip()) == str(project)
     assert f"- Project root: `{project}`" in rendered
+
+
+def test_render_new_state_ignores_fenced_canonical_example_in_legacy_template(
+    tmp_path: Path,
+):
+    template = tmp_path / "state-template.md"
+    template.write_text(
+        "# <Project Name>\n"
+        "```markdown\n"
+        '- Project root JSON: "D:/example-only"\n'
+        '- Runtime slug JSON: "example-only"\n'
+        "```\n"
+        "- Project root: `<absolute path>`\n",
+        encoding="utf-8",
+    )
+    project = tmp_path / "project"
+
+    rendered = _render_new_state(template, "project", project)
+
+    assert session_start_project_state._recorded_project_root(rendered) == str(project)
+    assert session_start_project_state._recorded_runtime_slug(rendered) == "project"
+    assert '- Project root JSON: "D:/example-only"' in rendered
+    assert "- Project root:" not in rendered
+
+
+@pytest.mark.parametrize(
+    "example_wrapper",
+    (
+        "```markdown\n{metadata}\n```",
+        "<!--\n{metadata}\n-->",
+    ),
+)
+def test_hidden_template_metadata_cannot_block_a_valid_project_claim(
+    monkeypatch,
+    tmp_path: Path,
+    example_wrapper: str,
+):
+    projects = tmp_path / "projects"
+    template = projects / "_template" / "state.md"
+    template.parent.mkdir(parents=True)
+    hidden = example_wrapper.format(
+        metadata=(
+            "- Project root: `D:/legacy-example`\n"
+            '- Project root JSON: "D:/canonical-example"\n'
+            '- Runtime slug JSON: "example-only"'
+        )
+    )
+    template.write_text(
+        "# <Project Name>\n"
+        f"{hidden}\n"
+        "- Project root: `<absolute path>`\n",
+        encoding="utf-8",
+    )
+    project = tmp_path / "workspace" / "active"
+    (project / ".git").mkdir(parents=True)
+    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "runtime"))
+
+    claimed = session_start_project_state.confirm_project_identity(project, projects)
+
+    assert claimed is not None
+    assert claimed[0] == "active"
+    assert session_start_project_state._state_path_owns_project(
+        claimed[1],
+        project.resolve(),
+    )
 
 
 @pytest.mark.parametrize(
@@ -1268,10 +1545,10 @@ def test_render_new_state_round_trips_placeholder_literals_in_project_path(
 
     assert session_start_project_state._recorded_project_root(rendered) == str(project)
     assert f"description: (new project at `{project}`, pending description)" in rendered
-    assert f"- Project root: `{project}`" in rendered
+    assert "- Project root:" not in rendered
 
 
-def test_session_end_slug_lookup_rejects_conflicting_json_and_legacy_root(
+def test_session_end_slug_lookup_uses_canonical_json_over_conflicting_legacy_root(
     tmp_path: Path,
 ):
     projects = tmp_path / "projects"
@@ -1287,7 +1564,9 @@ def test_session_end_slug_lookup_rejects_conflicting_json_and_legacy_root(
         encoding="utf-8",
     )
 
-    assert session_end_project_tag._lookup_existing_slug(project, projects) is None
+    assert session_end_project_tag._lookup_existing_slug(project, projects) == (
+        "collision-safe"
+    )
 
 
 def test_session_end_slug_lookup_rejects_malformed_json_root(tmp_path: Path):
@@ -1340,9 +1619,9 @@ def test_concurrent_same_project_claims_converge_on_one_complete_state(
         path for path in projects.glob("*/state.md") if path.parent.name != "_template"
     ]
     assert state_files == [projects / "service" / "state.md"]
-    assert state_files[0].read_text(encoding="utf-8").endswith(
-        f"- Project root: `{project.resolve()}`\n"
-    )
+    state_body = state_files[0].read_text(encoding="utf-8")
+    assert f"- Project root JSON: {json.dumps(str(project.resolve()))}\n" in state_body
+    assert "- Project root:" not in state_body
     assert len(claim_lock_calls) == 2
 
 
@@ -1375,9 +1654,9 @@ def test_concurrent_project_claims_never_share_state(monkeypatch, tmp_path: Path
     assert len({slug for slug, _path, _is_new in claims}) == 2
     for project, (slug, state_path, is_new) in zip((first, second), claims, strict=True):
         assert is_new is True
-        assert state_path.read_text(encoding="utf-8").endswith(
-            f"- Project root: `{project.resolve()}`\n"
-        )
+        state_body = state_path.read_text(encoding="utf-8")
+        assert f"- Project root JSON: {json.dumps(str(project.resolve()))}\n" in state_body
+        assert "- Project root:" not in state_body
         assert _slug_owns_dir(slug, project, projects) is True
     assert len(claim_lock_calls) == 2
 
@@ -1423,10 +1702,10 @@ def test_context_claim_winner_runs_first_discovery_bootstrap(monkeypatch, tmp_pa
     (project / ".git").mkdir(parents=True)
     monkeypatch.setattr(session_start_context, "PROJECTS_DIR", projects)
 
-    slug, state_path = session_start_context._resolve_project(project)
+    session_start_context.build_context(project)
+    state_path = projects / "active" / "state.md"
 
-    assert slug == "active"
-    assert state_path == projects / "active" / "state.md"
+    assert state_path.exists()
     deadline = time.monotonic() + 5
     while not (project / "bootstrap-called").exists() and time.monotonic() < deadline:
         time.sleep(0.01)
@@ -1446,16 +1725,25 @@ def test_context_retries_bootstrap_when_existing_project_has_no_bootstrap(
         f"# Active\n- Project root: `{project.resolve()}`\n",
         encoding="utf-8",
     )
-    calls: list[tuple[Path, Path, Path]] = []
+    calls: list[tuple[tuple, dict]] = []
     monkeypatch.setattr(session_start_context, "PROJECTS_DIR", projects)
     monkeypatch.setattr(
         session_start_project_state,
         "_bootstrap_project_state",
-        lambda *args: calls.append(args),
+        lambda *args, **kwargs: calls.append((args, kwargs)),
     )
 
     assert session_start_context._resolve_project(project) == ("active", state_path)
-    assert calls == [(vault, project.resolve(), state_path)]
+    assert calls == []
+
+    session_start_context.build_context(project)
+
+    assert calls == [
+        (
+            (vault, project.resolve(), state_path, "active"),
+            {"bootstrap_context": ""},
+        )
+    ]
 
 
 def test_bootstrap_launcher_spawns_detached_worker(monkeypatch, tmp_path: Path):
@@ -1495,20 +1783,27 @@ def test_bootstrap_launcher_spawns_detached_worker(monkeypatch, tmp_path: Path):
 def test_standalone_project_context_exposes_bootstrap_without_losing_identity(
     tmp_path: Path,
 ):
+    project_root = tmp_path / "alpha-project"
+    project_root.mkdir()
     state_path = tmp_path / "projects" / "alpha" / "state.md"
     state_path.parent.mkdir(parents=True)
     state_path.write_text(
         "# Alpha state\n\n"
         + "STATE_DETAIL_SENTINEL\n"
-        + '- Project root JSON: "D:/alpha"\n'
+        + f"- Project root JSON: {json.dumps(str(project_root.resolve()))}\n"
         + '- Runtime slug JSON: "alpha"\n',
         encoding="utf-8",
     )
+    fingerprint = bootstrap_project._bootstrap_source_fingerprint(project_root, None)
+    assert fingerprint is not None
     state_path.with_name("bootstrap.md").write_text(
         "---\ntype: bootstrap-context\n"
         'project_slug_json: "alpha"\n'
-        'project_root_json: "D:/alpha"\n'
+        f"project_root_json: {json.dumps(str(project_root.resolve()))}\n"
         f"project_state_path_json: {json.dumps(str(state_path.resolve()))}\n"
+        "git_head_json: null\n"
+        "bootstrap_schema_json: 2\n"
+        f"source_fingerprint_json: {json.dumps(fingerprint)}\n"
         "---\n\n"
         "# Alpha bootstrap\n\nSTANDALONE_BOOTSTRAP_SENTINEL\n"
         + ("x" * 3_000),
@@ -1519,11 +1814,12 @@ def test_standalone_project_context_exposes_bootstrap_without_losing_identity(
         state_path,
         "alpha",
         False,
+        project_root,
     )
 
     assert len(context) <= session_start_project_state.MAX_CONTEXT_CHARS
     assert "# Per-project state" in context
-    assert '- Project root JSON: "D:/alpha"' in context
+    assert f"- Project root JSON: {json.dumps(str(project_root.resolve()))}" in context
     assert "Project bootstrap" in context
     assert "UNTRUSTED" in context
     assert "STANDALONE_BOOTSTRAP_SENTINEL" in context
@@ -1582,22 +1878,29 @@ def test_orphan_bootstrap_without_matching_provenance_is_never_injected(tmp_path
 def test_standalone_project_context_prioritizes_saved_handoff_over_bootstrap(
     tmp_path: Path,
 ):
+    project_root = tmp_path / "alpha-project"
+    project_root.mkdir()
     state_path = tmp_path / "projects" / "alpha" / "state.md"
     state_path.parent.mkdir(parents=True)
     state_path.write_text(
         "# Alpha state\n"
-        '- Project root JSON: "D:/alpha"\n\n'
+        f"- Project root JSON: {json.dumps(str(project_root.resolve()))}\n\n"
         '- Runtime slug JSON: "alpha"\n\n'
         "## Where we left off\n"
         "SAVED_HANDOFF_SENTINEL\n"
         + ("STATE_DETAIL_TOO_LARGE " + "x" * 20_000 + "\n"),
         encoding="utf-8",
     )
+    fingerprint = bootstrap_project._bootstrap_source_fingerprint(project_root, None)
+    assert fingerprint is not None
     state_path.with_name("bootstrap.md").write_text(
         "---\ntype: bootstrap-context\n"
         'project_slug_json: "alpha"\n'
-        'project_root_json: "D:/alpha"\n'
+        f"project_root_json: {json.dumps(str(project_root.resolve()))}\n"
         f"project_state_path_json: {json.dumps(str(state_path.resolve()))}\n"
+        "git_head_json: null\n"
+        "bootstrap_schema_json: 2\n"
+        f"source_fingerprint_json: {json.dumps(fingerprint)}\n"
         "---\n\n"
         "# Alpha bootstrap\n\n"
         "BOOTSTRAP_MUST_YIELD_SENTINEL\n"
@@ -1609,6 +1912,7 @@ def test_standalone_project_context_prioritizes_saved_handoff_over_bootstrap(
         state_path,
         "alpha",
         False,
+        project_root,
     )
 
     assert "SAVED_HANDOFF_SENTINEL" in context
@@ -1660,8 +1964,10 @@ def test_project_state_hook_loser_never_emits_winner_state(monkeypatch, tmp_path
         contexts,
         strict=True,
     ):
-        assert f"- Project root: `{project.resolve()}`" in context
-        assert f"- Project root: `{other.resolve()}`" not in context
+        own_root = json.dumps(str(project.resolve()))
+        other_root = json.dumps(str(other.resolve()))
+        assert f"- Project root JSON: {own_root}" in context
+        assert f"- Project root JSON: {other_root}" not in context
     assert len(claim_lock_calls) == 2
 
 
@@ -1729,6 +2035,19 @@ def test_posix_case_distinct_project_paths_do_not_share_ownership_key():
     )
     assert session_start_project_state._path_comparison_key(upper, "win32") == (
         session_start_project_state._path_comparison_key(lower, "win32")
+    )
+
+
+def test_windows_project_path_key_normalizes_case_and_separators():
+    first = PureWindowsPath(r"C:\Workspace\Project")
+    equivalent = PureWindowsPath("c:/workspace/project")
+    different = PureWindowsPath("c:/workspace/other")
+
+    assert session_start_project_state._path_comparison_key(first, "win32") == (
+        session_start_project_state._path_comparison_key(equivalent, "win32")
+    )
+    assert session_start_project_state._path_comparison_key(first, "win32") != (
+        session_start_project_state._path_comparison_key(different, "win32")
     )
 
 

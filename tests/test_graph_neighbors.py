@@ -98,22 +98,33 @@ def test_rebuild_graph_cache_returns_edges(fake_graph):
         assert edges == 1  # only a→b
 
 
-def test_build_link_graph_extracts_wikilinks(fake_graph):
+def test_build_link_graph_extracts_wikilinks(fake_graph, tmp_path, monkeypatch):
     """_build_link_graph finds [[wikilinks]] in markdown files."""
-    fake_md = MagicMock()
-    fake_md.is_file.return_value = True
-    fake_md.read_text.return_value = "# Page A\n\nSee [[Page B]] and [[Page C]]."
-    fake_md.relative_to.return_value.as_posix.return_value = "page_a.md"
+    import vault_editorial
 
-    with patch.object(fake_graph, "KNOWLEDGE_DIR") as knowledge, \
-         patch.object(fake_graph, "_resolve_wikilink", side_effect=lambda t: f"{t.lower().replace(' ', '-')}.md"), \
-         patch.object(Path, "rglob", return_value=[fake_md]):
-        knowledge.exists.return_value = True
-        knowledge.rglob.return_value = [fake_md]
+    notes = tmp_path / "knowledge" / "notes"
+    notes.mkdir(parents=True)
 
-        graph = fake_graph._build_link_graph()
-        assert "page_a.md" in graph
-        assert len(graph["page_a.md"]) == 2
+    def write_page(name: str, title: str, body: str = "") -> Path:
+        page = notes / name
+        page.write_text(
+            "---\ntype: pattern\n---\n\n"
+            f"# {title}\n\n{body}\n",
+            encoding="utf-8",
+        )
+        return page
+
+    source = write_page("page-a.md", "Page A", "See [[page-b]] and [[page-c]].")
+    write_page("page-b.md", "Page B")
+    write_page("page-c.md", "Page C")
+    monkeypatch.setattr(fake_graph, "ROOT", tmp_path)
+    monkeypatch.setattr(fake_graph, "KNOWLEDGE_DIR", notes)
+    selection = vault_editorial.select_active_notes(notes, root=tmp_path)
+
+    graph = fake_graph._build_link_graph(selection)
+
+    assert source.relative_to(tmp_path).as_posix() in graph
+    assert len(graph[source.relative_to(tmp_path).as_posix()]) == 2
 
 
 @pytest.mark.parametrize(

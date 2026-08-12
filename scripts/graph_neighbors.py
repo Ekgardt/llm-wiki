@@ -12,6 +12,7 @@ Integrates into search_memory.py's _rrf_fuse_triple() as a 3rd signal.
 """
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -19,11 +20,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import (  # noqa: E402
     ROOT,
+    STATE_ROOT,
+    atomic_write,
     parse_frontmatter_scalar,
     parse_project_scope,
+    read_json_object_file_bounded,
 )
+from vault_editorial import ActiveNoteSelection, select_active_notes  # noqa: E402
 
 KNOWLEDGE_DIR = ROOT / "knowledge" / "notes"
+GRAPH_CACHE = STATE_ROOT / "cache" / "link-graph.json"
+MAX_GRAPH_CACHE_BYTES = 16 * 1024 * 1024
 
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+?)(?:\|[^\]]+)?\]\]")
 
@@ -42,42 +49,48 @@ def _is_inactive(content: str) -> bool:
     )
 
 
-def _build_link_graph() -> dict[str, list[str]]:
-    """Build adjacency: page_path → [linked_page_paths].
+def _resolve_snapshot_wikilink(
+    target: str,
+    by_path: dict[str, str],
+    by_stem: dict[str, str],
+) -> str | None:
+    value = target.strip()
+    if not value or "\\" in value:
+        return None
+    if "/" not in value:
+        return by_stem.get(Path(value).stem.casefold())
+    candidate = value if value.endswith(".md") else f"{value}.md"
+    direct = by_path.get(candidate.casefold())
+    if direct is not None:
+        return direct
+    prefix = KNOWLEDGE_DIR.relative_to(ROOT).as_posix()
+    return by_path.get(f"{prefix}/{candidate}".casefold())
 
-    Scans all knowledge markdown files for [[wikilinks]].
-    Resolves links to actual file paths.
-    """
+
+def _build_link_graph(
+    selection: ActiveNoteSelection | None = None,
+) -> dict[str, list[str]]:
+    """Build canonical adjacency from one immutable note selection."""
+    if selection is None:
+        selection = select_active_notes(KNOWLEDGE_DIR, root=ROOT)
     graph: dict[str, list[str]] = {}
-
-    if not KNOWLEDGE_DIR.exists():
-        return graph
-
-    for md in KNOWLEDGE_DIR.rglob("*.md"):
-        if not md.is_file():
-            continue
-        try:
-            content = md.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        # Skip superseded/archived pages from the active graph
-        if _is_inactive(content):
-            continue
-        try:
-            rel = md.relative_to(ROOT).as_posix()
-        except ValueError:
-            continue
-        links = []
-        for target in WIKILINK_RE.findall(content):
+    by_path = {
+        note.relative_path.casefold(): note.relative_path for note in selection.notes
+    }
+    by_stem: dict[str, str] = {}
+    for note in selection.notes:
+        by_stem.setdefault(note.path.stem.casefold(), note.relative_path)
+    for note in selection.notes:
+        links: set[str] = set()
+        for target in WIKILINK_RE.findall(note.content):
             target = target.strip()
             if not target:
                 continue
-            resolved = _resolve_wikilink(target)
+            resolved = _resolve_snapshot_wikilink(target, by_path, by_stem)
             if resolved:
-                links.append(resolved)
+                links.add(resolved)
         if links:
-            graph[rel] = list(set(links))  # dedupe
-
+            graph[note.relative_path] = sorted(links, key=lambda value: (value.casefold(), value))
     return graph
 
 
@@ -117,16 +130,68 @@ def _resolve_wikilink(target: str) -> str | None:
     return None
 
 
-# Cache the graph (rebuilt on first call, reused for all queries in session)
-_link_graph_cache: dict[str, list[str]] | None = None
+# Cache the graph (rebuilt when the canonical generation changes).
+_link_graph_cache: tuple[str, dict[str, list[str]]] | dict[str, list[str]] | None = None
 
 
-def get_link_graph() -> dict[str, list[str]]:
-    """Get the wikilink graph, cached at module level."""
+def _valid_cached_graph(
+    payload: dict,
+    selection: ActiveNoteSelection,
+) -> dict[str, list[str]] | None:
+    if (
+        payload.get("version") != selection.generation.version
+        or payload.get("canonical_sha256")
+        != selection.generation.canonical_sha256
+        or not isinstance(payload.get("graph"), dict)
+    ):
+        return None
+    allowed = {note.relative_path for note in selection.notes}
+    graph: dict[str, list[str]] = {}
+    for source, targets in payload["graph"].items():
+        if (
+            not isinstance(source, str)
+            or source not in allowed
+            or not isinstance(targets, list)
+            or any(not isinstance(target, str) or target not in allowed for target in targets)
+        ):
+            return None
+        graph[source] = list(targets)
+    return graph
+
+
+def get_link_graph(
+    selection: ActiveNoteSelection | None = None,
+) -> dict[str, list[str]]:
+    """Get a graph bound to one canonical selection generation."""
     global _link_graph_cache
-    if _link_graph_cache is None:
-        _link_graph_cache = _build_link_graph()
-    return _link_graph_cache
+    if selection is None and isinstance(_link_graph_cache, dict):
+        return _link_graph_cache
+    if selection is None:
+        selection = select_active_notes(KNOWLEDGE_DIR, root=ROOT)
+    generation = selection.generation.canonical_sha256
+    generation_key = f"v{selection.generation.version}:{generation}"
+    if isinstance(_link_graph_cache, tuple) and _link_graph_cache[0] == generation_key:
+        return _link_graph_cache[1]
+    payload = read_json_object_file_bounded(
+        GRAPH_CACHE,
+        max_bytes=MAX_GRAPH_CACHE_BYTES,
+        max_depth=8,
+    )
+    graph = _valid_cached_graph(payload, selection) if payload is not None else None
+    if graph is None:
+        graph = _build_link_graph(selection)
+        payload = {
+            "version": selection.generation.version,
+            "canonical_sha256": generation,
+            "graph": graph,
+        }
+        try:
+            GRAPH_CACHE.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write(GRAPH_CACHE, json.dumps(payload, sort_keys=True))
+        except OSError:
+            pass
+    _link_graph_cache = (generation_key, graph)
+    return graph
 
 
 def get_neighbors(page_path: str) -> list[str]:
@@ -145,6 +210,8 @@ def boost_graph_neighbors(
     bm25_results: list[dict],
     vector_results: list[dict] | None,
     boost_weight: float = 0.15,
+    *,
+    selection: ActiveNoteSelection | None = None,
 ) -> list[dict]:
     """Add graph-neighbor boost to existing results.
 
@@ -155,7 +222,7 @@ def boost_graph_neighbors(
     The boost is added to the 'graph_score' field and combined
     into the final fused_score via RRF.
     """
-    graph = get_link_graph()
+    graph = get_link_graph(selection)
 
     # Collect all paths that should get a boost
     boost_paths: dict[str, float] = {}
@@ -182,8 +249,14 @@ def boost_graph_neighbors(
 def rebuild_graph_cache() -> int:
     """Force rebuild the link graph. Returns edge count."""
     global _link_graph_cache
-    _link_graph_cache = _build_link_graph()
-    return sum(len(v) for v in _link_graph_cache.values())
+    selection = select_active_notes(KNOWLEDGE_DIR, root=ROOT)
+    graph = _build_link_graph(selection)
+    generation_key = (
+        f"v{selection.generation.version}:"
+        f"{selection.generation.canonical_sha256}"
+    )
+    _link_graph_cache = (generation_key, graph)
+    return sum(len(v) for v in graph.values())
 
 
 if __name__ == "__main__":

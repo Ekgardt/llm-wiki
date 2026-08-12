@@ -52,12 +52,19 @@ def make_promoted_feedback(path: Path, rule_text: str, **overrides):
     candidate = {
         "status": "promoted",
         "project": "alpha",
+        "project_root": str(
+            (path.parent.parent / "project-roots" / "alpha").resolve()
+        ),
         "type": "correction",
         "text": rule_text,
         "promoted_to": "knowledge/notes/valid.md",
         **overrides,
     }
     path.write_text(json.dumps(candidate), encoding="utf-8")
+
+
+def _scoped_root(knowledge: Path, project: str) -> Path:
+    return (knowledge.parent / "project-roots" / project).resolve()
 
 
 def test_lint_treats_matching_hash_without_receipt_as_uncompiled(
@@ -134,13 +141,25 @@ def test_collect_filters_by_project(fake_knowledge_dir):
     # Add project to frontmatter
     path = fake_knowledge_dir / "patterns/c1.md"
     content = path.read_text()
-    content = content.replace("---\n", "---\nproject: project-a\n", 1)
+    project_root = _scoped_root(fake_knowledge_dir, "project-a")
+    content = content.replace(
+        "---\n",
+        "---\n"
+        "project: project-a\n"
+        f"project_root: {json.dumps(str(project_root))}\n",
+        1,
+    )
     path.write_text(content)
 
     # Should find with project filter
-    assert len(build_guardrails._collect_corrections("project-a")) == 1
+    assert len(build_guardrails._collect_corrections("project-a", project_root)) == 1
     # Should NOT find with different project filter
-    assert len(build_guardrails._collect_corrections("project-b")) == 0
+    assert len(
+        build_guardrails._collect_corrections(
+            "project-b",
+            _scoped_root(fake_knowledge_dir, "project-b"),
+        )
+    ) == 0
 
 
 def test_quoted_project_keys_scope_and_invalid_key_forms_fail_closed(
@@ -159,11 +178,13 @@ def test_quoted_project_keys_scope_and_invalid_key_forms_fail_closed(
         "mismatched-single-key.md": ("'project\": beta", "Mismatched single quote"),
         "duplicate-key.md": ("'project': beta\nproject: beta", "Duplicate key"),
     }
+    project_root = _scoped_root(fake_knowledge_dir, "beta")
     for filename, (scope, title) in pages.items():
         (fake_knowledge_dir / filename).write_text(
             "---\n"
             "type: pattern\n"
             f"{scope}\n"
+            f"project_root: {json.dumps(str(project_root))}\n"
             "---\n\n"
             f"# {title}\n\n"
             f"One-sentence summary: Always enforce {title}.\n",
@@ -171,10 +192,15 @@ def test_quoted_project_keys_scope_and_invalid_key_forms_fail_closed(
         )
 
     beta_titles = {
-        item["title"] for item in build_guardrails._collect_corrections("beta")
+        item["title"]
+        for item in build_guardrails._collect_corrections("beta", project_root)
     }
     alpha_titles = {
-        item["title"] for item in build_guardrails._collect_corrections("alpha")
+        item["title"]
+        for item in build_guardrails._collect_corrections(
+            "alpha",
+            _scoped_root(fake_knowledge_dir, "alpha"),
+        )
     }
     global_titles = {
         item["title"] for item in build_guardrails._collect_corrections(None)
@@ -182,7 +208,7 @@ def test_quoted_project_keys_scope_and_invalid_key_forms_fail_closed(
 
     assert beta_titles == {"Plain key", "Single quoted key", "Double quoted key"}
     assert alpha_titles == set()
-    assert global_titles == {"Plain key", "Single quoted key", "Double quoted key"}
+    assert global_titles == set()
 
 
 def test_guardrail_project_scope_accepts_quoted_scalar_with_inline_comment(
@@ -191,18 +217,23 @@ def test_guardrail_project_scope_accepts_quoted_scalar_with_inline_comment(
     import build_guardrails
 
     path = fake_knowledge_dir / "quoted-project.md"
+    project_root = _scoped_root(fake_knowledge_dir, "beta")
     path.write_text(
         "---\n"
         "type: pattern\n"
         'project: "beta" # owned by beta\n'
+        f"project_root: {json.dumps(str(project_root))}\n"
         "---\n\n"
         "# Scoped rule\n\n"
         "One-sentence summary: Always keep beta data isolated.\n",
         encoding="utf-8",
     )
 
-    assert len(build_guardrails._collect_corrections("beta")) == 1
-    assert build_guardrails._collect_corrections("alpha") == []
+    assert len(build_guardrails._collect_corrections("beta", project_root)) == 1
+    assert build_guardrails._collect_corrections(
+        "alpha",
+        _scoped_root(fake_knowledge_dir, "alpha"),
+    ) == []
 
 
 def test_indented_block_scalar_marker_does_not_end_project_frontmatter(
@@ -210,6 +241,7 @@ def test_indented_block_scalar_marker_does_not_end_project_frontmatter(
 ):
     import build_guardrails
 
+    project_root = _scoped_root(fake_knowledge_dir, "beta")
     (fake_knowledge_dir / "block-scalar.md").write_text(
         "---\n"
         "type: pattern\n"
@@ -217,14 +249,18 @@ def test_indented_block_scalar_marker_does_not_end_project_frontmatter(
         "  scalar text\n"
         "  ---\n"
         "project: beta\n"
+        f"project_root: {json.dumps(str(project_root))}\n"
         "---\n\n"
         "# Beta block scalar\n\n"
         "One-sentence summary: Always keep this rule scoped to beta.\n",
         encoding="utf-8",
     )
 
-    assert len(build_guardrails._collect_corrections("beta")) == 1
-    assert build_guardrails._collect_corrections("alpha") == []
+    assert len(build_guardrails._collect_corrections("beta", project_root)) == 1
+    assert build_guardrails._collect_corrections(
+        "alpha",
+        _scoped_root(fake_knowledge_dir, "alpha"),
+    ) == []
 
 
 def test_advisory_decision_scope_accepts_quoted_scalar_with_inline_comment(
@@ -235,11 +271,13 @@ def test_advisory_decision_scope_accepts_quoted_scalar_with_inline_comment(
 
     knowledge = tmp_path / "knowledge" / "notes"
     knowledge.mkdir(parents=True)
+    project_root = _scoped_root(knowledge, "beta")
     (knowledge / "beta-decision.md").write_text(
         "---\n"
         "type: decision\n"
         "timestamp: 2026-07-28\n"
         'project: "beta" # owned by beta\n'
+        f"project_root: {json.dumps(str(project_root))}\n"
         "---\n\n"
         "# Beta-only decision\n\n"
         "One-sentence summary: Keep this decision private to beta.\n",
@@ -248,8 +286,14 @@ def test_advisory_decision_scope_accepts_quoted_scalar_with_inline_comment(
     monkeypatch.setattr(build_advisory, "KNOWLEDGE", knowledge)
     monkeypatch.setattr(build_advisory, "ROOT", tmp_path)
 
-    assert build_advisory._find_last_decision("beta") is not None
-    assert build_advisory._find_last_decision("alpha") is None
+    assert build_advisory._find_last_decision(
+        "beta",
+        project_root=project_root,
+    ) is not None
+    assert build_advisory._find_last_decision(
+        "alpha",
+        project_root=_scoped_root(knowledge, "alpha"),
+    ) is None
 
 
 def test_frontmatter_scalar_supports_yaml_single_quote_escaping():
@@ -925,11 +969,13 @@ def test_escaped_project_key_scopes_guardrail_advisory_and_project_context(
     import build_context
     import build_guardrails
 
+    project_root = tmp_path / "beta-root"
     guardrail = fake_knowledge_dir / "escaped-project-rule.md"
     guardrail.write_text(
         "---\n"
         "type: pattern\n"
         f"{project_key}: beta\n"
+        f"project_root: {json.dumps(str(project_root.resolve()))}\n"
         "---\n\n"
         "# Escaped project rule\n\n"
         "One-sentence summary: Always keep ESCAPED_PROJECT_RULE scoped.\n",
@@ -941,6 +987,7 @@ def test_escaped_project_key_scopes_guardrail_advisory_and_project_context(
         "type: decision\n"
         "timestamp: 2026-07-30\n"
         f"{project_key}: beta\n"
+        f"project_root: {json.dumps(str(project_root.resolve()))}\n"
         "---\n\n"
         "# Escaped project decision\n\n"
         "One-sentence summary: ESCAPED_PROJECT_DECISION stays scoped.\n",
@@ -951,20 +998,147 @@ def test_escaped_project_key_scopes_guardrail_advisory_and_project_context(
     monkeypatch.setattr(build_context, "KNOWLEDGE", fake_knowledge_dir)
     monkeypatch.setattr(build_context, "ROOT", tmp_path)
 
-    beta_rules = build_guardrails.build_guardrails("beta") or ""
-    alpha_rules = build_guardrails.build_guardrails("alpha") or ""
-    beta_pages = build_context._find_project_pages("beta")
+    beta_rules = build_guardrails.build_guardrails(
+        "beta",
+        project_root=project_root,
+    ) or ""
+    alpha_rules = build_guardrails.build_guardrails(
+        "alpha",
+        project_root=project_root,
+    ) or ""
+    beta_pages = build_context._find_project_pages("beta", project_root)
 
     assert "ESCAPED_PROJECT_RULE" in beta_rules
     assert "ESCAPED_PROJECT_RULE" not in alpha_rules
-    assert build_advisory._find_last_decision("beta")["title"] == (
+    assert build_advisory._find_last_decision(
+        "beta",
+        project_root=project_root,
+    )["title"] == (
         "Escaped project decision"
     )
-    assert build_advisory._find_last_decision("alpha") is None
+    assert build_advisory._find_last_decision(
+        "alpha",
+        project_root=project_root,
+    ) is None
     assert {page["title"] for page in beta_pages} == {
         "Escaped project rule",
         "Escaped project decision",
     }
+
+
+def test_same_slug_guardrails_require_exact_project_root(
+    fake_knowledge_dir,
+    tmp_path: Path,
+):
+    import build_guardrails
+
+    project_root = tmp_path / "workspaces" / "shared"
+    other_root = tmp_path / "other" / "shared"
+    project_root.mkdir(parents=True)
+    other_root.mkdir(parents=True)
+    for name, root_line, sentinel in (
+        (
+            "exact-note",
+            f"project_root: {json.dumps(str(project_root.resolve()))}\n",
+            "EXACT_ROOT_NOTE_RULE",
+        ),
+        (
+            "wrong-note",
+            f"project_root: {json.dumps(str(other_root.resolve()))}\n",
+            "WRONG_ROOT_NOTE_RULE",
+        ),
+        ("missing-note", "", "MISSING_ROOT_NOTE_RULE"),
+    ):
+        (fake_knowledge_dir / f"{name}.md").write_text(
+            "---\n"
+            "type: pattern\n"
+            "project: shared\n"
+            f"{root_line}"
+            "---\n\n"
+            f"# {name}\n\n"
+            f"One-sentence summary: Always enforce {sentinel}.\n",
+            encoding="utf-8",
+        )
+    for name, root, sentinel in (
+        ("exact-feedback", str(project_root.resolve()), "EXACT_ROOT_FEEDBACK_RULE"),
+        ("wrong-feedback", str(other_root.resolve()), "WRONG_ROOT_FEEDBACK_RULE"),
+        ("missing-feedback", None, "MISSING_ROOT_FEEDBACK_RULE"),
+    ):
+        candidate = {
+            "status": "promoted",
+            "project": "shared",
+            "type": "correction",
+            "text": f"Always enforce {sentinel}.",
+            "promoted_to": f"knowledge/notes/{name}.md",
+        }
+        if root is not None:
+            candidate["project_root"] = root
+        (build_guardrails.FEEDBACK_DIR / f"{name}.json").write_text(
+            json.dumps(candidate),
+            encoding="utf-8",
+        )
+
+    guardrails = build_guardrails.build_guardrails(
+        "shared",
+        project_root=project_root,
+    ) or ""
+
+    assert "EXACT_ROOT_NOTE_RULE" in guardrails
+    assert "EXACT_ROOT_FEEDBACK_RULE" in guardrails
+    assert "WRONG_ROOT_NOTE_RULE" not in guardrails
+    assert "WRONG_ROOT_FEEDBACK_RULE" not in guardrails
+    assert "MISSING_ROOT_NOTE_RULE" not in guardrails
+    assert "MISSING_ROOT_FEEDBACK_RULE" not in guardrails
+
+
+def test_same_slug_advisory_decisions_require_exact_project_root(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import build_advisory
+
+    knowledge = tmp_path / "knowledge" / "notes"
+    knowledge.mkdir(parents=True)
+    project_root = tmp_path / "workspaces" / "shared"
+    other_root = tmp_path / "other" / "shared"
+    project_root.mkdir(parents=True)
+    other_root.mkdir(parents=True)
+    for name, timestamp, root_line, sentinel in (
+        (
+            "exact",
+            "2026-08-01",
+            f"project_root: {json.dumps(str(project_root.resolve()))}\n",
+            "EXACT_ROOT_DECISION",
+        ),
+        (
+            "wrong",
+            "2026-08-03",
+            f"project_root: {json.dumps(str(other_root.resolve()))}\n",
+            "WRONG_ROOT_DECISION",
+        ),
+        ("missing", "2026-08-04", "", "MISSING_ROOT_DECISION"),
+    ):
+        (knowledge / f"{name}.md").write_text(
+            "---\n"
+            "type: decision\n"
+            f"timestamp: {timestamp}\n"
+            "project: shared\n"
+            f"{root_line}"
+            "---\n\n"
+            f"# {sentinel}\n\n"
+            f"One-sentence summary: {sentinel}.\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(build_advisory, "KNOWLEDGE", knowledge)
+    monkeypatch.setattr(build_advisory, "ROOT", tmp_path)
+
+    decision = build_advisory._find_last_decision(
+        "shared",
+        project_root=project_root,
+    )
+
+    assert decision is not None
+    assert decision["title"] == "EXACT_ROOT_DECISION"
 
 
 def test_malformed_escaped_project_key_is_never_global_or_project_scoped(
@@ -996,7 +1170,7 @@ def test_malformed_escaped_project_key_is_never_global_or_project_scoped(
     assert build_guardrails._collect_corrections(None) == []
     assert build_advisory._find_last_decision("beta") is None
     assert build_advisory._find_last_decision(None) is None
-    assert build_context._find_project_pages("beta") == []
+    assert build_context._find_project_pages("beta", tmp_path / "beta-root") == []
 
 
 @pytest.mark.parametrize(
@@ -1122,8 +1296,15 @@ def test_invalid_utf8_cannot_forge_guardrail_or_advisory_scope(
 
     assert "project: alpha" in guardrail_bytes.decode("utf-8", errors="ignore")
     assert "project: alpha" in decision_bytes.decode("utf-8", errors="ignore")
-    guardrails = build_guardrails.build_guardrails("alpha") or ""
-    advisory = build_advisory.build_advisory("alpha")
+    project_root = _scoped_root(fake_knowledge_dir, "alpha")
+    guardrails = build_guardrails.build_guardrails(
+        "alpha",
+        project_root=project_root,
+    ) or ""
+    advisory = build_advisory.build_advisory(
+        "alpha",
+        project_root=project_root,
+    )
 
     assert "FORGED_GUARDRAIL_SENTINEL" not in guardrails
     assert "FORGED_ADVISORY_SENTINEL" not in advisory
@@ -1236,7 +1417,10 @@ def test_type_confused_feedback_is_skipped_without_hiding_valid_neighbor(
     make_promoted_feedback(feedback / "00-malformed.json", "MALFORMED_SENTINEL", **{field: value})
     make_promoted_feedback(feedback / "01-valid.json", "Always keep VALID_NEIGHBOR_VISIBLE")
 
-    guardrails = build_guardrails.build_guardrails("alpha")
+    guardrails = build_guardrails.build_guardrails(
+        "alpha",
+        project_root=_scoped_root(fake_knowledge_dir, "alpha"),
+    )
 
     assert "VALID_NEIGHBOR_VISIBLE" in guardrails
     assert "MALFORMED_SENTINEL" not in guardrails
@@ -1279,11 +1463,17 @@ def test_deep_two_kilobyte_feedback_is_isolated_from_sessionstart_sources(
     )
     monkeypatch.setattr(session_start_context, "_recent_daily_paths", lambda: [])
     monkeypatch.setattr(session_start_context, "metacognitive_block", lambda: "## Health\n\nVALID_GLOBAL_HEALTH")
-    monkeypatch.setattr(session_start_context, "advisory_block", lambda *_args: "## Advisory\n\nVALID_ADVISORY")
+    monkeypatch.setattr(
+        session_start_context,
+        "advisory_block",
+        lambda *_args, **_kwargs: "## Advisory\n\nVALID_ADVISORY",
+    )
     monkeypatch.setattr(session_start_context, "MEMORY_INDEX", tmp_path / "missing-index.md")
     monkeypatch.setattr(session_start_context, "MEMORY_LOG", tmp_path / "missing-log.md")
 
-    context = session_start_context.build_context(tmp_path / "alpha")
+    project_root = _scoped_root(fake_knowledge_dir, "alpha")
+    project_root.mkdir(parents=True)
+    context = session_start_context.build_context(project_root)
 
     assert "VALID_GUARDRAIL" in context
     assert "VALID_ADVISORY" in context
@@ -1318,7 +1508,10 @@ def test_malformed_feedback_file_has_no_effect_on_valid_neighbor(
     make_promoted_feedback(valid, "Always preserve VALID_NEIGHBOR_RULE")
     before = {path.name: path.read_bytes() for path in feedback.iterdir()}
 
-    guardrails = build_guardrails.build_guardrails("alpha")
+    guardrails = build_guardrails.build_guardrails(
+        "alpha",
+        project_root=_scoped_root(fake_knowledge_dir, "alpha"),
+    )
 
     assert "VALID_NEIGHBOR_RULE" in guardrails
     assert "SURROGATE_" not in guardrails
@@ -1348,7 +1541,10 @@ def test_guardrails_isolate_feedback_file_memory_error(
 
     monkeypatch.setattr(Path, "open", fail_hostile_read)
 
-    guardrails = build_guardrails.build_guardrails("alpha")
+    guardrails = build_guardrails.build_guardrails(
+        "alpha",
+        project_root=_scoped_root(fake_knowledge_dir, "alpha"),
+    )
 
     assert "VALID_MEMORY_ERROR_NEIGHBOR" in guardrails
     assert "HOSTILE_READ_MUST_NOT_ESCAPE" not in guardrails
@@ -1362,12 +1558,15 @@ def test_advisory_sources_use_explicit_byte_bounds(monkeypatch, tmp_path: Path):
     projects = tmp_path / "projects"
     knowledge.mkdir()
     reports.mkdir()
+    project_root = tmp_path / "project-roots" / "alpha"
+    project_root.mkdir(parents=True)
     state = projects / "legacy folder" / "state.md"
     state.parent.mkdir(parents=True)
     note = knowledge / "decision.md"
     report = reports / "lint-2026-07-28.md"
     note.write_text(
-        "---\ntype: decision\ntimestamp: 2026-07-28\nproject: alpha\n---\n\n"
+        "---\ntype: decision\ntimestamp: 2026-07-28\nproject: alpha\n"
+        f"project_root: {json.dumps(str(project_root.resolve()))}\n---\n\n"
         "# Bounded decision\n\nOne-sentence summary: BOUNDED_DECISION\n",
         encoding="utf-8",
     )
@@ -1376,7 +1575,7 @@ def test_advisory_sources_use_explicit_byte_bounds(monkeypatch, tmp_path: Path):
         encoding="utf-8",
     )
     state.write_text(
-        '- Project root JSON: "D:/alpha"\n'
+        f"- Project root JSON: {json.dumps(str(project_root.resolve()))}\n"
         '- Runtime slug JSON: "alpha"\n'
         "## Open threads\n- BOUNDED_STATE_THREAD\n",
         encoding="utf-8",
@@ -1388,7 +1587,8 @@ def test_advisory_sources_use_explicit_byte_bounds(monkeypatch, tmp_path: Path):
     real_open = Path.open
     real_read_text = Path.read_text
     bounded_paths = {note, report, state}
-    read_sizes: dict[Path, list[int]] = {path: [] for path in bounded_paths}
+    tracked_open_paths = {note, report}
+    read_sizes: dict[Path, list[int]] = {path: [] for path in tracked_open_paths}
 
     class TrackingFile:
         def __init__(self, path, handle):
@@ -1416,7 +1616,7 @@ def test_advisory_sources_use_explicit_byte_bounds(monkeypatch, tmp_path: Path):
     def tracking_open(path, *args, **kwargs):
         handle = real_open(path, *args, **kwargs)
         mode = args[0] if args else kwargs.get("mode", "r")
-        if path in bounded_paths and "r" in mode:
+        if path in tracked_open_paths and "r" in mode:
             assert "b" in mode
             return TrackingFile(path, handle)
         return handle
@@ -1424,9 +1624,16 @@ def test_advisory_sources_use_explicit_byte_bounds(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(Path, "read_text", reject_read_text)
     monkeypatch.setattr(Path, "open", tracking_open)
 
-    assert build_advisory._find_last_decision("alpha")["title"] == "Bounded decision"
+    assert build_advisory._find_last_decision(
+        "alpha",
+        project_root=project_root,
+    )["title"] == "Bounded decision"
     assert build_advisory._find_contradictions() == ["BOUNDED_LINT_ALERT"]
-    assert build_advisory._read_open_threads("alpha", state) == ["BOUNDED_STATE_THREAD"]
+    assert build_advisory._read_open_threads(
+        "alpha",
+        state,
+        project_root,
+    ) == ["BOUNDED_STATE_THREAD"]
     assert all(sizes and all(size > 0 for size in sizes) for sizes in read_sizes.values())
 
 

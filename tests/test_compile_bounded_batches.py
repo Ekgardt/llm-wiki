@@ -17,6 +17,9 @@ from pathlib import Path
 
 import pytest
 
+_SYNTHETIC_PROJECT_SLUG = "compile-test"
+_SYNTHETIC_PROJECT_ROOT = str(Path.cwd().resolve())
+
 
 def _daily(path: Path, blocks: list[str]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -25,7 +28,17 @@ def _daily(path: Path, blocks: list[str]) -> Path:
 
 
 def _block(timestamp: str, body: str, kind: str = "session-end") -> str:
-    return f"## [{timestamp}] {kind} | session\n{body}"
+    return (
+        f"## [{timestamp}] {kind} | session\n"
+        "- Trigger: `synthetic-test`\n"
+        f"- Project slug: `{_SYNTHETIC_PROJECT_SLUG}`\n"
+        f"- Project root JSON: {json.dumps(_SYNTHETIC_PROJECT_ROOT)}\n"
+        "- Tier: `major`\n"
+        "- Source session: `session`\n\n"
+        "**Lessons / patterns**\n"
+        f"- Rule: {body}\n"
+        "<!-- llm-wiki-record-complete -->"
+    )
 
 
 def _generated_block(
@@ -34,15 +47,42 @@ def _generated_block(
     body: str,
     kind: str = "opencode-idle",
 ) -> str:
-    return _block(
+    return _project_block(
         timestamp,
+        root,
+        "admission-test",
+        body,
+        kind=kind,
+        synthetic_rule=False,
+    )
+
+
+def _project_block(
+    timestamp: str,
+    root: Path,
+    slug: str,
+    body: str,
+    *,
+    kind: str = "opencode-idle",
+    session: str = "session",
+    synthetic_rule: bool = True,
+) -> str:
+    if synthetic_rule:
+        body = "\n".join(
+            f"{line[: len(line) - len(line.lstrip())]}- Rule: {line.lstrip()[2:]}"
+            if line.lstrip().startswith("- ")
+            else line
+            for line in body.splitlines()
+        )
+    return (
+        f"## [{timestamp}] {kind} | {session}\n"
         "- Trigger: `opencode-idle`\n"
-        "- Project slug: `admission-test`\n"
+        f"- Project slug: `{slug}`\n"
         f"- Project root JSON: {json.dumps(str(root.resolve()))}\n"
         "- Tier: `major`\n"
-        "- Source session: `session`\n\n"
-        f"{body}",
-        kind,
+        f"- Source session: `{session}`\n\n"
+        f"{body}\n"
+        "<!-- llm-wiki-record-complete -->"
     )
 
 
@@ -52,6 +92,31 @@ def _word_body(count: int) -> str:
 
 def _valid_body(marker: str) -> str:
     return f"{marker}\n\n{_word_body(150)}"
+
+
+def _exact_test_evidence_quote(
+    daily: Path,
+    timestamp: str,
+    quoted_text: str,
+) -> str:
+    """Match the synthetic `Rule:` prefix when it is the complete source bullet."""
+    try:
+        lines = daily.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return quoted_text
+    header_prefix = f"## [{timestamp}] "
+    in_record = False
+    for line in lines:
+        if line.startswith("## ["):
+            in_record = line.startswith(header_prefix)
+            continue
+        if not in_record:
+            continue
+        if line == f"- {quoted_text}":
+            return quoted_text
+        if line == f"- Rule: {quoted_text}":
+            return f"Rule: {quoted_text}"
+    return quoted_text
 
 
 def _operation(daily: Path, slug: str, body: str, *, timestamp: str = "12:00:00") -> dict:
@@ -66,7 +131,11 @@ def _operation(daily: Path, slug: str, body: str, *, timestamp: str = "12:00:00"
         "evidence": [{
             "daily_date": daily.stem,
             "timestamp": timestamp,
-            "quoted_text": "journal evidence",
+            "quoted_text": _exact_test_evidence_quote(
+                daily,
+                timestamp,
+                "journal evidence",
+            ),
             "claim": "journal claim",
         }],
         "related": [],
@@ -96,7 +165,11 @@ def _admission_operation(
             {
                 "daily_date": daily.stem,
                 "timestamp": timestamp,
-                "quoted_text": quoted_text,
+                "quoted_text": _exact_test_evidence_quote(
+                    daily,
+                    timestamp,
+                    quoted_text,
+                ),
                 "claim": "Durable admission evidence.",
             }
         ],
@@ -108,20 +181,99 @@ def _response(*operations: dict, audit: dict | None = None) -> str:
     return json.dumps({"operations": list(operations), "audit": audit or {}})
 
 
-def _completed_journal_bytes(compile_memory, batch_id: str, sequence: int = 0) -> bytes:
-    accepted = {"operations": [], "audit": {}, "sequence": sequence}
+def _synthetic_current_journal(
+    compile_memory,
+    batch_id: str,
+    sequence: int = 0,
+    *,
+    status: str = "complete",
+) -> dict:
+    accepted = {
+        "operations": [],
+        "audit": {
+            "verified": sequence,
+            "dedup": 0,
+            "stubs": 0,
+            "contradictions": 0,
+            "rejected": 0,
+        },
+        "response_sha256": hashlib.sha256(f"response:{sequence}".encode()).hexdigest(),
+        "source": [],
+        "source_blocks": [],
+        "batch_ids": [batch_id],
+        "generation_id": hashlib.sha256(f"generation:{sequence}".encode()).hexdigest(),
+        "layout_sha256": hashlib.sha256(f"layout:{sequence}".encode()).hexdigest(),
+        "consumed_evidence": [],
+    }
     journal = {
-        "version": 1,
+        "version": compile_memory.CURRENT_JOURNAL_VERSION,
         "batch_id": batch_id,
         "accepted": accepted,
         "accepted_sha256": compile_memory._canonical_digest(accepted),
         "operation_states": [],
         "operation_recovery": [],
         "operation_effects": [],
-        "status": "complete",
+        "status": status,
     }
+    return journal
+
+
+def _completed_journal_bytes(compile_memory, batch_id: str, sequence: int = 0) -> bytes:
+    journal = _synthetic_current_journal(compile_memory, batch_id, sequence)
     journal["journal_sha256"] = compile_memory._journal_digest(journal)
     return json.dumps(journal, ensure_ascii=False).encode("utf-8")
+
+
+def _retired_archive_component(compile_env, monkeypatch, suffix: str):
+    compile_memory, root, state_root, state = compile_env
+    monkeypatch.setattr(compile_memory, "MAX_COMPLETED_JOURNALS", 0)
+    monkeypatch.setattr(compile_memory, "MAX_COMPLETED_MANIFESTS", 0)
+    daily = _daily(
+        root / "knowledge" / "daily" / f"2026-11-{suffix}.md",
+        [_block("12:00:00", f"Cold archive component {suffix} is disconnected.")],
+    )
+    request = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    )
+    assert compile_memory.apply_compile_batch(
+        request, '{"operations": [], "audit": {}}', False
+    )["ok"]
+    [manifest_path] = (state_root / "run" / "retired-manifests").glob(
+        f"{request['generation_id']}.*.json"
+    )
+    [journal_path] = (state_root / "run" / "retired-journals").glob(
+        f"{request['batch_id']}.*.json"
+    )
+    for field in (
+        "compile_generation_active",
+        "compile_generation_completed",
+        "compile_sdk_progress",
+        "compile_sdk_wave",
+        "compile_index_pending",
+        "compile_daily_replay_boundaries",
+        "compiled_daily_hashes",
+        "compiled_daily_receipts",
+        "compile_daily_checkpoints",
+    ):
+        state.pop(field, None)
+    return request, manifest_path, journal_path
+
+
+def _bind_archive_state_snapshot(compile_memory, monkeypatch, state):
+    def snapshot():
+        raw = json.dumps(state, indent=2, ensure_ascii=False).encode("utf-8")
+        return raw, json.loads(json.dumps(state))
+
+    monkeypatch.setattr(compile_memory, "read_state_snapshot_strict", snapshot)
+
+
+def _approve_archive_manifest(path: Path) -> None:
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["approved"] = True
+    path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _write_note(
@@ -130,12 +282,29 @@ def _write_note(
     summary: str,
     *,
     status: str = "active",
+    project_slug: str | None = None,
+    project_root: Path | str | None = None,
+    scoped: bool = True,
 ) -> None:
+    if scoped and project_slug is None and project_root is None:
+        project_slug = _SYNTHETIC_PROJECT_SLUG
+        project_root = _SYNTHETIC_PROJECT_ROOT
+    if not scoped and (project_slug is not None or project_root is not None):
+        raise ValueError("unscoped test note cannot define project identity")
+    if (project_slug is None) != (project_root is None):
+        raise ValueError("test project identity must be complete")
+    project_fields = (
+        f"project: {project_slug}\n"
+        f"project_root: {json.dumps(str(Path(project_root).resolve()))}\n"
+        if project_slug is not None and project_root is not None
+        else ""
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "---\n"
         "type: pattern\n"
         f"status: {status}\n"
+        f"{project_fields}"
         "---\n\n"
         f"# {title}\n\n"
         f"One-sentence summary: {summary}\n\n"
@@ -253,7 +422,9 @@ def test_noise_backlog_is_filtered_before_prompt_construction(compile_env):
         root / "knowledge" / "daily" / "2026-07-20.md",
         [
             noise,
-            _block("10:01:00", "- Tier: `major`\n\n(no body)", "opencode-idle"),
+            "## [10:01:00] opencode-idle | session\n"
+            "- Tier: `major`\n\n"
+            "(no body)",
             _block("10:02:00", "The durable retry rule keeps evidence pending."),
         ],
     )
@@ -578,11 +749,50 @@ def test_prompt_budget_has_safe_default_and_rejects_invalid_values(monkeypatch):
         compile_memory.prompt_char_budget()
 
 
+def test_compile_prompt_requires_complete_normalized_bullet_citations(compile_env):
+    compile_memory, root, _state_root, _state = compile_env
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-07-26-prompt-bullet.md",
+        [
+            _generated_block(
+                "12:00:00",
+                root,
+                "**Lessons / patterns**\n"
+                "- Always cite the complete normalized evidence bullet.",
+            )
+        ],
+    )
+    source_blocks = compile_memory.extract_meaningful_blocks(
+        daily.read_text(encoding="utf-8")
+    )
+
+    request = compile_memory.build_compile_request(
+        [daily],
+        daily_blocks=source_blocks,
+        prompt_char_budget=30_000,
+    )
+    prompt = " ".join(request["prompt"].split())
+
+    assert "must exactly equal the complete text of one displayed source bullet" in prompt
+    assert "excluding its leading `- ` marker" in prompt
+    assert "exact source substring" not in prompt
+    lower_prompt = prompt.lower()
+    assert "related must be a json array of strings; use [] when empty" in lower_prompt
+    assert "count body_markdown words before returning each create" in lower_prompt
+    assert "title, summary, evidence, and related do not count" in lower_prompt
+
+
 def test_evidence_quote_rejects_altered_whitespace(compile_env):
     compile_memory, root, _state_root, _state = compile_env
     daily = _daily(
         root / "knowledge" / "daily" / "2026-07-26.md",
-        [_block("12:00:00", "Exact   spacing\ncontinues here")],
+        [
+            _generated_block(
+                "12:00:00",
+                root,
+                "**Lessons / patterns**\n- Exact   spacing continues here",
+            )
+        ],
     )
     evidence = [
         {
@@ -595,14 +805,19 @@ def test_evidence_quote_rejects_altered_whitespace(compile_env):
     assert compile_memory._verify_evidence(evidence, [daily]) == (0, 1)
 
 
-def test_evidence_quote_matches_later_repeated_timestamp_block(compile_env):
+def test_evidence_quote_accepts_complete_normalized_bullet(compile_env):
     compile_memory, root, _state_root, _state = compile_env
-    quote = "Evidence belongs to the later block with the repeated timestamp."
+    quote = "Always preserve visible text around inline comments."
     daily = _daily(
-        root / "knowledge" / "daily" / "2026-07-26-repeated-timestamp.md",
+        root / "knowledge" / "daily" / "2026-07-26-normalized-bullet.md",
         [
-            _block("12:00:00", "Earlier unrelated evidence."),
-            _block("12:00:00", quote),
+            _generated_block(
+                "12:00:00",
+                root,
+                "**Lessons / patterns**\n"
+                "- Always preserve <!-- hidden detail -->visible text around "
+                "inline comments.",
+            )
         ],
     )
     evidence = [
@@ -616,6 +831,120 @@ def test_evidence_quote_matches_later_repeated_timestamp_block(compile_env):
     assert compile_memory._verify_evidence(evidence, [daily]) == (1, 0)
 
 
+def test_evidence_quote_rejects_substring_of_complete_bullet(compile_env):
+    compile_memory, root, _state_root, _state = compile_env
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-07-26-substring-decoy.md",
+        [
+            _generated_block(
+                "12:00:00",
+                root,
+                "**Lessons / patterns**\n"
+                "- Always reject substring citations before durable publication.",
+            )
+        ],
+    )
+    evidence = [
+        {
+            "daily_date": daily.stem,
+            "timestamp": "12:00:00",
+            "quoted_text": "reject substring citations",
+        }
+    ]
+
+    assert compile_memory._verify_evidence(evidence, [daily]) == (0, 1)
+
+
+def test_evidence_quote_matches_later_repeated_timestamp_block(compile_env):
+    compile_memory, root, _state_root, _state = compile_env
+    quote = "Always keep later evidence with its repeated timestamp block."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-07-26-repeated-timestamp.md",
+        [
+            _generated_block(
+                "12:00:00",
+                root,
+                "**Lessons / patterns**\n- Always keep earlier evidence distinct.",
+            ),
+            _generated_block(
+                "12:00:00",
+                root,
+                f"**Lessons / patterns**\n- {quote}",
+            ),
+        ],
+    )
+    evidence = [
+        {
+            "daily_date": daily.stem,
+            "timestamp": "12:00:00",
+            "quoted_text": quote,
+        }
+    ]
+
+    assert compile_memory._verify_evidence(evidence, [daily]) == (1, 0)
+
+
+def test_nondurable_substring_decoy_does_not_poison_exact_durable_bullet(
+    compile_env,
+):
+    compile_memory, root, _state_root, state = compile_env
+    quote = "Always require complete bullet identity before admitting evidence."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-07-26-quality-decoy.md",
+        [
+            _generated_block(
+                "12:00:00",
+                root,
+                "**Work completed**\n"
+                f"- Status says {quote} This is a longer operational bullet.\n\n"
+                "**Lessons / patterns**\n"
+                f"- {quote}",
+            )
+        ],
+    )
+    request = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    )
+
+    result = compile_memory.apply_compile_batch(
+        request,
+        _response(_admission_operation(daily, "quality-decoy", quote)),
+        False,
+    )
+
+    assert result["ok"] is True, result
+
+
+def test_exact_durable_and_nondurable_duplicate_remains_ambiguous(compile_env):
+    compile_memory, root, state_root, state = compile_env
+    quote = "Always keep exact duplicate quality visible during admission."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-07-26-quality-duplicate.md",
+        [
+            _generated_block(
+                "12:00:00",
+                root,
+                "**Work completed**\n"
+                f"- {quote}\n\n"
+                "**Lessons / patterns**\n"
+                f"- {quote}",
+            )
+        ],
+    )
+    request = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    )
+
+    result = compile_memory.apply_compile_batch(
+        request,
+        _response(_admission_operation(daily, "quality-duplicate", quote)),
+        False,
+    )
+
+    _assert_rejected_before_journal(result, request, daily, state_root, state)
+    assert "ambiguous between durable and nondurable" in result["error"]
+
+
 def test_plain_opencode_idle_audit_status_citation_is_rejected_before_journal(
     compile_env,
 ):
@@ -623,7 +952,14 @@ def test_plain_opencode_idle_audit_status_citation_is_rejected_before_journal(
     quote = "Audit complete: twelve files changed and all checks passed."
     daily = _daily(
         root / "knowledge" / "daily" / "2026-09-01.md",
-        [_generated_block("12:00:00", root, quote)],
+        [
+            _generated_block(
+                "12:00:00",
+                root,
+                f"{quote}\n\n**Lessons / patterns**\n"
+                "- Validate immutable source evidence before publication.",
+            )
+        ],
     )
     request = compile_memory.prepare_compile_request(
         [daily], state, prompt_char_budget=30_000
@@ -637,8 +973,131 @@ def test_plain_opencode_idle_audit_status_citation_is_rejected_before_journal(
     )
 
     _assert_rejected_before_journal(result, request, daily, state_root, state)
-    assert "durable section" in result["error"]
+    assert "not an exact source citation" in result["error"]
     assert not target.exists()
+
+
+def test_model_counters_cannot_admit_status_disguised_as_lesson(compile_env):
+    compile_memory, root, state_root, state = compile_env
+    status = "Status: implementation complete; twelve files changed."
+    durable = "When status is transient, exclude it before compiling evidence."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-09-02-disguised-status.md",
+        [
+            _generated_block(
+                "12:00:00",
+                root,
+                f"**Lessons / patterns**\n- {status}\n- {durable}",
+            )
+        ],
+    )
+    request = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    )
+
+    result = compile_memory.apply_compile_batch(
+        request,
+        _response(
+            _admission_operation(daily, "disguised-status", status),
+            audit={"verified": 999, "dedup": 999},
+        ),
+        False,
+    )
+
+    _assert_rejected_before_journal(result, request, daily, state_root, state)
+    assert "durable section" in result["error"]
+
+
+@pytest.mark.parametrize(
+    "outside_quote",
+    (
+        "Status: implementation complete; twelve files changed.",
+        "Files changed: scripts/compiler.py and tests/test_compiler.py.",
+        "Path/code summary: scripts/compiler.py now calls validate_source().",
+    ),
+)
+def test_nondurable_citation_cannot_update_even_with_valid_durable_sibling(
+    compile_env,
+    outside_quote,
+):
+    compile_memory, root, state_root, state = compile_env
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-09-01-update.md",
+        [
+            _generated_block(
+                "12:00:00",
+                root,
+                f"{outside_quote}\n\n**Lessons / patterns**\n"
+                "- Retry the immutable journal before requesting a replacement plan.",
+            )
+        ],
+    )
+    target = root / "knowledge" / "notes" / "status-update.md"
+    _write_note(target, "Status Update", "The existing durable note stays unchanged.")
+    before = target.read_bytes()
+    request = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    )
+
+    result = compile_memory.apply_compile_batch(
+        request,
+        _response(
+            _admission_operation(
+                daily,
+                target.stem,
+                outside_quote,
+                action="update",
+            )
+        ),
+        False,
+    )
+
+    _assert_rejected_before_journal(result, request, daily, state_root, state)
+    assert "not an exact source citation" in result["error"]
+    assert target.read_bytes() == before
+
+
+def test_citation_cannot_borrow_durable_occurrence_from_another_daily(compile_env):
+    compile_memory, root, _state_root, _state = compile_env
+    quote = "The same text has different admission quality on another date."
+    first = _daily(
+        root / "knowledge" / "daily" / "2026-09-01-first.md",
+        [
+            _project_block(
+                "12:00:00",
+                root / "projects" / "alpha",
+                "alpha",
+                f"{quote}\n\n**Lessons / patterns**\n"
+                "- A separate valid lesson keeps this record compile-eligible.",
+                session="alpha-session",
+            )
+        ],
+    )
+    second = _daily(
+        root / "knowledge" / "daily" / "2026-09-01-second.md",
+        [
+            _project_block(
+                "12:00:00",
+                root / "projects" / "beta",
+                "beta",
+                f"**Lessons / patterns**\n- {quote}",
+                session="beta-session",
+            )
+        ],
+    )
+    source_blocks = [
+        *compile_memory.extract_meaningful_blocks(first.read_text(encoding="utf-8")),
+        *compile_memory.extract_meaningful_blocks(second.read_text(encoding="utf-8")),
+    ]
+
+    plan, error = compile_memory._normalize_accepted_plan(
+        _response(_admission_operation(first, "date-scoped-citation", quote)),
+        [first, second],
+        source_blocks,
+    )
+
+    assert plan is None
+    assert "not an exact source citation" in error
 
 
 def test_structured_idle_lesson_is_accepted(compile_env):
@@ -666,9 +1125,916 @@ def test_structured_idle_lesson_is_accepted(compile_env):
     )
 
     assert result["ok"] is True
-    assert (root / "knowledge" / "notes" / "structured-idle-lesson.md").exists()
+    target = root / "knowledge" / "notes" / "structured-idle-lesson.md"
+    content = target.read_text(encoding="utf-8")
+    assert 'project: "admission-test"\n' in content
+    assert f"project_root: {json.dumps(str(root.resolve()))}\n" in content
     assert compile_memory.parse_compile_audit(result["audit"])["verified"] == 1
     assert compile_memory.parse_compile_audit(result["audit"])["dedup"] == 3
+
+
+@pytest.mark.parametrize("project_slug", ("true", "null", "123"))
+def test_created_project_identity_is_json_quoted_yaml_string(
+    compile_env,
+    project_slug,
+):
+    import yaml
+
+    compile_memory, root, _state_root, state = compile_env
+    quote = "Validate project identity before serializing frontmatter."
+    daily = _daily(
+        root / "knowledge" / "daily" / f"2026-09-02-{project_slug}.md",
+        [
+            _project_block(
+                "12:00:00",
+                root,
+                project_slug,
+                f"**Lessons / patterns**\n- {quote}",
+            )
+        ],
+    )
+    request = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    )
+
+    result = compile_memory.apply_compile_batch(
+        request,
+        _response(_admission_operation(daily, f"identity-{project_slug}", quote)),
+        False,
+    )
+
+    assert result["ok"] is True
+    content = (
+        root / "knowledge" / "notes" / f"identity-{project_slug}.md"
+    ).read_text(encoding="utf-8")
+    frontmatter = content.split("---", 2)[1]
+    parsed = yaml.safe_load(frontmatter)
+    assert f"project: {json.dumps(project_slug)}\n" in content
+    assert f"project_root: {json.dumps(str(root.resolve()))}\n" in content
+    assert parsed["project"] == project_slug
+    assert isinstance(parsed["project"], str)
+    assert parsed["project_root"] == str(root.resolve())
+    assert isinstance(parsed["project_root"], str)
+
+
+def test_compile_operation_project_identity_is_derived_from_cited_source(compile_env):
+    compile_memory, root, _state_root, _state = compile_env
+    quote = "Project provenance is selected by validated source evidence."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-09-02-derived.md",
+        [
+            _project_block(
+                "12:00:00",
+                root,
+                "derived-project",
+                f"**Lessons / patterns**\n- {quote}",
+            )
+        ],
+    )
+    source_blocks = compile_memory.extract_meaningful_blocks(
+        daily.read_text(encoding="utf-8")
+    )
+    provider_operation = _admission_operation(daily, "derived-project-note", quote)
+
+    plan, error = compile_memory._normalize_accepted_plan(
+        _response(provider_operation),
+        [daily],
+        source_blocks,
+    )
+
+    assert error == ""
+    assert plan is not None
+    assert "project_slug" not in provider_operation
+    assert "project_root" not in provider_operation
+    assert plan["operations"][0]["project_slug"] == "derived-project"
+    assert plan["operations"][0]["project_root"] == str(root.resolve())
+
+    forged = json.loads(json.dumps(provider_operation))
+    forged["project_slug"] = "forged-project"
+    forged["project_root"] = str((root / "forged").resolve())
+    forged_plan, forged_error = compile_memory._normalize_accepted_plan(
+        _response(forged),
+        [daily],
+        source_blocks,
+    )
+    assert forged_plan is None
+    assert "unknown fields" in forged_error
+
+
+def test_matching_project_update_is_accepted(compile_env):
+    compile_memory, root, _state_root, state = compile_env
+    quote = "A project note may be updated only by evidence from the same project."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-09-02-matching-update.md",
+        [
+            _project_block(
+                "12:00:00",
+                root,
+                "matching-project",
+                f"**Lessons / patterns**\n- {quote}",
+            )
+        ],
+    )
+    target = root / "knowledge" / "notes" / "matching-project-note.md"
+    _write_note(
+        target,
+        "Matching Project Note",
+        "The existing project identity remains authoritative.",
+        project_slug="matching-project",
+        project_root=root,
+    )
+    request = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    )
+
+    result = compile_memory.apply_compile_batch(
+        request,
+        _response(
+            _admission_operation(
+                daily,
+                target.stem,
+                quote,
+                action="update",
+            )
+        ),
+        False,
+    )
+
+    assert result["ok"] is True, result
+    assert target.read_text(encoding="utf-8").count("## Update") == 1
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows path semantics")
+def test_matching_project_update_accepts_equivalent_windows_root_spelling(compile_env):
+    compile_memory, root, _state_root, state = compile_env
+    quote = "Use host-native path comparison to preserve equivalent Windows roots."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-09-02-equivalent-root.md",
+        [
+            _project_block(
+                "12:00:00",
+                root,
+                "matching-project",
+                f"**Lessons / patterns**\n- {quote}",
+            )
+        ],
+    )
+    target = root / "knowledge" / "notes" / "equivalent-root-note.md"
+    _write_note(
+        target,
+        "Equivalent Root Note",
+        "Equivalent native roots retain the same project identity.",
+        project_slug="matching-project",
+        project_root=root,
+    )
+    canonical = str(root.resolve())
+    equivalent = canonical.swapcase().replace("\\", "/")
+    target.write_text(
+        target.read_text(encoding="utf-8").replace(
+            json.dumps(canonical),
+            json.dumps(equivalent),
+        ),
+        encoding="utf-8",
+    )
+    request = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    )
+
+    result = compile_memory.apply_compile_batch(
+        request,
+        _response(
+            _admission_operation(
+                daily,
+                target.stem,
+                quote,
+                action="update",
+            )
+        ),
+        False,
+    )
+
+    assert result["ok"] is True, result
+    assert target.read_text(encoding="utf-8").count("## Update") == 1
+
+
+def test_admitted_source_index_extracts_each_record_once_without_quote_rescans(
+    compile_env,
+    monkeypatch,
+):
+    compile_memory, root, _state_root, _state = compile_env
+    records = (
+        ("12:00:00", "Validate source evidence once before publication."),
+        ("12:01:00", "Use one admitted index to preserve project identity."),
+        ("12:02:00", "Reject mutable evidence before durable publication."),
+        ("12:03:00", "Keep source provenance immutable after admission."),
+        ("12:04:00", "Always retain normalized evidence identity in the index."),
+        ("12:05:00", "Ensure each distinct citation has one indexed fact."),
+    )
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-09-02-linear-index.md",
+        [
+            _project_block(
+                timestamp,
+                root,
+                "linear-project",
+                f"**Lessons / patterns**\n- {quote}",
+            )
+            for timestamp, quote in records
+        ],
+    )
+    source_blocks = compile_memory.extract_meaningful_blocks(
+        daily.read_text(encoding="utf-8")
+    )
+    operations = [
+        _admission_operation(
+            daily,
+            f"linear-index-{index}",
+            records[index][1],
+            timestamp=records[index][0],
+            summary=f"Distinct linear index summary {index}.",
+        )
+        for index in range(6)
+    ]
+    counters = {"build": 0, "render": 0, "extract": 0, "substring": 0}
+    real_build = compile_memory._build_admitted_source_index
+    real_render = compile_memory.render_daily_record_for_compile
+    real_extract = getattr(
+        compile_memory,
+        "daily_record_evidence_occurrences",
+        lambda _record: (),
+    )
+    real_substring = getattr(
+        compile_memory,
+        "_substring_positions",
+        lambda *_args, **_kwargs: (),
+    )
+
+    def counted_build(*args, **kwargs):
+        counters["build"] += 1
+        return real_build(*args, **kwargs)
+
+    def counted_render(*args, **kwargs):
+        counters["render"] += 1
+        return real_render(*args, **kwargs)
+
+    def counted_extract(*args, **kwargs):
+        counters["extract"] += 1
+        return real_extract(*args, **kwargs)
+
+    def counted_substring(*args, **kwargs):
+        counters["substring"] += 1
+        return real_substring(*args, **kwargs)
+
+    monkeypatch.setattr(compile_memory, "_build_admitted_source_index", counted_build)
+    monkeypatch.setattr(compile_memory, "render_daily_record_for_compile", counted_render)
+    monkeypatch.setattr(
+        compile_memory,
+        "daily_record_evidence_occurrences",
+        counted_extract,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        compile_memory,
+        "_substring_positions",
+        counted_substring,
+        raising=False,
+    )
+
+    plan, error = compile_memory._normalize_accepted_plan(
+        _response(*operations),
+        [daily],
+        source_blocks,
+    )
+
+    assert error == ""
+    assert plan is not None
+    assert counters == {
+        "build": 1,
+        "render": len(records),
+        "extract": len(records),
+        "substring": 0,
+    }
+
+
+def test_source_block_matching_preserves_duplicate_multiplicity(compile_env):
+    compile_memory, root, _state_root, _state = compile_env
+    record = _project_block(
+        "12:00:00",
+        root,
+        "duplicate-project",
+        "**Lessons / patterns**\n- Always count each duplicate source occurrence.",
+    )
+    single_source = f"# Daily\n\n{record}\n"
+    duplicate_source = f"# Daily\n\n{record}\n\n{record}\n"
+    [block] = compile_memory.extract_meaningful_blocks(single_source)
+    required = [block, block]
+
+    assert not compile_memory._canonical_blocks_available(single_source, required)
+    with pytest.raises(ValueError, match="prepared batch"):
+        compile_memory._build_admitted_source_index(
+            {"2026-09-02": single_source},
+            required,
+        )
+
+    assert compile_memory._canonical_blocks_available(duplicate_source, required)
+    compile_memory._build_admitted_source_index(
+        {"2026-09-02": duplicate_source},
+        required,
+    )
+
+
+def test_source_block_availability_matching_has_linear_equality_work(monkeypatch):
+    import compile_memory
+
+    class Probe(str):
+        equality_visits = 0
+        hash_visits = 0
+
+        def __hash__(self):
+            type(self).hash_visits += 1
+            return str.__hash__(self)
+
+        def __eq__(self, other):
+            type(self).equality_visits += 1
+            return str.__eq__(self, other)
+
+    count = 512
+    available = [Probe(f"source-block-{index}") for index in range(count)]
+    required = list(reversed(available))
+    monkeypatch.setattr(
+        compile_memory,
+        "extract_meaningful_blocks",
+        lambda _text: available,
+    )
+
+    assert compile_memory._canonical_blocks_available("ignored", required)
+    assert Probe.equality_visits <= count * 4
+    assert Probe.hash_visits <= count * 8
+
+
+def test_apply_reuses_admitted_source_index_for_journal_and_receipt_validation(
+    compile_env,
+    monkeypatch,
+):
+    compile_memory, root, _state_root, state = compile_env
+    quote = "Validate one admitted source index throughout the apply pass."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-09-02-linear-apply.md",
+        [
+            _project_block(
+                "12:00:00",
+                root,
+                "linear-project",
+                f"**Lessons / patterns**\n- {quote}",
+            )
+        ],
+    )
+    request = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    )
+    builds = 0
+    real_build = compile_memory._build_admitted_source_index
+
+    def counted_build(*args, **kwargs):
+        nonlocal builds
+        builds += 1
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(compile_memory, "_build_admitted_source_index", counted_build)
+
+    def reject_substring_scan(*_args, **_kwargs):
+        pytest.fail("exact admitted-source lookup must not rescan source strings")
+
+    monkeypatch.setattr(
+        compile_memory,
+        "_substring_positions",
+        reject_substring_scan,
+        raising=False,
+    )
+
+    result = compile_memory.apply_compile_batch(
+        request,
+        _response(_admission_operation(daily, "linear-apply", quote)),
+        False,
+    )
+
+    assert result["ok"] is True, result
+    assert builds == 1
+
+
+def test_multibatch_generation_caches_source_index_and_reserved_evidence_scan(
+    compile_env,
+    monkeypatch,
+):
+    compile_memory, root, _state_root, state = compile_env
+    records = tuple(
+        (
+            f"12:0{index}:00",
+            f"Always retain one linear admission fact for generation batch {index}.",
+        )
+        for index in range(3)
+    )
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-09-02-linear-generation.md",
+        [
+            _project_block(
+                timestamp,
+                root,
+                "linear-project",
+                (
+                    "**Lessons / patterns**\n"
+                    f"- {quote}\n\n"
+                    "**Open questions**\n"
+                    f"- Can {'x' * 14_000}{index} be retained?"
+                ),
+                synthetic_rule=False,
+            )
+            for index, (timestamp, quote) in enumerate(records)
+        ],
+    )
+    first = compile_memory.prepare_compile_request(
+        [daily],
+        state,
+        prompt_char_budget=24_000,
+    )
+    assert first["batch_count"] == len(records)
+
+    builds = 0
+    reserved_journal_loads = 0
+    inside_reserved_scan = False
+    real_build = compile_memory._build_admitted_source_index
+    real_load_journal = compile_memory._load_journal
+    real_reserved = compile_memory._reserved_evidence_for_manifest
+
+    def counted_build(*args, **kwargs):
+        nonlocal builds
+        builds += 1
+        return real_build(*args, **kwargs)
+
+    def counted_load_journal(*args, **kwargs):
+        nonlocal reserved_journal_loads
+        if inside_reserved_scan:
+            reserved_journal_loads += 1
+        return real_load_journal(*args, **kwargs)
+
+    def counted_reserved(*args, **kwargs):
+        nonlocal inside_reserved_scan
+        assert inside_reserved_scan is False
+        inside_reserved_scan = True
+        try:
+            return real_reserved(*args, **kwargs)
+        finally:
+            inside_reserved_scan = False
+
+    monkeypatch.setattr(
+        compile_memory,
+        "_build_admitted_source_index",
+        counted_build,
+    )
+    monkeypatch.setattr(compile_memory, "_load_journal", counted_load_journal)
+    monkeypatch.setattr(
+        compile_memory,
+        "_reserved_evidence_for_manifest",
+        counted_reserved,
+    )
+
+    request = first
+    for index in range(len(records)):
+        source = "\n".join(request["source_blocks"])
+        [(timestamp, quote)] = [
+            record for record in records if record[1] in source
+        ]
+        result = compile_memory.apply_compile_batch(
+            request,
+            _response(
+                _admission_operation(
+                    daily,
+                    f"linear-generation-{index}",
+                    quote,
+                    timestamp=timestamp,
+                    summary=f"Distinct generation admission summary {index}.",
+                )
+            ),
+            False,
+        )
+        assert result["ok"] is True, result
+        if index + 1 < len(records):
+            progress = state["compile_sdk_progress"][daily.name]
+            assert progress["generation_id"] == request["generation_id"]
+            assert progress["consumed_evidence"]
+            request = compile_memory.prepare_compile_request(
+                [daily],
+                state,
+                prompt_char_budget=24_000,
+            )
+
+    assert builds == 1 and reserved_journal_loads <= len(records), (
+        f"generation source builds={builds}, "
+        f"reserved-evidence journal loads={reserved_journal_loads}"
+    )
+
+
+def test_failed_accepted_batch_remains_in_cached_evidence_barrier(
+    compile_env,
+    monkeypatch,
+):
+    compile_memory, root, state_root, state = compile_env
+    first_quote = "Always persist the first accepted generation citation."
+    reserved_quote = "Never release evidence from a failed accepted journal."
+    records = (
+        ("12:00:00", first_quote),
+        ("12:01:00", reserved_quote),
+        ("12:01:00", reserved_quote),
+    )
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-09-02-failed-reservation.md",
+        [
+            _project_block(
+                timestamp,
+                root,
+                "linear-project",
+                (
+                    "**Lessons / patterns**\n"
+                    f"- {quote}\n\n"
+                    "**Open questions**\n"
+                    f"- Can {'y' * 14_000}{index} be retained?"
+                ),
+                synthetic_rule=False,
+            )
+            for index, (timestamp, quote) in enumerate(records)
+        ],
+    )
+    first = compile_memory.prepare_compile_request(
+        [daily],
+        state,
+        prompt_char_budget=24_000,
+    )
+    assert first["batch_count"] == len(records)
+    first_operation = _admission_operation(
+        daily,
+        "failed-reservation-first",
+        first_quote,
+        timestamp="12:00:00",
+    )
+    first_result = compile_memory.apply_compile_batch(
+        first,
+        _response(first_operation),
+        False,
+    )
+    assert first_result["ok"] is True
+    progress = state["compile_sdk_progress"][daily.name]
+    progress.pop("accepted_batch_ids")
+    progress.pop("consumed_evidence")
+
+    second = compile_memory.prepare_compile_request(
+        [daily],
+        state,
+        prompt_char_budget=24_000,
+    )
+    real_execute = compile_memory._execute_plan
+
+    def fail_after_journal(plan, *args, **kwargs):
+        if any(
+            operation.get("slug") == "failed-reservation-second"
+            for operation in plan["operations"]
+        ):
+            raise OSError("injected post-journal failure")
+        return real_execute(plan, *args, **kwargs)
+
+    monkeypatch.setattr(compile_memory, "_execute_plan", fail_after_journal)
+    second_operation = _admission_operation(
+        daily,
+        "failed-reservation-second",
+        reserved_quote,
+        timestamp="12:01:00",
+        summary="The failed accepted plan owns this evidence token.",
+    )
+    second_result = compile_memory.apply_compile_batch(
+        second,
+        _response(second_operation),
+        False,
+    )
+    assert second_result["ok"] is False
+    assert second_result["status"] == "apply_failed"
+    cached_evidence = state["compile_sdk_progress"][daily.name]["consumed_evidence"]
+    assert compile_memory._evidence_token(first_operation["evidence"][0]) in cached_evidence
+    assert compile_memory._evidence_token(second_operation["evidence"][0]) in cached_evidence
+    monkeypatch.setattr(compile_memory, "_execute_plan", real_execute)
+
+    manifest = compile_memory._load_manifest(first["generation_id"])
+    third = compile_memory._request_from_manifest(
+        manifest,
+        manifest["batch_ids"][2],
+    )
+    result = compile_memory.apply_compile_batch(
+        third,
+        _response(
+            _admission_operation(
+                daily,
+                "failed-reservation-third",
+                reserved_quote,
+                timestamp="12:01:00",
+                summary="A later batch cannot reuse failed accepted evidence.",
+            )
+        ),
+        False,
+    )
+
+    _assert_rejected_before_journal(result, third, daily, state_root, state)
+    assert "evidence was already consumed" in result["error"]
+
+
+def test_project_source_cannot_update_unscoped_note(compile_env):
+    compile_memory, root, state_root, state = compile_env
+    quote = "Missing target provenance cannot be inferred from a model operation."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-09-02-missing-project.md",
+        [
+            _project_block(
+                "12:00:00",
+                root,
+                "scoped-source",
+                f"**Lessons / patterns**\n- {quote}",
+            )
+        ],
+    )
+    target = root / "knowledge" / "notes" / "unscoped-target.md"
+    _write_note(
+        target,
+        "Unscoped Target",
+        "This note has no project provenance.",
+        scoped=False,
+    )
+    before = target.read_bytes()
+    request = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    )
+
+    result = compile_memory.apply_compile_batch(
+        request,
+        _response(
+            _admission_operation(
+                daily,
+                target.stem,
+                quote,
+                action="update",
+            )
+        ),
+        False,
+    )
+
+    _assert_rejected_before_journal(result, request, daily, state_root, state)
+    assert "project identity" in result["error"]
+    assert target.read_bytes() == before
+
+
+def test_cross_project_update_is_rejected(compile_env):
+    compile_memory, root, state_root, state = compile_env
+    alpha_root = (root / "projects" / "alpha").resolve()
+    beta_root = (root / "projects" / "beta").resolve()
+    quote = "Cross-project evidence must not mutate another project's note."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-09-02-cross-project.md",
+        [
+            _project_block(
+                "12:00:00",
+                alpha_root,
+                "alpha",
+                f"**Lessons / patterns**\n- {quote}",
+            )
+        ],
+    )
+    target = root / "knowledge" / "notes" / "beta-note.md"
+    _write_note(
+        target,
+        "Beta Note",
+        "Beta owns this durable note.",
+        project_slug="beta",
+        project_root=beta_root,
+    )
+    before = target.read_bytes()
+    request = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    )
+
+    result = compile_memory.apply_compile_batch(
+        request,
+        _response(
+            _admission_operation(
+                daily,
+                target.stem,
+                quote,
+                action="update",
+            )
+        ),
+        False,
+    )
+
+    _assert_rejected_before_journal(result, request, daily, state_root, state)
+    assert "project identity does not match" in result["error"]
+    assert target.read_bytes() == before
+
+
+def test_matching_slug_with_changed_project_root_is_rejected(compile_env):
+    compile_memory, root, state_root, state = compile_env
+    current_root = (root / "projects" / "current").resolve()
+    changed_root = (root / "projects" / "moved").resolve()
+    quote = "A changed canonical root is a different project identity."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-09-02-changed-root.md",
+        [
+            _project_block(
+                "12:00:00",
+                current_root,
+                "stable-slug",
+                f"**Lessons / patterns**\n- {quote}",
+            )
+        ],
+    )
+    target = root / "knowledge" / "notes" / "stable-slug-note.md"
+    _write_note(
+        target,
+        "Stable Slug Note",
+        "The old canonical root remains recorded.",
+        project_slug="stable-slug",
+        project_root=changed_root,
+    )
+    before = target.read_bytes()
+    request = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    )
+
+    result = compile_memory.apply_compile_batch(
+        request,
+        _response(
+            _admission_operation(
+                daily,
+                target.stem,
+                quote,
+                action="update",
+            )
+        ),
+        False,
+    )
+
+    _assert_rejected_before_journal(result, request, daily, state_root, state)
+    assert "project identity does not match" in result["error"]
+    assert target.read_bytes() == before
+
+
+def test_mixed_project_sources_reject_whole_operation(compile_env):
+    compile_memory, root, state_root, state = compile_env
+    alpha_quote = "Alpha evidence remains scoped to alpha."
+    beta_quote = "Beta evidence remains scoped to beta."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-09-02-mixed-project.md",
+        [
+            _project_block(
+                "12:00:00",
+                root / "projects" / "alpha",
+                "alpha",
+                f"**Lessons / patterns**\n- {alpha_quote}",
+                session="alpha-session",
+            ),
+            _project_block(
+                "12:01:00",
+                root / "projects" / "beta",
+                "beta",
+                f"**Lessons / patterns**\n- {beta_quote}",
+                session="beta-session",
+            ),
+        ],
+    )
+    request = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    )
+    operation = _admission_operation(daily, "mixed-project-note", alpha_quote)
+    operation["evidence"].append(
+        {
+            "daily_date": daily.stem,
+            "timestamp": "12:01:00",
+            "quoted_text": _exact_test_evidence_quote(
+                daily,
+                "12:01:00",
+                beta_quote,
+            ),
+            "claim": "Mixed provenance must fail closed.",
+        }
+    )
+
+    result = compile_memory.apply_compile_batch(
+        request,
+        _response(operation),
+        False,
+    )
+
+    _assert_rejected_before_journal(result, request, daily, state_root, state)
+    assert "mixed project" in result["error"]
+    assert not (root / "knowledge" / "notes" / "mixed-project-note.md").exists()
+
+
+def test_project_identity_is_validated_in_compile_receipt(compile_env):
+    import memory_state
+
+    compile_memory, root, _state_root, state = compile_env
+    quote = "Receipt validation binds the durable effect to its source project."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-09-02-project-receipt.md",
+        [
+            _project_block(
+                "12:00:00",
+                root,
+                "receipt-project",
+                f"**Lessons / patterns**\n- {quote}",
+            )
+        ],
+    )
+    request = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    )
+
+    result = compile_memory.apply_compile_batch(
+        request,
+        _response(_admission_operation(daily, "project-receipt", quote)),
+        False,
+    )
+
+    assert result["ok"] is True
+    receipt = state["compiled_daily_receipts"][daily.name]
+    assert receipt["version"] == 2
+    assert receipt["effects"][0]["project_slug"] == "receipt-project"
+    assert receipt["effects"][0]["project_root"] == str(root.resolve())
+    assert memory_state.is_compile_receipt_valid(
+        receipt,
+        daily.name,
+        request["dailies"][0]["sha256"],
+        root=root,
+    )
+
+    tampered = json.loads(json.dumps(receipt))
+    tampered["effects"][0]["project_root"] = str((root / "moved").resolve())
+    assert not memory_state.is_compile_receipt_valid(
+        tampered,
+        daily.name,
+        request["dailies"][0]["sha256"],
+        root=root,
+    )
+
+    downgraded = json.loads(json.dumps(receipt))
+    downgraded["version"] = 1
+    downgraded["effects"][0].pop("project_slug")
+    downgraded["effects"][0].pop("project_root")
+    assert not memory_state.is_compile_receipt_valid(
+        downgraded,
+        daily.name,
+        request["dailies"][0]["sha256"],
+        root=root,
+    )
+
+
+def test_rehashed_journal_project_tamper_is_rejected_against_source(compile_env):
+    compile_memory, root, state_root, state = compile_env
+    quote = "Journal replay re-derives project identity from immutable source."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-09-02-project-journal.md",
+        [
+            _project_block(
+                "12:00:00",
+                root,
+                "journal-project",
+                f"**Lessons / patterns**\n- {quote}",
+            )
+        ],
+    )
+    request = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    )
+    response = _response(_admission_operation(daily, "project-journal", quote))
+    first = compile_memory.apply_compile_batch(request, response, False)
+    target = root / "knowledge" / "notes" / "project-journal.md"
+    before = target.read_bytes()
+    journal_path = (
+        state_root / "run" / "compile-journal" / f"{request['batch_id']}.json"
+    )
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    operation = journal["accepted"]["operations"][0]
+    original_fingerprint = compile_memory._operation_replay_fingerprint(operation)
+    assert operation["project_slug"] == "journal-project"
+    assert operation["project_root"] == str(root.resolve())
+
+    operation["project_root"] = str((root / "moved").resolve())
+    tampered_fingerprint = compile_memory._operation_replay_fingerprint(operation)
+    journal["accepted_sha256"] = compile_memory._canonical_digest(journal["accepted"])
+    compile_memory._write_journal(journal)
+
+    replay = compile_memory.apply_compile_batch(request, response, False)
+
+    assert first["ok"] is True
+    assert original_fingerprint != tampered_fingerprint
+    assert replay["ok"] is False
+    assert replay["status"] == "journal_error"
+    assert "project identity" in replay["error"]
+    assert target.read_bytes() == before
 
 
 def test_create_existing_slug_is_rejected_not_converted_to_update(compile_env):
@@ -1241,7 +2607,14 @@ def test_two_duplicate_creates_reject_whole_plan(compile_env):
     second_quote = "The second proposed note also has valid evidence."
     daily = _daily(
         root / "knowledge" / "daily" / "2026-09-08.md",
-        [_block("12:00:00", f"{first_quote}\n{second_quote}")],
+        [
+            _project_block(
+                "12:00:00",
+                Path(_SYNTHETIC_PROJECT_ROOT),
+                _SYNTHETIC_PROJECT_SLUG,
+                f"**Lessons / patterns**\n- {first_quote}\n- {second_quote}",
+            )
+        ],
     )
     request = compile_memory.prepare_compile_request(
         [daily], state, prompt_char_budget=30_000
@@ -1359,7 +2732,7 @@ def test_provider_audit_inflation_cannot_bypass_and_values_are_python_derived(
 
 def test_create_body_word_bounds_are_enforced_inclusively(compile_env):
     compile_memory, root, _state_root, _state = compile_env
-    quote = "Body bounds are deterministic and inclusive."
+    quote = "Validate deterministic inclusive body bounds before publication."
     daily = _daily(
         root / "knowledge" / "daily" / "2026-09-11.md",
         [_generated_block("12:00:00", root, f"**Lessons / patterns**\n- {quote}")],
@@ -2820,10 +4193,11 @@ def test_plan_admission_reads_each_daily_once_for_all_operations(
     monkeypatch,
 ):
     compile_memory, root, _state_root, _state = compile_env
-    quote = "One source snapshot supports every operation in the accepted plan."
+    quote = "One source snapshot supports the first operation in an accepted plan."
+    second_quote = "The same snapshot also supports a distinct second operation."
     daily = _daily(
         root / "knowledge" / "daily" / "2026-09-11-single-read.md",
-        [_block("12:00:00", quote)],
+        [_block("12:00:00", quote), _block("12:01:00", second_quote)],
     )
     source_blocks = compile_memory.extract_meaningful_blocks(
         daily.read_text(encoding="utf-8")
@@ -2837,8 +4211,9 @@ def test_plan_admission_reads_each_daily_once_for_all_operations(
     second = _admission_operation(
         daily,
         "single-read-two",
-        quote,
+        second_quote,
         summary="Second distinct summary.",
+        timestamp="12:01:00",
     )
     real_read_snapshot = compile_memory._read_daily_snapshot
     daily_reads = 0
@@ -2914,10 +4289,16 @@ def test_plan_admission_rejects_quote_occurrence_overflow(
     monkeypatch,
 ):
     compile_memory, root, _state_root, _state = compile_env
-    quote = "repeated-evidence"
+    quote = "Always reject repeated exact evidence over the occurrence limit."
     daily = _daily(
         root / "knowledge" / "daily" / "2026-09-11-occurrence-limit.md",
-        [_block("12:00:00", " ".join([quote] * 3))],
+        [
+            _generated_block(
+                "12:00:00",
+                root,
+                "**Lessons / patterns**\n" + "\n".join([f"- {quote}"] * 3),
+            )
+        ],
     )
     source_blocks = compile_memory.extract_meaningful_blocks(
         daily.read_text(encoding="utf-8")
@@ -5012,11 +6393,12 @@ def test_recovery_required_journal_without_metadata_never_trusts_marker(
     )
 
     persisted = json.loads(case["journal_path"].read_text(encoding="utf-8"))
-    assert retry["status"] == "apply_failed"
-    assert retry["recovery_required"] is True
+    assert retry["status"] == "journal_error"
+    assert "fields are invalid" in retry["error"]
     assert case["target"].read_bytes() == attempted
     assert persisted["status"] == "recovery_required"
     assert persisted["operation_states"] == ["pending"]
+    assert "operation_recovery" not in persisted
     assert case["daily"].name not in case["state"].get("compiled_daily_hashes", {})
     assert case["rebuilds"] == []
 
@@ -5278,14 +6660,17 @@ def test_idle_quote_ambiguous_between_durable_and_nondurable_sections_is_rejecte
     compile_env,
 ):
     compile_memory, root, state_root, state = compile_env
-    quote = "The repeated statement appears in two source-quality contexts."
+    quote = "When repeated text appears in two contexts, reject source ambiguity."
     daily = _daily(
         root / "knowledge" / "daily" / "2026-09-16.md",
         [
             _generated_block(
                 "12:00:00",
                 root,
-                f"{quote}\n\n**Lessons / patterns**\n- {quote}",
+                "**Work completed**\n"
+                f"- {quote}\n\n"
+                "**Lessons / patterns**\n"
+                f"- {quote}",
             )
         ],
     )
@@ -5303,12 +6688,19 @@ def test_idle_quote_ambiguous_between_durable_and_nondurable_sections_is_rejecte
     assert "ambiguous" in result["error"]
 
 
-def test_idle_status_citation_remains_valid_for_updates(compile_env):
-    compile_memory, root, _state_root, state = compile_env
-    quote = "A status citation may update an existing target under compatibility rules."
+def test_idle_status_citation_is_rejected_for_updates(compile_env):
+    compile_memory, root, state_root, state = compile_env
+    quote = "A status citation cannot update an existing durable target."
     daily = _daily(
         root / "knowledge" / "daily" / "2026-09-17.md",
-        [_generated_block("12:00:00", root, quote)],
+        [
+            _generated_block(
+                "12:00:00",
+                root,
+                f"{quote}\n\n**Lessons / patterns**\n"
+                "- Only admitted durable bullets may support an update.",
+            )
+        ],
     )
     target = root / "knowledge" / "notes" / "compatible-update.md"
     _write_note(target, "Compatible Update", "The existing page can receive updates.")
@@ -5328,13 +6720,11 @@ def test_idle_status_citation_remains_valid_for_updates(compile_env):
         False,
     )
 
-    audit = compile_memory.parse_compile_audit(result["audit"])
-    assert result["ok"] is True
-    assert audit["verified"] == 1
-    assert audit["dedup"] == 0
+    _assert_rejected_before_journal(result, request, daily, state_root, state)
+    assert "not an exact source citation" in result["error"]
 
 
-def test_legacy_unscoped_and_canonical_session_end_create_compatibility(compile_env):
+def test_legacy_unscoped_source_is_excluded_while_scoped_source_remains(compile_env):
     compile_memory, root, _state_root, _state = compile_env
     session_quote = "Canonical session-end evidence remains compatible."
     legacy_quote = "Legacy unscoped deferred evidence remains compatible."
@@ -5349,26 +6739,26 @@ def test_legacy_unscoped_and_canonical_session_end_create_compatibility(compile_
         daily.read_text(encoding="utf-8")
     )
 
-    for slug, quote, timestamp in (
-        ("canonical-session-end", session_quote, "12:00:00"),
-        ("legacy-unscoped", legacy_quote, "12:01:00"),
-    ):
-        operation = _admission_operation(
-            daily,
-            slug,
-            quote,
-            timestamp=timestamp,
-        )
-        plan, error = compile_memory._normalize_accepted_plan(
-            _response(operation, audit={"verified": 999, "dedup": 999}),
-            [daily],
-            source_blocks,
-        )
+    assert len(source_blocks) == 1
+    assert session_quote in source_blocks[0]
+    assert legacy_quote not in source_blocks[0]
 
-        assert error == ""
-        assert plan is not None
-        assert plan["audit"]["verified"] == 1
-        assert plan["audit"]["dedup"] == 3
+    operation = _admission_operation(
+        daily,
+        "canonical-session-end",
+        session_quote,
+        timestamp="12:00:00",
+    )
+    plan, error = compile_memory._normalize_accepted_plan(
+        _response(operation, audit={"verified": 999, "dedup": 999}),
+        [daily],
+        source_blocks,
+    )
+
+    assert error == ""
+    assert plan is not None
+    assert plan["audit"]["verified"] == 1
+    assert plan["audit"]["dedup"] == 3
 
 
 def test_fuzzy_only_pair_is_report_only_and_does_not_supersede(compile_env):
@@ -5519,10 +6909,11 @@ def test_direct_retry_after_later_batch_failure_does_not_duplicate_write(
     compile_env, monkeypatch
 ):
     compile_memory, root, _state_root, state = compile_env
+    first_evidence = "first evidence " + "a" * 14_000
     daily = _daily(
         root / "knowledge" / "daily" / "2026-07-28.md",
         [
-            _block("12:00:00", "first evidence " + "a" * 14_000),
+            _block("12:00:00", first_evidence),
             _block("12:01:00", "second evidence " + "b" * 14_000),
         ],
     )
@@ -5547,7 +6938,7 @@ def test_direct_retry_after_later_batch_failure_does_not_duplicate_write(
                                 {
                                     "daily_date": daily.stem,
                                     "timestamp": "12:00:00",
-                                    "quoted_text": "first evidence",
+                                    "quoted_text": f"Rule: {first_evidence}",
                                     "claim": "first batch",
                                 }
                             ],
@@ -5608,7 +6999,7 @@ def test_source_append_during_apply_rejects_old_response_without_duplicate(
                         {
                             "daily_date": daily.stem,
                             "timestamp": "12:00:00",
-                            "quoted_text": "transaction evidence",
+                            "quoted_text": "Rule: transaction evidence",
                             "claim": "transaction race",
                         }
                     ],
@@ -5692,7 +7083,7 @@ def test_append_after_transaction_commit_keeps_write_tracked_and_source_pending(
                         {
                             "daily_date": daily.stem,
                             "timestamp": "12:00:00",
-                            "quoted_text": "commit boundary evidence",
+                            "quoted_text": "Rule: commit boundary evidence",
                             "claim": "commit boundary",
                         }
                     ],
@@ -5767,6 +7158,131 @@ def test_sdk_apply_waits_for_compile_lock_and_holds_it_through_progress(
     assert progress_saw_lock is True
 
 
+def test_knowledge_publication_lock_is_reentrant_with_one_advisory_lock(
+    tmp_path,
+    monkeypatch,
+):
+    import memory_state
+
+    events: list[object] = []
+
+    @contextmanager
+    def fake_advisory(path, **_kwargs):
+        events.append(("enter", path))
+        try:
+            yield
+        finally:
+            events.append(("exit", path))
+
+    monkeypatch.setattr(memory_state, "STATE_ROOT", tmp_path)
+    monkeypatch.setattr(memory_state, "advisory_file_lock", fake_advisory)
+
+    with memory_state.knowledge_publication_lock():
+        events.append("outer")
+        with memory_state.knowledge_publication_lock():
+            events.append("inner")
+
+    expected = tmp_path / "run" / "knowledge-publication.lock"
+    assert events == [
+        ("enter", expected),
+        "outer",
+        "inner",
+        ("exit", expected),
+    ]
+
+
+def test_global_compile_lock_precedes_shared_knowledge_publication_lock(
+    compile_env,
+    monkeypatch,
+):
+    compile_memory, _root, _state_root, _state = compile_env
+    events: list[str] = []
+
+    @contextmanager
+    def fake_compile_lock(*_args, **_kwargs):
+        events.append("compile-enter")
+        try:
+            yield
+        finally:
+            events.append("compile-exit")
+
+    @contextmanager
+    def fake_publication_lock(*_args, **_kwargs):
+        events.append("publication-enter")
+        try:
+            yield
+        finally:
+            events.append("publication-exit")
+
+    monkeypatch.setattr(compile_memory, "compile_file_lock", fake_compile_lock)
+    monkeypatch.setattr(
+        compile_memory,
+        "knowledge_publication_lock",
+        fake_publication_lock,
+        raising=False,
+    )
+
+    with compile_memory._global_compile_lock():
+        events.append("body")
+
+    assert events == [
+        "compile-enter",
+        "publication-enter",
+        "body",
+        "publication-exit",
+        "compile-exit",
+    ]
+
+
+def test_compile_rebuilds_index_in_process_under_reentrant_publication_lock(
+    tmp_path,
+    monkeypatch,
+):
+    import compile_memory
+    import memory_state
+    import rebuild_memory_index
+
+    root = tmp_path / "vault"
+    notes = root / "knowledge" / "notes"
+    notes.mkdir(parents=True)
+    state_root = tmp_path / "runtime"
+    events: list[str] = []
+
+    @contextmanager
+    def observed_advisory_lock(_path, **kwargs):
+        description = str(kwargs.get("description"))
+        events.append(f"{description}-enter")
+        try:
+            yield
+        finally:
+            events.append(f"{description}-exit")
+
+    monkeypatch.setattr(memory_state, "STATE_ROOT", state_root)
+    monkeypatch.setattr(memory_state, "advisory_file_lock", observed_advisory_lock)
+    monkeypatch.setattr(compile_memory, "STATE_ROOT", state_root)
+    monkeypatch.setattr(rebuild_memory_index, "ROOT", root)
+    monkeypatch.setattr(rebuild_memory_index, "memory", root / "knowledge")
+    monkeypatch.setattr(rebuild_memory_index, "knowledge", notes)
+    monkeypatch.setattr(
+        rebuild_memory_index,
+        "out",
+        root / "knowledge" / "index.md",
+    )
+
+    with compile_memory._global_compile_lock():
+        events.append("body")
+        assert compile_memory.rebuild_index() is True
+
+    assert rebuild_memory_index.out.exists()
+    assert events == [
+        "compile lock-enter",
+        "knowledge publication lock-enter",
+        "body",
+        "knowledge publication lock-exit",
+        "compile lock-exit",
+    ]
+
+
 def test_crash_after_note_commit_resumes_without_duplicate_append(
     compile_env, monkeypatch
 ):
@@ -5795,7 +7311,7 @@ def test_crash_after_note_commit_resumes_without_duplicate_append(
                         {
                             "daily_date": daily.stem,
                             "timestamp": "12:00:00",
-                            "quoted_text": "crash boundary evidence",
+                            "quoted_text": "Rule: crash boundary evidence",
                             "claim": "crash boundary",
                         }
                     ],
@@ -5859,7 +7375,7 @@ def test_crash_retry_uses_batch_operation_identity_not_changed_provider_text(
                             {
                                 "daily_date": daily.stem,
                                 "timestamp": "12:00:00",
-                                "quoted_text": "stable crash evidence",
+                                "quoted_text": "Rule: stable crash evidence",
                                 "claim": claim,
                             }
                         ],
@@ -6027,8 +7543,13 @@ def test_duplicate_manifest_key_fails_closed_before_journal_or_note(compile_env)
         / f"{request['generation_id']}.json"
     )
     raw = manifest_path.read_text(encoding="utf-8")
+    version = compile_memory.CURRENT_MANIFEST_VERSION
     manifest_path.write_text(
-        raw.replace('"version": 2,', '"version": 2,\n  "version": 2,', 1),
+        raw.replace(
+            f'"version": {version},',
+            f'"version": {version},\n  "version": {version},',
+            1,
+        ),
         encoding="utf-8",
     )
     slug = "duplicate-manifest-target"
@@ -6086,8 +7607,13 @@ def test_duplicate_journal_key_fails_closed_before_update_resume(compile_env):
         plan,
     )
     raw = case["journal_path"].read_text(encoding="utf-8")
+    version = case["compile_memory"].CURRENT_JOURNAL_VERSION
     case["journal_path"].write_text(
-        raw.replace('"version": 1,', '"version": 1,\n  "version": 1,', 1),
+        raw.replace(
+            f'"version": {version},',
+            f'"version": {version},\n  "version": {version},',
+            1,
+        ),
         encoding="utf-8",
     )
 
@@ -6334,7 +7860,7 @@ def test_applied_journal_state_without_target_marker_replays_safely(
     assert "llm-wiki-compile-op:" in content
 
 
-def test_operation_durable_effect_reads_regular_marker_with_a_bound(
+def test_operation_durable_effect_requires_marker_and_fingerprint_with_a_bound(
     compile_env,
     monkeypatch,
 ):
@@ -6354,6 +7880,7 @@ def test_operation_durable_effect_reads_regular_marker_with_a_bound(
         0,
         operation,
     )
+    fingerprint = compile_memory._operation_replay_fingerprint(operation)
     target.write_text(f"# Generated target\n\n{marker}\n", encoding="utf-8")
     real_open = Path.open
     read_sizes: list[int] = []
@@ -6377,12 +7904,20 @@ def test_operation_durable_effect_reads_regular_marker_with_a_bound(
             assert size > 0, "durable-effect reconciliation read without a bound"
             return self.handle.read(size)
 
+        def write(self, value):
+            return self.handle.write(value)
+
     def bounded_open(path, *args, **kwargs):
         handle = real_open(path, *args, **kwargs)
         return BoundedHandle(handle) if path == target else handle
 
     monkeypatch.setattr(Path, "open", bounded_open)
 
+    assert compile_memory._operation_has_durable_effect(journal, 0) is False
+    target.write_text(
+        f"# Generated target\n\n{marker}\n{fingerprint}\n",
+        encoding="utf-8",
+    )
     assert compile_memory._operation_has_durable_effect(journal, 0) is True
     assert read_sizes and all(size > 0 for size in read_sizes)
 
@@ -7180,6 +8715,9 @@ def test_crashed_generation_keeps_2_1_layout_across_1_1_1_rebudget_and_append(
 
     monkeypatch.setattr(compile_memory, "update_state", crash_before_progress)
     operation = _operation(daily, "generation-resume", "GENERATION_BODY")
+    operation["evidence"][0]["quoted_text"] = (
+        "Rule: journal evidence " + "a" * 14_000
+    )
     with pytest.raises(SystemExit, match="crash after note commit"):
         compile_memory.apply_compile_batch(first, _response(operation), False)
     monkeypatch.setattr(compile_memory, "update_state", real_update_state)
@@ -7936,16 +9474,13 @@ def test_completed_journal_retention_is_bounded_without_pruning_pending(
 ):
     compile_memory, _root, state_root, _state = compile_env
     for index in range(205):
-        accepted = {"operations": [], "audit": {}, "sequence": index}
         compile_memory._write_journal(
-            {
-                "version": 1,
-                "batch_id": f"{index:064x}",
-                "accepted": accepted,
-                "accepted_sha256": compile_memory._canonical_digest(accepted),
-                "operation_states": [],
-                "status": "complete" if index else "index_pending",
-            }
+            _synthetic_current_journal(
+                compile_memory,
+                f"{index:064x}",
+                index,
+                status="complete" if index else "index_pending",
+            )
         )
 
     compile_memory._prune_completed_journals()
@@ -7963,18 +9498,7 @@ def test_completed_journal_pruning_moves_owned_bytes_to_retired_store(
     monkeypatch.setattr(compile_memory, "MAX_COMPLETED_JOURNALS", 0)
     batch_id = "1" * 64
     compile_memory._write_journal(
-        {
-            "version": 1,
-            "batch_id": batch_id,
-            "accepted": {"operations": [], "audit": {}},
-            "accepted_sha256": compile_memory._canonical_digest(
-                {"operations": [], "audit": {}}
-            ),
-            "operation_states": [],
-            "operation_recovery": [],
-            "operation_effects": [],
-            "status": "complete",
-        }
+        _synthetic_current_journal(compile_memory, batch_id)
     )
     active = state_root / "run" / "compile-journal" / f"{batch_id}.json"
     original = active.read_bytes()
@@ -8042,19 +9566,15 @@ def test_completed_journal_pruning_preserves_active_generation_batches(
     compile_memory, _root, state_root, state = compile_env
     monkeypatch.setattr(compile_memory, "MAX_COMPLETED_JOURNALS", 2)
     active_batch = "a" * 64
-    for batch_id in (active_batch, "b" * 64, "c" * 64, "d" * 64):
-        accepted = {"operations": [], "audit": {}, "batch": batch_id}
+    for sequence, batch_id in enumerate(
+        (active_batch, "b" * 64, "c" * 64, "d" * 64)
+    ):
         compile_memory._write_journal(
-            {
-                "version": 1,
-                "batch_id": batch_id,
-                "accepted": accepted,
-                "accepted_sha256": compile_memory._canonical_digest(accepted),
-                "operation_states": [],
-                "operation_recovery": [],
-                "operation_effects": [],
-                "status": "complete",
-            }
+            _synthetic_current_journal(
+                compile_memory,
+                batch_id,
+                sequence,
+            )
         )
         time.sleep(0.002)
     state["compile_sdk_progress"] = {
@@ -8083,17 +9603,11 @@ def test_journal_pruning_rejects_non_strict_json_before_unlink(
     directory = state_root / "run" / "compile-journal"
     valid_paths = []
     for index in range(2):
-        accepted = {"operations": [], "audit": {}, "sequence": index}
-        journal = {
-            "version": 1,
-            "batch_id": f"{index:064x}",
-            "accepted": accepted,
-            "accepted_sha256": compile_memory._canonical_digest(accepted),
-            "operation_states": [],
-            "operation_recovery": [],
-            "operation_effects": [],
-            "status": "complete",
-        }
+        journal = _synthetic_current_journal(
+            compile_memory,
+            f"{index:064x}",
+            index,
+        )
         compile_memory._write_journal(journal)
         valid_paths.append(directory / f"{index:064x}.json")
     malformed_path = directory / f"{'f' * 64}.json"
@@ -8770,13 +10284,377 @@ def test_full_retired_store_blocks_new_generation_before_manifest_write(
     assert not list((state_root / "run" / "compile-manifests").glob("*.json"))
 
 
+def test_cold_archive_audit_selects_only_disconnected_components(
+    compile_env,
+    monkeypatch,
+):
+    compile_memory, _root, _state_root, state = compile_env
+    archived, archived_manifest, archived_journal = _retired_archive_component(
+        compile_env, monkeypatch, "13-archive"
+    )
+    live, live_manifest, live_journal = _retired_archive_component(
+        compile_env, monkeypatch, "14-live"
+    )
+    state["compile_sdk_progress"] = {
+        "live.md": {
+            "generation_id": live["generation_id"],
+            "expected_batch_ids": [live["batch_id"]],
+        }
+    }
+    _bind_archive_state_snapshot(compile_memory, monkeypatch, state)
+
+    report = compile_memory.archive_retired_evidence("audit")
+
+    assert report["status"] == "eligible"
+    assert report["component_count"] == 1
+    assert {(item["kind"], item["id"]) for item in report["artifacts"]} == {
+        ("manifest", archived["generation_id"]),
+        ("journal", archived["batch_id"]),
+    }
+    assert archived_manifest.is_file() and archived_journal.is_file()
+    assert live_manifest.is_file() and live_journal.is_file()
+
+
+def test_cold_archive_accepts_known_historical_prompt_contract(
+    compile_env,
+    monkeypatch,
+):
+    compile_memory, _root, _state_root, state = compile_env
+    request, manifest_path, journal_path = _retired_archive_component(
+        compile_env, monkeypatch, "21-historical-prompt"
+    )
+    _bind_archive_state_snapshot(compile_memory, monkeypatch, state)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    added_rules = (
+        "5. related must be a JSON array of strings; use [] when empty.\n"
+        "6. For create, count body_markdown words before returning each create. Title,\n"
+        "   summary, evidence, and related do not count. Expand, trim, or omit the\n"
+        "   operation unless body_markdown itself contains 150-400 words.\n"
+    )
+    for batch in manifest["batches"]:
+        assert added_rules in batch["prompt"]
+        batch["prompt"] = batch["prompt"].replace(added_rules, "", 1)
+    manifest["manifest_sha256"] = compile_memory._manifest_digest(manifest)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    report = compile_memory.archive_retired_evidence("audit")
+
+    assert report["status"] == "eligible"
+    assert {(item["kind"], item["id"]) for item in report["artifacts"]} == {
+        ("manifest", request["generation_id"]),
+        ("journal", request["batch_id"]),
+    }
+    assert manifest_path.is_file() and journal_path.is_file()
+
+
+def test_cold_archive_rejects_unknown_self_hashed_prompt_drift(
+    compile_env,
+    monkeypatch,
+):
+    compile_memory, _root, _state_root, state = compile_env
+    _request, manifest_path, _journal_path = _retired_archive_component(
+        compile_env, monkeypatch, "22-unknown-prompt"
+    )
+    _bind_archive_state_snapshot(compile_memory, monkeypatch, state)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["batches"][0]["prompt"] += "\nUNRECOGNIZED HISTORICAL RULE\n"
+    manifest["manifest_sha256"] = compile_memory._manifest_digest(manifest)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="manifest derivation check failed"):
+        compile_memory.archive_retired_evidence("audit")
+
+
+def test_cold_archive_backup_is_byte_exact_and_apply_is_approval_gated(
+    compile_env,
+    monkeypatch,
+):
+    compile_memory, _root, _state_root, state = compile_env
+    _request, hot_manifest, hot_journal = _retired_archive_component(
+        compile_env, monkeypatch, "15-backup"
+    )
+    _bind_archive_state_snapshot(compile_memory, monkeypatch, state)
+    before = {
+        "manifest": hot_manifest.read_bytes(),
+        "journal": hot_journal.read_bytes(),
+    }
+
+    prepared = compile_memory.archive_retired_evidence("backup-only")
+    manifest_path = Path(prepared["manifest"])
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert prepared["status"] == "prepared"
+    assert manifest["approved"] is False
+    assert hot_manifest.read_bytes() == before["manifest"]
+    assert hot_journal.read_bytes() == before["journal"]
+    for item in manifest["artifacts"]:
+        archived = manifest_path.parent / item["archive_path"]
+        assert archived.read_bytes() == before[item["kind"]]
+        assert hashlib.sha256(archived.read_bytes()).hexdigest() == item["sha256"]
+    with pytest.raises(ValueError, match="not approved"):
+        compile_memory.archive_retired_evidence("apply", manifest_path)
+    assert hot_manifest.read_bytes() == before["manifest"]
+    assert hot_journal.read_bytes() == before["journal"]
+
+
+def test_cold_archive_apply_resumes_after_staging_crash_and_verifies(
+    compile_env,
+    monkeypatch,
+):
+    compile_memory, _root, _state_root, state = compile_env
+    _request, hot_manifest, hot_journal = _retired_archive_component(
+        compile_env, monkeypatch, "16-resume"
+    )
+    _bind_archive_state_snapshot(compile_memory, monkeypatch, state)
+    prepared = compile_memory.archive_retired_evidence("backup-only")
+    manifest_path = Path(prepared["manifest"])
+    _approve_archive_manifest(manifest_path)
+    real_remove = compile_memory._cold_archive_remove_staged
+    crashed = False
+
+    def crash_after_first_stage(transaction_bound, relative_path, expected):
+        nonlocal crashed
+        if not crashed:
+            crashed = True
+            real_remove(transaction_bound, relative_path, expected)
+            raise RuntimeError("synthetic cold archive crash")
+        return real_remove(transaction_bound, relative_path, expected)
+
+    monkeypatch.setattr(
+        compile_memory,
+        "_cold_archive_remove_staged",
+        crash_after_first_stage,
+    )
+    with pytest.raises(RuntimeError, match="synthetic cold archive crash"):
+        compile_memory.archive_retired_evidence("apply", manifest_path)
+    monkeypatch.setattr(
+        compile_memory,
+        "_cold_archive_remove_staged",
+        real_remove,
+    )
+
+    applied = compile_memory.archive_retired_evidence("apply", manifest_path)
+    verified = compile_memory.archive_retired_evidence("verify", manifest_path)
+
+    assert crashed is True
+    assert applied["status"] == "applied"
+    assert verified["status"] == "verified"
+    assert not hot_manifest.exists()
+    assert not hot_journal.exists()
+    transaction = json.loads(
+        manifest_path.with_name("transaction.json").read_text(encoding="utf-8")
+    )
+    assert transaction["status"] == "committed"
+    assert all(item["status"] == "removed" for item in transaction["artifacts"])
+
+
+def test_cold_archive_apply_preserves_aba_replacement(
+    compile_env,
+    monkeypatch,
+):
+    compile_memory, _root, state_root, state = compile_env
+    _request, hot_manifest, _hot_journal = _retired_archive_component(
+        compile_env, monkeypatch, "17-aba"
+    )
+    _bind_archive_state_snapshot(compile_memory, monkeypatch, state)
+    prepared = compile_memory.archive_retired_evidence("backup-only")
+    manifest_path = Path(prepared["manifest"])
+    _approve_archive_manifest(manifest_path)
+    checked = state_root / "checked-cold-archive-original.json"
+    replacement = b"FOREIGN RETIRED MANIFEST MUST SURVIVE\n"
+    real_move = compile_memory._cold_archive_stage_hot_artifact
+    raced = False
+
+    def replace_before_stage(
+        source_bound,
+        source_name,
+        transaction_bound,
+        staged_name,
+        expected,
+    ):
+        nonlocal raced
+        if not raced and source_name == hot_manifest.name:
+            raced = True
+            os.replace(hot_manifest, checked)
+            hot_manifest.write_bytes(replacement)
+        return real_move(
+            source_bound,
+            source_name,
+            transaction_bound,
+            staged_name,
+            expected,
+        )
+
+    monkeypatch.setattr(
+        compile_memory,
+        "_cold_archive_stage_hot_artifact",
+        replace_before_stage,
+    )
+
+    with pytest.raises(ValueError, match="changed before archive removal"):
+        compile_memory.archive_retired_evidence("apply", manifest_path)
+
+    assert raced is True
+    assert hot_manifest.read_bytes() == replacement
+    assert checked.is_file()
+
+
+def test_cold_archive_rejects_linked_retired_store_without_external_mutation(
+    compile_env,
+):
+    compile_memory, _root, state_root, _state = compile_env
+    external = state_root / "external-retired-manifests"
+    external.mkdir()
+    sentinel = external / f"{'a' * 64}.{'b' * 32}.json"
+    sentinel.write_bytes(b"EXTERNAL RETIRED MANIFEST\n")
+    retired = state_root / "run" / "retired-manifests"
+    _directory_link_or_skip(retired, external)
+
+    with pytest.raises((OSError, ValueError)):
+        compile_memory.archive_retired_evidence("audit")
+
+    assert sentinel.read_bytes() == b"EXTERNAL RETIRED MANIFEST\n"
+
+
+def test_cold_archive_rejects_hardlinked_artifact(compile_env):
+    compile_memory, _root, state_root, _state = compile_env
+    retired = state_root / "run" / "retired-manifests"
+    retired.mkdir()
+    source = retired / f"{'c' * 64}.{'d' * 32}.json"
+    source.write_bytes(b"{}")
+    alias = state_root / "retired-manifest-hardlink.json"
+    _hard_link_or_skip(source, alias)
+
+    with pytest.raises((OSError, ValueError), match="unsafe"):
+        compile_memory.archive_retired_evidence("audit")
+
+    assert source.read_bytes() == b"{}"
+    assert alias.read_bytes() == b"{}"
+
+
+def test_cold_archive_rejects_malformed_queue_task(
+    compile_env,
+    monkeypatch,
+):
+    compile_memory, _root, state_root, state = compile_env
+    _retired_archive_component(compile_env, monkeypatch, "18-queue-schema")
+    _bind_archive_state_snapshot(compile_memory, monkeypatch, state)
+    queue = state_root / "run" / "queue"
+    queue.mkdir()
+    task_id = "20261118-120000-1234abcd"
+    (queue / f"{task_id}.json").write_text(
+        json.dumps({"id": task_id, "type": "compile"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="queue integrity"):
+        compile_memory.archive_retired_evidence("audit")
+
+
+def test_cold_archive_apply_rejects_component_that_became_live(
+    compile_env,
+    monkeypatch,
+):
+    compile_memory, _root, _state_root, state = compile_env
+    request, hot_manifest, hot_journal = _retired_archive_component(
+        compile_env, monkeypatch, "19-live-drift"
+    )
+    _bind_archive_state_snapshot(compile_memory, monkeypatch, state)
+    prepared = compile_memory.archive_retired_evidence("backup-only")
+    manifest_path = Path(prepared["manifest"])
+    _approve_archive_manifest(manifest_path)
+    state["compile_sdk_progress"] = {
+        "live.md": {
+            "generation_id": request["generation_id"],
+            "expected_batch_ids": [request["batch_id"]],
+        }
+    }
+
+    with pytest.raises(ValueError, match="became live"):
+        compile_memory.archive_retired_evidence("apply", manifest_path)
+
+    assert hot_manifest.is_file()
+    assert hot_journal.is_file()
+
+
+def test_cold_archive_verify_rejects_payload_tamper(
+    compile_env,
+    monkeypatch,
+):
+    compile_memory, _root, _state_root, state = compile_env
+    request, _hot_manifest, _hot_journal = _retired_archive_component(
+        compile_env, monkeypatch, "20-verify-tamper"
+    )
+    _bind_archive_state_snapshot(compile_memory, monkeypatch, state)
+    prepared = compile_memory.archive_retired_evidence("backup-only")
+    manifest_path = Path(prepared["manifest"])
+    _approve_archive_manifest(manifest_path)
+    assert compile_memory.archive_retired_evidence(
+        "apply", manifest_path
+    )["status"] == "applied"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    archived_manifest = next(
+        item for item in manifest["artifacts"] if item["id"] == request["generation_id"]
+    )
+    (manifest_path.parent / archived_manifest["archive_path"]).write_bytes(
+        b"TAMPERED COLD ARCHIVE PAYLOAD\n"
+    )
+
+    with pytest.raises(ValueError, match="payload verification"):
+        compile_memory.archive_retired_evidence("verify", manifest_path)
+
+
+def test_cold_archive_cli_dispatches_and_validates_manifest_arguments(
+    monkeypatch,
+    capsys,
+    tmp_path,
+):
+    import compile_memory
+
+    calls = []
+
+    def archive(phase, manifest=None):
+        calls.append((phase, manifest))
+        return {"status": "verified"}
+
+    monkeypatch.setattr(compile_memory, "archive_retired_evidence", archive)
+    manifest = tmp_path / "manifest.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "compile_memory.py",
+            "--archive-retired",
+            "verify",
+            "--manifest",
+            str(manifest),
+        ],
+    )
+
+    assert compile_memory.main() == 0
+    assert calls == [("verify", manifest)]
+    assert json.loads(capsys.readouterr().out)["status"] == "verified"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["compile_memory.py", "--archive-retired", "apply"],
+    )
+    assert compile_memory.main() == 2
+    assert "invalid cold archive arguments" in capsys.readouterr().err
+
+
 def test_atomic_write_flushes_file_before_replace_and_syncs_parent(
     tmp_path, monkeypatch
 ):
     import memory_state
 
     events = []
-    real_replace = memory_state.os.replace
+    real_replace = (
+        memory_state._move_file_write_through_windows
+        if os.name == "nt"
+        else memory_state.os.replace
+    )
     monkeypatch.setattr(
         memory_state.os,
         "fsync",
@@ -8789,11 +10667,14 @@ def test_atomic_write_flushes_file_before_replace_and_syncs_parent(
         raising=False,
     )
 
-    def replace(source, target):
+    def replace(source, target, **kwargs):
         events.append(("replace", Path(target)))
-        real_replace(source, target)
+        real_replace(source, target, **kwargs)
 
-    monkeypatch.setattr(memory_state.os, "replace", replace)
+    if os.name == "nt":
+        monkeypatch.setattr(memory_state, "_move_file_write_through_windows", replace)
+    else:
+        monkeypatch.setattr(memory_state.os, "replace", replace)
     target = tmp_path / "durable.json"
 
     memory_state.atomic_write(target, "durable")
@@ -8808,12 +10689,16 @@ def test_atomic_write_concurrent_writers_use_unique_temp_files(tmp_path, monkeyp
 
     target = tmp_path / "durable.json"
     contenders = threading.Barrier(2)
-    real_replace = memory_state.os.replace
+    real_replace = (
+        memory_state._move_file_write_through_windows
+        if os.name == "nt"
+        else memory_state.os.replace
+    )
     sources = []
     source_lock = threading.Lock()
     replace_calls = 0
 
-    def synchronized_replace(source, destination):
+    def synchronized_replace(source, destination, **kwargs):
         nonlocal replace_calls
         with source_lock:
             sources.append(Path(source))
@@ -8821,9 +10706,16 @@ def test_atomic_write_concurrent_writers_use_unique_temp_files(tmp_path, monkeyp
             synchronize = replace_calls <= 2
         if synchronize:
             contenders.wait(timeout=5)
-        real_replace(source, destination)
+        real_replace(source, destination, **kwargs)
 
-    monkeypatch.setattr(memory_state.os, "replace", synchronized_replace)
+    if os.name == "nt":
+        monkeypatch.setattr(
+            memory_state,
+            "_move_file_write_through_windows",
+            synchronized_replace,
+        )
+    else:
+        monkeypatch.setattr(memory_state.os, "replace", synchronized_replace)
     values = ('{"writer":1}\n', '{"writer":2}\n')
 
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -8997,6 +10889,8 @@ def test_execute_plan_uses_explicit_knowledge_directory_without_global_swap(
                 "body_markdown": "body",
                 "evidence": [{"daily_date": "x", "timestamp": "x", "claim": "x"}],
                 "related": [],
+                "project_slug": _SYNTHETIC_PROJECT_SLUG,
+                "project_root": _SYNTHETIC_PROJECT_ROOT,
             }
         ],
         "audit": {},
@@ -9081,13 +10975,15 @@ def test_journaled_crlf_update_preserves_prefix_and_uses_one_convention(
     )
     target = root / "knowledge" / "notes" / "crlf-update.md"
     original = (
-        b"---\r\n"
-        b"type: pattern\r\n"
-        b"status: active\r\n"
-        b"---\r\n\r\n"
-        b"# CRLF Update\r\n\r\n"
-        b"One-sentence summary: Existing bytes.  \r\n"
-    )
+        "---\r\n"
+        "type: pattern\r\n"
+        "status: active\r\n"
+        f"project: {_SYNTHETIC_PROJECT_SLUG}\r\n"
+        f"project_root: {json.dumps(_SYNTHETIC_PROJECT_ROOT)}\r\n"
+        "---\r\n\r\n"
+        "# CRLF Update\r\n\r\n"
+        "One-sentence summary: Existing bytes.  \r\n"
+    ).encode()
     target.write_bytes(original)
     request = compile_memory.prepare_compile_request(
         [daily], state, prompt_char_budget=30_000
@@ -9126,9 +11022,15 @@ def test_oversized_update_is_rejected_before_journal_or_mutation(compile_env):
     )
     target = root / "knowledge" / "notes" / "result-bound.md"
     prefix = (
-        b"---\ntype: pattern\nstatus: active\n---\n\n# Result Bound\n\n"
-        b"One-sentence summary: Existing bounded page.\n\n"
-    )
+        "---\n"
+        "type: pattern\n"
+        "status: active\n"
+        f"project: {_SYNTHETIC_PROJECT_SLUG}\n"
+        f"project_root: {json.dumps(_SYNTHETIC_PROJECT_ROOT)}\n"
+        "---\n\n"
+        "# Result Bound\n\n"
+        "One-sentence summary: Existing bounded page.\n\n"
+    ).encode()
     original = prefix + b"x" * (59 * 1024 - len(prefix))
     target.write_bytes(original)
     request = compile_memory.prepare_compile_request(
@@ -9239,6 +11141,7 @@ def test_finalization_revalidates_exact_effects_from_every_manifest_batch(
 ):
     compile_memory, root, _state_root, state = compile_env
     first_quote = "The first batch effect must survive until final publication."
+    first_evidence = f"Rule: {first_quote} " + "a" * 14_000
     daily = _daily(
         root / "knowledge" / "daily" / "2026-10-13-all-batch-effects.md",
         [
@@ -9253,7 +11156,7 @@ def test_finalization_revalidates_exact_effects_from_every_manifest_batch(
     )
     first_result = compile_memory.apply_compile_batch(
         first,
-        _response(_admission_operation(daily, slug, first_quote)),
+        _response(_admission_operation(daily, slug, first_evidence)),
         False,
     )
     assert first_result["daily_complete"] is False
@@ -9279,6 +11182,8 @@ def test_manifest_effect_chain_accepts_later_journaled_update_to_same_target(
     compile_memory, root, state_root, state = compile_env
     first_quote = "The first batch creates the chained target."
     second_quote = "The second batch appends through a journaled update."
+    first_evidence = f"Rule: {first_quote} " + "a" * 14_000
+    second_evidence = f"Rule: {second_quote} " + "b" * 14_000
     daily = _daily(
         root / "knowledge" / "daily" / "2026-10-13-effect-chain.md",
         [
@@ -9292,7 +11197,7 @@ def test_manifest_effect_chain_accepts_later_journaled_update_to_same_target(
     )
     assert compile_memory.apply_compile_batch(
         first,
-        _response(_admission_operation(daily, slug, first_quote)),
+        _response(_admission_operation(daily, slug, first_evidence)),
         False,
     )["ok"]
     second = compile_memory.prepare_compile_request(
@@ -9301,7 +11206,7 @@ def test_manifest_effect_chain_accepts_later_journaled_update_to_same_target(
     operation = _admission_operation(
         daily,
         slug,
-        second_quote,
+        second_evidence,
         action="update",
         timestamp="12:01:00",
     )
@@ -9568,7 +11473,7 @@ def test_successful_hash_persists_bounded_self_contained_effect_receipt(
 
     assert result["ok"] is True
     receipt = state["compiled_daily_receipts"][daily.name]
-    assert receipt["version"] == 1
+    assert receipt["version"] == 2
     assert receipt["daily_sha256"] == request["dailies"][0]["sha256"]
     assert receipt["generation_id"] == request["generation_id"]
     assert receipt["journal_ids"] == [request["batch_id"]]
@@ -9589,6 +11494,8 @@ def test_successful_hash_persists_bounded_self_contained_effect_receipt(
     assert effect["after"] == receipt["targets"][0]["current"]
     assert effect["marker"] in target.read_text(encoding="utf-8")
     assert effect["fingerprint"] in target.read_text(encoding="utf-8")
+    assert effect["project_slug"] == _SYNTHETIC_PROJECT_SLUG
+    assert effect["project_root"] == _SYNTHETIC_PROJECT_ROOT
     assert len(json.dumps(receipt).encode("utf-8")) <= (
         compile_memory.MAX_COMPILE_RECEIPT_BYTES
     )
@@ -9679,6 +11586,75 @@ def test_effect_receipt_accepts_only_same_identity_additive_evolution(
     assert (daily in selected) is pending
 
 
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="pre-3.12 st_dev width compatibility is Windows-specific",
+)
+def test_pre_312_windows_device_identity_remains_replayable(
+    compile_env,
+    monkeypatch,
+):
+    import memory_state
+
+    compile_memory, root, _state_root, state = compile_env
+    quote = "Persisted effects survive the Windows st_dev width change."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-10-14-windows-device-width.md",
+        [_block("12:00:00", quote)],
+    )
+    request = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    )
+    assert compile_memory.apply_compile_batch(
+        request,
+        _response(_admission_operation(daily, "windows-device-width", quote)),
+        False,
+    )["ok"]
+    receipt = json.loads(json.dumps(state["compiled_daily_receipts"][daily.name]))
+    current_device = receipt["targets"][0]["current"]["identity"][0]
+    alternate_width = (
+        current_device & 0xFFFFFFFF
+        if current_device > 0xFFFFFFFF
+        else current_device | (1 << 63)
+    )
+    receipt["targets"][0]["current"]["identity"][0] = alternate_width
+
+    assert memory_state.is_compile_receipt_valid(
+        receipt,
+        daily.name,
+        request["dailies"][0]["sha256"],
+        root=root,
+    )
+    wrong_device = json.loads(json.dumps(receipt))
+    wrong_device["targets"][0]["current"]["identity"][0] ^= 1
+    assert not memory_state.is_compile_receipt_valid(
+        wrong_device,
+        daily.name,
+        request["dailies"][0]["sha256"],
+        root=root,
+    )
+
+    manifest = compile_memory._load_manifest(request["generation_id"])
+    journal = json.loads(
+        json.dumps(compile_memory._load_journal(request["batch_id"]))
+    )
+    journal["operation_effects"][0]["after"]["identity"][0] = alternate_width
+    real_load_journal = compile_memory._load_journal
+    monkeypatch.setattr(
+        compile_memory,
+        "_load_journal",
+        lambda batch_id, *args, **kwargs: (
+            journal
+            if batch_id == request["batch_id"]
+            else real_load_journal(batch_id, *args, **kwargs)
+        ),
+    )
+
+    replayed_receipt = compile_memory._revalidate_generation_effects(manifest)
+
+    assert replayed_receipt["effects"][0]["after"]["identity"][0] == alternate_width
+
+
 @pytest.mark.parametrize("mutation", ("delete", "replace", "strip-body"))
 def test_invalidated_effect_retry_cannot_publish_an_empty_receipt(
     compile_env,
@@ -9757,9 +11733,22 @@ def test_invalidated_effect_retry_cannot_publish_an_empty_receipt(
 def test_replay_restores_missing_effect_without_duplicating_valid_sibling(compile_env):
     compile_memory, root, _state_root, state = compile_env
     quote = "Replay repairs only invalid durable effects."
+    sibling_quote = "Always preserve a valid sibling while replay repairs another effect."
     daily = _daily(
         root / "knowledge" / "daily" / "2026-10-14-replay-sibling.md",
-        [_block("12:00:00", quote)],
+        [
+            _project_block(
+                "12:00:00",
+                root,
+                _SYNTHETIC_PROJECT_SLUG,
+                (
+                    "**Lessons / patterns**\n"
+                    f"- {quote}\n"
+                    f"- {sibling_quote}"
+                ),
+                synthetic_rule=False,
+            )
+        ],
     )
     first_slug = "receipt-replay-missing-effect"
     second_slug = "receipt-replay-valid-effect"
@@ -9780,7 +11769,7 @@ def test_replay_restores_missing_effect_without_duplicating_valid_sibling(compil
             _admission_operation(
                 daily,
                 second_slug,
-                quote,
+                    sibling_quote,
                 summary="The second replay effect remains independently durable.",
             ),
         ),
@@ -9845,9 +11834,22 @@ def test_missing_receipt_empty_replays_get_fresh_attempt_for_later_valid_plan(
 ):
     compile_memory, root, _state_root, state = compile_env
     quote = "A rejected empty legacy replay must not pin later provider work."
+    recovery_quote = "Always reserve a distinct citation for later recovered work."
     daily = _daily(
         root / "knowledge" / "daily" / "2026-10-14-legacy-r3.md",
-        [_block("12:00:00", quote)],
+        [
+            _project_block(
+                "12:00:00",
+                root,
+                _SYNTHETIC_PROJECT_SLUG,
+                (
+                    "**Lessons / patterns**\n"
+                    f"- {quote}\n"
+                    f"- {recovery_quote}"
+                ),
+                synthetic_rule=False,
+            )
+        ],
     )
     original = compile_memory.prepare_compile_request(
         [daily], state, prompt_char_budget=30_000
@@ -9878,7 +11880,7 @@ def test_missing_receipt_empty_replays_get_fresh_attempt_for_later_valid_plan(
             _admission_operation(
                 daily,
                 "legacy-recovered",
-                quote,
+                recovery_quote,
                 summary="A recovered legacy replay now has a durable effect.",
             )
         ),
@@ -10698,19 +12700,36 @@ def test_commonmark_type1_incomplete_openers_are_container_scoped(
     ),
     ids=("fenced", "indented", "raw-html", "blockquote", "list", "escaped"),
 )
-def test_durable_section_heading_spoofs_do_not_validate_evidence(spoof):
-    import compile_memory
-
+def test_durable_section_heading_spoofs_do_not_validate_evidence(
+    compile_env,
+    spoof,
+):
+    compile_memory, root, _state_root, _state = compile_env
     quote = "spoofed durable evidence"
-    block = _generated_block(
-        "12:00:00",
-        Path.cwd(),
-        f"{spoof}\n\n- {quote}",
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-10-21-heading-spoof.md",
+        [
+            _generated_block(
+                "12:00:00",
+                root,
+                f"{spoof}\n\n- {quote}\n\n"
+                "**Lessons / patterns**\n"
+                "- Always preserve a real durable sibling before validation.",
+            )
+        ],
+    )
+    source_blocks = compile_memory.extract_meaningful_blocks(
+        daily.read_text(encoding="utf-8")
     )
 
-    assert compile_memory._source_quote_qualities(
-        "12:00:00", quote, [block]
-    ) == [False]
+    plan, error = compile_memory._normalize_accepted_plan(
+        _response(_admission_operation(daily, "heading-spoof", quote)),
+        [daily],
+        source_blocks,
+    )
+
+    assert plan is None
+    assert "durable section" in error
 
 
 @pytest.mark.parametrize(
@@ -10752,7 +12771,6 @@ def test_nested_durable_heading_rejects_plan_before_journal(
     body,
 ):
     compile_memory, root, state_root, state = compile_env
-    quote = "plain audit status only"
     daily = _daily(
         root / "knowledge" / "daily" / f"2026-10-21-{case_id}.md",
         [_generated_block("12:00:00", root, body)],
@@ -10760,50 +12778,68 @@ def test_nested_durable_heading_rejects_plan_before_journal(
     request = compile_memory.prepare_compile_request(
         [daily], state, prompt_char_budget=30_000
     )
-    operation = _admission_operation(daily, slug, quote)
-
-    result = compile_memory.apply_compile_batch(
-        request,
-        _response(operation),
-        False,
-    )
-
-    _assert_rejected_before_journal(result, request, daily, state_root, state)
-    assert "durable section" in result["error"]
+    assert request == {"pending": False}
     assert not (root / "knowledge" / "notes" / f"{slug}.md").exists()
+    assert not (state_root / "run" / "compile-journal").exists()
 
 
-def test_tilde_fence_info_string_may_contain_backticks():
-    import compile_memory
-
+def test_tilde_fence_info_string_may_contain_backticks(compile_env):
+    compile_memory, root, _state_root, _state = compile_env
     quote = "tilde-fenced spoofed evidence"
-    block = _generated_block(
-        "12:00:00",
-        Path.cwd(),
-        "~~~ markdown`variant\n"
-        "**Lessons / patterns**\n"
-        f"- {quote}\n"
-        "~~~",
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-10-21-tilde-fence.md",
+        [
+            _generated_block(
+                "12:00:00",
+                root,
+                "~~~ markdown`variant\n"
+                "**Lessons / patterns**\n"
+                f"- {quote}\n"
+                "~~~\n\n"
+                "**Lessons / patterns**\n"
+                "- Always keep fenced content outside durable evidence.",
+            )
+        ],
+    )
+    source_blocks = compile_memory.extract_meaningful_blocks(
+        daily.read_text(encoding="utf-8")
     )
 
-    assert compile_memory._source_quote_qualities(
-        "12:00:00", quote, [block]
-    ) == [False]
-
-
-def test_real_durable_section_heading_validates_evidence():
-    import compile_memory
-
-    quote = "real durable evidence"
-    block = _generated_block(
-        "12:00:00",
-        Path.cwd(),
-        f"**Lessons / patterns**\n\n- {quote}",
+    plan, error = compile_memory._normalize_accepted_plan(
+        _response(_admission_operation(daily, "tilde-fence", quote)),
+        [daily],
+        source_blocks,
     )
 
-    assert compile_memory._source_quote_qualities(
-        "12:00:00", quote, [block]
-    ) == [True]
+    assert plan is None
+    assert "not an exact source citation" in error
+
+
+def test_real_durable_section_heading_validates_evidence(compile_env):
+    compile_memory, root, _state_root, _state = compile_env
+    quote = "Always validate real durable evidence before publication."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-10-21-real-heading.md",
+        [
+            _generated_block(
+                "12:00:00",
+                root,
+                f"**Lessons / patterns**\n\n- {quote}",
+            )
+        ],
+    )
+    source_blocks = compile_memory.extract_meaningful_blocks(
+        daily.read_text(encoding="utf-8")
+    )
+
+    plan, error = compile_memory._normalize_accepted_plan(
+        _response(_admission_operation(daily, "real-heading", quote)),
+        [daily],
+        source_blocks,
+    )
+
+    assert error == ""
+    assert plan is not None
 
 
 def test_unresolved_reference_labels_count_and_reject_oversized_create(
@@ -11046,8 +13082,64 @@ def test_provider_yaml_forbidden_characters_reject_before_journal(
     )
 
     _assert_rejected_before_journal(result, request, daily, state_root, state)
-    assert "forbidden YAML character" in result["error"]
+    expected_error = (
+        "invalid Unicode scalar"
+        if compile_memory._is_unicode_noncharacter(ord(forbidden))
+        else "forbidden YAML character"
+    )
+    assert expected_error in result["error"]
     assert not (root / "knowledge" / "notes" / "yaml-control.md").exists()
+
+
+@pytest.mark.parametrize(
+    "noncharacter",
+    ("\ufdd0", "\ufffe", "\U0001ffff", "\U0010ffff"),
+    ids=("fdd0", "bmp-plane-end", "plane-1-end", "plane-16-end"),
+)
+def test_noncharacter_source_is_rejected_before_manifest_write(
+    compile_env,
+    noncharacter,
+):
+    compile_memory, root, state_root, state = compile_env
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-10-18-source-noncharacter.md",
+        [_block("12:00:00", f"Always reject {noncharacter} before persistence.")],
+    )
+
+    with pytest.raises(
+        compile_memory.CompilePreparationError,
+        match="invalid Unicode scalar",
+    ):
+        compile_memory.prepare_compile_request(
+            [daily],
+            state,
+            prompt_char_budget=30_000,
+        )
+
+    manifest_dir = state_root / "run" / "compile-manifests"
+    assert not manifest_dir.exists() or list(manifest_dir.glob("*.json")) == []
+    assert compile_memory.load_state() == {}
+    assert state == {}
+
+
+def test_manifest_encoding_round_trips_through_strict_reader(compile_env):
+    compile_memory, root, _state_root, state = compile_env
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-10-18-source-round-trip.md",
+        [_block("12:00:00", "Always preserve valid Unicode: caf\u00e9 \U0001f642.")],
+    )
+    request = compile_memory.prepare_compile_request(
+        [daily],
+        state,
+        prompt_char_budget=30_000,
+    )
+    manifest = compile_memory._load_manifest(request["generation_id"])
+    encoded = compile_memory._manifest_encoded(manifest)
+
+    assert compile_memory.decode_json_object_strict(
+        encoded,
+        max_bytes=compile_memory.MAX_GENERATION_MANIFEST_BYTES,
+    ) == manifest
 
 
 def test_rendered_accepted_metadata_parses_with_pyyaml(compile_env):
@@ -11084,3 +13176,3633 @@ def test_rendered_accepted_metadata_parses_with_pyyaml(compile_env):
     parsed = yaml.safe_load(frontmatter)
     assert parsed["title"] == title
     assert parsed["description"] == summary
+
+
+def _legacy_v2_manifest(compile_memory, daily: Path, *, budget: int = 30_000):
+    source_bytes, source_text = compile_memory._read_daily_snapshot(daily)
+    return compile_memory._derive_manifest_v2(
+        daily,
+        source_text,
+        budget,
+        compile_memory._compile_context_snapshot(budget),
+        None,
+        source_bytes=source_bytes,
+        source_sha256=hashlib.sha256(source_bytes).hexdigest(),
+    )
+
+
+def test_shipped_v2_fixture_loads_without_rebuilding_its_prompt(
+    compile_env,
+    monkeypatch,
+):
+    compile_memory, root, state_root, state = compile_env
+    fixture_path = Path(__file__).parent / "fixtures" / "compile-v2-93be6b8.json"
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    manifest = fixture["manifest"]
+    journal = fixture["journal"]
+    daily = root / manifest["daily"]["path"]
+    daily.write_text(fixture["source_utf8"], encoding="utf-8")
+    manifest_path = (
+        state_root
+        / "run"
+        / "compile-manifests"
+        / f"{manifest['generation_id']}.json"
+    )
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    journal_path = (
+        state_root / "run" / "compile-journal" / f"{journal['batch_id']}.json"
+    )
+    journal_path.parent.mkdir(parents=True)
+    journal_path.write_text(
+        json.dumps(journal, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    regenerated = compile_memory._derive_manifest_v2(
+        daily,
+        manifest["source_utf8"],
+        manifest["prompt_char_budget"],
+        manifest["context"],
+        manifest["base_checkpoint"],
+    )
+    assert regenerated["batches"][0]["prompt"] != manifest["batches"][0]["prompt"]
+
+    def reject_prompt_rebuild(*_args, **_kwargs):
+        pytest.fail("persisted v2 validation must not rebuild a current prompt")
+
+    monkeypatch.setattr(compile_memory, "_derive_manifest_v2", reject_prompt_rebuild)
+
+    assert compile_memory._load_manifest(manifest["generation_id"]) == manifest
+    assert compile_memory._load_journal(journal["batch_id"]) == journal
+    state["compile_generation_active"] = {
+        daily.name: {
+            "generation_id": manifest["generation_id"],
+            "source_sha256": manifest["daily"]["sha256"],
+        }
+    }
+
+    assert compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    ) == {"pending": False}
+    assert not (root / "knowledge" / "notes" / "golden-v2-substring.md").exists()
+    assert not manifest_path.exists()
+    assert not journal_path.exists()
+    assert list(
+        (state_root / "run" / "retired-manifests").glob(
+            f"{manifest['generation_id']}.*.json"
+        )
+    )
+    assert list(
+        (state_root / "run" / "retired-journals").glob(
+            f"{journal['batch_id']}.*.json"
+        )
+    )
+
+
+def test_shipped_scoped_v2_fixture_preserves_windows_root_and_migrates(
+    compile_env,
+    monkeypatch,
+):
+    compile_memory, root, state_root, state = compile_env
+    fixture_path = (
+        Path(__file__).parent / "fixtures" / "compile-v2-scoped-93be6b8.json"
+    )
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    manifest = fixture["manifest"]
+    journal = fixture["journal"]
+    daily = root / manifest["daily"]["path"]
+    daily.write_bytes(fixture["source_utf8"].encode("utf-8"))
+
+    def reject_current_daily_record(*_args, **_kwargs):
+        pytest.fail("legacy v2 validation must not use the current DailyRecord parser")
+
+    source = fixture["source_utf8"].replace("\r\n", "\n")
+    assert 'Project root JSON: "D:/projects/alpha"' in manifest["daily_blocks"][0]
+
+    manifest_path = (
+        state_root
+        / "run"
+        / "compile-manifests"
+        / f"{manifest['generation_id']}.json"
+    )
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    journal_path = (
+        state_root / "run" / "compile-journal" / f"{journal['batch_id']}.json"
+    )
+    journal_path.parent.mkdir(parents=True)
+    journal_path.write_text(
+        json.dumps(journal, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    with monkeypatch.context() as legacy_patch:
+        legacy_patch.setattr(
+            compile_memory,
+            "parse_daily_records",
+            reject_current_daily_record,
+        )
+        legacy_patch.setattr(
+            compile_memory,
+            "render_daily_record_for_legacy_compile",
+            reject_current_daily_record,
+            raising=False,
+        )
+        assert compile_memory._extract_legacy_manifest_blocks(source) == manifest[
+            "daily_blocks"
+        ]
+        assert compile_memory._load_manifest(manifest["generation_id"]) == manifest
+        assert compile_memory._load_journal(journal["batch_id"]) == journal
+    state["compile_generation_active"] = {
+        daily.name: {
+            "generation_id": manifest["generation_id"],
+            "source_sha256": manifest["daily"]["sha256"],
+        }
+    }
+
+    assert compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    ) == {"pending": False}
+    assert not (root / "knowledge" / "notes" / "golden-v2-scoped.md").exists()
+    assert not manifest_path.exists()
+    assert not journal_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("batch_index", False), ("batch_count", True)),
+)
+def test_shipped_v2_rejects_boolean_batch_position_drift(
+    compile_env,
+    field,
+    value,
+):
+    compile_memory, _root, state_root, _state = compile_env
+    fixture_path = Path(__file__).parent / "fixtures" / "compile-v2-93be6b8.json"
+    manifest = json.loads(fixture_path.read_text(encoding="utf-8"))["manifest"]
+    manifest["batches"][0][field] = value
+    manifest["manifest_sha256"] = compile_memory._manifest_digest(manifest)
+    manifest_path = (
+        state_root
+        / "run"
+        / "compile-manifests"
+        / f"{manifest['generation_id']}.json"
+    )
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        compile_memory.CompileManifestError,
+        match="legacy manifest batch fields",
+    ):
+        compile_memory._load_manifest(manifest["generation_id"])
+
+
+def _activate_legacy_manifest(compile_memory, state: dict, daily: Path, manifest: dict):
+    compile_memory._write_new_manifest(manifest)
+    state["compile_generation_active"] = {
+        daily.name: {
+            "generation_id": manifest["generation_id"],
+            "source_sha256": manifest["daily"]["sha256"],
+        }
+    }
+    return compile_memory._request_from_manifest(
+        manifest,
+        manifest["batch_ids"][0],
+    )
+
+
+def _legacy_accepted_operation(
+    daily: Path,
+    slug: str,
+    quote: str,
+    root: Path,
+    *,
+    action: str = "create",
+    expected_target: dict | None = None,
+) -> dict:
+    operation = _admission_operation(
+        daily,
+        slug,
+        quote,
+        action=action,
+    )
+    operation["evidence"][0]["quoted_text"] = quote
+    operation.update(
+        {
+            "project_slug": _SYNTHETIC_PROJECT_SLUG,
+            "project_root": str(root.resolve()),
+            "_rendered_at": "2026-08-02T12:00:00",
+            "_rendered_date": "2026-08-02",
+        }
+    )
+    if expected_target is not None:
+        operation["_expected_target"] = json.loads(json.dumps(expected_target))
+    return operation
+
+
+def _shipped_v1_operation(daily: Path, slug: str, quote: str) -> dict:
+    operation = _admission_operation(daily, slug, quote)
+    operation["evidence"][0]["quoted_text"] = quote
+    operation.update(
+        {
+            "_rendered_at": "2026-08-02T12:00:00",
+            "_rendered_date": "2026-08-02",
+        }
+    )
+    return operation
+
+
+def _render_shipped_v1_create(
+    compile_memory,
+    operation: dict,
+    marker: str,
+    fingerprint: str,
+) -> str:
+    title = operation["title"]
+    summary = operation["summary"]
+    category = operation["category"]
+    evidence = "\n".join(
+        f"- `knowledge/daily/{item['daily_date']}.md [{item['timestamp']}]` — "
+        f"{item['claim']}"
+        for item in operation["evidence"]
+    )
+    return (
+        "---\n"
+        f"type: {compile_memory.CATEGORY_SINGULAR[category]}\n"
+        f'title: "{title}"\n'
+        f'description: "{summary}"\n'
+        f"timestamp: {operation['_rendered_at']}\n"
+        "confidence: medium\n"
+        "source_authority: ai-derived\n"
+        "---\n\n"
+        f"# {title}\n\n"
+        f"One-sentence summary: {summary}\n\n"
+        f"## {operation['body_section']}\n{operation['body_markdown']}\n\n"
+        f"## Evidence\n{evidence}\n\n"
+        f"{marker}\n{fingerprint}\n"
+    )
+
+
+def _write_legacy_v1_journal(
+    compile_memory,
+    request: dict,
+    operations: list[dict],
+    *,
+    states: list[str] | None = None,
+    recoveries: list[dict | None] | None = None,
+    effects: list[dict | None] | None = None,
+    status: str = "accepted",
+) -> dict:
+    accepted = {
+        "operations": json.loads(json.dumps(operations)),
+        "audit": {
+            "verified": len(operations),
+            "dedup": 0,
+            "stubs": 0,
+            "contradictions": 0,
+            "rejected": 0,
+        },
+        "response_sha256": "a" * 64,
+        "source": json.loads(json.dumps(request["dailies"])),
+        "source_blocks": list(request["source_blocks"]),
+        "batch_ids": list(request["batch_ids"]),
+        "generation_id": request["generation_id"],
+        "layout_sha256": request["layout_sha256"],
+    }
+    journal = {
+        "version": 1,
+        "batch_id": request["batch_id"],
+        "accepted": accepted,
+        "accepted_sha256": compile_memory._canonical_digest(accepted),
+        "operation_states": states or ["pending"] * len(operations),
+        "operation_recovery": recoveries or [None] * len(operations),
+        "operation_effects": effects or [None] * len(operations),
+        "status": status,
+    }
+    compile_memory._write_journal(journal)
+    return journal
+
+
+def _install_golden_v1_scoped_update(
+    compile_memory,
+    root: Path,
+    state: dict,
+    *,
+    malformed: str | None = None,
+) -> dict:
+    fixture_path = Path(__file__).parent / "fixtures" / "compile-v2-93be6b8.json"
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    assert fixture["provenance"]["commit"] == "93be6b8"
+    manifest = fixture["manifest"]
+    journal = fixture["journal"]
+    daily = root / manifest["daily"]["path"]
+    daily.parent.mkdir(parents=True, exist_ok=True)
+    daily.write_bytes(fixture["source_utf8"].encode("utf-8"))
+    compile_memory._write_new_manifest(manifest)
+    state["compile_generation_active"] = {
+        daily.name: {
+            "generation_id": manifest["generation_id"],
+            "source_sha256": manifest["daily"]["sha256"],
+        }
+    }
+
+    target = root / "knowledge" / "notes" / "golden-v1-scoped-update.md"
+    _write_note(
+        target,
+        "Golden V1 Scoped Update",
+        "The scoped base predates the shipped unscoped update.",
+        project_slug="golden-project",
+        project_root=root,
+    )
+    before = compile_memory._read_knowledge_page_snapshot(target)
+    assert before is not None
+    operation = json.loads(json.dumps(journal["accepted"]["operations"][0]))
+    operation.update(
+        {
+            "action": "update",
+            "slug": target.stem,
+            "title": "Golden V1 Scoped Update",
+            "summary": "The shipped unscoped update was already applied exactly once.",
+            "_expected_target": json.loads(json.dumps(before[1])),
+        }
+    )
+    marker = compile_memory._operation_marker(
+        {"batch_id": journal["batch_id"]},
+        0,
+        operation,
+    )
+    fingerprint = compile_memory._operation_replay_fingerprint(operation)
+    target.write_bytes(
+        compile_memory._render_operation_result(
+            operation,
+            before[0],
+            marker,
+            fingerprint,
+        ).encode("utf-8"),
+    )
+    after = compile_memory._read_knowledge_page_snapshot(target)
+    assert after is not None
+    effect = {
+        "version": 2,
+        "target": target.name,
+        "before": json.loads(json.dumps(before[1])),
+        "after": json.loads(json.dumps(after[1])),
+        "retained_artifact": None,
+    }
+    if malformed == "effect-extra":
+        effect["unexpected"] = True
+    elif malformed == "version":
+        effect["version"] = 1
+    elif malformed == "target":
+        effect["target"] = "different-target.md"
+    elif malformed == "before-extra":
+        effect["before"]["unexpected"] = True
+    elif malformed == "after-extra":
+        effect["after"]["unexpected"] = True
+    elif malformed == "after-missing":
+        effect["after"].pop("mode")
+    elif malformed == "identity-shape":
+        effect["after"]["identity"] = effect["after"]["identity"][:2]
+    elif malformed == "identity-bool":
+        effect["after"]["identity"][0] = True
+    elif malformed == "sha256":
+        effect["after"]["sha256"] = "z" * 64
+    elif malformed == "size-bool":
+        effect["after"]["size"] = True
+    elif malformed == "mode-bool":
+        effect["after"]["mode"] = True
+    elif malformed == "file-attributes-bool":
+        effect["after"]["file_attributes"] = True
+    elif malformed == "nlink-zero":
+        effect["after"]["nlink"] = 0
+    elif malformed == "retained-artifact":
+        effect["retained_artifact"] = {}
+    elif malformed is not None:
+        raise AssertionError(f"unknown malformed golden effect case: {malformed}")
+
+    journal["accepted"]["operations"] = [operation]
+    journal["accepted_sha256"] = compile_memory._canonical_digest(journal["accepted"])
+    journal["operation_states"] = ["applied"]
+    journal["operation_recovery"] = [None]
+    journal["operation_effects"] = [effect]
+    journal["status"] = "complete"
+    compile_memory._write_journal(journal)
+    return {
+        "daily": daily,
+        "manifest": manifest,
+        "journal": journal,
+        "target": target,
+        "before": before[1],
+        "after": after[1],
+        "marker": marker,
+        "fingerprint": fingerprint,
+    }
+
+
+def _retire_legacy_generation(compile_memory, manifest: dict, request: dict) -> None:
+    with compile_memory._bound_journal_directory(create=False) as bound:
+        name = f"{request['batch_id']}.json"
+        admitted = compile_memory._journal_file_metadata(bound, name)
+        compile_memory._retire_journal_file(bound, name, admitted)
+    with compile_memory._bound_manifest_directory(create=False) as bound:
+        generation_id = manifest["generation_id"]
+        admitted = compile_memory._manifest_file_metadata(
+            bound,
+            f"{generation_id}.json",
+        )
+        compile_memory._retire_manifest_file(bound, generation_id, admitted)
+
+
+def test_new_manifest_and_journal_versions_bind_current_admission(compile_env):
+    compile_memory, root, _state_root, state = compile_env
+    quote = "Always validate the canonical source before applying a persisted plan."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-11-01-current-schema.md",
+        [_block("12:00:00", quote)],
+    )
+
+    request = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    )
+    manifest = compile_memory._load_manifest(request["generation_id"])
+    result = compile_memory.apply_compile_batch(
+        request,
+        _response(_admission_operation(daily, "current-schema", quote)),
+        False,
+    )
+    journal = compile_memory._load_journal(request["batch_id"])
+
+    assert result["ok"] is True
+    assert manifest["version"] == 3
+    assert journal["version"] == 2
+
+
+def test_legacy_v2_manifest_derivation_is_byte_exact_to_shipped_full_record(
+    compile_env,
+):
+    compile_memory, root, _state_root, _state = compile_env
+    status = "Status: implementation complete; twelve files changed."
+    lesson = "Always preserve the shipped renderer when validating old bytes."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-11-01-shipped-render.md",
+        [
+            _project_block(
+                "12:00:00",
+                root,
+                _SYNTHETIC_PROJECT_SLUG,
+                f"**Lessons / patterns**\n- {lesson}\n\n**Work completed**\n- {status}",
+                synthetic_rule=False,
+            )
+        ],
+    )
+
+    manifest = _legacy_v2_manifest(compile_memory, daily)
+
+    assert manifest["source_blocks"] == [
+        "\n".join(
+            (
+                "## [12:00:00] opencode-idle | session",
+                f"- Project root JSON: {json.dumps(str(root.resolve()))}",
+                f"- Project slug: `{_SYNTHETIC_PROJECT_SLUG}`",
+                "",
+                "**Lessons / patterns**",
+                f"- {lesson}",
+                "",
+                "**Work completed**",
+                f"- {status}",
+            )
+        )
+    ]
+
+
+@pytest.mark.parametrize("artifact_location", ("active", "retired"))
+def test_legacy_pending_generation_is_retired_and_freshly_prepared(
+    compile_env,
+    artifact_location,
+):
+    compile_memory, root, state_root, state = compile_env
+    rejected = "Status: implementation complete; twelve files changed."
+    admitted = "Always revalidate persisted input before applying pending work."
+    daily = _daily(
+        root / "knowledge" / "daily" / f"2026-11-01-legacy-{artifact_location}.md",
+        [
+            _project_block(
+                "12:00:00",
+                root,
+                _SYNTHETIC_PROJECT_SLUG,
+                f"**Lessons / patterns**\n- {rejected}\n- {admitted}",
+            )
+        ],
+    )
+    legacy = _legacy_v2_manifest(compile_memory, daily)
+    old_request = _activate_legacy_manifest(compile_memory, state, daily, legacy)
+    operation = _legacy_accepted_operation(
+        daily,
+        f"legacy-{artifact_location}",
+        rejected,
+        root,
+    )
+    _write_legacy_v1_journal(compile_memory, old_request, [operation])
+    if artifact_location == "retired":
+        _retire_legacy_generation(compile_memory, legacy, old_request)
+
+    request = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    )
+    replacement = compile_memory._load_manifest(request["generation_id"])
+
+    assert request["pending"] is True
+    assert request["generation_id"] != legacy["generation_id"]
+    assert replacement["version"] == 3
+    assert admitted in "\n".join(request["source_blocks"])
+    assert not (root / "knowledge" / "notes" / f"legacy-{artifact_location}.md").exists()
+    assert not (
+        state_root
+        / "run"
+        / "compile-journal"
+        / f"{old_request['batch_id']}.json"
+    ).exists()
+    assert not (
+        state_root
+        / "run"
+        / "compile-manifests"
+        / f"{legacy['generation_id']}.json"
+    ).exists()
+    assert len(
+        list(
+            (state_root / "run" / "retired-journals").glob(
+                f"{old_request['batch_id']}.*.json"
+            )
+        )
+    ) == 1
+    assert len(
+        list(
+            (state_root / "run" / "retired-manifests").glob(
+                f"{legacy['generation_id']}.*.json"
+            )
+        )
+    ) == 1
+
+
+def test_legacy_applied_effect_is_bound_into_replacement_manifest(compile_env):
+    import memory_state
+
+    compile_memory, root, _state_root, state = compile_env
+    applied_quote = "Always preserve a verified durable effect during schema migration."
+    pending_quote = "Validate remaining evidence under the current admission rules."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-11-01-legacy-applied.md",
+        [
+            _project_block(
+                "12:00:00",
+                root,
+                _SYNTHETIC_PROJECT_SLUG,
+                f"**Lessons / patterns**\n- {applied_quote}",
+            ),
+            _project_block(
+                "12:01:00",
+                root,
+                _SYNTHETIC_PROJECT_SLUG,
+                f"**Lessons / patterns**\n- {pending_quote}",
+            ),
+        ],
+    )
+    legacy = _legacy_v2_manifest(compile_memory, daily)
+    old_request = _activate_legacy_manifest(compile_memory, state, daily, legacy)
+    operation = _legacy_accepted_operation(
+        daily,
+        "legacy-applied-effect",
+        applied_quote,
+        root,
+    )
+    marker = compile_memory._operation_marker(old_request, 0, operation)
+    fingerprint = compile_memory._operation_replay_fingerprint(operation)
+    target = root / "knowledge" / "notes" / "legacy-applied-effect.md"
+    target.write_text(
+        compile_memory._render_operation_result(operation, "", marker, fingerprint),
+        encoding="utf-8",
+    )
+    snapshot = compile_memory._read_knowledge_page_snapshot(target)
+    assert snapshot is not None
+    effect = {
+        "version": 2,
+        "target": target.name,
+        "before": None,
+        "after": snapshot[1],
+        "retained_artifact": None,
+    }
+    _write_legacy_v1_journal(
+        compile_memory,
+        old_request,
+        [operation],
+        states=["applied"],
+        effects=[effect],
+        status="complete",
+    )
+    before = target.read_bytes()
+
+    request = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    )
+    replacement = compile_memory._load_manifest(request["generation_id"])
+    reconciliation = replacement["legacy_reconciliation"]
+
+    assert target.read_bytes() == before
+    assert reconciliation["journal_ids"] == [old_request["batch_id"]]
+    assert reconciliation["effects"][0]["marker"] == marker
+    assert reconciliation["effects"][0]["fingerprint"] == fingerprint
+    full_bullet_token = compile_memory._evidence_token(
+        {
+            "daily_date": daily.stem,
+            "timestamp": "12:00:00",
+            "quoted_text": f"Rule: {applied_quote}",
+        }
+    )
+    substring_token = compile_memory._evidence_token(operation["evidence"][0])
+    wildcard_token = compile_memory._evidence_wildcard_token(
+        operation["evidence"][0]
+    )
+    assert reconciliation["consumed_evidence"] == [wildcard_token]
+    assert state["compile_consumed_evidence"] == [wildcard_token]
+    assert full_bullet_token not in state["compile_consumed_evidence"]
+    assert substring_token not in state["compile_consumed_evidence"]
+
+    reused = compile_memory.apply_compile_batch(
+        request,
+        _response(
+            _admission_operation(
+                daily,
+                "legacy-reused-effect",
+                applied_quote,
+                summary="A migrated legacy substring cannot release its full bullet.",
+            )
+        ),
+        False,
+    )
+    assert reused["ok"] is False
+    assert reused["status"] == "plan_rejected"
+    assert "evidence was already consumed" in reused["error"]
+
+    result = compile_memory.apply_compile_batch(
+        request,
+        _response(
+            _admission_operation(
+                daily,
+                "legacy-fresh-effect",
+                pending_quote,
+                summary="Fresh evidence remains after legacy reconciliation.",
+                timestamp="12:01:00",
+            )
+        ),
+        False,
+    )
+    assert result["ok"] is True, result
+    receipt = state["compiled_daily_receipts"][daily.name]
+
+    assert receipt["journal_ids"] == [old_request["batch_id"], request["batch_id"]]
+    assert {effect["target"] for effect in receipt["effects"]} == {
+        "legacy-applied-effect.md",
+        "legacy-fresh-effect.md",
+    }
+    assert memory_state.is_compile_receipt_valid(
+        receipt,
+        daily.name,
+        replacement["daily"]["sha256"],
+        root=root,
+    )
+    assert daily.name not in state.get("compile_legacy_reconciliations", {})
+
+
+def test_shipped_unscoped_v1_effect_migrates_without_fabricated_project_fields(
+    compile_env,
+):
+    import memory_state
+
+    compile_memory, root, _state_root, state = compile_env
+    applied_quote = "Always retain authentic unscoped v1 effects byte for byte."
+    pending_quote = "Validate a distinct current citation after migration."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-11-01-shipped-v1-effect.md",
+        [
+            _project_block(
+                "12:00:00",
+                root,
+                _SYNTHETIC_PROJECT_SLUG,
+                    f"**Lessons / patterns**\n- {applied_quote}",
+                synthetic_rule=False,
+                ),
+                _project_block(
+                    "12:01:00",
+                    root,
+                    _SYNTHETIC_PROJECT_SLUG,
+                    f"**Lessons / patterns**\n- {pending_quote}",
+                    synthetic_rule=False,
+                ),
+        ],
+    )
+    legacy = _legacy_v2_manifest(compile_memory, daily)
+    old_request = _activate_legacy_manifest(compile_memory, state, daily, legacy)
+    operation = _shipped_v1_operation(
+        daily,
+        "shipped-unscoped-v1-effect",
+        applied_quote,
+    )
+    assert "project_slug" not in operation
+    assert "project_root" not in operation
+    marker = compile_memory._operation_marker(old_request, 0, operation)
+    fingerprint = compile_memory._operation_replay_fingerprint(operation)
+    target = root / "knowledge" / "notes" / "shipped-unscoped-v1-effect.md"
+    target.write_text(
+        _render_shipped_v1_create(
+            compile_memory,
+            operation,
+            marker,
+            fingerprint,
+        ),
+        encoding="utf-8",
+    )
+    snapshot = compile_memory._read_knowledge_page_snapshot(target)
+    assert snapshot is not None
+    _write_legacy_v1_journal(
+        compile_memory,
+        old_request,
+        [operation],
+        states=["applied"],
+        effects=[
+            {
+                "version": 2,
+                "target": target.name,
+                "before": None,
+                "after": snapshot[1],
+                "retained_artifact": None,
+            }
+        ],
+        status="complete",
+    )
+    before = target.read_bytes()
+
+    request = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    )
+    replacement = compile_memory._load_manifest(request["generation_id"])
+    [effect] = replacement["legacy_reconciliation"]["effects"]
+
+    assert target.read_bytes() == before
+    assert "project_slug" not in effect
+    assert "project_root" not in effect
+
+    result = compile_memory.apply_compile_batch(
+        request,
+        _response(
+            _admission_operation(
+                daily,
+                "shipped-v1-current-effect",
+                pending_quote,
+                summary="Current scoped evidence remains distinct after v1 migration.",
+                    timestamp="12:01:00",
+            )
+        ),
+        False,
+    )
+    assert result["ok"] is True, result
+    receipt = state["compiled_daily_receipts"][daily.name]
+    legacy_effect = next(
+        item for item in receipt["effects"] if item["journal_id"] == old_request["batch_id"]
+    )
+    assert "project_slug" not in legacy_effect
+    assert "project_root" not in legacy_effect
+    assert memory_state.is_compile_receipt_valid(
+        receipt,
+        daily.name,
+        replacement["daily"]["sha256"],
+        root=root,
+    )
+
+
+def test_pre_effect_v1_complete_create_is_bound_during_migration(compile_env):
+    compile_memory, root, _state_root, state = compile_env
+    applied_quote = "Always preserve authenticated creates from pre-effect journals."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-11-01-pre-effect-v1.md",
+        [
+            _project_block(
+                "12:00:00",
+                root,
+                _SYNTHETIC_PROJECT_SLUG,
+                f"**Lessons / patterns**\n- {applied_quote}",
+                synthetic_rule=False,
+            )
+        ],
+    )
+    legacy = _legacy_v2_manifest(compile_memory, daily)
+    old_request = _activate_legacy_manifest(compile_memory, state, daily, legacy)
+    operation = _shipped_v1_operation(
+        daily,
+        "pre-effect-v1-create",
+        applied_quote,
+    )
+    rendered_at = operation.pop("_rendered_at")
+    rendered_date = operation.pop("_rendered_date")
+    marker = compile_memory._operation_marker(old_request, 0, operation)
+    fingerprint = compile_memory._operation_replay_fingerprint(operation)
+    target = root / "knowledge" / "notes" / "pre-effect-v1-create.md"
+    target.write_text(
+        _render_shipped_v1_create(
+            compile_memory,
+            {
+                **operation,
+                "_rendered_at": rendered_at,
+                "_rendered_date": rendered_date,
+            },
+            marker,
+            fingerprint,
+        ),
+        encoding="utf-8",
+    )
+    snapshot = compile_memory._read_knowledge_page_snapshot(target)
+    assert snapshot is not None
+    journal = _write_legacy_v1_journal(
+        compile_memory,
+        old_request,
+        [operation],
+        states=["applied"],
+        status="complete",
+    )
+    journal.pop("operation_recovery")
+    journal.pop("operation_effects")
+    compile_memory._write_journal(journal)
+    before = target.read_bytes()
+
+    request = compile_memory.prepare_compile_request(
+        [daily],
+        state,
+        prompt_char_budget=30_000,
+    )
+    replacement = compile_memory._load_manifest(request["generation_id"])
+    [effect] = replacement["legacy_reconciliation"]["effects"]
+
+    assert target.read_bytes() == before
+    assert effect["journal_id"] == old_request["batch_id"]
+    assert effect["target"] == target.name
+    assert effect["after"] == snapshot[1]
+    assert effect["marker"] == marker
+    assert effect["fingerprint"] == fingerprint
+
+
+def test_golden_unscoped_v1_update_reconciles_scoped_target_without_reapply(
+    compile_env,
+    monkeypatch,
+):
+    import memory_state
+
+    compile_memory, root, state_root, state = compile_env
+    installed = _install_golden_v1_scoped_update(compile_memory, root, state)
+    target_before_migration = installed["target"].read_bytes()
+
+    def reject_new_operation(*_args, **_kwargs):
+        pytest.fail("legacy migration must not execute a new operation")
+
+    monkeypatch.setattr(compile_memory, "_execute_plan", reject_new_operation)
+
+    result = compile_memory.prepare_compile_request(
+        [installed["daily"]],
+        state,
+        prompt_char_budget=30_000,
+    )
+
+    assert result == {"pending": False}
+    assert installed["target"].read_bytes() == target_before_migration
+    receipt = state["compiled_daily_receipts"][installed["daily"].name]
+    [effect] = receipt["effects"]
+    assert effect["target"] == installed["target"].name
+    assert effect["after"] == installed["after"]
+    assert effect["marker"] == installed["marker"]
+    assert effect["fingerprint"] == installed["fingerprint"]
+    assert "project_slug" not in effect
+    assert "project_root" not in effect
+    assert effect["source_scope"] == "unscoped"
+    [evidence] = installed["journal"]["accepted"]["operations"][0]["evidence"]
+    wildcard = compile_memory._evidence_wildcard_token(evidence)
+    assert receipt["consumed_evidence"] == [wildcard]
+    assert state["compile_consumed_evidence"] == [wildcard]
+    assert memory_state.is_compile_receipt_valid(
+        receipt,
+        installed["daily"].name,
+        installed["manifest"]["daily"]["sha256"],
+        root=root,
+    )
+    assert list(
+        (state_root / "run" / "retired-manifests").glob(
+            f"{installed['manifest']['generation_id']}.*.json"
+        )
+    )
+    assert list(
+        (state_root / "run" / "retired-journals").glob(
+            f"{installed['journal']['batch_id']}.*.json"
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    (
+        "effect-extra",
+        "version",
+        "target",
+        "before-extra",
+        "after-extra",
+        "after-missing",
+        "identity-shape",
+        "identity-bool",
+        "sha256",
+        "size-bool",
+        "mode-bool",
+        "file-attributes-bool",
+        "nlink-zero",
+        "retained-artifact",
+    ),
+)
+def test_malformed_legacy_effect_snapshot_makes_no_migration_progress(
+    compile_env,
+    malformed,
+):
+    compile_memory, root, state_root, state = compile_env
+    installed = _install_golden_v1_scoped_update(
+        compile_memory,
+        root,
+        state,
+        malformed=malformed,
+    )
+    manifest_path = compile_memory._manifest_path(
+        installed["manifest"]["generation_id"]
+    )
+    journal_path = compile_memory._journal_path(installed["journal"]["batch_id"])
+    manifest_before = manifest_path.read_bytes()
+    journal_before = journal_path.read_bytes()
+    target_before = installed["target"].read_bytes()
+    state_before = json.loads(json.dumps(state))
+
+    with pytest.raises(
+        (compile_memory.CompileManifestError, compile_memory.CompilePreparationError, ValueError)
+    ):
+        compile_memory.prepare_compile_request(
+            [installed["daily"]],
+            state,
+            prompt_char_budget=30_000,
+        )
+
+    assert manifest_path.read_bytes() == manifest_before
+    assert journal_path.read_bytes() == journal_before
+    assert installed["target"].read_bytes() == target_before
+    assert state == state_before
+    assert not (state_root / "run" / "retired-manifests").exists()
+    assert not (state_root / "run" / "retired-journals").exists()
+
+
+@pytest.mark.parametrize("retired", (False, True), ids=("active", "retired"))
+@pytest.mark.parametrize(
+    ("case", "body", "legacy_quote", "blocked_bullet", "occurrence_limit"),
+    (
+        (
+            "zero",
+            "**Lessons / patterns**\n"
+            "- Always preserve another current rule when migration is uncertain.\n\n"
+            "**Work completed**\n"
+            "- Legacy migration status changed during the shipped run.",
+            "migration status changed",
+            "Always preserve another current rule when migration is uncertain.",
+            None,
+        ),
+        (
+            "ambiguous",
+            "**Lessons / patterns**\n"
+            "- When replaying a shared marker, preserve the first durable rule.\n"
+            "- When retiring a shared marker, preserve the second durable rule.",
+            "shared marker",
+            "When replaying a shared marker, preserve the first durable rule.",
+            1,
+        ),
+    ),
+)
+def test_legacy_unresolved_substring_consumes_timestamp_wildcard(
+    compile_env,
+    monkeypatch,
+    retired,
+    case,
+    body,
+    legacy_quote,
+    blocked_bullet,
+    occurrence_limit,
+):
+    compile_memory, root, _state_root, state = compile_env
+    location = "retired" if retired else "active"
+    fresh_bullet = "When migration completes, preserve evidence from a later timestamp."
+    daily = _daily(
+        root / "knowledge" / "daily" / f"2026-11-03-{case}-{location}.md",
+        [
+            _project_block(
+                "12:00:00",
+                root,
+                _SYNTHETIC_PROJECT_SLUG,
+                body,
+                synthetic_rule=False,
+            ),
+            _project_block(
+                "12:01:00",
+                root,
+                _SYNTHETIC_PROJECT_SLUG,
+                f"**Lessons / patterns**\n- {fresh_bullet}",
+                synthetic_rule=False,
+            ),
+        ],
+    )
+    legacy = _legacy_v2_manifest(compile_memory, daily)
+    old_request = _activate_legacy_manifest(compile_memory, state, daily, legacy)
+    operation = _legacy_accepted_operation(
+        daily,
+        f"legacy-wildcard-{case}-{location}",
+        legacy_quote,
+        root,
+    )
+    marker = compile_memory._operation_marker(old_request, 0, operation)
+    fingerprint = compile_memory._operation_replay_fingerprint(operation)
+    target = root / "knowledge" / "notes" / f"{operation['slug']}.md"
+    target.write_text(
+        compile_memory._render_operation_result(operation, "", marker, fingerprint),
+        encoding="utf-8",
+    )
+    snapshot = compile_memory._read_knowledge_page_snapshot(target)
+    assert snapshot is not None
+    _write_legacy_v1_journal(
+        compile_memory,
+        old_request,
+        [operation],
+        states=["applied"],
+        effects=[
+            {
+                "version": 2,
+                "target": target.name,
+                "before": None,
+                "after": snapshot[1],
+                "retained_artifact": None,
+            }
+        ],
+        status="complete",
+    )
+    if retired:
+        _retire_legacy_generation(compile_memory, legacy, old_request)
+
+    if occurrence_limit is None:
+        request = compile_memory.prepare_compile_request(
+            [daily], state, prompt_char_budget=30_000
+        )
+    else:
+        with monkeypatch.context() as bounded:
+            bounded.setattr(
+                compile_memory,
+                "MAX_EVIDENCE_QUOTE_OCCURRENCES",
+                occurrence_limit,
+            )
+            request = compile_memory.prepare_compile_request(
+                [daily], state, prompt_char_budget=30_000
+            )
+    wildcard = compile_memory._canonical_digest(
+        {
+            "kind": "source_timestamp_wildcard",
+            "daily_date": daily.stem,
+            "timestamp": "12:00:00",
+        }
+    )
+    substring_token = compile_memory._evidence_token(operation["evidence"][0])
+
+    assert state["compile_consumed_evidence"] == [wildcard]
+    assert substring_token not in state["compile_consumed_evidence"]
+    assert compile_memory.load_state()["compile_consumed_evidence"] == [wildcard]
+
+    result = compile_memory.apply_compile_batch(
+        request,
+        _response(
+            _admission_operation(
+                daily,
+                f"wildcard-reuse-{case}-{location}",
+                blocked_bullet,
+                summary="A timestamp wildcard must block every covered bullet.",
+            )
+        ),
+        False,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "plan_rejected"
+    assert "evidence was already consumed" in result["error"]
+
+    allowed = _admission_operation(
+        daily,
+        f"wildcard-allowed-{case}-{location}",
+        fresh_bullet,
+        summary=f"Fresh allowed summary for {case} {location}.",
+        timestamp="12:01:00",
+    )
+    applied = compile_memory.apply_compile_batch(
+        request,
+        _response(allowed),
+        False,
+    )
+    assert applied["ok"] is True, applied
+    receipt = state["compiled_daily_receipts"][daily.name]
+    assert wildcard in receipt["consumed_evidence"]
+    assert wildcard in state["compile_consumed_evidence"]
+
+    allowed_target = root / "knowledge" / "notes" / f"{allowed['slug']}.md"
+    allowed_target.unlink()
+    retry = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    )
+    boundary = state["compile_daily_replay_boundaries"][daily.name]
+    assert wildcard in boundary["consumed_evidence"]
+    replayed = compile_memory.apply_compile_batch(retry, _response(), False)
+
+    assert replayed["ok"] is True, replayed
+    assert allowed_target.is_file()
+    assert wildcard in state["compile_consumed_evidence"]
+    assert wildcard in state["compiled_daily_receipts"][daily.name][
+        "consumed_evidence"
+    ]
+
+
+def test_legacy_migration_capacity_failure_keeps_active_artifacts(
+    compile_env,
+    monkeypatch,
+):
+    compile_memory, root, state_root, state = compile_env
+    quote = "Preserve this complete bullet when a legacy substring was applied."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-11-04-capacity.md",
+        [
+            _project_block(
+                "12:00:00",
+                root,
+                _SYNTHETIC_PROJECT_SLUG,
+                f"**Lessons / patterns**\n- {quote}",
+            )
+        ],
+    )
+    legacy = _legacy_v2_manifest(compile_memory, daily)
+    old_request = _activate_legacy_manifest(compile_memory, state, daily, legacy)
+    operation = _legacy_accepted_operation(
+        daily,
+        "legacy-capacity",
+        quote,
+        root,
+    )
+    marker = compile_memory._operation_marker(old_request, 0, operation)
+    fingerprint = compile_memory._operation_replay_fingerprint(operation)
+    target = root / "knowledge" / "notes" / "legacy-capacity.md"
+    target.write_text(
+        compile_memory._render_operation_result(operation, "", marker, fingerprint),
+        encoding="utf-8",
+    )
+    snapshot = compile_memory._read_knowledge_page_snapshot(target)
+    assert snapshot is not None
+    _write_legacy_v1_journal(
+        compile_memory,
+        old_request,
+        [operation],
+        states=["applied"],
+        effects=[
+            {
+                "version": 2,
+                "target": target.name,
+                "before": None,
+                "after": snapshot[1],
+                "retained_artifact": None,
+            }
+        ],
+        status="complete",
+    )
+    existing = "a" * 64
+    state["compile_consumed_evidence"] = [existing]
+    monkeypatch.setattr(compile_memory, "MAX_CONSUMED_EVIDENCE_TOKENS", 1)
+
+    with pytest.raises(ValueError, match="consumed evidence capacity"):
+        compile_memory.prepare_compile_request(
+            [daily], state, prompt_char_budget=30_000
+        )
+
+    assert state["compile_consumed_evidence"] == [existing]
+    assert daily.name not in state.get("compile_legacy_reconciliations", {})
+    assert (
+        state_root
+        / "run"
+        / "compile-manifests"
+        / f"{legacy['generation_id']}.json"
+    ).is_file()
+    assert (
+        state_root
+        / "run"
+        / "compile-journal"
+        / f"{old_request['batch_id']}.json"
+    ).is_file()
+
+
+def test_same_plan_cannot_consume_one_evidence_token_twice(compile_env):
+    compile_memory, root, state_root, state = compile_env
+    quote = "One durable bullet can authorize at most one accepted operation."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-11-02-same-plan-token.md",
+        [_block("12:00:00", quote)],
+    )
+    request = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    )
+
+    result = compile_memory.apply_compile_batch(
+        request,
+        _response(
+            _admission_operation(
+                daily,
+                "same-token-first",
+                quote,
+                summary="The first proposed use of one durable token.",
+            ),
+            _admission_operation(
+                daily,
+                "same-token-second",
+                quote,
+                summary="The second proposed use of one durable token.",
+            ),
+        ),
+        False,
+    )
+
+    _assert_rejected_before_journal(result, request, daily, state_root, state)
+    assert "evidence was already consumed" in result["error"]
+    assert not list((root / "knowledge" / "notes").glob("same-token-*.md"))
+
+
+def test_retired_earlier_batch_reserves_evidence_for_later_batch(
+    compile_env,
+    monkeypatch,
+):
+    compile_memory, root, state_root, state = compile_env
+    monkeypatch.setattr(compile_memory, "MAX_COMPLETED_JOURNALS", 0)
+    quote = "Always reserve exact evidence from earlier accepted batches."
+    blocks = [
+        _project_block(
+            "12:00:00",
+            root,
+            _SYNTHETIC_PROJECT_SLUG,
+            (
+                "**Lessons / patterns**\n"
+                f"- {quote}\n\n"
+                "**Open questions**\n"
+                f"- Can {'a' * 14_000}{index} be retained?"
+            ),
+            synthetic_rule=False,
+        )
+        for index in range(2)
+    ]
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-11-02-later-batch-token.md",
+        blocks,
+    )
+    first = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=24_000
+    )
+    assert first["batch_count"] == 2
+    first_result = compile_memory.apply_compile_batch(
+        first,
+        _response(
+            _admission_operation(
+                daily,
+                "first-batch-token",
+                quote,
+                summary="The first batch reserves its admitted evidence.",
+            )
+        ),
+        False,
+    )
+    assert first_result["ok"] is True
+    assert first_result["daily_complete"] is False
+    with compile_memory._bound_journal_directory(create=False) as bound:
+        name = f"{first['batch_id']}.json"
+        admitted = compile_memory._journal_file_metadata(bound, name)
+        compile_memory._retire_journal_file(bound, name, admitted)
+    assert not (
+        state_root / "run" / "compile-journal" / f"{first['batch_id']}.json"
+    ).exists()
+    assert list(
+        (state_root / "run" / "retired-journals").glob(
+            f"{first['batch_id']}.*.json"
+        )
+    )
+
+    second = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=24_000
+    )
+    result = compile_memory.apply_compile_batch(
+        second,
+        _response(
+            _admission_operation(
+                daily,
+                "later-batch-token",
+                quote,
+                summary="A later batch must not reuse earlier evidence.",
+            )
+        ),
+        False,
+    )
+
+    _assert_rejected_before_journal(result, second, daily, state_root, state)
+    assert "evidence was already consumed" in result["error"]
+
+
+def test_published_evidence_survives_restart_and_rejects_fresh_generation_reuse(
+    compile_env,
+):
+    compile_memory, root, state_root, state = compile_env
+    quote = "Published evidence remains consumed across process restarts."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-11-02-restart-token.md",
+        [_block("12:00:00", quote)],
+    )
+    first = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    )
+    first_operation = _admission_operation(daily, "restart-token-first", quote)
+    assert compile_memory.apply_compile_batch(
+        first,
+        _response(first_operation),
+        False,
+    )["ok"]
+    token = compile_memory._evidence_token(first_operation["evidence"][0])
+    receipt = state["compiled_daily_receipts"][daily.name]
+    assert receipt["consumed_evidence"] == [token]
+    assert state["compile_consumed_evidence"] == [token]
+
+    def force_fresh_generation(current: dict) -> None:
+        for key in (
+            "compiled_daily_hashes",
+            "compiled_daily_receipts",
+            "compile_daily_checkpoints",
+            "compile_generation_active",
+            "compile_sdk_progress",
+            "compile_index_pending",
+        ):
+            current.pop(key, None)
+        current["compile_generation_attempt_ids"] = {daily.name: "f" * 32}
+
+    compile_memory.update_state(force_fresh_generation)
+    restarted_state = compile_memory.load_state()
+    request = compile_memory.prepare_compile_request(
+        [daily], restarted_state, prompt_char_budget=30_000
+    )
+    manifest = compile_memory._load_manifest(request["generation_id"])
+    assert manifest["consumed_evidence"] == [token]
+
+    result = compile_memory.apply_compile_batch(
+        request,
+        _response(
+            _admission_operation(
+                daily,
+                "restart-token-reuse",
+                quote,
+                summary="A fresh generation cannot reuse a published token.",
+            )
+        ),
+        False,
+    )
+    restarted_state.update(compile_memory.load_state())
+
+    _assert_rejected_before_journal(
+        result,
+        request,
+        daily,
+        state_root,
+        restarted_state,
+    )
+    assert "evidence was already consumed" in result["error"]
+
+
+def test_invalid_receipt_boundary_keeps_token_while_exact_journal_replays(
+    compile_env,
+    monkeypatch,
+):
+    compile_memory, root, state_root, state = compile_env
+    quote = "Receipt invalidation never releases accepted evidence for reuse."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-11-02-invalid-receipt-token.md",
+        [_block("12:00:00", quote)],
+    )
+    slug = "invalid-receipt-token"
+    target = root / "knowledge" / "notes" / f"{slug}.md"
+    original = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    )
+    assert compile_memory.apply_compile_batch(
+        original,
+        _response(_admission_operation(daily, slug, quote)),
+        False,
+    )["ok"]
+    token = state["compile_consumed_evidence"][0]
+    target.unlink()
+
+    def reject_substring_scan(*_args, **_kwargs):
+        pytest.fail("journal replay must use exact indexed evidence")
+
+    monkeypatch.setattr(
+        compile_memory,
+        "_substring_positions",
+        reject_substring_scan,
+        raising=False,
+    )
+
+    retry = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    )
+    boundary = state["compile_daily_replay_boundaries"][daily.name]
+    assert boundary["consumed_evidence"] == [token]
+    assert state["compile_consumed_evidence"] == [token]
+
+    replayed = compile_memory.apply_compile_batch(retry, _response(), False)
+
+    assert replayed["ok"] is True, replayed
+    assert target.is_file()
+    assert state["compile_consumed_evidence"] == [token]
+    assert state["compiled_daily_receipts"][daily.name]["consumed_evidence"] == [token]
+    assert (
+        state_root / "run" / "compile-journal" / f"{original['batch_id']}.json"
+    ).is_file()
+
+
+def test_consumed_evidence_capacity_fails_closed_before_journal(
+    compile_env,
+    monkeypatch,
+):
+    compile_memory, root, state_root, state = compile_env
+    monkeypatch.setattr(compile_memory, "MAX_CONSUMED_EVIDENCE_TOKENS", 1)
+    existing = "a" * 64
+    compile_memory.update_state(
+        lambda current: current.update({"compile_consumed_evidence": [existing]})
+    )
+    state.update(compile_memory.load_state())
+    quote = "Evidence capacity exhaustion must fail before durable admission."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-11-02-token-capacity.md",
+        [_block("12:00:00", quote)],
+    )
+    request = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    )
+
+    result = compile_memory.apply_compile_batch(
+        request,
+        _response(_admission_operation(daily, "token-capacity", quote)),
+        False,
+    )
+
+    _assert_rejected_before_journal(result, request, daily, state_root, state)
+    assert "consumed evidence capacity" in result["error"]
+    assert state["compile_consumed_evidence"] == [existing]
+
+
+def test_legacy_recovery_required_is_resolved_without_applying_operation(compile_env):
+    import memory_state
+
+    compile_memory, root, _state_root, state = compile_env
+    quote = "Always restore or discard prepared legacy updates before migration."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-11-01-legacy-recovery.md",
+        [
+            _project_block(
+                "12:00:00",
+                root,
+                _SYNTHETIC_PROJECT_SLUG,
+                f"**Lessons / patterns**\n- {quote}",
+            )
+        ],
+    )
+    target = root / "knowledge" / "notes" / "legacy-recovery.md"
+    _write_note(target, "Legacy Recovery", "The original bytes remain authoritative.")
+    target_snapshot = compile_memory._read_knowledge_page_snapshot(target)
+    assert target_snapshot is not None
+    legacy = _legacy_v2_manifest(compile_memory, daily)
+    old_request = _activate_legacy_manifest(compile_memory, state, daily, legacy)
+    operation = _legacy_accepted_operation(
+        daily,
+        target.stem,
+        quote,
+        root,
+        action="update",
+        expected_target=target_snapshot[1],
+    )
+    marker = compile_memory._operation_marker(old_request, 0, operation)
+    fingerprint = compile_memory._operation_replay_fingerprint(operation)
+    replacement = compile_memory._render_operation_result(
+        operation,
+        target_snapshot[0],
+        marker,
+        fingerprint,
+    )
+    with memory_state.bind_atomic_writes_to_directory(target.parent):
+        recovery = memory_state.prepare_conditional_atomic_write(
+            target,
+            replacement,
+            target_snapshot[1],
+            fingerprint,
+        )
+    _write_legacy_v1_journal(
+        compile_memory,
+        old_request,
+        [operation],
+        recoveries=[recovery],
+        status="recovery_required",
+    )
+    before = target.read_bytes()
+
+    request = compile_memory.prepare_compile_request(
+        [daily], state, prompt_char_budget=30_000
+    )
+
+    assert request["pending"] is True
+    assert request["generation_id"] != legacy["generation_id"]
+    assert target.read_bytes() == before
+    assert marker.encode("ascii") not in before
+
+
+def test_legacy_readers_reject_rehashed_version_specific_field_drift(compile_env):
+    compile_memory, root, _state_root, state = compile_env
+    quote = "Always validate exact legacy fields after checking their hashes."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-11-01-legacy-fields.md",
+        [_block("12:00:00", quote)],
+    )
+    legacy = _legacy_v2_manifest(compile_memory, daily)
+    request = _activate_legacy_manifest(compile_memory, state, daily, legacy)
+    operation = _legacy_accepted_operation(daily, "legacy-fields", quote, root)
+    journal = _write_legacy_v1_journal(
+        compile_memory,
+        request,
+        [operation],
+    )
+
+    manifest_path = compile_memory._manifest_path(legacy["generation_id"])
+    manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_data["unexpected"] = True
+    manifest_data["manifest_sha256"] = compile_memory._manifest_digest(manifest_data)
+    manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
+    journal_path = compile_memory._journal_path(request["batch_id"])
+    journal["unexpected"] = True
+    journal["journal_sha256"] = compile_memory._journal_digest(journal)
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+    with pytest.raises(compile_memory.CompileManifestError, match="fields are invalid"):
+        compile_memory._load_manifest(legacy["generation_id"])
+    with pytest.raises(ValueError, match="fields are invalid"):
+        compile_memory._load_journal(request["batch_id"])
+
+
+def _apply_nested_journal_drift(journal: dict, drift: str) -> None:
+    operation = journal["accepted"]["operations"][0]
+    if drift == "operation-extra":
+        operation["unexpected"] = True
+    elif drift == "operation-type":
+        operation["title"] = False
+    elif drift == "evidence-extra":
+        operation["evidence"][0]["unexpected"] = True
+    elif drift == "evidence-type":
+        operation["evidence"][0]["claim"] = False
+    elif drift == "audit-extra":
+        journal["accepted"]["audit"]["unexpected"] = True
+    elif drift == "audit-type":
+        journal["accepted"]["audit"]["verified"] = False
+    elif drift == "source-extra":
+        journal["accepted"]["source"][0]["unexpected"] = True
+    elif drift == "source-type":
+        journal["accepted"]["source"][0]["path"] = False
+    elif drift in {"recovery-extra", "recovery-type"}:
+        journal["operation_states"] = ["pending"]
+        journal["operation_effects"] = [None]
+        journal["operation_recovery"] = [
+            {
+                "version": 1,
+                "kind": "unresolved",
+                "status": "required",
+                "owned_paths": [],
+            }
+        ]
+        journal["status"] = "recovery_required"
+        if drift == "recovery-extra":
+            journal["operation_recovery"][0]["unexpected"] = True
+        else:
+            journal["operation_recovery"][0]["owned_paths"] = False
+    elif drift == "effect-extra":
+        journal["operation_effects"][0]["unexpected"] = True
+    elif drift == "effect-type":
+        journal["operation_effects"][0]["target"] = False
+    else:
+        raise AssertionError(f"unknown journal drift case: {drift}")
+
+
+@pytest.mark.parametrize("journal_version", (1, 2), ids=("shipped-v1", "current-v2"))
+def test_rehashed_journal_rejects_nested_key_and_type_drift(
+    compile_env,
+    journal_version,
+):
+    compile_memory, root, _state_root, state = compile_env
+    if journal_version == 1:
+        baseline = _install_golden_v1_scoped_update(
+            compile_memory,
+            root,
+            state,
+        )["journal"]
+    else:
+        quote = "Always reject rehashed nested journal schema drift before recovery."
+        daily = _daily(
+            root / "knowledge" / "daily" / "2026-11-01-journal-nested.md",
+            [
+                _project_block(
+                    "12:00:00",
+                    root,
+                    _SYNTHETIC_PROJECT_SLUG,
+                    f"**Lessons / patterns**\n- {quote}",
+                )
+            ],
+        )
+        request = compile_memory.prepare_compile_request(
+            [daily],
+            state,
+            prompt_char_budget=30_000,
+        )
+        result = compile_memory.apply_compile_batch(
+            request,
+            _response(_admission_operation(daily, "journal-nested", quote)),
+            False,
+        )
+        assert result["ok"] is True
+        baseline = compile_memory._load_journal(request["batch_id"])
+        assert baseline is not None
+
+    drift_cases = (
+        "operation-extra",
+        "operation-type",
+        "evidence-extra",
+        "evidence-type",
+        "audit-extra",
+        "audit-type",
+        "source-extra",
+        "source-type",
+        "recovery-extra",
+        "recovery-type",
+        "effect-extra",
+        "effect-type",
+    )
+    admitted = []
+    for drift in drift_cases:
+        journal = json.loads(json.dumps(baseline))
+        _apply_nested_journal_drift(journal, drift)
+        journal["accepted_sha256"] = compile_memory._canonical_digest(
+            journal["accepted"]
+        )
+        journal["journal_sha256"] = compile_memory._journal_digest(journal)
+        compile_memory._journal_path(journal["batch_id"]).write_text(
+            json.dumps(journal, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        try:
+            compile_memory._load_journal(journal["batch_id"])
+        except ValueError:
+            continue
+        admitted.append(drift)
+
+    assert admitted == [], f"rehashed nested drift was admitted: {admitted}"
+
+
+def test_shipped_v1_journal_accepts_rollback_with_unavailable_restore_snapshot(
+    compile_env,
+):
+    compile_memory, root, _state_root, state = compile_env
+    installed = _install_golden_v1_scoped_update(
+        compile_memory,
+        root,
+        state,
+    )
+    journal = installed["journal"]
+    target = installed["target"]
+    token = "b" * 32
+    journal["operation_states"] = ["pending"]
+    journal["operation_recovery"] = [
+        {
+            "version": 1,
+            "kind": "rollback",
+            "status": "required",
+            "target": target.name,
+            "token": token,
+            "displaced_path": f".{target.name}.{token}.displaced",
+            "rollback_backup_path": f".{target.name}.{token}.rejected",
+            "attempted": installed["after"],
+            "restore": None,
+            "attempted_artifact_path": None,
+            "owned_paths": [],
+        }
+    ]
+    journal["operation_effects"] = [None]
+    journal["status"] = "recovery_required"
+    compile_memory._write_journal(journal)
+
+    assert compile_memory._load_journal(journal["batch_id"]) == journal
+
+
+@pytest.mark.parametrize("entrypoint", ("sdk-prepare", "direct"))
+def test_production_resume_entrypoints_migrate_legacy_index_pending_before_current_match(
+    compile_env,
+    monkeypatch,
+    entrypoint,
+):
+    compile_memory, root, _state_root, state = compile_env
+    installed = _install_golden_v1_scoped_update(compile_memory, root, state)
+    journal = installed["journal"]
+    manifest = installed["manifest"]
+    journal["status"] = "index_pending"
+    compile_memory._write_journal(journal)
+    state["compile_index_pending"] = {
+        "batch_id": journal["batch_id"],
+        "daily": installed["daily"].name,
+        "sha256": manifest["daily"]["sha256"],
+        "generation_id": manifest["generation_id"],
+    }
+    current_match_calls = []
+    observed_states = []
+    monkeypatch.setattr(
+        compile_memory,
+        "_journal_matches_manifest",
+        lambda *_args, **_kwargs: current_match_calls.append(1) or False,
+    )
+
+    if entrypoint == "sdk-prepare":
+        monkeypatch.setattr(
+            compile_memory,
+            "select_dailies",
+            lambda _args, _state: [],
+        )
+
+        def prepare_after_resume(_paths, current, *, prompt_char_budget):
+            del prompt_char_budget
+            observed_states.append(json.loads(json.dumps(current)))
+            return {"pending": False}
+
+        monkeypatch.setattr(
+            compile_memory,
+            "prepare_compile_request",
+            prepare_after_resume,
+        )
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["compile_memory.py", "--prepare-sdk-request"],
+        )
+    else:
+        def run_after_resume(_args):
+            observed_states.append(compile_memory.load_state())
+            return 0
+
+        monkeypatch.setattr(compile_memory, "_run", run_after_resume)
+        monkeypatch.setattr(sys, "argv", ["compile_memory.py"])
+
+    assert compile_memory.main() == 0
+
+    assert current_match_calls == []
+    assert observed_states
+    assert "compile_index_pending" not in observed_states[0]
+    reconciliation = observed_states[0]["compile_legacy_reconciliations"][
+        installed["daily"].name
+    ]
+    assert reconciliation["journal_ids"] == [journal["batch_id"]]
+    assert reconciliation["effects"][0]["marker"] == installed["marker"]
+
+
+@pytest.mark.parametrize("effect_recorded", (False, True), ids=("before-effect", "after-effect"))
+def test_legacy_migration_repairs_marker_complete_create_write_windows(
+    compile_env,
+    effect_recorded,
+):
+    compile_memory, root, _state_root, state = compile_env
+    quote = "Always retain a marker-complete legacy create across migration."
+    daily = _daily(
+        root / "knowledge" / "daily" / f"2026-11-05-create-{effect_recorded}.md",
+        [
+            _project_block(
+                "12:00:00",
+                root,
+                _SYNTHETIC_PROJECT_SLUG,
+                f"**Lessons / patterns**\n- {quote}",
+                synthetic_rule=False,
+            )
+        ],
+    )
+    legacy = _legacy_v2_manifest(compile_memory, daily)
+    old_request = _activate_legacy_manifest(compile_memory, state, daily, legacy)
+    operation = _shipped_v1_operation(daily, "legacy-create-window", quote)
+    marker = compile_memory._operation_marker(old_request, 0, operation)
+    fingerprint = compile_memory._operation_replay_fingerprint(operation)
+    target = root / "knowledge" / "notes" / "legacy-create-window.md"
+    target.write_text(
+        _render_shipped_v1_create(
+            compile_memory,
+            operation,
+            marker,
+            fingerprint,
+        ),
+        encoding="utf-8",
+    )
+    snapshot = compile_memory._read_knowledge_page_snapshot(target)
+    assert snapshot is not None
+    effect = {
+        "version": 2,
+        "target": target.name,
+        "before": None,
+        "after": snapshot[1],
+        "retained_artifact": None,
+    }
+    _write_legacy_v1_journal(
+        compile_memory,
+        old_request,
+        [operation],
+        states=["pending"],
+        effects=[effect if effect_recorded else None],
+        status="applying",
+    )
+    target_before = target.read_bytes()
+
+    request = compile_memory.prepare_compile_request(
+        [daily],
+        state,
+        prompt_char_budget=30_000,
+    )
+    replacement = compile_memory._load_manifest(request["generation_id"])
+    [reconciled] = replacement["legacy_reconciliation"]["effects"]
+    retired = compile_memory._load_journal(old_request["batch_id"])
+
+    assert target.read_bytes() == target_before
+    assert target.read_text(encoding="utf-8").count(marker) == 1
+    assert reconciled["target"] == target.name
+    assert reconciled["after"] == snapshot[1]
+    assert retired["operation_states"] == ["applied"]
+    assert retired["operation_effects"] == [effect]
+    assert state["compile_consumed_evidence"] == [
+        compile_memory._evidence_wildcard_token(operation["evidence"][0])
+    ]
+
+
+def test_legacy_migration_repairs_cleanup_pending_update_after_effect_record(
+    compile_env,
+):
+    compile_memory, root, _state_root, state = compile_env
+    quote = "Always finish a recorded legacy update effect before migration."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-11-05-update-effect.md",
+        [
+            _project_block(
+                "12:00:00",
+                root,
+                _SYNTHETIC_PROJECT_SLUG,
+                f"**Lessons / patterns**\n- {quote}",
+                synthetic_rule=False,
+            )
+        ],
+    )
+    target = root / "knowledge" / "notes" / "legacy-update-window.md"
+    _write_note(
+        target,
+        "Legacy Update Window",
+        "The original target is durable before the update.",
+        project_slug=_SYNTHETIC_PROJECT_SLUG,
+        project_root=root,
+    )
+    before = compile_memory._read_knowledge_page_snapshot(target)
+    assert before is not None
+    legacy = _legacy_v2_manifest(compile_memory, daily)
+    old_request = _activate_legacy_manifest(compile_memory, state, daily, legacy)
+    operation = _legacy_accepted_operation(
+        daily,
+        target.stem,
+        quote,
+        root,
+        action="update",
+        expected_target=before[1],
+    )
+    journal = _write_legacy_v1_journal(
+        compile_memory,
+        old_request,
+        [operation],
+        status="applying",
+    )
+    marker = compile_memory._operation_marker(old_request, 0, operation)
+    fingerprint = compile_memory._operation_replay_fingerprint(operation)
+    replacement_content = compile_memory._render_operation_result(
+        operation,
+        before[0],
+        marker,
+        fingerprint,
+    )
+    with compile_memory.bind_atomic_writes_to_directory(target.parent):
+        recovery = compile_memory.prepare_conditional_atomic_write(
+            target,
+            replacement_content,
+            before[1],
+            fingerprint,
+        )
+        journal["operation_recovery"][0] = recovery
+        compile_memory._write_journal(journal)
+        compile_memory.conditional_atomic_write(
+            target,
+            recovery,
+            persist_recovery=lambda _recovery: compile_memory._write_journal(journal),
+        )
+        journal["operation_states"][0] = "cleanup_pending"
+        recovery["status"] = "cleanup_pending"
+        compile_memory._write_journal(journal)
+        compile_memory.finalize_conditional_atomic_write(
+            target,
+            recovery,
+            persist_recovery=lambda _recovery: compile_memory._write_journal(journal),
+        )
+        compile_memory._record_operation_effect(journal, 0)
+    crash_effect = json.loads(json.dumps(journal["operation_effects"][0]))
+    target_before = target.read_bytes()
+    assert journal["operation_states"] == ["cleanup_pending"]
+
+    request = compile_memory.prepare_compile_request(
+        [daily],
+        state,
+        prompt_char_budget=30_000,
+    )
+    replacement = compile_memory._load_manifest(request["generation_id"])
+    [reconciled] = replacement["legacy_reconciliation"]["effects"]
+    retired = compile_memory._load_journal(old_request["batch_id"])
+
+    assert target.read_bytes() == target_before
+    assert target.read_text(encoding="utf-8").count(marker) == 1
+    assert reconciled["after"] == crash_effect["after"]
+    assert retired["operation_states"] == ["applied"]
+    assert retired["operation_recovery"] == [None]
+    assert retired["operation_effects"] == [crash_effect]
+
+
+def test_v1_receipt_boundary_recovers_legacy_timestamp_provenance(
+    compile_env,
+):
+    compile_memory, root, _state_root, state = compile_env
+    installed = _install_golden_v1_scoped_update(compile_memory, root, state)
+    journal = installed["journal"]
+    target = installed["target"]
+    receipt = {
+        "version": 1,
+        "daily_sha256": installed["manifest"]["daily"]["sha256"],
+        "generation_id": installed["manifest"]["generation_id"],
+        "journal_ids": [journal["batch_id"]],
+        "effects": [
+            {
+                "journal_id": journal["batch_id"],
+                "operation_index": 0,
+                "target": target.name,
+                "after": installed["after"],
+                "marker": installed["marker"],
+                "fingerprint": installed["fingerprint"],
+            }
+        ],
+        "targets": [{"target": target.name, "current": installed["after"]}],
+        "index": {
+            "generation_id": installed["manifest"]["generation_id"],
+            "entries": [f"knowledge/notes/{target.stem}"],
+        },
+    }
+
+    boundary = compile_memory._receipt_replay_boundary(
+        receipt,
+        installed["manifest"]["daily"]["sha256"],
+    )
+
+    [evidence] = journal["accepted"]["operations"][0]["evidence"]
+    assert boundary["consumed_evidence"] == [
+        compile_memory._evidence_wildcard_token(evidence)
+    ]
+
+    compile_memory._journal_path(journal["batch_id"]).unlink()
+    with pytest.raises(
+        compile_memory.CompilePreparationError,
+        match="v1 receipt evidence reconstruction failed",
+    ):
+        compile_memory._receipt_replay_boundary(
+            receipt,
+            installed["manifest"]["daily"]["sha256"],
+        )
+
+
+def test_v1_receipt_restart_preserves_exact_current_evidence_through_replay(
+    compile_env,
+):
+    compile_memory, root, _state_root, state = compile_env
+    quote = "A v1 receipt restart must retain exact current evidence provenance."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-11-06-v1-receipt.md",
+        [_block("12:00:00", quote)],
+    )
+    operation = _admission_operation(daily, "v1-receipt-restart", quote)
+    original = compile_memory.prepare_compile_request(
+        [daily],
+        state,
+        prompt_char_budget=30_000,
+    )
+    assert compile_memory.apply_compile_batch(
+        original,
+        _response(operation),
+        False,
+    )["ok"]
+    token = compile_memory._evidence_token(operation["evidence"][0])
+    old_receipt = json.loads(json.dumps(state["compiled_daily_receipts"][daily.name]))
+    old_receipt["version"] = 1
+    old_receipt.pop("consumed_evidence")
+    old_receipt.pop("generation_lineage")
+    for effect in old_receipt["effects"]:
+        effect.pop("project_slug", None)
+        effect.pop("project_root", None)
+    state["compiled_daily_receipts"][daily.name] = old_receipt
+    state.pop("compile_consumed_evidence")
+    target = root / "knowledge" / "notes" / "v1-receipt-restart.md"
+    target.unlink()
+    restarted = compile_memory.load_state()
+
+    retry = compile_memory.prepare_compile_request(
+        [daily],
+        restarted,
+        prompt_char_budget=30_000,
+    )
+
+    boundary = state["compile_daily_replay_boundaries"][daily.name]
+    assert boundary["consumed_evidence"] == [token]
+    replayed = compile_memory.apply_compile_batch(retry, _response(), False)
+    assert replayed["ok"] is True, replayed
+    assert target.is_file()
+    assert state["compile_consumed_evidence"] == [token]
+    assert state["compiled_daily_receipts"][daily.name]["consumed_evidence"] == [token]
+
+
+def test_shipped_v2_index_pending_completion_binds_generation_lineage(
+    compile_env,
+):
+    import memory_state
+
+    compile_memory, root, _state_root, state = compile_env
+    fixture_path = Path(__file__).parent / "fixtures" / "compile-v2-93be6b8.json"
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    assert fixture["provenance"]["commit"] == "93be6b8"
+    manifest = fixture["manifest"]
+    journal = fixture["journal"]
+    daily = root / manifest["daily"]["path"]
+    daily.write_bytes(fixture["source_utf8"].encode("utf-8"))
+    compile_memory._write_new_manifest(manifest)
+    compile_memory._write_journal(journal)
+    state["compile_generation_active"] = {
+        daily.name: {
+            "generation_id": manifest["generation_id"],
+            "source_sha256": manifest["daily"]["sha256"],
+        }
+    }
+    state["compile_index_pending"] = {
+        "batch_id": journal["batch_id"],
+        "daily": daily.name,
+        "sha256": manifest["daily"]["sha256"],
+        "generation_id": manifest["generation_id"],
+    }
+
+    resumed = compile_memory._resume_pending_index_if_any()
+
+    assert resumed == {
+        "ok": True,
+        "status": "legacy_migrated",
+        "daily_complete": False,
+    }
+    reconciliation = state["compile_legacy_reconciliations"][daily.name]
+    assert reconciliation["generation_lineage"] == [manifest["generation_id"]]
+
+    assert compile_memory.prepare_compile_request(
+        [daily],
+        state,
+        prompt_char_budget=30_000,
+    ) == {"pending": False}
+
+    receipt = state["compiled_daily_receipts"][daily.name]
+    replacement = compile_memory._load_manifest(receipt["generation_id"])
+    assert replacement["version"] == 3
+    assert replacement["generation_id"] != manifest["generation_id"]
+    assert replacement["legacy_reconciliation"]["generation_lineage"] == [
+        manifest["generation_id"]
+    ]
+    assert receipt["generation_lineage"] == [manifest["generation_id"]]
+    assert memory_state.is_compile_receipt_valid(
+        receipt,
+        daily.name,
+        manifest["daily"]["sha256"],
+        root=root,
+    )
+
+
+def test_v3_generation_identity_binds_exact_predecessor_lineage(compile_env):
+    compile_memory, root, _state_root, _state = compile_env
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-11-07-lineage-identity.md",
+        [_block("12:00:00", "Generation lineage must remain part of immutable identity.")],
+    )
+    source_bytes, source_text = compile_memory._read_daily_snapshot(daily)
+    context = compile_memory._compile_context_snapshot(30_000)
+    no_lineage = compile_memory._empty_legacy_reconciliation()
+    predecessor = hashlib.sha256(b"shipped-v2-generation").hexdigest()
+    linked = {
+        **no_lineage,
+        "generation_lineage": [predecessor],
+    }
+
+    baseline = compile_memory._derive_manifest(
+        daily,
+        source_text,
+        30_000,
+        context,
+        None,
+        source_bytes=source_bytes,
+        legacy_reconciliation=no_lineage,
+    )
+    migrated = compile_memory._derive_manifest(
+        daily,
+        source_text,
+        30_000,
+        context,
+        None,
+        source_bytes=source_bytes,
+        legacy_reconciliation=linked,
+    )
+
+    assert no_lineage["generation_lineage"] == []
+    assert compile_memory._validate_manifest_legacy_reconciliation(linked) == linked
+    assert baseline["generation_id"] != migrated["generation_id"]
+
+
+@pytest.mark.parametrize(
+    "lineage",
+    (
+        "not-an-array",
+        [{}],
+        ["z" * 64],
+        ["a" * 64, "a" * 64],
+        [hashlib.sha256(f"lineage-{index}".encode()).hexdigest() for index in range(17)],
+    ),
+    ids=("wrong-type", "unhashable", "bad-digest", "duplicate", "over-capacity"),
+)
+def test_legacy_reconciliation_rejects_malformed_generation_lineage(
+    compile_env,
+    lineage,
+):
+    compile_memory, _root, _state_root, _state = compile_env
+    reconciliation = {
+        "version": 1,
+        "generation_lineage": lineage,
+        "predecessor_journal_ids": [],
+        "journal_ids": [],
+        "effects": [],
+        "consumed_evidence": [],
+    }
+
+    with pytest.raises(ValueError):
+        compile_memory._validate_manifest_legacy_reconciliation(reconciliation)
+
+
+def _replay_lineage_records(compile_memory):
+    predecessor = hashlib.sha256(b"predecessor-generation").hexdigest()
+    current = hashlib.sha256(b"current-generation").hexdigest()
+    predecessor_journal = hashlib.sha256(b"predecessor-journal").hexdigest()
+    current_journal = hashlib.sha256(b"current-journal").hexdigest()
+    daily_sha256 = hashlib.sha256(b"daily-source").hexdigest()
+    boundary = {
+        "version": 1,
+        "daily_sha256": daily_sha256,
+        "generation_id": predecessor,
+        "journal_ids": [predecessor_journal],
+        "effects": [],
+        "consumed_evidence": [],
+        "requires_nonempty": False,
+    }
+    manifest = {
+        "generation_id": current,
+        "batch_ids": [current_journal],
+        "legacy_reconciliation": {
+            "version": 1,
+            "generation_lineage": [predecessor],
+            "predecessor_journal_ids": [predecessor_journal],
+            "journal_ids": [],
+            "effects": [],
+            "consumed_evidence": [],
+        },
+    }
+    receipt = {
+        "daily_sha256": daily_sha256,
+        "generation_id": current,
+        "generation_lineage": [predecessor],
+        "journal_ids": [predecessor_journal, current_journal],
+        "effects": [],
+        "consumed_evidence": [],
+    }
+    return boundary, receipt, manifest, daily_sha256
+
+
+def test_replay_boundary_accepts_cryptographically_linked_predecessor(
+    compile_env,
+):
+    compile_memory, _root, _state_root, _state = compile_env
+    boundary, receipt, manifest, daily_sha256 = _replay_lineage_records(
+        compile_memory
+    )
+
+    assert compile_memory._replay_boundary_satisfied(
+        boundary,
+        receipt,
+        daily_sha256,
+        manifest,
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("receipt-only", "manifest-only", "different-predecessor", "current-mismatch"),
+)
+def test_replay_boundary_rejects_unlinked_generation_claims(
+    compile_env,
+    mutation,
+):
+    compile_memory, _root, _state_root, _state = compile_env
+    boundary, receipt, manifest, daily_sha256 = _replay_lineage_records(
+        compile_memory
+    )
+    if mutation == "receipt-only":
+        manifest["legacy_reconciliation"]["generation_lineage"] = []
+    elif mutation == "manifest-only":
+        receipt["generation_lineage"] = []
+    elif mutation == "different-predecessor":
+        different = hashlib.sha256(b"different-predecessor").hexdigest()
+        manifest["legacy_reconciliation"]["generation_lineage"] = [different]
+        receipt["generation_lineage"] = [different]
+    else:
+        receipt["generation_id"] = hashlib.sha256(b"different-current").hexdigest()
+
+    assert not compile_memory._replay_boundary_satisfied(
+        boundary,
+        receipt,
+        daily_sha256,
+        manifest,
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "manifest-omits-predecessor",
+        "receipt-omits-predecessor",
+        "receipt-has-extra",
+        "boundary-has-extra",
+    ),
+)
+def test_replay_boundary_rejects_inexact_predecessor_journal_union(
+    compile_env,
+    mutation,
+):
+    compile_memory, _root, _state_root, _state = compile_env
+    boundary, receipt, manifest, daily_sha256 = _replay_lineage_records(
+        compile_memory
+    )
+    if mutation == "manifest-omits-predecessor":
+        manifest["legacy_reconciliation"]["predecessor_journal_ids"] = []
+    elif mutation == "receipt-omits-predecessor":
+        receipt["journal_ids"] = list(manifest["batch_ids"])
+    elif mutation == "receipt-has-extra":
+        receipt["journal_ids"].append(hashlib.sha256(b"extra-journal").hexdigest())
+    else:
+        boundary["generation_id"] = manifest["generation_id"]
+        boundary["journal_ids"].append(hashlib.sha256(b"extra-journal").hexdigest())
+
+    assert not compile_memory._replay_boundary_satisfied(
+        boundary,
+        receipt,
+        daily_sha256,
+        manifest,
+    )
+
+
+def _install_v1_receipt_reconstruction_case(compile_env):
+    import memory_state
+
+    compile_memory, root, state_root, state = compile_env
+    quote = "A v1 receipt must reconstruct evidence before replay can begin."
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-11-08-v1-reconstruction.md",
+        [
+            _project_block(
+                "12:00:00",
+                root,
+                _SYNTHETIC_PROJECT_SLUG,
+                f"**Lessons / patterns**\n- {quote}",
+                synthetic_rule=False,
+            )
+        ],
+    )
+    manifest = _legacy_v2_manifest(compile_memory, daily)
+    request = _activate_legacy_manifest(compile_memory, state, daily, manifest)
+    operation = _shipped_v1_operation(
+        daily,
+        "v1-reconstruction-target",
+        quote,
+    )
+    marker = compile_memory._operation_marker(request, 0, operation)
+    fingerprint = compile_memory._operation_replay_fingerprint(operation)
+    target = root / "knowledge" / "notes" / "v1-reconstruction-target.md"
+    target.write_text(
+        _render_shipped_v1_create(
+            compile_memory,
+            operation,
+            marker,
+            fingerprint,
+        ),
+        encoding="utf-8",
+    )
+    snapshot = compile_memory._read_knowledge_page_snapshot(target)
+    assert snapshot is not None
+    journal = _write_legacy_v1_journal(
+        compile_memory,
+        request,
+        [operation],
+        states=["applied"],
+        effects=[
+            {
+                "version": 2,
+                "target": target.name,
+                "before": None,
+                "after": snapshot[1],
+                "retained_artifact": None,
+            }
+        ],
+        status="complete",
+    )
+    sentinel = root / "knowledge" / "notes" / "v1-reconstruction-sentinel.md"
+    _write_note(
+        sentinel,
+        "V1 Reconstruction Sentinel",
+        "Preparation failures must leave this note byte-exact.",
+    )
+    _rebuild_test_index(compile_memory)
+    receipt = {
+        "version": 1,
+        "daily_sha256": manifest["daily"]["sha256"],
+        "generation_id": manifest["generation_id"],
+        "journal_ids": [journal["batch_id"]],
+        "effects": [
+            {
+                "journal_id": journal["batch_id"],
+                "operation_index": 0,
+                "target": target.name,
+                "after": snapshot[1],
+                "marker": marker,
+                "fingerprint": fingerprint,
+            }
+        ],
+        "targets": [{"target": target.name, "current": snapshot[1]}],
+        "index": {
+            "generation_id": manifest["generation_id"],
+            "entries": [f"knowledge/notes/{target.stem}"],
+        },
+    }
+    assert memory_state.is_compile_receipt_valid(
+        receipt,
+        daily.name,
+        manifest["daily"]["sha256"],
+        root=root,
+    )
+    state.pop("compile_generation_active")
+    state["compiled_daily_hashes"] = {
+        daily.name: manifest["daily"]["sha256"]
+    }
+    state["compiled_daily_receipts"] = {daily.name: receipt}
+    return {
+        "compile_memory": compile_memory,
+        "root": root,
+        "state_root": state_root,
+        "state": state,
+        "daily": daily,
+        "target": target,
+        "sentinel": sentinel,
+        "journal": journal,
+    }
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ("missing", "inconsistent", "unreadable"),
+)
+def test_v1_receipt_reconstruction_failure_precedes_every_mutation(
+    compile_env,
+    monkeypatch,
+    failure,
+):
+    installed = _install_v1_receipt_reconstruction_case(compile_env)
+    compile_memory = installed["compile_memory"]
+    journal = installed["journal"]
+    journal_path = compile_memory._journal_path(journal["batch_id"])
+    if failure == "missing":
+        journal_path.unlink()
+    elif failure == "inconsistent":
+        journal["accepted"]["operations"][0]["summary"] = (
+            "A changed operation cannot authenticate the old receipt marker."
+        )
+        journal["accepted_sha256"] = compile_memory._canonical_digest(
+            journal["accepted"]
+        )
+        compile_memory._write_journal(journal)
+    else:
+        real_load_journal = compile_memory._load_journal
+
+        def unreadable_journal(journal_id, *args, **kwargs):
+            if journal_id == journal["batch_id"]:
+                raise OSError("injected v1 journal read failure")
+            return real_load_journal(journal_id, *args, **kwargs)
+
+        monkeypatch.setattr(compile_memory, "_load_journal", unreadable_journal)
+
+    installed["target"].unlink()
+    with compile_memory._global_compile_lock(
+        timeout=compile_memory.COMPILE_LOCK_TIMEOUT_SECONDS
+    ):
+        pass
+    state_before = json.loads(json.dumps(installed["state"]))
+    runtime_before = {
+        path.relative_to(installed["state_root"]).as_posix(): path.read_bytes()
+        for path in installed["state_root"].rglob("*")
+        if path.is_file()
+    }
+    sentinel_before = installed["sentinel"].read_bytes()
+    index_before = compile_memory.INDEX.read_bytes()
+
+    def reject_operation(*_args, **_kwargs):
+        pytest.fail("v1 evidence failure must precede note operations")
+
+    def reject_index():
+        pytest.fail("v1 evidence failure must precede index rebuilding")
+
+    monkeypatch.setattr(compile_memory, "_execute_plan", reject_operation)
+    monkeypatch.setattr(compile_memory, "rebuild_index", reject_index)
+
+    with pytest.raises(
+        compile_memory.CompilePreparationError,
+        match="v1 receipt evidence reconstruction failed",
+    ):
+        compile_memory.prepare_compile_request(
+            [installed["daily"]],
+            installed["state"],
+            prompt_char_budget=30_000,
+        )
+
+    runtime_after = {
+        path.relative_to(installed["state_root"]).as_posix(): path.read_bytes()
+        for path in installed["state_root"].rglob("*")
+        if path.is_file()
+    }
+    assert installed["state"] == state_before
+    assert runtime_after == runtime_before
+    assert installed["sentinel"].read_bytes() == sentinel_before
+    assert compile_memory.INDEX.read_bytes() == index_before
+    assert not installed["target"].exists()
+
+
+def test_v1_receipt_migration_retains_effectful_and_effectless_journal_provenance(
+    compile_env,
+):
+    import memory_state
+
+    compile_memory, root, _state_root, state = compile_env
+    effect_quote = (
+        "Effectful predecessor journals must retain their exact effect. "
+        + "effect provenance " * 100
+    ).strip()
+    empty_quote = (
+        "Effectless predecessor journals must retain provenance without effects. "
+        + "empty provenance " * 100
+    ).strip()
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-11-09-mixed-v1-journals.md",
+        [
+            _block("12:00:00", effect_quote),
+            _block("12:01:00", empty_quote),
+        ],
+    )
+    source_bytes, source_text = compile_memory._read_daily_snapshot(daily)
+    source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    legacy_blocks = compile_memory._extract_legacy_manifest_blocks(source_text)
+    context = compile_memory._compile_context_snapshot(30_000)
+    single_batch_costs = []
+    for block in legacy_blocks:
+        request = compile_memory.build_compile_request(
+            [daily],
+            daily_blocks=[block],
+            prompt_char_budget=1_000_000,
+            context_snapshot=context,
+            daily_sha256=source_sha256,
+        )
+        single_batch_costs.append(len(request["prompt"]) + len(request["system_prompt"]))
+    budget = max(single_batch_costs) + 512
+    manifest = compile_memory._derive_manifest_v2(
+        daily,
+        source_text,
+        budget,
+        context,
+        None,
+        source_bytes=source_bytes,
+        source_sha256=source_sha256,
+    )
+    assert len(manifest["batch_ids"]) == 2
+    compile_memory._write_new_manifest(manifest)
+    effectful_id, effectless_id = manifest["batch_ids"]
+    effectful_request = compile_memory._request_from_manifest(manifest, effectful_id)
+    effectless_request = compile_memory._request_from_manifest(manifest, effectless_id)
+
+    operation = _shipped_v1_operation(
+        daily,
+        "mixed-v1-journal-provenance",
+        effect_quote,
+    )
+    marker = compile_memory._operation_marker(effectful_request, 0, operation)
+    fingerprint = compile_memory._operation_replay_fingerprint(operation)
+    target = root / "knowledge" / "notes" / "mixed-v1-journal-provenance.md"
+    target.write_text(
+        _render_shipped_v1_create(
+            compile_memory,
+            operation,
+            marker,
+            fingerprint,
+        ),
+        encoding="utf-8",
+    )
+    snapshot = compile_memory._read_knowledge_page_snapshot(target)
+    assert snapshot is not None
+    _write_legacy_v1_journal(
+        compile_memory,
+        effectful_request,
+        [operation],
+        states=["applied"],
+        effects=[
+            {
+                "version": 2,
+                "target": target.name,
+                "before": None,
+                "after": snapshot[1],
+                "retained_artifact": None,
+            }
+        ],
+        status="complete",
+    )
+    _write_legacy_v1_journal(
+        compile_memory,
+        effectless_request,
+        [],
+        states=[],
+        effects=[],
+        status="complete",
+    )
+    _rebuild_test_index(compile_memory)
+    receipt = {
+        "version": 1,
+        "daily_sha256": source_sha256,
+        "generation_id": manifest["generation_id"],
+        "journal_ids": [effectful_id, effectless_id],
+        "effects": [
+            {
+                "journal_id": effectful_id,
+                "operation_index": 0,
+                "target": target.name,
+                "after": snapshot[1],
+                "marker": marker,
+                "fingerprint": fingerprint,
+            }
+        ],
+        "targets": [{"target": target.name, "current": snapshot[1]}],
+        "index": {
+            "generation_id": manifest["generation_id"],
+            "entries": [f"knowledge/notes/{target.stem}"],
+        },
+    }
+    assert memory_state.is_compile_receipt_valid(
+        receipt,
+        daily.name,
+        source_sha256,
+        root=root,
+    )
+    state["compiled_daily_hashes"] = {daily.name: source_sha256}
+    state["compiled_daily_receipts"] = {daily.name: receipt}
+    compile_memory.INDEX.write_text("# Memory Index\n", encoding="utf-8")
+
+    current_batch_ids = []
+    for _ in range(10):
+        request = compile_memory.prepare_compile_request(
+            [daily],
+            state,
+            prompt_char_budget=budget,
+        )
+        assert request["pending"] is True
+        current_batch_ids = request["batch_ids"]
+        result = compile_memory.apply_compile_batch(request, _response(), False)
+        assert result["ok"] is True, result
+        if result["daily_complete"]:
+            break
+    else:
+        pytest.fail("replacement v3 generation did not complete")
+
+    final_receipt = state["compiled_daily_receipts"][daily.name]
+    replacement = compile_memory._load_manifest(final_receipt["generation_id"])
+    reconciliation = replacement["legacy_reconciliation"]
+    assert reconciliation["predecessor_journal_ids"] == [
+        effectful_id,
+        effectless_id,
+    ]
+    assert reconciliation["journal_ids"] == [effectful_id]
+    assert [effect["journal_id"] for effect in reconciliation["effects"]] == [
+        effectful_id
+    ]
+    assert final_receipt["journal_ids"] == list(
+        dict.fromkeys([effectful_id, effectless_id, *current_batch_ids])
+    )
+    assert [effect["journal_id"] for effect in final_receipt["effects"]] == [
+        effectful_id
+    ]
+    assert memory_state.is_compile_receipt_valid(
+        final_receipt,
+        daily.name,
+        source_sha256,
+        root=root,
+    )
+    assert daily.name not in state.get("compile_daily_replay_boundaries", {})
+
+
+def test_legacy_reconciliation_accepts_bounded_predecessor_journal_ids(compile_env):
+    compile_memory, _root, _state_root, _state = compile_env
+    predecessor_generation = hashlib.sha256(b"predecessor-generation").hexdigest()
+    effectful_id = hashlib.sha256(b"effectful-journal").hexdigest()
+    effectless_id = hashlib.sha256(b"effectless-journal").hexdigest()
+    reconciliation = {
+        "version": 1,
+        "generation_lineage": [predecessor_generation],
+        "predecessor_journal_ids": [effectful_id, effectless_id],
+        "journal_ids": [],
+        "effects": [],
+        "consumed_evidence": [],
+    }
+
+    assert compile_memory._validate_manifest_legacy_reconciliation(
+        reconciliation
+    ) == reconciliation
+
+
+@pytest.mark.parametrize(
+    "predecessor_journal_ids",
+    (
+        "not-an-array",
+        [{}],
+        ["z" * 64],
+        ["a" * 64, "a" * 64],
+        [hashlib.sha256(f"journal-{index}".encode()).hexdigest() for index in range(1025)],
+    ),
+    ids=("wrong-type", "unhashable", "bad-digest", "duplicate", "over-capacity"),
+)
+def test_legacy_reconciliation_rejects_malformed_predecessor_journal_ids(
+    compile_env,
+    predecessor_journal_ids,
+):
+    compile_memory, _root, _state_root, _state = compile_env
+    reconciliation = {
+        "version": 1,
+        "generation_lineage": [hashlib.sha256(b"predecessor").hexdigest()],
+        "predecessor_journal_ids": predecessor_journal_ids,
+        "journal_ids": [],
+        "effects": [],
+        "consumed_evidence": [],
+    }
+
+    with pytest.raises(ValueError):
+        compile_memory._validate_manifest_legacy_reconciliation(reconciliation)
+
+
+def test_legacy_reconciliation_rejects_effectless_id_as_effect_journal(compile_env):
+    compile_memory, _root, _state_root, _state = compile_env
+    journal_id = hashlib.sha256(b"effectless-journal").hexdigest()
+    reconciliation = {
+        "version": 1,
+        "generation_lineage": [hashlib.sha256(b"predecessor").hexdigest()],
+        "predecessor_journal_ids": [journal_id],
+        "journal_ids": [journal_id],
+        "effects": [],
+        "consumed_evidence": [],
+    }
+
+    with pytest.raises(ValueError, match="effect journal"):
+        compile_memory._validate_manifest_legacy_reconciliation(reconciliation)
+
+
+def _run_compile_recovery_cli(
+    vault: Path,
+    state_root: Path,
+    phase: str,
+    manifest: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    script = Path(__file__).resolve().parent.parent / "scripts" / "compile_memory.py"
+    command = [sys.executable, str(script), "--recover-pending", phase]
+    if manifest is not None:
+        command.extend(["--manifest", str(manifest)])
+    env = os.environ.copy()
+    env.update(
+        {
+            "LLM_WIKI_ROOT": str(vault),
+            "LLM_WIKI_STATE_ROOT": str(state_root),
+        }
+    )
+    return subprocess.run(
+        command,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+
+def _approve_recovery_manifest(path: Path) -> None:
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["approved"] = True
+    path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _orphaned_pending_recovery_fixture(tmp_path: Path) -> tuple[Path, Path, Path, dict]:
+    vault = tmp_path / "vault"
+    state_root = tmp_path / "runtime"
+    daily = _daily(
+        vault / "knowledge" / "daily" / "2026-07-01.md",
+        [_block("12:00:00", "Recovery leaves this source unpublished.")],
+    )
+    state_path = state_root / "run" / "state.json"
+    state_path.parent.mkdir(parents=True)
+    state = {
+        "compile_index_pending": {
+            "batch_id": hashlib.sha256(b"missing-batch").hexdigest(),
+            "daily": daily.name,
+            "sha256": hashlib.sha256(daily.read_bytes()).hexdigest(),
+            "generation_id": hashlib.sha256(b"missing-generation").hexdigest(),
+        },
+        "last_compile_status": "error",
+    }
+    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    return vault, state_root, state_path, state
+
+
+def test_pending_compile_recovery_is_manifest_gated_and_preserves_history(tmp_path):
+    vault = tmp_path / "vault"
+    state_root = tmp_path / "runtime"
+    daily = _daily(
+        vault / "knowledge" / "daily" / "2026-07-01.md",
+        [_block("12:00:00", "Recovery leaves this source unpublished.")],
+    )
+    source_hash = hashlib.sha256(daily.read_bytes()).hexdigest()
+    batch_id = hashlib.sha256(b"missing-batch").hexdigest()
+    generation_id = hashlib.sha256(b"missing-generation").hexdigest()
+    state_path = state_root / "run" / "state.json"
+    state_path.parent.mkdir(parents=True)
+    state = {
+        "compile_index_pending": {
+            "batch_id": batch_id,
+            "daily": daily.name,
+            "sha256": source_hash,
+            "generation_id": generation_id,
+        },
+        "compiled_daily_hashes": {"sentinel.md": "a" * 64},
+        "last_compile_at": "2026-07-31T05:49:10",
+        "last_compile_status": "error",
+    }
+    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    before = state_path.read_bytes()
+
+    audited = _run_compile_recovery_cli(vault, state_root, "audit")
+    assert audited.returncode == 0, audited.stderr
+    assert json.loads(audited.stdout)["status"] == "eligible"
+    assert state_path.read_bytes() == before
+    assert not (state_root / "run" / "backups").exists()
+
+    prepared = _run_compile_recovery_cli(vault, state_root, "backup-only")
+    assert prepared.returncode == 0, prepared.stderr
+    prepared_result = json.loads(prepared.stdout)
+    assert prepared_result["status"] == "prepared"
+    manifest_path = Path(prepared_result["manifest"])
+    assert manifest_path.is_file()
+    assert state_path.read_bytes() == before
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["approved"] is False
+
+    _approve_recovery_manifest(manifest_path)
+    applied = _run_compile_recovery_cli(vault, state_root, "apply", manifest_path)
+    assert applied.returncode == 0, applied.stderr
+    assert json.loads(applied.stdout)["status"] == "applied"
+    current = json.loads(state_path.read_text(encoding="utf-8"))
+    assert "compile_index_pending" not in current
+    assert current["compiled_daily_hashes"] == state["compiled_daily_hashes"]
+    assert current["last_compile_at"] == state["last_compile_at"]
+    assert current["last_compile_status"] == "error"
+    assert "daily remains uncompiled" in current["last_compile_error"]
+
+    verified = _run_compile_recovery_cli(vault, state_root, "verify", manifest_path)
+    assert verified.returncode == 0, verified.stderr
+    assert json.loads(verified.stdout)["status"] == "verified"
+
+
+def test_pending_compile_recovery_fails_closed_when_artifact_appears(tmp_path):
+    vault = tmp_path / "vault"
+    state_root = tmp_path / "runtime"
+    daily = _daily(vault / "knowledge" / "daily" / "2026-07-01.md", [])
+    batch_id = hashlib.sha256(b"batch").hexdigest()
+    generation_id = hashlib.sha256(b"generation").hexdigest()
+    state_path = state_root / "run" / "state.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "compile_index_pending": {
+                    "batch_id": batch_id,
+                    "daily": daily.name,
+                    "sha256": hashlib.sha256(daily.read_bytes()).hexdigest(),
+                    "generation_id": generation_id,
+                }
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    before = state_path.read_bytes()
+    journal = state_root / "run" / "compile-journal" / f"{batch_id}.json"
+    journal.parent.mkdir(parents=True)
+    journal.write_text("{}", encoding="utf-8")
+
+    audited = _run_compile_recovery_cli(vault, state_root, "audit")
+    assert audited.returncode == 3
+    assert json.loads(audited.stdout)["status"] == "ineligible"
+    assert state_path.read_bytes() == before
+    assert journal.read_text(encoding="utf-8") == "{}"
+
+
+def test_pending_compile_recovery_rejects_malformed_receipt_evidence(tmp_path):
+    vault, state_root, state_path, state = _orphaned_pending_recovery_fixture(tmp_path)
+    state["compiled_daily_receipts"] = {"other.md": []}
+    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+    audited = _run_compile_recovery_cli(vault, state_root, "audit")
+
+    assert audited.returncode == 3
+    report = json.loads(audited.stdout)
+    assert report["status"] == "ineligible"
+    assert "compiled_receipts_schema_invalid" in report["diagnostics"]
+
+
+def test_pending_compile_recovery_rejects_related_batch_progress(tmp_path):
+    vault, state_root, state_path, state = _orphaned_pending_recovery_fixture(tmp_path)
+    pending = state["compile_index_pending"]
+    sibling_id = hashlib.sha256(b"sibling-batch").hexdigest()
+    state["compile_sdk_progress"] = {
+        pending["daily"]: {
+            "generation_id": pending["generation_id"],
+            "sha256": pending["sha256"],
+            "completed_batch_ids": [sibling_id],
+            "expected_batch_ids": [sibling_id, pending["batch_id"]],
+        }
+    }
+    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+    audited = _run_compile_recovery_cli(vault, state_root, "audit")
+
+    assert audited.returncode == 3
+    assert "related_compile_progress_present" in json.loads(audited.stdout)[
+        "diagnostics"
+    ]
+
+
+def test_pending_compile_recovery_allows_unpublished_completion_history(tmp_path):
+    vault, state_root, state_path, state = _orphaned_pending_recovery_fixture(tmp_path)
+    pending = state["compile_index_pending"]
+    expected = {pending["daily"]: pending["sha256"]}
+    wave_id = hashlib.sha256(
+        json.dumps(expected, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    state["compile_generation_completed"] = [pending["generation_id"]]
+    state["compile_sdk_wave"] = {
+        "version": 1,
+        "wave_id": wave_id,
+        "status": "active",
+        "expected": expected,
+        "completed": {},
+        "daily_audits": {},
+    }
+    state["compile_daily_replay_boundaries"] = {
+        pending["daily"]: {
+            "version": 1,
+            "daily_sha256": pending["sha256"],
+            "generation_id": None,
+            "journal_ids": [],
+            "effects": [],
+            "consumed_evidence": [],
+            "requires_nonempty": True,
+        }
+    }
+    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+    audited = _run_compile_recovery_cli(vault, state_root, "audit")
+
+    assert audited.returncode == 0, audited.stderr
+    report = json.loads(audited.stdout)
+    assert report["status"] == "eligible"
+    assert report["observations"] == [
+        "completed_generation_recorded",
+        "active_compile_sdk_wave_recorded",
+        "replay_boundary_preserved",
+    ]
+
+
+def test_pending_compile_recovery_verify_revalidates_state_backup(tmp_path):
+    vault, state_root, _state_path, _state = _orphaned_pending_recovery_fixture(tmp_path)
+    prepared = _run_compile_recovery_cli(vault, state_root, "backup-only")
+    assert prepared.returncode == 0, prepared.stderr
+    manifest_path = Path(json.loads(prepared.stdout)["manifest"])
+    _approve_recovery_manifest(manifest_path)
+    applied = _run_compile_recovery_cli(vault, state_root, "apply", manifest_path)
+    assert applied.returncode == 0, applied.stderr
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    backup_path = manifest_path.parent / manifest["state_backup"]
+    backup = json.loads(backup_path.read_text(encoding="utf-8"))
+    backup["compile_index_pending"]["batch_id"] = hashlib.sha256(
+        b"substituted-backup"
+    ).hexdigest()
+    backup_path.write_text(json.dumps(backup, indent=2), encoding="utf-8")
+
+    verified = _run_compile_recovery_cli(vault, state_root, "verify", manifest_path)
+
+    assert verified.returncode == 3
+    assert "backup" in verified.stderr.lower()
+
+
+def test_pending_compile_recovery_repairs_exact_missing_source_references(tmp_path):
+    vault = tmp_path / "vault"
+    state_root = tmp_path / "runtime"
+    (vault / "knowledge" / "daily").mkdir(parents=True)
+    state_path = state_root / "run" / "state.json"
+    state_path.parent.mkdir(parents=True)
+    daily_name = "2026-07-01.md"
+    source_hash = hashlib.sha256(b"missing daily source").hexdigest()
+    generation_id = hashlib.sha256(b"completed generation").hexdigest()
+    batch_id = hashlib.sha256(b"missing journal").hexdigest()
+    expected = {daily_name: source_hash}
+    state = {
+        "compile_index_pending": {
+            "batch_id": batch_id,
+            "daily": daily_name,
+            "sha256": source_hash,
+            "generation_id": generation_id,
+        },
+        "compile_generation_completed": [generation_id],
+        "compile_sdk_wave": {
+            "version": 1,
+            "wave_id": hashlib.sha256(
+                json.dumps(expected, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+            "status": "active",
+            "expected": expected,
+            "completed": {},
+            "daily_audits": {},
+        },
+        "compile_daily_replay_boundaries": {
+            daily_name: {
+                "version": 1,
+                "daily_sha256": source_hash,
+                "generation_id": None,
+                "journal_ids": [],
+                "effects": [],
+                "requires_nonempty": True,
+            }
+        },
+        "sentinel": {"preserve": True},
+    }
+    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+    audited = _run_compile_recovery_cli(vault, state_root, "audit")
+    assert audited.returncode == 0, audited.stderr
+    report = json.loads(audited.stdout)
+    assert report["status"] == "eligible"
+    assert report["recovery_mode"] == "missing_source"
+    assert report["daily_present"] is False
+
+    prepared = _run_compile_recovery_cli(vault, state_root, "backup-only")
+    assert prepared.returncode == 0, prepared.stderr
+    manifest_path = Path(json.loads(prepared.stdout)["manifest"])
+    _approve_recovery_manifest(manifest_path)
+    applied = _run_compile_recovery_cli(vault, state_root, "apply", manifest_path)
+    assert applied.returncode == 0, applied.stderr
+    current = json.loads(state_path.read_text(encoding="utf-8"))
+    assert "compile_index_pending" not in current
+    assert "compile_sdk_wave" not in current
+    assert "compile_daily_replay_boundaries" not in current
+    assert current["compile_generation_completed"] == [generation_id]
+    assert current["sentinel"] == state["sentinel"]
+    assert "missing daily source" in current["last_compile_error"]
+
+
+def test_pending_compile_recovery_missing_source_apply_rejects_source_appearance(
+    tmp_path,
+):
+    vault = tmp_path / "vault"
+    state_root = tmp_path / "runtime"
+    daily_dir = vault / "knowledge" / "daily"
+    daily_dir.mkdir(parents=True)
+    daily_bytes = b"source reappeared after review\n"
+    state_path = state_root / "run" / "state.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "compile_index_pending": {
+                    "batch_id": hashlib.sha256(b"batch").hexdigest(),
+                    "daily": "2026-07-01.md",
+                    "sha256": hashlib.sha256(daily_bytes).hexdigest(),
+                    "generation_id": hashlib.sha256(b"generation").hexdigest(),
+                }
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    prepared = _run_compile_recovery_cli(vault, state_root, "backup-only")
+    assert prepared.returncode == 0, prepared.stderr
+    manifest_path = Path(json.loads(prepared.stdout)["manifest"])
+    _approve_recovery_manifest(manifest_path)
+    (daily_dir / "2026-07-01.md").write_bytes(daily_bytes)
+
+    applied = _run_compile_recovery_cli(vault, state_root, "apply", manifest_path)
+
+    assert applied.returncode == 3
+    assert "drift" in applied.stderr.lower()
+    assert "compile_index_pending" in json.loads(
+        state_path.read_text(encoding="utf-8")
+    )
+
+
+def test_pending_compile_recovery_missing_source_rejects_durable_boundary(tmp_path):
+    vault = tmp_path / "vault"
+    state_root = tmp_path / "runtime"
+    (vault / "knowledge" / "daily").mkdir(parents=True)
+    state_path = state_root / "run" / "state.json"
+    state_path.parent.mkdir(parents=True)
+    daily_name = "2026-07-01.md"
+    source_hash = hashlib.sha256(b"missing source with evidence").hexdigest()
+    journal_id = hashlib.sha256(b"durable journal").hexdigest()
+    state_path.write_text(
+        json.dumps(
+            {
+                "compile_index_pending": {
+                    "batch_id": hashlib.sha256(b"missing batch").hexdigest(),
+                    "daily": daily_name,
+                    "sha256": source_hash,
+                    "generation_id": hashlib.sha256(b"generation").hexdigest(),
+                },
+                "compile_daily_replay_boundaries": {
+                    daily_name: {
+                        "version": 1,
+                        "daily_sha256": source_hash,
+                        "generation_id": None,
+                        "journal_ids": [journal_id],
+                        "effects": [],
+                        "consumed_evidence": [],
+                        "requires_nonempty": True,
+                    }
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    audited = _run_compile_recovery_cli(vault, state_root, "audit")
+
+    assert audited.returncode == 3
+    assert "replay_boundary_has_durable_evidence" in json.loads(audited.stdout)[
+        "diagnostics"
+    ]
+
+
+def test_missing_source_post_state_completes_surviving_finished_wave():
+    import compile_memory
+
+    missing = "2026-07-01.md"
+    sibling = "2026-07-02.md"
+    missing_hash = hashlib.sha256(b"missing").hexdigest()
+    sibling_hash = hashlib.sha256(b"sibling").hexdigest()
+    pending = {
+        "batch_id": hashlib.sha256(b"batch").hexdigest(),
+        "daily": missing,
+        "sha256": missing_hash,
+        "generation_id": hashlib.sha256(b"generation").hexdigest(),
+    }
+    expected = {missing: missing_hash, sibling: sibling_hash}
+    state = {
+        "compile_index_pending": pending,
+        "compile_sdk_wave": {
+            "version": 1,
+            "wave_id": compile_memory._sdk_wave_id(expected),
+            "status": "active",
+            "expected": expected,
+            "completed": {sibling: sibling_hash},
+            "daily_audits": {sibling: {}},
+        },
+    }
+
+    post = compile_memory._pending_recovery_post_state(
+        state,
+        "missing_source",
+        pending,
+    )
+
+    assert post["compile_sdk_wave"]["status"] == "complete"
+    assert post["compile_sdk_wave"]["expected"] == {sibling: sibling_hash}
+    assert post["compile_sdk_wave"]["wave_id"] == compile_memory._sdk_wave_id(
+        {sibling: sibling_hash}
+    )
+
+
+def test_pending_compile_recovery_rejects_accepted_sibling_progress(tmp_path):
+    vault, state_root, state_path, state = _orphaned_pending_recovery_fixture(tmp_path)
+    pending = state["compile_index_pending"]
+    state["compile_sdk_progress"] = {
+        "other.md": {
+            "generation_id": hashlib.sha256(b"other generation").hexdigest(),
+            "sha256": hashlib.sha256(b"other source").hexdigest(),
+            "completed_batch_ids": [],
+            "expected_batch_ids": [],
+            "accepted_batch_ids": [pending["batch_id"]],
+        }
+    }
+    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+    audited = _run_compile_recovery_cli(vault, state_root, "audit")
+
+    assert audited.returncode == 3
+    assert "related_compile_progress_present" in json.loads(audited.stdout)[
+        "diagnostics"
+    ]
+
+
+def test_pending_compile_recovery_rejects_sibling_generation_artifact(tmp_path):
+    vault, state_root, _state_path, state = _orphaned_pending_recovery_fixture(tmp_path)
+    sibling_id = hashlib.sha256(b"sibling artifact").hexdigest()
+    journal_dir = state_root / "run" / "compile-journal"
+    journal_dir.mkdir()
+    (journal_dir / f"{sibling_id}.json").write_text(
+        json.dumps(
+            {
+                "batch_id": sibling_id,
+                "accepted": {
+                    "generation_id": state["compile_index_pending"]["generation_id"]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    audited = _run_compile_recovery_cli(vault, state_root, "audit")
+
+    assert audited.returncode == 3
+    assert "related_journal_artifact_present" in json.loads(audited.stdout)[
+        "diagnostics"
+    ]
+
+
+def test_orphaned_legacy_audit_ignores_retained_current_artifacts(
+    compile_env,
+    monkeypatch,
+):
+    compile_memory, root, _state_root, state = compile_env
+    quote = "Current completed artifacts remain ordinary bounded history."
+    current_daily = _daily(
+        root / "knowledge" / "daily" / "2026-11-09-current-retained.md",
+        [_block("12:00:00", quote)],
+    )
+    request = compile_memory.prepare_compile_request(
+        [current_daily],
+        state,
+        prompt_char_budget=30_000,
+    )
+    result = compile_memory.apply_compile_batch(
+        request,
+        _response(_admission_operation(current_daily, "current-retained", quote)),
+        False,
+    )
+    assert result["ok"] is True
+    assert result["daily_complete"] is True
+    assert request["generation_id"] in state["compile_generation_completed"]
+
+    legacy_daily = _daily(
+        root / "knowledge" / "daily" / "2026-11-10-orphaned-empty.md",
+        [],
+    )
+    legacy = _legacy_v2_manifest(compile_memory, legacy_daily)
+    assert legacy["batch_ids"] == []
+    compile_memory._write_new_manifest(legacy)
+
+    def state_snapshot():
+        raw = json.dumps(state, indent=2, ensure_ascii=False).encode("utf-8")
+        return raw, json.loads(json.dumps(state))
+
+    monkeypatch.setattr(
+        compile_memory,
+        "read_state_snapshot_strict",
+        state_snapshot,
+    )
+
+    audited = compile_memory.recover_orphaned_generations("audit")
+
+    assert audited["status"] == "eligible"
+    assert audited["manifest_ids"] == [legacy["generation_id"]]
+    assert audited["journal_ids"] == []
+    assert [(item["kind"], item["id"]) for item in audited["artifacts"]] == [
+        ("manifest", legacy["generation_id"])
+    ]
+    assert compile_memory._manifest_path(request["generation_id"]).is_file()
+    assert compile_memory._journal_path(request["batch_id"]).is_file()
+
+
+def test_orphaned_legacy_generation_recovery_preserves_effect_provenance(
+    compile_env,
+    monkeypatch,
+):
+    compile_memory, root, state_root, state = compile_env
+    quote = "Always retain orphaned legacy provenance before releasing capacity."
+    legacy_noise = (
+        "## [11:59:00] opencode-heartbeat | legacy-noise\n"
+        "- Status: transient heartbeat only"
+    )
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-11-10-orphaned-legacy.md",
+        [
+            legacy_noise,
+            "## [12:00:00] opencode-idle | legacy-session\n"
+            "- Tier: `major`\n\n"
+            f"**Lessons / patterns**\n- {quote}"
+        ],
+    )
+    current_extract = compile_memory._extract_legacy_manifest_blocks
+
+    def legacy_extract(value):
+        return [
+            legacy_noise,
+            *[
+                block.replace("\n\n", "\n- Tier: `major`\n\n", 1)
+                for block in current_extract(value)
+            ],
+        ]
+
+    monkeypatch.setattr(
+        compile_memory,
+        "_extract_legacy_manifest_blocks",
+        legacy_extract,
+    )
+    legacy = _legacy_v2_manifest(compile_memory, daily)
+    old_request = _activate_legacy_manifest(compile_memory, state, daily, legacy)
+    monkeypatch.setattr(
+        compile_memory,
+        "_extract_legacy_manifest_blocks",
+        current_extract,
+    )
+    operation = _shipped_v1_operation(daily, "orphaned-legacy", quote)
+    operation["evidence"].append(
+        {
+            **operation["evidence"][0],
+            "claim": "A second legacy claim may share the same wildcard timestamp.",
+        }
+    )
+    marker = compile_memory._operation_marker(old_request, 0, operation)
+    fingerprint = compile_memory._operation_replay_fingerprint(operation)
+    target = root / "knowledge" / "notes" / "orphaned-legacy.md"
+    target.write_text(
+        _render_shipped_v1_create(
+            compile_memory,
+            operation,
+            marker,
+            fingerprint,
+        ),
+        encoding="utf-8",
+    )
+    snapshot = compile_memory._read_knowledge_page_snapshot(target)
+    assert snapshot is not None
+    _write_legacy_v1_journal(
+        compile_memory,
+        old_request,
+        [operation],
+        states=["applied"],
+        effects=[
+            {
+                "version": 2,
+                "target": target.name,
+                "before": None,
+                "after": snapshot[1],
+                "retained_artifact": None,
+            }
+        ],
+        status="complete",
+    )
+    state.pop("compile_generation_active")
+
+    def state_snapshot():
+        raw = json.dumps(state, indent=2, ensure_ascii=False).encode("utf-8")
+        return raw, json.loads(json.dumps(state))
+
+    def update_state_if_unchanged(expected_raw, mutator):
+        current_raw, _current = state_snapshot()
+        if current_raw != expected_raw:
+            raise ValueError("test state preimage changed")
+        mutator(state)
+        published_raw, published = state_snapshot()
+        return published_raw, published
+
+    monkeypatch.setattr(
+        compile_memory,
+        "read_state_snapshot_strict",
+        state_snapshot,
+    )
+    monkeypatch.setattr(
+        compile_memory,
+        "update_state_if_unchanged",
+        update_state_if_unchanged,
+    )
+    target_before = target.read_bytes()
+
+    audited = compile_memory.recover_orphaned_generations("audit")
+    assert audited["status"] == "eligible"
+    assert audited["manifest_ids"] == [legacy["generation_id"]]
+    assert audited["journal_ids"] == [old_request["batch_id"]]
+
+    prepared = compile_memory.recover_orphaned_generations("backup-only")
+    manifest_path = Path(prepared["manifest"])
+    with pytest.raises(ValueError, match="not approved"):
+        compile_memory.recover_orphaned_generations("apply", manifest_path)
+    assert compile_memory._manifest_path(legacy["generation_id"]).is_file()
+    assert compile_memory._journal_path(old_request["batch_id"]).is_file()
+    _approve_recovery_manifest(manifest_path)
+    state["tool_capture_dedupe"] = {
+        "v1:" + "a" * 64: "2026-11-10T12:01:00",
+    }
+    applied = compile_memory.recover_orphaned_generations(
+        "apply",
+        manifest_path,
+    )
+    verified = compile_memory.recover_orphaned_generations(
+        "verify",
+        manifest_path,
+    )
+
+    assert applied["status"] == "applied"
+    assert verified["status"] == "verified"
+    assert target.read_bytes() == target_before
+    assert not compile_memory._manifest_path(legacy["generation_id"]).exists()
+    assert not compile_memory._journal_path(old_request["batch_id"]).exists()
+    assert compile_memory._load_manifest_for_orphan_recovery(
+        legacy["generation_id"]
+    )["version"] == 2
+    assert compile_memory._load_journal(old_request["batch_id"])["status"] == "complete"
+    persisted = compile_memory.load_state()
+    assert persisted["tool_capture_dedupe"] == state["tool_capture_dedupe"]
+    reconciliation = persisted["compile_legacy_reconciliations"][daily.name]
+    assert reconciliation["generation_lineage"] == [legacy["generation_id"]]
+    assert reconciliation["predecessor_journal_ids"] == [old_request["batch_id"]]
+    assert reconciliation["journal_ids"] == [old_request["batch_id"]]
+    assert reconciliation["effects"][0]["target"] == target.name
+    assert reconciliation["effects"][0]["marker"] == marker
+    assert reconciliation["effects"][0]["fingerprint"] == fingerprint
+    assert persisted["compile_consumed_evidence"] == [
+        compile_memory._evidence_wildcard_token(operation["evidence"][0])
+    ]
+    assert (state_root / "run" / "backups" / manifest_path.parent.name).is_dir()
+
+    old_source_sha256 = legacy["daily"]["sha256"]
+    _daily(daily, [])
+    current_source_sha256 = hashlib.sha256(daily.read_bytes()).hexdigest()
+    state["compile_daily_replay_boundaries"] = {
+        daily.name: {
+            "version": 1,
+            "daily_sha256": old_source_sha256,
+            "generation_id": None,
+            "journal_ids": [],
+            "effects": [],
+            "consumed_evidence": [],
+            "requires_nonempty": True,
+        }
+    }
+    with pytest.raises(
+        compile_memory.CompilePreparationError,
+        match="does not satisfy replay boundary",
+    ):
+        compile_memory.prepare_compile_request(
+            [daily],
+            state,
+            prompt_char_budget=30_000,
+        )
+    effectful_pending = json.loads(json.dumps(state["compile_index_pending"]))
+
+    effectful_audit = compile_memory.recover_empty_replay_boundary("audit")
+    assert effectful_audit["status"] == "eligible"
+    effectful_prepared = compile_memory.recover_empty_replay_boundary("backup-only")
+    effectful_manifest_path = Path(effectful_prepared["manifest"])
+    _approve_recovery_manifest(effectful_manifest_path)
+    assert compile_memory.recover_empty_replay_boundary(
+        "apply", effectful_manifest_path
+    ) == {"status": "applied"}
+    assert compile_memory.recover_empty_replay_boundary(
+        "verify", effectful_manifest_path
+    ) == {"status": "verified"}
+    advanced_boundary = state["compile_daily_replay_boundaries"][daily.name]
+    assert advanced_boundary["daily_sha256"] == current_source_sha256
+    assert advanced_boundary["requires_nonempty"] is True
+    assert state["compile_index_pending"] == effectful_pending
+    effectful_resumed = compile_memory._resume_pending_index_if_any()
+    assert effectful_resumed is not None and effectful_resumed["ok"] is True
+    assert state["compiled_daily_receipts"][daily.name]["effects"][0]["target"] == (
+        target.name
+    )
+
+
+def test_empty_replay_boundary_recovery_requires_reviewed_zero_evidence(
+    compile_env,
+    monkeypatch,
+):
+    compile_memory, root, _state_root, state = compile_env
+    daily = _daily(
+        root / "knowledge" / "daily" / "2026-11-11-empty-boundary.md",
+        [],
+    )
+    source_sha256 = hashlib.sha256(daily.read_bytes()).hexdigest()
+    state["compile_daily_replay_boundaries"] = {
+        daily.name: {
+            "version": 1,
+            "daily_sha256": source_sha256,
+            "generation_id": None,
+            "journal_ids": [],
+            "effects": [],
+            "consumed_evidence": [],
+            "requires_nonempty": True,
+        }
+    }
+    state["compile_legacy_reconciliations"] = {
+        daily.name: {
+            "version": 1,
+            "generation_lineage": ["d" * 64],
+            "predecessor_journal_ids": [],
+            "journal_ids": [],
+            "effects": [],
+            "consumed_evidence": [],
+        }
+    }
+
+    def state_snapshot():
+        raw = json.dumps(state, indent=2, ensure_ascii=False).encode("utf-8")
+        return raw, json.loads(json.dumps(state))
+
+    def update_state_if_unchanged(expected_raw, mutator):
+        current_raw, _current = state_snapshot()
+        if current_raw != expected_raw:
+            raise ValueError("test state preimage changed")
+        mutator(state)
+        published_raw, published = state_snapshot()
+        return published_raw, published
+
+    monkeypatch.setattr(
+        compile_memory,
+        "read_state_snapshot_strict",
+        state_snapshot,
+    )
+    monkeypatch.setattr(
+        compile_memory,
+        "update_state_if_unchanged",
+        update_state_if_unchanged,
+    )
+
+    with pytest.raises(
+        compile_memory.CompilePreparationError,
+        match="does not satisfy replay boundary",
+    ):
+        compile_memory.prepare_compile_request(
+            [daily],
+            state,
+            prompt_char_budget=30_000,
+        )
+    pending_before = json.loads(json.dumps(state["compile_index_pending"]))
+    other_daily = _daily(
+        root / "knowledge" / "daily" / "2026-11-12-other-empty.md",
+        [],
+    )
+    other_manifest = compile_memory._create_generation_manifest(
+        other_daily,
+        30_000,
+        state,
+    )
+    state["compile_generation_active"].pop(other_daily.name)
+    state.setdefault("compile_generation_completed", []).append(
+        other_manifest["generation_id"]
+    )
+
+    state["compile_daily_replay_boundaries"][daily.name]["journal_ids"] = [
+        "c" * 64
+    ]
+    rejected = compile_memory.recover_empty_replay_boundary("audit")
+    assert rejected["status"] == "ineligible"
+    assert "empty_boundary_has_durable_or_changed_evidence" in rejected["diagnostics"]
+    state["compile_daily_replay_boundaries"][daily.name]["journal_ids"] = []
+    audited = compile_memory.recover_empty_replay_boundary("audit")
+    assert audited == {
+        "status": "eligible",
+        "eligible": True,
+        "diagnostics": [],
+        "daily": daily.name,
+        "generation_id": pending_before["generation_id"],
+        "state_before_sha256": audited["state_before_sha256"],
+        "state_after_sha256": audited["state_after_sha256"],
+    }
+    prepared = compile_memory.recover_empty_replay_boundary("backup-only")
+    manifest_path = Path(prepared["manifest"])
+    with pytest.raises(ValueError, match="not approved"):
+        compile_memory.recover_empty_replay_boundary("apply", manifest_path)
+    _approve_recovery_manifest(manifest_path)
+    state["tool_capture_dedupe"] = {
+        "v1:" + "b" * 64: "2026-11-11T12:01:00",
+    }
+
+    assert compile_memory.recover_empty_replay_boundary(
+        "apply", manifest_path
+    ) == {"status": "applied"}
+    assert compile_memory.recover_empty_replay_boundary(
+        "verify", manifest_path
+    ) == {"status": "verified"}
+    assert state["compile_index_pending"] == pending_before
+    assert (
+        state["compile_daily_replay_boundaries"][daily.name]["requires_nonempty"]
+        is False
+    )
+    resumed = compile_memory._resume_pending_index_if_any()
+    assert resumed is not None and resumed["ok"] is True
+    assert "compile_index_pending" not in state
+    assert state["compiled_daily_hashes"][daily.name] == source_sha256
+    assert state["compiled_daily_receipts"][daily.name]["effects"] == []
+
+
+def test_pending_compile_recovery_publication_cas_uses_manifest_preimage(monkeypatch):
+    import compile_memory
+
+    backup_raw = b'{"compile_index_pending":{}}'
+    expected_post = {"last_compile_status": "error"}
+    captured = {}
+
+    def guarded_update(expected_raw, mutator):
+        captured["expected_raw"] = expected_raw
+        state = {"compile_index_pending": {}}
+        mutator(state)
+        return json.dumps(state).encode(), state
+
+    monkeypatch.setattr(compile_memory, "update_state_if_unchanged", guarded_update)
+
+    _published_raw, published = compile_memory._publish_pending_recovery_state(
+        backup_raw,
+        backup_raw,
+        expected_post,
+    )
+    assert captured["expected_raw"] == backup_raw
+    assert published == expected_post
+    with pytest.raises(ValueError, match="drifted during evidence review"):
+        compile_memory._publish_pending_recovery_state(
+            backup_raw,
+            b'{"concurrent_sentinel":true}',
+            expected_post,
+        )

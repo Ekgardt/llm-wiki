@@ -29,6 +29,14 @@ from memory_state import (  # noqa: E402
     parse_frontmatter_scalar,
     parse_project_scope,
 )
+from session_start_project_state import (  # noqa: E402
+    _read_trusted_state_body,
+    _same_native_project_root,
+    _slug_identity_key,
+    _state_h2_title,
+    _state_visible_lines,
+    _trusted_state_body_matches_identity,
+)
 
 PROJECTS_DIR = ROOT / "knowledge" / "projects"
 KNOWLEDGE = ROOT / "knowledge" / "notes"
@@ -45,6 +53,7 @@ MAX_STATE_BYTES = 64 * 1024
 MAX_LINT_REPORT_BYTES = 128 * 1024
 MAX_NOTE_FILES_SCANNED = 1_000
 MAX_LINT_REPORTS_SCANNED = 100
+_TRUSTED_STATE_UNSET = object()
 
 
 def _bounded_files(
@@ -103,30 +112,83 @@ def _fm_field(content: str, pattern: re.Pattern) -> str | None:
     return m.group(1).strip() if m else None
 
 
-def _read_open_threads(slug: str, state_path: Path | None) -> list[str]:
-    """Extract open threads from project state.md."""
-    if state_path is None:
-        return []
-    try:
-        state_path = state_path.resolve()
-        state_path.relative_to(PROJECTS_DIR.resolve())
-        from session_start_project_state import _recorded_runtime_slug
-
-        ownership = _read_text_bounded(state_path, MAX_STATE_BYTES)
-        if ownership is None or _recorded_runtime_slug(ownership) != slug:
-            return []
-    except (ImportError, OSError, RuntimeError, ValueError):
-        return []
-    content = ownership
-    match = re.search(
-        r"^##\s*Open threads\s*$\n(.*?)(?=\n##\s|\Z)",
-        content,
-        re.MULTILINE | re.DOTALL,
+def _matches_project_identity(
+    content: str,
+    slug: str | None,
+    project_root: str | Path | None,
+) -> bool:
+    scope = parse_project_scope(content)
+    root_scope = parse_frontmatter_scalar(content, "project_root")
+    if slug is None and project_root is None:
+        return not scope.present and not root_scope.present
+    expected_slug = _slug_identity_key(slug)
+    return bool(
+        expected_slug is not None
+        and project_root is not None
+        and scope.present
+        and scope.value is not None
+        and _slug_identity_key(scope.value) == expected_slug
+        and root_scope.present
+        and root_scope.value is not None
+        and _same_native_project_root(root_scope.value, str(project_root))
     )
-    if not match:
+
+
+def _read_open_threads(
+    slug: str,
+    state_path: Path | None,
+    project_root: str | Path | None = None,
+    *,
+    trusted_state_body: str | None | object = _TRUSTED_STATE_UNSET,
+) -> list[str]:
+    """Extract open threads from project state.md."""
+    if trusted_state_body is _TRUSTED_STATE_UNSET:
+        if state_path is None or project_root is None:
+            return []
+        try:
+            ownership = _read_trusted_state_body(
+                state_path,
+                slug,
+                Path(project_root),
+            )
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError):
+            return []
+    else:
+        ownership = trusted_state_body
+    try:
+        cached_identity_matches = bool(
+            isinstance(ownership, str)
+            and project_root is not None
+            and _trusted_state_body_matches_identity(
+                ownership,
+                slug,
+                Path(project_root),
+            )
+        )
+    except (OSError, RuntimeError, TypeError, ValueError):
+        cached_identity_matches = False
+    if not cached_identity_matches:
         return []
-    threads = []
-    for line in match.group(1).strip().splitlines():
+
+    return _open_threads_from_state(ownership)
+
+
+def _open_threads_from_state(ownership: str) -> list[str]:
+    visible = _state_visible_lines(ownership)
+    start = next(
+        (
+            index + 1
+            for index, line in enumerate(visible)
+            if _state_h2_title(line) == "open threads"
+        ),
+        None,
+    )
+    if start is None:
+        return []
+    threads: list[str] = []
+    for line in visible[start:]:
+        if _state_h2_title(line) is not None:
+            break
         line = line.strip()
         if line.startswith("- ") and len(line) > 3:
             threads.append(line[2:].strip()[:120])
@@ -136,6 +198,8 @@ def _read_open_threads(slug: str, state_path: Path | None) -> list[str]:
 def _find_last_decision(
     slug: str | None = None,
     inventory: BoundedPathInventory | None = None,
+    *,
+    project_root: str | Path | None = None,
 ) -> dict | None:
     """Find the most recent decision page (optionally filtered by project).
 
@@ -163,11 +227,7 @@ def _find_last_decision(
         ts = _fm_field(content, TIMESTAMP_RE)
         if not ts:
             continue
-        scope = parse_project_scope(content)
-        if scope.present and scope.value is None:
-            continue
-        project = scope.value
-        if slug and project and project.lower() != slug.lower():
+        if not _matches_project_identity(content, slug, project_root):
             continue
         title_match = H1_RE.search(content)
         title = title_match.group(1).strip() if title_match else md.stem
@@ -213,6 +273,8 @@ def _find_contradictions(
 def _find_cross_project_insights(
     slug: str,
     inventory: BoundedPathInventory | None = None,
+    *,
+    project_root: str | Path | None = None,
 ) -> list[str]:
     """Find knowledge pages in OTHER projects that share concepts with this project."""
     # Get this project's pages' titles
@@ -229,6 +291,13 @@ def _find_cross_project_insights(
         if scope.present and scope.value is None:
             continue
         project = scope.value
+        root_scope = parse_frontmatter_scalar(content, "project_root")
+        if (
+            project is None
+            or root_scope.value is None
+            or _slug_identity_key(project) is None
+        ):
+            continue
         title_match = H1_RE.search(content)
         title = title_match.group(1).strip().lower() if title_match else ""
         summary_match = SUMMARY_RE.search(content)
@@ -239,9 +308,9 @@ def _find_cross_project_insights(
             "project": project or "global",
             "path": md.relative_to(ROOT).as_posix(),
         }
-        if project and project.lower() == slug.lower():
+        if _matches_project_identity(content, slug, project_root):
             project_titles.add(title)
-        elif project and project.lower() != slug.lower():
+        else:
             other_pages.append(entry)
     # Check if any other-project page shares keywords
     insights = []
@@ -292,6 +361,8 @@ def build_advisory(
     use_llm: bool = False,
     *,
     state_path: Path | None = None,
+    project_root: str | Path | None = None,
+    trusted_state_body: str | None | object = _TRUSTED_STATE_UNSET,
 ) -> str:
     """Build the proactive advisory block for SessionStart injection.
 
@@ -304,7 +375,13 @@ def build_advisory(
         use_llm: If True and LLM available, generate a richer insight paragraph.
     """
     # Always build the rule-based advisory first (fast, reliable)
-    rule_based = _build_rule_based_advisory(slug, max_chars, state_path)
+    rule_based = _build_rule_based_advisory(
+        slug,
+        max_chars,
+        state_path,
+        project_root,
+        trusted_state_body,
+    )
 
     if not use_llm:
         return rule_based
@@ -355,6 +432,8 @@ def _build_rule_based_advisory(
     slug: str | None,
     max_chars: int,
     state_path: Path | None = None,
+    project_root: str | Path | None = None,
+    trusted_state_body: str | None | object = _TRUSTED_STATE_UNSET,
 ) -> str:
     """Build the fast rule-based advisory (no LLM)."""
     parts: list[str] = []
@@ -363,7 +442,12 @@ def _build_rule_based_advisory(
 
     # 1. Open threads (most actionable)
     if slug:
-        threads = _read_open_threads(slug, state_path)
+        threads = _read_open_threads(
+            slug,
+            state_path,
+            project_root,
+            trusted_state_body=trusted_state_body,
+        )
         if threads:
             parts.append(f"**Open threads ({len(threads)}):**")
             for t in threads:
@@ -375,7 +459,11 @@ def _build_rule_based_advisory(
         parts.append("**Advisory sources:** knowledge inventory unavailable.")
         parts.append("")
     else:
-        last = _find_last_decision(slug, note_inventory)
+        last = _find_last_decision(
+            slug,
+            note_inventory,
+            project_root=project_root,
+        )
         if last:
             parts.append(f"**Last decision** ({last['timestamp']}):")
             parts.append(f"- {last['title']}: {last['summary']}")
@@ -395,7 +483,11 @@ def _build_rule_based_advisory(
 
     # 4. Cross-project insights
     if slug and not note_inventory.incomplete:
-        insights = _find_cross_project_insights(slug, note_inventory)
+        insights = _find_cross_project_insights(
+            slug,
+            note_inventory,
+            project_root=project_root,
+        )
         if insights:
             parts.append("**Cross-project insights:**")
             for i in insights:
@@ -421,10 +513,16 @@ def main() -> int:
     import argparse
     p = argparse.ArgumentParser(description="Build proactive advisory for SessionStart.")
     p.add_argument("slug", nargs="?", default=None, help="Project slug (optional)")
+    p.add_argument("--project-root", default=None, help="Canonical project root")
     p.add_argument("--max-chars", type=int, default=800)
     p.add_argument("--llm", action="store_true", help="Enhance with LLM insight (needs ~5-10s)")
     args = p.parse_args()
-    advisory = build_advisory(args.slug, args.max_chars, use_llm=args.llm)
+    advisory = build_advisory(
+        args.slug,
+        args.max_chars,
+        use_llm=args.llm,
+        project_root=args.project_root,
+    )
     if advisory:
         print(advisory)
     else:

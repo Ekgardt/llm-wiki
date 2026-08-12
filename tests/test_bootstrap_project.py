@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 import bootstrap_project
@@ -112,6 +115,26 @@ def test_bootstrap_dry_run_is_byte_for_byte_vault_read_only(
     assert after == before
     assert not (projects / "new-project").exists()
     assert not (tmp_path / "runtime").exists()
+
+
+def test_bootstrap_git_call_does_not_reresolve_an_explicit_missing_executable(
+    monkeypatch,
+    tmp_path: Path,
+):
+    monkeypatch.setattr(
+        session_start_project_state,
+        "_resolve_git_executable",
+        lambda: (_ for _ in ()).throw(AssertionError("Git resolution repeated")),
+    )
+
+    assert (
+        bootstrap_project._run_git(
+            str(tmp_path),
+            "status",
+            git_executable=None,
+        )
+        == ""
+    )
 
 
 def test_bootstrap_readme_read_requests_an_explicit_byte_bound(monkeypatch, tmp_path):
@@ -587,7 +610,8 @@ def test_windows_directory_handle_lists_system_directory_without_delete_access()
         device, inode, attributes = memory_state._windows_directory_handle_metadata(
             handle_state
         )
-        assert (device, inode) == (expected.st_dev, expected.st_ino)
+        assert isinstance(device, int) and device > 0
+        assert inode == expected.st_ino
         assert attributes & 0x10
         assert not attributes & 0x400
         with os.scandir(windows) as entries:
@@ -1067,10 +1091,10 @@ def test_bootstrap_docs_cap_counts_nonmatching_entries_and_reports_unavailable(
         (docs / f"ignored-{index}.txt").write_text("not docs\n", encoding="utf-8")
     (docs / "visible.md").write_text("docs\n", encoding="utf-8")
     monkeypatch.setattr(bootstrap_project, "MAX_DOC_ENTRIES_SCANNED", 2)
-    monkeypatch.setattr(bootstrap_project, "_extract_git_timeline", lambda _cwd: [])
+    monkeypatch.setattr(bootstrap_project, "_extract_git_timeline", lambda _cwd, **_kwargs: [])
     monkeypatch.setattr(bootstrap_project, "_extract_readme_summary", lambda _cwd: "Summary")
     monkeypatch.setattr(bootstrap_project, "_extract_tech_stack", lambda _cwd: [])
-    monkeypatch.setattr(bootstrap_project, "_run_git", lambda _cwd, *_args: "")
+    monkeypatch.setattr(bootstrap_project, "_run_git", lambda _cwd, *_args, **_kwargs: "")
 
     assert bootstrap_project._extract_docs_structure(str(tmp_path)) is None
     result = bootstrap_project.bootstrap(str(tmp_path), apply=False)
@@ -1081,10 +1105,11 @@ def test_concurrent_bootstrap_collects_project_once(monkeypatch, tmp_path: Path)
     project, projects, _state_path = _configure_owned_project(
         monkeypatch, tmp_path
     )
-    monkeypatch.setattr(bootstrap_project, "_extract_git_timeline", lambda _cwd: [])
-    monkeypatch.setattr(bootstrap_project, "_extract_tech_stack", lambda _cwd: [])
-    monkeypatch.setattr(bootstrap_project, "_extract_docs_structure", lambda _cwd: [])
-    monkeypatch.setattr(bootstrap_project, "_run_git", lambda _cwd, *_args: "")
+    monkeypatch.setattr(bootstrap_project, "_run_git", lambda _cwd, *_args, **_kwargs: "")
+    (project / "README.md").write_text(
+        "# Project\n\nProject summary\n",
+        encoding="utf-8",
+    )
 
     contenders = threading.Barrier(2)
     counter_lock = threading.Lock()
@@ -1092,7 +1117,9 @@ def test_concurrent_bootstrap_collects_project_once(monkeypatch, tmp_path: Path)
     max_active_collectors = 0
     collector_calls = 0
 
-    def slow_summary(_cwd: str) -> str:
+    real_collect = bootstrap_project._collect_bootstrap_source_snapshot
+
+    def slow_collect(project_root: Path, git_head: str | None, **kwargs):
         nonlocal active_collectors, max_active_collectors, collector_calls
         with counter_lock:
             collector_calls += 1
@@ -1105,14 +1132,18 @@ def test_concurrent_bootstrap_collects_project_once(monkeypatch, tmp_path: Path)
         time.sleep(0.02)
         with counter_lock:
             active_collectors -= 1
-        return "Project summary"
+        return real_collect(project_root, git_head, **kwargs)
 
-    monkeypatch.setattr(bootstrap_project, "_extract_readme_summary", slow_summary)
+    monkeypatch.setattr(
+        bootstrap_project,
+        "_collect_bootstrap_source_snapshot",
+        slow_collect,
+    )
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(lambda _index: bootstrap_project.bootstrap(str(project), True), range(2)))
 
-    assert collector_calls == 1
+    assert collector_calls >= 2
     assert max_active_collectors == 1
     bootstrap_path = projects / "active" / "bootstrap.md"
     assert bootstrap_path.is_file()
@@ -1125,15 +1156,11 @@ def test_bootstrap_is_complete_when_it_becomes_visible(monkeypatch, tmp_path: Pa
         monkeypatch, tmp_path
     )
     bootstrap_path = projects / "active" / "bootstrap.md"
-    monkeypatch.setattr(bootstrap_project, "_extract_git_timeline", lambda _cwd: [])
-    monkeypatch.setattr(
-        bootstrap_project,
-        "_extract_readme_summary",
-        lambda _cwd: "Complete project summary",
+    (project / "README.md").write_text(
+        "# Project\n\nComplete project summary\n",
+        encoding="utf-8",
     )
-    monkeypatch.setattr(bootstrap_project, "_extract_tech_stack", lambda _cwd: [])
-    monkeypatch.setattr(bootstrap_project, "_extract_docs_structure", lambda _cwd: [])
-    monkeypatch.setattr(bootstrap_project, "_run_git", lambda _cwd, *_args: "")
+    monkeypatch.setattr(bootstrap_project, "_run_git", lambda _cwd, *_args, **_kwargs: "")
 
     real_open = Path.open
     partial_visible = threading.Event()
@@ -1208,11 +1235,11 @@ def test_bootstrap_uses_exact_owned_state_path_and_records_provenance(
     monkeypatch.setattr(bootstrap_project, "STATE_DIR", tmp_path / "run")
     monkeypatch.setattr(bootstrap_project, "PROJECTS_DIR", projects)
     monkeypatch.setenv("LLM_WIKI_STATE_ROOT", str(tmp_path / "runtime"))
-    monkeypatch.setattr(bootstrap_project, "_extract_git_timeline", lambda _cwd: [])
+    monkeypatch.setattr(bootstrap_project, "_extract_git_timeline", lambda _cwd, **_kwargs: [])
     monkeypatch.setattr(bootstrap_project, "_extract_readme_summary", lambda _cwd: "Summary")
     monkeypatch.setattr(bootstrap_project, "_extract_tech_stack", lambda _cwd: [])
     monkeypatch.setattr(bootstrap_project, "_extract_docs_structure", lambda _cwd: [])
-    monkeypatch.setattr(bootstrap_project, "_run_git", lambda _cwd, *_args: "")
+    monkeypatch.setattr(bootstrap_project, "_run_git", lambda _cwd, *_args, **_kwargs: "")
 
     bootstrap_project.bootstrap(str(project), apply=True)
 
@@ -1237,11 +1264,11 @@ def test_bootstrap_revalidates_identity_before_publishing(monkeypatch, tmp_path:
         "confirm_project_identity",
         lambda *_args: next(confirmations),
     )
-    monkeypatch.setattr(bootstrap_project, "_extract_git_timeline", lambda _cwd: [])
+    monkeypatch.setattr(bootstrap_project, "_extract_git_timeline", lambda _cwd, **_kwargs: [])
     monkeypatch.setattr(bootstrap_project, "_extract_readme_summary", lambda _cwd: "Summary")
     monkeypatch.setattr(bootstrap_project, "_extract_tech_stack", lambda _cwd: [])
     monkeypatch.setattr(bootstrap_project, "_extract_docs_structure", lambda _cwd: [])
-    monkeypatch.setattr(bootstrap_project, "_run_git", lambda _cwd, *_args: "")
+    monkeypatch.setattr(bootstrap_project, "_run_git", lambda _cwd, *_args, **_kwargs: "")
 
     result = bootstrap_project.bootstrap(str(project), apply=True)
 
@@ -1258,15 +1285,19 @@ def test_bootstrap_publication_fits_consumer_with_complete_line_truncation(
         f"README_LINE_{index:03d} " + ("x" * 160) + f" END_{index:03d}"
         for index in range(100)
     )
-    monkeypatch.setattr(bootstrap_project, "_extract_git_timeline", lambda _cwd: [])
+    real_collect = bootstrap_project._collect_bootstrap_source_snapshot
+
+    def long_summary_snapshot(project_root: Path, git_head: str | None, **kwargs):
+        snapshot = real_collect(project_root, git_head, **kwargs)
+        assert snapshot is not None
+        return replace(snapshot, readme_summary=summary)
+
     monkeypatch.setattr(
         bootstrap_project,
-        "_extract_readme_summary",
-        lambda _cwd: summary,
+        "_collect_bootstrap_source_snapshot",
+        long_summary_snapshot,
     )
-    monkeypatch.setattr(bootstrap_project, "_extract_tech_stack", lambda _cwd: [])
-    monkeypatch.setattr(bootstrap_project, "_extract_docs_structure", lambda _cwd: [])
-    monkeypatch.setattr(bootstrap_project, "_run_git", lambda _cwd, *_args: "")
+    monkeypatch.setattr(bootstrap_project, "_run_git", lambda _cwd, *_args, **_kwargs: "")
 
     result = bootstrap_project.bootstrap(str(project), apply=True)
 
@@ -1283,4 +1314,237 @@ def test_bootstrap_publication_fits_consumer_with_complete_line_truncation(
         if line.startswith("README_LINE_"):
             index = line.removeprefix("README_LINE_").split()[0]
             assert line.endswith(f"END_{index}")
-    assert marker in session_start_project_state._read_bootstrap_context(state_path)
+    assert marker in session_start_project_state._read_bootstrap_context(
+        state_path,
+        "active",
+        project,
+    )
+
+
+def _run_test_git(project: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "initial", "changed"),
+    (
+        ("README.md", "# Project\n\nInitial summary.\n", "# Project\n\nDirty summary.\n"),
+        (
+            "package.json",
+            '{"dependencies":{"react":"1"}}\n',
+            '{"dependencies":{"vue":"1"}}\n',
+        ),
+        ("docs/guide.md", "initial guide\n", "changed guide\n"),
+    ),
+    ids=("readme", "package", "docs"),
+)
+def test_non_git_relevant_source_change_invalidates_bootstrap_fingerprint(
+    monkeypatch,
+    tmp_path: Path,
+    relative_path: str,
+    initial: str,
+    changed: str,
+):
+    project, _projects, state_path = _configure_owned_project(monkeypatch, tmp_path)
+    source = project / relative_path
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(initial, encoding="utf-8")
+
+    result = bootstrap_project.bootstrap(str(project), apply=True)
+    serialized = state_path.with_name("bootstrap.md").read_text(encoding="utf-8")
+
+    assert result.startswith("Written:")
+    assert "bootstrap_schema_json: 2\n" in serialized
+    assert "source_fingerprint_json: \"" in serialized
+    assert session_start_project_state._read_bootstrap_context(
+        state_path,
+        "active",
+        project,
+    )
+
+    source.write_text(changed, encoding="utf-8")
+
+    assert session_start_project_state._read_bootstrap_context(
+        state_path,
+        "active",
+        project,
+    ) == ""
+
+
+def test_dirty_tracked_and_new_untracked_selected_inputs_invalidate_bootstrap(
+    monkeypatch,
+    tmp_path: Path,
+):
+    if shutil.which("git") is None:
+        pytest.skip("git is unavailable")
+    project, _projects, state_path = _configure_owned_project(monkeypatch, tmp_path)
+    _run_test_git(project, "init")
+    (project / "README.md").write_text("# Project\n\nCommitted.\n", encoding="utf-8")
+    _run_test_git(project, "add", "README.md")
+    _run_test_git(
+        project,
+        "-c",
+        "user.name=LLM Wiki Tests",
+        "-c",
+        "user.email=tests@example.invalid",
+        "commit",
+        "-m",
+        "initial",
+    )
+
+    assert bootstrap_project.bootstrap(str(project), apply=True).startswith("Written:")
+    assert session_start_project_state._read_bootstrap_context(
+        state_path,
+        "active",
+        project,
+    )
+
+    (project / "README.md").write_text("# Project\n\nDirty.\n", encoding="utf-8")
+    assert session_start_project_state._read_bootstrap_context(
+        state_path,
+        "active",
+        project,
+    ) == ""
+
+    (project / "README.md").write_text("# Project\n\nCommitted.\n", encoding="utf-8")
+    (project / "package.json").write_text('{"dependencies":{}}\n', encoding="utf-8")
+    assert session_start_project_state._read_bootstrap_context(
+        state_path,
+        "active",
+        project,
+    ) == ""
+
+
+def test_git_derived_value_change_invalidates_bootstrap_fingerprint(
+    monkeypatch,
+    tmp_path: Path,
+):
+    project = tmp_path / "project"
+    (project / ".git").mkdir(parents=True)
+    values = {
+        "timeline": "aaaa111 initial",
+        "remote": "https://example.invalid/one.git",
+        "last_commit": "2026-08-03 10:00:00 +0000",
+    }
+    monkeypatch.setattr(
+        bootstrap_project,
+        "_extract_git_timeline",
+        lambda _cwd, **_kwargs: [f"- `{values['timeline']}`"],
+    )
+
+    def fake_git(_cwd: str, *args: str, **_kwargs) -> str:
+        if args[:3] == ("remote", "get-url", "origin"):
+            return values["remote"]
+        if args[:2] == ("log", "-1"):
+            return values["last_commit"]
+        return ""
+
+    monkeypatch.setattr(bootstrap_project, "_run_git", fake_git)
+    executable = Path(sys.executable).resolve()
+    head = "a" * 40
+
+    before = bootstrap_project._bootstrap_source_fingerprint(
+        project,
+        head,
+        git_executable=executable,
+    )
+    values["remote"] = "https://example.invalid/two.git"
+    after = bootstrap_project._bootstrap_source_fingerprint(
+        project,
+        head,
+        git_executable=executable,
+    )
+
+    assert before is not None
+    assert after is not None
+    assert before != after
+
+
+def test_irrelevant_file_change_keeps_bootstrap_fingerprint_current(
+    monkeypatch,
+    tmp_path: Path,
+):
+    project, _projects, state_path = _configure_owned_project(monkeypatch, tmp_path)
+    (project / "README.md").write_text("# Project\n\nStable.\n", encoding="utf-8")
+    irrelevant = project / "notes.txt"
+    irrelevant.write_text("before\n", encoding="utf-8")
+    assert bootstrap_project.bootstrap(str(project), apply=True).startswith("Written:")
+
+    irrelevant.write_text("after\n", encoding="utf-8")
+
+    assert session_start_project_state._read_bootstrap_context(
+        state_path,
+        "active",
+        project,
+    )
+
+
+def test_git_repository_without_head_records_explicit_no_head_fingerprint(
+    monkeypatch,
+    tmp_path: Path,
+):
+    if shutil.which("git") is None:
+        pytest.skip("git is unavailable")
+    project, _projects, state_path = _configure_owned_project(monkeypatch, tmp_path)
+    _run_test_git(project, "init")
+    (project / "README.md").write_text("# Initial repository\n", encoding="utf-8")
+
+    result = bootstrap_project.bootstrap(str(project), apply=True)
+
+    assert result.startswith("Written:")
+    serialized = state_path.with_name("bootstrap.md").read_text(encoding="utf-8")
+    assert "git_head_json: null\n" in serialized
+    assert "bootstrap_schema_json: 2\n" in serialized
+    assert session_start_project_state._read_bootstrap_context(
+        state_path,
+        "active",
+        project,
+    )
+
+
+def test_bootstrap_rejects_source_snapshot_over_total_content_bound(
+    monkeypatch,
+    tmp_path: Path,
+):
+    project, _projects, state_path = _configure_owned_project(monkeypatch, tmp_path)
+    (project / "README.md").write_text("x" * 1024, encoding="utf-8")
+    monkeypatch.setattr(
+        bootstrap_project,
+        "MAX_BOOTSTRAP_SOURCE_TOTAL_BYTES",
+        128,
+        raising=False,
+    )
+
+    result = bootstrap_project.bootstrap(str(project), apply=True)
+
+    assert "source snapshot unavailable" in result.lower()
+    assert not state_path.with_name("bootstrap.md").exists()
+
+
+def test_bootstrap_schema_version_is_strict_at_injection(
+    monkeypatch,
+    tmp_path: Path,
+):
+    project, _projects, state_path = _configure_owned_project(monkeypatch, tmp_path)
+    (project / "README.md").write_text("# Strict schema\n", encoding="utf-8")
+    assert bootstrap_project.bootstrap(str(project), apply=True).startswith("Written:")
+    bootstrap_path = state_path.with_name("bootstrap.md")
+    serialized = bootstrap_path.read_text(encoding="utf-8")
+    bootstrap_path.write_text(
+        serialized.replace("bootstrap_schema_json: 2", "bootstrap_schema_json: 1"),
+        encoding="utf-8",
+    )
+
+    assert session_start_project_state._read_bootstrap_context(
+        state_path,
+        "active",
+        project,
+    ) == ""

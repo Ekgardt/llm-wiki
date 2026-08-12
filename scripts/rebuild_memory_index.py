@@ -13,8 +13,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from memory_state import (  # noqa: E402
     ROOT,
     atomic_write,
-    parse_frontmatter_scalar,
-    parse_project_scope,
+    knowledge_publication_lock,
+)
+from vault_editorial import (  # noqa: E402
+    ActiveNote,
+    ActiveNoteSelection,
+    parse_active_note_metadata,
+    read_bounded_note,
+    select_active_notes,
 )
 
 memory = ROOT / "knowledge"
@@ -48,20 +54,18 @@ SKIP_NAMES = {"README.md", "index.md", "log.md"}
 
 
 def _page_is_active(content: str) -> bool:
-    status = parse_frontmatter_scalar(content, "status")
-    project = parse_project_scope(content)
-    return not (
-        status.present
-        and status.value is None
-        or project.present
-        and project.value is None
-        or status.value is not None
-        and status.value.casefold() in {"superseded", "archived"}
-    )
+    return parse_active_note_metadata(content) is not None
 
 
 def extract_hook(md_path: Path) -> str:
-    text = md_path.read_text(encoding="utf-8", errors="ignore")
+    try:
+        text = read_bounded_note(md_path)
+    except OSError:
+        return ""
+    return _extract_hook_from_content(text)
+
+
+def _extract_hook_from_content(text: str) -> str:
     m = SUMMARY_RE.search(text)
     if m:
         return m.group(1).strip()
@@ -77,11 +81,11 @@ def extract_hook(md_path: Path) -> str:
 
 def extract_type(md_path: Path) -> str:
     try:
-        text = md_path.read_text(encoding="utf-8", errors="ignore")
+        text = read_bounded_note(md_path)
     except OSError:
         return ""
-    field = parse_frontmatter_scalar(text, "type")
-    return field.value or ""
+    metadata = parse_active_note_metadata(text)
+    return metadata.page_type if metadata is not None else ""
 
 
 def rel_link(md_path: Path) -> str:
@@ -89,61 +93,39 @@ def rel_link(md_path: Path) -> str:
     return rel.as_posix()
 
 
-def collect_pages() -> dict[str, list[Path]]:
-    buckets: dict[str, list[Path]] = {name: [] for name in TYPE_SECTIONS.values()}
+def _collect_note_buckets(
+    selection: ActiveNoteSelection,
+) -> dict[str, list[ActiveNote]]:
+    buckets: dict[str, list[ActiveNote]] = {
+        name: [] for name in TYPE_SECTIONS.values()
+    }
     buckets["Other"] = []
-
-    # Prefer typed subdirs when they exist and have content.
-    used_subdir = False
-    for name, path in SUBDIR_SECTIONS.items():
-        if path.exists():
-            pages = sorted(p for p in path.glob("*.md") if p.name not in SKIP_NAMES)
-            # Check status FIRST, before bucketing — superseded/archived
-            # pages must not appear in the index regardless of location.
-            filtered = []
-            for p in pages:
-                try:
-                    content = p.read_text(encoding="utf-8", errors="ignore")
-                    if not _page_is_active(content):
-                        continue
-                except OSError:
-                    continue
-                filtered.append(p)
-            if filtered:
-                buckets[name].extend(filtered)
-                used_subdir = True
-
-    # Flat notes + any remaining nested files.
-    already_bucketed: set[Path] = {x for xs in buckets.values() for x in xs}
-    if knowledge.exists():
-        for p in sorted(knowledge.rglob("*.md")):
-            if p.name in SKIP_NAMES:
-                continue
-            if "archive" in p.parts:
-                continue
-            # Skip superseded/archived pages from the index
-            try:
-                content = p.read_text(encoding="utf-8", errors="ignore")
-                if not _page_is_active(content):
-                    continue
-            except OSError:
-                continue
-            if used_subdir and p.parent != knowledge and p.parent.name in {
-                "concepts", "decisions", "patterns", "debugging", "qa"
-            }:
-                continue  # already listed via subdir
-            if p in already_bucketed:
-                continue
-            t = extract_type(p)
-            section = TYPE_SECTIONS.get(t, "Other")
-            buckets.setdefault(section, []).append(p)
+    for note in selection.notes:
+        section = TYPE_SECTIONS.get(note.page_type, "Other")
+        buckets.setdefault(section, []).append(note)
 
     return buckets
 
 
-def main() -> int:
+def collect_pages() -> dict[str, list[Path]]:
+    """Compatibility view over one immutable active-note selection."""
+    # The shared selector excludes archived and superseded pages before bucketing.
+    selection = select_active_notes(knowledge, root=ROOT)
+    return {
+        section: [note.path for note in notes]
+        for section, notes in _collect_note_buckets(selection).items()
+    }
+
+
+def _render_index(selection: ActiveNoteSelection) -> str:
     lines = [
         "# Session Memory Index",
+        "",
+        (
+            "<!-- llm-wiki-active-generation:"
+            f"v{selection.generation.version}:"
+            f"{selection.generation.canonical_sha256} -->"
+        ),
         "",
         "This index catalogs durable memory distilled from AI agent sessions",
         "(OpenCode, Codex, Claude Code, Cursor, Antigravity).",
@@ -154,15 +136,18 @@ def main() -> int:
         "",
     ]
 
-    buckets = collect_pages()
+    buckets = _collect_note_buckets(selection)
     for name in list(TYPE_SECTIONS.values()) + ["Other"]:
-        pages = sorted(set(buckets.get(name, [])), key=lambda p: p.name.lower())
-        if not pages:
+        notes = sorted(
+            buckets.get(name, []),
+            key=lambda note: (note.path.name.casefold(), note.path.name),
+        )
+        if not notes:
             continue
         lines.append(f"## {name}")
-        for p in pages:
-            hook = extract_hook(p)
-            link = f"[[{rel_link(p)}]]"
+        for note in notes:
+            hook = _extract_hook_from_content(note.content)
+            link = f"[[{rel_link(note.path)}]]"
             lines.append(f"- {link} — {hook}" if hook else f"- {link}")
         lines.append("")
 
@@ -173,8 +158,27 @@ def main() -> int:
         ]
     )
 
-    atomic_write(out, "\n".join(lines).rstrip() + "\n")
-    return 0
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _rebuild_index_locked() -> bool:
+    selection = select_active_notes(knowledge, root=ROOT)
+    rendered = _render_index(selection)
+    current = select_active_notes(knowledge, root=ROOT)
+    if current.generation != selection.generation:
+        return False
+    atomic_write(out, rendered)
+    return True
+
+
+def rebuild_index() -> bool:
+    """Publish one revalidated Markdown index under the shared writer lock."""
+    with knowledge_publication_lock():
+        return _rebuild_index_locked()
+
+
+def main() -> int:
+    return 0 if rebuild_index() else 1
 
 
 if __name__ == "__main__":

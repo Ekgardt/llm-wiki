@@ -118,10 +118,12 @@ def _append_prompt_tag(
     preview: str,
 ) -> None:
     """Append a one-line breadcrumb to today's daily log."""
-    from daily_log_append import append_daily
+    from daily_log_append import append_daily, neutralize_capture_marker_prefix
 
     ts = datetime.now().strftime("%H:%M:%S")
-    safe = " ".join(redact_secrets(preview).split())[:MAX_PROMPT_PREVIEW]
+    safe = neutralize_capture_marker_prefix(
+        " ".join(redact_secrets(preview).split())
+    )[:MAX_PROMPT_PREVIEW]
     block = (
         f"- `[{ts}] prompt | {session_id[:8]} | {slug}` "
         f"project-root-json={json.dumps(str(project_root), ensure_ascii=False)} | {safe}"

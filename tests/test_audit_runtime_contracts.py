@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -77,7 +78,7 @@ def test_loop_detector_matches_breadcrumb_format(tmp_path, monkeypatch):
 
     daily = tmp_path / "knowledge" / "daily"
     daily.mkdir(parents=True)
-    day = daily / "2026-07-09.md"
+    day = daily / f"{date.today().isoformat()}.md"
     # Exact writer format from tool_breadcrumb_append.py
     day.write_text(
         "# Daily\n"

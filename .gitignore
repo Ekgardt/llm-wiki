@@ -66,6 +66,7 @@ knowledge/notes/*
 !knowledge/notes/pipeline-mirroring.md
 !knowledge/notes/prospective-memory-page-drift.md
 !knowledge/notes/provenance-rule-6.md
+!knowledge/notes/retired-compile-evidence-cold-archive.md
 !knowledge/notes/state-md-exempt-from-lint.md
 !knowledge/notes/xdg-opencode-plugin-destination.md
 # Nested personal categories stay ignored unless explicitly published:

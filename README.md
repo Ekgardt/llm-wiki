@@ -1,6 +1,6 @@
 # LLM Wiki
 
-[![Tests](https://img.shields.io/badge/tests-1916%20collected-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://img.shields.io/badge/tests-2793%20collected-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-3.4.0-blue.svg)](CHANGELOG.md)
@@ -62,7 +62,7 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 ### Compile pipeline
 - **JSON-protocol compile** — no agent tool-use required, works with any LLM backend
 - **VERIFY-BEFORE-WRITE** — Python-side deterministic citation verification; the LLM cannot fabricate evidence
-- **Deterministic admission** — before journaling or mutation, Python requires durable-section citations and lifecycle/word bounds, then rejects live-corpus or same-plan duplicates; provider counters cannot bypass admission, and ambiguous pairs are report-only
+- **Deterministic admission** — before journaling or mutation, Python requires complete normalized durable bullets through one bounded exact index plus lifecycle/word bounds, then rejects live-corpus or same-plan duplicates; provider counters cannot bypass admission, and ambiguous pairs are report-only
 - **Semantic dedup** — update preferred over create; auto-supersede on contradiction
 - **Incremental** — SHA-256 hashing; only changed daily logs are recompiled
 - **Concurrency-safe** — one OS-held fixed-file lock serializes compile on Windows and POSIX; process exit releases ownership
@@ -75,7 +75,7 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 - **Weighted RRF**: BM25=2.0, Vector=1.0, Graph=0.5 — prevents regression on known-item queries
 - **Title + filename boost** — exact filename match short-circuits to rank 1
 - **Typed-provenance ranking** — `source_authority: user` outranks `ai-derived` / `inferred`
-- **Temporal queries** — `--as-of YYYY-MM-DD` filters by `valid_to` frontmatter
+- **Temporal queries** — strict `--as-of YYYY-MM-DD` / `--since YYYY-MM-DD`; `as_of` checks timestamp/`valid_to` and applies typed-provenance weights
 - **3-tier strategy** — DIRECT (<50 pages, index-only), HYBRID (50–300, +QMD), QMD (>300)
 
 ### Proactive intelligence
@@ -97,7 +97,7 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 - **Type-aware archive** — debugging 60d, patterns 180d, decisions never
 - **Truthful nightly status** — queue, compile, lint, and derived-index failures or remaining work produce a nonzero exit
 - **Single-lease weekly maintenance** — one maintenance lock spans nightly work, OKF migration, durable failed-queue reporting, archive, optional contradiction checks, and final Markdown/FTS/graph rebuilds
-- **Auditable installed repair** — separate audit, validated backup-only, explicit existing-manifest apply, and verify stages; only backup-only creates a manifest and no cleanup is implied until the operator reviews and runs them
+- **Auditable installed repair** — schema-v4 preparation journals ownership before private staging, output is preflighted outside vault/state roots, and apply accepts only the operator-approved direct-child manifest; exact commit/rollback purge progress leaves no completed source backup, while schema v3 remains recovery/verification-only
 - **OKF v0.1 frontmatter** — `type`, `confidence`, `source_authority`, `supersede` fields; auto-migration from legacy pages
 
 ### Infrastructure
@@ -106,7 +106,7 @@ The system follows the "compile, not retrieve" pattern ([Karpathy, April 2026](h
 - **Cross-platform**: Windows, macOS, Linux, WSL2
 - **Windowless Windows maintenance** — Task Scheduler launches `pythonw`, and maintenance child processes are created without console windows
 - **Zero runtime dependencies** — base install is stdlib-only; sentence-transformers and Cognee are optional
-- **1916 tests collected (platform-stable); local Windows verification: 1881 passed, 35 skipped**. Skip count varies with optional Bash, PowerShell, and symlink availability; CI targets Ubuntu + Windows + macOS on Python 3.10 + 3.13.
+- **2793 tests collected (platform-stable); local Windows verification: 2749 passed, 44 skipped**. Skip count varies with optional Bash, PowerShell, and symlink availability; CI targets Ubuntu + Windows + macOS on Python 3.10 + 3.13.
 - **Pre-commit hooks**: ruff (static analysis) + structural lint + gitleaks (secret scanning)
 
 ---
@@ -137,7 +137,7 @@ The installer:
 1. Checks prerequisites (Python 3.10+, git)
 2. Installs `uv` (fast Python package manager) if missing
 3. Syncs dependencies (`uv sync`)
-4. Runs the test suite (1916 collected platform-wide; local Windows: 1881 passed, 35 skipped; skips vary with optional shell/symlink support)
+4. Runs the test suite (2793 collected platform-wide; local Windows: 2749 passed, 44 skipped; skips vary with optional shell/symlink support)
 5. Sets `LLM_WIKI_ROOT` environment variable (user scope)
 6. Creates gitignored runtime dirs (`cache/` and logs are replaceable; `run/` holds durable automation/recovery state)
 7. Registers scheduled maintenance (cron on Unix, Task Scheduler on Windows)
@@ -150,7 +150,7 @@ The installer:
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync
-uv run pytest -q          # 1916 collected; local Windows: 1881 passed, 35 skipped; skips vary by environment
+uv run pytest -q          # 2793 collected; local Windows: 2749 passed, 44 skipped; skips vary by environment
 ```
 
 ### Verify it works
@@ -227,16 +227,16 @@ For the canonical structure reference (what lives where, env contracts, forbidde
 
 ## Benchmark
 
-> **Methodology**: 60 known-item queries (exact title match + summary-derived keywords, not LLM-paraphrased) over 34 curated pages. BM25-only mode (FTS5). This measures "can the system find page X when given its title or summary keywords?" — the most relevant metric for personal knowledge retrieval. It is **not** LoCoMo or LongMemEval (multi-session conversation recall). Competitor numbers are from different datasets and are not directly comparable. Run `benchmark/run_benchmark.py` to reproduce.
+> **Methodology**: 66 known-item queries (exact title match + summary-derived keywords, not LLM-paraphrased) over 33 canonical active selector winners; shadows and inactive pages are excluded. BM25-only mode (FTS5). This measures "can the system find page X when given its title or summary keywords?" — the most relevant metric for personal knowledge retrieval. It is **not** LoCoMo or LongMemEval (multi-session conversation recall). Competitor numbers are from different datasets and are not directly comparable. Results below are from one local Windows / Python 3.14 run on 2026-08-03; latency is machine-specific. Run `benchmark/run_benchmark.py` to reproduce.
 
-| Metric | LLM Wiki v3.3 | agentmemory | Zep | Mem0 |
+| Metric | LLM Wiki v3.4 + Unreleased | agentmemory | Zep | Mem0 |
 |--------|---------------|-------------|-----|------|
-| Recall@1 | **95.0%** | n/a | n/a | n/a |
+| Recall@1 | **92.4%** | n/a | n/a | n/a |
 | Recall@3 | **100%** | n/a | n/a | n/a |
 | Recall@5 | **100%** | 95.2% | 94.7% | 91.6% |
 | Recall@10 | **100%** | n/a | n/a | n/a |
-| MRR | **0.9667** | 0.882 | n/a | n/a |
-| Latency p50 | **6ms** | 14ms | 155ms | 880ms |
+| MRR | **0.9596** | 0.882 | n/a | n/a |
+| Latency p50 | **36.4ms** | 14ms | 155ms | 880ms |
 | Token cost/search | **0** | ~1900 | $$ | $$ |
 
 100% Recall@5 is achievable on small curated datasets; expect 85–95% on 500+ pages. Triple-fusion (BM25 + Vector + Graph) adds semantic recall on top of these BM25-only numbers.

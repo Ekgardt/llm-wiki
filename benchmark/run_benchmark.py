@@ -29,6 +29,7 @@ import argparse
 import json
 import math
 import os
+import platform
 import re
 import statistics
 import sys
@@ -37,12 +38,11 @@ from pathlib import Path
 
 ROOT = Path(os.environ.get("LLM_WIKI_ROOT", Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(ROOT / "scripts"))
+from vault_editorial import select_active_notes  # noqa: E402
 
 INDEX_DIR = ROOT / "benchmark"
 KNOWLEDGE = ROOT / "knowledge" / "notes"
 
-FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
-H1_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
 SUMMARY_RE = re.compile(
     r"^One-sentence summary:\s*(.+?)\s*$", re.MULTILINE | re.IGNORECASE
 )
@@ -55,64 +55,33 @@ def _generate_qa_pairs() -> list[dict]:
     Also generates a keyword query using key words from the summary.
     """
     pairs = []
-    # Flat notes (current layout) + optional typed subdirs (legacy/aspirational).
-    search_dirs = [
-        KNOWLEDGE,  # flat knowledge/notes/*.md
-        KNOWLEDGE / "decisions",
-        KNOWLEDGE / "patterns",
-        KNOWLEDGE / "debugging",
-        KNOWLEDGE / "concepts",
-        KNOWLEDGE / "qa",
-    ]
-    seen: set[Path] = set()
+    selection = select_active_notes(KNOWLEDGE, root=ROOT)
+    for note in selection.notes:
+        summary_match = SUMMARY_RE.search(note.content)
+        title = note.title.strip()
+        summary = summary_match.group(1).strip() if summary_match else ""
 
-    for d in search_dirs:
-        if not d.exists():
-            continue
-        # Only direct children for flat root; subdirs use their own glob.
-        for md in sorted(d.glob("*.md")):
-            if md in seen:
-                continue
-            if md.name.lower() in {"readme.md", "index.md", "log.md"}:
-                continue
-            seen.add(md)
-            try:
-                content = md.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                continue
+        pairs.append({
+            "query": title.lower(),
+            "gold_path": note.relative_path,
+            "query_type": "exact_title",
+        })
 
-            title_match = H1_RE.search(content)
-            summary_match = SUMMARY_RE.search(content)
-            if not title_match:
-                continue
-
-            title = title_match.group(1).strip()
-            summary = summary_match.group(1).strip() if summary_match else ""
-            rel_path = md.relative_to(ROOT).as_posix()
-
-            # Query 1: exact title (easy)
-            pairs.append({
-                "query": title.lower(),
-                "gold_path": rel_path,
-                "query_type": "exact_title",
-            })
-
-            # Query 2: key words from summary (medium)
-            if summary:
-                # Extract 3-5 key words from summary
-                words = re.findall(r"\b[a-zA-Z]{4,}\b", summary.lower())
-                # Remove common words
-                stop = {"that", "this", "with", "from", "have", "they", "will",
-                        "been", "were", "more", "than", "when", "what", "which",
-                        "should", "would", "could", "their", "there", "where",
-                        "page", "file", "using", "used", "into"}
-                keywords = [w for w in words if w not in stop][:4]
-                if len(keywords) >= 2:
-                    pairs.append({
-                        "query": " ".join(keywords),
-                        "gold_path": rel_path,
-                        "query_type": "keywords_from_summary",
-                    })
+        if summary:
+            words = re.findall(r"\b[a-zA-Z]{4,}\b", summary.lower())
+            stop = {
+                "that", "this", "with", "from", "have", "they", "will",
+                "been", "were", "more", "than", "when", "what", "which",
+                "should", "would", "could", "their", "there", "where",
+                "page", "file", "using", "used", "into",
+            }
+            keywords = [word for word in words if word not in stop][:4]
+            if len(keywords) >= 2:
+                pairs.append({
+                    "query": " ".join(keywords),
+                    "gold_path": note.relative_path,
+                    "query_type": "keywords_from_summary",
+                })
 
     return pairs
 
@@ -129,6 +98,7 @@ def _run_benchmark(
 
     results = {
         "total_queries": len(qa_pairs),
+        "total_pages": len({pair["gold_path"] for pair in qa_pairs}),
         "semantic": semantic,
         "k_values": k_values,
         "recall_at_k": {k: 0 for k in k_values},
@@ -180,7 +150,11 @@ def _run_benchmark(
         k: round(count / n, 4) for k, count in results["recall_at_k"].items()
     }
     results["mrr"] = round(results["mrr_sum"] / n, 4) if n > 0 else 0
-    results["latency_p50_ms"] = round(statistics.median(results["latencies_ms"]), 1)
+    results["latency_p50_ms"] = (
+        round(statistics.median(results["latencies_ms"]), 1)
+        if results["latencies_ms"]
+        else 0
+    )
     sorted_lat = sorted(results["latencies_ms"])
     n = len(sorted_lat)
     results["latency_p95_ms"] = round(
@@ -200,7 +174,15 @@ def _format_report(results: dict) -> str:
         "",
         f"Date: {time.strftime('%Y-%m-%d %H:%M:%S')}",
         f"Mode: {'BM25 + Vector (hybrid RRF)' if results['semantic'] else 'BM25 only'}",
-        f"Queries: {results['total_queries']}",
+        (
+            f"Queries: {results['total_queries']} canonical known-item queries "
+            f"over {results['total_pages']} active selector winners"
+        ),
+        (
+            f"Environment: one local {platform.system()} / "
+            f"Python {sys.version_info.major}.{sys.version_info.minor} run; "
+            "latency is machine-specific"
+        ),
         "",
         "## Results",
         "",

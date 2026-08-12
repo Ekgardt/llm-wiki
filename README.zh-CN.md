@@ -1,6 +1,6 @@
 # LLM Wiki
 
-[![Tests](https://img.shields.io/badge/tests-1916%20collected-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
+[![Tests](https://img.shields.io/badge/tests-2793%20collected-brightgreen.svg)](https://github.com/Ekgardt/llm-wiki/actions)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-3.4.0-blue.svg)](CHANGELOG.md)
@@ -62,7 +62,7 @@ LLM Wiki 为你使用的每一个 AI 编码智能体——OpenCode、Codex、Cla
 ### 编译流水线
 - **JSON 协议编译**——无需智能体 tool-use，适用于任何 LLM 后端
 - **VERIFY-BEFORE-WRITE**——Python 端确定性引用验证；LLM 无法伪造证据
-- **确定性准入**——在写 journal 或执行 mutation 前，Python 要求引用持久内容分区并满足 lifecycle/字数边界，同时拒绝 live corpus 或同一 plan 内的重复项；provider 计数器不能绕过准入，模糊配对只报告不修改
+- **确定性准入**——在写 journal 或执行 mutation 前，Python 通过单个有界精确索引要求引用完整、规范化的持久 bullet，并满足 lifecycle/字数边界，同时拒绝 live corpus 或同一 plan 内的重复项；provider 计数器不能绕过准入，模糊配对只报告不修改
 - **语义去重**——优先 update 而非 create；矛盾时自动 supersede
 - **增量编译**——SHA-256 哈希；仅重新编译变更的 daily 日志
 - **并发安全**——Windows 和 POSIX 上由一个操作系统持有的固定锁文件串行化编译；进程退出即释放锁所有权
@@ -75,7 +75,7 @@ LLM Wiki 为你使用的每一个 AI 编码智能体——OpenCode、Codex、Cla
 - **加权 RRF**：BM25=2.0、Vector=1.0、Graph=0.5——防止已知项查询回归
 - **Title + filename 提升**——文件名精确匹配直接短路到 rank 1
 - **Typed-provenance 排序**——`source_authority: user` 高于 `ai-derived` / `inferred`
-- **时间查询**——`--as-of YYYY-MM-DD` 按 `valid_to` frontmatter 过滤
+- **时间查询**——严格校验 `--as-of YYYY-MM-DD` / `--since YYYY-MM-DD`；`as_of` 检查 timestamp/`valid_to` 并应用 typed-provenance 权重
 - **3 级策略**——DIRECT（<50 页，仅索引）、HYBRID（50–300，+QMD）、QMD（>300）
 
 ### 主动智能
@@ -97,7 +97,7 @@ LLM Wiki 为你使用的每一个 AI 编码智能体——OpenCode、Codex、Cla
 - **类型感知归档**——debugging 60 天、patterns 180 天、decisions 永不
 - **真实 nightly 状态**——队列、编译、lint、派生索引失败或仍有待处理工作时返回非零退出码
 - **单 lease weekly 维护**——一个 maintenance 锁覆盖 nightly 工作、OKF 迁移、持久失败队列报告（不删除任务）、归档、可选矛盾检查以及最终 Markdown/FTS/graph 重建
-- **可审计的已安装 vault 修复**——audit、已验证 backup-only、manifest 绑定 apply 和 verify 分离；只有操作者审阅并运行后才算执行 cleanup
+- **可审计的已安装 vault 修复**——schema v4 audit 会生成密封的 `approved: false` manifest 和私有临时 staging；apply 仅接受操作者批准的 manifest，只物理删除严格验证的垃圾，并在 commit 后清除源 staging，因此已完成的清理不保留源 backup，也不能 rollback
 - **OKF v0.1 frontmatter**——`type`、`confidence`、`source_authority`、`supersede` 字段；从遗留页面自动迁移
 
 ### 基础设施
@@ -106,7 +106,7 @@ LLM Wiki 为你使用的每一个 AI 编码智能体——OpenCode、Codex、Cla
 - **跨平台**：Windows、macOS、Linux、WSL2
 - **无控制台窗口的 Windows 维护**——Task Scheduler 使用 `pythonw` 启动任务，维护子进程也不会创建控制台窗口
 - **零运行时依赖**——基础安装仅用标准库；sentence-transformers 和 Cognee 为可选
-- **各平台稳定收集 1916 个测试；本地 Windows 验证：1881 个通过，35 个跳过**。跳过数量取决于可选 Bash、PowerShell 和符号链接支持；CI 目标为 Ubuntu + Windows + macOS、Python 3.10 + 3.13。
+- **各平台稳定收集 2793 个测试；本地 Windows 验证：2749 个通过，44 个跳过**。跳过数量取决于可选 Bash、PowerShell 和符号链接支持；CI 目标为 Ubuntu + Windows + macOS、Python 3.10 + 3.13。
 - **Pre-commit 钩子**：ruff（静态分析）+ 结构 lint + gitleaks（密钥扫描）
 
 ---
@@ -137,7 +137,7 @@ irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 1. 检查前置条件（Python 3.10+、git）
 2. 如缺失则安装 `uv`（快速 Python 包管理器）
 3. 同步依赖（`uv sync`）
-4. 运行测试套件（各平台收集 1916 个；本地 Windows：1881 个通过，35 个跳过；跳过数量取决于 shell/符号链接支持）
+4. 运行测试套件（各平台收集 2793 个；本地 Windows：2749 个通过，44 个跳过；跳过数量取决于 shell/符号链接支持）
 5. 设置 `LLM_WIKI_ROOT` 环境变量（用户级）
 6. 创建 gitignored 运行时目录（`cache/` 和日志可替换；`run/` 保存持久自动化与恢复状态）
 7. 注册计划维护（Unix 上 cron，Windows 上 Task Scheduler）
@@ -150,7 +150,7 @@ irm https://raw.githubusercontent.com/Ekgardt/llm-wiki/main/install.ps1 | iex
 git clone https://github.com/Ekgardt/llm-wiki.git
 cd llm-wiki
 uv sync
-uv run pytest -q          # 收集 1916 个；本地 Windows：1881 个通过，35 个跳过；跳过数依环境而异
+uv run pytest -q          # 收集 2793 个；本地 Windows：2749 个通过，44 个跳过；跳过数依环境而异
 ```
 
 ### 验证可用
@@ -225,16 +225,16 @@ RUNTIME       cache/  logs/  run/  cache/cognee/   （gitignored，vault 内）
 
 ## 基准测试
 
-> **方法论**：60 个已知项查询（精确标题匹配 + 摘要派生关键词，非 LLM 改写），覆盖 34 个精选页面。仅 BM25 模式（FTS5）。测量"系统能否在给定标题或摘要关键词时找到页面 X？"——对个人知识检索最相关的指标。这**不是** LoCoMo 或 LongMemEval（多会话对话召回）。竞争对手数据来自不同数据集，不可直接比较。运行 `benchmark/run_benchmark.py` 复现。
+> **方法论**：66 个已知项查询（精确标题匹配 + 摘要派生关键词，非 LLM 改写），覆盖 selector 选出的 33 个规范活跃页面；shadow 与非活跃页面不计入。仅 BM25 模式（FTS5）。测量"系统能否在给定标题或摘要关键词时找到页面 X？"——对个人知识检索最相关的指标。这**不是** LoCoMo 或 LongMemEval（多会话对话召回）。竞争对手数据来自不同数据集，不可直接比较。以下结果来自 2026-08-03 的一次本地 Windows / Python 3.14 运行；延迟取决于机器。运行 `benchmark/run_benchmark.py` 复现。
 
-| 指标 | LLM Wiki v3.3 | agentmemory | Zep | Mem0 |
+| 指标 | LLM Wiki v3.4 + Unreleased | agentmemory | Zep | Mem0 |
 |------|---------------|-------------|-----|------|
-| Recall@1 | **95.0%** | n/a | n/a | n/a |
+| Recall@1 | **92.4%** | n/a | n/a | n/a |
 | Recall@3 | **100%** | n/a | n/a | n/a |
 | Recall@5 | **100%** | 95.2% | 94.7% | 91.6% |
 | Recall@10 | **100%** | n/a | n/a | n/a |
-| MRR | **0.9667** | 0.882 | n/a | n/a |
-| 延迟 p50 | **6ms** | 14ms | 155ms | 880ms |
+| MRR | **0.9596** | 0.882 | n/a | n/a |
+| 延迟 p50 | **36.4ms** | 14ms | 155ms | 880ms |
 | Token 成本/搜索 | **0** | ~1900 | $$ | $$ |
 
 100% Recall@5 在小型精选数据集上可实现；500+ 页时预期 85–95%。Triple-fusion（BM25 + Vector + Graph）在这些仅 BM25 的数字基础上增加了语义召回。

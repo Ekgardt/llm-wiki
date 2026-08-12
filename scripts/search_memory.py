@@ -22,11 +22,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sqlite3
 import sys
 import time
+from datetime import date, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -34,8 +36,20 @@ from memory_state import (  # noqa: E402
     ROOT,
     STATE_ROOT,
     atomic_write,
+    decode_json_object_strict,
     parse_frontmatter_scalar,
-    parse_project_scope,
+)
+from vault_editorial import (  # noqa: E402
+    AUTHORITY_RANKS,
+    CONFIDENCE_RANKS,
+    MAX_ACTIVE_NOTE_ENTRIES,
+    ActiveNote,
+    ActiveNoteSelection,
+    active_note_generation_manifest,
+    parse_active_note_metadata,
+    read_bounded_note,
+    read_bounded_note_snapshot,
+    select_active_notes,
 )
 
 INDEX_DIR = STATE_ROOT / "cache"
@@ -61,6 +75,69 @@ SUMMARY_RE = re.compile(
 # Embedding model — lightweight, CPU-friendly, ~90MB download on first use
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 EMBEDDING_DIM = 384
+EMBEDDING_MODEL_VERSION = 1
+VECTOR_CACHE_SCHEMA = "llm-wiki-vector-cache"
+VECTOR_CACHE_VERSION = 1
+MAX_VECTOR_CACHE_BYTES = 64 * 1024 * 1024
+MAX_VECTOR_CACHE_CHARS = 64 * 1024 * 1024
+MAX_VECTOR_CACHE_JSON_DEPTH = 8
+MAX_VECTOR_CACHE_METADATA_CHARS = 16 * 1024 * 1024
+MAX_VECTOR_CACHE_VECTOR_VALUES = MAX_ACTIVE_NOTE_ENTRIES * EMBEDDING_DIM
+MAX_VECTOR_CACHE_PAGES = MAX_ACTIVE_NOTE_ENTRIES
+_VECTOR_CACHE_PARALLEL_ARRAY_KEYS = (
+    "paths",
+    "hashes",
+    "titles",
+    "summaries",
+    "projects",
+    "timestamps",
+)
+_VECTOR_CACHE_GENERATION_KEYS = {
+    "version",
+    "artifact",
+    "canonical_sha256",
+    "paths",
+}
+_VECTOR_CACHE_KEYS = {
+    "schema",
+    "version",
+    "generation",
+    "model",
+    "model_version",
+    "dimensions",
+    "page_count",
+    "paths",
+    "hashes",
+    "titles",
+    "summaries",
+    "projects",
+    "timestamps",
+    "vectors",
+}
+# The strict decoder counts every mapping member and sequence item as one node.
+MAX_VECTOR_CACHE_JSON_NODES = min(
+    MAX_VECTOR_CACHE_BYTES,
+    len(_VECTOR_CACHE_KEYS)
+    + len(_VECTOR_CACHE_GENERATION_KEYS)
+    + MAX_VECTOR_CACHE_PAGES
+    * (EMBEDDING_DIM + len(_VECTOR_CACHE_PARALLEL_ARRAY_KEYS) + 2),
+)
+MAX_VECTOR_CACHE_JSON_MEMBERS = MAX_VECTOR_CACHE_JSON_NODES
+# Compact JSON adds one structural token per node plus container delimiters.
+_VECTOR_CACHE_FIXED_LEXICAL_TOKENS = (
+    2 * len(_VECTOR_CACHE_KEYS)
+    + 1
+    + 2 * len(_VECTOR_CACHE_GENERATION_KEYS)
+    + 1
+    + len(_VECTOR_CACHE_PARALLEL_ARRAY_KEYS)
+    + 2
+)
+MAX_VECTOR_CACHE_JSON_LEXICAL_TOKENS = min(
+    MAX_VECTOR_CACHE_BYTES,
+    _VECTOR_CACHE_FIXED_LEXICAL_TOKENS
+    + MAX_VECTOR_CACHE_PAGES
+    * (EMBEDDING_DIM + len(_VECTOR_CACHE_PARALLEL_ARRAY_KEYS) + 3),
+)
 MAX_STDIN_QUERY_BYTES = 64 * 1024
 
 
@@ -135,36 +212,14 @@ def _cosine_similarity(query_vec: list[float], doc_vecs: list[list[float]]) -> l
 
 
 def _collect_pages(scope: str = "all") -> list[Path]:
-    """Collect all searchable markdown pages."""
-    pages: list[Path] = []
-    seen: set[Path] = set()
+    """Return the shared set after archived/superseded filtering and dedup."""
+    return list(_collect_note_selection(scope).paths)
 
-    roots: list[Path] = []
-    # All scope values resolve to the single knowledge/notes tree after the
-    # three-zone consolidation; "wiki" and "memory" are kept as legacy aliases.
-    if scope in ("wiki", "memory", "knowledge", "all"):
-        roots.append(KNOWLEDGE_DIR)
 
-    for root in roots:
-        if not root.exists():
-            continue
-        for md in sorted(root.rglob("*.md")):
-            if not md.is_file() or md in seen:
-                continue
-            if md.name in SKIP_NAMES:
-                continue
-            if any(skip in md.relative_to(root).parts for skip in SKIP_DIRS):
-                continue
-            try:
-                content = md.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                continue
-            active, _project = _active_search_metadata(content)
-            if not active:
-                continue
-            seen.add(md)
-            pages.append(md)
-    return pages
+def _collect_note_selection(scope: str = "all") -> ActiveNoteSelection:
+    if scope not in ("wiki", "memory", "knowledge", "all"):
+        return ActiveNoteSelection((), ())
+    return select_active_notes(KNOWLEDGE_DIR, root=ROOT)
 
 
 def _extract_frontmatter_field(content: str, pattern: re.Pattern) -> str | None:
@@ -181,33 +236,44 @@ AUTHORITY_FIELD_RE = re.compile(
     r"^source_authority:\s*[\"']?([^\"'\n]+)[\"']?\s*$", re.MULTILINE
 )
 VALID_TO_FIELD_RE = re.compile(r"^valid_to:\s*(.+?)\s*$", re.MULTILINE)
+ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _active_search_metadata(content: str) -> tuple[bool, str]:
-    status = parse_frontmatter_scalar(content, "status")
-    project = parse_project_scope(content)
-    if status.present and status.value is None:
+    metadata = parse_active_note_metadata(content)
+    if metadata is None:
         return False, ""
-    if project.present and project.value is None:
-        return False, ""
-    if status.value is not None and status.value.casefold() in {
-        "superseded",
-        "archived",
-    }:
-        return False, ""
-    return True, project.value or ""
+    return True, metadata.project
 
-# Higher weight = preferred in ranking (typed provenance).
-AUTHORITY_WEIGHTS = {
-    "user": 1.35,
-    "human": 1.35,
-    "ai-derived": 1.0,
-    "ai": 1.0,
-    "web": 0.9,
-    "inferred": 0.8,
-    "unknown": 1.0,
-}
 
+def _require_iso_date(value: str, field: str) -> str:
+    if not isinstance(value, str) or ISO_DATE_RE.fullmatch(value) is None:
+        raise ValueError(f"{field} must be a valid YYYY-MM-DD date")
+    try:
+        date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{field} must be a valid YYYY-MM-DD date") from exc
+    return value
+
+
+def _timestamp_date(content: str) -> str:
+    field = parse_frontmatter_scalar(content, "timestamp")
+    if not field.present:
+        return ""
+    if field.value is None:
+        return ""
+    value = field.value
+    candidate = value[:10]
+    try:
+        _require_iso_date(candidate, "timestamp")
+        if len(value) == 10:
+            return candidate
+        if value[10] not in {"T", " "}:
+            return ""
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    return candidate
 
 def _extract_title_and_summary(content: str, fallback_stem: str) -> tuple[str, str]:
     title = fallback_stem
@@ -228,36 +294,32 @@ def _strip_frontmatter(content: str) -> str:
     return FRONTMATTER_RE.sub("", content, count=1)
 
 
-def _needs_rebuild(pages: list[Path]) -> bool:
-    """Check if any page is newer than the index, or if pages were added/removed."""
+def _needs_rebuild(selection: ActiveNoteSelection) -> bool:
+    """Return whether FTS metadata differs from the immutable selection."""
     if not INDEX_FILE.exists():
         return True
-    # Manifest check: if the set of indexed paths differs from the
-    # current set (e.g. a page was deleted), trigger rebuild.
-    current_paths = sorted(p.relative_to(ROOT).as_posix() for p in pages)
-    if INDEX_MANIFEST.exists():
-        try:
-            manifest_paths = json.loads(
-                INDEX_MANIFEST.read_text(encoding="utf-8")
-            )
-            if manifest_paths != current_paths:
-                return True
-        except (OSError, json.JSONDecodeError):
-            return True
-    else:
-        # No manifest from a prior build — rebuild to create one.
+    if not isinstance(selection, ActiveNoteSelection):
         return True
-    index_mtime = INDEX_FILE.stat().st_mtime
-    for p in pages:
+    expected = active_note_generation_manifest(selection, "fts-v1")
+    try:
+        connection = sqlite3.connect(
+            f"file:{INDEX_FILE.as_posix()}?mode=ro",
+            uri=True,
+        )
         try:
-            if p.stat().st_mtime > index_mtime:
-                return True
-        except OSError:
-            continue
-    return False
+            stored = dict(connection.execute("SELECT key, value FROM index_metadata"))
+        finally:
+            connection.close()
+    except (OSError, sqlite3.DatabaseError):
+        return True
+    return stored != {
+        "artifact": str(expected["artifact"]),
+        "canonical_sha256": str(expected["canonical_sha256"]),
+        "version": str(expected["version"]),
+    }
 
 
-def _build_index(pages: list[Path]) -> None:
+def _build_index(selection: ActiveNoteSelection) -> None:
     """Build the FTS5 index from scratch (atomically).
 
     Builds into a temporary database file, then atomically replaces the
@@ -273,6 +335,16 @@ def _build_index(pages: list[Path]) -> None:
 
     conn = sqlite3.connect(str(tmp_file))
     try:
+        manifest = active_note_generation_manifest(selection, "fts-v1")
+        conn.execute("CREATE TABLE index_metadata (key TEXT PRIMARY KEY, value TEXT)")
+        conn.executemany(
+            "INSERT INTO index_metadata (key, value) VALUES (?, ?)",
+            (
+                ("artifact", str(manifest["artifact"])),
+                ("canonical_sha256", str(manifest["canonical_sha256"])),
+                ("version", str(manifest["version"])),
+            ),
+        )
         conn.execute(
             """
             CREATE VIRTUAL TABLE pages USING fts5(
@@ -287,20 +359,17 @@ def _build_index(pages: list[Path]) -> None:
             """
         )
 
-        for p in pages:
-            try:
-                content = p.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                continue
+        for note in selection.notes:
+            content = note.content
             active, project = _active_search_metadata(content)
             if not active:
-                continue
-            title, summary = _extract_title_and_summary(content, p.stem)
+                raise OSError(
+                    f"canonical search snapshot became inactive or invalid: {note.path}"
+                )
+            title, summary = _extract_title_and_summary(content, note.path.stem)
             body = _strip_frontmatter(content)
-            rel_path = p.relative_to(ROOT).as_posix()
-            timestamp = _extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or ""
-            # Truncate timestamp to date only for filtering
-            timestamp = timestamp[:10] if timestamp else ""
+            rel_path = note.relative_path
+            timestamp = _timestamp_date(content)
             conn.execute(
                 "INSERT INTO pages (path, title, summary, body, project, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
                 (rel_path, title, summary, body, project.lower(), timestamp),
@@ -326,45 +395,142 @@ def _build_index(pages: list[Path]) -> None:
     # atomic at the OS level, so concurrent readers never see a gap.
     os.replace(str(tmp_file), str(INDEX_FILE))
 
-    # Write paths manifest so deletions are detected on the next check.
+    # The database metadata is authoritative; this sidecar is inspectable.
     try:
         atomic_write(
             INDEX_MANIFEST,
             json.dumps(
-                sorted(p.relative_to(ROOT).as_posix() for p in pages)
+                active_note_generation_manifest(selection, "fts-v1"),
+                sort_keys=True,
             ),
         )
     except OSError:
         pass  # best-effort
 
 
-def _authority_weight(path: str) -> float:
-    """Read source_authority from page frontmatter; default 1.0."""
-    try:
-        p = ROOT / path if not Path(path).is_absolute() else Path(path)
-        content = p.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return 1.0
-    auth = _extract_frontmatter_field(content, AUTHORITY_FIELD_RE)
-    if not auth:
-        return 1.0
-    return AUTHORITY_WEIGHTS.get(auth.strip().lower(), 1.0)
-
-
-def _valid_as_of(path: str, as_of: str) -> bool:
-    """True if page is valid at as_of (valid_to empty/null or >= as_of)."""
-    try:
-        p = ROOT / path if not Path(path).is_absolute() else Path(path)
-        content = p.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
+def _valid_as_of(source: ActiveNote | str, as_of: str) -> bool:
+    """Return whether strict timestamp and valid_to metadata allow as_of."""
+    as_of = _require_iso_date(as_of, "as_of")
+    if isinstance(source, ActiveNote):
+        content = source.content
+    else:
+        try:
+            p = ROOT / source if not Path(source).is_absolute() else Path(source)
+            content = read_bounded_note(p)
+        except OSError:
+            return True
+    timestamp_field = parse_frontmatter_scalar(content, "timestamp")
+    if timestamp_field.present:
+        timestamp = _timestamp_date(content)
+        if not timestamp or timestamp > as_of:
+            return False
+    valid_to = parse_frontmatter_scalar(content, "valid_to")
+    if not valid_to.present:
         return True
-    valid_to = _extract_frontmatter_field(content, VALID_TO_FIELD_RE)
-    if not valid_to:
-        return True
-    vt = valid_to.strip().strip("\"'").lower()
+    if valid_to.value is None:
+        return False
+    vt = valid_to.value.lower()
     if vt in ("null", "none", "~", ""):
         return True
-    return vt[:10] >= as_of[:10]
+    try:
+        return _require_iso_date(vt, "valid_to") >= as_of
+    except ValueError:
+        return False
+
+
+def _sort_search_results(results: list[dict], *, score_field: str) -> list[dict]:
+    """Sort by unrounded relevance, then strict provenance and stable path."""
+    return sorted(
+        results,
+        key=lambda item: (
+            -float(item.get(score_field, 0.0)),
+            -int(item.get("_authority_rank", AUTHORITY_RANKS["inferred"])),
+            -int(item.get("_confidence_rank", CONFIDENCE_RANKS["low"])),
+            str(item.get("path", "")).casefold(),
+            str(item.get("path", "")),
+        ),
+    )
+
+
+def _finalize_result_scores(results: list[dict]) -> list[dict]:
+    finalized: list[dict] = []
+    for result in results:
+        item = result.copy()
+        if isinstance(item.get("score"), int | float):
+            item["score"] = round(float(item["score"]), 4)
+        if isinstance(item.get("fused_score"), int | float):
+            item["fused_score"] = round(float(item["fused_score"]), 6)
+        item.pop("_authority_rank", None)
+        item.pop("_confidence_rank", None)
+        finalized.append(item)
+    return finalized
+
+
+def _query_fts(
+    fts_query: str,
+    limit: int,
+    allowed_paths: set[str],
+    expected_generation: dict[str, object],
+) -> list[tuple]:
+    connection = sqlite3.connect(
+        f"file:{INDEX_FILE.as_posix()}?mode=ro",
+        uri=True,
+    )
+    try:
+        connection.execute(
+            "CREATE TEMP TABLE allowed_search_paths "
+            "(path TEXT PRIMARY KEY) WITHOUT ROWID"
+        )
+        connection.executemany(
+            "INSERT INTO allowed_search_paths (path) VALUES (?)",
+            ((path,) for path in sorted(allowed_paths)),
+        )
+        objects = dict(
+            connection.execute(
+                "SELECT name, type FROM sqlite_schema "
+                "WHERE name IN ('index_metadata', 'pages')"
+            )
+        )
+        metadata_columns = [
+            (row[1], str(row[2]).upper(), row[5])
+            for row in connection.execute("PRAGMA table_info(index_metadata)")
+        ]
+        page_columns = [
+            row[1] for row in connection.execute("PRAGMA table_info(pages)")
+        ]
+        stored_generation = dict(
+            connection.execute("SELECT key, value FROM index_metadata")
+        )
+        expected_metadata = {
+            "artifact": str(expected_generation.get("artifact", "")),
+            "canonical_sha256": str(
+                expected_generation.get("canonical_sha256", "")
+            ),
+            "version": str(expected_generation.get("version", "")),
+        }
+        if (
+            objects != {"index_metadata": "table", "pages": "table"}
+            or metadata_columns != [("key", "TEXT", 1), ("value", "TEXT", 0)]
+            or page_columns
+            != ["path", "title", "summary", "body", "project", "timestamp"]
+            or stored_generation != expected_metadata
+        ):
+            raise sqlite3.DatabaseError("FTS index schema or generation mismatch")
+        return connection.execute(
+            """
+            SELECT pages.path, pages.title, pages.summary, pages.project,
+                   pages.timestamp, bm25(pages) as rank
+            FROM pages
+            INNER JOIN allowed_search_paths AS allowed
+                ON allowed.path = pages.path
+            WHERE pages MATCH ?
+            ORDER BY rank
+            LIMIT ?
+            """,
+            (fts_query, limit),
+        ).fetchall()
+    finally:
+        connection.close()
 
 
 def search(
@@ -383,21 +549,26 @@ def search(
     - project: boost results tagged with `project: <slug>` (x2 score boost)
     - since: only results with timestamp >= YYYY-MM-DD
     - as_of: only results valid on YYYY-MM-DD (timestamp <= as_of and
-      valid_to empty or >= as_of); also applies source_authority weights
+      valid_to empty or >= as_of)
     - semantic: if sentence-transformers is installed, also run vector
       search and fuse results via RRF. Finds semantically related pages
       even when keywords don't match.
     """
     if not query or not query.strip():
         return []
-    pages = _collect_pages(scope)
+    if since is not None:
+        since = _require_iso_date(since, "since")
+    if as_of is not None:
+        as_of = _require_iso_date(as_of, "as_of")
+    selection = _collect_note_selection(scope)
+    pages = list(selection.paths)
     if not pages:
         return []
+    notes_by_path = {note.relative_path: note for note in selection.notes}
+    allowed_paths = set(notes_by_path)
 
-    if force_rebuild or _needs_rebuild(pages):
-        _build_index(pages)
-
-    conn = sqlite3.connect(str(INDEX_FILE))
+    if force_rebuild or _needs_rebuild(selection):
+        _build_index(selection)
 
     # BM25 search (always runs)
     # Escape FTS5 special tokens: wrap each word in double quotes to
@@ -414,17 +585,22 @@ def search(
         safe = w.replace('"', '""')
         fts_terms.append(f'"{safe}"')
     fts_query = " ".join(fts_terms)
-    bm25_raw = conn.execute(
-        """
-        SELECT path, title, summary, project, timestamp, bm25(pages) as rank
-        FROM pages
-        WHERE pages MATCH ?
-        ORDER BY rank
-        LIMIT ?
-        """,
-        (fts_query, limit * 3),
-    ).fetchall()
-    conn.close()
+    expected_fts_generation = active_note_generation_manifest(selection, "fts-v1")
+    try:
+        bm25_raw = _query_fts(
+            fts_query,
+            limit * 3,
+            allowed_paths,
+            expected_fts_generation,
+        )
+    except sqlite3.DatabaseError:
+        _build_index(selection)
+        bm25_raw = _query_fts(
+            fts_query,
+            limit * 3,
+            allowed_paths,
+            expected_fts_generation,
+        )
 
     # TITLE BOOST: if a page's title matches the query, boost its score.
     # This fixes Recall@1 regressions where a duplicate page (promoted
@@ -435,6 +611,9 @@ def search(
     bm25_results = []
     for row in bm25_raw:
         path, title, summary, proj, ts, rank = row
+        if path not in allowed_paths:
+            continue
+        note = notes_by_path[path]
         if since and ts:
             try:
                 if ts[:10] < since:
@@ -447,7 +626,7 @@ def search(
                     continue
             except (IndexError, TypeError):
                 pass
-        if as_of and not _valid_as_of(path, as_of):
+        if as_of and not _valid_as_of(notes_by_path[path], as_of):
             continue
         score = -rank
         if project and proj and proj.lower() == project.lower():
@@ -481,24 +660,22 @@ def search(
         # no-op kept for forward-compat if a second tree is reintroduced.)
         if "knowledge/notes/" in path:
             score *= 1.3  # increased from 1.2 to break ties more decisively
-
-        # Typed provenance: user-said outranks inferred/ai-derived.
-        score *= _authority_weight(path)
-
         bm25_results.append({
             "path": path,
             "title": title,
             "summary": summary[:120] if summary else "",
-            "score": round(score, 2),
+            "score": score,
             "project": proj or "",
             "timestamp": ts or "",
+            "_authority_rank": note.authority_rank,
+            "_confidence_rank": note.confidence_rank,
         })
 
     # RE-SORT after boosts! FTS5 returns results in bm25() order, but
     # title/filename boosts change the effective score. Without this
     # re-sort, a page boosted to score=300 stays at its original FTS5
     # position (e.g. rank 2) even though it should be rank 1.
-    bm25_results.sort(key=lambda x: x["score"], reverse=True)
+    bm25_results = _sort_search_results(bm25_results, score_field="score")
 
     # SHORT-CIRCUIT: if any page has exact filename match with the query,
     # return it at rank 1 immediately. This prevents graph-neighbor RRF
@@ -517,17 +694,30 @@ def search(
             key=lambda r: (
                 0 if "knowledge/notes/" in r["path"] else 1,
                 -r["score"],
+                -r["_authority_rank"],
+                -r["_confidence_rank"],
+                r["path"].casefold(),
+                r["path"],
             )
         )
         best = filename_matches[0]
         rest = [x for x in bm25_results if x["path"] != best["path"]][:limit-1]
-        return [best] + rest
+        return _finalize_result_scores([best] + rest)
 
     # Optional: vector search for semantic matching
     vector_results = None
     if semantic and _have_sentence_transformers():
         try:
-            vector_results = _vector_search(query, pages, limit * 3, project, since, as_of)
+            vector_results = _vector_search(
+                query,
+                selection,
+                limit * 3,
+                project,
+                since,
+                as_of,
+                notes_by_path=notes_by_path,
+                allowed_paths=allowed_paths,
+            )
         except Exception as e:
             print(f"  (vector search failed: {e})", file=sys.stderr)
             vector_results = None
@@ -537,24 +727,37 @@ def search(
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from graph_neighbors import boost_graph_neighbors
-        graph_boosts = boost_graph_neighbors(bm25_results, vector_results)
+        graph_boosts = boost_graph_neighbors(
+            bm25_results,
+            vector_results,
+            selection=selection,
+        )
     except Exception:
         pass
 
     # Fuse results: BM25 + Vector + Graph-neighbor via RRF
     if vector_results or graph_boosts:
-        fused = _rrf_fuse_triple(bm25_results, vector_results, graph_boosts)
+        fused = _rrf_fuse_triple(
+            bm25_results,
+            vector_results,
+            graph_boosts,
+            allowed_paths=allowed_paths,
+        )
+        for result in fused:
+            note = notes_by_path[result["path"]]
+            result["_authority_rank"] = note.authority_rank
+            result["_confidence_rank"] = note.confidence_rank
         # Apply project boost on fused results
         if project:
             for r in fused:
                 if r.get("project", "").lower() == project.lower():
-                    r["fused_score"] = round(r["fused_score"] * 1.5, 4)
-            fused.sort(key=lambda x: x.get("fused_score", 0), reverse=True)
-        return fused[:limit]
+                    r["fused_score"] *= 1.5
+        fused = _sort_search_results(fused, score_field="fused_score")
+        return _finalize_result_scores(fused[:limit])
 
     # BM25 only (fallback)
-    bm25_results.sort(key=lambda x: x["score"], reverse=True)
-    return bm25_results[:limit]
+    bm25_results = _sort_search_results(bm25_results, score_field="score")
+    return _finalize_result_scores(bm25_results[:limit])
 
 
 def _rrf_fuse_triple(
@@ -562,6 +765,8 @@ def _rrf_fuse_triple(
     vector_results: list[dict] | None,
     graph_boosts: list[dict] | None,
     k: int = 60,
+    *,
+    allowed_paths: set[str] | None = None,
 ) -> list[dict]:
     """Triple-fusion RRF: BM25 + Vector + Graph-neighbor.
 
@@ -578,14 +783,24 @@ def _rrf_fuse_triple(
     metadata: dict[str, dict] = {}
 
     # BM25 — weight 2.0 (most reliable signal)
-    for rank, r in enumerate(bm25_results):
+    allowed_bm25 = (
+        bm25_results
+        if allowed_paths is None
+        else [result for result in bm25_results if result["path"] in allowed_paths]
+    )
+    for rank, r in enumerate(allowed_bm25):
         path = r["path"]
         scores[path] = scores.get(path, 0) + 2.0 / (k + rank + 1)
         metadata[path] = r
 
     # Vector — weight 1.0 (helps when BM25 misses)
     if vector_results:
-        for rank, r in enumerate(vector_results):
+        allowed_vector = (
+            vector_results
+            if allowed_paths is None
+            else [result for result in vector_results if result["path"] in allowed_paths]
+        )
+        for rank, r in enumerate(allowed_vector):
             path = r["path"]
             scores[path] = scores.get(path, 0) + 1.0 / (k + rank + 1)
             if path not in metadata:
@@ -593,7 +808,12 @@ def _rrf_fuse_triple(
 
     # Graph-neighbor — weight 0.5 (softest signal, boosts through links)
     if graph_boosts:
-        for rank, r in enumerate(graph_boosts):
+        allowed_graph = (
+            graph_boosts
+            if allowed_paths is None
+            else [result for result in graph_boosts if result["path"] in allowed_paths]
+        )
+        for rank, r in enumerate(allowed_graph):
             path = r["path"]
             scores[path] = scores.get(path, 0) + 0.5 * r.get("graph_boost", 0) / (k * 2 + rank + 1)
             if path not in metadata:
@@ -606,22 +826,24 @@ def _rrf_fuse_triple(
                     "timestamp": "",
                 }
 
-    sorted_paths = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     results = []
-    for path, score in sorted_paths:
+    for path, score in scores.items():
         r = metadata[path].copy()
-        r["fused_score"] = round(score, 4)
+        r["fused_score"] = score
         results.append(r)
-    return results
+    return _sort_search_results(results, score_field="fused_score")
 
 
 def _vector_search(
     query: str,
-    pages: list[Path],
+    selection: ActiveNoteSelection,
     limit: int,
     project: str | None = None,
     since: str | None = None,
     as_of: str | None = None,
+    *,
+    notes_by_path: dict | None = None,
+    allowed_paths: set[str] | None = None,
 ) -> list[dict] | None:
     """Run vector similarity search using sentence-transformers.
 
@@ -629,7 +851,7 @@ def _vector_search(
     returns pages ranked by cosine similarity.
     """
     # Load or build vector cache
-    vectors_data = _load_or_build_vectors(pages)
+    vectors_data = _load_or_build_vectors(selection)
     if not vectors_data:
         return None
 
@@ -651,6 +873,9 @@ def _vector_search(
     # Build results
     results = []
     for i, sim in enumerate(sims):
+        path = paths[i]
+        if allowed_paths is not None and path not in allowed_paths:
+            continue
         proj = projects[i]
         ts = timestamps[i]
         # Apply temporal filter
@@ -667,55 +892,149 @@ def _vector_search(
                     continue
             except (IndexError, TypeError):
                 pass
-        if as_of and not _valid_as_of(paths[i], as_of):
+        note = notes_by_path.get(path) if notes_by_path is not None else None
+        if as_of and note is not None and not _valid_as_of(note, as_of):
             continue
-        score = round(sim, 4)
+        score = sim
         if project and proj and proj.lower() == project.lower():
-            score = round(score * 1.5, 4)
-        results.append({
-            "path": paths[i],
+            score *= 1.5
+        result = {
+            "path": path,
             "title": titles[i],
             "summary": summaries[i][:120],
             "score": score,
             "project": proj,
             "timestamp": ts,
-        })
+        }
+        if note is not None:
+            result["_authority_rank"] = note.authority_rank
+            result["_confidence_rank"] = note.confidence_rank
+        results.append(result)
 
-    results.sort(key=lambda x: x["score"], reverse=True)
+    results = _sort_search_results(results, score_field="score")
     return results[:limit]
 
 
-def _load_or_build_vectors(pages: list[Path]) -> dict | None:
-    """Load cached embeddings or build them fresh.
+def _load_or_build_vectors(selection: ActiveNoteSelection) -> dict | None:
+    """Load embeddings only when bound to the current canonical generation."""
+    cached = _read_vector_cache_payload()
+    validated = _validate_vector_cache_payload(cached, selection)
+    if validated is not None:
+        return validated
+    rebuilt = _build_vectors(selection)
+    return _validate_vector_cache_payload(rebuilt, selection)
 
-    Cache is invalidated when any source file changes (mtime check).
-    """
-    # Check cache validity via mtime + path set (JSON cache; no pickle).
-    needs_rebuild = True
-    current_paths = sorted(
-        p.relative_to(ROOT).as_posix() for p in pages if p.exists()
+
+def _read_vector_cache_payload() -> dict | None:
+    try:
+        snapshot = read_bounded_note_snapshot(
+            VECTOR_CACHE,
+            MAX_VECTOR_CACHE_BYTES,
+        )
+        return _decode_vector_cache_payload(snapshot.source_bytes)
+    except (
+        OSError,
+        UnicodeError,
+        ValueError,
+        TypeError,
+        RecursionError,
+        MemoryError,
+        OverflowError,
+    ):
+        return None
+
+
+def _decode_vector_cache_payload(raw: bytes | bytearray | str) -> dict:
+    return decode_json_object_strict(
+        raw,
+        max_bytes=MAX_VECTOR_CACHE_BYTES,
+        max_chars=MAX_VECTOR_CACHE_CHARS,
+        max_depth=MAX_VECTOR_CACHE_JSON_DEPTH,
+        max_members=MAX_VECTOR_CACHE_JSON_MEMBERS,
+        max_lexical_tokens=MAX_VECTOR_CACHE_JSON_LEXICAL_TOKENS,
     )
-    if VECTOR_CACHE.exists():
-        try:
-            cache_mtime = VECTOR_CACHE.stat().st_mtime
-            needs_rebuild = any(
-                p.stat().st_mtime > cache_mtime for p in pages if p.exists()
-            )
-            if not needs_rebuild:
-                data = json.loads(VECTOR_CACHE.read_text(encoding="utf-8"))
-                if sorted(data.get("paths") or []) != current_paths:
-                    needs_rebuild = True
-                else:
-                    return data
-        except Exception:
-            needs_rebuild = True
-
-    if needs_rebuild:
-        return _build_vectors(pages)
-    return None
 
 
-def _build_vectors(pages: list[Path]) -> dict | None:
+def _validate_vector_cache_payload(
+    data: object,
+    selection: ActiveNoteSelection,
+) -> dict | None:
+    if not isinstance(data, dict) or set(data) != _VECTOR_CACHE_KEYS:
+        return None
+    page_count = data.get("page_count")
+    dimensions = data.get("dimensions")
+    if (
+        data.get("schema") != VECTOR_CACHE_SCHEMA
+        or type(data.get("version")) is not int
+        or data.get("version") != VECTOR_CACHE_VERSION
+        or data.get("generation")
+        != active_note_generation_manifest(selection, "vectors-v1")
+        or data.get("model") != EMBEDDING_MODEL
+        or type(data.get("model_version")) is not int
+        or data.get("model_version") != EMBEDDING_MODEL_VERSION
+        or type(dimensions) is not int
+        or dimensions != EMBEDDING_DIM
+        or type(page_count) is not int
+        or page_count != len(selection.notes)
+        or page_count > MAX_VECTOR_CACHE_PAGES
+        or page_count * dimensions > MAX_VECTOR_CACHE_VECTOR_VALUES
+    ):
+        return None
+
+    names = _VECTOR_CACHE_PARALLEL_ARRAY_KEYS
+    arrays = [data.get(name) for name in names]
+    vectors = data.get("vectors")
+    if (
+        any(not isinstance(items, list) or len(items) != page_count for items in arrays)
+        or not isinstance(vectors, list)
+        or len(vectors) != page_count
+    ):
+        return None
+    paths, hashes, titles, summaries, projects, timestamps = arrays
+    if any(
+        not isinstance(value, str)
+        for items in arrays
+        for value in items
+    ):
+        return None
+    if len(set(paths)) != page_count:
+        return None
+
+    expected_paths = [note.relative_path for note in selection.notes]
+    expected_hashes = [note.content_sha256 for note in selection.notes]
+    expected_titles: list[str] = []
+    expected_summaries: list[str] = []
+    for note in selection.notes:
+        title, summary = _extract_title_and_summary(note.content, note.path.stem)
+        expected_titles.append(title)
+        expected_summaries.append(summary)
+    if (
+        paths != expected_paths
+        or hashes != expected_hashes
+        or titles != expected_titles
+        or summaries != expected_summaries
+        or projects != [note.project.lower() for note in selection.notes]
+        or timestamps != [_timestamp_date(note.content) for note in selection.notes]
+        or sum(len(value) for items in arrays for value in items)
+        > MAX_VECTOR_CACHE_METADATA_CHARS
+    ):
+        return None
+
+    for vector in vectors:
+        if not isinstance(vector, list) or len(vector) != dimensions:
+            return None
+        for value in vector:
+            if isinstance(value, bool) or not isinstance(value, int | float):
+                return None
+            try:
+                if not math.isfinite(value):
+                    return None
+            except (TypeError, OverflowError):
+                return None
+    return data
+
+
+def _build_vectors(selection: ActiveNoteSelection) -> dict | None:
     """Build embeddings for all pages. Returns None if model unavailable."""
     embedder = _get_embedder()
     if not embedder:
@@ -730,25 +1049,18 @@ def _build_vectors(pages: list[Path]) -> dict | None:
     projects_list = []
     timestamps_list = []
 
-    for p in pages:
-        try:
-            content = p.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        active, project = _active_search_metadata(content)
-        if not active:
-            continue
-        title, summary = _extract_title_and_summary(content, p.stem)
+    for note in selection.notes:
+        content = note.content
+        title, summary = _extract_title_and_summary(content, note.path.stem)
         body = _strip_frontmatter(content)[:500]  # truncate for embedding
-        timestamp = _extract_frontmatter_field(content, TIMESTAMP_FIELD_RE) or ""
-        timestamp = timestamp[:10] if timestamp else ""
+        timestamp = _timestamp_date(content)
 
         text_for_embedding = f"{title}. {summary}. {body[:300]}"
-        paths_list.append(p.relative_to(ROOT).as_posix())
+        paths_list.append(note.relative_path)
         texts_list.append(text_for_embedding)
         titles_list.append(title)
         summaries_list.append(summary)
-        projects_list.append(project.lower())
+        projects_list.append(note.project.lower())
         timestamps_list.append(timestamp)
 
     if not texts_list:
@@ -759,23 +1071,61 @@ def _build_vectors(pages: list[Path]) -> dict | None:
         vectors = embedder.encode(texts_list, show_progress_bar=False, convert_to_numpy=True)
     except Exception:
         return None
+    try:
+        vector_values = vectors.tolist()
+    except (AttributeError, TypeError, ValueError, MemoryError, OverflowError, RecursionError):
+        return None
 
     data = {
+        "schema": VECTOR_CACHE_SCHEMA,
+        "version": VECTOR_CACHE_VERSION,
+        "generation": active_note_generation_manifest(selection, "vectors-v1"),
+        "model": EMBEDDING_MODEL,
+        "model_version": EMBEDDING_MODEL_VERSION,
+        "dimensions": EMBEDDING_DIM,
+        "page_count": len(selection.notes),
         "paths": paths_list,
+        "hashes": [note.content_sha256 for note in selection.notes],
         "titles": titles_list,
         "summaries": summaries_list,
         "projects": projects_list,
         "timestamps": timestamps_list,
-        "vectors": vectors.tolist(),
+        "vectors": vector_values,
     }
+    validated = _validate_vector_cache_payload(data, selection)
+    if validated is None:
+        return None
 
     # Cache to disk as JSON (no pickle — safer if state root is compromised).
     try:
-        atomic_write(VECTOR_CACHE, json.dumps(data))
-    except Exception:
+        encoded = json.dumps(
+            validated,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        if (
+            len(encoded) > MAX_VECTOR_CACHE_CHARS
+            or len(encoded.encode("utf-8", errors="strict")) > MAX_VECTOR_CACHE_BYTES
+        ):
+            return None
+        roundtrip = _decode_vector_cache_payload(encoded)
+        if _validate_vector_cache_payload(roundtrip, selection) is None:
+            return None
+        del roundtrip
+        atomic_write(VECTOR_CACHE, encoded)
+    except (
+        OSError,
+        UnicodeError,
+        ValueError,
+        TypeError,
+        RecursionError,
+        MemoryError,
+        OverflowError,
+    ):
         pass  # best-effort cache
 
-    return data
+    return validated
 
 
 def main() -> int:
@@ -803,7 +1153,8 @@ def main() -> int:
         args.query = query.strip()
 
     if args.status:
-        pages = _collect_pages("all")
+        selection = _collect_note_selection("all")
+        pages = list(selection.paths)
         if INDEX_FILE.exists():
             conn = sqlite3.connect(str(INDEX_FILE))
             count = conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
@@ -812,16 +1163,16 @@ def main() -> int:
             print(f"  Pages indexed: {count}")
             print(f"  Pages on disk: {len(pages)}")
             print(f"  Index size: {INDEX_FILE.stat().st_size} bytes")
-            print(f"  Needs rebuild: {_needs_rebuild(pages)}")
+            print(f"  Needs rebuild: {_needs_rebuild(selection)}")
         else:
             print(f"Index: not built ({len(pages)} pages would be indexed)")
         return 0
 
     if args.rebuild:
-        pages = _collect_pages(args.scope)
-        print(f"Rebuilding index with {len(pages)} pages...")
+        selection = _collect_note_selection(args.scope)
+        print(f"Rebuilding index with {len(selection.notes)} pages...")
         t0 = time.time()
-        _build_index(pages)
+        _build_index(selection)
         print(f"Done in {time.time() - t0:.2f}s")
         return 0
 
@@ -830,14 +1181,18 @@ def main() -> int:
         return 1
 
     t0 = time.time()
-    results = search(
-        args.query, args.scope, args.limit,
-        force_rebuild=args.rebuild,
-        project=args.project,
-        since=args.since,
-        as_of=args.as_of,
-        semantic=args.semantic,
-    )
+    try:
+        results = search(
+            args.query, args.scope, args.limit,
+            force_rebuild=args.rebuild,
+            project=args.project,
+            since=args.since,
+            as_of=args.as_of,
+            semantic=args.semantic,
+        )
+    except ValueError as exc:
+        print(f"search_memory: {exc}", file=sys.stderr)
+        return 2
     elapsed = time.time() - t0
 
     if not results:

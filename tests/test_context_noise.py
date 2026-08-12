@@ -24,6 +24,7 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
+import bootstrap_project
 import build_context
 import pytest
 
@@ -140,13 +141,20 @@ def _write_manual_builder_page(
     project: str,
     sentinel: str,
     *,
+    project_root: Path | None = None,
     page_type: str = "pattern",
 ) -> None:
     notes.mkdir(parents=True, exist_ok=True)
+    root_line = (
+        f"project_root: {json.dumps(str(project_root.resolve()))}\n"
+        if project_root is not None
+        else ""
+    )
     (notes / f"{filename}.md").write_text(
         "---\n"
         f"type: {page_type}\n"
         f"project: {project}\n"
+        f"{root_line}"
         "status: active\n"
         "source_authority: opencode\n"
         "---\n"
@@ -154,6 +162,115 @@ def _write_manual_builder_page(
         f"One-sentence summary: {sentinel}\n",
         encoding="utf-8",
     )
+
+
+def _render_combined_identity_context(
+    monkeypatch,
+    tmp_path: Path,
+    identity: str,
+    *,
+    slug: str,
+    payload_size: int = 800,
+    project_secondary: str | None = None,
+) -> str:
+    import session_start_context
+
+    project_root = tmp_path / "active-project"
+    project_root.mkdir()
+    state_path = tmp_path / "projects" / slug / "state.md"
+    state_path.parent.mkdir(parents=True)
+    if project_secondary is None:
+        trusted_state_parts = (
+            identity,
+            "## Where we left off\nCOMBINED_PRIORITY_HANDOFF_"
+            + ("h" * payload_size),
+            "# Authored state\nCOMBINED_SECONDARY_DETAIL_"
+            + ("d" * payload_size),
+        )
+        bootstrap = "COMBINED_BOOTSTRAP_" + ("b" * payload_size)
+    else:
+        trusted_state_parts = (identity, project_secondary, "")
+        bootstrap = ""
+    snapshot = session_start_context.ProjectContextSnapshot(
+        slug=slug,
+        state_path=state_path,
+        project_root=project_root.resolve(),
+        trusted_state_body="trusted synthetic state",
+        trusted_state_parts=trusted_state_parts,
+        bootstrap=bootstrap,
+    )
+    monkeypatch.setattr(
+        session_start_context,
+        "_resolve_project",
+        lambda _active: (slug, state_path),
+    )
+    monkeypatch.setattr(
+        session_start_context,
+        "_load_project_snapshot",
+        lambda *_args, **_kwargs: snapshot,
+    )
+    monkeypatch.setattr(session_start_context, "MEMORY_INDEX", tmp_path / "missing-index")
+    monkeypatch.setattr(session_start_context, "MEMORY_LOG", tmp_path / "missing-log")
+    monkeypatch.setattr(session_start_context, "DAILY_DIR", tmp_path / "missing-daily")
+    monkeypatch.setattr(session_start_context, "_recent_daily_paths", lambda: [])
+    monkeypatch.setattr(
+        session_start_context,
+        "trim_index",
+        lambda _text: "INDEX_SECONDARY_" + ("i" * payload_size),
+    )
+    monkeypatch.setattr(
+        session_start_context,
+        "_daily_section",
+        lambda _name, _record, _fallback, budget: session_start_context._bounded_block(
+            "## Latest daily log: synthetic\n\n" + ("q" * payload_size),
+            budget,
+        ),
+    )
+    monkeypatch.setattr(
+        session_start_context,
+        "guardrails_block",
+        lambda *_args: "## Guard rails\n\n" + ("g" * payload_size),
+    )
+    monkeypatch.setattr(
+        session_start_context,
+        "metacognitive_block",
+        lambda: "## Your knowledge state (self-awareness)\n\n"
+        + ("m" * payload_size),
+    )
+    monkeypatch.setattr(
+        session_start_context,
+        "advisory_block",
+        lambda *_args, **_kwargs: "## Advisory\n\n" + ("a" * payload_size),
+    )
+    monkeypatch.setattr(
+        session_start_context,
+        "last_log_entries",
+        lambda _count: "LOG_SECONDARY_" + ("l" * payload_size),
+    )
+    return session_start_context.build_context(project_root)
+
+
+def _combined_identity_at_marker_boundary(
+    module,
+    slug: str,
+    *,
+    extra_chars: int = 0,
+) -> tuple[str, str, str]:
+    root_prefix = '- Project root JSON: "/'
+    root_suffix = '"'
+    slug_line = f"- Runtime slug JSON: {json.dumps(slug)}"
+    base_identity = f"{root_prefix}{root_suffix}\n{slug_line}"
+    base_mandatory = "\n\n".join(
+        ("## Current project state", f"**Project:** `{slug}`", base_identity)
+    )
+    base_context = (
+        f"{module.CONTEXT_HEADING}\n\n{base_mandatory}\n\n"
+        f"{module.SECTION_TRUNCATION_MARKER}\n"
+    )
+    filler_size = module.MAX_CONTEXT_CHARS - len(base_context) + extra_chars
+    assert filler_size >= 0
+    root_line = f'{root_prefix}{"x" * filler_size}{root_suffix}'
+    return f"{root_line}\n{slug_line}", root_line, slug_line
 
 
 @pytest.mark.parametrize("module_name", SESSION_START_READER_MODULES)
@@ -168,11 +285,9 @@ def test_session_start_reader_rejects_nested_lone_surrogate(module_name):
 
 
 @pytest.mark.parametrize("module_name", SESSION_START_READER_MODULES)
-def test_session_start_reader_catches_deep_json_parser_recursion(module_name):
+def test_session_start_reader_rejects_deep_json_nesting(module_name):
     depth = sys.getrecursionlimit() + 100
     payload = '{"ignored":' + "[" * depth + "null" + "]" * depth + "}"
-    with pytest.raises(RecursionError):
-        json.loads(payload)
 
     module = __import__(module_name)
     assert module._read_hook_payload(io.StringIO(payload)) is None
@@ -1507,7 +1622,7 @@ def test_direct_flush_marker_is_removed_across_render_parse_and_excerpt(tmp_path
     assert marker not in excerpt
 
 
-@pytest.mark.parametrize("marker_kind", ("queue-task", "direct-flush"))
+@pytest.mark.parametrize("marker_kind", ("queue-task", "direct-flush", "capture"))
 def test_canonical_daily_idempotency_marker_is_not_meaningful(
     marker_kind,
     tmp_path,
@@ -1536,7 +1651,7 @@ def test_canonical_daily_idempotency_marker_is_not_meaningful(
     assert marker not in excerpt
 
 
-@pytest.mark.parametrize("marker_kind", ("queue-task", "direct-flush"))
+@pytest.mark.parametrize("marker_kind", ("queue-task", "direct-flush", "capture"))
 def test_malformed_daily_idempotency_marker_remains_untrusted_content(
     marker_kind,
     tmp_path,
@@ -1860,9 +1975,17 @@ def test_latest_useful_daily_skips_empty_newest_file(monkeypatch, tmp_path):
     monkeypatch.setattr(session_start_context, "MEMORY_INDEX", tmp_path / "missing-index.md")
     monkeypatch.setattr(session_start_context, "MEMORY_LOG", tmp_path / "missing-log.md")
     monkeypatch.setattr(session_start_context, "_resolve_project", lambda _directory: ("alpha", None))
-    monkeypatch.setattr(session_start_context, "guardrails_block", lambda _slug=None: "")
+    monkeypatch.setattr(
+        session_start_context,
+        "guardrails_block",
+        lambda _slug=None, _project_root=None: "",
+    )
     monkeypatch.setattr(session_start_context, "metacognitive_block", lambda: "## Health\n\nhealthy")
-    monkeypatch.setattr(session_start_context, "advisory_block", lambda *_args: "")
+    monkeypatch.setattr(
+        session_start_context,
+        "advisory_block",
+        lambda *_args, **_kwargs: "",
+    )
 
     context = session_start_context.build_context(tmp_path / "alpha")
 
@@ -2045,13 +2168,21 @@ def test_invalid_utf8_body_fails_closed_for_excerpt_latest_and_hook(
         "_resolve_project",
         lambda _active: ("alpha", None),
     )
-    monkeypatch.setattr(session_start_context, "guardrails_block", lambda _slug=None: "")
+    monkeypatch.setattr(
+        session_start_context,
+        "guardrails_block",
+        lambda _slug=None, _project_root=None: "",
+    )
     monkeypatch.setattr(
         session_start_context,
         "metacognitive_block",
         lambda: "## Health\n\nhealthy",
     )
-    monkeypatch.setattr(session_start_context, "advisory_block", lambda *_args: "")
+    monkeypatch.setattr(
+        session_start_context,
+        "advisory_block",
+        lambda *_args, **_kwargs: "",
+    )
 
     assert session_start_context._read_daily_records(newer) == []
     excerpt = session_start_context.daily_excerpt(newer, "alpha", project_root)
@@ -2169,9 +2300,17 @@ def test_daily_excerpt_keeps_its_more_lines_marker_after_final_budgeting(
     monkeypatch.setattr(session_start_context, "MEMORY_INDEX", tmp_path / "missing-index.md")
     monkeypatch.setattr(session_start_context, "MEMORY_LOG", tmp_path / "missing-log.md")
     monkeypatch.setattr(session_start_context, "_resolve_project", lambda _directory: ("alpha", None))
-    monkeypatch.setattr(session_start_context, "guardrails_block", lambda _slug=None: "")
+    monkeypatch.setattr(
+        session_start_context,
+        "guardrails_block",
+        lambda _slug=None, _project_root=None: "",
+    )
     monkeypatch.setattr(session_start_context, "metacognitive_block", lambda: "## Health\n\nhealthy")
-    monkeypatch.setattr(session_start_context, "advisory_block", lambda *_args: "")
+    monkeypatch.setattr(
+        session_start_context,
+        "advisory_block",
+        lambda *_args, **_kwargs: "",
+    )
 
     context = session_start_context.build_context(tmp_path / "alpha")
     daily_section = context.split("## Latest daily log", 1)[1].split(
@@ -2189,11 +2328,19 @@ def test_session_start_reads_index_log_and_project_state_with_explicit_bounds(
 
     index = tmp_path / "index.md"
     log = tmp_path / "log.md"
+    project_root = tmp_path / "alpha"
+    project_root.mkdir()
     state_path = tmp_path / "projects" / "alpha" / "state.md"
     state_path.parent.mkdir(parents=True)
     index.write_text("# Index\n\n## Entry points\n- [[one]]\n", encoding="utf-8")
     log.write_text("- 2026-07-28 - bounded log\n", encoding="utf-8")
-    state_path.write_text("# Alpha\n\nBounded state\n", encoding="utf-8")
+    state_path.write_text(
+        "# Alpha\n"
+        f"- Project root JSON: {json.dumps(str(project_root.resolve()))}\n"
+        '- Runtime slug JSON: "alpha"\n'
+        "## Where we left off\nBounded state\n",
+        encoding="utf-8",
+    )
     daily_dir = tmp_path / "daily"
     daily_dir.mkdir()
     monkeypatch.setattr(session_start_context, "MEMORY_INDEX", index)
@@ -2206,7 +2353,11 @@ def test_session_start_reads_index_log_and_project_state_with_explicit_bounds(
     )
     monkeypatch.setattr(session_start_context, "guardrails_block", lambda *_args: "")
     monkeypatch.setattr(session_start_context, "metacognitive_block", lambda: "health")
-    monkeypatch.setattr(session_start_context, "advisory_block", lambda *_args: "")
+    monkeypatch.setattr(
+        session_start_context,
+        "advisory_block",
+        lambda *_args, **_kwargs: "",
+    )
     real_read_text = Path.read_text
     real_open = Path.open
     read_sizes: list[int] = []
@@ -2240,7 +2391,7 @@ def test_session_start_reads_index_log_and_project_state_with_explicit_bounds(
     monkeypatch.setattr(Path, "read_text", reject_unbounded_read)
     monkeypatch.setattr(Path, "open", tracking_open)
 
-    context = session_start_context.build_context(tmp_path / "alpha")
+    context = session_start_context.build_context(project_root)
 
     assert "Bounded state" in context
     assert read_sizes
@@ -2252,11 +2403,19 @@ def test_standalone_project_state_context_reads_state_with_explicit_bound(
 ):
     import session_start_project_state
 
+    project_root = tmp_path / "alpha"
+    project_root.mkdir()
     state_path = tmp_path / "projects" / "alpha" / "state.md"
     state_path.parent.mkdir(parents=True)
-    state_path.write_text("# Alpha\n\nBOUNDED_STANDALONE_STATE\n", encoding="utf-8")
+    state_path.write_text(
+        "# Alpha\n"
+        f"- Project root JSON: {json.dumps(str(project_root.resolve()))}\n"
+        '- Runtime slug JSON: "alpha"\n'
+        "## Where we left off\nBOUNDED_STANDALONE_STATE\n",
+        encoding="utf-8",
+    )
     real_read_text = Path.read_text
-    real_open = Path.open
+    real_fdopen = os.fdopen
     read_sizes: list[int] = []
 
     def reject_read_text(path, *args, **kwargs):
@@ -2281,14 +2440,18 @@ def test_standalone_project_state_context_reads_state_with_explicit_bound(
             read_sizes.append(size)
             return self.handle.read(size)
 
-    def tracking_open(path, *args, **kwargs):
-        handle = real_open(path, *args, **kwargs)
-        return TrackingFile(handle) if path == state_path else handle
+    def tracking_fdopen(*args, **kwargs):
+        return TrackingFile(real_fdopen(*args, **kwargs))
 
     monkeypatch.setattr(Path, "read_text", reject_read_text)
-    monkeypatch.setattr(Path, "open", tracking_open)
+    monkeypatch.setattr(os, "fdopen", tracking_fdopen)
 
-    context = session_start_project_state._build_context(state_path, "alpha", False)
+    context = session_start_project_state._build_context(
+        state_path,
+        "alpha",
+        False,
+        project_root,
+    )
 
     assert "BOUNDED_STANDALONE_STATE" in context
     assert read_sizes and all(size >= 0 for size in read_sizes)
@@ -2815,21 +2978,28 @@ def test_combined_project_block_exposes_bounded_untrusted_bootstrap(
 ):
     import session_start_context
 
+    project_root = tmp_path / "alpha-project"
+    project_root.mkdir()
     state_path = tmp_path / "projects" / "alpha" / "state.md"
     state_path.parent.mkdir(parents=True)
     state_path.write_text(
         "# Alpha state\n\n"
         + "STATE_DETAIL_SENTINEL\n"
-        + '- Project root JSON: "D:/alpha"\n'
+        + f"- Project root JSON: {json.dumps(str(project_root.resolve()))}\n"
         + '- Runtime slug JSON: "alpha"\n',
         encoding="utf-8",
     )
     bootstrap_path = state_path.with_name("bootstrap.md")
+    fingerprint = bootstrap_project._bootstrap_source_fingerprint(project_root, None)
+    assert fingerprint is not None
     bootstrap_path.write_text(
         "---\ntype: bootstrap-context\n"
         'project_slug_json: "alpha"\n'
-        'project_root_json: "D:/alpha"\n'
+        f"project_root_json: {json.dumps(str(project_root.resolve()))}\n"
         f"project_state_path_json: {json.dumps(str(state_path.resolve()))}\n"
+        "git_head_json: null\n"
+        "bootstrap_schema_json: 2\n"
+        f"source_fingerprint_json: {json.dumps(fingerprint)}\n"
         "---\n\n"
         "# Alpha bootstrap\n\nBOOTSTRAP_CONTEXT_SENTINEL\n"
         + ("x" * 3_000),
@@ -2864,7 +3034,11 @@ def test_combined_project_block_exposes_bounded_untrusted_bootstrap(
 
     monkeypatch.setattr(Path, "open", tracking_open)
 
-    block = session_start_context._project_state_block("alpha", state_path)
+    block = session_start_context._project_state_block(
+        "alpha",
+        state_path,
+        project_root,
+    )
     bounded = session_start_context._bounded_block(
         block,
         session_start_context.SECTION_BUDGETS["project"],
@@ -2872,7 +3046,7 @@ def test_combined_project_block_exposes_bounded_untrusted_bootstrap(
 
     assert len(bounded) <= session_start_context.SECTION_BUDGETS["project"]
     assert "## Current project state" in bounded
-    assert '- Project root JSON: "D:/alpha"' in bounded
+    assert f"- Project root JSON: {json.dumps(str(project_root.resolve()))}" in bounded
     assert "Project bootstrap" in bounded
     assert "UNTRUSTED" in bounded
     assert "BOOTSTRAP_CONTEXT_SENTINEL" in bounded
@@ -2880,27 +3054,226 @@ def test_combined_project_block_exposes_bounded_untrusted_bootstrap(
     assert all(0 <= size <= 8193 for size in bootstrap_read_sizes)
 
 
+def test_combined_context_reserves_complete_288_char_posix_identity(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import session_start_context
+
+    posix_root = "/" + ("p" * 287)
+    assert len(posix_root) == 288
+    root_line = f"- Project root JSON: {json.dumps(posix_root)}"
+    slug_line = '- Runtime slug JSON: "long-posix"'
+
+    context = _render_combined_identity_context(
+        monkeypatch,
+        tmp_path,
+        f"{root_line}\n{slug_line}",
+        slug="long-posix",
+    )
+
+    assert len(context) <= session_start_context.MAX_CONTEXT_CHARS
+    assert root_line in context.splitlines()
+    assert slug_line in context.splitlines()
+    assert context.index(root_line) < context.index("COMBINED_PRIORITY_HANDOFF_")
+    assert "COMBINED_SECONDARY_DETAIL_" not in context
+
+
+def test_combined_context_omits_project_when_identity_exceeds_total_budget(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import session_start_context
+
+    root_prefix = "OVER_TOTAL_COMBINED_ROOT_"
+    root_line = f'- Project root JSON: "/{root_prefix}{"x" * 3_000}"'
+    slug_line = '- Runtime slug JSON: "over-total-combined"'
+
+    context = _render_combined_identity_context(
+        monkeypatch,
+        tmp_path,
+        f"{root_line}\n{slug_line}",
+        slug="over-total-combined",
+    )
+
+    assert len(context) <= session_start_context.MAX_CONTEXT_CHARS
+    assert session_start_context.CONTEXT_HEADING in context
+    assert "## Current project state" not in context
+    assert root_prefix not in context
+    assert slug_line not in context
+
+
+def test_combined_context_emits_complete_marker_when_only_marker_fits(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import session_start_context
+
+    slug = "marker-floor"
+    identity, root_line, slug_line = _combined_identity_at_marker_boundary(
+        session_start_context,
+        slug,
+    )
+
+    context = _render_combined_identity_context(
+        monkeypatch,
+        tmp_path,
+        identity,
+        slug=slug,
+    )
+
+    assert len(context) == session_start_context.MAX_CONTEXT_CHARS
+    assert root_line in context.splitlines()
+    assert slug_line in context.splitlines()
+    assert context.splitlines()[-1] == session_start_context.SECTION_TRUNCATION_MARKER
+    assert context.count(session_start_context.SECTION_TRUNCATION_MARKER) == 1
+    assert "COMBINED_PRIORITY_HANDOFF_" not in context
+
+
+def test_combined_context_omits_project_when_required_marker_cannot_fit(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import session_start_context
+
+    slug = "marker-overflow"
+    identity, root_line, slug_line = _combined_identity_at_marker_boundary(
+        session_start_context,
+        slug,
+        extra_chars=1,
+    )
+    mandatory = "\n\n".join(
+        ("## Current project state", f"**Project:** `{slug}`", identity)
+    )
+    identity_only = f"{session_start_context.CONTEXT_HEADING}\n\n{mandatory}\n"
+    required = (
+        f"{session_start_context.CONTEXT_HEADING}\n\n{mandatory}\n\n"
+        f"{session_start_context.SECTION_TRUNCATION_MARKER}\n"
+    )
+    assert len(identity_only) <= session_start_context.MAX_CONTEXT_CHARS
+    assert len(required) == session_start_context.MAX_CONTEXT_CHARS + 1
+
+    context = _render_combined_identity_context(
+        monkeypatch,
+        tmp_path,
+        identity,
+        slug=slug,
+    )
+
+    assert len(context) <= session_start_context.MAX_CONTEXT_CHARS
+    assert "## Current project state" not in context
+    assert root_line not in context
+    assert slug_line not in context
+
+
+def test_combined_context_emits_complete_short_secondary_at_exact_boundary(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import session_start_context
+
+    slug = "exact-short-secondary"
+    secondary = "EXACT"
+    assert len(secondary) < len(session_start_context.SECTION_TRUNCATION_MARKER)
+    root_prefix = '- Project root JSON: "/'
+    identity_suffix = f'"\n- Runtime slug JSON: {json.dumps(slug)}'
+    base_identity = f"{root_prefix}{identity_suffix}"
+    base_mandatory = "\n\n".join(
+        ("## Current project state", f"**Project:** `{slug}`", base_identity)
+    )
+    base_context = (
+        f"{session_start_context.CONTEXT_HEADING}\n\n{base_mandatory}\n\n"
+        f"{secondary}\n"
+    )
+    filler_size = session_start_context.MAX_CONTEXT_CHARS - len(base_context)
+    assert filler_size > 0
+    identity = f'{root_prefix}{"s" * filler_size}{identity_suffix}'
+    mandatory = "\n\n".join(
+        ("## Current project state", f"**Project:** `{slug}`", identity)
+    )
+    expected = (
+        f"{session_start_context.CONTEXT_HEADING}\n\n{mandatory}\n\n"
+        f"{secondary}\n"
+    )
+    marker_context = (
+        f"{session_start_context.CONTEXT_HEADING}\n\n{mandatory}\n\n"
+        f"{session_start_context.SECTION_TRUNCATION_MARKER}\n"
+    )
+    assert len(expected) == session_start_context.MAX_CONTEXT_CHARS
+    assert len(marker_context) > session_start_context.MAX_CONTEXT_CHARS
+
+    context = _render_combined_identity_context(
+        monkeypatch,
+        tmp_path,
+        identity,
+        slug=slug,
+        project_secondary=secondary,
+    )
+
+    assert context == expected
+    assert session_start_context.SECTION_TRUNCATION_MARKER not in context
+
+
+def test_combined_context_redistributes_to_zero_budget_candidate_sections(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import session_start_context
+
+    slug = "redistribute-zero"
+    root_prefix = '- Project root JSON: "/'
+    identity_suffix = f'"\n- Runtime slug JSON: {json.dumps(slug)}'
+    filler_size = 1_000 - len(root_prefix) - len(identity_suffix)
+    assert filler_size > 0
+    identity = f'{root_prefix}{"r" * filler_size}{identity_suffix}'
+    assert len(identity) == 1_000
+    assert session_start_context.MAX_CONTEXT_CHARS == 2_200
+
+    context = _render_combined_identity_context(
+        monkeypatch,
+        tmp_path,
+        identity,
+        slug=slug,
+        payload_size=0,
+    )
+
+    assert len(context) <= session_start_context.MAX_CONTEXT_CHARS
+    assert "## Latest daily log: synthetic" in context
+    assert "LOG_SECONDARY_" in context
+    assert "INDEX_SECONDARY_" in context
+    assert context.index("## Latest daily log: synthetic") < context.index(
+        "LOG_SECONDARY_"
+    ) < context.index("INDEX_SECONDARY_")
+
+
 def test_combined_project_block_prioritizes_saved_handoff_over_bootstrap(
     tmp_path,
 ):
     import session_start_context
 
+    project_root = tmp_path / "alpha-project"
+    project_root.mkdir()
     state_path = tmp_path / "projects" / "alpha" / "state.md"
     state_path.parent.mkdir(parents=True)
     state_path.write_text(
         "# Alpha state\n"
-        '- Project root JSON: "D:/alpha"\n\n'
+        f"- Project root JSON: {json.dumps(str(project_root.resolve()))}\n\n"
         '- Runtime slug JSON: "alpha"\n\n'
         "## Where we left off\n"
         "SAVED_HANDOFF_SENTINEL\n"
         + ("STATE_DETAIL_TOO_LARGE " + "x" * 2_000 + "\n"),
         encoding="utf-8",
     )
+    fingerprint = bootstrap_project._bootstrap_source_fingerprint(project_root, None)
+    assert fingerprint is not None
     state_path.with_name("bootstrap.md").write_text(
         "---\ntype: bootstrap-context\n"
         'project_slug_json: "alpha"\n'
-        'project_root_json: "D:/alpha"\n'
+        f"project_root_json: {json.dumps(str(project_root.resolve()))}\n"
         f"project_state_path_json: {json.dumps(str(state_path.resolve()))}\n"
+        "git_head_json: null\n"
+        "bootstrap_schema_json: 2\n"
+        f"source_fingerprint_json: {json.dumps(fingerprint)}\n"
         "---\n\n"
         "# Alpha bootstrap\n\n"
         "BOOTSTRAP_MUST_YIELD_SENTINEL\n"
@@ -2908,7 +3281,11 @@ def test_combined_project_block_prioritizes_saved_handoff_over_bootstrap(
         encoding="utf-8",
     )
 
-    block = session_start_context._project_state_block("alpha", state_path)
+    block = session_start_context._project_state_block(
+        "alpha",
+        state_path,
+        project_root,
+    )
     bounded = session_start_context._bounded_block(
         block,
         session_start_context.SECTION_BUDGETS["project"],
@@ -2916,6 +3293,155 @@ def test_combined_project_block_prioritizes_saved_handoff_over_bootstrap(
 
     assert "SAVED_HANDOFF_SENTINEL" in bounded
     assert "BOOTSTRAP_MUST_YIELD_SENTINEL" not in bounded
+
+
+def test_combined_project_block_truncates_overlong_handoff_line_before_detail(
+    tmp_path: Path,
+):
+    import session_start_context
+
+    project_root = tmp_path / "project-root"
+    project_root.mkdir()
+    state_path = tmp_path / "projects" / "long-handoff" / "state.md"
+    state_path.parent.mkdir(parents=True)
+    handoff_prefix = "HANDOFF_500_CHAR_PREFIX_"
+    handoff_line = handoff_prefix + ("h" * (500 - len(handoff_prefix)))
+    assert len(handoff_line) == 500
+    state_path.write_text(
+        "# Long handoff state\n"
+        f"- Project root JSON: {json.dumps(str(project_root.resolve()))}\n"
+        '- Runtime slug JSON: "long-handoff"\n'
+        "## Where we left off\n"
+        f"{handoff_line}\n"
+        "## Recent decisions\n"
+        "LOWER_PRIORITY_DETAIL_MUST_NOT_DISPLACE_HANDOFF\n",
+        encoding="utf-8",
+    )
+
+    block = session_start_context._project_state_block(
+        "long-handoff",
+        state_path,
+        project_root,
+    )
+    bounded = session_start_context._bounded_block(
+        block,
+        session_start_context.SECTION_BUDGETS["project"],
+    )
+
+    assert len(bounded) <= session_start_context.SECTION_BUDGETS["project"]
+    assert handoff_prefix in bounded
+    assert session_start_context.SECTION_TRUNCATION_MARKER in bounded
+    assert "LOWER_PRIORITY_DETAIL_MUST_NOT_DISPLACE_HANDOFF" not in bounded
+
+
+def test_combined_project_block_preserves_identity_before_clipped_unicode(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import session_start_context
+
+    project_root = tmp_path / "project-root"
+    project_root.mkdir()
+    state_path = tmp_path / "projects" / "unicode-combined" / "state.md"
+    state_path.parent.mkdir(parents=True)
+    handoff = "COMBINED_HANDOFF_START_" + ("界🙂" * 400) + "_COMBINED_HANDOFF_END"
+    bootstrap = "COMBINED_BOOTSTRAP_START_" + ("λ🚀" * 800)
+    state_path.write_text(
+        "# Unicode combined state\n"
+        f"- Project root JSON: {json.dumps(str(project_root.resolve()))}\n"
+        '- Runtime slug JSON: "unicode-combined"\n'
+        "## Where we left off\n"
+        f"{handoff}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        session_start_context,
+        "_read_bootstrap_context",
+        lambda *_args, **_kwargs: bootstrap,
+    )
+
+    block = session_start_context._project_state_block(
+        "unicode-combined",
+        state_path,
+        project_root,
+    )
+    bounded = session_start_context._bounded_block(
+        block,
+        session_start_context.SECTION_BUDGETS["project"],
+    )
+
+    root_line = f"- Project root JSON: {json.dumps(str(project_root.resolve()))}"
+    slug_line = '- Runtime slug JSON: "unicode-combined"'
+    assert len(bounded) <= session_start_context.SECTION_BUDGETS["project"]
+    assert root_line in bounded
+    assert slug_line in bounded
+    assert bounded.index(root_line) < bounded.index("COMBINED_HANDOFF_START_")
+    assert bounded.index(slug_line) < bounded.index("COMBINED_HANDOFF_START_")
+    assert "_COMBINED_HANDOFF_END" not in bounded
+    assert "... (line truncated)" in bounded
+    assert session_start_context.SECTION_TRUNCATION_MARKER in bounded
+    assert bounded.encode("utf-8").decode("utf-8") == bounded
+
+
+def test_full_context_preserves_identity_before_clipped_unicode_project_data(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import session_start_context
+
+    project_root = tmp_path / "unicode-full"
+    project_root.mkdir()
+    state_path = tmp_path / "projects" / "unicode-full" / "state.md"
+    state_path.parent.mkdir(parents=True)
+    handoff = "FULL_HANDOFF_START_" + ("界🙂" * 500) + "_FULL_HANDOFF_END"
+    bootstrap = "FULL_BOOTSTRAP_START_" + ("λ🚀" * 1_000) + "_FULL_BOOTSTRAP_END"
+    state_path.write_text(
+        "# Unicode full state\n"
+        f"- Project root JSON: {json.dumps(str(project_root.resolve()))}\n"
+        '- Runtime slug JSON: "unicode-full"\n'
+        "## Where we left off\n"
+        f"{handoff}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        session_start_context,
+        "_resolve_project",
+        lambda _active: ("unicode-full", state_path),
+    )
+    monkeypatch.setattr(
+        session_start_context,
+        "_read_bootstrap_context",
+        lambda *_args, **_kwargs: bootstrap,
+    )
+    monkeypatch.setattr(session_start_context, "MEMORY_INDEX", tmp_path / "missing-index")
+    monkeypatch.setattr(session_start_context, "MEMORY_LOG", tmp_path / "missing-log")
+    monkeypatch.setattr(session_start_context, "DAILY_DIR", tmp_path / "missing-daily")
+    monkeypatch.setattr(session_start_context, "_recent_daily_paths", lambda: [])
+    monkeypatch.setattr(session_start_context, "guardrails_block", lambda *_args: "")
+    monkeypatch.setattr(
+        session_start_context,
+        "metacognitive_block",
+        lambda: "## Your knowledge state (self-awareness)\n\nHEALTH",
+    )
+    monkeypatch.setattr(
+        session_start_context,
+        "advisory_block",
+        lambda *_args, **_kwargs: "",
+    )
+
+    context = session_start_context.build_context(project_root)
+
+    root_line = f"- Project root JSON: {json.dumps(str(project_root.resolve()))}"
+    slug_line = '- Runtime slug JSON: "unicode-full"'
+    assert len(context) <= session_start_context.MAX_CONTEXT_CHARS
+    assert root_line in context
+    assert slug_line in context
+    assert context.index(root_line) < context.index("FULL_HANDOFF_START_")
+    assert context.index(slug_line) < context.index("FULL_HANDOFF_START_")
+    assert "_FULL_BOOTSTRAP_END" not in context
+    assert "... (line truncated)" in context
+    assert session_start_context.SECTION_TRUNCATION_MARKER in context
+    assert context.encode("utf-8").decode("utf-8") == context
 
 
 @pytest.mark.parametrize("indent", ("", "  "))
@@ -2971,19 +3497,83 @@ def test_advisory_receives_exact_owned_state_path(monkeypatch, tmp_path):
     import build_advisory
     import session_start_context
 
+    project_root = tmp_path / "active-root"
+    project_root.mkdir()
     state_path = tmp_path / "projects" / "legacy folder" / "state.md"
     state_path.parent.mkdir(parents=True)
-    calls: list[tuple[str | None, Path | None]] = []
+    calls: list[tuple[str | None, Path | None, Path | None]] = []
     monkeypatch.setattr(
         build_advisory,
         "build_advisory",
-        lambda slug, *, state_path: calls.append((slug, state_path)) or "ADVICE",
+        lambda slug, *, state_path, project_root: calls.append(
+            (slug, state_path, project_root)
+        )
+        or "ADVICE",
     )
 
-    block = session_start_context.advisory_block("active-safe", state_path)
+    block = session_start_context.advisory_block(
+        "active-safe",
+        state_path,
+        project_root,
+    )
 
     assert "ADVICE" in block
-    assert calls == [("active-safe", state_path)]
+    assert calls == [("active-safe", state_path, project_root)]
+
+
+def test_session_context_passes_exact_root_to_guardrails_and_advisory(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import session_start_context
+
+    project_root = tmp_path / "workspaces" / "shared"
+    project_root.mkdir(parents=True)
+    state_path = tmp_path / "projects" / "shared" / "state.md"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text("state\n", encoding="utf-8")
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        session_start_context,
+        "_resolve_project",
+        lambda _active: ("shared", state_path),
+    )
+    monkeypatch.setattr(session_start_context, "_recent_daily_paths", lambda: [])
+    monkeypatch.setattr(
+        session_start_context,
+        "guardrails_block",
+        lambda slug, root: calls.append(("guardrails", slug, root))
+        or "## Guard rails\n\nEXACT_GUARDRAILS",
+    )
+    monkeypatch.setattr(
+        session_start_context,
+        "advisory_block",
+        lambda slug, state, root, **_kwargs: calls.append(
+            ("advisory", slug, state, root)
+        )
+        or "## Advisory\n\nEXACT_ADVISORY",
+    )
+    monkeypatch.setattr(
+        session_start_context,
+        "_project_state_block",
+        lambda *_args, **_kwargs: "## Current project state\n\nPROJECT_STATE",
+    )
+    monkeypatch.setattr(
+        session_start_context,
+        "metacognitive_block",
+        lambda: "## Your knowledge state (self-awareness)\n\nHEALTH",
+    )
+    monkeypatch.setattr(session_start_context, "MEMORY_INDEX", tmp_path / "missing-index")
+    monkeypatch.setattr(session_start_context, "MEMORY_LOG", tmp_path / "missing-log")
+
+    context = session_start_context.build_context(project_root)
+
+    assert "EXACT_GUARDRAILS" in context
+    assert "EXACT_ADVISORY" in context
+    assert calls == [
+        ("guardrails", "shared", project_root.resolve()),
+        ("advisory", "shared", state_path, project_root.resolve()),
+    ]
 
 
 def test_open_threads_use_exact_contained_state_not_runtime_slug_folder(
@@ -3011,10 +3601,268 @@ def test_open_threads_use_exact_contained_state_not_runtime_slug_folder(
     outside.write_text("## Open threads\n- OUTSIDE_THREAD\n", encoding="utf-8")
     monkeypatch.setattr(build_advisory, "PROJECTS_DIR", projects)
 
-    threads = build_advisory._read_open_threads("active-safe", exact)
+    threads = build_advisory._read_open_threads("active-safe", exact, "D:/active")
 
     assert threads == ["EXACT_OWNED_THREAD"]
-    assert build_advisory._read_open_threads("active-safe", outside) == []
+    assert build_advisory._read_open_threads(
+        "active-safe",
+        outside,
+        "D:/active",
+    ) == []
+
+
+def test_open_threads_use_shared_identity_bound_reader_without_reopening_state(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import build_advisory
+
+    project_root = tmp_path / "work" / "shared-reader"
+    project_root.mkdir(parents=True)
+    state_path = tmp_path / "projects" / "shared-reader" / "state.md"
+    calls: list[tuple[Path, str, Path]] = []
+    body = (
+        f"- Project root JSON: {json.dumps(str(project_root.resolve()))}\n"
+        '- Runtime slug JSON: "shared-reader"\n'
+        "## Open threads\n- SHARED_READER_THREAD\n"
+    )
+
+    def shared_reader(path: Path, slug: str, root: Path) -> str:
+        calls.append((path, slug, root))
+        return body
+
+    monkeypatch.setattr(
+        build_advisory,
+        "_read_trusted_state_body",
+        shared_reader,
+        raising=False,
+    )
+    real_resolve = Path.resolve
+
+    def forbid_state_resolution(path: Path, *args, **kwargs):
+        if path == state_path:
+            raise AssertionError("advisory must not resolve or reopen state")
+        return real_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", forbid_state_resolution)
+
+    threads = build_advisory._read_open_threads(
+        "shared-reader",
+        state_path,
+        project_root,
+    )
+
+    assert threads == ["SHARED_READER_THREAD"]
+    assert calls == [(state_path, "shared-reader", project_root)]
+
+
+def test_open_threads_parser_ignores_fenced_commented_and_raw_html_structure(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import build_advisory
+
+    projects = tmp_path / "projects"
+    project_root = tmp_path / "work" / "structural-threads"
+    project_root.mkdir(parents=True)
+    state_path = projects / "structural-threads" / "state.md"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        "# Structural threads state\n"
+        f"- Project root JSON: {json.dumps(str(project_root.resolve()))}\n"
+        '- Runtime slug JSON: "structural-threads"\n'
+        "```markdown\n"
+        "## Open threads\n"
+        "- FENCED_THREAD_MUST_NOT_APPEAR\n"
+        "```\n"
+        "<!--\n"
+        "## Open threads\n"
+        "- COMMENTED_THREAD_MUST_NOT_APPEAR\n"
+        "-->\n"
+        "<script>\n"
+        "## Open threads\n"
+        "- RAW_THREAD_MUST_NOT_APPEAR\n"
+        "</script>\n"
+        "## Open threads\n"
+        "- FIRST_VISIBLE_THREAD\n"
+        "<div>\n"
+        "## Recent decisions\n"
+        "- RAW_TERMINATOR_MUST_NOT_APPEAR\n"
+        "\n"
+        "- SECOND_VISIBLE_THREAD\n"
+        "## Recent decisions\n"
+        "- visible decision\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(build_advisory, "PROJECTS_DIR", projects)
+
+    threads = build_advisory._read_open_threads(
+        "structural-threads",
+        state_path,
+        project_root,
+    )
+
+    assert threads == ["FIRST_VISIBLE_THREAD", "SECOND_VISIBLE_THREAD"]
+
+
+def test_cached_open_threads_body_still_requires_matching_identity(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import build_advisory
+
+    project = tmp_path / "requested"
+    other = tmp_path / "other"
+    project.mkdir()
+    other.mkdir()
+    state_path = tmp_path / "projects" / "requested" / "state.md"
+    forged = (
+        f"- Project root JSON: {json.dumps(str(other.resolve()))}\n"
+        '- Runtime slug JSON: "requested"\n'
+        "## Open threads\n"
+        "- FORGED_CACHED_THREAD\n"
+    )
+    monkeypatch.setattr(
+        build_advisory,
+        "_read_trusted_state_body",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("cached validation must not reread state")
+        ),
+    )
+
+    threads = build_advisory._read_open_threads(
+        "requested",
+        state_path,
+        project,
+        trusted_state_body=forged,
+    )
+
+    assert threads == []
+
+
+@pytest.mark.parametrize(
+    ("include_project_state", "expected_git_calls"),
+    ((True, 5), (False, 0)),
+    ids=("project-included", "project-omitted"),
+)
+def test_context_build_caches_project_freshness_and_omit_skips_git(
+    monkeypatch,
+    tmp_path: Path,
+    include_project_state: bool,
+    expected_git_calls: int,
+):
+    import build_advisory
+    import session_start_context
+    import session_start_project_state
+
+    project = tmp_path / "work" / "cached-project"
+    (project / ".git").mkdir(parents=True)
+    executable = Path(sys.executable).resolve()
+    git_resolutions = 0
+
+    def resolve_git() -> Path:
+        nonlocal git_resolutions
+        git_resolutions += 1
+        return executable
+
+    monkeypatch.setattr(
+        session_start_project_state,
+        "_resolve_git_executable",
+        resolve_git,
+    )
+    git_calls: list[list[str | Path]] = []
+
+    def fake_git(command, **_kwargs):
+        git_calls.append(list(command))
+        output = str(project.resolve()) if "--show-toplevel" in command else head
+        return session_start_project_state.BoundedProcessResult(0, output.encode(), b"")
+
+    monkeypatch.setattr(session_start_project_state, "_run_bounded_process", fake_git)
+    projects = tmp_path / "projects"
+    state_path = projects / "cached-project" / "state.md"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        "# Cached project state\n"
+        f"- Project root JSON: {json.dumps(str(project.resolve()))}\n"
+        '- Runtime slug JSON: "cached-project"\n'
+        "## Where we left off\n"
+        "CACHED_HANDOFF\n"
+        "## Open threads\n"
+        "- CACHED_THREAD\n",
+        encoding="utf-8",
+    )
+    head = "a" * 40
+    fingerprint = bootstrap_project._bootstrap_source_fingerprint(project, head)
+    assert fingerprint is not None
+    git_calls.clear()
+    git_resolutions = 0
+    state_path.with_name("bootstrap.md").write_text(
+        "---\n"
+        "type: bootstrap-context\n"
+        'project_slug_json: "cached-project"\n'
+        f"project_root_json: {json.dumps(str(project.resolve()))}\n"
+        f"project_state_path_json: {json.dumps(str(state_path.resolve()))}\n"
+        f"git_head_json: {json.dumps(head)}\n"
+        "bootstrap_schema_json: 2\n"
+        f"source_fingerprint_json: {json.dumps(fingerprint)}\n"
+        "---\n\n"
+        "# Cached bootstrap\n\nCACHED_BOOTSTRAP\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(session_start_context, "PROJECTS_DIR", projects)
+    monkeypatch.setattr(session_start_context, "MEMORY_INDEX", tmp_path / "missing-index")
+    monkeypatch.setattr(session_start_context, "MEMORY_LOG", tmp_path / "missing-log")
+    monkeypatch.setattr(session_start_context, "DAILY_DIR", tmp_path / "missing-daily")
+    monkeypatch.setattr(session_start_context, "guardrails_block", lambda *_args: "")
+    monkeypatch.setattr(
+        session_start_context,
+        "metacognitive_block",
+        lambda: "## Your knowledge state (self-awareness)\n\nHEALTH",
+    )
+    monkeypatch.setattr(
+        build_advisory,
+        "_note_inventory",
+        lambda: session_start_context.BoundedPathInventory(()),
+    )
+    monkeypatch.setattr(
+        build_advisory,
+        "_lint_report_inventory",
+        lambda: session_start_context.BoundedPathInventory(()),
+    )
+    monkeypatch.setattr(build_advisory, "_find_stale_pages", lambda _inventory: 0)
+    state_reads = 0
+    real_state_read = session_start_project_state._read_trusted_state_body
+
+    def counted_state_read(*args, **kwargs):
+        nonlocal state_reads
+        state_reads += 1
+        return real_state_read(*args, **kwargs)
+
+    monkeypatch.setattr(
+        session_start_project_state,
+        "_read_trusted_state_body",
+        counted_state_read,
+    )
+    monkeypatch.setattr(
+        session_start_context,
+        "_read_trusted_state_body",
+        counted_state_read,
+    )
+    monkeypatch.setattr(
+        build_advisory,
+        "_read_trusted_state_body",
+        counted_state_read,
+    )
+
+    context = session_start_context.build_context(
+        project,
+        include_project_state=include_project_state,
+    )
+
+    assert len(git_calls) == expected_git_calls
+    assert git_resolutions == (1 if include_project_state else 0)
+    assert state_reads == 1
+    assert ("## Current project state" in context) is include_project_state
 
 
 def test_global_compile_health_uses_metadata_without_reading_daily_content(
@@ -3564,7 +4412,9 @@ def test_oversized_index_preserves_every_context_section(monkeypatch, tmp_path):
     state_dir.mkdir(parents=True)
     (state_dir / "state.md").write_text(
         "# Active project\n\nPROJECT_SENTINEL\n\n"
-        f"- Project root: `{project_dir}`\n" + "p" * 1000,
+        f"- Project root JSON: {json.dumps(str(project_dir.resolve()))}\n"
+        '- Runtime slug JSON: "active-project"\n'
+        + "p" * 1000,
         encoding="utf-8",
     )
 
@@ -3575,7 +4425,9 @@ def test_oversized_index_preserves_every_context_section(monkeypatch, tmp_path):
     monkeypatch.setattr(
         session_start_context,
         "guardrails_block",
-        lambda _slug=None: "## Guard rails\n\nGUARDRAIL_SENTINEL\n" + "g" * 1000,
+        lambda _slug=None, _project_root=None: (
+            "## Guard rails\n\nGUARDRAIL_SENTINEL\n" + "g" * 1000
+        ),
     )
     monkeypatch.setattr(
         session_start_context,
@@ -3585,7 +4437,7 @@ def test_oversized_index_preserves_every_context_section(monkeypatch, tmp_path):
     monkeypatch.setattr(
         session_start_context,
         "advisory_block",
-        lambda *_args: "## Advisory\n\nADVISORY_SENTINEL\n" + "a" * 1000,
+        lambda *_args, **_kwargs: "## Advisory\n\nADVISORY_SENTINEL\n" + "a" * 1000,
     )
 
     context = session_start_context.build_context(project_dir)
@@ -3636,7 +4488,8 @@ def test_unused_section_budget_expands_project_state_with_all_headings(monkeypat
         "# Active project\n\n"
         + "\n".join(state_lines)
         + "\nPROJECT_EXPANDED_SENTINEL\n\n"
-        + f"- Project root: `{project_dir}`\n",
+        + f"- Project root JSON: {json.dumps(str(project_dir.resolve()))}\n"
+        + '- Runtime slug JSON: "active-project"\n',
         encoding="utf-8",
     )
 
@@ -3647,7 +4500,7 @@ def test_unused_section_budget_expands_project_state_with_all_headings(monkeypat
     monkeypatch.setattr(
         session_start_context,
         "guardrails_block",
-        lambda _slug=None: "## Guard rails\n\nsmall guardrail",
+        lambda _slug=None, _project_root=None: "## Guard rails\n\nsmall guardrail",
     )
     monkeypatch.setattr(
         session_start_context,
@@ -3657,7 +4510,7 @@ def test_unused_section_budget_expands_project_state_with_all_headings(monkeypat
     monkeypatch.setattr(
         session_start_context,
         "advisory_block",
-        lambda *_args: "## Advisory\n\nsmall advisory",
+        lambda *_args, **_kwargs: "## Advisory\n\nsmall advisory",
     )
 
     context = session_start_context.build_context(project_dir)
@@ -3957,12 +4810,19 @@ def test_manual_context_uses_exact_registry_state_and_structured_daily_selector(
         app_root,
         "EXACT_STATE_HANDOFF",
     )
-    _write_manual_builder_page(notes, "app", "app", "APP_KNOWLEDGE_SENTINEL")
+    _write_manual_builder_page(
+        notes,
+        "app",
+        "app",
+        "APP_KNOWLEDGE_SENTINEL",
+        project_root=app_root,
+    )
     _write_manual_builder_page(
         notes,
         "my-app",
         "my-app",
         "OTHER_PROJECT_KNOWLEDGE",
+        project_root=other_root,
     )
     daily.mkdir(parents=True)
     (daily / "2026-07-28.md").write_text(
@@ -3990,6 +4850,221 @@ def test_manual_context_uses_exact_registry_state_and_structured_daily_selector(
     assert "TOOL_BREADCRUMB_SENTINEL" not in context
     assert "MY_APP_PROMPT_SENTINEL" not in context
     assert "WRONG_ROOT_PROMPT_SENTINEL" not in context
+
+
+def test_manual_context_marks_600_char_handoff_without_partial_source_lines(
+    monkeypatch,
+    tmp_path: Path,
+):
+    vault = tmp_path / "vault"
+    _notes, _daily, projects = _configure_manual_builder(monkeypatch, vault)
+    project_root = tmp_path / "workspaces" / "bounded-handoff"
+    first_prefix = "COMPLETE_600_CHAR_HANDOFF_"
+    second_prefix = "OMITTED_600_CHAR_HANDOFF_"
+    first_line = first_prefix + ("a" * (299 - len(first_prefix)))
+    second_line = second_prefix + ("b" * (300 - len(second_prefix)))
+    handoff = f"{first_line}\n{second_line}"
+    assert len(handoff) == 600
+    _write_manual_builder_state(
+        projects,
+        "bounded-handoff",
+        "bounded-handoff",
+        project_root,
+        handoff,
+    )
+
+    context = build_context.build_context("bounded-handoff")
+
+    assert f"- {first_line}" in context
+    assert second_line not in context
+    assert all(not line.startswith(second_prefix) for line in context.splitlines())
+    assert "... (line truncated)" in context
+    assert "... (section truncated)" in context
+
+
+def test_manual_context_final_budget_marks_omitted_complete_source_line(
+    monkeypatch,
+    tmp_path: Path,
+):
+    vault = tmp_path / "vault"
+    _notes, _daily, projects = _configure_manual_builder(monkeypatch, vault)
+    project_root = tmp_path / "workspaces" / "final-budget"
+    complete_line = "FINAL_COMPLETE_SOURCE_LINE"
+    omitted_prefix = "FINAL_OMITTED_SOURCE_LINE_"
+    omitted_line = omitted_prefix + ("z" * 300)
+    _write_manual_builder_state(
+        projects,
+        "final-budget",
+        "final-budget",
+        project_root,
+        f"{complete_line}\n{omitted_line}",
+    )
+
+    context = build_context.build_context("final-budget", max_chars=170)
+
+    assert len(context) <= 170
+    assert f"- {complete_line}" in context
+    assert omitted_line not in context
+    assert all(not line.startswith(omitted_prefix) for line in context.splitlines())
+    assert "... (line truncated)" in context
+    assert "... (section truncated)" in context
+    assert "... (truncated)" not in context
+
+
+def test_manual_context_pages_require_same_slug_and_exact_confirmed_root(
+    monkeypatch,
+    tmp_path: Path,
+):
+    vault = tmp_path / "vault"
+    notes, daily, projects = _configure_manual_builder(monkeypatch, vault)
+    project_root = tmp_path / "workspaces" / "app"
+    other_root = tmp_path / "other" / "app"
+    _write_manual_builder_state(
+        projects,
+        "app",
+        "app",
+        project_root,
+        "EXACT_STATE_HANDOFF",
+    )
+    notes.mkdir(parents=True)
+    for filename, root_line, sentinel in (
+        (
+            "exact-root",
+            f"project_root: {json.dumps(str(project_root.resolve()))}\n",
+            "EXACT_ROOT_PAGE",
+        ),
+        (
+            "wrong-root",
+            f"project_root: {json.dumps(str(other_root.resolve()))}\n",
+            "WRONG_ROOT_SAME_SLUG_PAGE",
+        ),
+        ("missing-root", "", "MISSING_ROOT_SAME_SLUG_PAGE"),
+    ):
+        (notes / f"{filename}.md").write_text(
+            "---\n"
+            "type: pattern\n"
+            "project: app\n"
+            f"{root_line}"
+            "status: active\n"
+            "---\n"
+            f"# {filename}\n"
+            f"One-sentence summary: {sentinel}\n",
+            encoding="utf-8",
+        )
+    daily.mkdir(parents=True)
+
+    context = build_context.build_context("app")
+
+    assert "EXACT_ROOT_PAGE" in context
+    assert "WRONG_ROOT_SAME_SLUG_PAGE" not in context
+    assert "MISSING_ROOT_SAME_SLUG_PAGE" not in context
+
+
+@pytest.mark.parametrize("record_root", (None, "other"))
+def test_manual_context_heartbeat_requires_exact_confirmed_root(
+    monkeypatch,
+    tmp_path: Path,
+    record_root: str | None,
+):
+    vault = tmp_path / "vault"
+    _notes, daily, projects = _configure_manual_builder(monkeypatch, vault)
+    project_root = tmp_path / "workspaces" / "app"
+    other_root = tmp_path / "other" / "app"
+    _write_manual_builder_state(
+        projects,
+        "app",
+        "app",
+        project_root,
+        "EXACT_STATE_HANDOFF",
+    )
+    heartbeat = {
+        "at": "2026-08-02T12:00:00",
+        "reason": "CROSS_ROOT_HEARTBEAT_MUST_NOT_APPEAR",
+    }
+    if record_root == "other":
+        heartbeat["project_root"] = str(other_root.resolve())
+    monkeypatch.setattr(
+        build_context,
+        "load_state",
+        lambda: {"codex_heartbeats": {"app": heartbeat}},
+    )
+    daily.mkdir(parents=True)
+
+    context = build_context.build_context("app")
+
+    assert "CROSS_ROOT_HEARTBEAT_MUST_NOT_APPEAR" not in context
+    assert "### Last seen" not in context
+
+
+def test_manual_context_rejects_legacy_only_state_ownership(
+    monkeypatch,
+    tmp_path: Path,
+):
+    vault = tmp_path / "vault"
+    notes, daily, projects = _configure_manual_builder(monkeypatch, vault)
+    project_root = tmp_path / "workspaces" / "bank-list"
+    project_root.mkdir(parents=True)
+    state_path = projects / "bank-list" / "state.md"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        "# Bank list state\n"
+        f"- Project root: `{project_root.resolve()}`\n"
+        '- Runtime slug JSON: "bank-list"\n'
+        "## Where we left off\nLEGACY_BANK_LIST_HANDOFF\n",
+        encoding="utf-8",
+    )
+    _write_manual_builder_page(notes, "bank-list", "bank-list", "BANK_LIST_PAGE")
+    daily.mkdir(parents=True)
+
+    context = build_context.build_context("bank-list")
+
+    assert "LEGACY_BANK_LIST_HANDOFF" not in context
+    assert "BANK_LIST_PAGE" not in context
+
+
+def test_manual_context_orders_handoff_then_current_bootstrap_then_daily(
+    monkeypatch,
+    tmp_path: Path,
+):
+    vault = tmp_path / "vault"
+    _notes, daily, projects = _configure_manual_builder(monkeypatch, vault)
+    project_root = tmp_path / "workspaces" / "ordered"
+    state_path = _write_manual_builder_state(
+        projects,
+        "ordered",
+        "ordered",
+        project_root,
+        "FIRST_SAVED_HANDOFF",
+    )
+    fingerprint = bootstrap_project._bootstrap_source_fingerprint(project_root, None)
+    assert fingerprint is not None
+    state_path.with_name("bootstrap.md").write_text(
+        "---\n"
+        "type: bootstrap-context\n"
+        'project_slug_json: "ordered"\n'
+        f"project_root_json: {json.dumps(str(project_root.resolve()))}\n"
+        f"project_state_path_json: {json.dumps(str(state_path.resolve()))}\n"
+        "git_head_json: null\n"
+        "bootstrap_schema_json: 2\n"
+        f"source_fingerprint_json: {json.dumps(fingerprint)}\n"
+        "---\n\n"
+        "# Ordered bootstrap\n\nSECOND_CURRENT_BOOTSTRAP\n",
+        encoding="utf-8",
+    )
+    daily.mkdir(parents=True)
+    (daily / "2026-08-02.md").write_text(
+        "- `[12:00:00] prompt | session | ordered` "
+        f"project-root-json={json.dumps(str(project_root.resolve()))} | "
+        "THIRD_RECENT_DAILY\n",
+        encoding="utf-8",
+    )
+
+    context = build_context.build_context("ordered")
+
+    assert "Project bootstrap (UNTRUSTED project-derived data)" in context
+    assert context.index("FIRST_SAVED_HANDOFF") < context.index(
+        "SECOND_CURRENT_BOOTSTRAP"
+    ) < context.index("THIRD_RECENT_DAILY")
 
 
 def test_manual_context_write_targets_exact_state_parent(monkeypatch, tmp_path: Path):
@@ -4132,14 +5207,21 @@ def test_manual_context_reads_each_knowledge_page_with_named_byte_limit(
 ):
     vault = tmp_path / "vault"
     notes, _daily, projects = _configure_manual_builder(monkeypatch, vault)
+    project_root = tmp_path / "workspace" / "app"
     _write_manual_builder_state(
         projects,
         "physical-app",
         "app",
-        tmp_path / "workspace" / "app",
+        project_root,
         "BOUNDED_READ_HANDOFF",
     )
-    _write_manual_builder_page(notes, "app", "app", "BOUNDED_NOTE")
+    _write_manual_builder_page(
+        notes,
+        "app",
+        "app",
+        "BOUNDED_NOTE",
+        project_root=project_root,
+    )
     monkeypatch.setattr(build_context, "MAX_NOTE_BYTES", 256, raising=False)
     real_open = Path.open
     read_sizes: list[int] = []
@@ -4179,11 +5261,12 @@ def test_manual_context_emits_type_groups_in_agent_priority_order(
 ):
     vault = tmp_path / "vault"
     notes, _daily, projects = _configure_manual_builder(monkeypatch, vault)
+    project_root = tmp_path / "workspace" / "app"
     _write_manual_builder_state(
         projects,
         "physical-app",
         "app",
-        tmp_path / "workspace" / "app",
+        project_root,
         "AGENT_PRIORITY_HANDOFF",
     )
     _write_manual_builder_page(
@@ -4191,10 +5274,23 @@ def test_manual_context_emits_type_groups_in_agent_priority_order(
         "decision-page",
         "app",
         "DECISION_PAGE",
+        project_root=project_root,
         page_type="decision",
     )
-    _write_manual_builder_page(notes, "pattern-one", "app", "PATTERN_ONE")
-    _write_manual_builder_page(notes, "pattern-two", "app", "PATTERN_TWO")
+    _write_manual_builder_page(
+        notes,
+        "pattern-one",
+        "app",
+        "PATTERN_ONE",
+        project_root=project_root,
+    )
+    _write_manual_builder_page(
+        notes,
+        "pattern-two",
+        "app",
+        "PATTERN_TWO",
+        project_root=project_root,
+    )
 
     context = build_context.build_context("app", agent="opencode")
 

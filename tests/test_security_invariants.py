@@ -653,6 +653,8 @@ class TestCompileEvidenceEnforcement:
                     "summary": "s",
                     "body_section": "Lesson",
                     "body_markdown": "b",
+                    "project_slug": "test-project",
+                    "project_root": str(tmp_path.resolve()),
                     "evidence": [
                         {
                             "daily_date": "2026-07-11",

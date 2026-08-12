@@ -39,7 +39,7 @@ import sys
 import threading
 import uuid
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -58,6 +58,13 @@ MAX_QUEUE_TASK_BYTES = 16 * 1024 * 1024
 MAX_QUEUE_SEQUENCE_BYTES = 128
 MAX_QUEUE_MIGRATION_BYTES = 4 * 1024 * 1024
 MAX_QUEUE_JSON_DEPTH = 64
+QUEUE_RETRY_SCHEMA_VERSION = 1
+MAX_QUEUE_RETRY_MANIFEST_BYTES = 4 * 1024 * 1024
+MAX_QUEUE_RETRY_TASKS = 1_000
+MAX_QUEUE_RETRY_BACKUP_BYTES = 512 * 1024 * 1024
+QUEUE_RETRY_MANIFEST_NAME = "queue-retry-manifest.json"
+QUEUE_RETRY_SEAL_NAME = "queue-retry-manifest.seal.json"
+QUEUE_RETRY_BARRIER_NAME = "queue-retry-active.json"
 SOURCE_PROVENANCE_FIELDS = (
     "session_id",
     "trigger",
@@ -71,6 +78,7 @@ PROVENANCE_FIELDS = (
     "enqueued_by",
 )
 _TASK_ID_PATTERN = re.compile(r"[0-9]{8}-[0-9]{6}-[0-9a-f]{8}")
+_CAPTURE_ID_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 _QUEUE_THREAD_LOCK = threading.Lock()
 
@@ -84,6 +92,22 @@ def _is_canonical_task_id(task_id: object) -> bool:
         isinstance(task_id, str)
         and _TASK_ID_PATTERN.fullmatch(task_id) is not None
     )
+
+
+def _is_canonical_capture_id(capture_id: object) -> bool:
+    return (
+        isinstance(capture_id, str)
+        and _CAPTURE_ID_PATTERN.fullmatch(capture_id) is not None
+    )
+
+
+def _validated_capture_id(payload: dict[str, Any]) -> str | None:
+    if "capture_id" not in payload:
+        return None
+    capture_id = payload["capture_id"]
+    if not _is_canonical_capture_id(capture_id):
+        raise ValueError("capture_id must be canonical lowercase 64-hex")
+    return capture_id
 
 
 @dataclass(frozen=True)
@@ -109,8 +133,12 @@ def _state_root() -> Path:
         return vault.resolve()
 
 
+def _queue_path() -> Path:
+    return _state_root() / "run" / "queue"
+
+
 def _queue_dir() -> Path:
-    q = _state_root() / "run" / "queue"
+    q = _queue_path()
     q.mkdir(parents=True, exist_ok=True)
     return q
 
@@ -127,6 +155,10 @@ def _sequence_file(queue_dir: Path) -> Path:
 
 def _migration_file(queue_dir: Path) -> Path:
     return queue_dir.parent / "queue-migration.json"
+
+
+def _queue_retry_barrier_path() -> Path:
+    return _queue_path().parent / QUEUE_RETRY_BARRIER_NAME
 
 
 @contextmanager
@@ -147,7 +179,19 @@ def _queue_order_lock():
 def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     from memory_state import atomic_write
 
-    atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    atomic_write(path, _queue_json_bytes(data).decode("utf-8"))
+
+
+def _queue_json_bytes(data: object, *, canonical: bool = False) -> bytes:
+    options = (
+        {"sort_keys": True, "separators": (",", ":")}
+        if canonical
+        else {"indent": 2}
+    )
+    return (
+        json.dumps(data, ensure_ascii=False, **options)
+        + ("" if canonical else "\n")
+    ).encode("utf-8", errors="strict")
 
 
 def _sanitize_queue_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -532,7 +576,40 @@ def enqueue(task_type: str, payload: dict[str, Any]) -> str:
     Safe to call from any process — atomic file write via tmp+rename.
     """
     payload = _sanitize_queue_payload(payload)
+    capture_id = _validated_capture_id(payload) if task_type == "flush" else None
     with _queue_order_lock() as queue_dir:
+        if capture_id is not None:
+            inventory = _inventory_queue_locked(queue_dir)
+            pending = _migrate_legacy_tasks(
+                queue_dir,
+                [
+                    (path, task)
+                    for path, task in inventory.tasks
+                    if path.suffix == ".json"
+                ],
+            )
+            processing = [
+                (path, task)
+                for path, task in inventory.tasks
+                if path.suffix == ".processing"
+            ]
+            matches = [
+                (path, task)
+                for path, task in (*pending, *processing)
+                if task.get("type") == "flush"
+                and isinstance(task.get("payload"), dict)
+                and task["payload"].get("capture_id") == capture_id
+            ]
+            if matches:
+                _path, task = min(
+                    matches,
+                    key=lambda item: (
+                        int(item[1].get("enqueue_sequence", sys.maxsize)),
+                        str(item[1].get("enqueued_at", "")),
+                        item[0].name,
+                    ),
+                )
+                return str(task["id"])
         return _enqueue_locked(queue_dir, task_type, payload)
 
 
@@ -745,6 +822,7 @@ def _recover_stale_leases_locked(qdir: Path, max_age_seconds: int) -> int:
 def recover_stale_leases(max_age_seconds: int = 600) -> int:
     """Recover stale queue leases while excluding claim and settlement."""
     with _queue_order_lock() as qdir:
+        _queue_retry_require_no_barrier()
         return _recover_stale_leases_locked(qdir, max_age_seconds)
 
 
@@ -837,6 +915,7 @@ def _validate_occurrence(value: str) -> None:
 
 
 def _classify_flush_provenance(payload: dict[str, Any]) -> FlushProvenance:
+    _validated_capture_id(payload)
     if "provenance_version" in payload:
         version = payload["provenance_version"]
         if type(version) is not int or version != CURRENT_FLUSH_PROVENANCE_VERSION:
@@ -900,6 +979,7 @@ def _classify_flush_provenance(payload: dict[str, Any]) -> FlushProvenance:
 def _claim_next_task() -> tuple[dict[str, Any], Path] | None:
     """Atomically select and lease one eligible task under the order lock."""
     with _queue_order_lock() as queue_dir:
+        _queue_retry_require_no_barrier()
         pending = _migrate_legacy_tasks(
             queue_dir, _read_pending_files(queue_dir)
         )
@@ -1166,6 +1246,12 @@ def _flush_task_marker(task_id: str) -> str:
     return f"<!-- llm-wiki-queue-task: {digest} -->"
 
 
+def _flush_capture_marker(capture_id: object) -> str:
+    if not _is_canonical_capture_id(capture_id):
+        raise ValueError("flush capture_id is not canonical")
+    return f"<!-- llm-wiki-capture: {capture_id} -->"
+
+
 def _declared_non_ok_flush_tier(response: str) -> str | None:
     stripped = str(response or "").strip()
     if not stripped:
@@ -1252,7 +1338,12 @@ def apply_classified_flush_response(
     )
     if tier == "ok":
         return None
-    marker = _flush_task_marker(task_id)
+    capture_id = _validated_capture_id(payload)
+    marker = (
+        _flush_capture_marker(capture_id)
+        if capture_id is not None
+        else _flush_task_marker(task_id)
+    )
     day, block = render_flush_block(
         tier,
         body,
@@ -1569,6 +1660,723 @@ def status() -> dict[str, Any]:
     }
 
 
+def _queue_retry_digest(value: object) -> str:
+    return hashlib.sha256(_queue_json_bytes(value, canonical=True)).hexdigest()
+
+
+def _queue_retry_payload_digest(task: dict[str, Any]) -> str:
+    return _queue_retry_digest(task["payload"])
+
+
+def _queue_retry_manifest_digest(manifest: dict[str, Any]) -> str:
+    return _queue_retry_digest(
+        {key: value for key, value in manifest.items() if key != "approved"}
+    )
+
+
+def _queue_retry_write_private(path: Path, raw: bytes, *, bound=None) -> None:
+    if bound is not None:
+        bound.validate_path()
+        if Path(os.path.abspath(path.parent)) != bound.path:
+            raise QueueIntegrityError("queue retry artifact escaped its bound directory")
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = (
+        os.open(path.name, flags, 0o600, dir_fd=bound.descriptor)
+        if bound is not None and bound.descriptor is not None
+        else os.open(path, flags, 0o600)
+    )
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(raw)
+        handle.flush()
+        os.fsync(handle.fileno())
+    metadata = (
+        os.stat(path.name, dir_fd=bound.descriptor, follow_symlinks=False)
+        if bound is not None and bound.descriptor is not None
+        else path.lstat()
+    )
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or _is_reparse_point(metadata)
+        or metadata.st_nlink != 1
+    ):
+        raise QueueIntegrityError(f"unsafe created queue retry artifact: {path}")
+    if bound is not None:
+        bound.validate_path()
+
+
+def _queue_retry_read_private(path: Path, *, max_bytes: int, bound=None) -> bytes:
+    if bound is not None:
+        bound.validate_path()
+        if Path(os.path.abspath(path.parent)) != bound.path:
+            raise QueueIntegrityError("queue retry artifact escaped its bound directory")
+    metadata = (
+        os.stat(path.name, dir_fd=bound.descriptor, follow_symlinks=False)
+        if bound is not None and bound.descriptor is not None
+        else path.lstat()
+    )
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or _is_reparse_point(metadata)
+        or metadata.st_nlink != 1
+        or metadata.st_size > max_bytes
+    ):
+        raise QueueIntegrityError(f"unsafe queue retry artifact: {path}")
+    descriptor = (
+        os.open(
+            path.name,
+            os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=bound.descriptor,
+        )
+        if bound is not None and bound.descriptor is not None
+        else os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+    )
+    with os.fdopen(descriptor, "rb") as handle:
+        opened = os.fstat(handle.fileno())
+        if not os.path.samestat(metadata, opened):
+            raise QueueIntegrityError(f"queue retry artifact changed while opening: {path}")
+        raw = handle.read(max_bytes + 1)
+        finished = os.fstat(handle.fileno())
+    current = (
+        os.stat(path.name, dir_fd=bound.descriptor, follow_symlinks=False)
+        if bound is not None and bound.descriptor is not None
+        else path.lstat()
+    )
+    stable_fields = ("st_mode", "st_nlink", "st_size", "st_mtime_ns")
+    if (
+        len(raw) > max_bytes
+        or not os.path.samestat(opened, finished)
+        or not os.path.samestat(finished, current)
+        or any(getattr(opened, field) != getattr(finished, field) for field in stable_fields)
+        or any(getattr(finished, field) != getattr(current, field) for field in stable_fields)
+    ):
+        raise QueueIntegrityError(
+            f"queue retry artifact changed or exceeded its bound: {path}"
+        )
+    if bound is not None:
+        bound.validate_path()
+    return raw
+
+
+def _queue_retry_barrier(*, bound=None) -> dict[str, Any] | None:
+    path = _queue_retry_barrier_path()
+    try:
+        raw = _queue_retry_read_private(path, max_bytes=4096, bound=bound)
+    except FileNotFoundError:
+        return None
+    from memory_state import decode_json_object_strict
+
+    barrier = decode_json_object_strict(raw, max_bytes=4096)
+    if (
+        set(barrier) != {"schema_version", "manifest", "manifest_sha256"}
+        or barrier.get("schema_version") != QUEUE_RETRY_SCHEMA_VERSION
+        or not isinstance(barrier.get("manifest"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", barrier.get("manifest_sha256", "")) is None
+    ):
+        raise QueueIntegrityError("queue retry transaction barrier is invalid")
+    return barrier
+
+
+def _queue_retry_require_no_barrier() -> None:
+    if _queue_retry_barrier() is not None:
+        raise QueueIntegrityError("queue retry transaction is incomplete")
+
+
+def _queue_retry_publish_barrier(value: dict[str, Any]) -> None:
+    from memory_state import (
+        atomic_write,
+        bind_atomic_writes_to_directory,
+        require_absent_atomic_target,
+    )
+
+    path = _queue_retry_barrier_path()
+    with bind_atomic_writes_to_directory(path.parent) as bound:
+        with require_absent_atomic_target():
+            atomic_write(path, _queue_json_bytes(value).decode("utf-8"))
+        from memory_state import sync_parent_directory_strict
+
+        sync_parent_directory_strict(path)
+        if _queue_retry_barrier(bound=bound) != value:
+            raise QueueIntegrityError("queue retry transaction barrier publication failed")
+
+
+def _queue_retry_snapshot(path: Path) -> tuple[bytes, dict[str, Any], dict[str, int]]:
+    metadata = path.lstat()
+    if metadata.st_nlink != 1:
+        raise _integrity_error("queue retry task has multiple hard links", path)
+    raw = _read_bounded_regular_bytes(
+        path,
+        max_bytes=MAX_QUEUE_TASK_BYTES,
+        label="queue retry task",
+    )
+    assert raw is not None
+    from memory_state import decode_json_object_strict
+
+    task = decode_json_object_strict(raw, max_bytes=MAX_QUEUE_TASK_BYTES)
+    validated = _read_task_json(path)
+    if validated != task:
+        raise _integrity_error("queue retry task changed while validating", path)
+    current = path.lstat()
+    if (
+        not os.path.samestat(metadata, current)
+        or metadata.st_size != current.st_size
+        or metadata.st_mtime_ns != current.st_mtime_ns
+        or metadata.st_nlink != current.st_nlink
+    ):
+        raise _integrity_error("queue retry task identity changed", path)
+    identity = {
+        "device": int(metadata.st_dev),
+        "inode": int(metadata.st_ino),
+        "mode": int(metadata.st_mode),
+        "nlink": int(metadata.st_nlink),
+    }
+    return raw, task, identity
+
+
+def _queue_retry_selected(
+    queue_dir: Path,
+    task_ids: list[str],
+) -> list[tuple[Path, bytes, dict[str, Any], dict[str, int]]]:
+    if (
+        not task_ids
+        or len(task_ids) > MAX_QUEUE_RETRY_TASKS
+        or len(set(task_ids)) != len(task_ids)
+    ):
+        raise QueueIntegrityError("queue retry requires unique explicit task ids")
+    if any(not _is_canonical_task_id(task_id) for task_id in task_ids):
+        raise QueueIntegrityError("queue retry task id is not canonical")
+    inventory = _inventory_queue_locked(queue_dir)
+    selected = []
+    for task_id in task_ids:
+        matches = [
+            (path, task)
+            for path, task in inventory.tasks
+            if task.get("id") == task_id
+        ]
+        if len(matches) != 1 or matches[0][0].suffix != ".json":
+            raise QueueIntegrityError(
+                f"queue retry task is missing, duplicated, or leased: {task_id}"
+            )
+        path, _task = matches[0]
+        raw, task, identity = _queue_retry_snapshot(path)
+        if task.get("attempts", 0) < MAX_ATTEMPTS:
+            raise QueueIntegrityError(f"queue retry task is not exhausted: {task_id}")
+        if type(task.get("enqueue_sequence")) is not int:
+            raise QueueIntegrityError(
+                f"queue retry task lacks a durable queue sequence: {task_id}"
+            )
+        selected.append((path, raw, task, identity))
+    return selected
+
+
+def retry_failed_audit(task_ids: list[str]) -> dict[str, Any]:
+    try:
+        _queue_retry_require_no_barrier()
+        queue_dir = _queue_path()
+        selected = _queue_retry_selected(queue_dir, task_ids)
+        confirmed = _queue_retry_selected(queue_dir, task_ids)
+        if [
+            (path.name, raw, identity)
+            for path, raw, _task, identity in selected
+        ] != [
+            (path.name, raw, identity)
+            for path, raw, _task, identity in confirmed
+        ]:
+            raise QueueIntegrityError("queue retry audit snapshot drifted")
+    except (OSError, ValueError, QueueIntegrityError) as exc:
+        return {
+            "schema_version": QUEUE_RETRY_SCHEMA_VERSION,
+            "status": "ineligible",
+            "eligible": False,
+            "diagnostic": str(exc)[:500],
+        }
+    return {
+        "schema_version": QUEUE_RETRY_SCHEMA_VERSION,
+        "status": "eligible",
+        "eligible": True,
+        "task_ids": [task[2]["id"] for task in selected],
+    }
+
+
+def retry_failed_backup_only(task_ids: list[str]) -> dict[str, Any]:
+    with _queue_order_lock() as queue_dir:
+        _queue_retry_require_no_barrier()
+        selected = _queue_retry_selected(queue_dir, task_ids)
+        created_at = datetime.now(timezone.utc)
+        entries = []
+        artifacts = []
+        aggregate_bytes = 0
+        for path, before_raw, before_task, identity in selected:
+            after_task = json.loads(json.dumps(before_task))
+            after_task["attempts"] = 0
+            after_task["last_attempt_at"] = None
+            after_raw = _queue_json_bytes(after_task)
+            if len(after_raw) > MAX_QUEUE_TASK_BYTES:
+                raise QueueIntegrityError(
+                    f"queue retry postimage exceeds its bound: {before_task['id']}"
+                )
+            before_name = f"queue-retry-tasks/{before_task['id']}.before.json"
+            after_name = f"queue-retry-tasks/{before_task['id']}.after.json"
+            aggregate_bytes += len(before_raw) + len(after_raw)
+            if aggregate_bytes > MAX_QUEUE_RETRY_BACKUP_BYTES:
+                raise QueueIntegrityError("queue retry backup exceeds its aggregate bound")
+            artifacts.extend(((before_name, before_raw), (after_name, after_raw)))
+            entries.append(
+                {
+                    "task_id": before_task["id"],
+                    "task_type": before_task["type"],
+                    "filename": path.name,
+                    "enqueue_sequence": before_task["enqueue_sequence"],
+                    "attempts": before_task["attempts"],
+                    "last_error": before_task.get("last_error"),
+                    "payload_identity_sha256": _queue_retry_payload_digest(before_task),
+                    "identity": identity,
+                    "before_artifact": before_name,
+                    "before_sha256": hashlib.sha256(before_raw).hexdigest(),
+                    "before_size": len(before_raw),
+                    "before_digest": _task_digest(before_task),
+                    "after_artifact": after_name,
+                    "after_sha256": hashlib.sha256(after_raw).hexdigest(),
+                    "after_size": len(after_raw),
+                    "after_digest": _task_digest(after_task),
+                }
+            )
+        manifest = {
+            "schema_version": QUEUE_RETRY_SCHEMA_VERSION,
+            "kind": "queue_retry_failed",
+            "approved": False,
+            "created_at": created_at.isoformat(),
+            "state_root": str(_state_root().resolve()),
+            "tasks": entries,
+        }
+        manifest_raw = _queue_json_bytes(manifest)
+        if len(manifest_raw) > MAX_QUEUE_RETRY_MANIFEST_BYTES:
+            raise QueueIntegrityError("queue retry manifest exceeds its bound")
+
+        run_dir = queue_dir.parent
+        for directory in (_state_root(), run_dir):
+            metadata = directory.lstat()
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or stat.S_ISLNK(metadata.st_mode)
+                or _is_reparse_point(metadata)
+            ):
+                raise QueueIntegrityError("queue retry runtime directory is unsafe")
+        backups = run_dir / "backups"
+        backups.mkdir(mode=0o700, exist_ok=True)
+        backup_metadata = backups.lstat()
+        if (
+            not stat.S_ISDIR(backup_metadata.st_mode)
+            or stat.S_ISLNK(backup_metadata.st_mode)
+            or _is_reparse_point(backup_metadata)
+        ):
+            raise QueueIntegrityError("queue retry backup directory is unsafe")
+        transaction = backups / (
+            created_at.strftime("%Y%m%dT%H%M%S.%fZ") + f"-{uuid.uuid4().hex[:8]}"
+        )
+        from memory_state import (
+            bind_atomic_writes_to_directory,
+            sync_parent_directory_strict,
+        )
+
+        with bind_atomic_writes_to_directory(backups):
+            transaction.mkdir(mode=0o700)
+            sync_parent_directory_strict(transaction)
+            with bind_atomic_writes_to_directory(transaction) as transaction_bound:
+                task_artifacts = transaction / "queue-retry-tasks"
+                task_artifacts.mkdir(mode=0o700)
+                sync_parent_directory_strict(task_artifacts)
+                with bind_atomic_writes_to_directory(task_artifacts) as artifact_bound:
+                    for relative_name, raw in artifacts:
+                        _queue_retry_write_private(
+                            transaction / relative_name,
+                            raw,
+                            bound=artifact_bound,
+                        )
+                    sync_parent_directory_strict(task_artifacts / "artifact")
+                manifest_path = transaction / QUEUE_RETRY_MANIFEST_NAME
+                _queue_retry_write_private(
+                    manifest_path,
+                    manifest_raw,
+                    bound=transaction_bound,
+                )
+                _queue_retry_write_private(
+                    transaction / QUEUE_RETRY_SEAL_NAME,
+                    _queue_json_bytes(
+                        {"sha256": _queue_retry_manifest_digest(manifest)}
+                    ),
+                    bound=transaction_bound,
+                )
+                sync_parent_directory_strict(transaction / "artifact")
+        return {
+            "schema_version": QUEUE_RETRY_SCHEMA_VERSION,
+            "status": "prepared",
+            "manifest": str(manifest_path),
+        }
+
+
+def _queue_retry_manifest_path(path: Path) -> Path:
+    candidate = path.absolute()
+    backups = (_queue_path().parent / "backups").absolute()
+    if (
+        candidate.name != QUEUE_RETRY_MANIFEST_NAME
+        or candidate.parent.parent != backups
+        or re.fullmatch(r"[0-9]{8}T[0-9]{6}\.[0-9]{6}Z-[0-9a-f]{8}", candidate.parent.name)
+        is None
+    ):
+        raise QueueIntegrityError("queue retry manifest is outside its backup transaction")
+    for directory in (backups, candidate.parent):
+        metadata = directory.lstat()
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or _is_reparse_point(metadata)
+        ):
+            raise QueueIntegrityError("queue retry manifest directory is unsafe")
+    return candidate
+
+
+def _load_queue_retry_manifest(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    candidate = _queue_retry_manifest_path(path)
+    from memory_state import bind_atomic_writes_to_directory
+
+    with ExitStack() as stack:
+        transaction_bound = stack.enter_context(
+            bind_atomic_writes_to_directory(candidate.parent)
+        )
+        artifact_bound = stack.enter_context(
+            bind_atomic_writes_to_directory(candidate.parent / "queue-retry-tasks")
+        )
+        return _load_queue_retry_manifest_files(
+            candidate,
+            transaction_bound,
+            artifact_bound,
+        )
+
+
+def _load_queue_retry_manifest_files(
+    candidate: Path,
+    transaction_bound,
+    artifact_bound,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    from memory_state import decode_json_object_strict
+
+    manifest = decode_json_object_strict(
+        _queue_retry_read_private(
+            candidate,
+            max_bytes=MAX_QUEUE_RETRY_MANIFEST_BYTES,
+            bound=transaction_bound,
+        ),
+        max_bytes=MAX_QUEUE_RETRY_MANIFEST_BYTES,
+    )
+    if set(manifest) != {
+        "schema_version",
+        "kind",
+        "approved",
+        "created_at",
+        "state_root",
+        "tasks",
+    } or (
+        manifest.get("schema_version") != QUEUE_RETRY_SCHEMA_VERSION
+        or manifest.get("kind") != "queue_retry_failed"
+        or type(manifest.get("approved")) is not bool
+        or manifest.get("state_root") != str(_state_root().resolve())
+        or not isinstance(manifest.get("tasks"), list)
+        or not manifest["tasks"]
+        or len(manifest["tasks"]) > MAX_QUEUE_RETRY_TASKS
+    ):
+        raise QueueIntegrityError("queue retry manifest schema is invalid")
+    try:
+        datetime.fromisoformat(manifest["created_at"])
+    except (TypeError, ValueError) as exc:
+        raise QueueIntegrityError("queue retry manifest timestamp is invalid") from exc
+    artifact_directory = candidate.parent / "queue-retry-tasks"
+    artifact_metadata = artifact_directory.lstat()
+    if (
+        not stat.S_ISDIR(artifact_metadata.st_mode)
+        or stat.S_ISLNK(artifact_metadata.st_mode)
+        or _is_reparse_point(artifact_metadata)
+    ):
+        raise QueueIntegrityError("queue retry artifact directory is unsafe")
+    seal = decode_json_object_strict(
+        _queue_retry_read_private(
+            candidate.parent / QUEUE_RETRY_SEAL_NAME,
+            max_bytes=1024,
+            bound=transaction_bound,
+        ),
+        max_bytes=1024,
+    )
+    if set(seal) != {"sha256"} or not hmac.compare_digest(
+        str(seal.get("sha256") or ""),
+        _queue_retry_manifest_digest(manifest),
+    ):
+        raise QueueIntegrityError("queue retry manifest seal is invalid")
+    expected_entry_keys = {
+        "task_id",
+        "task_type",
+        "filename",
+        "enqueue_sequence",
+        "attempts",
+        "last_error",
+        "payload_identity_sha256",
+        "identity",
+        "before_artifact",
+        "before_sha256",
+        "before_size",
+        "before_digest",
+        "after_artifact",
+        "after_sha256",
+        "after_size",
+        "after_digest",
+    }
+    seen: set[str] = set()
+    loaded = []
+    aggregate_bytes = 0
+    for entry in manifest["tasks"]:
+        if not isinstance(entry, dict) or set(entry) != expected_entry_keys:
+            raise QueueIntegrityError("queue retry manifest task entry is invalid")
+        task_id = entry.get("task_id")
+        identity = entry.get("identity")
+        if (
+            not _is_canonical_task_id(task_id)
+            or task_id in seen
+            or not isinstance(entry.get("task_type"), str)
+            or not entry["task_type"]
+            or type(entry.get("enqueue_sequence")) is not int
+            or entry["enqueue_sequence"] < 1
+            or type(entry.get("attempts")) is not int
+            or entry["attempts"] < MAX_ATTEMPTS
+            or (
+                entry.get("last_error") is not None
+                and not isinstance(entry.get("last_error"), str)
+            )
+            or re.fullmatch(r"[0-9a-f]{64}", entry.get("payload_identity_sha256", ""))
+            is None
+            or not isinstance(identity, dict)
+            or set(identity) != {"device", "inode", "mode", "nlink"}
+            or any(type(value) is not int for value in identity.values())
+            or identity["nlink"] != 1
+        ):
+            raise QueueIntegrityError("queue retry manifest task identity is invalid")
+        seen.add(task_id)
+        expected_before = f"queue-retry-tasks/{task_id}.before.json"
+        expected_after = f"queue-retry-tasks/{task_id}.after.json"
+        if (
+            entry.get("filename") != f"{task_id}.json"
+            or entry.get("before_artifact") != expected_before
+            or entry.get("after_artifact") != expected_after
+            or type(entry.get("before_size")) is not int
+            or not 0 <= entry["before_size"] <= MAX_QUEUE_TASK_BYTES
+            or type(entry.get("after_size")) is not int
+            or not 0 <= entry["after_size"] <= MAX_QUEUE_TASK_BYTES
+            or any(
+                re.fullmatch(r"[0-9a-f]{64}", entry.get(field, "")) is None
+                for field in (
+                    "before_sha256",
+                    "before_digest",
+                    "after_sha256",
+                    "after_digest",
+                )
+            )
+        ):
+            raise QueueIntegrityError("queue retry artifact path is invalid")
+        before_raw = _queue_retry_read_private(
+            candidate.parent / expected_before,
+            max_bytes=MAX_QUEUE_TASK_BYTES,
+            bound=artifact_bound,
+        )
+        after_raw = _queue_retry_read_private(
+            candidate.parent / expected_after,
+            max_bytes=MAX_QUEUE_TASK_BYTES,
+            bound=artifact_bound,
+        )
+        aggregate_bytes += len(before_raw) + len(after_raw)
+        if aggregate_bytes > MAX_QUEUE_RETRY_BACKUP_BYTES:
+            raise QueueIntegrityError("queue retry backup exceeds its aggregate bound")
+        before_task = decode_json_object_strict(before_raw, max_bytes=MAX_QUEUE_TASK_BYTES)
+        after_task = decode_json_object_strict(after_raw, max_bytes=MAX_QUEUE_TASK_BYTES)
+        if (
+            len(before_raw) != entry.get("before_size")
+            or len(after_raw) != entry.get("after_size")
+            or not hmac.compare_digest(hashlib.sha256(before_raw).hexdigest(), entry["before_sha256"])
+            or not hmac.compare_digest(hashlib.sha256(after_raw).hexdigest(), entry["after_sha256"])
+            or _task_digest(before_task) != entry.get("before_digest")
+            or _task_digest(after_task) != entry.get("after_digest")
+            or before_task.get("id") != task_id
+            or before_task.get("type") != entry["task_type"]
+            or before_task.get("enqueue_sequence") != entry["enqueue_sequence"]
+            or before_task.get("attempts") != entry["attempts"]
+            or before_task.get("last_error") != entry["last_error"]
+            or _queue_retry_payload_digest(before_task)
+            != entry["payload_identity_sha256"]
+        ):
+            raise QueueIntegrityError("queue retry artifact digest is invalid")
+        expected_after_task = json.loads(json.dumps(before_task))
+        expected_after_task["attempts"] = 0
+        expected_after_task["last_attempt_at"] = None
+        if after_task != expected_after_task or before_task.get("attempts", 0) < MAX_ATTEMPTS:
+            raise QueueIntegrityError("queue retry postimage is invalid")
+        loaded.append(
+            {
+                "entry": entry,
+                "before_raw": before_raw,
+                "before_task": before_task,
+                "after_raw": after_raw,
+                "after_task": after_task,
+            }
+        )
+    return manifest, loaded
+
+
+def retry_failed_apply(manifest_path: Path) -> dict[str, Any]:
+    manifest, loaded = _load_queue_retry_manifest(manifest_path)
+    if manifest["approved"] is not True:
+        raise QueueIntegrityError("queue retry manifest is not approved")
+    from memory_state import bind_atomic_writes_to_directory
+
+    with _queue_order_lock() as queue_dir:
+        with ExitStack() as stack:
+            run_bound = stack.enter_context(
+                bind_atomic_writes_to_directory(queue_dir.parent)
+            )
+            stack.enter_context(bind_atomic_writes_to_directory(queue_dir))
+            return _retry_failed_apply_locked(
+                manifest_path,
+                manifest,
+                loaded,
+                queue_dir,
+                run_bound,
+            )
+
+
+def _retry_failed_apply_locked(
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    loaded: list[dict[str, Any]],
+    queue_dir: Path,
+    run_bound,
+) -> dict[str, Any]:
+    manifest_identity = {
+        "schema_version": QUEUE_RETRY_SCHEMA_VERSION,
+        "manifest": str(_queue_retry_manifest_path(manifest_path)),
+        "manifest_sha256": _queue_retry_manifest_digest(manifest),
+    }
+    active_barrier = _queue_retry_barrier(bound=run_bound)
+    if active_barrier is not None and active_barrier != manifest_identity:
+        raise QueueIntegrityError("another queue retry transaction is incomplete")
+    if active_barrier is not None:
+        from memory_state import sync_file_strict, sync_parent_directory_strict
+
+        barrier_path = _queue_retry_barrier_path()
+        sync_file_strict(barrier_path)
+        sync_parent_directory_strict(barrier_path)
+        if _queue_retry_barrier(bound=run_bound) != manifest_identity:
+            raise QueueIntegrityError("queue retry transaction barrier drifted")
+    inventory = _inventory_queue_locked(queue_dir)
+    states = []
+    for item in loaded:
+        entry = item["entry"]
+        matches = [
+            path
+            for path, task in inventory.tasks
+            if task.get("id") == entry["task_id"]
+        ]
+        if len(matches) != 1 or matches[0].suffix != ".json":
+            raise QueueIntegrityError(
+                f"queue retry task drifted or became leased: {entry['task_id']}"
+            )
+        path = matches[0]
+        current_raw, _current_task, identity = _queue_retry_snapshot(path)
+        if hmac.compare_digest(current_raw, item["after_raw"]):
+            states.append((path, item, "after"))
+            continue
+        if not hmac.compare_digest(current_raw, item["before_raw"]):
+            raise QueueIntegrityError(f"queue retry task drift: {entry['task_id']}")
+        if identity != entry["identity"]:
+            raise QueueIntegrityError(f"queue retry task identity drift: {entry['task_id']}")
+        states.append((path, item, "before"))
+    has_preimages = any(
+        current_state == "before" for _path, _item, current_state in states
+    )
+    if has_preimages and active_barrier is None:
+        _queue_retry_publish_barrier(manifest_identity)
+        active_barrier = manifest_identity
+    changed = active_barrier is not None
+    for path, item, current_state in states:
+        if current_state == "before":
+            _atomic_write_json(path, item["after_task"])
+            changed = True
+        from memory_state import sync_file_strict, sync_parent_directory_strict
+
+        sync_file_strict(path)
+        sync_parent_directory_strict(path)
+        published = _read_bounded_regular_bytes(
+            path,
+            max_bytes=MAX_QUEUE_TASK_BYTES,
+            label="queue retry published task",
+        )
+        if published is None or not hmac.compare_digest(published, item["after_raw"]):
+            raise QueueIntegrityError("queue retry task postimage verification failed")
+    if active_barrier is not None:
+        if _queue_retry_barrier(bound=run_bound) != manifest_identity:
+            raise QueueIntegrityError("queue retry transaction barrier drifted")
+        barrier_path = _queue_retry_barrier_path()
+        if run_bound.descriptor is not None:
+            os.unlink(barrier_path.name, dir_fd=run_bound.descriptor)
+        else:
+            barrier_path.unlink()
+        run_bound.validate_path()
+        from memory_state import sync_parent_directory_strict
+
+        sync_parent_directory_strict(barrier_path)
+    return {"status": "applied" if changed else "already_applied"}
+
+
+def retry_failed_verify(manifest_path: Path) -> dict[str, Any]:
+    manifest, loaded = _load_queue_retry_manifest(manifest_path)
+    if manifest["approved"] is not True:
+        raise QueueIntegrityError("queue retry manifest is not approved")
+    from memory_state import bind_atomic_writes_to_directory
+
+    with _queue_order_lock() as queue_dir:
+        with ExitStack() as stack:
+            stack.enter_context(bind_atomic_writes_to_directory(queue_dir.parent))
+            stack.enter_context(bind_atomic_writes_to_directory(queue_dir))
+            _queue_retry_require_no_barrier()
+            inventory = _inventory_queue_locked(queue_dir)
+            for item in loaded:
+                task_id = item["entry"]["task_id"]
+                matches = [
+                    path
+                    for path, task in inventory.tasks
+                    if task.get("id") == task_id
+                ]
+                if not matches:
+                    raise QueueIntegrityError(
+                        f"queue retry verification found missing task: {task_id}"
+                    )
+                if len(matches) != 1 or matches[0].suffix != ".json":
+                    raise QueueIntegrityError(
+                        f"queue retry verification found an active lease: {task_id}"
+                    )
+                raw, _task, _identity = _queue_retry_snapshot(matches[0])
+                if not hmac.compare_digest(raw, item["after_raw"]):
+                    raise QueueIntegrityError(
+                        f"queue retry verification drift: {task_id}"
+                    )
+    return {"status": "verified"}
+
+
 # ---------------------------------------------------------------------------
 # CLI for manual drain / inspection
 # ---------------------------------------------------------------------------
@@ -1579,14 +2387,51 @@ def _cli() -> int:
 
     p = argparse.ArgumentParser()
     p.add_argument(
-        "command", nargs="?", choices=["list", "status", "drain", "clear-failed"]
+        "command",
+        nargs="?",
+        choices=["list", "status", "drain", "clear-failed", "retry-failed"],
     )
     bridge = p.add_mutually_exclusive_group()
     bridge.add_argument("--prepare-sdk-task", action="store_true")
     bridge.add_argument("--apply-sdk-result", action="store_true")
     bridge.add_argument("--renew-sdk-task", action="store_true")
     bridge.add_argument("--ensure-compile-task", action="store_true")
+    p.add_argument(
+        "--phase",
+        choices=["audit", "backup-only", "apply", "verify"],
+    )
+    p.add_argument("--task-id", action="append", default=[])
+    p.add_argument("--manifest")
     args = p.parse_args()
+
+    if args.command == "retry-failed":
+        phase = args.phase
+        invalid = (
+            phase is None
+            or (phase in {"audit", "backup-only"} and (not args.task_id or args.manifest))
+            or (phase in {"apply", "verify"} and (args.task_id or not args.manifest))
+        )
+        if invalid:
+            print("memory_queue: invalid retry-failed arguments", file=sys.stderr)
+            return 2
+        try:
+            if phase == "audit":
+                result = retry_failed_audit(args.task_id)
+            elif phase == "backup-only":
+                result = retry_failed_backup_only(args.task_id)
+            elif phase == "apply":
+                result = retry_failed_apply(Path(args.manifest))
+            else:
+                result = retry_failed_verify(Path(args.manifest))
+        except (OSError, ValueError, QueueIntegrityError) as exc:
+            print(f"memory_queue: retry-failed drift: {exc}", file=sys.stderr)
+            return 3
+        print(json.dumps(result, ensure_ascii=False))
+        return 0 if result.get("status") != "ineligible" else 3
+
+    if args.phase is not None or args.task_id or args.manifest is not None:
+        print("memory_queue: retry options require retry-failed", file=sys.stderr)
+        return 2
 
     if args.prepare_sdk_task:
         print(json.dumps(prepare_sdk_task(), ensure_ascii=False))
@@ -1738,13 +2583,16 @@ def _cli() -> int:
 
     if args.command == "clear-failed":
         cleared = 0
-        for t in list_pending():
-            if t.get("attempts", 0) >= MAX_ATTEMPTS:
-                try:
-                    Path(t["_path"]).unlink()
-                    cleared += 1
-                except OSError:
-                    pass
+        with _queue_order_lock() as queue_dir:
+            _queue_retry_require_no_barrier()
+            inventory = _inventory_queue_locked(queue_dir)
+            for path, task in inventory.tasks:
+                if path.suffix == ".json" and task.get("attempts", 0) >= MAX_ATTEMPTS:
+                    try:
+                        path.unlink()
+                        cleared += 1
+                    except OSError:
+                        pass
         print(f"cleared {cleared} permanently-failed task(s)")
         return 0
 

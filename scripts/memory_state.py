@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -98,6 +99,8 @@ _STATE_PROCESS_LOCK = threading.Lock()
 _STATE_LOCK_LOCAL = threading.local()
 _COMPILE_PROCESS_LOCK = threading.Lock()
 _COMPILE_LOCK_LOCAL = threading.local()
+_KNOWLEDGE_PUBLICATION_PROCESS_LOCK = threading.Lock()
+_KNOWLEDGE_PUBLICATION_LOCK_LOCAL = threading.local()
 _BOUND_ATOMIC_DIRECTORY_LOCAL = threading.local()
 _ATOMIC_WRITE_REQUIRE_ABSENT_LOCAL = threading.local()
 _ATOMIC_WRITE_EXPECTED_TARGET_LOCAL = threading.local()
@@ -112,9 +115,13 @@ MAX_COMPILE_RECEIPT_BYTES = 512 * 1024
 MAX_COMPILE_RECEIPT_JOURNALS = 1024
 MAX_COMPILE_RECEIPT_EFFECTS = 1024
 MAX_COMPILE_RECEIPT_TARGETS = 256
+MAX_COMPILE_RECEIPT_EVIDENCE = 4096
+MAX_COMPILE_GENERATION_LINEAGE = 16
 MAX_COMPILE_RECEIPT_TARGET_BYTES = 64 * 1024
 MAX_COMPILE_RECEIPT_INDEX_BYTES = 4 * 1024 * 1024
 MAX_INTERNAL_JSON_DEPTH = 128
+MAX_JSON_LEXICAL_TOKENS = 1_000_000
+MAX_JSON_NUMBER_CHARS = 1_024
 MAX_FRONTMATTER_CHARS = 16 * 1024
 MAX_HOOK_STDIN_BYTES = 4 * 1024 * 1024
 
@@ -150,7 +157,7 @@ def _reject_duplicate_json_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
-            raise ValueError(f"duplicate JSON object key: {key}")
+            raise ValueError(f"duplicate key in JSON object: {key}")
         result[key] = value
     return result
 
@@ -159,33 +166,133 @@ def _reject_json_constant(value: str) -> None:
     raise ValueError(f"non-finite JSON number: {value}")
 
 
+def _is_unicode_noncharacter(codepoint: int) -> bool:
+    return (
+        0xFDD0 <= codepoint <= 0xFDEF
+        or 0 <= codepoint <= 0x10FFFF
+        and codepoint & 0xFFFF in {0xFFFE, 0xFFFF}
+    )
+
+
+def _contains_invalid_unicode_scalar(value: str) -> bool:
+    return any(
+        0xD800 <= ord(char) <= 0xDFFF
+        or _is_unicode_noncharacter(ord(char))
+        for char in value
+    )
+
+
+def _preflight_json_lexical_resources(
+    text: str,
+    *,
+    max_depth: int,
+    max_lexical_tokens: int,
+) -> None:
+    in_string = False
+    escaped = False
+    container_depth = 0
+    structural_tokens = 0
+    number_chars = 0
+    in_number = False
+
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+            in_number = False
+            number_chars = 0
+            continue
+
+        if in_number and (char.isdigit() or char in ".eE+-"):
+            number_chars += 1
+            if number_chars > MAX_JSON_NUMBER_CHARS:
+                raise ValueError("JSON number exceeds number length limit")
+            continue
+        in_number = False
+        number_chars = 0
+        if char.isdigit() or char == "-":
+            in_number = True
+            number_chars = 1
+
+        if char in "{}[],:":
+            structural_tokens += 1
+            if structural_tokens > max_lexical_tokens:
+                raise ValueError("JSON object exceeds lexical resource limit")
+        if char in "{[":
+            container_depth += 1
+            if container_depth - 1 > max_depth:
+                raise ValueError("JSON object exceeds depth limit")
+        elif char in "}]" and container_depth:
+            container_depth -= 1
+
+
 def decode_json_object_strict(
     raw: bytes | bytearray | str,
     *,
     max_bytes: int,
+    max_chars: int | None = None,
     max_depth: int = MAX_INTERNAL_JSON_DEPTH,
+    max_members: int = MAX_JSON_LEXICAL_TOKENS,
+    max_lexical_tokens: int | None = None,
 ) -> dict[str, Any]:
-    """Decode one bounded, strict UTF-8 JSON object."""
+    """Decode one byte, character, depth, and member bounded JSON object."""
     if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
         raise ValueError("max_bytes must be a positive integer")
+    if max_chars is None:
+        max_chars = max_bytes
+    if (
+        isinstance(max_chars, bool)
+        or not isinstance(max_chars, int)
+        or max_chars <= 0
+    ):
+        raise ValueError("max_chars must be a positive integer")
     if (
         isinstance(max_depth, bool)
         or not isinstance(max_depth, int)
         or max_depth < 0
     ):
         raise ValueError("max_depth must be a nonnegative integer")
+    if (
+        isinstance(max_members, bool)
+        or not isinstance(max_members, int)
+        or max_members < 0
+    ):
+        raise ValueError("max_members must be a nonnegative integer")
+    if max_lexical_tokens is None:
+        max_lexical_tokens = MAX_JSON_LEXICAL_TOKENS
+    if (
+        isinstance(max_lexical_tokens, bool)
+        or not isinstance(max_lexical_tokens, int)
+        or max_lexical_tokens < 0
+    ):
+        raise ValueError("max_lexical_tokens must be a nonnegative integer")
     if isinstance(raw, str):
         encoded = raw.encode("utf-8", errors="strict")
         if len(encoded) > max_bytes:
             raise ValueError("JSON object exceeds byte limit")
         text = raw
-    elif isinstance(raw, (bytes, bytearray)):
+    elif isinstance(raw, bytes | bytearray):
         if len(raw) > max_bytes:
             raise ValueError("JSON object exceeds byte limit")
         text = bytes(raw).decode("utf-8", errors="strict")
     else:
         raise TypeError("JSON input must be bytes or text")
+    if len(text) > max_chars:
+        raise ValueError("JSON object exceeds character limit")
 
+    _preflight_json_lexical_resources(
+        text,
+        max_depth=max_depth,
+        max_lexical_tokens=max_lexical_tokens,
+    )
     payload = json.loads(
         text,
         object_pairs_hook=_reject_duplicate_json_pairs,
@@ -195,19 +302,26 @@ def decode_json_object_strict(
         raise ValueError("JSON root must be an object")
 
     pending: list[tuple[Any, int]] = [(payload, 0)]
+    members = 0
     while pending:
         value, depth = pending.pop()
         if depth > max_depth:
             raise ValueError("JSON object exceeds depth limit")
         if isinstance(value, str):
-            if any(0xD800 <= ord(char) <= 0xDFFF for char in value):
-                raise ValueError("JSON object contains a lone surrogate")
+            if _contains_invalid_unicode_scalar(value):
+                raise ValueError("JSON object contains an invalid Unicode scalar")
         elif isinstance(value, float) and not math.isfinite(value):
             raise ValueError("JSON object contains a non-finite number")
         elif isinstance(value, dict):
+            members += len(value)
+            if members > max_members:
+                raise ValueError("JSON object exceeds member limit")
             pending.extend((key, depth + 1) for key in value)
             pending.extend((item, depth + 1) for item in value.values())
         elif isinstance(value, list):
+            members += len(value)
+            if members > max_members:
+                raise ValueError("JSON object exceeds member limit")
             pending.extend((item, depth + 1) for item in value)
     return payload
 
@@ -225,7 +339,7 @@ def read_json_object_bounded_with_status(
         binary_stream = getattr(stream, "buffer", None)
         if binary_stream is not None:
             raw = binary_stream.read(max_bytes + 1)
-            if not isinstance(raw, (bytes, bytearray)):
+            if not isinstance(raw, bytes | bytearray):
                 return None, "invalid"
             if len(raw) > max_bytes:
                 return None, "oversized"
@@ -401,7 +515,7 @@ def _scan_yaml_double_quoted_scalar(value: str) -> tuple[str, int, bool]:
                 or 0x7F <= codepoint <= 0x84
                 or 0x86 <= codepoint <= 0x9F
                 or 0xD800 <= codepoint <= 0xDFFF
-                or codepoint in {0xFFFE, 0xFFFF}
+                or _is_unicode_noncharacter(codepoint)
             ):
                 return "".join(decoded), index, False
             decoded.append(char)
@@ -424,7 +538,11 @@ def _scan_yaml_double_quoted_scalar(value: str) -> tuple[str, int, bool]:
         if len(digits) != width or re.fullmatch(r"[0-9A-Fa-f]+", digits) is None:
             return "".join(decoded), index, False
         codepoint = int(digits, 16)
-        if codepoint > 0x10FFFF or 0xD800 <= codepoint <= 0xDFFF:
+        if (
+            codepoint > 0x10FFFF
+            or 0xD800 <= codepoint <= 0xDFFF
+            or _is_unicode_noncharacter(codepoint)
+        ):
             return "".join(decoded), index, False
         decoded.append(chr(codepoint))
         index = digits_end
@@ -445,7 +563,11 @@ def _parse_scalar(value: str) -> str | None:
         if parsed is None:
             return None
         scalar, end = parsed
-        if not scalar or not _comment_or_empty(text[end:]):
+        if (
+            not scalar
+            or any(_is_unicode_noncharacter(ord(char)) for char in scalar)
+            or not _comment_or_empty(text[end:])
+        ):
             return None
         return scalar
     if text.startswith("'"):
@@ -453,7 +575,11 @@ def _parse_scalar(value: str) -> str | None:
         if parsed is None:
             return None
         scalar, end = parsed
-        if not scalar or not _comment_or_empty(text[end:]):
+        if (
+            not scalar
+            or any(_is_unicode_noncharacter(ord(char)) for char in scalar)
+            or not _comment_or_empty(text[end:])
+        ):
             return None
         return scalar
     if text[0] in "-?:,[]{}#&*!|>@`\"'":
@@ -461,7 +587,9 @@ def _parse_scalar(value: str) -> str | None:
     comment = re.search(r"\s+#", text)
     if comment:
         text = text[: comment.start()].rstrip()
-    if not text or any(ord(char) < 32 for char in text):
+    if not text or any(
+        ord(char) < 32 or _is_unicode_noncharacter(ord(char)) for char in text
+    ):
         return None
     return text
 
@@ -742,9 +870,9 @@ def _held_windows_directory(path: Path, expected_metadata) -> Iterator[None]:
 
     handle_state = _open_windows_directory_handle(path)
     try:
-        device, inode, attributes = _windows_directory_handle_metadata(handle_state)
+        _device, inode, attributes = _windows_directory_handle_metadata(handle_state)
         if (
-            (device, inode) != (expected_metadata.st_dev, expected_metadata.st_ino)
+            inode != expected_metadata.st_ino
             or not attributes & _WINDOWS_FILE_ATTRIBUTE_DIRECTORY
             or attributes & _WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT
         ):
@@ -1086,6 +1214,44 @@ def compile_file_lock(lock_path: Path, timeout: float = 30.0, poll: float = 0.05
         _COMPILE_PROCESS_LOCK.release()
 
 
+@contextmanager
+def knowledge_publication_lock(
+    timeout: float = 30.0,
+    poll: float = 0.05,
+) -> Iterator[None]:
+    """Serialize knowledge validation and publication across writers."""
+    depth = getattr(_KNOWLEDGE_PUBLICATION_LOCK_LOCAL, "depth", 0)
+    if depth:
+        _KNOWLEDGE_PUBLICATION_LOCK_LOCAL.depth = depth + 1
+        try:
+            yield
+        finally:
+            _KNOWLEDGE_PUBLICATION_LOCK_LOCAL.depth -= 1
+        return
+
+    lock_path = STATE_ROOT / "run" / "knowledge-publication.lock"
+    deadline = time.monotonic() + max(0.0, timeout)
+    remaining = max(0.0, deadline - time.monotonic())
+    if not _KNOWLEDGE_PUBLICATION_PROCESS_LOCK.acquire(timeout=remaining):
+        raise TimeoutError(f"Could not acquire knowledge publication lock: {lock_path}")
+
+    try:
+        remaining = max(0.0, deadline - time.monotonic())
+        with advisory_file_lock(
+            lock_path,
+            timeout=remaining,
+            poll=poll,
+            description="knowledge publication lock",
+        ):
+            _KNOWLEDGE_PUBLICATION_LOCK_LOCAL.depth = 1
+            try:
+                yield
+            finally:
+                _KNOWLEDGE_PUBLICATION_LOCK_LOCAL.depth = 0
+    finally:
+        _KNOWLEDGE_PUBLICATION_PROCESS_LOCK.release()
+
+
 def _load_state_while_locked(*, degrade_on_read_error: bool) -> dict[str, Any]:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     try:
@@ -1149,6 +1315,8 @@ def load_state() -> dict[str, Any]:
 def save_state(state: dict[str, Any]) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     serialized = json.dumps(state, indent=2, ensure_ascii=False)
+    if _contains_invalid_unicode_scalar(serialized):
+        raise ValueError("state JSON contains an invalid Unicode scalar")
     if len(serialized.encode("utf-8", errors="strict")) > MAX_STATE_JSON_CHARS:
         raise ValueError(
             f"state JSON exceeds {MAX_STATE_JSON_CHARS}-byte limit"
@@ -1208,6 +1376,51 @@ def update_state(mutator: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
         return state
 
 
+def read_state_snapshot_strict() -> tuple[bytes, dict[str, Any]]:
+    """Read state without quarantine or other recovery side effects."""
+    metadata = STATE_FILE.lstat()
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or _is_reparse_point(metadata)
+        or metadata.st_nlink != 1
+        or metadata.st_size > MAX_STATE_JSON_CHARS
+    ):
+        raise ValueError("state.json is not a safe bounded regular file")
+    with STATE_FILE.open("rb") as handle:
+        opened = os.fstat(handle.fileno())
+        if not os.path.samestat(metadata, opened):
+            raise ValueError("state.json changed before it could be read")
+        raw = handle.read(MAX_STATE_JSON_CHARS + 1)
+        finished = os.fstat(handle.fileno())
+    current = STATE_FILE.lstat()
+    stable_fields = ("st_mode", "st_nlink", "st_size", "st_mtime_ns")
+    if (
+        len(raw) > MAX_STATE_JSON_CHARS
+        or not os.path.samestat(opened, finished)
+        or not os.path.samestat(finished, current)
+        or any(getattr(opened, field) != getattr(finished, field) for field in stable_fields)
+        or any(getattr(finished, field) != getattr(current, field) for field in stable_fields)
+    ):
+        raise ValueError("state.json changed or exceeded its bound while reading")
+    state = decode_json_object_strict(raw, max_bytes=MAX_STATE_JSON_CHARS)
+    return raw, state
+
+
+def update_state_if_unchanged(
+    expected_raw: bytes,
+    mutator: Callable[[dict[str, Any]], None],
+) -> tuple[bytes, dict[str, Any]]:
+    """Atomically update state only when its byte-exact preimage still matches."""
+    with _state_lock():
+        current_raw, state = read_state_snapshot_strict()
+        if not hmac.compare_digest(current_raw, expected_raw):
+            raise ValueError("state.json drifted after recovery review")
+        mutator(state)
+        save_state(state)
+        return read_state_snapshot_strict()
+
+
 def file_hash(path: Path) -> str:
     if not path.exists():
         return ""
@@ -1243,6 +1456,48 @@ def _valid_receipt_snapshot(value: object) -> bool:
         and isinstance(value.get("file_attributes"), int)
         and not isinstance(value.get("file_attributes"), bool)
         and value.get("nlink") == 1
+    )
+
+
+def _file_identity_matches(expected: object, current: object) -> bool:
+    if expected == current:
+        return True
+    if (
+        os.name != "nt"
+        or not isinstance(expected, list)
+        or not isinstance(current, list)
+        or len(expected) != 3
+        or len(current) != 3
+        or expected[1:] != current[1:]
+    ):
+        return False
+    expected_device = expected[0]
+    current_device = current[0]
+    if any(
+        not isinstance(device, int) or isinstance(device, bool) or device < 0
+        for device in (expected_device, current_device)
+    ):
+        return False
+    # Python 3.12 widened Windows st_dev; older receipts retain its low 32 bits.
+    legacy_max = 0xFFFFFFFF
+    expected_is_legacy = (
+        expected_device <= legacy_max < current_device
+        and current_device & legacy_max == expected_device
+    )
+    current_is_legacy = (
+        current_device <= legacy_max < expected_device
+        and expected_device & legacy_max == current_device
+    )
+    return expected_is_legacy or current_is_legacy
+
+
+def _file_snapshot_matches_exact(
+    expected: dict[str, Any],
+    current: dict[str, Any],
+) -> bool:
+    return _file_identity_matches(expected.get("identity"), current.get("identity")) and all(
+        expected.get(field) == current.get(field)
+        for field in ("sha256", "size", "mode", "file_attributes", "nlink")
     )
 
 
@@ -1315,11 +1570,11 @@ def _receipt_snapshot_matches(
     raw: bytes,
     current: dict[str, Any],
 ) -> bool:
-    if current == expected:
+    if _file_snapshot_matches_exact(expected, current):
         return True
     prefix_size = expected["size"]
     return (
-        current["identity"] == expected["identity"]
+        _file_identity_matches(expected["identity"], current["identity"])
         and current["mode"] == expected["mode"]
         and current["file_attributes"] == expected["file_attributes"]
         and current["nlink"] == expected["nlink"]
@@ -1337,10 +1592,12 @@ def is_compile_receipt_valid(
 ) -> bool:
     """Validate one self-contained compiled-hash receipt against live effects."""
     try:
-        if (
-            not isinstance(receipt, dict)
-            or set(receipt)
-            != {
+        from session_start_project_state import _same_native_project_root
+
+        if not isinstance(receipt, dict):
+            return False
+        receipt_version = receipt.get("version")
+        receipt_fields = {
                 "version",
                 "daily_sha256",
                 "generation_id",
@@ -1349,7 +1606,11 @@ def is_compile_receipt_valid(
                 "targets",
                 "index",
             }
-            or receipt.get("version") != 1
+        if receipt_version == 2:
+            receipt_fields.update({"consumed_evidence", "generation_lineage"})
+        if (
+            set(receipt) != receipt_fields
+            or receipt_version not in {1, 2}
             or not isinstance(daily_name, str)
             or Path(daily_name).name != daily_name
             or not daily_name.endswith(".md")
@@ -1372,6 +1633,8 @@ def is_compile_receipt_valid(
         effects = receipt["effects"]
         targets = receipt["targets"]
         index = receipt["index"]
+        consumed_evidence = receipt.get("consumed_evidence", [])
+        generation_lineage = receipt.get("generation_lineage", [])
         if (
             not isinstance(journal_ids, list)
             or len(journal_ids) > MAX_COMPILE_RECEIPT_JOURNALS
@@ -1388,6 +1651,22 @@ def is_compile_receipt_valid(
             or not isinstance(index, dict)
             or set(index) != {"generation_id", "entries"}
             or index.get("generation_id") != receipt["generation_id"]
+            or not isinstance(consumed_evidence, list)
+            or len(consumed_evidence) > MAX_COMPILE_RECEIPT_EVIDENCE
+            or any(
+                not isinstance(token, str)
+                or re.fullmatch(r"[0-9a-f]{64}", token) is None
+                for token in consumed_evidence
+            )
+            or len(set(consumed_evidence)) != len(consumed_evidence)
+            or not isinstance(generation_lineage, list)
+            or len(generation_lineage) > MAX_COMPILE_GENERATION_LINEAGE
+            or any(
+                not isinstance(generation_id, str)
+                or re.fullmatch(r"[0-9a-f]{64}", generation_id) is None
+                for generation_id in generation_lineage
+            )
+            or len(set(generation_lineage)) != len(generation_lineage)
         ):
             return False
 
@@ -1409,17 +1688,40 @@ def is_compile_receipt_valid(
         effect_records: dict[str, list[dict[str, Any]]] = {}
         effect_ids: set[tuple[str, int]] = set()
         for effect in effects:
+            base_effect_fields = {
+                "journal_id",
+                "operation_index",
+                "target",
+                "after",
+                "marker",
+                "fingerprint",
+            }
+            scoped_effect_fields = {
+                *base_effect_fields,
+                "project_slug",
+                "project_root",
+            }
+            unscoped_legacy_effect_fields = {
+                *base_effect_fields,
+                "source_scope",
+            }
+            effect_fields = (
+                frozenset(effect) if isinstance(effect, dict) else frozenset()
+            )
+            scoped = effect_fields == scoped_effect_fields
+            unscoped_legacy = effect_fields == unscoped_legacy_effect_fields
             if (
                 not isinstance(effect, dict)
-                or set(effect)
-                != {
-                    "journal_id",
-                    "operation_index",
-                    "target",
-                    "after",
-                    "marker",
-                    "fingerprint",
-                }
+                or effect_fields
+                not in (
+                    {frozenset(base_effect_fields)}
+                    if receipt_version == 1
+                    else {
+                        frozenset(base_effect_fields),
+                        frozenset(scoped_effect_fields),
+                        frozenset(unscoped_legacy_effect_fields),
+                    }
+                )
             ):
                 return False
             journal_id = effect.get("journal_id")
@@ -1447,6 +1749,15 @@ def is_compile_receipt_valid(
                     fingerprint,
                 )
                 is None
+                or scoped
+                and (
+                    not isinstance(effect.get("project_slug"), str)
+                    or not effect["project_slug"]
+                    or not isinstance(effect.get("project_root"), str)
+                    or not effect["project_root"]
+                )
+                or unscoped_legacy
+                and effect.get("source_scope") != "unscoped"
             ):
                 return False
             effect_ids.add(effect_id)
@@ -1474,14 +1785,30 @@ def is_compile_receipt_valid(
             )
             if not _receipt_snapshot_matches(expected_current, raw, current):
                 return False
+            content = raw.decode("utf-8", errors="strict")
+            target_project = parse_project_scope(content)
+            target_project_root = parse_frontmatter_scalar(content, "project_root")
             for effect in effect_records[target_name]:
                 after = effect["after"]
+                scoped = "project_slug" in effect
+                unscoped_legacy = effect.get("source_scope") == "unscoped"
                 if (
                     len(raw) < after["size"]
                     or hashlib.sha256(raw[: after["size"]]).hexdigest()
                     != after["sha256"]
                     or effect["marker"].encode("ascii") not in raw
                     or effect["fingerprint"].encode("ascii") not in raw
+                    or scoped
+                    and (
+                        target_project.value != effect["project_slug"]
+                        or not _same_native_project_root(
+                            target_project_root.value,
+                            effect["project_root"],
+                        )
+                    )
+                    or not scoped
+                    and not unscoped_legacy
+                    and (target_project.present or target_project_root.present)
                 ):
                     return False
 
@@ -3932,7 +4259,10 @@ def _atomic_write_path(path: Path, content: str, encoding: str) -> None:
         replace_deadline = time.monotonic() + 1.0
         while True:
             try:
-                os.replace(str(tmp), str(path))
+                if os.name == "nt":
+                    _move_file_write_through_windows(tmp, path, replace=True)
+                else:
+                    os.replace(str(tmp), str(path))
                 break
             except PermissionError:
                 if os.name != "nt" or time.monotonic() >= replace_deadline:
@@ -4028,7 +4358,7 @@ def _atomic_create_path(path: Path, content: str, encoding: str) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         if os.name == "nt":
-            os.rename(str(tmp), str(path))
+            _move_file_write_through_windows(tmp, path)
         else:
             os.link(str(tmp), str(path), follow_symlinks=False)
         _sync_parent_directory(path)
@@ -4040,6 +4370,35 @@ def _atomic_create_path(path: Path, content: str, encoding: str) -> None:
                 tmp.unlink()
             except FileNotFoundError:
                 pass
+
+
+def _move_file_write_through_windows(
+    source: Path,
+    target: Path,
+    *,
+    replace: bool = False,
+) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    def extended(path: Path) -> str:
+        value = os.path.abspath(path)
+        if value.startswith("\\\\?\\"):
+            return value
+        return (
+            "\\\\?\\UNC\\" + value[2:]
+            if value.startswith("\\\\")
+            else "\\\\?\\" + value
+        )
+
+    kernel32 = _load_windows_kernel32()
+    move_file = kernel32.MoveFileExW
+    move_file.argtypes = (wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD)
+    move_file.restype = wintypes.BOOL
+    flags = 0x00000008 | (0x00000001 if replace else 0)
+    if not move_file(extended(source), extended(target), flags):
+        error = ctypes.get_last_error()
+        raise ctypes.WinError(error)
 
 
 def _atomic_create_bound_posix(

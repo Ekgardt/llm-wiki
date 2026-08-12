@@ -70,7 +70,7 @@ The principles below summarize the non-negotiable invariants.
 - Concurrency-sensitive code (`maybe_compile.py`, `memory_queue.py`) needs explicit race-condition tests
 - Tests must be hermetic — no dependency on a real LLM, real network, or pre-existing state beyond what conftest.py bootstraps
 - **Minimum coverage**: all scripts with ranking/scoring/archival logic MUST have dedicated tests. This includes: `search_memory.py`, `graph_neighbors.py`, `feedback_capture.py`, `archive_stale.py`, `build_guardrails.py`
-- **1916 collected (platform-stable); local Windows: 1881 passed, 35 skipped** — skips vary with optional Bash, PowerShell, and symlink availability; see `tests/` for patterns
+- **2793 collected (platform-stable); local Windows: 2749 passed, 44 skipped** — skips vary with optional Bash, PowerShell, and symlink availability; see `tests/` for patterns
 
 ## Test commands
 

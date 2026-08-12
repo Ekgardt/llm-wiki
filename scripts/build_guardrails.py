@@ -44,6 +44,10 @@ from memory_state import (  # noqa: E402
     parse_project_scope,
     read_json_object_file_bounded,
 )
+from session_start_project_state import (  # noqa: E402
+    _same_native_project_root,
+    _slug_identity_key,
+)
 
 KNOWLEDGE = ROOT / "knowledge" / "notes"
 FEEDBACK_DIR = ROOT / "knowledge" / "feedback"
@@ -92,7 +96,49 @@ def _read_text_bounded(path: Path, max_bytes: int) -> str | None:
         return None
 
 
-def _collect_corrections(project: str | None = None) -> list[dict] | None:
+def _matches_project_identity(
+    content: str,
+    project: str | None,
+    project_root: str | Path | None,
+) -> bool:
+    scope = parse_project_scope(content)
+    root_scope = parse_frontmatter_scalar(content, "project_root")
+    if project is None and project_root is None:
+        return not scope.present and not root_scope.present
+    expected_slug = _slug_identity_key(project)
+    return bool(
+        expected_slug is not None
+        and project_root is not None
+        and scope.present
+        and scope.value is not None
+        and _slug_identity_key(scope.value) == expected_slug
+        and root_scope.present
+        and root_scope.value is not None
+        and _same_native_project_root(root_scope.value, str(project_root))
+    )
+
+
+def _feedback_matches_project_identity(
+    project: str,
+    project_root: str,
+    expected_project: str | None,
+    expected_root: str | Path | None,
+) -> bool:
+    if expected_project is None and expected_root is None:
+        return not project and not project_root
+    expected_slug = _slug_identity_key(expected_project)
+    return bool(
+        expected_slug is not None
+        and expected_root is not None
+        and _slug_identity_key(project) == expected_slug
+        and _same_native_project_root(project_root, str(expected_root))
+    )
+
+
+def _collect_corrections(
+    project: str | None = None,
+    project_root: str | Path | None = None,
+) -> list[dict] | None:
     """Collect all knowledge pages that are corrections/preferences/rules.
 
     Sources:
@@ -139,12 +185,7 @@ def _collect_corrections(project: str | None = None) -> list[dict] | None:
             if not re.search(r"\b(do not|don'?t|always|never|must|should)\b", summary, re.IGNORECASE):
                 continue
 
-            # Filter by project
-            scope = parse_project_scope(content)
-            if scope.present and scope.value is None:
-                continue
-            proj = scope.value
-            if project and proj and proj.lower() != project.lower():
+            if not _matches_project_identity(content, project, project_root):
                 continue
 
             title_m = H1_RE.search(content)
@@ -172,14 +213,19 @@ def _collect_corrections(project: str | None = None) -> list[dict] | None:
                 continue
             fields = {
                 "project": candidate.get("project", ""),
+                "project_root": candidate.get("project_root", ""),
                 "type": candidate.get("type", "feedback"),
                 "text": candidate.get("text", ""),
                 "promoted_to": candidate.get("promoted_to", ""),
             }
             if any(not isinstance(value, str) for value in fields.values()):
                 continue
-            proj = fields["project"]
-            if project and proj.lower() != project.lower():
+            if not _feedback_matches_project_identity(
+                fields["project"],
+                fields["project_root"],
+                project,
+                project_root,
+            ):
                 continue
             corrections.append({
                 "type": fields["type"],
@@ -197,13 +243,18 @@ def _extract(text: str, pattern: re.Pattern) -> str | None:
     return m.group(1).strip() if m else None
 
 
-def build_guardrails(project: str | None = None, max_rules: int = 15) -> str | None:
+def build_guardrails(
+    project: str | None = None,
+    max_rules: int = 15,
+    *,
+    project_root: str | Path | None = None,
+) -> str | None:
     """Build the guard rails block for SessionStart injection.
 
     This is the "learned instincts" — rules the agent must follow
     because they were learned from past corrections.
     """
-    corrections = _collect_corrections(project)
+    corrections = _collect_corrections(project, project_root)
 
     if corrections is None:
         return None
@@ -248,11 +299,16 @@ def build_guardrails(project: str | None = None, max_rules: int = 15) -> str | N
 def main() -> int:
     p = argparse.ArgumentParser(description="Build guard rails from learned corrections.")
     p.add_argument("--project", default=None, help="Filter by project")
+    p.add_argument("--project-root", default=None, help="Canonical project root")
     p.add_argument("--max-rules", type=int, default=15)
     p.add_argument("--apply", action="store_true", help="Write to knowledge/guardrails.md")
     args = p.parse_args()
 
-    guardrails = build_guardrails(args.project, args.max_rules)
+    guardrails = build_guardrails(
+        args.project,
+        args.max_rules,
+        project_root=args.project_root,
+    )
 
     if guardrails is None:
         print("(guard rail inventory unavailable)")

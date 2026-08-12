@@ -78,8 +78,8 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
   VERIFY-BEFORE-WRITE), `flush_memory.py` (3-tier classification),
   `maybe_compile.py` (OS-lock-aware spawn), `search_memory.py` (triple-RRF),
   `llm_client.py` (5 backends + fake).
-- `tests/` — 32 test files, 1916 collected on every platform; local Windows
-  verification: 1881 passed, 35 skipped. Skip count varies with optional Bash,
+- `tests/` — 34 test files, 2793 collected on every platform; local Windows
+  verification: 2749 passed, 44 skipped. Skip count varies with optional Bash,
   PowerShell, and symlink availability. Hermetic via `conftest.py` (pins
   `LLM_WIKI_ROOT` to checkout, redirects `LLM_WIKI_STATE_ROOT` to a temp
   dir, defaults `MEMORY_LLM_PROVIDER=fake`).
@@ -110,8 +110,8 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
 - `knowledge/feedback/` — correction candidates (JSON). Gitignored.
 
 ### RUNTIME zone (always gitignored, inside vault)
-- `cache/` — regenerable derived data: `index.sqlite` (FTS5), `vectors.json`
-  (embeddings), QMD index.
+- `cache/` — regenerable derived data: `index.sqlite` (generation-validated
+  FTS5), `vectors.json` (bounded exact-schema embeddings), QMD index.
 - `logs/` — diagnostic output that may be rotated: `lint-YYYY-MM-DD.md`,
   `compile-last.log`, `session-start-last.txt`.
 - `run/` — durable automation and recovery state: `state.json` (compile hashes,
@@ -123,8 +123,15 @@ llm-wiki/                          ← vault root (= $LLM_WIKI_ROOT)
   `queue-order.lock` (cross-process ordering lock), `queue-migration.json`
   (temporary resumable legacy migration journal), `project-state-claim.lock`
   (serialized slug allocation), `bootstrap-project/<slug>.lock` (per-project
-  bootstrap exclusion), `backups/<timestamp>/`
-  (repair manifests, staged files, and transaction journals), `state.json.lock`.
+  bootstrap exclusion), `backups/<timestamp>/` (sealed repair manifests,
+  pre-staging schema-v4 ownership journals, temporary source staging, and exact
+  commit/rollback purge progress), `compile-archive/transactions/<transaction-id>/`
+  (sealed byte-exact `payload/` backups plus original-inode `source-retired/`
+  cold storage for whole retired compile-evidence components),
+  `state.json.lock`. Successful or rolled-back v4 repair purges source staging;
+  legacy v3 recovery artifacts remain intact. Cold compile evidence is not an
+  automatic replay tier and can enter the archive only through compiler-owned
+  `audit` -> `backup-only` -> approved `apply` -> `verify` transactions.
 - `cache/cognee/` — optional semantic graph data (only if Cognee installed).
 
 `cache/` is derived and can be rebuilt. `logs/` may be rotated after preserving

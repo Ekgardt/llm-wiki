@@ -297,6 +297,17 @@ quotas.
 SDK completion updates canonical compile time and index health only in the
 atomic state transition after its final Markdown index rebuild succeeds.
 
+**Retired compile archive contract:** when a bounded hot retired store is full,
+use `compile_memory.py --archive-retired` in the order `audit` -> `backup-only`
+-> reviewed `apply --manifest` -> `verify --manifest`. Only whole disconnected
+manifest/journal components may move under
+`run/compile-archive/transactions/<transaction-id>/`. Apply accepts only the
+sealed manifest with its top-level `approved` field changed to `true`, rechecks
+state, queue, active-artifact closure and exact file identity under the compile
+and queue locks, preserves reviewed payload copies plus the original hot files,
+and resumes from its transaction journal after interruption. Cold records are
+not an automatic replay tier. Never remove hot retired files manually.
+
 **Maintenance contract:** nightly and weekly return nonzero for failed or
 remaining queue/compile work and required lint/index failures. Weekly holds one
 maintenance lease across nightly work, mutations, and the final Markdown,
@@ -309,11 +320,17 @@ without console windows.
 **Installed cleanup contract:** use `repair_installed_memory.py` in the order
 `audit` → `apply --backup-only` → reviewed `apply --manifest` → `verify
 --manifest`. Only backup-only may create a manifest; mutating apply requires the
-explicit reviewed manifest under `run/backups/<timestamp>/` and never creates
-one implicitly. Only verified empty daily records and generated false feedback
-are mutable. Ordinary feedback is preserved; duplicate notes
-and orphan service sessions are report-only. Never run cleanup apply or a live
-restart without explicit operator approval.
+explicit reviewed manifest under `run/backups/<timestamp>/`, with only its
+top-level `approved` field changed from `false` to `true`. Schema v4 may remove
+only byte-exact noncanonical note shadows, explicitly named active stale notes,
+canonical generated-service feedback, and whole generated-only daily files; it
+may replace one exact visible trusted handoff placeholder with the unavailable
+marker. Nonidentical shadows, ordinary content, and service-session inventories
+remain preserved, report-only, or out of scope. Private source staging exists
+only for transaction recovery and is purged after commit, leaving no completed
+v4 source backup or rollback. Verify may finish interrupted recovery before
+checking the committed result. Never run cleanup apply or a live restart
+without explicit operator approval.
 
 **Project-state contract:** slug claims are serialized by the runtime
 `run/project-state-claim.lock` and publish complete `state.md` files atomically.
@@ -326,7 +343,10 @@ Daily records are project-scoped by both confirmed alias and absolute root.
 Bootstrap output records and revalidates that alias, root, and exact state path;
 orphan output is never injected. Published bootstrap data is bounded, labeled
 untrusted, and placed after project identity and the saved handoff without
-entering the search index.
+entering the search index. Trusted handoffs require the exact canonical root and
+runtime-alias JSON tuple; literal template sections and PID/time-only handoff
+metadata are omitted. Bootstrap freshness records the exact Git HEAD or explicit
+non-Git status, and bounded Git checks run only after root ownership is confirmed.
 
 **Claude hook compatibility contract:** installers detect the Claude Code
 version. Versions before 2.1.139, or unknown versions, receive absolute
@@ -341,7 +361,7 @@ receive direct `command` + `args` hooks. SessionStart covers forked sessions.
 ## 7. Quick command reference
 
 ```bash
-uv run pytest -q                              # 1916 collected; local Windows: 1881 passed, 35 skipped; skips vary by environment
+uv run pytest -q                              # 2793 collected; local Windows: 2749 passed, 44 skipped; skips vary by environment
 uv run ruff check scripts/ tests/             # Python static analysis
 uv run python scripts/lint_memory.py --scope all   # structural lint
 uv run python scripts/search_memory.py "query"     # hybrid search

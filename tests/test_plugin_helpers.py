@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import threading
 from datetime import date
@@ -135,7 +136,14 @@ def test_plugin_helpers_fail_silently_on_nul_vault_root(
 ):
     project = tmp_path / "workspace" / "service"
     project.mkdir(parents=True)
-    monkeypatch.setenv("LLM_WIKI_ROOT", f"{tmp_path / 'vault'}\0suffix")
+    monkeypatch.setattr(
+        os,
+        "environ",
+        {
+            **os.environ,
+            "LLM_WIKI_ROOT": f"{tmp_path / 'vault'}\0suffix",
+        },
+    )
     payload = {
         "slug": "service",
         "projectRoot": str(project.resolve()),
@@ -185,10 +193,21 @@ def test_plugin_helpers_accept_legacy_alias_spelling_after_identity_migration(
         "tool": "edit",
         "target": "src/app.py",
         "block": (
-            "## [10:00:00] test | opencode\n"
+            "## [10:00:00] opencode-idle | session-1234\n"
             "- Project slug: `Service`\n"
-            f"- Project root JSON: {json.dumps(str(project.resolve()))}\n\n"
-            "LEGACY_ALIAS_PAYLOAD\n"
+            f"- Project root JSON: {json.dumps(str(project.resolve()))}\n"
+            "- Tier: `minor`\n"
+            "- Source session: `session-1234`\n\n"
+            "**Gotchas / debugging**\n"
+            "- LEGACY_ALIAS_PAYLOAD fails unless identity aliases remain compatible.\n"
+            "<!-- llm-wiki-record-complete -->\n"
+            if module_name == "daily_log_append"
+            else (
+                "## [10:00:00] test | opencode\n"
+                "- Project slug: `Service`\n"
+                f"- Project root JSON: {json.dumps(str(project.resolve()))}\n\n"
+                "LEGACY_ALIAS_PAYLOAD\n"
+            )
         ),
     }
 
@@ -278,11 +297,9 @@ def test_daily_log_append_rejects_lone_surrogate_in_ignored_nested_field(
     assert not daily_dir.exists() or list(daily_dir.glob("*.md")) == []
 
 
-def test_daily_log_append_catches_deep_json_parser_recursion(monkeypatch):
+def test_daily_log_append_rejects_deep_json_nesting(monkeypatch):
     depth = sys.getrecursionlimit() + 100
     payload = '{"ignored":' + "[" * depth + "null" + "]" * depth + "}"
-    with pytest.raises(RecursionError):
-        json.loads(payload)
 
     module = _reload("daily_log_append")
     appended: list[tuple] = []
@@ -307,10 +324,14 @@ def test_daily_log_append_writes_canonical_root_metadata(
         "projectRoot": str(project),
         "sessionId": "opencode-abc123",
         "block": (
-            "## [10:00:00] test | opencode\n"
+            "## [10:00:00] opencode-idle | opencode-abc123\n"
             "- Project slug: `your-app`\n"
             f"- Project root JSON: {json.dumps(str(noncanonical_root))}\n"
-            "- Tier: `major`\n\nbody here\n"
+            "- Tier: `major`\n"
+            "- Source session: `opencode-abc123`\n\n"
+            "**Lessons / patterns**\n"
+            "- Always preserve canonical project metadata before append.\n"
+            "<!-- llm-wiki-record-complete -->\n"
         ),
     }
     rc = _run_with_stdin("daily_log_append", json.dumps(payload))
@@ -325,10 +346,67 @@ def test_daily_log_append_writes_canonical_root_metadata(
     assert daily.exists()
     content = daily.read_text(encoding="utf-8")
     assert "Tier: `major`" in content
-    assert "body here" in content
+    assert "Always preserve canonical project metadata before append." in content
     canonical_line = f"- Project root JSON: {json.dumps(str(project.resolve()))}"
     assert canonical_line in content
     assert str(noncanonical_root) not in content
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "incomplete",
+        "invalid-tier",
+        "minor-with-major-section",
+        "session-mismatch",
+        "unknown-session",
+    ),
+)
+def test_daily_log_append_acks_only_valid_complete_classified_record(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    case,
+):
+    monkeypatch.setenv("LLM_WIKI_ROOT", str(tmp_path))
+    project = tmp_path.parent / f"{tmp_path.name}-project"
+    _write_owned_state(tmp_path, project, "your-app")
+    session_id = "opencode-abc123"
+    tier = "major"
+    section = "Lessons / patterns"
+    completion = "<!-- llm-wiki-record-complete -->\n"
+    if case == "incomplete":
+        completion = ""
+    elif case == "invalid-tier":
+        tier = "ok"
+    elif case == "minor-with-major-section":
+        tier = "minor"
+    elif case == "session-mismatch":
+        session_id = "different-session"
+    elif case == "unknown-session":
+        session_id = "unknown"
+
+    source_session = "unknown" if case == "unknown-session" else "opencode-abc123"
+    payload = {
+        "slug": "your-app",
+        "projectRoot": str(project),
+        "sessionId": session_id,
+        "block": (
+            "## [10:00:00] opencode-idle | opencode-abc123\n"
+            "- Project slug: `your-app`\n"
+            f"- Project root JSON: {json.dumps(str(project.resolve()))}\n"
+            f"- Tier: `{tier}`\n"
+            f"- Source session: `{source_session}`\n\n"
+            f"**{section}**\n"
+            "- Always reject an invalid direct capture frame before append.\n"
+            f"{completion}"
+        ),
+    }
+
+    assert _run_with_stdin("daily_log_append", json.dumps(payload)) == 0
+    assert capsys.readouterr().out == ""
+    daily_dir = tmp_path / "knowledge" / "daily"
+    assert not daily_dir.exists() or list(daily_dir.glob("*.md")) == []
 
 
 def test_daily_log_append_rejects_scope_that_contradicts_confirmed_root(

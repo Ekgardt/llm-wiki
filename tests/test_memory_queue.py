@@ -9,6 +9,7 @@ Locks in:
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -38,6 +39,7 @@ def clean_queue(tmp_path, monkeypatch):
 
     queue_path = tmp_path / "queue"
     queue_path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(memory_queue, "_queue_path", lambda: queue_path)
     monkeypatch.setattr(memory_queue, "_queue_dir", lambda: queue_path)
     return memory_queue
 
@@ -71,7 +73,14 @@ def test_queue_rejects_nul_explicit_state_root_before_filesystem_access(
 ):
     import memory_queue
 
-    monkeypatch.setenv("LLM_WIKI_STATE_ROOT", f"{tmp_path / 'runtime'}\0suffix")
+    monkeypatch.setattr(
+        memory_queue.os,
+        "environ",
+        {
+            **os.environ,
+            "LLM_WIKI_STATE_ROOT": f"{tmp_path / 'runtime'}\0suffix",
+        },
+    )
 
     with pytest.raises(ValueError, match="LLM_WIKI_STATE_ROOT contains NUL"):
         memory_queue._state_root()
@@ -635,6 +644,76 @@ def test_concurrent_producers_receive_unique_exact_fifo_sequences(clean_queue):
     assert {task["payload"]["prompt"] for task in pending} == {
         str(index) for index in range(producer_count)
     }
+
+
+def test_concurrent_duplicate_flush_capture_enqueue_reuses_one_task(clean_queue):
+    producer_count = 20
+    barrier = threading.Barrier(producer_count)
+    task_ids: list[str] = []
+    errors: list[Exception] = []
+    payload = {"prompt": "classify once", "capture_id": "a" * 64}
+
+    def producer():
+        try:
+            barrier.wait()
+            task_ids.append(clean_queue.enqueue("flush", payload))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=producer) for _ in range(producer_count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert not errors
+    assert not [thread for thread in threads if thread.is_alive()]
+    assert len(set(task_ids)) == 1
+    [pending] = clean_queue.list_pending()
+    assert pending["id"] == task_ids[0]
+    assert pending["enqueue_sequence"] == 1
+
+
+def test_duplicate_flush_capture_reuses_pending_task_id(clean_queue):
+    payload = {"prompt": "classify pending", "capture_id": "b" * 64}
+
+    first = clean_queue.enqueue("flush", payload)
+
+    assert clean_queue.enqueue("flush", payload) == first
+    assert [task["id"] for task in clean_queue.list_pending()] == [first]
+
+
+def test_duplicate_flush_capture_reuses_processing_task_id(clean_queue):
+    payload = {"prompt": "classify processing", "capture_id": "c" * 64}
+    first = clean_queue.enqueue("flush", payload)
+    prepared = clean_queue.prepare_sdk_task()
+
+    assert prepared["task_id"] == first
+    assert clean_queue.enqueue("flush", payload) == first
+    assert clean_queue.list_pending() == []
+    assert (clean_queue._queue_dir() / f"{first}.processing").exists()
+
+
+@pytest.mark.parametrize(
+    "capture_id",
+    ("", "a" * 63, "A" * 64, "g" * 64, 7, None),
+)
+def test_flush_enqueue_rejects_noncanonical_capture_id(clean_queue, capture_id):
+    with pytest.raises(ValueError, match="capture_id"):
+        clean_queue.enqueue(
+            "flush",
+            {"prompt": "must reject malformed identity", "capture_id": capture_id},
+        )
+
+    assert clean_queue.list_pending() == []
+
+
+def test_legacy_flush_enqueue_without_capture_id_keeps_distinct_tasks(clean_queue):
+    first = clean_queue.enqueue("flush", {"prompt": "legacy"})
+    second = clean_queue.enqueue("flush", {"prompt": "legacy"})
+
+    assert first != second
+    assert [task["id"] for task in clean_queue.list_pending()] == [first, second]
 
 
 def test_cross_process_producers_serialize_durable_sequences(tmp_path):
@@ -1867,7 +1946,624 @@ def test_locked_append_once_ignores_marker_in_unrelated_daily(
     assert unrelated.read_text(encoding="utf-8") == original
 
 
-@pytest.mark.parametrize("marker_kind", ("queue-task", "direct-flush"))
+def test_capture_marker_is_global_across_daily_dates(tmp_path):
+    import daily_log_append
+
+    daily_dir = tmp_path / "daily"
+    first = daily_dir / "2026-08-01.md"
+    second = daily_dir / "2026-08-02.md"
+    marker = f"<!-- llm-wiki-capture: {'a' * 64} -->"
+
+    assert daily_log_append.locked_append_once(
+        first,
+        f"first capture\n{marker}\n",
+        marker,
+        state_root=tmp_path / "runtime",
+    ) == first
+    assert daily_log_append.locked_append_once(
+        second,
+        f"duplicate after midnight\n{marker}\n",
+        marker,
+        state_root=tmp_path / "runtime",
+    ) == first
+
+    assert first.read_text(encoding="utf-8").count(marker) == 1
+    assert not second.exists()
+
+
+@pytest.mark.parametrize(
+    "unsafe_candidate",
+    ("oversized", "unreadable", "symlink", "reparse"),
+)
+def test_capture_global_scan_fails_closed_on_unsafe_daily_candidate(
+    tmp_path,
+    monkeypatch,
+    unsafe_candidate,
+):
+    import daily_log_append
+
+    daily_dir = tmp_path / "daily"
+    daily_dir.mkdir()
+    candidate = daily_dir / "2026-08-01.md"
+    target = daily_dir / "2026-08-02.md"
+    marker = f"<!-- llm-wiki-capture: {'b' * 64} -->"
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside must remain untouched\n", encoding="utf-8")
+    candidate.write_text("prior safe daily\n", encoding="utf-8")
+
+    if unsafe_candidate == "oversized":
+        monkeypatch.setattr(
+            daily_log_append,
+            "MAX_DAILY_MARKER_SCAN_BYTES",
+            8,
+            raising=False,
+        )
+    elif unsafe_candidate == "unreadable":
+        real_open = daily_log_append._open_daily_candidate_descriptor
+
+        def denied_open(path, directory_bound):
+            if path == candidate:
+                raise PermissionError("injected unreadable daily")
+            return real_open(path, directory_bound)
+
+        monkeypatch.setattr(
+            daily_log_append,
+            "_open_daily_candidate_descriptor",
+            denied_open,
+        )
+    elif unsafe_candidate == "symlink":
+        candidate.unlink()
+        try:
+            candidate.symlink_to(outside)
+        except OSError:
+            pytest.skip("file symlinks are not available on this platform")
+    else:
+        reparse_flag = getattr(
+            daily_log_append.stat,
+            "FILE_ATTRIBUTE_REPARSE_POINT",
+            0x400,
+        )
+        real_lstat = Path.lstat
+
+        class ReparseMetadata:
+            def __init__(self, metadata):
+                self._metadata = metadata
+                self.st_mode = metadata.st_mode
+                self.st_size = metadata.st_size
+                self.st_file_attributes = reparse_flag
+
+            def __getattr__(self, name):
+                return getattr(self._metadata, name)
+
+        monkeypatch.setattr(
+            Path,
+            "lstat",
+            lambda path: ReparseMetadata(real_lstat(path))
+            if path == candidate
+            else real_lstat(path),
+        )
+
+    with pytest.raises(RuntimeError, match="daily marker scan"):
+        daily_log_append.locked_append_once(
+            target,
+            f"must not append\n{marker}\n",
+            marker,
+            state_root=tmp_path / "runtime",
+        )
+
+    assert not target.exists()
+    assert outside.read_text(encoding="utf-8") == "outside must remain untouched\n"
+
+
+def test_capture_global_scan_bounds_daily_inventory(tmp_path, monkeypatch):
+    import daily_log_append
+
+    daily_dir = tmp_path / "daily"
+    daily_dir.mkdir()
+    for day in ("2026-08-01", "2026-08-02"):
+        (daily_dir / f"{day}.md").write_text("safe daily\n", encoding="utf-8")
+    target = daily_dir / "2026-08-03.md"
+    marker = f"<!-- llm-wiki-capture: {'c' * 64} -->"
+    monkeypatch.setattr(
+        daily_log_append,
+        "MAX_DAILY_MARKER_SCAN_FILES",
+        1,
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="daily marker scan.*limit"):
+        daily_log_append.locked_append_once(
+            target,
+            f"must not append\n{marker}\n",
+            marker,
+            state_root=tmp_path / "runtime",
+        )
+
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("unsafe_directory", ("symlink", "reparse"))
+def test_capture_global_scan_rejects_unsafe_daily_directory(
+    tmp_path,
+    monkeypatch,
+    unsafe_directory,
+):
+    import daily_log_append
+
+    daily_dir = tmp_path / "daily"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    if unsafe_directory == "symlink":
+        try:
+            daily_dir.symlink_to(outside, target_is_directory=True)
+        except OSError:
+            pytest.skip("directory symlinks are not available on this platform")
+    else:
+        daily_dir.mkdir()
+        reparse_flag = getattr(
+            daily_log_append.stat,
+            "FILE_ATTRIBUTE_REPARSE_POINT",
+            0x400,
+        )
+        real_lstat = Path.lstat
+
+        class ReparseMetadata:
+            def __init__(self, metadata):
+                self._metadata = metadata
+                self.st_mode = metadata.st_mode
+                self.st_size = metadata.st_size
+                self.st_dev = metadata.st_dev
+                self.st_ino = metadata.st_ino
+                self.st_file_attributes = reparse_flag
+
+            def __getattr__(self, name):
+                return getattr(self._metadata, name)
+
+        monkeypatch.setattr(
+            Path,
+            "lstat",
+            lambda path: ReparseMetadata(real_lstat(path))
+            if path == daily_dir
+            else real_lstat(path),
+        )
+
+    target = daily_dir / "2026-08-03.md"
+    marker = f"<!-- llm-wiki-capture: {'f' * 64} -->"
+    with pytest.raises((OSError, RuntimeError), match="director|marker scan"):
+        daily_log_append.locked_append_once(
+            target,
+            f"must not append\n{marker}\n",
+            marker,
+            state_root=tmp_path / "runtime",
+        )
+
+    assert not (outside / target.name).exists()
+
+
+def test_capture_global_scan_rejects_candidate_replaced_before_fd_open(
+    tmp_path,
+    monkeypatch,
+):
+    import daily_log_append
+
+    daily_dir = tmp_path / "daily"
+    daily_dir.mkdir()
+    candidate = daily_dir / "2026-08-01.md"
+    replacement = daily_dir / "replacement.tmp"
+    target = daily_dir / "2026-08-02.md"
+    candidate.write_text("original identity\n", encoding="utf-8")
+    replacement.write_text("replacement identity\n", encoding="utf-8")
+    marker = f"<!-- llm-wiki-capture: {'1' * 64} -->"
+    real_open = daily_log_append._open_daily_candidate_descriptor
+    swapped = False
+
+    def swapping_open(path, directory_bound):
+        nonlocal swapped
+        if not swapped and Path(path).name == candidate.name:
+            swapped = True
+            os.replace(replacement, candidate)
+        return real_open(path, directory_bound)
+
+    monkeypatch.setattr(
+        daily_log_append,
+        "_open_daily_candidate_descriptor",
+        swapping_open,
+    )
+
+    with pytest.raises(RuntimeError, match="daily marker scan"):
+        daily_log_append.locked_append_once(
+            target,
+            f"must not append\n{marker}\n",
+            marker,
+            state_root=tmp_path / "runtime",
+        )
+
+    assert swapped is True
+    assert not target.exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO requires POSIX")
+def test_capture_global_scan_path_swap_to_fifo_never_blocks(tmp_path, monkeypatch):
+    import daily_log_append
+
+    daily_dir = tmp_path / "daily"
+    daily_dir.mkdir()
+    candidate = daily_dir / "2026-08-01.md"
+    target = daily_dir / "2026-08-02.md"
+    candidate.write_text("regular before open\n", encoding="utf-8")
+    marker = f"<!-- llm-wiki-capture: {'2' * 64} -->"
+    real_open = daily_log_append._open_daily_candidate_descriptor
+    swapped = False
+
+    def fifo_swapping_open(path, directory_bound):
+        nonlocal swapped
+        if not swapped and Path(path).name == candidate.name:
+            swapped = True
+            candidate.unlink()
+            os.mkfifo(candidate)
+        return real_open(path, directory_bound)
+
+    monkeypatch.setattr(
+        daily_log_append,
+        "_open_daily_candidate_descriptor",
+        fifo_swapping_open,
+    )
+
+    with pytest.raises(RuntimeError, match="daily marker scan"):
+        daily_log_append.locked_append_once(
+            target,
+            f"must not append\n{marker}\n",
+            marker,
+            state_root=tmp_path / "runtime",
+        )
+
+    assert swapped is True
+    assert not target.exists()
+
+
+def test_capture_global_scan_reads_candidate_by_descriptor(tmp_path, monkeypatch):
+    import daily_log_append
+
+    daily_dir = tmp_path / "daily"
+    daily_dir.mkdir()
+    candidate = daily_dir / "2026-08-01.md"
+    target = daily_dir / "2026-08-02.md"
+    marker = f"<!-- llm-wiki-capture: {'3' * 64} -->"
+    candidate.write_text(f"prior capture\n{marker}\n", encoding="utf-8")
+    real_path_open = Path.open
+
+    def denied_path_open(path, *args, **kwargs):
+        if path == candidate:
+            raise AssertionError("daily candidates must be read by descriptor")
+        return real_path_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", denied_path_open)
+
+    assert daily_log_append.locked_append_once(
+        target,
+        f"duplicate\n{marker}\n",
+        marker,
+        state_root=tmp_path / "runtime",
+    ) == candidate
+    assert not target.exists()
+
+
+def test_capture_inventory_rejects_casefold_target_alias(tmp_path):
+    import daily_log_append
+
+    daily_dir = tmp_path / "daily"
+    daily_dir.mkdir()
+    target = daily_dir / "2026-08-01.md"
+    collision = daily_dir / "2026-08-01.MD"
+    original = b"case-preserved daily must survive\n"
+    collision.write_bytes(original)
+    marker = f"<!-- llm-wiki-capture: {'9' * 64} -->"
+
+    with pytest.raises(RuntimeError, match="case-insensitive.*collision"):
+        daily_log_append.locked_append_once(
+            target,
+            f"new capture\n{marker}\n",
+            marker,
+            state_root=tmp_path / "runtime",
+        )
+
+    assert collision.read_bytes() == original
+
+
+def test_capture_inventory_rejects_distinct_casefold_collision(tmp_path):
+    import daily_log_append
+
+    daily_dir = tmp_path / "daily"
+    daily_dir.mkdir()
+    target = daily_dir / "2026-08-01.md"
+    collision = daily_dir / "2026-08-01.MD"
+    target_original = b"canonical daily\n"
+    collision_original = b"case-colliding daily\n"
+    target.write_bytes(target_original)
+    try:
+        descriptor = os.open(
+            collision,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+        )
+    except FileExistsError:
+        pytest.skip("filesystem treats casefold-equivalent names as one entry")
+    try:
+        os.write(descriptor, collision_original)
+    finally:
+        os.close(descriptor)
+    marker = f"<!-- llm-wiki-capture: {'a' * 64} -->"
+
+    with pytest.raises(RuntimeError, match="case-insensitive.*collision"):
+        daily_log_append.locked_append_once(
+            target,
+            f"new capture\n{marker}\n",
+            marker,
+            state_root=tmp_path / "runtime",
+        )
+
+    assert target.read_bytes() == target_original
+    assert collision.read_bytes() == collision_original
+
+
+@pytest.mark.parametrize("standalone", (False, True), ids=("inline", "standalone"))
+def test_capture_global_scan_requires_standalone_marker_line(
+    tmp_path,
+    monkeypatch,
+    standalone,
+):
+    import daily_log_append
+
+    daily_dir = tmp_path / "daily"
+    daily_dir.mkdir()
+    existing = daily_dir / "2026-08-01.md"
+    target = daily_dir / "2026-08-02.md"
+    marker = f"<!-- llm-wiki-capture: {'b' * 64} -->"
+    prior = f"{marker}\n" if standalone else f"inline metadata text {marker} remains prose\n"
+    existing.write_text(prior, encoding="utf-8")
+    monkeypatch.setattr(
+        daily_log_append,
+        "DAILY_MARKER_SCAN_CHUNK_BYTES",
+        7,
+        raising=False,
+    )
+
+    result = daily_log_append.locked_append_once(
+        target,
+        f"new capture\n{marker}\n",
+        marker,
+        state_root=tmp_path / "runtime",
+    )
+
+    if standalone:
+        assert result == existing
+        assert not target.exists()
+    else:
+        assert result == target
+        assert target.read_text(encoding="utf-8").splitlines().count(marker) == 1
+    assert existing.read_text(encoding="utf-8") == prior
+
+
+@pytest.mark.parametrize("swap_kind", ("hardlink", "symlink", "replacement"))
+def test_capture_append_reuses_scanned_target_bytes_after_path_swap(
+    tmp_path,
+    monkeypatch,
+    swap_kind,
+):
+    import daily_log_append
+
+    daily_dir = tmp_path / "daily"
+    daily_dir.mkdir()
+    daily = daily_dir / "2026-08-01.md"
+    outside = tmp_path / "outside.md"
+    original = "validated target bytes\n"
+    outside_original = "outside must remain untouched\n"
+    replacement = tmp_path / "replacement.md"
+    daily.write_text(original, encoding="utf-8")
+    outside.write_text(outside_original, encoding="utf-8")
+    replacement.write_text("replacement must not be adopted\n", encoding="utf-8")
+    marker = f"<!-- llm-wiki-capture: {'6' * 64} -->"
+    appended = f"new capture\n{marker}\n"
+
+    if swap_kind == "symlink":
+        probe = tmp_path / "symlink-probe"
+        try:
+            probe.symlink_to(outside)
+        except OSError:
+            pytest.skip("file symlinks are not available on this platform")
+        probe.unlink()
+
+    real_open = daily_log_append._open_daily_candidate_descriptor
+    real_close = os.close
+    target_descriptor: int | None = None
+    swapped = False
+
+    def tracking_open(path, directory_bound):
+        nonlocal target_descriptor
+        descriptor = real_open(path, directory_bound)
+        if path == daily:
+            target_descriptor = descriptor
+        return descriptor
+
+    def swapping_close(descriptor):
+        nonlocal swapped
+        real_close(descriptor)
+        if descriptor != target_descriptor or swapped:
+            return
+        swapped = True
+        daily.unlink()
+        if swap_kind == "hardlink":
+            os.link(outside, daily)
+        elif swap_kind == "symlink":
+            daily.symlink_to(outside)
+        else:
+            os.replace(replacement, daily)
+
+    monkeypatch.setattr(
+        daily_log_append,
+        "_open_daily_candidate_descriptor",
+        tracking_open,
+    )
+    monkeypatch.setattr(os, "close", swapping_close)
+
+    try:
+        result = daily_log_append.locked_append_once(
+            daily,
+            appended,
+            marker,
+            state_root=tmp_path / "runtime",
+        )
+    except OSError:
+        if swap_kind != "symlink":
+            raise
+        result = None
+
+    assert swapped is True
+    assert outside.read_text(encoding="utf-8") == outside_original
+    if result is not None:
+        assert result == daily
+        assert daily.read_text(encoding="utf-8") == original + appended
+        assert not os.path.samefile(daily, outside)
+
+
+@pytest.mark.parametrize("extra_byte", (False, True))
+def test_capture_global_scan_accepts_exact_file_limit_only(
+    tmp_path,
+    extra_byte,
+):
+    import daily_log_append
+
+    daily_dir = tmp_path / "daily"
+    daily_dir.mkdir()
+    candidate = daily_dir / "2026-08-01.md"
+    existing = daily_dir / "2026-08-02.md"
+    target = daily_dir / "2026-08-03.md"
+    marker = f"<!-- llm-wiki-capture: {'7' * 64} -->"
+    candidate.write_bytes(
+        b"x" * (daily_log_append.MAX_DAILY_MARKER_SCAN_BYTES + int(extra_byte))
+    )
+    existing.write_text(f"prior capture\n{marker}\n", encoding="utf-8")
+
+    if extra_byte:
+        with pytest.raises(RuntimeError, match="daily marker scan.*byte limit"):
+            daily_log_append.locked_append_once(
+                target,
+                f"duplicate\n{marker}\n",
+                marker,
+                state_root=tmp_path / "runtime",
+            )
+    else:
+        assert daily_log_append.locked_append_once(
+            target,
+            f"duplicate\n{marker}\n",
+            marker,
+            state_root=tmp_path / "runtime",
+        ) == existing
+
+    assert candidate.stat().st_size == (
+        daily_log_append.MAX_DAILY_MARKER_SCAN_BYTES + int(extra_byte)
+    )
+    assert not target.exists()
+
+
+def test_capture_append_rejects_final_content_beyond_scan_limit(
+    tmp_path,
+    monkeypatch,
+):
+    import daily_log_append
+
+    daily = tmp_path / "daily" / "2026-08-01.md"
+    daily.parent.mkdir()
+    marker = f"<!-- llm-wiki-capture: {'8' * 64} -->"
+    original = b"x" * 200
+    daily.write_bytes(original)
+    monkeypatch.setattr(
+        daily_log_append,
+        "MAX_DAILY_MARKER_SCAN_BYTES",
+        256,
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="daily.*byte limit"):
+        daily_log_append.locked_append_once(
+            daily,
+            f"new capture\n{marker}\n",
+            marker,
+            state_root=tmp_path / "runtime",
+        )
+
+    assert daily.read_bytes() == original
+
+
+def test_capture_global_scan_stops_before_later_unsafe_candidate(
+    tmp_path,
+    monkeypatch,
+):
+    import daily_log_append
+
+    daily_dir = tmp_path / "daily"
+    daily_dir.mkdir()
+    first = daily_dir / "2026-08-01.md"
+    later = daily_dir / "2026-08-02.md"
+    target = daily_dir / "2026-08-03.md"
+    marker = f"<!-- llm-wiki-capture: {'4' * 64} -->"
+    first.write_text(f"prior capture\n{marker}\n", encoding="utf-8")
+    later.write_bytes(b"x" * 1_024)
+    monkeypatch.setattr(
+        daily_log_append,
+        "MAX_DAILY_MARKER_SCAN_BYTES",
+        256,
+        raising=False,
+    )
+
+    assert daily_log_append.locked_append_once(
+        target,
+        f"duplicate\n{marker}\n",
+        marker,
+        state_root=tmp_path / "runtime",
+    ) == first
+    assert not target.exists()
+
+
+def test_capture_global_scan_enforces_aggregate_byte_limit(tmp_path, monkeypatch):
+    import daily_log_append
+
+    daily_dir = tmp_path / "daily"
+    daily_dir.mkdir()
+    for day in ("2026-08-01", "2026-08-02"):
+        (daily_dir / f"{day}.md").write_bytes(b"x" * 10)
+    target = daily_dir / "2026-08-03.md"
+    marker = f"<!-- llm-wiki-capture: {'5' * 64} -->"
+    monkeypatch.setattr(
+        daily_log_append,
+        "MAX_DAILY_MARKER_SCAN_TOTAL_BYTES",
+        15,
+        raising=False,
+    )
+    real_read = os.read
+    bytes_read = 0
+
+    def tracking_read(descriptor, size):
+        nonlocal bytes_read
+        chunk = real_read(descriptor, size)
+        bytes_read += len(chunk)
+        return chunk
+
+    monkeypatch.setattr(os, "read", tracking_read)
+
+    with pytest.raises(RuntimeError, match="daily marker scan.*aggregate"):
+        daily_log_append.locked_append_once(
+            target,
+            f"must not append\n{marker}\n",
+            marker,
+            state_root=tmp_path / "runtime",
+        )
+
+    assert daily_log_append.MAX_DAILY_MARKER_SCAN_FILES == 4_096
+    assert bytes_read == 15
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("marker_kind", ("queue-task", "direct-flush", "capture"))
 def test_locked_append_once_accepts_canonical_marker_families(
     tmp_path,
     marker_kind: str,
@@ -1884,6 +2580,251 @@ def test_locked_append_once_accepts_canonical_marker_families(
         state_root=tmp_path / "runtime",
     ) == daily
     assert daily.read_text(encoding="utf-8").count(marker) == 1
+
+
+def test_daily_append_capture_id_must_match_block_marker(tmp_path):
+    import flush_memory
+
+    vault = tmp_path / "vault"
+    state_root = tmp_path / "state"
+    project = (tmp_path / "project").resolve()
+    (project / ".git").mkdir(parents=True)
+    template = vault / "knowledge" / "projects" / "_template" / "state.md"
+    template.parent.mkdir(parents=True)
+    template.write_text(
+        "# <Project Name>\n- Project root JSON: <absolute path JSON>\n",
+        encoding="utf-8",
+    )
+    marker = f"<!-- llm-wiki-capture: {'d' * 64} -->"
+    _day, block = flush_memory.render_flush_block(
+        "minor",
+        "CAPTURE_ID_MISMATCH_MUST_NOT_APPEND",
+        event="opencode-idle",
+        session_id="session-1",
+        trigger="opencode-idle",
+        project_slug="project",
+        project_root=str(project),
+        occurred_at="2026-08-01T12:00:00+00:00",
+        idempotency_marker=marker,
+    )
+    payload = {
+        "slug": "project",
+        "projectRoot": str(project),
+        "sessionId": "session-1",
+        "captureId": "e" * 64,
+        "block": block,
+    }
+    result = subprocess.run(
+        [sys.executable, str(SCRIPTS_DIR / "daily_log_append.py")],
+        cwd=SCRIPTS_DIR.parent,
+        env={
+            **os.environ,
+            "LLM_WIKI_ROOT": str(vault),
+            "LLM_WIKI_STATE_ROOT": str(state_root),
+        },
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert not (vault / "knowledge" / "daily").exists()
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "canonical-plus-malformed",
+        "canonical-plus-hidden-malformed",
+        "malformed-without-capture-id",
+        "duplicate-canonical",
+        "missing-canonical",
+    ),
+)
+def test_daily_append_rejects_invalid_capture_prefix_contract(tmp_path, case):
+    import flush_memory
+
+    vault = tmp_path / "vault"
+    state_root = tmp_path / "state"
+    project = (tmp_path / "project").resolve()
+    (project / ".git").mkdir(parents=True)
+    template = vault / "knowledge" / "projects" / "_template" / "state.md"
+    template.parent.mkdir(parents=True)
+    template.write_text(
+        "# <Project Name>\n- Project root JSON: <absolute path JSON>\n",
+        encoding="utf-8",
+    )
+    capture_id = "d" * 64
+    canonical = f"<!-- llm-wiki-capture: {capture_id} -->"
+    malformed = "<!-- llm-wiki-capture: short -->"
+    marker_lines = {
+        "canonical-plus-malformed": [canonical, malformed],
+        "canonical-plus-hidden-malformed": [canonical, f"- quoted {malformed}"],
+        "malformed-without-capture-id": [malformed],
+        "duplicate-canonical": [canonical, canonical],
+        "missing-canonical": [],
+    }[case]
+    _day, block = flush_memory.render_flush_block(
+        "minor",
+        "**Gotchas / debugging**\n- Reject malformed capture metadata.",
+        event="opencode-idle",
+        session_id="session-1",
+        trigger="opencode-idle",
+        project_slug="project",
+        project_root=str(project),
+        occurred_at="2026-08-01T12:00:00+00:00",
+    )
+    block = block.replace(
+        "<!-- llm-wiki-record-complete -->",
+        "\n".join([*marker_lines, "<!-- llm-wiki-record-complete -->"]),
+    )
+    payload = {
+        "slug": "project",
+        "projectRoot": str(project),
+        "sessionId": "session-1",
+        "block": block,
+    }
+    if case != "malformed-without-capture-id":
+        payload["captureId"] = capture_id
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPTS_DIR / "daily_log_append.py")],
+        cwd=SCRIPTS_DIR.parent,
+        env={
+            **os.environ,
+            "LLM_WIKI_ROOT": str(vault),
+            "LLM_WIKI_STATE_ROOT": str(state_root),
+        },
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert not (vault / "knowledge" / "daily").exists()
+
+
+def test_direct_then_queue_apply_uses_one_capture_marker(
+    clean_queue,
+    tmp_path,
+    monkeypatch,
+):
+    import daily_log_append
+    import flush_memory
+
+    daily_dir = tmp_path / "knowledge" / "daily"
+    project_root = (tmp_path / "alpha").resolve()
+    project_root.mkdir()
+    monkeypatch.setattr(clean_queue, "_daily_dir", lambda: daily_dir)
+    monkeypatch.setattr(
+        flush_memory,
+        "_resolve_project_identity",
+        lambda slug, root, *, env=None: (
+            ("alpha", project_root)
+            if slug == "alpha" and root == str(project_root) and env == {}
+            else None
+        ),
+    )
+    payload = flush_memory._build_flush_queue_payload(
+        "user: durable capture",
+        "session-end",
+        session_id="session-1",
+        trigger="hook",
+        project_slug="alpha",
+        project_root=str(project_root),
+        occurred_at="2026-08-01T12:00:00+00:00",
+        project_identity_confirmed=True,
+    )
+    assert payload is not None
+    marker = f"<!-- llm-wiki-capture: {payload['capture_id']} -->"
+    response = "FLUSH_MINOR\n\n**Gotchas / debugging**\n- Append one capture."
+    tier, body = flush_memory._classify_response(response)
+    day, block = flush_memory.render_flush_block(
+        tier,
+        body,
+        event="session-end",
+        session_id="session-1",
+        trigger="hook",
+        project_slug="alpha",
+        project_root=str(project_root),
+        occurred_at="2026-08-01T12:00:00+00:00",
+        idempotency_marker=marker,
+    )
+    daily = daily_dir / f"{day}.md"
+    daily_log_append.locked_append_once(
+        daily,
+        block,
+        marker,
+        state_root=tmp_path / "runtime",
+    )
+
+    task_id = clean_queue.enqueue("flush", payload)
+    [task] = clean_queue.list_pending()
+    assert task["id"] == task_id
+    clean_queue.apply_classified_flush_response(task, response)
+
+    text = daily.read_text(encoding="utf-8")
+    assert text.count("Append one capture.") == 1
+    assert text.count(marker) == 1
+
+
+def test_ack_then_reenqueue_same_capture_dedupes_daily_apply(
+    clean_queue,
+    tmp_path,
+    monkeypatch,
+):
+    import flush_memory
+
+    daily_dir = tmp_path / "knowledge" / "daily"
+    project_root = (tmp_path / "alpha").resolve()
+    project_root.mkdir()
+    monkeypatch.setattr(clean_queue, "_daily_dir", lambda: daily_dir)
+    monkeypatch.setattr(
+        flush_memory,
+        "_resolve_project_identity",
+        lambda slug, root, *, env=None: (
+            ("alpha", project_root)
+            if slug == "alpha" and root == str(project_root) and env == {}
+            else None
+        ),
+    )
+    payload = {
+        "prompt": "classify captured transcript",
+        "capture_id": "d" * 64,
+        "event": "session-end",
+        "session_id": "session-1",
+        "trigger": "hook",
+        "project_slug": "alpha",
+        "project_root": str(project_root),
+        "occurred_at": "2026-08-01T12:00:00+00:00",
+        "enqueued_by": "flush_memory",
+        "provenance_version": 1,
+    }
+    response = "FLUSH_MINOR\n\n**Open questions**\n- Apply after ack once."
+
+    first = clean_queue.enqueue("flush", payload)
+    prepared = clean_queue.prepare_sdk_task()
+    assert clean_queue.apply_sdk_result(
+        {**prepared, "success": True, "response": response}
+    ) == (True, "acknowledged")
+
+    second = clean_queue.enqueue("flush", payload)
+    assert second != first
+    prepared = clean_queue.prepare_sdk_task()
+    assert clean_queue.apply_sdk_result(
+        {**prepared, "success": True, "response": response}
+    ) == (True, "acknowledged")
+
+    marker = f"<!-- llm-wiki-capture: {payload['capture_id']} -->"
+    text = (daily_dir / "2026-08-01.md").read_text(encoding="utf-8")
+    assert text.count("Apply after ack once.") == 1
+    assert text.count(marker) == 1
 
 
 @pytest.mark.parametrize(
@@ -1914,15 +2855,18 @@ def test_locked_append_once_fails_closed_on_uncertain_target(
             raising=False,
         )
     elif unsafe_candidate == "unreadable":
-        real_open = Path.open
+        real_open = daily_log_append._open_daily_candidate_descriptor
 
-        def denied_open(path, *args, **kwargs):
-            mode = args[0] if args else kwargs.get("mode", "r")
-            if path == candidate and mode == "rb":
+        def denied_open(path, directory_bound):
+            if path == candidate:
                 raise PermissionError("injected unreadable daily")
-            return real_open(path, *args, **kwargs)
+            return real_open(path, directory_bound)
 
-        monkeypatch.setattr(Path, "open", denied_open)
+        monkeypatch.setattr(
+            daily_log_append,
+            "_open_daily_candidate_descriptor",
+            denied_open,
+        )
     elif unsafe_candidate == "symlink":
         candidate.unlink()
         try:
@@ -1994,14 +2938,18 @@ def test_locked_append_once_ignores_uncertain_unrelated_daily(
             raising=False,
         )
     elif unsafe_candidate == "unreadable":
-        real_open = Path.open
+        real_open = daily_log_append._open_daily_candidate_descriptor
 
-        def denied_open(path, *args, **kwargs):
+        def denied_open(path, directory_bound):
             if path == candidate:
                 raise PermissionError("injected unreadable daily")
-            return real_open(path, *args, **kwargs)
+            return real_open(path, directory_bound)
 
-        monkeypatch.setattr(Path, "open", denied_open)
+        monkeypatch.setattr(
+            daily_log_append,
+            "_open_daily_candidate_descriptor",
+            denied_open,
+        )
     elif unsafe_candidate == "symlink":
         candidate.unlink()
         try:
@@ -2057,31 +3005,29 @@ def test_locked_append_once_scans_marker_with_bounded_chunk_overlap(
         8,
         raising=False,
     )
-    real_open = Path.open
+    real_open = daily_log_append._open_daily_candidate_descriptor
+    real_read = os.read
     read_sizes: list[int] = []
+    candidate_descriptor: int | None = None
 
-    class TrackingFile:
-        def __init__(self, handle):
-            self.handle = handle
+    def tracking_open(path, directory_bound):
+        nonlocal candidate_descriptor
+        descriptor = real_open(path, directory_bound)
+        if path == daily:
+            candidate_descriptor = descriptor
+        return descriptor
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc_info):
-            return self.handle.__exit__(*exc_info)
-
-        def __getattr__(self, name):
-            return getattr(self.handle, name)
-
-        def read(self, size=-1):
+    def tracking_read(descriptor, size):
+        if descriptor == candidate_descriptor:
             read_sizes.append(size)
-            return self.handle.read(size)
+        return real_read(descriptor, size)
 
-    def tracking_open(path, *args, **kwargs):
-        handle = real_open(path, *args, **kwargs)
-        return TrackingFile(handle) if path == daily else handle
-
-    monkeypatch.setattr(Path, "open", tracking_open)
+    monkeypatch.setattr(
+        daily_log_append,
+        "_open_daily_candidate_descriptor",
+        tracking_open,
+    )
+    monkeypatch.setattr(os, "read", tracking_read)
 
     assert daily_log_append.locked_append_once(
         daily,
@@ -2969,3 +3915,626 @@ def test_malformed_sdk_result_records_failure_without_acknowledging(
     assert reason in pending["last_error"]
     assert not list(clean_queue._queue_dir().glob("*.processing"))
     assert not (clean_queue._queue_dir().parent / "queue-results").exists()
+
+
+def _approve_queue_retry_manifest(path: Path) -> None:
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["approved"] = True
+    path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_retry_failed_manifest_cycle_resets_only_retry_metadata(
+    clean_queue,
+    monkeypatch,
+    capsys,
+):
+    task_id = clean_queue.enqueue("query", {"prompt": "preserve payload"})
+    task_path = clean_queue._queue_dir() / f"{task_id}.json"
+    task = json.loads(task_path.read_text(encoding="utf-8"))
+    task["last_error"] = "provider unavailable"
+    task_path.write_text(json.dumps(task, indent=2) + "\n", encoding="utf-8")
+    for _ in range(clean_queue.MAX_ATTEMPTS):
+        clean_queue.mark_attempt(task_id, success=False)
+    exhausted = json.loads(task_path.read_text(encoding="utf-8"))
+
+    code, captured = _run_cli(
+        clean_queue,
+        monkeypatch,
+        capsys,
+        "retry-failed",
+        "--phase",
+        "audit",
+        "--task-id",
+        task_id,
+    )
+    assert code == 0, captured.err
+    assert json.loads(captured.out)["status"] == "eligible"
+
+    code, captured = _run_cli(
+        clean_queue,
+        monkeypatch,
+        capsys,
+        "retry-failed",
+        "--phase",
+        "backup-only",
+        "--task-id",
+        task_id,
+    )
+    assert code == 0, captured.err
+    prepared = json.loads(captured.out)
+    manifest_path = Path(prepared["manifest"])
+    assert prepared["status"] == "prepared"
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["approved"] is False
+    assert json.loads(task_path.read_text(encoding="utf-8")) == exhausted
+
+    _approve_queue_retry_manifest(manifest_path)
+    code, captured = _run_cli(
+        clean_queue,
+        monkeypatch,
+        capsys,
+        "retry-failed",
+        "--phase",
+        "apply",
+        "--manifest",
+        str(manifest_path),
+    )
+    assert code == 0, captured.err
+    assert json.loads(captured.out)["status"] == "applied"
+    retried = json.loads(task_path.read_text(encoding="utf-8"))
+    assert retried["attempts"] == 0
+    assert retried["last_attempt_at"] is None
+    assert retried["last_error"] == exhausted["last_error"]
+    assert retried["payload"] == exhausted["payload"]
+    assert retried["id"] == exhausted["id"]
+    assert retried["enqueue_sequence"] == exhausted["enqueue_sequence"]
+
+    code, captured = _run_cli(
+        clean_queue,
+        monkeypatch,
+        capsys,
+        "retry-failed",
+        "--phase",
+        "verify",
+        "--manifest",
+        str(manifest_path),
+    )
+    assert code == 0, captured.err
+    assert json.loads(captured.out)["status"] == "verified"
+
+
+def test_retry_failed_apply_rejects_task_drift_without_overwrite(
+    clean_queue,
+    monkeypatch,
+    capsys,
+):
+    task_id = clean_queue.enqueue("query", {"prompt": "original"})
+    for _ in range(clean_queue.MAX_ATTEMPTS):
+        clean_queue.mark_attempt(task_id, success=False)
+    code, captured = _run_cli(
+        clean_queue,
+        monkeypatch,
+        capsys,
+        "retry-failed",
+        "--phase",
+        "backup-only",
+        "--task-id",
+        task_id,
+    )
+    assert code == 0, captured.err
+    manifest_path = Path(json.loads(captured.out)["manifest"])
+    _approve_queue_retry_manifest(manifest_path)
+
+    task_path = clean_queue._queue_dir() / f"{task_id}.json"
+    drifted = json.loads(task_path.read_text(encoding="utf-8"))
+    drifted["payload"]["prompt"] = "changed after review"
+    task_path.write_text(json.dumps(drifted, indent=2) + "\n", encoding="utf-8")
+    drifted_bytes = task_path.read_bytes()
+
+    code, captured = _run_cli(
+        clean_queue,
+        monkeypatch,
+        capsys,
+        "retry-failed",
+        "--phase",
+        "apply",
+        "--manifest",
+        str(manifest_path),
+    )
+    assert code == 3
+    assert "drift" in captured.err.lower()
+    assert task_path.read_bytes() == drifted_bytes
+
+
+def test_retry_failed_manifest_pins_reviewed_task_identity(clean_queue, monkeypatch, capsys):
+    task_id = clean_queue.enqueue("query", {"prompt": "review exact identity"})
+    for _ in range(clean_queue.MAX_ATTEMPTS):
+        clean_queue.mark_attempt(task_id, success=False)
+
+    code, captured = _run_cli(
+        clean_queue,
+        monkeypatch,
+        capsys,
+        "retry-failed",
+        "--phase",
+        "backup-only",
+        "--task-id",
+        task_id,
+    )
+
+    assert code == 0, captured.err
+    manifest_path = Path(json.loads(captured.out)["manifest"])
+    [entry] = json.loads(manifest_path.read_text(encoding="utf-8"))["tasks"]
+    task = json.loads(
+        (clean_queue._queue_dir() / f"{task_id}.json").read_text(encoding="utf-8")
+    )
+    assert entry["task_id"] == task_id
+    assert entry["task_type"] == task["type"]
+    assert entry["enqueue_sequence"] == task["enqueue_sequence"]
+    assert entry["attempts"] == clean_queue.MAX_ATTEMPTS
+    assert entry["last_error"] == task.get("last_error")
+    assert entry["payload_identity_sha256"] == hashlib.sha256(
+        json.dumps(
+            task["payload"],
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def test_retry_failed_verify_rejects_missing_task(clean_queue, monkeypatch, capsys):
+    task_id = clean_queue.enqueue("query", {"prompt": "must remain pending"})
+    for _ in range(clean_queue.MAX_ATTEMPTS):
+        clean_queue.mark_attempt(task_id, success=False)
+    code, captured = _run_cli(
+        clean_queue,
+        monkeypatch,
+        capsys,
+        "retry-failed",
+        "--phase",
+        "backup-only",
+        "--task-id",
+        task_id,
+    )
+    manifest_path = Path(json.loads(captured.out)["manifest"])
+    _approve_queue_retry_manifest(manifest_path)
+    code, captured = _run_cli(
+        clean_queue,
+        monkeypatch,
+        capsys,
+        "retry-failed",
+        "--phase",
+        "apply",
+        "--manifest",
+        str(manifest_path),
+    )
+    assert code == 0, captured.err
+    (clean_queue._queue_dir() / f"{task_id}.json").unlink()
+
+    code, captured = _run_cli(
+        clean_queue,
+        monkeypatch,
+        capsys,
+        "retry-failed",
+        "--phase",
+        "verify",
+        "--manifest",
+        str(manifest_path),
+    )
+
+    assert code == 3
+    assert "missing" in captured.err.lower()
+
+
+def test_retry_failed_partial_apply_blocks_claim_and_resumes(
+    clean_queue,
+    monkeypatch,
+    capsys,
+):
+    task_ids = [
+        clean_queue.enqueue("query", {"prompt": f"task {index}"})
+        for index in range(2)
+    ]
+    for task_id in task_ids:
+        for _ in range(clean_queue.MAX_ATTEMPTS):
+            clean_queue.mark_attempt(task_id, success=False)
+    arguments = [
+        item
+        for task_id in task_ids
+        for item in ("--task-id", task_id)
+    ]
+    code, captured = _run_cli(
+        clean_queue,
+        monkeypatch,
+        capsys,
+        "retry-failed",
+        "--phase",
+        "backup-only",
+        *arguments,
+    )
+    assert code == 0, captured.err
+    manifest_path = Path(json.loads(captured.out)["manifest"])
+    _approve_queue_retry_manifest(manifest_path)
+
+    real_write = clean_queue._atomic_write_json
+    writes = 0
+
+    def interrupted(path, value):
+        nonlocal writes
+        if path.suffix == ".json" and path.parent == clean_queue._queue_dir():
+            writes += 1
+            if writes == 2:
+                raise OSError("injected retry interruption")
+        return real_write(path, value)
+
+    monkeypatch.setattr(clean_queue, "_atomic_write_json", interrupted)
+    with pytest.raises(OSError, match="retry interruption"):
+        clean_queue.retry_failed_apply(manifest_path)
+    assert clean_queue._queue_retry_barrier_path().is_file()
+    with pytest.raises(clean_queue.QueueIntegrityError, match="retry transaction"):
+        clean_queue._claim_next_task()
+
+    monkeypatch.setattr(clean_queue, "_atomic_write_json", real_write)
+    assert clean_queue.retry_failed_apply(manifest_path)["status"] == "applied"
+    assert not clean_queue._queue_retry_barrier_path().exists()
+    assert [task["attempts"] for task in clean_queue.list_pending()] == [0, 0]
+
+
+def test_retry_failed_apply_requires_approval_without_touching_task(
+    clean_queue,
+    monkeypatch,
+    capsys,
+):
+    task_id = clean_queue.enqueue("query", {"prompt": "approval required"})
+    for _ in range(clean_queue.MAX_ATTEMPTS):
+        clean_queue.mark_attempt(task_id, success=False)
+    task_path = clean_queue._queue_dir() / f"{task_id}.json"
+    before = task_path.read_bytes()
+    code, captured = _run_cli(
+        clean_queue,
+        monkeypatch,
+        capsys,
+        "retry-failed",
+        "--phase",
+        "backup-only",
+        "--task-id",
+        task_id,
+    )
+    manifest_path = Path(json.loads(captured.out)["manifest"])
+
+    code, captured = _run_cli(
+        clean_queue,
+        monkeypatch,
+        capsys,
+        "retry-failed",
+        "--phase",
+        "apply",
+        "--manifest",
+        str(manifest_path),
+    )
+
+    assert code == 3
+    assert "approved" in captured.err.lower()
+    assert task_path.read_bytes() == before
+
+
+def test_retry_failed_apply_rejects_tampered_artifact(
+    clean_queue,
+    monkeypatch,
+    capsys,
+):
+    task_id = clean_queue.enqueue("query", {"prompt": "sealed artifact"})
+    for _ in range(clean_queue.MAX_ATTEMPTS):
+        clean_queue.mark_attempt(task_id, success=False)
+    code, captured = _run_cli(
+        clean_queue,
+        monkeypatch,
+        capsys,
+        "retry-failed",
+        "--phase",
+        "backup-only",
+        "--task-id",
+        task_id,
+    )
+    manifest_path = Path(json.loads(captured.out)["manifest"])
+    _approve_queue_retry_manifest(manifest_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    artifact_path = manifest_path.parent / manifest["tasks"][0]["after_artifact"]
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    artifact["payload"]["prompt"] = "tampered"
+    artifact_path.write_text(json.dumps(artifact, indent=2) + "\n", encoding="utf-8")
+
+    code, captured = _run_cli(
+        clean_queue,
+        monkeypatch,
+        capsys,
+        "retry-failed",
+        "--phase",
+        "apply",
+        "--manifest",
+        str(manifest_path),
+    )
+
+    assert code == 3
+    assert "digest" in captured.err.lower()
+
+
+def test_retry_failed_apply_rejects_task_that_became_leased(
+    clean_queue,
+    monkeypatch,
+    capsys,
+):
+    task_id = clean_queue.enqueue("query", {"prompt": "lease drift"})
+    for _ in range(clean_queue.MAX_ATTEMPTS):
+        clean_queue.mark_attempt(task_id, success=False)
+    code, captured = _run_cli(
+        clean_queue,
+        monkeypatch,
+        capsys,
+        "retry-failed",
+        "--phase",
+        "backup-only",
+        "--task-id",
+        task_id,
+    )
+    manifest_path = Path(json.loads(captured.out)["manifest"])
+    _approve_queue_retry_manifest(manifest_path)
+    task_path = clean_queue._queue_dir() / f"{task_id}.json"
+    task_path.rename(task_path.with_suffix(".processing"))
+
+    code, captured = _run_cli(
+        clean_queue,
+        monkeypatch,
+        capsys,
+        "retry-failed",
+        "--phase",
+        "apply",
+        "--manifest",
+        str(manifest_path),
+    )
+
+    assert code == 3
+    assert "leased" in captured.err.lower()
+
+
+def test_retry_failed_rejects_legacy_task_without_durable_sequence(
+    clean_queue,
+    monkeypatch,
+    capsys,
+):
+    task_id = "20200101-000000-00000001"
+    (clean_queue._queue_dir() / f"{task_id}.json").write_text(
+        json.dumps(
+            {
+                "id": task_id,
+                "type": "query",
+                "enqueued_at": "2020-01-01T00:00:00",
+                "attempts": clean_queue.MAX_ATTEMPTS,
+                "last_attempt_at": "2020-01-01T00:01:00",
+                "payload": {"prompt": "legacy"},
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    code, captured = _run_cli(
+        clean_queue,
+        monkeypatch,
+        capsys,
+        "retry-failed",
+        "--phase",
+        "audit",
+        "--task-id",
+        task_id,
+    )
+
+    assert code == 3
+    assert "sequence" in json.loads(captured.out)["diagnostic"].lower()
+    assert not (clean_queue._queue_dir().parent / "backups").exists()
+
+
+def test_retry_failed_reapply_is_idempotent_and_next_lease_uses_reviewed_digest(
+    clean_queue,
+    monkeypatch,
+    capsys,
+):
+    task_id = clean_queue.enqueue("query", {"prompt": "lease reviewed postimage"})
+    for _ in range(clean_queue.MAX_ATTEMPTS):
+        clean_queue.mark_attempt(task_id, success=False)
+    code, captured = _run_cli(
+        clean_queue,
+        monkeypatch,
+        capsys,
+        "retry-failed",
+        "--phase",
+        "backup-only",
+        "--task-id",
+        task_id,
+    )
+    manifest_path = Path(json.loads(captured.out)["manifest"])
+    _approve_queue_retry_manifest(manifest_path)
+    assert clean_queue.retry_failed_apply(manifest_path)["status"] == "applied"
+
+    assert clean_queue.retry_failed_apply(manifest_path)["status"] == "already_applied"
+    [entry] = json.loads(manifest_path.read_text(encoding="utf-8"))["tasks"]
+    prepared = clean_queue.prepare_sdk_task()
+    assert prepared["task_id"] == task_id
+    assert prepared["digest"] == entry["after_digest"]
+
+
+def test_retry_failed_barrier_publication_failure_precedes_task_mutation(
+    clean_queue,
+    monkeypatch,
+    capsys,
+):
+    import memory_state
+
+    task_id = clean_queue.enqueue("query", {"prompt": "barrier first"})
+    for _ in range(clean_queue.MAX_ATTEMPTS):
+        clean_queue.mark_attempt(task_id, success=False)
+    task_path = clean_queue._queue_dir() / f"{task_id}.json"
+    before = task_path.read_bytes()
+    code, captured = _run_cli(
+        clean_queue,
+        monkeypatch,
+        capsys,
+        "retry-failed",
+        "--phase",
+        "backup-only",
+        "--task-id",
+        task_id,
+    )
+    manifest_path = Path(json.loads(captured.out)["manifest"])
+    _approve_queue_retry_manifest(manifest_path)
+    real_atomic_write = memory_state.atomic_write
+
+    def interrupted(path, content, encoding="utf-8"):
+        if Path(path).name == clean_queue.QUEUE_RETRY_BARRIER_NAME:
+            raise OSError("injected barrier publication failure")
+        return real_atomic_write(path, content, encoding)
+
+    monkeypatch.setattr(memory_state, "atomic_write", interrupted)
+
+    with pytest.raises(OSError, match="barrier publication"):
+        clean_queue.retry_failed_apply(manifest_path)
+    assert task_path.read_bytes() == before
+    assert not clean_queue._queue_retry_barrier_path().exists()
+
+
+def test_retry_failed_apply_enforces_aggregate_artifact_bound(
+    clean_queue,
+    monkeypatch,
+    capsys,
+):
+    task_id = clean_queue.enqueue("query", {"prompt": "bounded package"})
+    for _ in range(clean_queue.MAX_ATTEMPTS):
+        clean_queue.mark_attempt(task_id, success=False)
+    task_path = clean_queue._queue_dir() / f"{task_id}.json"
+    before = task_path.read_bytes()
+    code, captured = _run_cli(
+        clean_queue,
+        monkeypatch,
+        capsys,
+        "retry-failed",
+        "--phase",
+        "backup-only",
+        "--task-id",
+        task_id,
+    )
+    manifest_path = Path(json.loads(captured.out)["manifest"])
+    _approve_queue_retry_manifest(manifest_path)
+    monkeypatch.setattr(clean_queue, "MAX_QUEUE_RETRY_BACKUP_BYTES", 1)
+
+    code, captured = _run_cli(
+        clean_queue,
+        monkeypatch,
+        capsys,
+        "retry-failed",
+        "--phase",
+        "apply",
+        "--manifest",
+        str(manifest_path),
+    )
+
+    assert code == 3
+    assert "aggregate" in captured.err.lower()
+    assert task_path.read_bytes() == before
+    assert not clean_queue._queue_retry_barrier_path().exists()
+
+
+def test_retry_failed_barrier_durability_failure_blocks_before_task_mutation(
+    clean_queue,
+    monkeypatch,
+    capsys,
+):
+    import memory_state
+
+    task_id = clean_queue.enqueue("query", {"prompt": "durable barrier"})
+    for _ in range(clean_queue.MAX_ATTEMPTS):
+        clean_queue.mark_attempt(task_id, success=False)
+    task_path = clean_queue._queue_dir() / f"{task_id}.json"
+    before = task_path.read_bytes()
+    code, captured = _run_cli(
+        clean_queue,
+        monkeypatch,
+        capsys,
+        "retry-failed",
+        "--phase",
+        "backup-only",
+        "--task-id",
+        task_id,
+    )
+    manifest_path = Path(json.loads(captured.out)["manifest"])
+    _approve_queue_retry_manifest(manifest_path)
+    real_sync = memory_state.sync_parent_directory_strict
+
+    def failed_sync(path):
+        if Path(path).name == clean_queue.QUEUE_RETRY_BARRIER_NAME:
+            raise OSError("injected barrier durability failure")
+        return real_sync(path)
+
+    monkeypatch.setattr(memory_state, "sync_parent_directory_strict", failed_sync)
+
+    with pytest.raises(OSError, match="barrier durability"):
+        clean_queue.retry_failed_apply(manifest_path)
+    assert task_path.read_bytes() == before
+    assert clean_queue._queue_retry_barrier_path().is_file()
+    with pytest.raises(clean_queue.QueueIntegrityError, match="retry transaction"):
+        clean_queue._claim_next_task()
+
+    monkeypatch.setattr(memory_state, "sync_parent_directory_strict", real_sync)
+    assert clean_queue.retry_failed_apply(manifest_path)["status"] == "applied"
+    assert not clean_queue._queue_retry_barrier_path().exists()
+
+
+def test_retry_failed_postimage_durability_failure_keeps_barrier(
+    clean_queue,
+    monkeypatch,
+    capsys,
+):
+    import memory_state
+
+    task_id = clean_queue.enqueue("query", {"prompt": "durable postimage"})
+    for _ in range(clean_queue.MAX_ATTEMPTS):
+        clean_queue.mark_attempt(task_id, success=False)
+    code, captured = _run_cli(
+        clean_queue,
+        monkeypatch,
+        capsys,
+        "retry-failed",
+        "--phase",
+        "backup-only",
+        "--task-id",
+        task_id,
+    )
+    manifest_path = Path(json.loads(captured.out)["manifest"])
+    _approve_queue_retry_manifest(manifest_path)
+    real_sync = memory_state.sync_file_strict
+
+    def failed_sync(path):
+        if Path(path).parent == clean_queue._queue_dir():
+            raise OSError("injected postimage durability failure")
+        return real_sync(path)
+
+    monkeypatch.setattr(memory_state, "sync_file_strict", failed_sync)
+
+    with pytest.raises(OSError, match="postimage durability"):
+        clean_queue.retry_failed_apply(manifest_path)
+    assert clean_queue._queue_retry_barrier_path().is_file()
+    with pytest.raises(clean_queue.QueueIntegrityError, match="retry transaction"):
+        clean_queue._claim_next_task()
+
+    synced = []
+
+    def tracked_sync(path):
+        synced.append(Path(path))
+        return real_sync(path)
+
+    monkeypatch.setattr(memory_state, "sync_file_strict", tracked_sync)
+    assert clean_queue.retry_failed_apply(manifest_path)["status"] == "applied"
+    assert clean_queue._queue_dir() / f"{task_id}.json" in synced
+    assert not clean_queue._queue_retry_barrier_path().exists()

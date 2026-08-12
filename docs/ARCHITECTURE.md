@@ -90,15 +90,15 @@ search activity is not captured and never creates a breadcrumb.
 └──────────────────────────┬───────────────────────────────────────────┘
                            ↓
 ┌──────────────────────────────────────────────────────────────────────┤
-│  SEARCH + RETRIEVAL LAYER (on-demand, ~6ms p50)                      │
+│  SEARCH + RETRIEVAL LAYER (on-demand, 36.4ms measured p50)           │
 │                                                                       │
 │  search_memory.py ── Triple-fusion:                                  │
 │    BM25 (FTS5, weight=2) + Vector (MiniLM, weight=1)                │
 │    + Graph-neighbor (wikilinks, weight=0.5)                         │
 │  Weighted RRF fusion with title/filename boost + short-circuit       │
-│  Recall@5 = 100%, MRR = 0.9667, p50 = 6ms                             │
-│  (benchmark measured in BM25-only mode; triple-fusion adds           │
-│   Vector + Graph signals on top)                                      │
+│  Recall@5 = 100%, MRR = 0.9596, p50 = 36.4ms                         │
+│  (66 canonical BM25 queries, local Windows/Python 3.14 run;          │
+│   latency is machine-specific; triple-fusion adds other signals)     │
 └──────────────────────────┬───────────────────────────────────────────┘
                            ↓
 ┌──────────────────────────────────────────────────────────────────────┤
@@ -170,13 +170,15 @@ Three retrieval signals fused via Weighted RRF:
 
 1. **BM25 (weight=2.0)**: FTS5 full-text search, per-word tokenized. Most reliable for known-item retrieval. Title boost (5x exact, 3x subset), filename boost (10x exact match short-circuit), path preference (1.3x for knowledge/notes/).
 
-2. **Vector (weight=1.0)**: sentence-transformers all-MiniLM-L6-v2 (384 dims, ~90MB). Optional dependency — degrades gracefully to BM25-only. Finds semantic relationships ("database performance" → "N+1 query fix").
+2. **Vector (weight=1.0)**: sentence-transformers all-MiniLM-L6-v2 (384 dims, ~90MB). Optional dependency — degrades gracefully to BM25-only. Its JSON cache is bounded, no-follow, exact-schema, generation/hash/model/version/dimension validated, and rebuilt once on rejection. Finds semantic relationships ("database performance" → "N+1 query fix").
 
 3. **Graph-neighbor (weight=0.5)**: wikilink adjacency boost. When BM25 finds page A, pages linked FROM A get a soft boost. Finds connected knowledge through the link graph.
 
 **RRF formula**: `score = 2.0/(60+bm25_rank) + 1.0/(60+vector_rank) + 0.5*graph_boost/(120+graph_rank)`
 
 **Short-circuit**: if filename slug exactly matches query → return at rank 1 immediately (bypasses RRF).
+
+Within each retrieval signal, unrounded relevance sorts first. Source authority, confidence, and stable path order break exact score ties only. FTS validates its required schema and canonical generation on the same open connection immediately before querying, then rebuilds and retries once on rejection.
 
 ---
 

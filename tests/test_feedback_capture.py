@@ -160,6 +160,82 @@ def test_capture_from_text_saves_candidate(tmp_path, monkeypatch):
     assert candidate["session_id"] == "test-session"
 
 
+def _owned_feedback_project(
+    tmp_path: Path,
+    monkeypatch,
+) -> tuple[object, Path, Path]:
+    import feedback_capture
+
+    vault = tmp_path / "vault"
+    projects = vault / "knowledge" / "projects"
+    project = tmp_path / "work" / "feedback-project"
+    state_path = projects / "feedback-project" / "state.md"
+    project.mkdir(parents=True)
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        "# Feedback project state\n"
+        f"- Project root JSON: {json.dumps(str(project.resolve()))}\n"
+        '- Runtime slug JSON: "feedback-project"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(feedback_capture, "ROOT", vault)
+    monkeypatch.setattr(feedback_capture, "PROJECTS_DIR", projects)
+    monkeypatch.setattr(
+        feedback_capture,
+        "FEEDBACK_DIR",
+        vault / "knowledge" / "feedback",
+    )
+    return feedback_capture, project, state_path
+
+
+def test_capture_persists_only_confirmed_canonical_project_identity(
+    tmp_path,
+    monkeypatch,
+):
+    feedback_capture, project, _state_path = _owned_feedback_project(
+        tmp_path,
+        monkeypatch,
+    )
+
+    cid = feedback_capture.capture_from_text(
+        "No, always preserve the confirmed project root for feedback.",
+        session_id="confirmed-session",
+        slug="feedback-project",
+        project_root=str(project / "."),
+        trigger="test",
+    )
+
+    assert cid is not None
+    candidate = json.loads(
+        (feedback_capture.FEEDBACK_DIR / f"{cid}.json").read_text(encoding="utf-8")
+    )
+    assert candidate["project"] == "feedback-project"
+    assert candidate["project_root"] == str(project.resolve())
+
+
+@pytest.mark.parametrize("slug", ("other-project", "feedback-project-copy"))
+def test_capture_rejects_unconfirmed_feedback_identity(
+    tmp_path,
+    monkeypatch,
+    slug: str,
+):
+    feedback_capture, project, _state_path = _owned_feedback_project(
+        tmp_path,
+        monkeypatch,
+    )
+
+    cid = feedback_capture.capture_from_text(
+        "No, never persist feedback under an unconfirmed identity.",
+        session_id="rejected-session",
+        slug=slug,
+        project_root=project,
+        trigger="test",
+    )
+
+    assert cid is None
+    assert not feedback_capture.FEEDBACK_DIR.exists()
+
+
 def test_capture_from_text_rejects_noise(tmp_path, monkeypatch):
     """Noise text returns None, no file saved."""
     import feedback_capture
@@ -402,3 +478,28 @@ def test_promote_candidate_creates_knowledge_page(tmp_path, monkeypatch):
     candidate_file = tmp_path / "feedback" / f"{cid}.json"
     candidate = json.loads(candidate_file.read_text())
     assert candidate["status"] == "promoted"
+
+
+def test_promoted_feedback_frontmatter_preserves_confirmed_project_root(
+    tmp_path,
+    monkeypatch,
+):
+    feedback_capture, project, _state_path = _owned_feedback_project(
+        tmp_path,
+        monkeypatch,
+    )
+    cid = feedback_capture.capture_from_text(
+        "No, always carry the confirmed root into promoted feedback.",
+        session_id="promotion-session",
+        slug="feedback-project",
+        project_root=project,
+        trigger="test",
+    )
+    assert cid is not None
+
+    promoted = feedback_capture.promote_candidate(cid, "patterns")
+
+    assert promoted is not None
+    page = (feedback_capture.ROOT / promoted).read_text(encoding="utf-8")
+    assert "project: feedback-project\n" in page
+    assert f"project_root: {json.dumps(str(project.resolve()))}\n" in page

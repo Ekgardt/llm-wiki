@@ -13,6 +13,8 @@
  */
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 const _LLM_WIKI_ROOT = process.env.LLM_WIKI_ROOT;
@@ -21,9 +23,31 @@ if (!_LLM_WIKI_ROOT) {
 }
 const _LLM_WIKI_STATE_ROOT = process.env.LLM_WIKI_STATE_ROOT || _LLM_WIKI_ROOT || "";
 const SCRIPTS = `${_LLM_WIKI_ROOT || ""}/scripts`;
-const PYTHON = process.platform === "win32"
+const WINDOWS_VENV = `${_LLM_WIKI_ROOT || ""}/.venv`;
+let PYTHON = process.platform === "win32"
   ? `${_LLM_WIKI_ROOT || ""}/.venv/Scripts/python.exe`
   : `${_LLM_WIKI_ROOT || ""}/.venv/bin/python`;
+let PYTHON_ENV = process.env;
+if (process.platform === "win32") {
+  try {
+    const config = readFileSync(`${WINDOWS_VENV}/pyvenv.cfg`, "utf8");
+    const home = config.match(/^home\s*=\s*(.+?)\s*$/m)?.[1]?.trim();
+    if (home && path.win32.isAbsolute(home) && !/[\u0000-\u001f]/.test(home)) {
+      const windowed = `${home.replaceAll("\\", "/").replace(/\/+$/, "")}/pythonw.exe`;
+      if (existsSync(windowed)) {
+        const sitePackages = `${WINDOWS_VENV}/Lib/site-packages`;
+        PYTHON = windowed;
+        PYTHON_ENV = {
+          ...process.env,
+          VIRTUAL_ENV: WINDOWS_VENV,
+          PYTHONPATH: process.env.PYTHONPATH
+            ? `${sitePackages};${process.env.PYTHONPATH}`
+            : sitePackages,
+        };
+      }
+    }
+  } catch {}
+}
 const SIGNIFICANT_TOOLS = new Map([
   ["edit", "Edit"],
   ["write", "Write"],
@@ -41,16 +65,62 @@ const SOURCE_SESSION_LOOKUP_TIMEOUT_MS = 30_000;
 const MAX_PROVENANCE_CHARS = 500;
 const MAX_QUEUE_TASKS = 5;
 const MAX_COMPILE_BATCHES = 10;
+const MAX_IDLE_DIGEST_SESSIONS = 256;
 const LEASE_RENEWAL_INTERVAL_MS = 60_000;
 const SERVICE_MODEL = { providerID: "openai", modelID: "gpt-5.6-luna" };
 const OUTCOME_COMPLETE = "complete";
 const OUTCOME_FAILED = "failed";
 const OUTCOME_CAPPED = "capped";
 const DAILY_RECORD_COMPLETION_MARKER = "<!-- llm-wiki-record-complete -->";
+const CAPTURE_MARKER_PREFIX = "<!-- llm-wiki-capture:";
+const ESCAPED_CAPTURE_MARKER_PREFIX = "&lt;!-- llm-wiki-capture:";
 const DAILY_APPEND_STATUS = "appended";
+const FLUSH_SECTION_HEADINGS = [
+  "Decisions made",
+  "Lessons / patterns",
+  "Commands / snippets",
+  "Gotchas / debugging",
+  "Open questions",
+];
+const FLUSH_HEADING_LINES = new Map(
+  FLUSH_SECTION_HEADINGS.map((heading) => [`**${heading}**`, heading]),
+);
+const FLUSH_MAJOR_SECTION_HEADINGS = new Set(FLUSH_SECTION_HEADINGS.slice(0, 2));
+const FLUSH_MINOR_SECTION_HEADINGS = new Set(FLUSH_SECTION_HEADINGS.slice(2));
+const FLUSH_BULLET_RE = /^[ \t]*-[ \t]+(?=\S).*\S[ \t]*$/;
+
+function validFlushBody(tierToken, body) {
+  const allowed = tierToken === "FLUSH_MAJOR"
+    ? new Set(FLUSH_SECTION_HEADINGS)
+    : FLUSH_MINOR_SECTION_HEADINGS;
+  let currentHeading = null;
+  let bulletCount = 0;
+  let sectionCount = 0;
+  const seenHeadings = new Set();
+  for (const line of String(body || "").split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const heading = FLUSH_HEADING_LINES.get(line);
+    if (heading !== undefined) {
+      if (currentHeading !== null && bulletCount === 0) return false;
+      if (!allowed.has(heading)) return false;
+      currentHeading = heading;
+      bulletCount = 0;
+      sectionCount++;
+      seenHeadings.add(heading);
+      continue;
+    }
+    if (currentHeading === null || !FLUSH_BULLET_RE.test(line)) return false;
+    bulletCount++;
+  }
+  return sectionCount > 0 && bulletCount > 0 && (
+    tierToken !== "FLUSH_MAJOR" ||
+    Array.from(FLUSH_MAJOR_SECTION_HEADINGS).some((heading) => seenHeadings.has(heading))
+  );
+}
 
 function neutralizeDailyRecordHeaders(body) {
-  return String(body || "").split(/\r?\n/).map((line) => {
+  return String(body || "").split(/\r?\n/).map((rawLine) => {
+    const line = rawLine.split(CAPTURE_MARKER_PREFIX).join(ESCAPED_CAPTURE_MARKER_PREFIX);
     const normalized = line.replace(/<\/?(?:analysis|summary)>/gi, "");
     let marker = "";
     if (/^##\s+\[/.test(normalized)) marker = "#";
@@ -70,6 +140,7 @@ export const LlmWikiMemoryPlugin = async ({ client, directory, worktree, runtime
   let maintenanceRequested = false;
   let maintenanceContinuationScheduled = false;
   const internalSessionIds = new Set();
+  const idleDigestStates = new Map();
   const schedule = runtime?.schedule || ((callback, delay) => setTimeout(callback, delay));
   const scheduleTimeout = runtime?.setTimeout || ((callback, delay) => setTimeout(callback, delay));
   const cancelTimeout = runtime?.clearTimeout || ((handle) => clearTimeout(handle));
@@ -127,7 +198,7 @@ export const LlmWikiMemoryPlugin = async ({ client, directory, worktree, runtime
       try {
         child = spawn(PYTHON, [`${SCRIPTS}/${script}`, ...args], {
           cwd: _LLM_WIKI_ROOT,
-          env: process.env,
+          env: PYTHON_ENV,
           stdio: ["pipe", "pipe", "pipe"],
           windowsHide: true,
         });
@@ -247,6 +318,24 @@ export const LlmWikiMemoryPlugin = async ({ client, directory, worktree, runtime
     return response?.error || response?.data?.info?.error || response?.info?.error;
   }
 
+  function extractTextResponse(response) {
+    const parts = response?.data?.parts || response?.parts || [];
+    return parts
+      .filter((part) => part?.type === undefined || part?.type === "text")
+      .map((part) => typeof part?.text === "string" ? part.text : "")
+      .join("")
+      .trim();
+  }
+
+  function isNativeAbsolutePath(value) {
+    if (typeof value !== "string") return false;
+    if (process.platform === "win32") {
+      const windowsRoot = path.win32.parse(value).root;
+      return path.win32.isAbsolute(value) && windowsRoot !== "\\" && windowsRoot !== "/";
+    }
+    return path.posix.isAbsolute(value);
+  }
+
   function extractRecoveredProjectRoot(response) {
     if (!response || typeof response !== "object" || Array.isArray(response)) {
       throw new Error("OpenCode source session lookup returned an invalid response");
@@ -259,23 +348,13 @@ export const LlmWikiMemoryPlugin = async ({ client, directory, worktree, runtime
       throw new Error("OpenCode source session lookup returned invalid session data");
     }
     const directory = session.directory;
-    let nativeAbsolute = false;
-    if (typeof directory === "string") {
-      if (process.platform === "win32") {
-        const windowsRoot = path.win32.parse(directory).root;
-        nativeAbsolute = path.win32.isAbsolute(directory) &&
-          windowsRoot !== "\\" && windowsRoot !== "/";
-      } else {
-        nativeAbsolute = path.posix.isAbsolute(directory);
-      }
-    }
     if (
       typeof directory !== "string" ||
       !directory ||
       directory !== directory.trim() ||
       directory.length > MAX_PROVENANCE_CHARS ||
       /[\u0000-\u001f\u007f-\u009f]/.test(directory) ||
-      !nativeAbsolute
+      !isNativeAbsolutePath(directory)
     ) {
       throw new Error("OpenCode source session returned an invalid directory");
     }
@@ -390,8 +469,8 @@ export const LlmWikiMemoryPlugin = async ({ client, directory, worktree, runtime
   async function warmStartVectorSearch() {
     try { await runPython("search_memory.py", ["warmup", "--semantic", "--limit", "1"]); } catch {}
   }
-  async function appendDaily(slug, projectRoot, sessionId, block) {
-    const p = JSON.stringify({ slug, projectRoot, sessionId, block });
+  async function appendDaily(slug, projectRoot, sessionId, block, captureId) {
+    const p = JSON.stringify({ slug, projectRoot, sessionId, block, captureId });
     const output = await runPython("daily_log_append.py", [], p);
     let acknowledgement;
     try {
@@ -407,14 +486,64 @@ export const LlmWikiMemoryPlugin = async ({ client, directory, worktree, runtime
     try {
       const p = JSON.stringify({ slug, projectRoot: String(dir||""), reason, sessionId: String(sid) });
       await runPython("heartbeat_record.py", [], p);
-    } catch {}
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  function parseProjectIdentity(output) {
+    const text = String(output || "");
+    if (!text || Buffer.byteLength(text, "utf8") > MAX_CHILD_STDOUT_BYTES) return null;
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return null;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const slug = parsed.slug;
+    const projectRoot = parsed.cwd;
+    const validField = (value) => typeof value === "string" &&
+      value.length > 0 && value === value.trim() &&
+      value.length <= MAX_PROVENANCE_CHARS &&
+      !/[\u0000-\u001f\u007f-\u009f]/.test(value);
+    if (!validField(slug) || !validField(projectRoot) || !isNativeAbsolutePath(projectRoot)) {
+      return null;
+    }
+    return { slug, projectRoot };
+  }
+  async function resolveProjectIdentity(cwd) {
+    try {
+      const output = await runPython(
+        "codex_memory.py",
+        ["state-path", "--cwd", String(cwd || ""), "--json"],
+      );
+      return parseProjectIdentity(output);
+    } catch {
+      return null;
+    }
   }
   async function computeSlug(cwd) {
-    try {
-      const output = await runPython("codex_memory.py", ["state-path", "--cwd", String(cwd || ""), "--json"]);
-      const m = output.match(/"slug"\s*:\s*"([^"]+)"/);
-      return m ? m[1] : null;
-    } catch { return null; }
+    return (await resolveProjectIdentity(cwd))?.slug || null;
+  }
+  async function computeCaptureId(transcript, sessionId, projectSlug, projectRoot) {
+    const output = String(await runPython(
+      "flush_memory.py",
+      [
+        "--capture-id",
+        "--event", "session-end",
+        "--session-id", String(sessionId),
+        "--transcript-stdin",
+        "--trigger", "opencode-idle",
+        "--project-slug", projectSlug,
+        "--project-root", projectRoot,
+      ],
+      transcript,
+    ) || "");
+    if (!/^[0-9a-f]{64}(?:\r?\n)?$/.test(output)) {
+      throw new Error("flush_memory.py returned an invalid capture id");
+    }
+    return output.slice(0, 64);
   }
 
   /**
@@ -507,8 +636,7 @@ export const LlmWikiMemoryPlugin = async ({ client, directory, worktree, runtime
           );
           const responseError = providerError(result);
           if (responseError) throw new Error(`OpenCode provider error: ${JSON.stringify(responseError)}`);
-          const parts = result?.data?.parts || result?.parts || [];
-          const response = parts.map((part) => part?.text || "").join("").trim();
+          const response = extractTextResponse(result);
           if (!response) throw new Error("OpenCode returned an empty compile response");
           providerComplete = true;
           const applyOutput = await runPython(
@@ -685,8 +813,7 @@ export const LlmWikiMemoryPlugin = async ({ client, directory, worktree, runtime
       );
       const responseError = providerError(result);
       if (responseError) throw new Error(`OpenCode provider error: ${JSON.stringify(responseError)}`);
-      const parts = result?.data?.parts || result?.parts || [];
-      const response = parts.map((part) => part?.text || "").join("").trim();
+      const response = extractTextResponse(result);
       if (!response) throw new Error("OpenCode returned an empty queue response");
       providerResultReady = true;
       const successfulResult = { success: true, response };
@@ -801,7 +928,7 @@ export const LlmWikiMemoryPlugin = async ({ client, directory, worktree, runtime
     void runRequestedMaintenance();
   }
 
-  async function persistIdleFallback(slug, sid, redactedTranscript, occurredAt) {
+  async function persistIdleFallback(slug, projectRoot, sid, redactedTranscript, occurredAt) {
     try {
       await runPython(
         "flush_memory.py",
@@ -811,17 +938,66 @@ export const LlmWikiMemoryPlugin = async ({ client, directory, worktree, runtime
           "--transcript-stdin",
           "--trigger", "opencode-idle",
           "--project-slug", slug,
-          "--project-root", projectDirectory,
+          "--project-root", projectRoot,
           "--occurred-at", occurredAt.toISOString(),
         ],
         redactedTranscript,
       );
-      await heartbeat(slug, projectDirectory, "flush-deferred", String(sid));
+      await heartbeat(slug, projectRoot, "flush-deferred", String(sid));
       return true;
     } catch (error) {
       await logError("OpenCode durable classification fallback failed", error);
-      await heartbeat(slug, projectDirectory, "flush-failed", String(sid));
+      await heartbeat(slug, projectRoot, "flush-failed", String(sid));
       return false;
+    }
+  }
+
+  function idleDigestState(sessionId) {
+    if (!idleDigestStates.has(sessionId) && idleDigestStates.size >= MAX_IDLE_DIGEST_SESSIONS) {
+      const reusable = Array.from(idleDigestStates.entries()).find(([, state]) => !state.inFlight);
+      if (reusable) {
+        idleDigestStates.delete(reusable[0]);
+      } else return null;
+    }
+    const state = idleDigestStates.get(sessionId) || {
+      completedDigest: null,
+      inFlightDigest: null,
+      inFlight: null,
+    };
+    idleDigestStates.delete(sessionId);
+    idleDigestStates.set(sessionId, state);
+    return state;
+  }
+
+  async function processIdleDigest(sessionId, digest, operation) {
+    while (true) {
+      const state = idleDigestState(sessionId);
+      if (!state) {
+        await Promise.race(
+          Array.from(idleDigestStates.values(), (current) => current.inFlight),
+        );
+        continue;
+      }
+      if (state.completedDigest === digest) return;
+      if (state.inFlight) {
+        await state.inFlight;
+        continue;
+      }
+      state.inFlightDigest = digest;
+      const pending = Promise.resolve()
+        .then(operation)
+        .then((durable) => {
+          if (durable) state.completedDigest = digest;
+        })
+        .finally(() => {
+          if (state.inFlight === pending) {
+            state.inFlight = null;
+            state.inFlightDigest = null;
+          }
+        });
+      state.inFlight = pending;
+      await pending;
+      return;
     }
   }
 
@@ -841,10 +1017,11 @@ export const LlmWikiMemoryPlugin = async ({ client, directory, worktree, runtime
     const occurredAt = new Date();
     const sid = event?.properties?.info?.id || event?.properties?.sessionID || event?.properties?.sessionId || "opencode";
     if (await isInternalSession(sid)) return;
-    const slug = await computeSlug(projectDirectory);
-    if (!slug) return;
+    const identity = await resolveProjectIdentity(projectDirectory);
+    if (!identity) return;
+    const { slug, projectRoot } = identity;
     const transcript = await collectTranscript(sid);
-    if (transcript.length < 50) { await heartbeat(slug, projectDirectory, "idle-short", String(sid)); return; }
+    if (transcript.length < 50) { await heartbeat(slug, projectRoot, "idle-short", String(sid)); return; }
     let redactedTranscript;
     try {
       redactedTranscript = String(await runPython("secret_redact.py", ["--stdin"], transcript));
@@ -852,17 +1029,28 @@ export const LlmWikiMemoryPlugin = async ({ client, directory, worktree, runtime
       redactedTranscript = redactedTranscript.slice(-MAX_TRANSCRIPT_CHARS);
     } catch (error) {
       await logError("OpenCode transcript redaction failed", error);
-      await heartbeat(slug, projectDirectory, "redaction-failed", String(sid));
+      await heartbeat(slug, projectRoot, "redaction-failed", String(sid));
       return;
     }
+    const transcriptDigest = createHash("sha256").update(redactedTranscript, "utf8").digest("hex");
+    await processIdleDigest(String(sid), transcriptDigest, async () => {
+    let captureId;
+    try {
+      captureId = await computeCaptureId(redactedTranscript, String(sid), slug, projectRoot);
+    } catch (error) {
+      await logError("OpenCode capture identity failed", error);
+      return persistIdleFallback(slug, projectRoot, sid, redactedTranscript, occurredAt);
+    }
+    const captureMarker = `<!-- llm-wiki-capture: ${captureId} -->`;
     const prompt = `Classify and distill this transcript into durable project memory.\n\n` +
-      `FLUSH_MAJOR requires a concrete decision with rationale, a reusable lesson/pattern, ` +
-      `or a non-obvious command/snippet worth remembering across sessions.\n` +
-      `FLUSH_MINOR is limited to a debug gotcha (symptom, cause, fix), a durable open question, ` +
-      `or one useful non-obvious observation.\n` +
+      `FLUSH_MAJOR requires a concrete decision with rationale or a reusable lesson/pattern ` +
+      `worth remembering across sessions.\n` +
+      `FLUSH_MINOR is limited to a concrete debug gotcha (symptom, cause, fix), ` +
+      `a durable open question, or a non-obvious command/snippet.\n` +
       `FLUSH_OK covers status/progress updates, audit/review verdicts or findings, ` +
-      `file/path/code summaries, facts derivable from code/config, navigation, and other material ` +
-      `that a future session can recover without memory. When in doubt, choose FLUSH_OK.\n\n` +
+      `file/path/code summaries, facts derivable from code/config, navigation, ` +
+      `service/system prompts, shell telemetry, and other material that a future session can ` +
+      `recover without memory. When in doubt, choose FLUSH_OK.\n\n` +
       `FLUSH_MAJOR and FLUSH_MINOR require a non-empty distilled body using ONLY the applicable ` +
       `recognized Markdown sections below; omit empty sections:\n` +
       `- **Decisions made** - concrete choices with reasons (MAJOR only).\n` +
@@ -870,6 +1058,9 @@ export const LlmWikiMemoryPlugin = async ({ client, directory, worktree, runtime
       `- **Commands / snippets** - non-obvious invocations.\n` +
       `- **Gotchas / debugging** - symptom, cause, and fix.\n` +
       `- **Open questions** - unresolved and worth returning to.\n` +
+      `Each included section must contain at least one non-empty bullet beginning with "- ". ` +
+      `Do not emit prose outside sections. FLUSH_MINOR may use only Commands / snippets, ` +
+      `Gotchas / debugging, and Open questions.\n` +
       `Be terse. Keep each bullet to one line and do not narrate work completed.\n\n` +
       `Respond with FLUSH_MAJOR, FLUSH_MINOR, or FLUSH_OK as the first line. ` +
       `FLUSH_OK must be the token only, with no body.\n\n` +
@@ -885,8 +1076,7 @@ export const LlmWikiMemoryPlugin = async ({ client, directory, worktree, runtime
       const result = await client.session.prompt({ path: { id: sessId2 }, body: { model: SERVICE_MODEL, parts: [{ type: "text", text: prompt }] } });
       const responseError = providerError(result);
       if (responseError) throw new Error(`OpenCode provider error: ${JSON.stringify(responseError)}`);
-      const parts = result?.data?.parts || result?.parts || [];
-      const text = parts.map(p=>p.text||"").join("").trim();
+      const text = extractTextResponse(result);
       if (!text) throw new Error("OpenCode returned an empty classification response");
       if (text === "FLUSH_OK") {
         classification = { tier: "ok", body: "" };
@@ -894,7 +1084,8 @@ export const LlmWikiMemoryPlugin = async ({ client, directory, worktree, runtime
         const lines = text.split(/\r?\n/);
         const first = lines.shift() || "";
         const body = lines.join("\n").trim();
-        if (!["FLUSH_MAJOR", "FLUSH_MINOR"].includes(first) || !body) {
+        if (!["FLUSH_MAJOR", "FLUSH_MINOR"].includes(first) ||
+            !validFlushBody(first, body)) {
           throw new Error("OpenCode returned an invalid classification response");
         }
         classification = {
@@ -908,28 +1099,32 @@ export const LlmWikiMemoryPlugin = async ({ client, directory, worktree, runtime
       await cleanupInternalSession(sessId2, "classification");
     }
     if (!classification) {
-      await persistIdleFallback(slug, sid, redactedTranscript, occurredAt);
-      return;
+      return persistIdleFallback(slug, projectRoot, sid, redactedTranscript, occurredAt);
     }
     const { tier, body } = classification;
-    if (tier === "ok") { await heartbeat(slug, projectDirectory, "flush-ok", String(sid)); return; }
+    if (tier === "ok") {
+      await heartbeat(slug, projectRoot, "flush-ok", String(sid));
+      return true;
+    }
     const ts = occurredAt.toTimeString().slice(0, 8);
     try {
       await appendDaily(
         slug,
-        projectDirectory,
+        projectRoot,
         String(sid),
         `## [${ts}] opencode-idle | ${sid}\n- Trigger: \`opencode-idle\`\n` +
-          `- Project slug: \`${slug}\`\n- Project root JSON: ${JSON.stringify(String(projectDirectory || ""))}\n` +
+          `- Project slug: \`${slug}\`\n- Project root JSON: ${JSON.stringify(projectRoot)}\n` +
           `- Tier: \`${tier}\`\n- Source session: \`${sid}\`\n\n` +
-          `${neutralizeDailyRecordHeaders(body)}\n${DAILY_RECORD_COMPLETION_MARKER}\n`,
+          `${neutralizeDailyRecordHeaders(body)}\n${captureMarker}\n${DAILY_RECORD_COMPLETION_MARKER}\n`,
+        captureId,
       );
     } catch (error) {
       await logError("OpenCode direct daily append failed", error);
-      await persistIdleFallback(slug, sid, redactedTranscript, occurredAt);
-      return;
+      return persistIdleFallback(slug, projectRoot, sid, redactedTranscript, occurredAt);
     }
     if (tier === "major") await triggerCompile();
+    return true;
+    });
   }
 
   function normalizeToolInput(input) {
@@ -968,6 +1163,12 @@ export const LlmWikiMemoryPlugin = async ({ client, directory, worktree, runtime
     event: async ({ event }) => {
       if (event?.type === "session.created") await handleSessionCreated(event);
       else if (event?.type === "session.idle") await handleSessionIdle(event);
+      else if (event?.type === "session.deleted") {
+        const sid = event?.properties?.info?.id || event?.properties?.id ||
+          event?.properties?.sessionID || event?.properties?.sessionId;
+        const state = sid ? idleDigestStates.get(String(sid)) : null;
+        if (state && !state.inFlight) idleDigestStates.delete(String(sid));
+      }
     },
 
     "chat.message": async (input, output) => {
@@ -996,6 +1197,7 @@ export const LlmWikiMemoryPlugin = async ({ client, directory, worktree, runtime
           text: prompt,
           session_id: sid,
           slug,
+          project_root: projectDirectory,
           trigger: "opencode-user-message",
         }));
       } catch {}
@@ -1047,16 +1249,16 @@ export const LlmWikiMemoryPlugin = async ({ client, directory, worktree, runtime
         const sid = String(input?.sessionID || input?.sessionId || "unknown");
         if (await isInternalSession(sid)) return;
         const transcript = await collectTranscript(sid);
-        const slug = await computeSlug(projectDirectory);
-        if (!slug) return;
+        const identity = await resolveProjectIdentity(projectDirectory);
+        if (!identity) return;
         // Best-effort flush before context loss (parity with Claude PreCompact).
         try {
           await runPython("precompact_capture.py", [], JSON.stringify({
             session_id: sid,
             transcript,
             trigger: "opencode-compacting",
-            project_slug: slug,
-            project_root: projectDirectory,
+            project_slug: identity.slug,
+            project_root: identity.projectRoot,
             occurred_at: occurredAt,
           }));
         } catch {}

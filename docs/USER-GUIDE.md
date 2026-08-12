@@ -58,7 +58,7 @@ The installer detects your agents and wires them up automatically.
    git clone https://github.com/Ekgardt/llm-wiki.git
    cd llm-wiki
    uv sync
-   uv run pytest -q          # 1916 collected; local Windows: 1881 passed, 35 skipped; skips vary by environment
+   uv run pytest -q          # 2793 collected; local Windows: 2749 passed, 44 skipped; skips vary by environment
    ```
 
 2. **Set environment variables** (add to your shell profile):
@@ -162,10 +162,15 @@ step fails. Inspect their report under `logs/` instead of assuming completion.
 uv run python scripts/search_memory.py "how do we handle auth?"
 uv run python scripts/search_memory.py "database performance" --semantic
 uv run python scripts/search_memory.py --project my-app "decisions"
+uv run python scripts/search_memory.py "past decision" --as-of 2026-08-03
+uv run python scripts/search_memory.py "recent change" --since 2026-08-01
 uv run python scripts/query_memory.py "why did we choose Postgres?" --file-back
 ```
 
-`search_memory.py` runs hybrid BM25 + Vector + Graph fusion.
+`search_memory.py` runs hybrid BM25 + Vector + Graph fusion. `--as-of` and
+`--since` require exact, real `YYYY-MM-DD` dates. `--as-of` checks page
+timestamps and `valid_to`. Relevance always ranks first; `source_authority`,
+confidence, and stable path order only break exact score ties.
 `query_memory.py` asks the LLM to answer from the knowledge index and
 optionally files the answer as a Q&A page.
 
@@ -205,6 +210,22 @@ and retired stores fail closed when truthful count or byte quotas are reached.
 One OpenCode pass handles at most 10 compile batches, then schedules a bounded
 continuation.
 
+If a hot retired store reaches its truthful quota, do not remove records by
+hand. Use the compiler-owned cold archive:
+
+```bash
+uv run python scripts/compile_memory.py --archive-retired audit
+uv run python scripts/compile_memory.py --archive-retired backup-only
+# Review the emitted manifest and change only top-level approved to true.
+uv run python scripts/compile_memory.py --archive-retired apply --manifest PATH
+uv run python scripts/compile_memory.py --archive-retired verify --manifest PATH
+```
+
+Only whole manifest/journal components outside state, queue, and active-artifact
+recovery closure are eligible. The transaction keeps a reviewed byte-exact
+`payload/` copy and moves the exact original hot files into `source-retired/`.
+Cold evidence is preserved but is not searched by automatic compile replay.
+
 ### Deferred queue behavior
 
 Tasks receive a durable monotonic `enqueue_sequence` under a cross-process
@@ -239,22 +260,60 @@ Run this only against the installed vault, never the public source checkout.
 Use four explicit stages and review every JSON artifact before continuing:
 
 ```bash
-uv run python scripts/repair_installed_memory.py audit --root "$LLM_WIKI_ROOT" --state-root "$LLM_WIKI_STATE_ROOT" --output repair-audit.json
-uv run python scripts/repair_installed_memory.py apply --root "$LLM_WIKI_ROOT" --state-root "$LLM_WIKI_STATE_ROOT" --audit-report repair-audit.json --backup-only --output repair-backup.json
+REPAIR_REVIEW_DIR="/absolute/path/outside-the-vault-and-state-root"
+mkdir -p "$REPAIR_REVIEW_DIR"
+uv run python scripts/repair_installed_memory.py audit --root "$LLM_WIKI_ROOT" --state-root "$LLM_WIKI_STATE_ROOT" --output "$REPAIR_REVIEW_DIR/repair-audit.json"
+uv run python scripts/repair_installed_memory.py apply --root "$LLM_WIKI_ROOT" --state-root "$LLM_WIKI_STATE_ROOT" --audit-report "$REPAIR_REVIEW_DIR/repair-audit.json" --backup-only --output "$REPAIR_REVIEW_DIR/repair-backup.json"
 # Read repair-backup.json and use its backup_manifest value below.
-uv run python scripts/repair_installed_memory.py apply --root "$LLM_WIKI_ROOT" --state-root "$LLM_WIKI_STATE_ROOT" --audit-report repair-audit.json --manifest "/absolute/path/to/manifest.json" --output repair-apply.json
-uv run python scripts/repair_installed_memory.py verify --root "$LLM_WIKI_ROOT" --state-root "$LLM_WIKI_STATE_ROOT" --manifest "/absolute/path/to/manifest.json" --output repair-verify.json
+# Inspect every manifest entry, then change only top-level approved: false to true.
+uv run python scripts/repair_installed_memory.py apply --root "$LLM_WIKI_ROOT" --state-root "$LLM_WIKI_STATE_ROOT" --audit-report "$REPAIR_REVIEW_DIR/repair-audit.json" --manifest "/absolute/path/to/manifest.json" --output "$REPAIR_REVIEW_DIR/repair-apply.json"
+uv run python scripts/repair_installed_memory.py verify --root "$LLM_WIKI_ROOT" --state-root "$LLM_WIKI_STATE_ROOT" --manifest "/absolute/path/to/manifest.json" --output "$REPAIR_REVIEW_DIR/repair-verify.json"
 ```
 
-`audit` and `verify` are read-only. `--backup-only` creates and validates
-`run/backups/<timestamp>/manifest.json` plus staged copies without mutating
-source data. Mutating apply never creates a manifest: it requires the explicit
-reviewed `--manifest` path, then revalidates the audit digest, manifest, source
-identities, and backups under writer locks before committing. It removes only
-structurally empty daily records and quarantines generated-idle feedback without
-user provenance. Meaningful daily content and ordinary feedback are preserved; duplicate notes and orphan
-`memory-*` service sessions are report-only and require explicit review or a
-separately verified safe API deletion path.
+Pass each explicit stale active note as a repeatable root-relative
+`--stale-page knowledge/notes/<slug>.md` argument to `audit` and both `apply`
+commands. The list must match exactly at every stage.
+
+Every `--output` parent must already exist outside both the vault and state
+root. Output preflight rejects links, hard links, and aliases of input artifacts
+before inventory, recovery, staging, or mutation. `audit` does not mutate the
+vault. `--backup-only` first computes the complete manifest and fsyncs a
+schema-v4 `preparing` ownership journal containing its approval-normalized
+SHA-256 and every expected staging descriptor, then writes source bytes and
+validates private `source-staging/` plus exactly
+`run/backups/<timestamp>/manifest.json` with a sealed `approved: false` value,
+without changing a source. Approved apply reuses that journal and accepts only
+schema v4; schema v3 is recovery/verification-only. Mutating apply never creates
+a manifest. It accepts only the reviewed manifest with that one field changed
+to `true`; apply, recovery, and verify reject any other manifest rewrite even
+when it is resealed and the source bytes are unchanged. Apply then revalidates
+the audit digest, stale-page list, strict manifest structure, source hashes and
+identities, and staged bytes under the repair, publication, daily, feedback,
+and project-state locks.
+
+Apply may physically delete only byte-exact noncanonical note shadows,
+explicitly named active stale notes, canonical unpromoted `opencode-idle`
+feedback, and whole daily files proven to contain only generated or empty
+records, including exactly framed writer completion markers. It may
+replace one exact visible handoff placeholder in a canonically owned project
+state with `(saved project handoff unavailable)`. Nonidentical shadows,
+ordinary feedback, mixed or unrecognized daily content, queue/compile state,
+and service-session inventories remain preserved, report-only, or out of scope.
+
+Temporary source bytes support preparation, rollback, and interrupted-
+transaction recovery. Preparation recovery removes only exact journal-owned
+staging and stops on unknown paths. Commit and rollback record each purge step
+before deletion, so recovery accepts only the corresponding missing artifact.
+Every journal status also requires its exact legal progress: action/result IDs
+are manifest-path prefixes, restore IDs are reverse-attempted subsequences,
+purge IDs are staging-path prefixes, and terminal states require complete
+commit or rollback/purge sets. Contradictory or duplicated progress fails closed.
+Staging is purged before a successful v4 apply returns. The retained manifest
+and transaction journal contain hashes and results only, so completed v4 cleanup
+has no source backup or post-completion rollback. `verify` may first finish
+interrupted recovery under the same locks; once the transaction is terminal,
+repeated verify is read-only. Legacy schema-v3 recovery and verification retain
+their original artifacts; v3 can no longer enter mutating apply.
 
 ### Skills (agent-side workflows)
 
@@ -282,8 +341,9 @@ uv sync --extra semantic
 ```
 
 This installs `sentence-transformers` with a MiniLM model. Embeddings are
-cached in `cache/vectors.json` (gitignored) and rebuilt automatically when
-pages change.
+cached in `cache/vectors.json` (gitignored). The bounded no-follow cache is
+accepted only when its exact schema, generation, source hashes, model version,
+dimensions, and vectors validate; otherwise it is rebuilt once.
 
 ## Optional: Cognee graph (300+ pages)
 
@@ -320,6 +380,8 @@ journals/manifests and checkpoints, plus repair manifests/transactions. Use
   mode, pending work requires an active authenticated OpenCode session.
 - If `compile_index_pending` exists, the daily is not complete; inspect
   `last_compile_error`, `last_compile_sdk_error`, and `run/compile-journal/`.
+- If the error reports a full retired store, use the four-phase
+  `--archive-retired` workflow above; never delete retired files manually.
 
 ### "Queue never drains"
 - Run `uv run python scripts/memory_queue.py status` and
@@ -360,10 +422,10 @@ journals/manifests and checkpoints, plus repair manifests/transactions. Use
 
 ### "Tests fail on fresh clone"
 - `uv sync` first (deps must be installed)
-- `uv run pytest -q` — collects 1916 on every platform; the local Windows
-  verification is 1881 passed, 35 skipped. Skip count varies with optional Bash,
+- `uv run pytest -q` — collects 2793 on every platform; the local Windows
+  verification is 2749 passed, 44 skipped. Skip count varies with optional Bash,
   PowerShell, and symlink availability.
-- If fewer than 1916 tests are collected, your checkout is stale; `git pull`
+- If fewer than 2793 tests are collected, your checkout is stale; `git pull`
 
 ---
 
@@ -372,7 +434,7 @@ journals/manifests and checkpoints, plus repair manifests/transactions. Use
 | Path | Zone | Purpose |
 |------|------|---------|
 | `scripts/` | CODE | Pipeline, hooks, maintenance, repair, and integration helpers |
-| `tests/` | CODE | Regression suite: 1916 collected platform-wide; local Windows 1881 passed, 35 skipped, with skips varying by optional shell/symlink support |
+| `tests/` | CODE | Regression suite: 2793 collected platform-wide; local Windows 2749 passed, 44 skipped, with skips varying by optional shell/symlink support |
 | `docs/` | CODE | This file + ARCHITECTURE + STRUCTURE + SETUP-COGNEE + EXPORTING |
 | `skills/` | CODE | 9 agent skills |
 | `rules/` | CODE | 3 file-handling policies |

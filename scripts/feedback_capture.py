@@ -37,6 +37,7 @@ from memory_state import (  # noqa: E402
     ROOT,
     STATE_ROOT,
     advisory_file_lock,
+    atomic_write,
     bounded_path_inventory,
     read_json_object_bounded,
     read_json_object_file_bounded,
@@ -44,6 +45,7 @@ from memory_state import (  # noqa: E402
 from secret_redact import redact_secrets  # noqa: E402
 
 FEEDBACK_DIR = ROOT / "knowledge" / "feedback"
+PROJECTS_DIR = ROOT / "knowledge" / "projects"
 MAX_FEEDBACK_BYTES = 64 * 1024
 MAX_FEEDBACK_FILES_SCANNED = 1_000
 MAX_FEEDBACK_JSON_DEPTH = 64
@@ -122,6 +124,7 @@ def capture_from_text(
     session_id: str = "unknown",
     slug: str = "unknown",
     trigger: str = "session-end",
+    project_root: str | Path | None = None,
 ) -> str | None:
     """Check if a text block contains feedback worth saving.
 
@@ -130,6 +133,25 @@ def capture_from_text(
     ftype, confidence = _detect_feedback_type(text)
     if not ftype or confidence < 0.5:
         return None
+
+    canonical_project_root: str | None = None
+    if project_root is not None:
+        try:
+            from session_start_project_state import (
+                _slug_identity_key,
+                confirm_project_identity,
+            )
+
+            resolved_root = Path(project_root).resolve(strict=True)
+            confirmed = confirm_project_identity(resolved_root, PROJECTS_DIR)
+            if (
+                confirmed is None
+                or _slug_identity_key(confirmed[0]) != _slug_identity_key(slug)
+            ):
+                return None
+            canonical_project_root = str(resolved_root)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return None
 
     # Redact secrets from the feedback text before persisting it (mirrors
     # the secret_redact pass that all capture hooks run).
@@ -150,10 +172,12 @@ def capture_from_text(
             "captured_at": now.isoformat(timespec="seconds"),
             "status": "candidate",
         }
+        if canonical_project_root is not None:
+            candidate["project_root"] = canonical_project_root
         out = FEEDBACK_DIR / f"{candidate_id}.json"
-        out.write_text(
+        atomic_write(
+            out,
             json.dumps(candidate, indent=2, ensure_ascii=False),
-            encoding="utf-8",
         )
     return candidate_id
 
@@ -179,10 +203,12 @@ def _read_feedback_candidate(path: Path) -> dict | None:
     )
     if any(not isinstance(candidate.get(field), str) for field in string_fields):
         return None
+    if "project_root" in candidate and not isinstance(candidate["project_root"], str):
+        return None
     confidence = candidate.get("confidence")
     if (
         isinstance(confidence, bool)
-        or not isinstance(confidence, (int, float))
+        or not isinstance(confidence, int | float)
         or not 0 <= confidence <= 1
     ):
         return None
@@ -226,6 +252,8 @@ _FEEDBACK_TYPE_MAP: dict[str, str] = {
     "preference": "decision",
     "rejection": "decision",
     "requirement": "qa",
+    "concepts": "concept",
+    "workflow": "workflow",
 }
 
 
@@ -248,9 +276,8 @@ def _promote_candidate_unlocked(candidate_id: str, category: str = "patterns") -
     if not candidate_file.exists():
         return None
 
-    try:
-        candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+    candidate = _read_feedback_candidate(candidate_file)
+    if candidate is None:
         return None
 
     # Create knowledge page (containment-checked, flat layout)
@@ -276,14 +303,39 @@ def _promote_candidate_unlocked(candidate_id: str, category: str = "patterns") -
             .replace(chr(13), " ")
         )
 
+    # Map category to canonical type if provided. The `--category` CLI
+    # arg otherwise only affected the (now-flat) path, so an explicit
+    # category was silently ignored in the frontmatter.
+    if category and category != "patterns":
+        type_from_category = {
+            "debugging": "debugging",
+            "qa": "qa",
+            "decisions": "decision",
+            "concepts": "concept",
+            "workflow": "workflow",
+        }.get(category)
+        if type_from_category:
+            page_type = type_from_category
+        else:
+            page_type = _FEEDBACK_TYPE_MAP.get(candidate.get("type", ""), "pattern")
+    else:
+        page_type = _FEEDBACK_TYPE_MAP.get(candidate.get("type", ""), "pattern")
+
+    project_root = candidate.get("project_root")
+    project_root_line = (
+        f"project_root: {json.dumps(project_root, ensure_ascii=False)}\n"
+        if isinstance(project_root, str) and project_root
+        else ""
+    )
     page_content = (
         "---\n"
-        f"type: {_esc(_FEEDBACK_TYPE_MAP.get(candidate['type'], 'pattern'))}\n"
+        f"type: {_esc(page_type)}\n"
         f"feedback_type: {_esc(candidate['type'])}\n"
         f'title: "{_esc("User feedback: " + candidate["text"][:60])}..."\n'
         f'description: "{_esc("Captured from " + candidate["project"] + " session")}"\n'
         f"timestamp: {_esc(candidate['captured_at'])}\n"
         f"project: {_esc(candidate['project'])}\n"
+        f"{project_root_line}"
         f"confidence: {_esc(candidate['confidence'])}\n"
         f"source_authority: user\n"
         "---\n\n"
@@ -292,21 +344,21 @@ def _promote_candidate_unlocked(candidate_id: str, category: str = "patterns") -
         f"## {candidate['type'].title()}\n"
         f"{_esc(candidate['text'])}\n\n"
         f"## Evidence\n"
-        f"- Captured from session `{candidate['session_id']}` "
-        f"in project `{candidate['project']}` "
-        f"({candidate['trigger']})\n"
+        f"- Captured from session `{_esc(candidate['session_id'])}` "
+        f"in project `{_esc(candidate['project'])}` "
+        f"({_esc(candidate['trigger'])})\n"
         f"- Confidence: {candidate['confidence']}\n\n"
         f"## Related\n"
         f"- [[knowledge/feedback/{candidate_id}.json]]\n"
     )
-    page_path.write_text(page_content, encoding="utf-8")
+    atomic_write(page_path, page_content)
 
     # Update candidate status
     candidate["status"] = "promoted"
     candidate["promoted_to"] = page_path.relative_to(ROOT).as_posix()
-    candidate_file.write_text(
+    atomic_write(
+        candidate_file,
         json.dumps(candidate, indent=2, ensure_ascii=False),
-        encoding="utf-8",
     )
 
     return page_path.relative_to(ROOT).as_posix()
@@ -321,7 +373,7 @@ def promote_candidate(candidate_id: str, category: str = "patterns") -> str | No
 def _capture_from_stdin() -> int:
     """OpenCode plugin contract: JSON on stdin, no CLI args.
 
-    Payload: {"text": "...", "session_id": "...", "slug": "...", "trigger": "..."}
+    Payload includes text, session_id, slug, project_root, and trigger.
     """
     payload = read_json_object_bounded(
         sys.stdin,
@@ -337,6 +389,11 @@ def _capture_from_stdin() -> int:
         session_id=str(payload.get("session_id") or "unknown"),
         slug=str(payload.get("slug") or "unknown"),
         trigger=str(payload.get("trigger") or "stdin"),
+        project_root=(
+            str(payload["project_root"])
+            if payload.get("project_root") is not None
+            else None
+        ),
     )
     if cid:
         print(cid)
@@ -363,6 +420,7 @@ def main() -> int:
     capture.add_argument("--session-id", default="unknown")
     capture.add_argument("--slug", default="unknown")
     capture.add_argument("--trigger", default="cli")
+    capture.add_argument("--project-root", default=None)
 
     args = p.parse_args()
 
@@ -399,6 +457,7 @@ def main() -> int:
             session_id=args.session_id,
             slug=args.slug,
             trigger=args.trigger,
+            project_root=args.project_root,
         )
         if cid:
             print(cid)

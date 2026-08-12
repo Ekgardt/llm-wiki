@@ -38,8 +38,11 @@ def test_completed_metadata_only_codex_stop_record_is_not_compile_evidence(tmp_p
         "## [10:00:00] session-end | durable-session\n"
         "- Trigger: `hook`\n"
         "- Project slug: `alpha`\n"
-        f"- Project root JSON: {json.dumps(project_root)}\n\n"
-        "DURABLE_COMPILE_EVIDENCE\n"
+        f"- Project root JSON: {json.dumps(project_root)}\n"
+        "- Tier: `major`\n"
+        "- Source session: `durable-session`\n\n"
+        "**Lessons / patterns**\n"
+        "- Rule: DURABLE_COMPILE_EVIDENCE\n"
         f"{completion}\n"
     )
 
@@ -65,7 +68,8 @@ def test_completed_flush_keeps_scope_but_removes_capture_metadata_and_markers(tm
         "- Transcript: `session.jsonl`\n"
         "- Tier: `major`\n"
         "- Source session: `flush-session`\n\n"
-        "DURABLE_FLUSH_EVIDENCE\n"
+        "**Lessons / patterns**\n"
+        "- Rule: DURABLE_FLUSH_EVIDENCE\n"
         f"{idempotency}\n"
         f"{completion}\n"
         "- `[11:01:00] prompt | flush-session | alpha` COMPACT_PROMPT_NOISE\n"
@@ -79,11 +83,11 @@ def test_completed_flush_keeps_scope_but_removes_capture_metadata_and_markers(tm
     assert "DURABLE_FLUSH_EVIDENCE" in block
     assert "- Project slug: `alpha`" in block
     assert f"- Project root JSON: {json.dumps(project_root)}" in block
+    assert "- Tier: `major`" in block
+    assert "- Source session: `flush-session`" in block
     for noise in (
         "- Trigger:",
         "- Transcript:",
-        "- Tier:",
-        "- Source session:",
         idempotency,
         completion,
         "COMPACT_PROMPT_NOISE",
@@ -92,25 +96,33 @@ def test_completed_flush_keeps_scope_but_removes_capture_metadata_and_markers(tm
         assert noise not in block
 
 
-def test_malformed_heading_metadata_isolated_from_valid_legacy_record():
+def test_malformed_heading_metadata_isolated_from_valid_operational_record(tmp_path):
     import compile_memory
 
+    project_root = str((tmp_path / "valid").resolve())
+    completion = "<!-- llm-wiki-record-complete -->"
     text = (
         "## [12:00:00] session-end | malformed\n"
         "- Project slug = `forged`\n"
         "MALFORMED_SCOPE_MUST_NOT_COMPILE\n"
-        "## [12:01:00] deferred-pre-compact\n"
-        "LEGACY_DURABLE_EVIDENCE\n"
+        "## [12:01:00] deferred-pre-compact | valid-session\n"
+        "- Project slug: `valid`\n"
+        f"- Project root JSON: {json.dumps(project_root)}\n"
+        "- Tier: `major`\n"
+        "- Source session: `valid-session`\n\n"
+        "**Lessons / patterns**\n"
+        "- Rule: VALID_DURABLE_EVIDENCE\n"
+        f"{completion}\n"
     )
 
     blocks = compile_memory.extract_meaningful_blocks(text)
 
     assert len(blocks) == 1
-    assert "LEGACY_DURABLE_EVIDENCE" in blocks[0]
+    assert "VALID_DURABLE_EVIDENCE" in blocks[0]
     assert "MALFORMED_SCOPE_MUST_NOT_COMPILE" not in blocks[0]
 
 
-def test_compiler_sees_all_legitimate_markerless_scoped_heading_records(
+def test_compiler_excludes_markerless_scoped_heading_records(
     tmp_path,
 ):
     import compile_memory
@@ -130,13 +142,7 @@ def test_compiler_sees_all_legitimate_markerless_scoped_heading_records(
 
     blocks = compile_memory.extract_meaningful_blocks(text)
 
-    assert len(blocks) == 2
-    assert "BETA_DURABLE_EVIDENCE" in blocks[0]
-    assert f"- Project root JSON: {json.dumps(beta_root)}" in blocks[0]
-    assert "ALPHA_DURABLE_EVIDENCE" not in blocks[0]
-    assert "ALPHA_DURABLE_EVIDENCE" in blocks[1]
-    assert f"- Project root JSON: {json.dumps(alpha_root)}" in blocks[1]
-    assert "BETA_DURABLE_EVIDENCE" not in blocks[1]
+    assert blocks == []
 
 
 # ---------------------------------------------------------------------------

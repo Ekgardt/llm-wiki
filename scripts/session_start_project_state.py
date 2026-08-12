@@ -44,7 +44,10 @@ import json
 import os
 import re
 import stat
+import subprocess
 import sys
+import threading
+import time
 import traceback
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
@@ -59,9 +62,16 @@ if hasattr(sys.stdout, "reconfigure"):
     except (AttributeError, io.UnsupportedOperation):
         pass
 
-from memory_state import read_json_object_bounded  # noqa: E402
+from memory_state import (  # noqa: E402
+    _is_unicode_noncharacter,
+    bind_atomic_writes_to_directory,
+    parse_frontmatter_scalar,
+    read_json_object_bounded,
+)
 
 MAX_CONTEXT_CHARS = 2400  # keep the injection compact
+LINE_TRUNCATION_MARKER = "... (line truncated)"
+CONTEXT_TRUNCATION_MARKER = "... (context truncated)"
 MAX_BOOTSTRAP_READ_CHARS = 8192
 HOOK_INPUT_MAX_BYTES = 64_000
 HOOK_PROJECT_FIELDS = ("cwd", "project_dir")
@@ -89,23 +99,36 @@ MAX_RANDOM_SLUG_ATTEMPTS = 8
 
 # Ownership metadata used to detect slug collisions. JSON is canonical;
 # the backtick form remains a read-only fallback for existing state files.
+JSON_STRING_VALUE_PATTERN = (
+    r'"(?:[^"\\\x00-\x1f]|\\(?:["\\/bfnrt]|u[0-9A-Fa-f]{4}))*"'
+)
 STATE_SOURCE_LINE_RE = re.compile(
-    r"^- Project root:\s*`([^`]+)`\s*$", re.MULTILINE
+    r"^- Project root[ \t]*:[ \t]*`([^`\r\n]+)`[ \t]*$", re.MULTILINE
 )
 STATE_SOURCE_PREFIX_RE = re.compile(
-    r"^- Project root(?! JSON)\b.*$", re.MULTILINE
+    r"^- Project root[ \t]*:[ \t]*`[^`\r\n]+`[ \t]*$", re.MULTILINE
+)
+STATE_SOURCE_JSON_DECLARATION_RE = re.compile(
+    r"^- Project root JSON[ \t]*:", re.MULTILINE
 )
 STATE_SOURCE_JSON_PREFIX_RE = re.compile(
-    r"^- Project root JSON\b.*$", re.MULTILINE
+    rf"^- Project root JSON[ \t]*:[ \t]*{JSON_STRING_VALUE_PATTERN}[ \t]*$",
+    re.MULTILINE,
 )
 STATE_SOURCE_JSON_LINE_RE = re.compile(
-    r"^- Project root JSON:\s*(.+?)\s*$", re.MULTILINE
+    rf"^- Project root JSON[ \t]*:[ \t]*({JSON_STRING_VALUE_PATTERN})[ \t]*$",
+    re.MULTILINE,
 )
 STATE_RUNTIME_SLUG_JSON_PREFIX_RE = re.compile(
-    r"^- Runtime slug JSON\b.*$", re.MULTILINE
+    rf"^- Runtime slug JSON[ \t]*:[ \t]*{JSON_STRING_VALUE_PATTERN}[ \t]*$",
+    re.MULTILINE,
+)
+STATE_RUNTIME_SLUG_JSON_DECLARATION_RE = re.compile(
+    r"^- Runtime slug JSON[ \t]*:", re.MULTILINE
 )
 STATE_RUNTIME_SLUG_JSON_LINE_RE = re.compile(
-    r"^- Runtime slug JSON:\s*(.+?)\s*$", re.MULTILINE
+    rf"^- Runtime slug JSON[ \t]*:[ \t]*({JSON_STRING_VALUE_PATTERN})[ \t]*$",
+    re.MULTILINE,
 )
 STATE_H1_HEADING_RE = re.compile(r"^ {0,3}#(?!#)(?:[ \t]+|$)")
 STATE_H2_HEADING_RE = re.compile(r"^ {0,3}##(?!#)(?:[ \t]+|$)")
@@ -130,6 +153,69 @@ BOOTSTRAP_STATE_PATH_JSON_PREFIX_RE = re.compile(
 BOOTSTRAP_STATE_PATH_JSON_LINE_RE = re.compile(
     r"^project_state_path_json:\s*(.+?)\s*$", re.MULTILINE
 )
+BOOTSTRAP_GIT_HEAD_JSON_PREFIX_RE = re.compile(
+    r"^git_head_json\b.*$", re.MULTILINE
+)
+BOOTSTRAP_GIT_HEAD_JSON_LINE_RE = re.compile(
+    r"^git_head_json:\s*(.+?)\s*$", re.MULTILINE
+)
+GIT_OBJECT_ID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+SOURCE_FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
+BOOTSTRAP_SCHEMA_VERSION = 2
+BOOTSTRAP_GIT_TIMEOUT_SECONDS = 2.0
+MAX_GIT_IDENTITY_OUTPUT_CHARS = 32 * 1024
+MAX_GIT_STDERR_BYTES = 32 * 1024
+PROCESS_IO_CHUNK_BYTES = 8 * 1024
+_GIT_EXECUTABLE_UNSET = object()
+_TRUSTED_STATE_UNSET = object()
+_GIT_EXECUTABLE_UNSET = object()
+MAX_GIT_STDERR_BYTES = 32 * 1024
+PROCESS_IO_CHUNK_BYTES = 8 * 1024
+BOOTSTRAP_REQUIRED_FRONTMATTER_KEYS = frozenset(
+    {
+        "type",
+        "project_slug_json",
+        "project_root_json",
+        "project_state_path_json",
+        "git_head_json",
+        "bootstrap_schema_json",
+        "source_fingerprint_json",
+    }
+)
+BOOTSTRAP_ALLOWED_FRONTMATTER_KEYS = BOOTSTRAP_REQUIRED_FRONTMATTER_KEYS | {
+    "title",
+    "description",
+    "timestamp",
+}
+GIT_REPOSITORY_ROUTING_ENV = frozenset(
+    {
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_ATTR_SOURCE",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_CONFIG",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_DIR",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+        "GIT_GRAFT_FILE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_INTERNAL_SUPER_PREFIX",
+        "GIT_NAMESPACE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_PREFIX",
+        "GIT_QUARANTINE_PATH",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_SHALLOW_FILE",
+        "GIT_SUPER_PREFIX",
+        "GIT_WORK_TREE",
+    }
+)
 STATE_TEMPLATE_PLACEHOLDERS = (
     "<Project Name>",
     "<what this project is, in one sentence>",
@@ -143,6 +229,80 @@ STATE_TEMPLATE_PLACEHOLDER_RE = re.compile(
         for placeholder in sorted(STATE_TEMPLATE_PLACEHOLDERS, key=len, reverse=True)
     )
 )
+STATE_SECTION_TEMPLATE_PLACEHOLDERS = {
+    "where we left off": (
+        '<Most recent context — "we were working on X, stopped at Y, next step is Z". '
+        "Keep to ≤ 5 bullets. This is what gets injected at session start, so it "
+        "should read like a handoff note to future-you.>"
+    ),
+    "recent decisions": (
+        "<Architectural or scope decisions specific to this project. Include the "
+        "*why*. Cross-cutting decisions belong in `knowledge/notes/`, not here.>"
+    ),
+    "open threads": (
+        "<Unresolved questions, pending investigations, TODOs that need context to "
+        "understand. Close them when resolved.>"
+    ),
+    "links": (
+        "<Wikilinks to related pages in this vault: concepts used, sibling projects, "
+        "raw sources. Wikilinks only — external URLs belong inside the content above "
+        "with context.>"
+    ),
+}
+STATE_EDITORIAL_TEMPLATE = (
+    "This page is per-project state — **read and auto-created** by the SessionStart "
+    "hook when a markered folder is opened; its **content** is edited by Claude or "
+    "the user during/after the session (the SessionEnd hook only tags the shared "
+    "daily log, it does not write state.md). Content decisions (what to keep, what "
+    "to archive) follow [[Global Multi-Project Migration Plan]] conventions. Keep "
+    "this page to ≤ 1 screen; move detail into sibling pages under the same project "
+    "folder."
+)
+STATE_PENDING_DESCRIPTION_RE = re.compile(
+    r"^One-sentence summary:\s*"
+    r"\(new project at .+, pending description\)\.?$"
+)
+STATE_FENCE_OPEN_RE = re.compile(r"^ {0,3}(?P<run>`{3,}|~{3,})(?P<rest>.*)$")
+STATE_RAW_TYPE_1_RE = re.compile(
+    r"^ {0,3}<(?P<tag>script|style|pre|textarea)(?=[ \t/>]|$)",
+    re.IGNORECASE,
+)
+STATE_RAW_TYPE_6_RE = re.compile(
+    r"^ {0,3}</?(?:address|article|aside|base|basefont|blockquote|body|caption|"
+    r"center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|"
+    r"figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|"
+    r"hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|"
+    r"ol|optgroup|option|p|param|search|section|summary|table|tbody|td|"
+    r"tfoot|th|thead|title|tr|track|ul)(?=[ \t\f\r/>]|$)",
+    re.IGNORECASE,
+)
+STATE_RAW_COMPLETE_TAG_RE = re.compile(
+    r"^ {0,3}</?[A-Za-z][A-Za-z0-9-]*(?:[ \t]+[^<>]*)?/?>[ \t]*$"
+)
+STATE_HANDOFF_PROCESS_STATUS_RE = re.compile(
+    r"^(?:[-*]\s*)?.*\bPID\s*[:#=]?\s*(?P<pid>\d+)\b.*\b"
+    r"(?:is|was|remains?)\s+(?:still\s+)?(?:listed\s+as\s+)?"
+    r"(?:active|alive|running)\.?$",
+    re.IGNORECASE,
+)
+STATE_HANDOFF_BARE_PROCESS_PID_RE = re.compile(
+    r"^(?:[-*]\s*)?"
+    r"(?:FreeCAD(?:[ \t]+GUI)?|(?:[\w.-]+[ \t]+){1,4}"
+    r"(?:process|server|daemon|application|app))"
+    r"[ \t]+PID\s*[:#=]?\s*(?P<pid>\d+)\s*[.!]?$",
+    re.IGNORECASE,
+)
+STATE_HANDOFF_STANDALONE_PID_RE = re.compile(
+    r"^(?:[-*]\s*)?PID\s*:\s*(?P<pid>\d+)\s*[.!]?$",
+    re.IGNORECASE,
+)
+STATE_HANDOFF_TIME_RE = re.compile(
+    r"^(?:[-*]\s*)?(?:last\s+(?:updated|seen|active|activity)|updated\s+at|as\s+of)"
+    r"\s*[:=-]\s*(?:\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2})(?:[^\r\n]*)$",
+    re.IGNORECASE,
+)
+MAX_PROCESS_ID = 2_147_483_647
+MAX_PROCESS_ID_DIGITS = 10
 
 # Project markers — presence of ANY of these signals "this folder is a real
 # project", gating auto-creation of state.md. Without a marker, the hook
@@ -192,6 +352,23 @@ class ProjectAliasResolution:
 class RuntimeSlugMetadata:
     present: bool
     value: str | None
+
+
+@dataclass(frozen=True)
+class BoundedProcessResult:
+    returncode: int
+    stdout: bytes
+    stderr: bytes
+
+
+@dataclass(frozen=True)
+class ProjectStateContextSnapshot:
+    state_path: Path
+    slug: str
+    project_root: Path
+    trusted_state_body: str | None
+    trusted_state_parts: tuple[str, str, str] | None
+    bootstrap: str
 
 
 def _resolve_state_root() -> Path | None:
@@ -341,8 +518,26 @@ def _path_hash_suffix(project_dir: Path, length: int = PATH_HASH_SUFFIX_LEN) -> 
 
 def _path_comparison_key(path: Path, platform: str | None = None) -> str:
     """Return a filesystem-appropriate key without erasing POSIX case."""
-    key = path.as_posix()
-    return key.casefold() if (platform or sys.platform) == "win32" else key
+    if (platform or sys.platform) == "win32":
+        return PureWindowsPath(str(path)).as_posix().casefold()
+    return PurePosixPath(str(path)).as_posix()
+
+
+def _same_native_project_root(first: object, second: object) -> bool:
+    """Compare two validated absolute project roots using host semantics."""
+    if (
+        not isinstance(first, str)
+        or not isinstance(second, str)
+        or not _is_native_absolute_root(first)
+        or not _is_native_absolute_root(second)
+    ):
+        return False
+    try:
+        return _path_comparison_key(Path(first).resolve()) == _path_comparison_key(
+            Path(second).resolve()
+        )
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def _path_is_within(candidate: Path, root: Path) -> bool:
@@ -423,27 +618,123 @@ def _is_native_absolute_root(root: str, platform: str | None = None) -> bool:
     if (
         not root
         or len(root) > MAX_PROJECT_ROOT_CHARS
-        or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in root)
+        or any(
+            ord(char) < 32
+            or 127 <= ord(char) <= 159
+            or ord(char) in {0x2028, 0x2029}
+            or 0xD800 <= ord(char) <= 0xDFFF
+            or _is_unicode_noncharacter(ord(char))
+            for char in root
+        )
     ):
         return False
     path_type = PureWindowsPath if (platform or sys.platform) == "win32" else PurePosixPath
     return path_type(root).is_absolute()
 
 
+def _state_visible_lines(body: str, *, hide_fences: bool = True) -> list[str]:
+    """Return same-length lines with non-visible Markdown constructs hidden."""
+    lines = body.splitlines()
+    visible = list(lines)
+    start = 0
+    if lines and lines[0].strip() == "---":
+        closing = next(
+            (index for index, line in enumerate(lines[1:], 1) if line.strip() == "---"),
+            None,
+        )
+        if closing is None:
+            return [""] * len(lines)
+        for index in range(closing + 1):
+            visible[index] = ""
+        start = closing + 1
+
+    fence: tuple[str, int] | None = None
+    in_comment = False
+    raw_closer: str | None = None
+    blank_terminated_raw = False
+    for index in range(start, len(lines)):
+        line = lines[index]
+        if fence is not None:
+            marker, width = fence
+            closing_fence = re.fullmatch(
+                rf" {{0,3}}{re.escape(marker)}{{{width},}}[ \t]*",
+                line,
+            )
+            if closing_fence:
+                fence = None
+            visible[index] = "" if hide_fences or closing_fence else line
+            continue
+        if raw_closer is not None:
+            if raw_closer.casefold() in line.casefold():
+                raw_closer = None
+            visible[index] = ""
+            continue
+        if blank_terminated_raw:
+            if not line.strip(" \t"):
+                blank_terminated_raw = False
+            visible[index] = ""
+            continue
+
+        pieces: list[str] = []
+        cursor = 0
+        while cursor < len(line):
+            if in_comment:
+                comment_end = line.find("-->", cursor)
+                if comment_end < 0:
+                    cursor = len(line)
+                    break
+                in_comment = False
+                cursor = comment_end + 3
+                continue
+            comment_start = line.find("<!--", cursor)
+            if comment_start < 0:
+                pieces.append(line[cursor:])
+                break
+            pieces.append(line[cursor:comment_start])
+            in_comment = True
+            cursor = comment_start + 4
+        structural = "".join(pieces)
+        opening = STATE_FENCE_OPEN_RE.fullmatch(structural)
+        if opening is not None:
+            run = opening.group("run")
+            if not (run.startswith("`") and "`" in opening.group("rest")):
+                fence = (run[0], len(run))
+                structural = ""
+        if structural:
+            type_1 = STATE_RAW_TYPE_1_RE.match(structural)
+            if type_1 is not None:
+                closer = f"</{type_1.group('tag')}>"
+                if closer.casefold() not in structural[type_1.end() :].casefold():
+                    raw_closer = closer
+                structural = ""
+            else:
+                stripped = structural.lstrip(" ")
+                indent = len(structural) - len(stripped)
+                if indent <= 3 and stripped.startswith("<?"):
+                    if "?>" not in stripped[2:]:
+                        raw_closer = "?>"
+                    structural = ""
+                elif indent <= 3 and stripped.startswith("<![CDATA["):
+                    if "]]>" not in stripped[len("<![CDATA[") :]:
+                        raw_closer = "]]>"
+                    structural = ""
+                elif indent <= 3 and re.match(r"<![A-Z]", stripped):
+                    if ">" not in stripped[2:]:
+                        raw_closer = ">"
+                    structural = ""
+                elif (
+                    STATE_RAW_TYPE_6_RE.match(structural)
+                    or STATE_RAW_COMPLETE_TAG_RE.fullmatch(structural)
+                ):
+                    blank_terminated_raw = True
+                    structural = ""
+        visible[index] = structural
+    return visible
+
+
 def _recorded_project_root(body: str) -> str | None:
     """Return strict JSON ownership, or legacy ownership only when absent."""
-    legacy_metadata = STATE_SOURCE_PREFIX_RE.findall(body)
-    legacy_matches = STATE_SOURCE_LINE_RE.findall(body)
-    if len(legacy_metadata) > 1:
-        return None
-    legacy = (
-        legacy_matches[0].strip()
-        if len(legacy_metadata) == len(legacy_matches) == 1
-        else None
-    )
-    if legacy is not None and not _is_native_absolute_root(legacy):
-        return None
-
+    body = "\n".join(_state_visible_lines(body))
     json_metadata = STATE_SOURCE_JSON_PREFIX_RE.findall(body)
     if json_metadata:
         matches = STATE_SOURCE_JSON_LINE_RE.findall(body)
@@ -455,24 +746,31 @@ def _recorded_project_root(body: str) -> str | None:
             return None
         if not isinstance(recorded, str) or not _is_native_absolute_root(recorded):
             return None
-        if legacy is not None:
-            try:
-                if _path_comparison_key(Path(legacy).resolve()) != _path_comparison_key(
-                    Path(recorded).resolve()
-                ):
-                    return None
-            except (OSError, RuntimeError, ValueError):
-                return None
         return recorded
+    if STATE_SOURCE_JSON_DECLARATION_RE.search(body):
+        return None
 
+    legacy_metadata = STATE_SOURCE_PREFIX_RE.findall(body)
+    legacy_matches = STATE_SOURCE_LINE_RE.findall(body)
+    if len(legacy_metadata) > 1:
+        return None
+    legacy = (
+        legacy_matches[0].strip()
+        if len(legacy_metadata) == len(legacy_matches) == 1
+        else None
+    )
+    if legacy is not None and not _is_native_absolute_root(legacy):
+        return None
     return legacy if len(legacy_metadata) == len(legacy_matches) == 1 else None
 
 
 def _runtime_slug_metadata(body: str) -> RuntimeSlugMetadata:
     """Distinguish absent runtime metadata from a present-invalid claim."""
+    body = "\n".join(_state_visible_lines(body))
     metadata = STATE_RUNTIME_SLUG_JSON_PREFIX_RE.findall(body)
     if not metadata:
-        return RuntimeSlugMetadata(False, None)
+        malformed_declaration = STATE_RUNTIME_SLUG_JSON_DECLARATION_RE.search(body)
+        return RuntimeSlugMetadata(malformed_declaration is not None, None)
     matches = STATE_RUNTIME_SLUG_JSON_LINE_RE.findall(body)
     if len(metadata) != 1 or len(matches) != 1:
         return RuntimeSlugMetadata(True, None)
@@ -495,8 +793,8 @@ def _render_runtime_slug_metadata(body: str, slug: str) -> str:
     lines = body.splitlines(keepends=True)
     metadata_indexes = [
         index
-        for index, line in enumerate(lines)
-        if STATE_RUNTIME_SLUG_JSON_PREFIX_RE.fullmatch(line.rstrip("\r\n"))
+        for index, line in enumerate(_state_visible_lines(body))
+        if STATE_RUNTIME_SLUG_JSON_PREFIX_RE.fullmatch(line)
     ]
     if metadata_indexes:
         first = metadata_indexes[0]
@@ -509,8 +807,8 @@ def _render_runtime_slug_metadata(body: str, slug: str) -> str:
     owner_index = next(
         (
             index
-            for index, line in enumerate(lines)
-            if STATE_SOURCE_JSON_PREFIX_RE.fullmatch(line.rstrip("\r\n"))
+            for index, line in enumerate(_state_visible_lines(body))
+            if STATE_SOURCE_JSON_PREFIX_RE.fullmatch(line)
         ),
         None,
     )
@@ -518,8 +816,8 @@ def _render_runtime_slug_metadata(body: str, slug: str) -> str:
         owner_index = next(
             (
                 index
-                for index, line in enumerate(lines)
-                if STATE_SOURCE_LINE_RE.fullmatch(line.rstrip("\r\n"))
+                for index, line in enumerate(_state_visible_lines(body))
+                if STATE_SOURCE_LINE_RE.fullmatch(line)
             ),
             None,
         )
@@ -536,18 +834,170 @@ def _render_runtime_slug_metadata(body: str, slug: str) -> str:
     return "".join(lines)
 
 
-def _read_state_ownership_body(state_path: Path) -> str | None:
-    """Read enough state text to prove ownership without unbounded allocation."""
+def _is_reparse_point(metadata) -> bool:
+    return bool(
+        getattr(metadata, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    )
+
+
+def _open_windows_state_descriptor(path: Path) -> int:
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    path_text = os.path.abspath(path)
+    if not path_text.startswith("\\\\?\\"):
+        path_text = (
+            "\\\\?\\UNC\\" + path_text[2:]
+            if path_text.startswith("\\\\")
+            else "\\\\?\\" + path_text
+        )
+    handle = create_file(
+        path_text,
+        0x80000000,  # GENERIC_READ
+        0x00000001 | 0x00000002,  # FILE_SHARE_READ | FILE_SHARE_WRITE
+        None,
+        3,  # OPEN_EXISTING
+        0x00200000,  # FILE_FLAG_OPEN_REPARSE_POINT
+        None,
+    )
+    invalid = ctypes.c_void_p(-1).value
+    if handle in {None, invalid}:
+        error = ctypes.get_last_error()
+        raise OSError(error, f"CreateFileW failed with Windows error {error}")
     try:
-        with state_path.open(
+        return msvcrt.open_osfhandle(
+            int(handle),
+            os.O_RDONLY | getattr(os, "O_BINARY", 0),
+        )
+    except BaseException:
+        kernel32.CloseHandle(handle)
+        raise
+
+
+def _open_state_descriptor(state_path: Path, directory_bound) -> int:
+    if os.name == "nt":
+        return _open_windows_state_descriptor(state_path)
+    if os.name != "posix" or directory_bound.descriptor is None:
+        raise OSError("identity-bound no-follow state reads are unsupported")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    return os.open(state_path.name, flags, dir_fd=directory_bound.descriptor)
+
+
+def _state_path_metadata(state_path: Path, directory_bound):
+    if os.name == "posix" and directory_bound.descriptor is not None:
+        return os.stat(
+            state_path.name,
+            dir_fd=directory_bound.descriptor,
+            follow_symlinks=False,
+        )
+    return state_path.lstat()
+
+
+def _state_metadata_is_regular(metadata) -> bool:
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and not stat.S_ISLNK(metadata.st_mode)
+        and not _is_reparse_point(metadata)
+    )
+
+
+def _read_state_ownership_body(
+    state_path: Path,
+    *,
+    _directory_bound=None,
+    _expected_metadata=None,
+) -> str | None:
+    """Read state through a no-follow descriptor bound to its lexical parent."""
+    state_path = Path(os.path.abspath(state_path))
+    if _directory_bound is None:
+        try:
+            with bind_atomic_writes_to_directory(state_path.parent) as bound:
+                return _read_state_ownership_body(
+                    state_path,
+                    _directory_bound=bound,
+                    _expected_metadata=_expected_metadata,
+                )
+        except (OSError, RuntimeError, UnicodeError, ValueError):
+            return None
+
+    descriptor: int | None = None
+    handle = None
+    try:
+        _directory_bound.validate_path()
+        metadata = _state_path_metadata(state_path, _directory_bound)
+        if (
+            not _state_metadata_is_regular(metadata)
+            or _expected_metadata is not None
+            and not os.path.samestat(_expected_metadata, metadata)
+        ):
+            return None
+        descriptor = _open_state_descriptor(state_path, _directory_bound)
+        opened = os.fstat(descriptor)
+        if not _state_metadata_is_regular(opened) or not os.path.samestat(
+            metadata,
+            opened,
+        ):
+            return None
+        handle = os.fdopen(
+            descriptor,
             "r",
             encoding="utf-8",
             errors="strict",
-        ) as handle:
-            body = handle.read(MAX_PROJECT_STATE_OWNERSHIP_CHARS + 1)
-    except (OSError, UnicodeError):
+            closefd=True,
+        )
+        descriptor = None
+        body = handle.read(MAX_PROJECT_STATE_OWNERSHIP_CHARS + 1)
+        opened_after = os.fstat(handle.fileno())
+        _directory_bound.validate_path()
+        current = _state_path_metadata(state_path, _directory_bound)
+    except (OSError, RuntimeError, UnicodeError, ValueError):
         return None
+    finally:
+        if handle is not None:
+            handle.close()
+        elif descriptor is not None:
+            os.close(descriptor)
     if len(body) > MAX_PROJECT_STATE_OWNERSHIP_CHARS:
+        return None
+    if (
+        not _state_metadata_is_regular(opened_after)
+        or not _state_metadata_is_regular(current)
+        or not os.path.samestat(opened, opened_after)
+        or not os.path.samestat(opened_after, current)
+        or metadata.st_size != opened.st_size
+        or opened.st_size != opened_after.st_size
+        or opened_after.st_size != current.st_size
+        or getattr(metadata, "st_mtime_ns", None)
+        != getattr(opened_after, "st_mtime_ns", None)
+        or getattr(opened_after, "st_mtime_ns", None)
+        != getattr(current, "st_mtime_ns", None)
+        or stat.S_IMODE(metadata.st_mode) != stat.S_IMODE(opened_after.st_mode)
+        or stat.S_IMODE(opened_after.st_mode) != stat.S_IMODE(current.st_mode)
+        or getattr(metadata, "st_file_attributes", 0)
+        != getattr(opened_after, "st_file_attributes", 0)
+        or getattr(opened_after, "st_file_attributes", 0)
+        != getattr(current, "st_file_attributes", 0)
+        or min(opened.st_nlink, opened_after.st_nlink, current.st_nlink) < 1
+    ):
         return None
     return body
 
@@ -575,47 +1025,77 @@ def _state_path_owns_project(
 def _scan_project_states(projects_dir: Path) -> list[ProjectStateEntry]:
     """Return every contained state, or raise when inventory is incomplete."""
     try:
-        directories = projects_dir.iterdir()
+        projects_dir = Path(os.path.abspath(projects_dir))
         entries: list[ProjectStateEntry] = []
         seen: set[Path] = set()
         scanned = 0
-        for directory in directories:
-            scanned += 1
-            if scanned > MAX_PROJECT_STATE_ENTRIES:
-                raise RuntimeError("project state inventory entry limit exceeded")
-            if directory.name == "_template":
-                continue
-            try:
-                directory_mode = directory.stat().st_mode
-            except FileNotFoundError:
-                continue
-            if not stat.S_ISDIR(directory_mode):
-                continue
-            state_path = _resolve_under(directory / "state.md", projects_dir)
-            if state_path in seen:
-                continue
-            try:
-                state_mode = state_path.stat().st_mode
-            except FileNotFoundError:
-                continue
-            if not stat.S_ISREG(state_mode):
-                continue
-            body = _read_state_ownership_body(state_path)
-            if body is None:
-                raise OSError(f"project state inventory unreadable: {state_path}")
-            recorded = _recorded_project_root(body)
-            recorded_root = Path(recorded).resolve() if recorded is not None else None
-            runtime_metadata = _runtime_slug_metadata(body)
-            if runtime_metadata.present and runtime_metadata.value is None:
-                raise RuntimeError(f"project state runtime alias is invalid: {state_path}")
-            seen.add(state_path)
-            entries.append(
-                ProjectStateEntry(
-                    state_path=state_path,
-                    project_root=recorded_root,
-                    runtime_slug=runtime_metadata.value,
+        with bind_atomic_writes_to_directory(projects_dir) as projects_bound:
+            projects_bound.validate_path()
+            for directory in projects_dir.iterdir():
+                scanned += 1
+                if scanned > MAX_PROJECT_STATE_ENTRIES:
+                    raise RuntimeError("project state inventory entry limit exceeded")
+                if directory.name == "_template":
+                    continue
+                projects_bound.validate_path()
+                try:
+                    lexical = directory.lstat()
+                except FileNotFoundError:
+                    continue
+                lexical_identity = (
+                    lexical.st_dev,
+                    lexical.st_ino,
+                    stat.S_IFMT(lexical.st_mode),
                 )
-            )
+                if stat.S_ISLNK(lexical.st_mode) or _is_reparse_point(lexical):
+                    raise OSError("project state directory is a link or reparse point")
+                if not stat.S_ISDIR(lexical.st_mode):
+                    continue
+                with bind_atomic_writes_to_directory(directory) as directory_bound:
+                    if directory_bound.identity != lexical_identity:
+                        raise OSError("project state directory changed while binding")
+                    projects_bound.validate_path()
+                    state_path = directory / "state.md"
+                    if state_path in seen:
+                        continue
+                    try:
+                        state_metadata = _state_path_metadata(
+                            state_path,
+                            directory_bound,
+                        )
+                    except FileNotFoundError:
+                        continue
+                    if not _state_metadata_is_regular(state_metadata):
+                        raise OSError(
+                            "project state inventory entry is not a regular file"
+                        )
+                    body = _read_state_ownership_body(
+                        state_path,
+                        _directory_bound=directory_bound,
+                        _expected_metadata=state_metadata,
+                    )
+                    if body is None:
+                        raise OSError(
+                            f"project state inventory unreadable: {state_path}"
+                        )
+                    recorded = _recorded_project_root(body)
+                    recorded_root = (
+                        Path(recorded).resolve() if recorded is not None else None
+                    )
+                    runtime_metadata = _runtime_slug_metadata(body)
+                    if runtime_metadata.present and runtime_metadata.value is None:
+                        raise RuntimeError(
+                            f"project state runtime alias is invalid: {state_path}"
+                        )
+                    seen.add(state_path)
+                    entries.append(
+                        ProjectStateEntry(
+                            state_path=state_path,
+                            project_root=recorded_root,
+                            runtime_slug=runtime_metadata.value,
+                        )
+                    )
+            projects_bound.validate_path()
         runtime_claims: dict[str, Path] = {}
         for entry in entries:
             key = _slug_identity_key(entry.runtime_slug)
@@ -861,16 +1341,22 @@ def resolve_project_alias(
         ):
             matches: list[tuple[str, ProjectStateEntry]] = []
             for entry in _scan_project_states(projects_dir):
-                if entry.runtime_slug is not None:
-                    entry_slug = _sanitize(entry.runtime_slug)
-                else:
-                    folder = entry.state_path.parent.name
-                    entry_slug = _sanitize(folder) if is_canonical_project_slug(folder) else ""
+                entry_slug = (
+                    _sanitize(entry.runtime_slug)
+                    if entry.runtime_slug is not None
+                    else ""
+                )
                 if _slug_identity_key(entry_slug) == requested_key:
                     matches.append((entry_slug, entry))
             if len(matches) != 1 or matches[0][1].project_root is None:
                 return None
             resolved_slug, entry = matches[0]
+            if _read_trusted_state_body(
+                entry.state_path,
+                resolved_slug,
+                entry.project_root,
+            ) is None:
+                return None
             return ProjectAliasResolution(
                 slug=resolved_slug,
                 project_root=entry.project_root,
@@ -960,19 +1446,37 @@ def _render_new_state(state_template: Path, slug: str, project_dir: Path) -> str
         lambda match: replacements[match.group(0)],
         tmpl,
     )
-    if not STATE_SOURCE_JSON_PREFIX_RE.search(filled):
+    visible_lines = _state_visible_lines(filled)
+    if not STATE_SOURCE_JSON_PREFIX_RE.search("\n".join(visible_lines)):
         json_line = f"- Project root JSON: {root_json}\n"
-        legacy = STATE_SOURCE_LINE_RE.search(filled)
-        if legacy:
-            filled = filled[:legacy.start()] + json_line + filled[legacy.start():]
+        legacy_index = next(
+            (
+                index
+                for index, visible in enumerate(visible_lines)
+                if STATE_SOURCE_LINE_RE.fullmatch(visible)
+            ),
+            None,
+        )
+        if legacy_index is not None:
+            lines = filled.splitlines(keepends=True)
+            lines.insert(legacy_index, json_line)
+            filled = "".join(lines)
         else:
             filled = filled.rstrip() + "\n\n## Source\n" + json_line
+    if STATE_SOURCE_JSON_PREFIX_RE.search("\n".join(_state_visible_lines(filled))):
+        lines = filled.splitlines(keepends=True)
+        filled = "".join(
+            line
+            for line, visible in zip(lines, _state_visible_lines(filled), strict=False)
+            if not STATE_SOURCE_PREFIX_RE.fullmatch(visible)
+        )
     return _render_runtime_slug_metadata(filled, slug)
 
 
 def _rendered_state_claim_is_valid(body: str, slug: str, project_dir: Path) -> bool:
     """Require exact canonical ownership and alias metadata before publication."""
-    if len(STATE_SOURCE_JSON_PREFIX_RE.findall(body)) != 1:
+    visible = "\n".join(_state_visible_lines(body))
+    if len(STATE_SOURCE_JSON_PREFIX_RE.findall(visible)) != 1:
         return False
     recorded_root = _recorded_project_root(body)
     runtime_metadata = _runtime_slug_metadata(body)
@@ -1054,11 +1558,349 @@ def confirm_project_identity(
         return None
 
 
-def _bootstrap_project_state(vault: Path, project_dir: Path, state_path: Path) -> None:
+def _project_git_marker_status(project_root: Path) -> bool | None:
+    """Return True for a safe .git entry, False when absent, None when unsafe."""
+    marker = project_root / ".git"
+    try:
+        metadata = marker.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        or not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode))
+    ):
+        return None
+    return True
+
+
+def _absolute_path_entries(environment: Mapping[str, str]) -> tuple[str, ...]:
+    raw_path = environment.get("PATH", os.defpath)
+    entries: list[str] = []
+    for raw_entry in raw_path.split(os.pathsep):
+        if not raw_entry:
+            continue
+        try:
+            entry = Path(raw_entry)
+            if entry.is_absolute():
+                entries.append(str(entry))
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return tuple(entries)
+
+
+def _path_is_regular_non_reparse(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return False
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    return bool(
+        stat.S_ISREG(metadata.st_mode)
+        and not stat.S_ISLNK(metadata.st_mode)
+        and not attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    )
+
+
+def _resolve_git_executable(
+    environment: Mapping[str, str] | None = None,
+) -> Path | None:
+    """Resolve Git without consulting relative PATH entries or project cwd."""
+    source = os.environ if environment is None else environment
+    if os.name == "nt":
+        raw_extensions = source.get("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+        extensions = tuple(
+            extension.casefold()
+            for extension in raw_extensions.split(os.pathsep)
+            if extension.startswith(".")
+            and "/" not in extension
+            and "\\" not in extension
+        )
+        names = tuple(f"git{extension}" for extension in extensions)
+    else:
+        names = ("git",)
+
+    for raw_directory in _absolute_path_entries(source):
+        for name in names:
+            candidate = Path(raw_directory) / name
+            if not _path_is_regular_non_reparse(candidate):
+                continue
+            if os.name != "nt" and not os.access(candidate, os.X_OK):
+                continue
+            try:
+                resolved = candidate.resolve(strict=True)
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if resolved.is_absolute() and _path_is_regular_non_reparse(resolved):
+                return resolved
+    return None
+
+
+def _run_bounded_process(
+    command: list[str | Path],
+    *,
+    cwd: Path,
+    env: Mapping[str, str],
+    timeout: float,
+    max_stdout_bytes: int,
+    max_stderr_bytes: int,
+) -> BoundedProcessResult | None:
+    """Run a child while draining both pipes without unbounded buffering."""
+    if (
+        not command
+        or timeout <= 0
+        or max_stdout_bytes < 0
+        or max_stderr_bytes < 0
+    ):
+        return None
+    run_kwargs: dict[str, object] = {}
+    if os.name == "nt":
+        run_kwargs["creationflags"] = getattr(
+            subprocess,
+            "CREATE_NO_WINDOW",
+            0x08000000,
+        )
+    try:
+        process = subprocess.Popen(
+            [str(part) for part in command],
+            cwd=str(cwd),
+            env=dict(env),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            close_fds=True,
+            **run_kwargs,
+        )
+    except (OSError, ValueError):
+        return None
+    if process.stdout is None or process.stderr is None:
+        try:
+            process.kill()
+        except OSError:
+            pass
+        return None
+
+    stdout = bytearray()
+    stderr = bytearray()
+    failed = threading.Event()
+
+    def terminate() -> None:
+        if failed.is_set():
+            return
+        failed.set()
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+    def drain(stream, destination: bytearray, limit: int) -> None:
+        try:
+            while not failed.is_set():
+                chunk = stream.read(
+                    min(PROCESS_IO_CHUNK_BYTES, max(1, limit - len(destination) + 1))
+                )
+                if not chunk:
+                    return
+                remaining = limit - len(destination)
+                if len(chunk) > remaining:
+                    if remaining > 0:
+                        destination.extend(chunk[:remaining])
+                    terminate()
+                    return
+                destination.extend(chunk)
+        except (OSError, ValueError):
+            terminate()
+        finally:
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+
+    threads = (
+        threading.Thread(
+            target=drain,
+            args=(process.stdout, stdout, max_stdout_bytes),
+            name="llm-wiki-process-stdout",
+            daemon=True,
+        ),
+        threading.Thread(
+            target=drain,
+            args=(process.stderr, stderr, max_stderr_bytes),
+            name="llm-wiki-process-stderr",
+            daemon=True,
+        ),
+    )
+    for thread in threads:
+        thread.start()
+
+    deadline = time.monotonic() + timeout
+    try:
+        returncode = process.wait(timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        terminate()
+        returncode = -1
+    for thread in threads:
+        thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        if thread.is_alive():
+            terminate()
+    if failed.is_set():
+        try:
+            process.wait(timeout=1)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        return None
+    return BoundedProcessResult(returncode, bytes(stdout), bytes(stderr))
+
+
+def _git_subprocess_environment() -> dict[str, str]:
+    """Preserve executable context while removing ambient repository routing."""
+    environment = dict(os.environ)
+    for name in tuple(environment):
+        canonical = name.upper()
+        if (
+            canonical in GIT_REPOSITORY_ROUTING_ENV
+            or canonical.startswith("GIT_CONFIG_KEY_")
+            or canonical.startswith("GIT_CONFIG_VALUE_")
+        ):
+            del environment[name]
+    environment["PATH"] = os.pathsep.join(_absolute_path_entries(environment))
+    environment["NoDefaultCurrentDirectoryInExePath"] = "1"
+    return environment
+
+
+def _run_git_text(
+    project_root: Path,
+    *args: str,
+    git_executable: Path | None | object = _GIT_EXECUTABLE_UNSET,
+) -> tuple[int, str] | None:
+    executable = (
+        _resolve_git_executable()
+        if git_executable is _GIT_EXECUTABLE_UNSET
+        else git_executable
+    )
+    if not isinstance(executable, Path):
+        return None
+    try:
+        result = _run_bounded_process(
+            [executable, *args],
+            cwd=project_root,
+            env=_git_subprocess_environment(),
+            timeout=BOOTSTRAP_GIT_TIMEOUT_SECONDS,
+            max_stdout_bytes=MAX_GIT_IDENTITY_OUTPUT_CHARS,
+            max_stderr_bytes=MAX_GIT_STDERR_BYTES,
+        )
+        if result is None:
+            return None
+        stdout = result.stdout.decode("utf-8", errors="strict")
+    except (UnicodeError, ValueError):
+        return None
+    return result.returncode, stdout
+
+
+def _run_git_identity(
+    project_root: Path,
+    *args: str,
+    git_executable: Path | None | object = _GIT_EXECUTABLE_UNSET,
+) -> str | None:
+    result = _run_git_text(
+        project_root,
+        *args,
+        git_executable=git_executable,
+    )
+    if result is None or result[0] != 0:
+        return None
+    lines = result[1].strip().splitlines()
+    return lines[0] if len(lines) == 1 and lines[0] else None
+
+
+def _current_project_git_head(
+    project_root: Path,
+    git_executable: Path | None | object = _GIT_EXECUTABLE_UNSET,
+) -> tuple[bool, str | None]:
+    """Return a verified exact-repository HEAD or explicit non-Git status."""
+    try:
+        resolved_root = project_root.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False, None
+    if not _is_native_absolute_root(str(resolved_root)):
+        return False, None
+    marker_status = _project_git_marker_status(resolved_root)
+    if marker_status is False:
+        if any(
+            _project_git_marker_status(parent) is not False
+            for parent in resolved_root.parents
+        ):
+            return False, None
+        return True, None
+    if marker_status is None:
+        return False, None
+    executable = (
+        _resolve_git_executable()
+        if git_executable is _GIT_EXECUTABLE_UNSET
+        else git_executable
+    )
+    if not isinstance(executable, Path):
+        return False, None
+    top_level = _run_git_identity(
+        resolved_root,
+        "rev-parse",
+        "--path-format=absolute",
+        "--show-toplevel",
+        git_executable=executable,
+    )
+    if top_level is None or not _same_native_project_root(
+        top_level,
+        str(resolved_root),
+    ):
+        return False, None
+    head_result = _run_git_text(
+        resolved_root,
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "--end-of-options",
+        "HEAD^{commit}",
+        git_executable=executable,
+    )
+    if head_result is None:
+        return False, None
+    returncode, head_output = head_result
+    if returncode == 1 and not head_output.strip():
+        return True, None
+    lines = head_output.strip().splitlines()
+    if (
+        returncode != 0
+        or len(lines) != 1
+        or GIT_OBJECT_ID_RE.fullmatch(lines[0]) is None
+    ):
+        return False, None
+    head = lines[0]
+    return True, head
+
+
+def _bootstrap_project_state(
+    vault: Path,
+    project_dir: Path,
+    state_path: Path,
+    slug: str | None = None,
+    *,
+    bootstrap_context: str | object = _TRUSTED_STATE_UNSET,
+) -> None:
     """Best-effort detached bootstrap, retried until output exists."""
     try:
         bootstrap_path = state_path.parent / "bootstrap.md"
-        if bootstrap_path.exists() and _read_bootstrap_context(state_path):
+        if bootstrap_context is not _TRUSTED_STATE_UNSET:
+            if bootstrap_context:
+                return
+        elif (
+            slug is not None
+            and bootstrap_path.exists()
+            and _read_bootstrap_context(state_path, slug, project_dir)
+        ):
             return
         import memory_state
 
@@ -1076,94 +1918,185 @@ def _bootstrap_project_state(vault: Path, project_dir: Path, state_path: Path) -
         pass  # never block session start on bootstrap failure
 
 
-def _single_bootstrap_json_value(
+def _strict_bootstrap_frontmatter(
     body: str,
-    prefix_re: re.Pattern[str],
-    line_re: re.Pattern[str],
-) -> str | None:
-    metadata = prefix_re.findall(body)
-    matches = line_re.findall(body)
-    if len(metadata) != 1 or len(matches) != 1:
+) -> tuple[dict[str, object], int] | None:
+    """Parse the writer's bounded flat YAML mapping and return its body offset."""
+    if not body.startswith("---\n"):
         return None
-    try:
-        value = json.loads(matches[0])
-    except (json.JSONDecodeError, TypeError):
+    closing = body.find("\n---\n", 4)
+    if closing < 0:
         return None
-    return value if isinstance(value, str) else None
+    frontmatter = body[: closing + 5]
+    lines = body[4:closing].splitlines()
+    raw_values: dict[str, str] = {}
+    for line in lines:
+        if not line.strip() or line.startswith("#"):
+            continue
+        match = re.fullmatch(
+            r"(?P<key>[a-z][a-z0-9_]*):(?:[ \t]+(?P<value>.*)|[ \t]*)",
+            line,
+        )
+        if match is None:
+            return None
+        key = match.group("key")
+        if key not in BOOTSTRAP_ALLOWED_FRONTMATTER_KEYS or key in raw_values:
+            return None
+        raw_values[key] = match.group("value") or ""
+    if not BOOTSTRAP_REQUIRED_FRONTMATTER_KEYS.issubset(raw_values):
+        return None
+
+    parsed: dict[str, object] = {}
+    for key, raw_value in raw_values.items():
+        if key.endswith("_json"):
+            try:
+                value = json.loads(raw_value)
+            except (json.JSONDecodeError, TypeError):
+                return None
+            if key == "git_head_json":
+                if value is not None and not isinstance(value, str):
+                    return None
+            elif key == "bootstrap_schema_json":
+                if isinstance(value, bool) or not isinstance(value, int):
+                    return None
+            elif not isinstance(value, str):
+                return None
+            parsed[key] = value
+            continue
+        scalar = parse_frontmatter_scalar(
+            frontmatter,
+            key,
+            max_chars=MAX_BOOTSTRAP_READ_CHARS,
+        )
+        if not scalar.present or scalar.value is None:
+            return None
+        parsed[key] = scalar.value
+    return parsed, closing + 5
 
 
-def _bootstrap_provenance_matches(body: str, state_path: Path) -> bool:
-    """Require bootstrap provenance to match the exact owned state."""
-    slug = _single_bootstrap_json_value(
-        body,
-        BOOTSTRAP_PROJECT_SLUG_JSON_PREFIX_RE,
-        BOOTSTRAP_PROJECT_SLUG_JSON_LINE_RE,
+def _bootstrap_provenance_matches(
+    body: str,
+    state_path: Path,
+    expected_slug: str,
+    expected_project_root: Path,
+    *,
+    trusted_state_body: str | None | object = _TRUSTED_STATE_UNSET,
+) -> bool:
+    """Require current bootstrap provenance to match the confirmed state."""
+    trusted_state = (
+        _read_trusted_state_body(
+            state_path,
+            expected_slug,
+            expected_project_root,
+        )
+        if trusted_state_body is _TRUSTED_STATE_UNSET
+        else trusted_state_body
     )
-    project_root = _single_bootstrap_json_value(
-        body,
-        BOOTSTRAP_PROJECT_ROOT_JSON_PREFIX_RE,
-        BOOTSTRAP_PROJECT_ROOT_JSON_LINE_RE,
-    )
-    recorded_state_path = _single_bootstrap_json_value(
-        body,
-        BOOTSTRAP_STATE_PATH_JSON_PREFIX_RE,
-        BOOTSTRAP_STATE_PATH_JSON_LINE_RE,
-    )
+    if not isinstance(trusted_state, str) or not _trusted_state_body_matches_identity(
+        trusted_state,
+        expected_slug,
+        expected_project_root,
+    ):
+        return False
+    frontmatter = _strict_bootstrap_frontmatter(body)
+    if frontmatter is None:
+        return False
+    values, _body_offset = frontmatter
+    recorded_slug = values["project_slug_json"]
+    recorded_project_root = values["project_root_json"]
+    recorded_state_path = values["project_state_path_json"]
+    recorded_fingerprint = values["source_fingerprint_json"]
     if (
-        slug is None
-        or not is_canonical_project_slug(slug)
-        or project_root is None
-        or recorded_state_path is None
-        or not _is_native_absolute_root(project_root)
+        values["type"] != "bootstrap-context"
+        or values["bootstrap_schema_json"] != BOOTSTRAP_SCHEMA_VERSION
+        or not isinstance(recorded_slug, str)
+        or recorded_slug != expected_slug
+        or not isinstance(recorded_project_root, str)
+        or not isinstance(recorded_state_path, str)
+        or not _is_native_absolute_root(recorded_project_root)
         or not _is_native_absolute_root(recorded_state_path)
+        or not isinstance(recorded_fingerprint, str)
+        or SOURCE_FINGERPRINT_RE.fullmatch(recorded_fingerprint) is None
     ):
         return False
 
-    state_body = _read_state_ownership_body(state_path)
-    if state_body is None:
-        return False
-    state_root = _recorded_project_root(state_body)
-    state_slug = _recorded_runtime_slug(state_body)
-    if state_root is None or state_slug != slug:
+    recorded_git_head = values["git_head_json"]
+    if recorded_git_head is not None and (
+        not isinstance(recorded_git_head, str)
+        or GIT_OBJECT_ID_RE.fullmatch(recorded_git_head) is None
+    ):
         return False
     try:
-        return (
-            _path_comparison_key(Path(project_root).resolve())
-            == _path_comparison_key(Path(state_root).resolve())
-            and _path_comparison_key(Path(recorded_state_path).resolve())
-            == _path_comparison_key(state_path.resolve())
-            and _state_path_owns_project(state_path, Path(project_root))
-        )
+        provenance_matches = recorded_project_root == str(
+            expected_project_root.resolve()
+        ) and recorded_state_path == str(state_path.resolve())
     except (OSError, RuntimeError, ValueError):
         return False
-
-
-def _read_bootstrap_context(state_path: Path) -> str:
-    """Read a bounded sibling bootstrap file without following path escapes."""
+    if not provenance_matches:
+        return False
+    git_executable = (
+        _resolve_git_executable()
+        if _project_git_marker_status(expected_project_root) is True
+        else None
+    )
+    git_status, current_git_head = _current_project_git_head(
+        expected_project_root,
+        git_executable=git_executable,
+    )
+    if not git_status or current_git_head != recorded_git_head:
+        return False
     try:
+        from bootstrap_project import _bootstrap_source_fingerprint
+
+        current_fingerprint = _bootstrap_source_fingerprint(
+            expected_project_root,
+            current_git_head,
+            git_executable=git_executable,
+        )
+    except (ImportError, OSError, RuntimeError, ValueError):
+        return False
+    return current_fingerprint == recorded_fingerprint
+
+
+def _read_bootstrap_context(
+    state_path: Path,
+    slug: str | None = None,
+    project_root: Path | None = None,
+    *,
+    trusted_state_body: str | None | object = _TRUSTED_STATE_UNSET,
+) -> str:
+    """Read a bounded sibling bootstrap file without following path escapes."""
+    if slug is None or project_root is None:
+        return ""
+    try:
+        candidate = state_path.with_name("bootstrap.md")
+        if not _state_file_is_regular(candidate):
+            return ""
         bootstrap_path = _resolve_under(
-            state_path.with_name("bootstrap.md"),
+            candidate,
             state_path.parent,
         )
-        if not bootstrap_path.is_file():
-            return ""
         with bootstrap_path.open(
             "r",
             encoding="utf-8",
-            errors="replace",
+            errors="strict",
         ) as handle:
             text = handle.read(MAX_BOOTSTRAP_READ_CHARS + 1)
-    except (OSError, RuntimeError, ValueError):
+    except (OSError, RuntimeError, UnicodeError, ValueError):
         return ""
 
     truncated = len(text) > MAX_BOOTSTRAP_READ_CHARS
     text = text[:MAX_BOOTSTRAP_READ_CHARS]
-    if truncated or not _bootstrap_provenance_matches(text, state_path):
+    frontmatter = _strict_bootstrap_frontmatter(text)
+    if truncated or frontmatter is None or not _bootstrap_provenance_matches(
+        text,
+        state_path,
+        slug,
+        project_root,
+        trusted_state_body=trusted_state_body,
+    ):
         return ""
-    if text.startswith("---\n"):
-        frontmatter_end = text.find("\n---\n", 4)
-        if frontmatter_end >= 0:
-            text = text[frontmatter_end + 5:]
+    text = text[frontmatter[1]:]
 
     lines = text.strip().splitlines()
     if lines and lines[0].startswith("# "):
@@ -1265,13 +2198,311 @@ def _split_state_handoff(body: str) -> tuple[str, str]:
     return handoff, remainder
 
 
+def _state_file_is_regular(state_path: Path) -> bool:
+    try:
+        metadata = state_path.lstat()
+    except OSError:
+        return False
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and not stat.S_ISLNK(metadata.st_mode)
+        and not bool(
+            attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        )
+    )
+
+
+def _state_metadata_text(body: str) -> str:
+    """Return metadata-visible lines, excluding frontmatter, comments, and fences."""
+    return "\n".join(line for line in _state_visible_lines(body) if line.strip())
+
+
+def _trusted_state_body_matches_identity(
+    body: str,
+    slug: str,
+    project_root: Path,
+) -> bool:
+    """Validate cached state ownership without another filesystem read."""
+    if (
+        not isinstance(body, str)
+        or _slug_identity_key(slug) is None
+        or not _is_native_absolute_root(str(project_root))
+    ):
+        return False
+    metadata_text = _state_metadata_text(body)
+    json_metadata = STATE_SOURCE_JSON_PREFIX_RE.findall(metadata_text)
+    json_matches = STATE_SOURCE_JSON_LINE_RE.findall(metadata_text)
+    runtime_metadata = _runtime_slug_metadata(metadata_text)
+    if (
+        len(json_metadata) != 1
+        or len(json_matches) != 1
+        or not runtime_metadata.present
+        or runtime_metadata.value is None
+        or _slug_identity_key(runtime_metadata.value) != _slug_identity_key(slug)
+    ):
+        return False
+    recorded_root = _recorded_project_root(metadata_text)
+    return recorded_root is not None and _same_native_project_root(
+        recorded_root,
+        str(project_root),
+    )
+
+
+def _read_trusted_state_body(
+    state_path: Path,
+    slug: str,
+    project_root: Path,
+) -> str | None:
+    """Read state only when canonical ownership matches the confirmed request."""
+    if (
+        _slug_identity_key(slug) is None
+        or not _is_native_absolute_root(str(project_root))
+        or not _state_file_is_regular(state_path)
+    ):
+        return None
+    body = _read_state_ownership_body(state_path)
+    return (
+        body
+        if body is not None
+        and _trusted_state_body_matches_identity(body, slug, project_root)
+        else None
+    )
+
+
+def _state_lines_without_frontmatter(body: str) -> list[str]:
+    lines = body.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return lines
+    closing = next(
+        (index for index, line in enumerate(lines[1:], 1) if line.strip() == "---"),
+        None,
+    )
+    return lines[closing + 1 :] if closing is not None else lines
+
+
+def _trim_state_lines(lines: list[str]) -> list[str]:
+    start = 0
+    end = len(lines)
+    while start < end and not lines[start].strip():
+        start += 1
+    while end > start and not lines[end - 1].strip():
+        end -= 1
+    return lines[start:end]
+
+
+def _bounded_process_id(raw_pid: str | int) -> int | None:
+    if isinstance(raw_pid, bool):
+        return None
+    if isinstance(raw_pid, int):
+        return raw_pid if 1 <= raw_pid <= MAX_PROCESS_ID else None
+    if (
+        not isinstance(raw_pid, str)
+        or not raw_pid
+        or len(raw_pid) > MAX_PROCESS_ID_DIGITS
+        or not raw_pid.isascii()
+        or not raw_pid.isdigit()
+    ):
+        return None
+    try:
+        pid = int(raw_pid)
+    except (ValueError, OverflowError):
+        return None
+    return pid if 1 <= pid <= MAX_PROCESS_ID else None
+
+
+def _process_id_is_alive(raw_pid: str | int) -> bool:
+    pid = _bounded_process_id(raw_pid)
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (ValueError, OverflowError, OSError):
+        return False
+    return True
+
+
+def _state_line_is_dead_process_metadata(line: str) -> bool:
+    for pattern in (
+        STATE_HANDOFF_PROCESS_STATUS_RE,
+        STATE_HANDOFF_BARE_PROCESS_PID_RE,
+    ):
+        match = pattern.fullmatch(line)
+        if match is not None:
+            return not _process_id_is_alive(match.group("pid"))
+    return False
+
+
+def _state_section_lines(
+    title: str,
+    lines: list[str],
+    project_root: Path,
+) -> list[str]:
+    """Remove only exact template forms and non-handoff runtime metadata."""
+    output: list[str] = []
+    fence: tuple[str, int] | None = None
+    expected_placeholder = STATE_SECTION_TEMPLATE_PLACEHOLDERS.get(title)
+    for line in lines:
+        if fence is not None:
+            output.append(line)
+            marker, width = fence
+            if re.fullmatch(
+                rf" {{0,3}}{re.escape(marker)}{{{width},}}[ \t]*",
+                line,
+            ):
+                fence = None
+            continue
+        opening = STATE_FENCE_OPEN_RE.fullmatch(line)
+        if opening is not None:
+            run = opening.group("run")
+            if not (run.startswith("`") and "`" in opening.group("rest")):
+                fence = (run[0], len(run))
+            output.append(line)
+            continue
+
+        stripped = line.strip()
+        if expected_placeholder is not None and stripped == expected_placeholder:
+            continue
+        if title == "" and STATE_PENDING_DESCRIPTION_RE.fullmatch(stripped):
+            continue
+        if title == "where we left off" and (
+            _state_line_is_dead_process_metadata(stripped)
+            or STATE_HANDOFF_TIME_RE.fullmatch(stripped)
+        ):
+            continue
+        if (
+            STATE_SOURCE_JSON_PREFIX_RE.fullmatch(stripped)
+            or STATE_SOURCE_PREFIX_RE.fullmatch(stripped)
+            or STATE_RUNTIME_SLUG_JSON_PREFIX_RE.fullmatch(stripped)
+        ):
+            continue
+        output.append(line)
+    cleaned = _trim_state_lines(output)
+    if title == "where we left off" and len(cleaned) == 1:
+        standalone_pid = STATE_HANDOFF_STANDALONE_PID_RE.fullmatch(cleaned[0].strip())
+        if standalone_pid is not None and not _process_id_is_alive(
+            standalone_pid.group("pid")
+        ):
+            return []
+    return cleaned
+
+
+def _state_lines_are_useful(lines: list[str]) -> bool:
+    visible = _state_visible_lines("\n".join(lines), hide_fences=False)
+    return any(any(char.isalnum() for char in line) for line in visible)
+
+
+def _trusted_state_parts(
+    body: str,
+    slug: str,
+    project_root: Path,
+) -> tuple[str, str, str]:
+    lines = body.splitlines()
+    visible_lines = _state_visible_lines(body)
+    if lines and lines[0].strip() == "---":
+        closing = next(
+            (index for index, line in enumerate(lines[1:], 1) if line.strip() == "---"),
+            None,
+        )
+        start = len(lines) if closing is None else closing + 1
+        lines = lines[start:]
+        visible_lines = visible_lines[start:]
+    heading_index = next(
+        (
+            index
+            for index, line in enumerate(visible_lines)
+            if STATE_H1_HEADING_RE.match(line)
+        ),
+        None,
+    )
+    heading = visible_lines[heading_index].strip() if heading_index is not None else ""
+    identity_lines = [
+        f"- Project root JSON: {json.dumps(str(project_root.resolve()), ensure_ascii=False)}",
+        f"- Runtime slug JSON: {json.dumps(slug, ensure_ascii=False)}",
+    ]
+    section_starts = [
+        index
+        for index, line in enumerate(visible_lines)
+        if _state_h2_title(line) is not None
+    ]
+    preamble_end = section_starts[0] if section_starts else len(lines)
+    preamble = [
+        line
+        for index, line in enumerate(lines[:preamble_end])
+        if index != heading_index
+    ]
+    detail_chunks: list[str] = []
+    cleaned_preamble = _state_section_lines("", preamble, project_root)
+    if _state_lines_are_useful(cleaned_preamble):
+        detail_chunks.append("\n".join(cleaned_preamble))
+
+    handoff_sections: list[str] = []
+    for position, start in enumerate(section_starts):
+        end = section_starts[position + 1] if position + 1 < len(section_starts) else len(lines)
+        title = _state_h2_title(visible_lines[start])
+        if title is None:
+            continue
+        cleaned = _state_section_lines(title, lines[start + 1 : end], project_root)
+        if title in STATE_IDENTITY_SECTION_TITLES:
+            if title != "source" and _state_lines_are_useful(cleaned):
+                detail_chunks.append(
+                    "\n".join([visible_lines[start].strip(), *cleaned])
+                )
+            continue
+        template_editorial = (
+            title == "editorial note" and cleaned == [STATE_EDITORIAL_TEMPLATE]
+        )
+        if template_editorial or not _state_lines_are_useful(cleaned):
+            continue
+        rendered = "\n".join([visible_lines[start].strip(), *cleaned])
+        if title == "where we left off":
+            handoff_sections.append(rendered)
+        else:
+            detail_chunks.append(rendered)
+
+    handoff = handoff_sections[0] if len(handoff_sections) == 1 else ""
+    if heading and (handoff or detail_chunks):
+        detail_chunks.insert(0, heading)
+    return (
+        "\n".join(identity_lines).strip(),
+        handoff,
+        "\n\n".join(detail_chunks).strip(),
+    )
+
+
+def _read_trusted_state_parts(
+    state_path: Path,
+    slug: str,
+    project_root: Path,
+) -> tuple[str, str, str] | None:
+    body = _read_trusted_state_body(state_path, slug, project_root)
+    return _trusted_state_parts(body, slug, project_root) if body is not None else None
+
+
 def _clip(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
-    marker = "\n… (truncated for hook injection)\n"
+    marker = f"\n{CONTEXT_TRUNCATION_MARKER}\n"
     if limit <= len(marker):
-        return text[:limit]
-    return text[: limit - len(marker)].rstrip() + marker
+        return CONTEXT_TRUNCATION_MARKER[:max(0, limit)]
+    prefix_limit = limit - len(marker)
+    prefix = text[:prefix_limit]
+    if (
+        prefix
+        and prefix_limit < len(text)
+        and not prefix.endswith(("\n", "\r"))
+        and text[prefix_limit] not in "\n\r"
+        and prefix_limit > len(LINE_TRUNCATION_MARKER)
+    ):
+        prefix = (
+            text[: prefix_limit - len(LINE_TRUNCATION_MARKER)].rstrip()
+            + LINE_TRUNCATION_MARKER
+        )
+    return prefix.rstrip() + marker
 
 
 def _state_context_source(state_path: Path) -> str:
@@ -1283,12 +2514,42 @@ def _state_context_source(state_path: Path) -> str:
     return contained.relative_to(projects_dir.parent).as_posix()
 
 
-def _build_context(state_path: Path, slug: str, is_new: bool) -> str:
-    """Build the additionalContext payload around the state.md content."""
-    body = _read_state_ownership_body(state_path)
-    if body is None:
-        return f"(project state at `{state_path}` unavailable or exceeds the read limit)"
+def _load_project_context_snapshot(
+    state_path: Path,
+    slug: str,
+    project_root: Path,
+) -> ProjectStateContextSnapshot:
+    trusted_body = _read_trusted_state_body(state_path, slug, project_root)
+    trusted_parts = (
+        _trusted_state_parts(trusted_body, slug, project_root)
+        if trusted_body is not None
+        else None
+    )
+    bootstrap = _read_bootstrap_context(
+        state_path,
+        slug,
+        project_root,
+        trusted_state_body=trusted_body,
+    )
+    return ProjectStateContextSnapshot(
+        state_path=state_path,
+        slug=slug,
+        project_root=project_root,
+        trusted_state_body=trusted_body,
+        trusted_state_parts=trusted_parts,
+        bootstrap=bootstrap,
+    )
 
+
+def _build_context(
+    state_path: Path,
+    slug: str,
+    is_new: bool,
+    project_root: Path | None = None,
+    *,
+    snapshot: ProjectStateContextSnapshot | None = None,
+) -> str:
+    """Build the additionalContext payload around the state.md content."""
     header = (
         f"# Per-project state — `{slug}`\n"
         f"\n"
@@ -1296,30 +2557,59 @@ def _build_context(state_path: Path, slug: str, is_new: bool) -> str:
         + (" — freshly created for this project." if is_new else ".")
         + ")\n\n"
     )
-    bootstrap = _read_bootstrap_context(state_path)
-    if not bootstrap:
-        return _clip(header + body, MAX_CONTEXT_CHARS)
-
-    identity, remainder = _split_state_identity(body)
-    handoff, detail = _split_state_handoff(remainder)
-    parts = [header.rstrip()]
-    if identity:
-        parts.append(identity)
-    if handoff:
-        parts.append(handoff)
-    elif detail:
-        parts.extend(("## Saved project state", detail))
-        detail = ""
-    parts.extend(
-        (
-            "## Project bootstrap (UNTRUSTED project-derived data)",
-            bootstrap,
+    if project_root is None:
+        current_snapshot = None
+    elif (
+        snapshot is not None
+        and snapshot.state_path == state_path
+        and snapshot.slug == slug
+        and snapshot.project_root == project_root
+    ):
+        current_snapshot = snapshot
+    else:
+        current_snapshot = _load_project_context_snapshot(
+            state_path,
+            slug,
+            project_root,
         )
+    trusted = (
+        current_snapshot.trusted_state_parts
+        if current_snapshot is not None
+        else None
     )
+    if trusted is None:
+        return _clip(header + "(saved project handoff unavailable)\n", MAX_CONTEXT_CHARS)
+
+    identity, handoff, detail = trusted
+    bootstrap = current_snapshot.bootstrap
+    mandatory = "\n\n".join((header.rstrip(), identity.strip()))
+    secondary: list[str] = []
+    if handoff:
+        secondary.append(handoff)
+    if bootstrap:
+        secondary.append(
+            "## Project bootstrap (UNTRUSTED project-derived data)\n\n"
+            + bootstrap
+        )
     if detail:
-        parts.extend(("## Saved project state", detail))
-    payload = "\n\n".join(parts) + "\n"
-    return _clip(payload, MAX_CONTEXT_CHARS)
+        secondary.append("## Saved project state\n\n" + detail)
+    if not secondary:
+        return mandatory + "\n" if len(mandatory) + 1 <= MAX_CONTEXT_CHARS else ""
+    secondary_text = "\n\n".join(secondary)
+    secondary_floor = (
+        secondary_text
+        if len(secondary_text) <= len(CONTEXT_TRUNCATION_MARKER)
+        else CONTEXT_TRUNCATION_MARKER
+    )
+    if len(f"{mandatory}\n\n{secondary_floor}\n") > MAX_CONTEXT_CHARS:
+        return ""
+    secondary_budget = MAX_CONTEXT_CHARS - len(mandatory) - 3
+    bounded_secondary = _clip(secondary_text, secondary_budget).rstrip()
+    return (
+        f"{mandatory}\n\n{bounded_secondary}\n"
+        if bounded_secondary
+        else mandatory + "\n"
+    )
 
 
 def main() -> int:
@@ -1349,11 +2639,26 @@ def main() -> int:
             return _emit_empty()
         slug, state_path, is_new = claimed
 
-        # 3. Retry bootstrap until the detached worker publishes its output.
-        _bootstrap_project_state(vault, project_dir, state_path)
+        # 3. Validate state/bootstrap once, then reuse it for launch and rendering.
+        snapshot = _load_project_context_snapshot(state_path, slug, project_dir)
+        _bootstrap_project_state(
+            vault,
+            project_dir,
+            state_path,
+            slug,
+            bootstrap_context=snapshot.bootstrap,
+        )
 
         # 4. Build and emit context.
-        return _emit(_build_context(state_path, slug, is_new))
+        return _emit(
+            _build_context(
+                state_path,
+                slug,
+                is_new,
+                project_dir,
+                snapshot=snapshot,
+            )
+        )
 
     except Exception:  # noqa: BLE001 — hook MUST exit 0
         _safe_write_error("unhandled:\n" + traceback.format_exc())

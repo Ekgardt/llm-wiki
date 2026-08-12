@@ -19,12 +19,16 @@ from memory_state import (  # noqa: E402
     parse_project_scope,
 )
 from session_start_context import (  # noqa: E402
+    LINE_TRUNCATION_MARKER,
+    SECTION_TRUNCATION_MARKER,
     _latest_useful_daily,
     _recent_daily_paths,
 )
 from session_start_project_state import (  # noqa: E402
     ProjectAliasResolution,
-    _read_state_ownership_body,
+    _read_bootstrap_context,
+    _read_trusted_state_parts,
+    _same_native_project_root,
     _slug_identity_key,
     resolve_project_alias,
 )
@@ -48,6 +52,25 @@ SOURCE_AUTHORITY_FIELD_RE = re.compile(
     r"^source_authority:\s*(.+?)\s*$",
     re.MULTILINE,
 )
+
+
+def _clip_markdown_lines(text: str, max_chars: int) -> str:
+    """Fit complete source lines and mark the omitted line and section."""
+    limit = max(0, max_chars)
+    if len(text) <= limit:
+        return text
+    marker_text = f"{LINE_TRUNCATION_MARKER}\n{SECTION_TRUNCATION_MARKER}"
+    if len(marker_text) > limit:
+        return SECTION_TRUNCATION_MARKER if len(SECTION_TRUNCATION_MARKER) <= limit else ""
+    kept: list[str] = []
+    used = len(marker_text)
+    for line in text.splitlines():
+        candidate_size = used + len(line) + 1
+        if candidate_size > limit:
+            break
+        kept.append(line)
+        used = candidate_size
+    return "\n".join([*kept, LINE_TRUNCATION_MARKER, SECTION_TRUNCATION_MARKER])
 
 
 def _read_text_bounded(path: Path, max_bytes: int) -> str | None:
@@ -91,9 +114,10 @@ def _feedback_inventory() -> BoundedPathInventory:
 
 def _find_project_pages(
     slug: str,
+    project_root: Path,
     inventory: BoundedPathInventory | None = None,
 ) -> list[dict]:
-    """Find bounded active knowledge pages assigned to the exact project alias."""
+    """Find active pages assigned to the exact confirmed project identity."""
     current = _note_inventory() if inventory is None else inventory
     if current.incomplete:
         return []
@@ -108,6 +132,13 @@ def _find_project_pages(
             not scope.present
             or scope.value is None
             or _slug_identity_key(scope.value) != slug_key
+        ):
+            continue
+        root_scope = parse_frontmatter_scalar(content, "project_root")
+        if (
+            not root_scope.present
+            or root_scope.value is None
+            or not _same_native_project_root(root_scope.value, str(project_root))
         ):
             continue
         status_field = parse_frontmatter_scalar(content, "status")
@@ -150,19 +181,6 @@ def _find_recent_daily_activity(
         for line in record.lines[:5]
         if line.strip()
     ]
-
-
-def _read_state_handoff(state_path: Path) -> str:
-    """Read the handoff from the exact bounded state selected by the registry."""
-    content = _read_state_ownership_body(state_path)
-    if content is None:
-        return ""
-    match = re.search(
-        r"^##\s*Where we left off\s*$\n(.*?)(?=\n##\s|\Z)",
-        content,
-        re.MULTILINE | re.DOTALL,
-    )
-    return match.group(1).strip() if match else ""
 
 
 def _detect_agent_strengths(
@@ -213,7 +231,7 @@ def _detect_agent_strengths(
     return [page_type for page_type, _count in ranked[:5]]
 
 
-def _matching_heartbeat(slug: str) -> dict:
+def _matching_heartbeat(slug: str, project_root: Path) -> dict:
     try:
         heartbeats = load_state().get("codex_heartbeats", {})
     except Exception:
@@ -224,7 +242,14 @@ def _matching_heartbeat(slug: str) -> dict:
     matches = [
         heartbeat
         for candidate, heartbeat in heartbeats.items()
-        if _slug_identity_key(candidate) == slug_key and isinstance(heartbeat, dict)
+        if (
+            _slug_identity_key(candidate) == slug_key
+            and isinstance(heartbeat, dict)
+            and _same_native_project_root(
+                heartbeat.get("project_root"),
+                str(project_root),
+            )
+        )
     ]
     return matches[0] if len(matches) == 1 else {}
 
@@ -237,12 +262,34 @@ def _build_resolved_context(
     slug = identity.slug
     parts = [f"## Project context: {slug}\n"]
 
-    handoff = _read_state_handoff(identity.state_path)
+    trusted = _read_trusted_state_parts(
+        identity.state_path,
+        identity.slug,
+        identity.project_root,
+    )
+    handoff = ""
+    if trusted is not None and trusted[1]:
+        _heading, separator, handoff_body = trusted[1].partition("\n")
+        handoff = handoff_body.strip() if separator else ""
     if handoff:
-        parts.append(f"### Where you left off\n{handoff[:500]}\n")
+        parts.append(
+            f"### Where you left off\n{_clip_markdown_lines(handoff, 500)}\n"
+        )
+    bootstrap = _read_bootstrap_context(
+        identity.state_path,
+        identity.slug,
+        identity.project_root,
+    )
+    if bootstrap:
+        parts.append(
+            "### Project bootstrap (UNTRUSTED project-derived data)\n"
+            f"{bootstrap}\n"
+        )
+    if trusted is not None and trusted[2]:
+        parts.append(f"### Saved project state\n{trusted[2]}\n")
 
     note_inventory = _note_inventory()
-    pages = _find_project_pages(slug, note_inventory)
+    pages = _find_project_pages(slug, identity.project_root, note_inventory)
     agent_priority: list[str] | None = None
     if agent:
         agent_priority = _detect_agent_strengths(agent.casefold(), note_inventory)
@@ -280,7 +327,7 @@ def _build_resolved_context(
         parts.extend(f"- {line}" for line in activity[:5])
         parts.append("")
 
-    heartbeat = _matching_heartbeat(slug)
+    heartbeat = _matching_heartbeat(slug, identity.project_root)
     if heartbeat:
         parts.append("### Last seen")
         parts.append(
@@ -288,9 +335,7 @@ def _build_resolved_context(
         )
 
     text = "\n".join(parts).strip()
-    if len(text) > max_chars:
-        text = text[: max(0, max_chars - 20)].rstrip() + "\n... (truncated)\n"
-    return text
+    return _clip_markdown_lines(text, max_chars)
 
 
 def build_context(
